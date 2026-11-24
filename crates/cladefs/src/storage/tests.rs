@@ -94,9 +94,11 @@ pub(super) async fn fork_storage(storage: &Storage, path: &Path) -> Storage {
     let cell = storage.open_cell();
     let path = path.to_owned();
     let to = path.clone();
-    super::on_bucket_runtime(async move { cell.fork(&to, cell.cell().tenant).await.map(drop) })
-        .await
-        .unwrap();
+    super::on_bucket_runtime_on(crate::Host::process(), async move {
+        cell.fork(&to, cell.cell().tenant).await.map(drop)
+    })
+    .await
+    .unwrap();
     Storage::open(&path).await.unwrap()
 }
 

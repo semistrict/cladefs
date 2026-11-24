@@ -153,7 +153,7 @@
 //! storage. A record about a VM's request names it, `request_id`, the guest's number of it, with
 //! its `store` (TASK-260).
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(madsim)))]
 fn main() -> anyhow::Result<()> {
     use anyhow::Context;
     cladefs::cladefsd::logging::to_stderr()?;
@@ -200,7 +200,7 @@ fn main() -> anyhow::Result<()> {
 /// SIGINT and SIGHUP too, whose default action ended it at once, a crash for every cell (board
 /// 8567). They are blocked in every thread but one, made here first, which waits for them
 /// (`cladefs::signals`), and, once draining, for none again.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(madsim)))]
 fn drain_on_signals(
     daemon: std::sync::Arc<cladefs::cladefsd::Daemon>,
     bound: std::time::Duration,
@@ -241,8 +241,8 @@ fn drain_on_signals(
     })
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(any(not(target_os = "linux"), madsim))]
 fn main() {
-    eprintln!("cladefsd runs on Linux only");
+    eprintln!("cladefsd runs on Linux only (not under madsim)");
     std::process::exit(2);
 }

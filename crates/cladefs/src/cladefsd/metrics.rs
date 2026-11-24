@@ -514,7 +514,7 @@ fn render_rest(daemon: &Daemon, mut out: String, mut laps: Laps) -> String {
     }
     laps.lap("tenants");
     // cladefs: the host's disks, as the disk governor sees them (doc-22).
-    for (name, help, values) in super::disk::host_disks() {
+    for (name, help, values) in super::disk::host_disks_on(daemon) {
         let _ = writeln!(out, "# HELP {name} {help}");
         let _ = writeln!(out, "# TYPE {name} gauge");
         for (device, value) in values {
@@ -531,7 +531,7 @@ fn render_rest(daemon: &Daemon, mut out: String, mut laps: Laps) -> String {
     }
 
     // cladefs: what the uploads hold of the objects they upload (TASK-317).
-    let memory = crate::bucket::upload_memory();
+    let memory = crate::bucket::upload_memory_on(&daemon.host);
     for (name, help, value) in [
         (
             "cladefsd_upload_held_bytes",
@@ -572,7 +572,7 @@ fn render_rest(daemon: &Daemon, mut out: String, mut laps: Laps) -> String {
     }
 
     // cladefs: the parts asked of peers, and served them (TASK-406.2).
-    if let Some((counts, served, served_missing)) = super::peers::counts() {
+    if let Some((counts, served, served_missing)) = super::peers::counts_on(daemon) {
         let name = "cladefsd_peer_parts_total";
         let _ = writeln!(out, "# HELP {name} Parts asked of the peers that own them, by outcome.");
         let _ = writeln!(out, "# TYPE {name} counter");
@@ -886,7 +886,7 @@ fn render_subsystems(daemon: &Daemon, out: &mut String) {
         single(out, name, "counter", help, value);
     }
 
-    let pages = local_cell::pages::shared();
+    let pages = daemon.host.local().pages();
     let (usage, options) = (pages.usage(), pages.options());
     let gauges: [(&str, &str, u64); 6] = [
         ("cladefsd_page_cache_bytes", "Bytes of pages the cells' page cache holds.", usage.held),
@@ -1012,7 +1012,8 @@ fn by_cell(
 
 /// The gauges of `daemon` as of now.
 pub(super) fn gauges_on(daemon: &Daemon) -> Vec<(&'static str, &'static str, u64)> {
-    let (entries, live) = (crate::cache::entries(), crate::dax::live());
+    let slabs = daemon.host.slabs();
+    let (entries, live) = (daemon.host.cache().entries(), crate::dax::live());
     let mut gauges = vec![
         ("connections", "VM processes connected.", super::server::connections_on(daemon) as u64),
         (
@@ -1045,36 +1046,28 @@ pub(super) fn gauges_on(daemon: &Daemon) -> Vec<(&'static str, &'static str, u64
                 .filter(|vm| vm.window.is_some())
                 .fold(0, |sum, vm| sum.saturating_add(vm.stage.private)),
         ),
-        (
-            "memory_bytes",
-            "Memory extents' parts hold, every tenant's.",
-            crate::slabs::arenas_bytes(),
-        ),
-        (
-            "memory_capacity_bytes",
-            "The most memory the daemon has.",
-            crate::slabs::count_total_bytes(),
-        ),
+        ("memory_bytes", "Memory extents' parts hold, every tenant's.", slabs.arenas_bytes()),
+        ("memory_capacity_bytes", "The most memory the daemon has.", slabs.count_total_bytes()),
         (
             "memory_leaked_bytes",
             "Memory of runs freed whose punch failed, counted still: what should never be.",
-            crate::slabs::leaked_bytes(),
+            slabs.leaked_bytes(),
         ),
         // cladefs: what a page-in finding no memory has to go on (board 5662).
         (
             "memory_free_bytes",
             "Of the daemon's memory, what no arena holds in use.",
-            crate::slabs::count_total_bytes().saturating_sub(crate::slabs::arenas_bytes_in_use()),
+            slabs.count_total_bytes().saturating_sub(slabs.arenas_bytes_in_use()),
         ),
         (
             "memory_quarantined_bytes",
             "Memory of runs freed and quarantined, waiting for VM processes to unmap them.",
-            crate::slabs::quarantined_bytes(),
+            slabs.quarantined_bytes(),
         ),
         (
             "memory_exhausted_arenas",
             "Arenas whose relief found nothing to free: their allocations fail.",
-            crate::slabs::exhausted_arenas(),
+            slabs.exhausted_arenas(),
         ),
         // cladefs: board 8535.
         (
@@ -1085,7 +1078,7 @@ pub(super) fn gauges_on(daemon: &Daemon) -> Vec<(&'static str, &'static str, u64
         (
             "memory_wedged_bytes",
             "Memory quarantined for wedged VM processes, which comes back only once they exit.",
-            crate::slabs::wedged_bytes(),
+            slabs.wedged_bytes(),
         ),
         // cladefs: board 8465.
         (
@@ -1099,11 +1092,11 @@ pub(super) fn gauges_on(daemon: &Daemon) -> Vec<(&'static str, &'static str, u64
             super::memory::total_in_flight_on(daemon).budget(),
         ),
     ];
-    if let Some(limit) = crate::slabs::total_cap() {
+    if let Some(limit) = slabs.total_cap() {
         gauges.push(("memory_limit_bytes", "The limit of every tenant's memory.", limit));
     }
     // cladefs: TASK-94.
-    let disk = super::disk::total();
+    let disk = super::disk::total_on(daemon);
     gauges.push(("disk_bytes", "The host's disk every tenant's cells take.", disk));
     let reserved = super::disk::count_on(daemon, None).map_or(0, |counted| counted.reserved);
     gauges.push((
@@ -1111,7 +1104,7 @@ pub(super) fn gauges_on(daemon: &Daemon) -> Vec<(&'static str, &'static str, u64
         "What every tenant's cells hold past what they take against the limit.",
         reserved,
     ));
-    if let Some(limit) = super::disk::total_limit() {
+    if let Some(limit) = super::disk::total_limit_on(daemon) {
         gauges.push(("disk_limit_bytes", "The limit of every tenant's disk together.", limit));
     }
     gauges

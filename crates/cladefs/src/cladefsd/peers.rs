@@ -398,17 +398,20 @@ pub(super) async fn start_on(
     let region = crate::bucket::peers::region(&*bucket).await;
     let region = region.map_err(|err| failed(&err.to_string()))?;
     let linked = url.clone();
-    let runtime = crate::bucket::bucket_runtime().map_err(|err| failed(&err.to_string()))?;
+    let runtime =
+        crate::bucket::bucket_runtime_on(&daemon.host).map_err(|err| failed(&err.to_string()))?;
     let linking = runtime.clone();
     let linking_daemon = Arc::clone(daemon);
     let asking =
         Peers::new(address, move |peer| link(&linking_daemon, &linking, peer, (&linked, region)));
     asking.set(peers);
-    crate::bucket::ask_peers(bucket.clone(), asking)?;
+    crate::bucket::ask_peers_on(&daemon.host, bucket.clone(), asking)?;
     let replicas = match node_local::env::var_os("CLADEFSD_REPLICAS") {
         Some(dir) => Some(
-            local_cell::upload::blocking(|| replicas(std::path::Path::new(&dir)))
-                .map_err(|err| failed(&err))?,
+            local_cell::upload::blocking(|| {
+                replicas(daemon.host.local(), std::path::Path::new(&dir))
+            })
+            .map_err(|err| failed(&err))?,
         ),
         None => None,
     };
@@ -420,10 +423,10 @@ pub(super) async fn start_on(
             incarnation: replicas.incarnation(),
             channels: Channels::new(Arc::clone(daemon), runtime.clone()),
         };
-        crate::bucket::replicate_with(Arc::new(members))?;
+        crate::bucket::replicate_with_on(&daemon.host, Arc::new(members))?;
     }
     let heads = bucket.clone();
-    let serving = crate::bucket::serving_peers(bucket, cache);
+    let serving = crate::bucket::serving_peers_on(&daemon.host, bucket, cache);
     let serving = serving.map_err(|err| failed(&err.to_string()))?;
     let server = Server {
         daemon: Arc::clone(daemon),
@@ -447,7 +450,7 @@ pub(super) async fn start_on(
     });
     serving.map_err(|err| failed(&err.to_string()))?;
     // cladefs: the migrations to it their sources abandoned, given up (board 5734).
-    if crate::ephemeral_host::host().is_ok() {
+    if crate::ephemeral_host::host_on(&daemon.host).is_ok() {
         let idle = super::migration::idle().map_err(|err| failed(&err))?;
         runtime.spawn(super::migration::target::reap(Arc::clone(daemon), idle));
     }
@@ -473,10 +476,9 @@ pub type Listening = std::net::TcpListener;
 #[cfg(madsim)]
 pub type Listening = std::net::SocketAddr;
 
-/// Has the hosts sharing the bucket be those at `addresses` (`SetPeers`): `EINVAL` if one is no
-/// `HOST:PORT`, `ENOTSUP` if the daemon serves no peers.
-pub(super) fn set(addresses: Vec<String>) -> Result<(), crate::Errno> {
-    let peers = crate::bucket::peers().ok_or(crate::Errno::ENOTSUP)?;
+/// Has the hosts sharing the bucket on `daemon` be those at `addresses` (`SetPeers`).
+pub(super) fn set_on(daemon: &Daemon, addresses: Vec<String>) -> Result<(), crate::Errno> {
+    let peers = crate::bucket::peers_on(&daemon.host).ok_or(crate::Errno::ENOTSUP)?;
     for address in &addresses {
         check_address(address).map_err(|err| {
             log::warn!("cladefsd: SetPeers: {err}");
@@ -502,16 +504,16 @@ fn check_address(address: &str) -> Result<(), String> {
     }
 }
 
-/// What the daemon's cells' fetchers asked its peers, and the parts it served them and had not as
+/// What `daemon`'s cells' fetchers asked its peers, and the parts it served them and had not as
 /// they asked, if it serves peers.
-pub(super) fn counts() -> Option<(crate::bucket::peers::Counts, u64, u64)> {
-    let counts = crate::bucket::peers()?.counts();
+pub(super) fn counts_on(daemon: &Daemon) -> Option<(crate::bucket::peers::Counts, u64, u64)> {
+    let counts = crate::bucket::peers_on(&daemon.host)?.counts();
     Some((counts, SERVED.load(Ordering::Relaxed), SERVED_MISSING.load(Ordering::Relaxed)))
 }
 
-/// The daemon's line in its stats file (`CLADEFSD_STATS`): its [`counts`].
-pub(super) fn line() -> Option<String> {
-    let (counts, served, served_missing) = counts()?;
+/// `daemon`'s line in its stats file (`CLADEFSD_STATS`): its [`counts_on`].
+pub(super) fn line_on(daemon: &Daemon) -> Option<String> {
+    let (counts, served, served_missing) = counts_on(daemon)?;
     let crate::bucket::peers::Counts { asked, given, missing, failed } = counts;
     Some(format!(
         "peers: asked={asked} given={given} missing={missing} failed={failed} served={served} \
@@ -949,9 +951,12 @@ fn for_good(err: &std::io::Error) -> bool {
 
 /// cladefs: the daemon's replica directory at `dir` (`CLADEFSD_REPLICAS`, doc-21), made if it is
 /// not there: each cell's logs held to the lag bound in bytes, which bounds a writer's.
-fn replicas(dir: &std::path::Path) -> Result<Arc<Replicas<HostDir>>, String> {
+fn replicas(
+    local: &Arc<local_cell::Host>,
+    dir: &std::path::Path,
+) -> Result<Arc<Replicas<HostDir>>, String> {
     // cladefs: made durable, its promises with it (TASK-708).
-    let made = host_fs::create_dir_all_durably(dir).and_then(|()| HostDir::new(dir));
+    let made = host_fs::create_dir_all_durably(dir).and_then(|()| HostDir::new_on(local, dir));
     let dir = made.map_err(|err| format!("the replica directory {}: {err}", dir.display()))?;
     let replicas = Replicas::open(dir, members_most())
         .map_err(|err| format!("the replica directory: {err}"))?;
@@ -1112,9 +1117,13 @@ fn of_in(
 /// 8445, `replica::admit`): none if the bucket holds no live head of it, replicated. Read on the
 /// bucket runtime within [`HEAD_WITHIN`]: UNAVAILABLE if it can't be, as of a member down, its
 /// asker trying again.
-async fn seen(bucket: &Arc<RoutedBucket>, cell: crate::CellId) -> Result<Option<Seen>, Status> {
+async fn seen(
+    host: &crate::Host,
+    bucket: &Arc<RoutedBucket>,
+    cell: crate::CellId,
+) -> Result<Option<Seen>, Status> {
     let bucket = bucket.clone();
-    let runtime = crate::bucket::bucket_runtime()
+    let runtime = crate::bucket::bucket_runtime_on(host)
         .map_err(|err| Status::internal(format!("the bucket's runtime: {err}")))?;
     let reading = async move {
         tokio::time::timeout(HEAD_WITHIN, bucket_cell::head::get(&*bucket, cell)).await
@@ -1146,12 +1155,13 @@ async fn seen(bucket: &Arc<RoutedBucket>, cell: crate::CellId) -> Result<Option<
 /// writer's streams, opened again, and drops go on. The head read now, if it was ([`Read`]), or
 /// the refusal (board 8445).
 async fn admitted(
+    host: &crate::Host,
     bucket: &Arc<RoutedBucket>,
     replicas: &Arc<Replicas<HostDir>>,
     cell: crate::CellId,
     asked: replica::Asked,
 ) -> Result<Option<Read>, Status> {
-    let (read, admitted) = match seen(bucket, cell).await {
+    let (read, admitted) = match seen(host, bucket, cell).await {
         Ok(Some(head)) => {
             noted(replicas, cell, Some(Read(head))).await?;
             (Some(Read(head)), replica::admit(cell, Some(&head), asked))
@@ -1276,6 +1286,7 @@ impl proto::peer_server::Peer for Server {
         let mut appends = request.into_inner();
         let (ours, replicas) = (self.bucket.clone(), self.replicas.clone());
         let heads = self.heads.clone();
+        let host = Arc::clone(&self.daemon.host);
         let (answer, answers) = tokio::sync::mpsc::channel(16);
         let appending = Counted::new(&self.appending);
         spawn_in_call(async move {
@@ -1294,7 +1305,8 @@ impl proto::peer_server::Peer for Server {
             let begun = async {
                 let (replicas, of) =
                     of_in(&ours, &replicas, first.of.clone(), ReplicationCall::Write)?;
-                let read = admitted(&heads, &replicas, of.0, replica::Asked::Append(of.1)).await?;
+                let read =
+                    admitted(&host, &heads, &replicas, of.0, replica::Asked::Append(of.1)).await?;
                 // Trimmed by the head read now alone: a head noted before may name an active
                 // configuration the bucket's names no more, and trimming by it would drop the
                 // one it names since (Codex's review of board 8451).
@@ -1347,8 +1359,14 @@ impl proto::peer_server::Peer for Server {
     ) -> Result<Response<FenceResponse>, Status> {
         let FenceRequest { of, epoch } = request.into_inner();
         let (replicas, of) = self.of(of, ReplicationCall::Read)?;
-        let read =
-            admitted(&self.heads, &replicas, of.0, replica::Asked::Fence(of.1, epoch)).await?;
+        let read = admitted(
+            &self.daemon.host,
+            &self.heads,
+            &replicas,
+            of.0,
+            replica::Asked::Fence(of.1, epoch),
+        )
+        .await?;
         let fencing = replicas.clone();
         let logs = blocking(move || fencing.fence(of, epoch)).await?;
         // Noted again, its promise made: kept now (Codex's review of board 8445).
@@ -1441,7 +1459,14 @@ impl proto::peer_server::Peer for Server {
     ) -> Result<Response<DropLogsResponse>, Status> {
         let DropLogsRequest { of, through } = request.into_inner();
         let (replicas, of) = self.of(of, ReplicationCall::Drop)?;
-        admitted(&self.heads, &replicas, of.0, replica::Asked::Drop(of.1, through)).await?;
+        admitted(
+            &self.daemon.host,
+            &self.heads,
+            &replicas,
+            of.0,
+            replica::Asked::Drop(of.1, through),
+        )
+        .await?;
         blocking(move || replicas.drop_logs(of, through)).await?;
         Ok(Response::new(DropLogsResponse {}))
     }
@@ -1574,7 +1599,9 @@ impl Channels {
     /// The channel to the member at `address`, made if there is none.
     fn of(&self, address: &str) -> Result<Arc<Channel>, String> {
         // No peers asked yet: none kept but those held.
-        let peers = crate::bucket::peers().map(|peers| peers.addresses()).unwrap_or_default();
+        let peers = crate::bucket::peers_on(&self.daemon.host)
+            .map(|peers| peers.addresses())
+            .unwrap_or_default();
         let mut open = self.open.lock().unwrap();
         open.retain(|at, channel| Arc::strong_count(channel) > 1 || peers.contains(at));
         if let Some(channel) = open.get(address) {
@@ -1605,7 +1632,7 @@ impl local_cell::upload::Members for ReplicaMembers {
 
     /// cladefs: this host, or one of its peers now (board 8579): one `SetPeers` removed is no more.
     fn is_peer(&self, address: &str) -> bool {
-        let peers = crate::bucket::peers();
+        let peers = crate::bucket::peers_on(&self.channels.daemon.host);
         address == self.me
             || peers.is_some_and(|peers| peers.addresses().iter().any(|at| at == address))
     }
@@ -1762,7 +1789,8 @@ impl ReplicaMembers {
         f: u8,
         avoid: &[String],
     ) -> Result<Vec<bucket_cell::layout::Member>, String> {
-        let peers = crate::bucket::peers().ok_or("the daemon has no peers")?;
+        let peers =
+            crate::bucket::peers_on(&self.channels.daemon.host).ok_or("the daemon has no peers")?;
         let addresses = peers.addresses();
         let others = (addresses.iter().map(String::as_str))
             .filter(|address| *address != self.me && !avoid.iter().any(|avoid| avoid == address));

@@ -54,11 +54,11 @@ pub(super) fn watch_stats(daemon: Weak<Daemon>, bucket: Weak<RoutedBucket>) {
                     stats.line(),
                     daemon_line(&daemon),
                     super::metrics::requests_line(),
-                    uploads_line(),
+                    uploads_line(&daemon),
                     cache_line(&daemon),
                     buckets_line(&bucket),
-                    super::disk::line(),
-                    super::peers::line().unwrap_or_else(|| "peers: none".to_owned()),
+                    super::disk::line_on(&daemon),
+                    super::peers::line_on(&daemon).unwrap_or_else(|| "peers: none".to_owned()),
                     super::process::line_on(&daemon),
                 ];
                 // cladefs: the process's line, its CPU time changing each poll, every
@@ -103,10 +103,10 @@ fn buckets_line(bucket: &RoutedBucket) -> String {
     }
 }
 
-/// cladefs: what the daemon's uploads hold of the objects they upload, in bytes, now and at most,
-/// and the most they may (`crate::bucket::upload_memory`, TASK-317).
-fn uploads_line() -> String {
-    let memory = crate::bucket::upload_memory();
+/// cladefs: what `daemon`'s uploads hold of the objects they upload, in bytes, now and at most,
+/// and the most they may (`crate::bucket::upload_memory_on`, TASK-317).
+fn uploads_line(daemon: &Daemon) -> String {
+    let memory = crate::bucket::upload_memory_on(&daemon.host);
     format!("uploads: held={} max-held={} budget={}", memory.held, memory.max_held, memory.budget)
 }
 
@@ -124,7 +124,7 @@ fn daemon_line(daemon: &Daemon) -> String {
     let named = crate::stats::stats().named().map(|(name, count)| format!("{name}={count}"));
     // cladefs: and how long its cells' commits waited to be made durable (TASK-165.9): each
     // bucket of `local_cell::Lags` a count of its own, within its bound, the last beyond.
-    let lags = local_cell::durability_lags();
+    let lags = local_cell::durability_lags_on(daemon.host.local());
     let quantile = |fraction| lags.quantile_ms(fraction).unwrap_or(0);
     let last = local_cell::LAG_BUCKETS - 1;
     let bucket = |(bucket, count): (usize, &u64)| match bucket == last {

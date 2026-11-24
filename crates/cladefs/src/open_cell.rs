@@ -33,7 +33,7 @@ mod tests;
 pub use bases::OpenBase;
 pub use opening::Opening;
 
-use crate::cache::{self, CachedExtent, CachedIn};
+use crate::cache::{CachedExtent, CachedIn};
 use crate::cell_dir;
 use crate::dax::{
     Dax, DaxMapping, DaxWindow, SecondStage, Source, WindowChangeKind, WindowChanges,
@@ -41,7 +41,9 @@ use crate::dax::{
 use crate::error::{Errno, Error, Result};
 use crate::faults::failpoint;
 use crate::halt::{CellMutex, CellRwLock, Halt};
-use crate::host_cell::{self, CellOf};
+use crate::host_cell;
+#[cfg(not(madsim))]
+use crate::host_cell::CellOf;
 use crate::memory::{VolatileSlice, VolatileSliceMut, gather, scatter};
 use crate::pages::{Arena, ArenaId, page_size};
 use crate::stats::{self, Counter};
@@ -210,6 +212,8 @@ impl Admitted<'_> {
 
 /// An open cell: the extent store a guest's filesystem lives on. See the module docs.
 pub struct OpenCell {
+    /// cladefs: the host context this open cell runs on (board 10962).
+    pub(crate) host: Arc<crate::Host>,
     local: Arc<LocalCell<HostDir>>,
     /// cladefs: the bucket the open cell's description names, which its cell is kept in
     /// (`host_cell::Opened`, TASK-165.6).
@@ -521,6 +525,7 @@ impl OpenCell {
     /// cladefs's system, a file bucket of its own, which its description names
     /// (`host_cell::create`, TASK-165.6), opened as this process opens open cells
     /// ([`Opening::here`]).
+    #[cfg(not(madsim))]
     pub async fn create(path: impl AsRef<Path>, capacity: u64) -> Result<Self, Error> {
         Opening::here()?.create(path, capacity, CellOf::New(host_cell::DEFAULT_TENANT)).await
     }
@@ -630,8 +635,14 @@ impl OpenCell {
         let inherited = |making: &mut local_cell::Making<'_, HostDir>| -> anyhow::Result<()> {
             Ok(cell_dir::inherit(&self.path, self.cell().id, &self.forked_from, making)?)
         };
-        let forking =
-            host_cell::fork_ephemeral(admitted.local(), uploader, path.as_ref(), child, inherited);
+        let forking = host_cell::fork_ephemeral_on(
+            &self.host,
+            admitted.local(),
+            uploader,
+            path.as_ref(),
+            child,
+            inherited,
+        );
         self.fork_span(cell).run_async(forking).await?;
         Ok(cell)
     }
@@ -698,7 +709,15 @@ impl OpenCell {
                 if quiescent {
                     self.at_rest(admitted, async { Ok(()) }).await?;
                 }
-                return host_cell::fork(admitted.local(), uploader, path, child, inherited).await;
+                return host_cell::fork_on(
+                    &self.host,
+                    admitted.local(),
+                    uploader,
+                    path,
+                    child,
+                    inherited,
+                )
+                .await;
             }
             (false, true) => {
                 self.at_rest(admitted, self.commit_version(admitted, None, true)).await?
@@ -707,7 +726,16 @@ impl OpenCell {
         };
         self.make_uploaded().await?;
         failpoint!("fork::uploaded");
-        host_cell::fork_through(admitted.local(), uploader, id, path, child, inherited).await
+        host_cell::fork_through_on(
+            &self.host,
+            admitted.local(),
+            uploader,
+            id,
+            path,
+            child,
+            inherited,
+        )
+        .await
     }
 
     /// cladefs: the bucket the open cell's description names, which its cell is kept in: what its
@@ -1032,7 +1060,8 @@ impl OpenCell {
         admitted.local().free(extent).map_err(errno)?;
         // cladefs: its pages, unless another open cell that asked for them holds it still, which
         // reads them through itself (TASK-79.7): one that holds it reads them anew.
-        let Some(cached) = cache::freed(&self.local, self.arenas.of(extent), extent) else {
+        let Some(cached) = self.host.cache().freed(&self.local, self.arenas.of(extent), extent)
+        else {
             return Ok(());
         };
         // cladefs: the window's mappings of it, which kept its pages, map zeros instead: a guest
@@ -1298,7 +1327,7 @@ impl OpenCell {
         size: u64,
         second_stage: Option<Arc<dyn SecondStage>>,
     ) -> Result<DaxWindow, Error> {
-        self.install_dax(|| Ok(Dax::new(size, second_stage)?))
+        self.install_dax(|| Ok(Dax::new_on(&self.host, size, second_stage)?))
     }
 
     /// cladefs: creates the DAX window as [`create_dax_window`](Self::create_dax_window) does, one
@@ -1312,7 +1341,7 @@ impl OpenCell {
         second_stage: Arc<dyn SecondStage>,
     ) -> Result<DaxWindow, Error> {
         let _admitted = self.admit(Changing::Contents)?;
-        self.install_dax(|| Ok(Dax::copying(size, second_stage)?))
+        self.install_dax(|| Ok(Dax::copying_on(&self.host, size, second_stage)?))
     }
 
     fn install_dax(
@@ -1567,7 +1596,7 @@ impl OpenCell {
         self.within_versions(keep_last).await?;
         let id = self.at_rest(&admitted, self.commit_version(&admitted, keep_last, true)).await?;
         let named = self.versions().await.into_iter().map(|version| version.id).collect();
-        host_cell::made_version(self.cell(), id, &self.path, &named);
+        host_cell::made_version_on(&self.host, self.cell(), id, &self.path, &named);
         Ok(id)
     }
 
@@ -1637,7 +1666,7 @@ impl OpenCell {
         // cladefs: forgotten as made here, dropped or not: a drop that failed may have taken
         // effect, and one that didn't is the caller's to retry, which needs no open cell made here
         // (TASK-610).
-        host_cell::dropped_versions(self.cell(), ids);
+        host_cell::dropped_versions_on(&self.host, self.cell(), ids);
         Ok(dropped?)
     }
 
@@ -1670,10 +1699,9 @@ impl OpenCell {
         Self::create_at_version(path, (url, kind), self.local.description(), id)
     }
 
-    /// cladefs: makes a cell directory at `path`, which must not exist, of the version `id` of the
-    /// cell `description` names, of `kind`, kept in the bucket at `url`: what the daemon opens a
-    /// version in for forks of it on a host, nothing writing it.
-    pub fn create_at_version(
+    /// cladefs: makes a cell directory at `path` on `host`, of the version `id` of `description`.
+    pub(crate) fn create_at_version_on(
+        host: &crate::Host,
         path: &Path,
         (url, kind): (&str, Kind),
         description: local_cell::Description,
@@ -1683,13 +1711,27 @@ impl OpenCell {
             std::io::ErrorKind::AlreadyExists => Error::new(Errno::EEXIST),
             _ => Error::new(anyhow::Error::new(err).context(format!("making {}", path.display()))),
         })?;
-        let made = local_cell::create_host_at_version(path, description, url, kind, id)
-            .and_then(|()| local_cell::made_host(path));
+        let made =
+            local_cell::create_host_at_version_on(host.local(), path, description, url, kind, id)
+                .and_then(|()| local_cell::made_host_on(host.local(), path));
         if let Err(err) = made {
-            crate::host_cell::discard(path);
+            crate::host_cell::discard_on(host, path);
             return Err(Error::new(err));
         }
         Ok(())
+    }
+
+    /// cladefs: makes a cell directory at `path`, which must not exist, of the version `id` of the
+    /// cell `description` names, of `kind`, kept in the bucket at `url`: what the daemon opens a
+    /// version in for forks of it on a host, nothing writing it.
+    #[cfg(not(madsim))]
+    pub fn create_at_version(
+        path: &Path,
+        (url, kind): (&str, Kind),
+        description: local_cell::Description,
+        id: u64,
+    ) -> Result<(), Error> {
+        Self::create_at_version_on(crate::Host::process(), path, (url, kind), description, id)
     }
 
     /// cladefs: makes a version, uploaded, and opens it at `path` as [`OpenCell::open_version_at`]
@@ -1787,7 +1829,7 @@ impl OpenCell {
     }
 
     fn mark_public(&self, admitted: &Admitted<'_>, cells: &[u64]) -> Result<()> {
-        cell_dir::mark_public(admitted.local().dir().path(), cells)
+        cell_dir::mark_public_on(self.host.local(), admitted.local().dir().path(), cells)
     }
 
     /// cladefs: the cell, and those it inherited from, nearest first.
@@ -1825,6 +1867,7 @@ impl PublicReach {
 /// cladefs: the arenas of physical memory an open cell's extents' pages are of (TASK-43).
 #[derive(Clone)]
 pub(crate) struct Arenas {
+    host: Arc<crate::Host>,
     /// The open cell's, its tenant's, held for as long as the open cell and what reads into the
     /// extent cache for it, which clone these, allocate in it (TASK-79.36); or none, the default.
     own: Option<Arc<Arena>>,
@@ -1859,7 +1902,7 @@ impl Arenas {
             Some(reach) => CachedIn::Public(reach),
             None => CachedIn::Arena(self.of(extent)),
         };
-        cache::cached(local, cached_in, Some(fetcher), extent, len).await
+        self.host.cache().cached(local, cached_in, Some(fetcher), extent, len).await
     }
 
     /// cladefs: that `extent` is reachable from a published generation, if it is: `local`'s cell

@@ -35,7 +35,7 @@ pub(crate) fn daemon_bucket_on(daemon: &Arc<Daemon>) -> Result<Arc<RoutedBucket>
         log::error!("cladefsd: {err}");
         Errno::EIO
     })?;
-    let bucket = crate::host_cell::bucket(&host.bucket).map_err(|err| {
+    let bucket = crate::host_cell::bucket_on(&daemon.host, &host.bucket).map_err(|err| {
         log::error!("cladefsd: CLADEFSD_BUCKET: {err:#}");
         Errno::EIO
     })?;
@@ -81,7 +81,7 @@ pub(super) fn upload_interval() -> std::time::Duration {
 pub(super) fn use_bucket_on(daemon: &Arc<Daemon>, bucket: impl Into<Arc<RoutedBucket>>) {
     let bucket = bucket.into();
     let host = crate::bucket::Host::from_env().expect("the daemon's host");
-    crate::host_cell::use_bucket(&host.bucket, bucket.clone());
+    crate::host_cell::use_bucket_on(&daemon.host, &host.bucket, bucket.clone());
     assert!(daemon.bucket.set(bucket.clone()).is_ok(), "the daemon has its bucket already");
     super::telemetry::watch_stats(Arc::downgrade(daemon), Arc::downgrade(&bucket));
 }
@@ -139,8 +139,9 @@ pub(super) fn open_part_cache(daemon: &Daemon) -> Result<Option<Arc<Cache>>, Str
         return Ok(cache.clone());
     }
     let cache = match cache_config()? {
-        Some((dir, capacity)) => match local_cell::upload::blocking(|| Cache::open(&dir, capacity))
-        {
+        Some((dir, capacity)) => match local_cell::upload::blocking(|| {
+            Cache::open_on(daemon.host.bucket_host(), &dir, capacity)
+        }) {
             Ok(cache) => Some(Arc::new(cache)),
             Err(err) => return Err(format!("CLADEFSD_PART_CACHE: {}: {err}", dir.display())),
         },

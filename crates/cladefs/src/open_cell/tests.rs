@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 use super::*;
+use crate::cache;
 use crate::dax::{Access, SecondStage};
 use crate::pages::PhysLocation;
 use futures::executor::block_on;
@@ -1367,7 +1368,7 @@ async fn the_cache_keeps_no_cell_closed() {
 /// by the hundred thousand, those never asked for again would be most of what it holds.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_cache_keeps_its_bound() {
-    cache::MOST_CACHED.get().store(8, Ordering::Relaxed);
+    crate::Host::process().cache().most_cached().store(8, Ordering::Relaxed);
     let (cell, _dir) = cell(1 << 20).await;
     let ps = page_size();
     for sequence in 1..=20 {
@@ -1394,7 +1395,7 @@ async fn the_cache_keeps_its_bound() {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_cache_trims_what_windows_hold_once_per_eighth_of_its_bound() {
     const MOST: usize = 64;
-    cache::MOST_CACHED.get().store(MOST, Ordering::Relaxed);
+    crate::Host::process().cache().most_cached().store(MOST, Ordering::Relaxed);
     let (cell, _dir) = cell(8 << 20).await;
     let ps = page_size();
     let (mapped, looked_up) = (2 * MOST as u64, 4 * MOST as u64);

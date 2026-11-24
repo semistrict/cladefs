@@ -5,7 +5,6 @@
 //! Opening, creating, taking, placing, and deleting [`OpenCell`]s through [`Opening`].
 
 use super::{Arenas, OpenCell};
-use crate::cache;
 use crate::cell_dir;
 use crate::dax::WindowChanges;
 use crate::error::{Errno, Error, Result};
@@ -22,6 +21,8 @@ use std::sync::Arc;
 /// cladefs: how an open cell is opened, created, or taken ([`Opening::open`], [`Opening::create`],
 /// [`Opening::take`], TASK-165.9).
 pub struct Opening {
+    /// The host context this open cell runs on (board 10962).
+    pub(crate) host: Arc<crate::Host>,
     /// The arena of physical memory its own extents' pages are of; the default arena's if none.
     pub arena: Option<Arc<Arena>>,
     /// Whether a guest boots from it: of a fork of a version, what its version's read evidence
@@ -33,18 +34,30 @@ pub struct Opening {
 }
 
 impl Opening {
+    /// As `host` opens open cells where no host's daemon serves them.
+    pub(crate) fn here_on(host: Arc<crate::Host>) -> Result<Self, Error> {
+        let keeping = host_cell::keeping_on(&host)?;
+        Ok(Self { host, arena: None, guest: true, keeping })
+    }
+
     /// As this process opens open cells where no host's daemon serves them, as [`crate::Storage`]
     /// does: a copy never placed taking its cell with this host's token, or the first
     /// placement's (`host_cell::keeping`); its pages the default arena's, a guest booting from
     /// it.
+    #[cfg(not(madsim))]
     pub fn here() -> Result<Self, Error> {
-        let keeping = host_cell::keeping()?;
-        Ok(Self { arena: None, guest: true, keeping })
+        Self::here_on(crate::Host::process().clone())
+    }
+
+    /// Opens on `host` with uploader options `keeping`: the default arena, a guest booting from it.
+    pub(crate) fn keeping_on(host: Arc<crate::Host>, keeping: local_cell::upload::Options) -> Self {
+        Self { host, arena: None, guest: true, keeping }
     }
 
     /// Opens with uploader options `keeping`: the default arena, a guest booting from it.
+    #[cfg(not(madsim))]
     pub fn keeping(keeping: local_cell::upload::Options) -> Self {
-        Self { arena: None, guest: true, keeping }
+        Self::keeping_on(crate::Host::process().clone(), keeping)
     }
 
     /// Sets the arena of physical memory the open cell's own extents' pages are of (TASK-43).
@@ -104,7 +117,7 @@ impl Opening {
                 true if migrating => return Err(Errno::EBUSY.into()),
                 true => {
                     let (local, bucket, keys, forked) =
-                        host_cell::open_ephemeral(path, &self.keeping).await?;
+                        host_cell::open_ephemeral_on(&self.host, path, &self.keeping).await?;
                     let assembling =
                         OpenCell::assemble(path, (local, bucket, None), Some(forked), self);
                     let mut opened = assembling.await?;
@@ -112,7 +125,7 @@ impl Opening {
                     opened
                 }
                 false => {
-                    let opened = host_cell::open(path, self.keeping.clone()).await?;
+                    let opened = host_cell::open_on(&self.host, path, self.keeping.clone()).await?;
                     OpenCell::new(path, opened, self).await?
                 }
             };
@@ -160,7 +173,8 @@ impl Opening {
         let path = path.as_ref();
         OpenCell::creating(path, async |span| {
             let keeping = self.keeping.clone();
-            let opened = host_cell::create(path, capacity, of, kind, keeping).await?;
+            let opened =
+                host_cell::create_on(&self.host, path, capacity, of, kind, keeping).await?;
             span.set_cell(opened.local.description().cell);
             OpenCell::new(path, opened, self).await
         })
@@ -192,7 +206,8 @@ impl Opening {
         let opened = if existing.is_none() {
             let kept = self.keeping.clone();
             let of = CellOf::Taken(cell);
-            OpenCell::made_placed(path, (capacity, of, token), Kind::Fxfs, kept).await?
+            OpenCell::made_placed_on(&self.host, path, (capacity, of, token), Kind::Fxfs, kept)
+                .await?
         } else if existing != Some(cell) {
             let refused = format!("{} holds another cell than {cell}", path.display());
             return Err(Error::new(anyhow::Error::new(Errno::EEXIST).context(refused)));
@@ -200,11 +215,11 @@ impl Opening {
             if let Some(token) = token {
                 let force = self.keeping.force;
                 local_cell::upload::blocking(|| match force {
-                    true => OpenCell::place_forced(path, token),
-                    false => OpenCell::place(path, token),
+                    true => OpenCell::place_forced_on(&self.host, path, token),
+                    false => OpenCell::place_on(&self.host, path, token),
                 })?;
             }
-            host_cell::take(path, self.keeping.clone()).await?
+            host_cell::take_on(&self.host, path, self.keeping.clone()).await?
         };
         OpenCell::new(path, opened, self).await
     }
@@ -222,7 +237,9 @@ impl Opening {
     ) -> Result<OpenCell, Error> {
         let path = path.as_ref();
         let kept = (Kind::Fxfs, Some(url), self.keeping.clone());
-        let opened = host_cell::create_unmade(path, capacity, of, kept.0, kept.1, kept.2).await?;
+        let opened =
+            host_cell::create_unmade_on(&self.host, path, capacity, of, kept.0, kept.1, kept.2)
+                .await?;
         local_cell::upload::blocking(|| opened.made()).map_err(Error::new)?;
         OpenCell::new(path, opened, self).await
     }
@@ -254,6 +271,7 @@ impl OpenCell {
 
     /// The cell directory at `path`, as of its last commit. cladefs: opened as this process opens
     /// open cells ([`Opening::here`]).
+    #[cfg(not(madsim))]
     pub async fn open(path: impl AsRef<Path>) -> Result<Self, Error> {
         Opening::here()?.open(path).await
     }
@@ -266,6 +284,7 @@ impl OpenCell {
 
     /// cladefs: the cell directory at `path`, a fork attached to other open cells, its uploader as
     /// `keeping` says ([`Opening::open_base`]).
+    #[cfg(not(madsim))]
     pub async fn open_base_with(
         path: impl AsRef<Path>,
         arena: Option<Arc<Arena>>,
@@ -301,11 +320,11 @@ impl OpenCell {
     ) -> Result<Self, Error> {
         // cladefs: what may fail of it first, its open cell closed if it does (TASK-685.3).
         let made = local_cell::upload::blocking(|| -> Result<_, Error> {
-            cache::relieve_pressure();
+            opening.host.cache().relieve_pressure();
             let public = cell_dir::public_cells(path)?;
             let forked_from = Arc::new(cell_dir::ancestry(path)?);
             let cache = opening.keeping.cache.clone();
-            let fetcher = crate::bucket::HostFetcher::new(bucket.clone(), cache)?;
+            let fetcher = crate::bucket::HostFetcher::new_on(&opening.host, bucket.clone(), cache)?;
             Ok((public, forked_from, fetcher))
         });
         let (public, forked_from, fetcher) = match made {
@@ -318,17 +337,19 @@ impl OpenCell {
                 return Err(err);
             }
         };
-        let Opening { arena, guest, keeping: _ } = opening;
-        let arenas = Arenas { own: arena, public: Arc::new(public) };
+        let Opening { host, arena, guest, keeping: _ } = opening;
+        let arenas = Arenas { host: host.clone(), own: arena, public: Arc::new(public) };
         let cell = local.description().cell;
         // cladefs: a guest's boot of a fork of a version, whose reads its version's evidence
         // predicts, fetched ahead, and records (TASK-702.2, TASK-702.3).
         let evidence = (forked.filter(|_| guest)).map(|forked| {
             let (local, bucket, fetcher) = (local.clone(), bucket.clone(), fetcher.clone());
             let reading = crate::evidence::Reading { local, arenas: arenas.clone(), fetcher };
-            crate::evidence::Evidence::opened(forked, cell, bucket, reading)
+            crate::evidence::Evidence::opened_on(&host, forked, cell, bucket, reading)
         });
+        let halt = Halt::new_on(&host, path, cell);
         Ok(Self {
+            host,
             evidence,
             arenas,
             forked_from,
@@ -342,7 +363,7 @@ impl OpenCell {
             opening: CellRwLock::new("opening", ()),
             changes: CellMutex::new("changes", WindowChanges::default()),
             flush_turns: Default::default(),
-            halt: Halt::new(path, cell),
+            halt,
             fetcher,
             closed: false,
             kept_until_closed: Default::default(),
@@ -359,29 +380,40 @@ impl OpenCell {
         opening.take(path, capacity, cell, token).await
     }
 
+    /// cladefs: makes a new cell directory at `path` on `host`, placed at `token` if given, closes
+    /// it, and returns its cell.
+    pub(crate) async fn create_placed_on(
+        host: &crate::Host,
+        path: impl AsRef<Path>,
+        (capacity, of, token): (u64, CellOf, Option<u64>),
+        kind: Kind,
+        keeping: local_cell::upload::Options,
+    ) -> Result<CellId, Error> {
+        let opened =
+            Self::made_placed_on(host, path.as_ref(), (capacity, of, token), kind, keeping).await?;
+        let cell = opened.local.description().cell;
+        opened.close().await;
+        Ok(cell)
+    }
+
     /// cladefs: makes a new cell directory at `path`, which must not exist, of `capacity` bytes and
     /// the cell `of` says, a cell of `kind` (TASK-364), its uploader as `keeping`
-    /// says, placed at `token`'s placement if given, closes it, and returns its cell: what
-    /// [`Opening::take`] takes a cell into, and the daemon's `CreateCell` makes. Its
-    /// cell, and so its head, is taken as it is made with the token of the placement it is given,
-    /// not `keeping`'s, this host's: a new copy placed later
-    /// took no cell from an earlier placement (`ESTALE`), the head taken before the placement
-    /// was recorded (TASK-149.20, TASK-266).
+    /// says, placed at `token`'s placement if given, closes it, and returns its cell.
+    #[cfg(not(madsim))]
     pub async fn create_placed(
         path: impl AsRef<Path>,
         (capacity, of, token): (u64, CellOf, Option<u64>),
         kind: Kind,
         keeping: local_cell::upload::Options,
     ) -> Result<CellId, Error> {
-        let opened = Self::made_placed(path.as_ref(), (capacity, of, token), kind, keeping).await?;
-        let cell = opened.local.description().cell;
-        opened.close().await;
-        Ok(cell)
+        Self::create_placed_on(crate::Host::process(), path, (capacity, of, token), kind, keeping)
+            .await
     }
 
-    /// cladefs: makes a new cell directory at `path` as [`OpenCell::create_placed`] does, and
-    /// returns it opened, as made: what [`Opening::take`] opens.
-    async fn made_placed(
+    /// cladefs: makes a new cell directory at `path` on `host` as [`OpenCell::create_placed_on`]
+    /// does, and returns it opened, as made: what [`Opening::take`] opens.
+    async fn made_placed_on(
+        host: &crate::Host,
         path: &Path,
         (capacity, of, token): (u64, CellOf, Option<u64>),
         kind: Kind,
@@ -391,7 +423,8 @@ impl OpenCell {
             local_cell::upload::Options { token: token.unwrap_or(keeping.token), ..keeping };
         let force = keeping.force;
         let opened = Self::creating(path, async |span| {
-            let opened = host_cell::create_unmade(path, capacity, of, kind, None, keeping).await?;
+            let opened =
+                host_cell::create_unmade_on(host, path, capacity, of, kind, None, keeping).await?;
             span.set_cell(opened.local.description().cell);
             Ok(opened)
         })
@@ -402,55 +435,87 @@ impl OpenCell {
         // made. A forced taking's placement forced from then on (TASK-681).
         let placed = local_cell::upload::blocking(|| {
             match (token, force) {
-                (Some(token), true) => Self::place_forced(path, token),
-                (Some(token), false) => Self::place(path, token),
+                (Some(token), true) => Self::place_forced_on(host, path, token),
+                (Some(token), false) => Self::place_on(host, path, token),
                 (None, _) => Ok(()),
             }?;
             opened.made().map_err(Error::new)
         });
         if let Err(err) = placed {
             opened.close().await;
-            local_cell::upload::blocking(|| host_cell::discard(path));
+            local_cell::upload::blocking(|| host_cell::discard_on(host, path));
             return Err(err);
         }
         Ok(opened)
     }
 
+    /// cladefs: places the cell directory at `path` on `host` at the placement whose fencing token
+    /// is `token`.
+    pub(crate) fn place_on(
+        host: &crate::Host,
+        path: impl AsRef<Path>,
+        token: u64,
+    ) -> Result<(), Error> {
+        local_cell::place_host_on(host.local(), path.as_ref(), token, false).map_err(Error::new)
+    }
+
     /// cladefs: places the cell directory at `path` at the placement
-    /// whose fencing token, its boot ID, is `token` (TASK-39.7): its host takes its cell's
-    /// cell with that token from then on, and its writer the cell's head with that taking's
-    /// epoch; a later placement's token exceeds it, so a placement cut off takes no cell back
-    /// from the one after it (`ESTALE`), and its commits fail once a later one takes it (`EROFS`).
+    /// whose fencing token, its boot ID, is `token` (TASK-39.7).
+    #[cfg(not(madsim))]
     pub fn place(path: impl AsRef<Path>, token: u64) -> Result<(), Error> {
-        local_cell::place_host(path.as_ref(), token, false).map_err(Error::new)
+        Self::place_on(crate::Host::process(), path, token)
+    }
+
+    /// cladefs: places the cell directory at `path` on `host` with forced takings.
+    pub(crate) fn place_forced_on(
+        host: &crate::Host,
+        path: impl AsRef<Path>,
+        token: u64,
+    ) -> Result<(), Error> {
+        local_cell::place_host_on(host.local(), path.as_ref(), token, true).map_err(Error::new)
     }
 
     /// cladefs: places the cell directory at `path` as [`OpenCell::place`] does, its placement's
-    /// takings of a replicated cell forced (doc-21, TASK-681): a taking goes on with the members of
-    /// the configuration the cell's head names that answer, fewer than a take needs, as when f+1 of
-    /// them are gone for good. Commits told replicated that only the others held are lost.
+    /// takings of a replicated cell forced (doc-21, TASK-681).
+    #[cfg(not(madsim))]
     pub fn place_forced(path: impl AsRef<Path>, token: u64) -> Result<(), Error> {
-        local_cell::place_host(path.as_ref(), token, true).map_err(Error::new)
+        Self::place_forced_on(crate::Host::process(), path, token)
     }
 
-    /// cladefs: deletes the cell directory at `path`, which nothing has open: with `bucket`, its
-    /// cell there first, its forks' cells living on, which the collector keeps what they inherited
-    /// for; then its directory, which holds its cell alone (TASK-165.7). A deletion that stopped
-    /// partway is finished by deleting again. Fails with `ENOENT` if there is none at `path`, and
-    /// with `ESTALE` if a later placement holds its cell in `bucket`.
+    /// cladefs: deletes the cell directory at `path` on `host`.
+    pub(crate) async fn delete_on(
+        host: &crate::Host,
+        path: impl AsRef<Path>,
+        bucket: Option<&bucket_cell::object_bucket::RoutedBucket>,
+    ) -> Result<(), Error> {
+        host_cell::delete_on(host, path.as_ref(), bucket, crate::bucket::host_token).await
+    }
+
+    /// cladefs: deletes the cell directory at `path`, which nothing has open.
+    #[cfg(not(madsim))]
     pub async fn delete(
         path: impl AsRef<Path>,
         bucket: Option<&bucket_cell::object_bucket::RoutedBucket>,
     ) -> Result<(), Error> {
-        host_cell::delete(path.as_ref(), bucket, crate::bucket::host_token).await
+        Self::delete_on(crate::Host::process(), path, bucket).await
+    }
+
+    /// cladefs: the bucket the description of the cell directory at `path` names on `host`.
+    #[cfg(not(madsim))]
+    pub(crate) fn bucket_at_on(
+        host: &crate::Host,
+        path: impl AsRef<Path>,
+    ) -> Result<Option<Arc<bucket_cell::object_bucket::RoutedBucket>>, Error> {
+        host_cell::bucket_at_on(host, path.as_ref()).map_err(Error::new)
     }
 
     /// cladefs: the bucket the description of the cell directory at `path` names, which its cell is
     /// kept in, if its description is there: what deleting it deletes its cell in. An open cell of
     /// another format is refused (`local_cell::Format`).
+    #[cfg(not(madsim))]
     pub fn bucket_at(
         path: impl AsRef<Path>,
     ) -> Result<Option<Arc<bucket_cell::object_bucket::RoutedBucket>>, Error> {
-        host_cell::bucket_at(path.as_ref()).map_err(Error::new)
+        Self::bucket_at_on(crate::Host::process(), path)
     }
 }

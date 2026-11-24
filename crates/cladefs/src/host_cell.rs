@@ -74,11 +74,21 @@ pub(crate) async fn new_cell(bucket: &RoutedBucket, tenant: u64) -> Result<CellI
     Ok(CellId { tenant, id })
 }
 
+/// A new cell of `tenant`'s, of the bucket at `url` on `host`, as [`new_cell`] gives it.
+#[cfg(all(target_os = "linux", not(madsim)))]
+pub(crate) async fn new_cell_at_on(
+    host: &crate::Host,
+    url: &str,
+    tenant: u64,
+) -> Result<CellId, Failure> {
+    new_cell(&*bucket_on(host, url)?, tenant).await
+}
+
 /// A new cell of `tenant`'s, of the bucket at `url`, as [`new_cell`] gives it: for a cell whose
 /// object is made before its cell ([`CellOf::Named`]), as the FUSE mount's are. It blocks.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(madsim)))]
 pub(crate) async fn new_cell_at(url: &str, tenant: u64) -> Result<CellId, Failure> {
-    new_cell(&*bucket(url)?, tenant).await
+    new_cell_at_on(crate::Host::process(), url, tenant).await
 }
 
 /// A cell of a new cell of the default tenant's, of a random ID no allocator gave: for tests
@@ -126,32 +136,64 @@ const OWN_BUCKET: &str = ".bucket";
 /// one, as for the cladefs CLI's images ([`token`]): the first placement's.
 const FIRST_PLACEMENT: u64 = 1;
 
-node_local::node_local! {
-    /// The buckets this process keeps cells in, by their URLs: one each, which every cell
-    /// naming it shares, so that a memory bucket (`memory:///NAME`) is one for the process, as a
-    /// bucket elsewhere is one for every process.
-    static BUCKETS: Mutex<BTreeMap<String, Arc<RoutedBucket>>> = Mutex::new(BTreeMap::new());
+/// Explicit per-host bucket registry and versions-made map (board 10962), replacing `BUCKETS` and
+/// `VERSIONS_MADE` `node_local!` statics.
+pub(crate) struct State {
+    /// The buckets this host keeps cells in, by their URLs: one each, which every cell naming it
+    /// shares.
+    buckets: Mutex<BTreeMap<String, Arc<RoutedBucket>>>,
+    /// cladefs: the cells this host made versions of, by the version (cell and ID).
+    versions_made: Mutex<BTreeMap<(CellId, u64), PathBuf>>,
+}
+
+impl State {
+    pub(crate) fn new() -> Self {
+        Self { buckets: Mutex::new(BTreeMap::new()), versions_made: Mutex::new(BTreeMap::new()) }
+    }
+}
+
+/// The bucket at `url` in `state`.
+pub(crate) fn bucket_in(state: &State, url: &str) -> anyhow::Result<Arc<RoutedBucket>> {
+    bucket_opened_in(state, url, ObjectBucket::from_url)
+}
+
+/// The bucket at `url` on `host` ([`ObjectBucket::from_url`]): `host`'s, made if it has none yet.
+pub(crate) fn bucket_on(host: &crate::Host, url: &str) -> anyhow::Result<Arc<RoutedBucket>> {
+    bucket_in(host.host_cells(), url)
 }
 
 /// The bucket at `url` ([`ObjectBucket::from_url`]): this process's, made if it has none yet.
+#[cfg(not(madsim))]
 pub(crate) fn bucket(url: &str) -> anyhow::Result<Arc<RoutedBucket>> {
-    bucket_opened(url, ObjectBucket::from_url)
+    bucket_on(crate::Host::process(), url)
+}
+
+/// cladefs: the bucket numbered `number` at `url` on `host`.
+#[cfg(not(madsim))]
+pub(crate) fn bucket_of_on(
+    host: &crate::Host,
+    url: &str,
+    number: u16,
+) -> anyhow::Result<Arc<RoutedBucket>> {
+    bucket_opened_in(host.host_cells(), url, |url| ObjectBucket::from_url_numbered(url, number))
 }
 
 /// cladefs: the bucket numbered `number` at `url`, as [`bucket`] has it: opened with that bucket's
 /// own options, its credentials (`CLADEFSD_BUCKET_<number>_*`,
 /// [`bucket_cell::object_bucket::numbered_options`]), unless this process opened it already
 /// (board 5550).
+#[cfg(not(madsim))]
 pub(crate) fn bucket_of(url: &str, number: u16) -> anyhow::Result<Arc<RoutedBucket>> {
-    bucket_opened(url, |url| ObjectBucket::from_url_numbered(url, number))
+    bucket_of_on(crate::Host::process(), url, number)
 }
 
-/// This process's bucket at `url`, `open` opening it if it has none yet.
-fn bucket_opened(
+/// `state`'s bucket at `url`, `open` opening it if it has none yet.
+fn bucket_opened_in(
+    state: &State,
     url: &str,
     open: impl FnOnce(&str) -> Result<ObjectBucket, String>,
 ) -> anyhow::Result<Arc<RoutedBucket>> {
-    let mut buckets = BUCKETS.get().lock().unwrap();
+    let mut buckets = state.buckets.lock().unwrap();
     if let Some(bucket) = buckets.get(url) {
         return Ok(bucket.clone());
     }
@@ -163,13 +205,14 @@ fn bucket_opened(
     Ok(bucket)
 }
 
-/// cladefs: the bucket numbered `number`, as the host whose bucket is at `home` reaches it
-/// (TASK-633.3, backlog doc-23): `home` itself, if of that number; else the bucket its requests of
-/// that number's cells go to ([`RoutedBucket::numbered`]): the registry in `home`'s root, or the
-/// root bucket's, records it; opened with its own options, and refused unless its identity is the
-/// one recorded (`Error::Mismatched`). `NoBucket` if no registry records it.
-pub(crate) async fn bucket_numbered(home: &str, number: u16) -> Result<Arc<ObjectBucket>, Failure> {
-    let ours = bucket(home)?;
+/// cladefs: the bucket numbered `number`, as `host` whose bucket is at `home` reaches it.
+#[cfg(not(madsim))]
+pub(crate) async fn bucket_numbered_on(
+    host: &crate::Host,
+    home: &str,
+    number: u16,
+) -> Result<Arc<ObjectBucket>, Failure> {
+    let ours = bucket_on(host, home)?;
     let identity = bucket_cell::identity::get(&*ours).await?;
     if identity.is_some_and(|identity| identity.number == number) {
         return Ok(ours.own().clone());
@@ -177,32 +220,54 @@ pub(crate) async fn bucket_numbered(home: &str, number: u16) -> Result<Arc<Objec
     Ok(ours.numbered(number).await?)
 }
 
-/// cladefs: the URLs of the buckets this process opened, for tests counting them (board 8443).
-#[cfg(test)]
-pub(crate) fn buckets_opened() -> Vec<String> {
-    BUCKETS.get().lock().unwrap().keys().cloned().collect()
+/// cladefs: the bucket numbered `number`, as the host whose bucket is at `home` reaches it
+/// (TASK-633.3, backlog doc-23): `home` itself, if of that number; else the bucket its requests of
+/// that number's cells go to ([`RoutedBucket::numbered`]): the registry in `home`'s root, or the
+/// root bucket's, records it; opened with its own options, and refused unless its identity is the
+/// one recorded (`Error::Mismatched`). `NoBucket` if no registry records it.
+#[cfg(not(madsim))]
+pub(crate) async fn bucket_numbered(home: &str, number: u16) -> Result<Arc<ObjectBucket>, Failure> {
+    bucket_numbered_on(crate::Host::process(), home, number).await
 }
 
-/// cladefs: what the decoded states of the cells this process's buckets keep, or its cells hold
-/// as the maps of the extents they share, hold: each once, however many cells share it
-/// (`bucket_cell::recovery::Decoded::held`, TASK-453).
+/// cladefs: the URLs of the buckets `host` opened, for tests counting them (board 8443).
+#[cfg(test)]
+pub(crate) fn buckets_opened_on(host: &crate::Host) -> Vec<String> {
+    host.host_cells().buckets.lock().unwrap().keys().cloned().collect()
+}
+
+/// cladefs: what the decoded states of the cells `host`'s buckets keep hold.
 #[cfg(any(target_os = "linux", madsim, test))]
-pub(crate) fn decoded_held() -> bucket_cell::recovery::Held {
-    let buckets = BUCKETS.get().lock().unwrap();
+pub(crate) fn decoded_held_on(host: &crate::Host) -> bucket_cell::recovery::Held {
+    let buckets = host.host_cells().buckets.lock().unwrap();
     (buckets.values())
         .filter_map(|bucket| bucket_cell::Bucket::decoded(&**bucket))
         .map(bucket_cell::recovery::Decoded::held)
         .fold(bucket_cell::recovery::Held::default(), std::ops::Add::add)
 }
 
+/// cladefs: what the decoded states of the cells this process's buckets keep, or its cells hold
+/// as the maps of the extents they share, hold: each once, however many cells share it
+/// (`bucket_cell::recovery::Decoded::held`, TASK-453).
+#[cfg(all(test, not(madsim)))]
+pub(crate) fn decoded_held() -> bucket_cell::recovery::Held {
+    decoded_held_on(crate::Host::process())
+}
+
+/// Makes `bucket` `host`'s of `url`, before any cell naming it opens.
+#[cfg(any(test, madsim))]
+pub(crate) fn use_bucket_on(host: &crate::Host, url: &str, bucket: Arc<RoutedBucket>) {
+    let mut buckets = host.host_cells().buckets.lock().unwrap();
+    let had = buckets.entry(url.to_owned()).or_insert_with(|| bucket.clone());
+    assert!(Arc::ptr_eq(had, &bucket), "this host has another bucket at {url}");
+}
+
 /// Makes `bucket` this process's of `url`, before any cell naming it opens, as the tests do the
 /// buckets they put themselves in front of, and the simulation the bucket its hosts share; unless
 /// it is already, the same.
-#[cfg(any(test, madsim))]
+#[cfg(all(test, not(madsim)))]
 pub(crate) fn use_bucket(url: &str, bucket: Arc<RoutedBucket>) {
-    let mut buckets = BUCKETS.get().lock().unwrap();
-    let had = buckets.entry(url.to_owned()).or_insert_with(|| bucket.clone());
-    assert!(Arc::ptr_eq(had, &bucket), "this process has another bucket at {url}");
+    use_bucket_on(crate::Host::process(), url, bucket);
 }
 
 /// cladefs: the URL of this host's bucket, if it is a host of cladefs's system: what a test made
@@ -269,11 +334,17 @@ pub(crate) fn token() -> Result<u64, Failure> {
     }
 }
 
+/// How a cell `host` opens where no host's daemon serves it keeps its cell in its bucket.
+pub(crate) fn keeping_on(host: &crate::Host) -> Result<upload::Options, Failure> {
+    let fetching = Some(crate::bucket::fetching_on(host));
+    Ok(upload::Options { token: token()?, fetching, ..Default::default() })
+}
+
 /// How a cell this process opens where no host's daemon serves it keeps its cell in its bucket:
 /// its uploader's options, as a copy never placed takes its cell's head here ([`token`]).
+#[cfg(all(test, not(madsim)))]
 pub(crate) fn keeping() -> Result<upload::Options, Failure> {
-    let fetching = Some(crate::bucket::fetching());
-    Ok(upload::Options { token: token()?, fetching, ..Default::default() })
+    keeping_on(crate::Host::process())
 }
 
 /// A cell directory opened ([`open`]), with the bucket its description names, which its cell is
@@ -299,13 +370,13 @@ impl Opened {
     }
 }
 
-/// The bucket the cell directory at `path` names, if its description is there: as deleting it, or
-/// what of it a deletion that stopped left, goes by. A cell of another format is refused
-/// (`local_cell::Format`), and a description there but unread, or not whole: taken for none, its
-/// cell would be deleted in no bucket, or the daemon's, and left in its own (board 6908).
-pub(crate) fn bucket_at(path: &Path) -> anyhow::Result<Option<Arc<RoutedBucket>>> {
+/// The bucket the cell directory at `path` names on `host`, if its description is there.
+pub(crate) fn bucket_at_on(
+    host: &crate::Host,
+    path: &Path,
+) -> anyhow::Result<Option<Arc<RoutedBucket>>> {
     match local_cell::host_bucket(path) {
-        Ok(Some(url)) => Ok(Some(bucket(&url)?)),
+        Ok(Some(url)) => Ok(Some(bucket_on(host, &url)?)),
         Ok(None) => Ok(None),
         Err(err)
             if err
@@ -318,17 +389,42 @@ pub(crate) fn bucket_at(path: &Path) -> anyhow::Result<Option<Arc<RoutedBucket>>
     }
 }
 
+/// The bucket the cell directory at `path` names, if its description is there: as deleting it, or
+/// what of it a deletion that stopped left, goes by. A cell of another format is refused
+/// (`local_cell::Format`), and a description there but unread, or not whole: taken for none, its
+/// cell would be deleted in no bucket, or the daemon's, and left in its own (board 6908).
+#[cfg(all(test, not(madsim)))]
+pub(crate) fn bucket_at(path: &Path) -> anyhow::Result<Option<Arc<RoutedBucket>>> {
+    bucket_at_on(crate::Host::process(), path)
+}
+
 /// The options cells are opened with: their extents hold at most what the guest's device says
 /// one does (doc-4's `max_extent`).
 pub(crate) fn options() -> Options {
     Options { max_extent: crate::OpenCell::MAX_EXTENT, ..Options::default() }
 }
 
-/// Makes a new cell at `path`, which must not exist, holding at most `capacity` bytes, of the
-/// cell `of` says, kept in this host's bucket, or a file bucket of its own ([`bucket_for`]), its
-/// cell's, of `kind` (doc-20), and opens it, its uploader as `keeping` says ([`open`]): whole, as
-/// made. Its directory entry is as durable as
-/// it is. A cell that is not made whole is removed; what is at `path` already is left as it is.
+/// Makes a new cell at `path` on `host`, whole, as made.
+pub(crate) async fn create_on(
+    host: &crate::Host,
+    path: &Path,
+    capacity: u64,
+    of: CellOf,
+    kind: cell::Kind,
+    keeping: upload::Options,
+) -> Result<Opened, Failure> {
+    let opened = create_unmade_on(host, path, capacity, of, kind, None, keeping).await?;
+    if let Err(err) = upload::blocking(|| opened.made()) {
+        opened.close().await;
+        // Its making's last step failing may have left it looking made (`UNMADE` gone, not
+        // durably): no store whose making failed is left behind (board 5668).
+        upload::blocking(|| discard_on(host, path));
+        return Err(err.into());
+    }
+    Ok(opened)
+}
+
+#[cfg(all(test, not(madsim)))]
 pub(crate) async fn create(
     path: &Path,
     capacity: u64,
@@ -336,22 +432,12 @@ pub(crate) async fn create(
     kind: cell::Kind,
     keeping: upload::Options,
 ) -> Result<Opened, Failure> {
-    let opened = create_unmade(path, capacity, of, kind, None, keeping).await?;
-    if let Err(err) = upload::blocking(|| opened.made()) {
-        opened.close().await;
-        // Its making's last step failing may have left it looking made (`UNMADE` gone, not
-        // durably): no store whose making failed is left behind (board 5668).
-        upload::blocking(|| discard(path));
-        return Err(err.into());
-    }
-    Ok(opened)
+    create_on(crate::Host::process(), path, capacity, of, kind, keeping).await
 }
 
-/// Makes a new cell at `path` as [`create`] does, kept in the bucket at `bucket`, if given, or
-/// else at [`bucket_for`]'s; unmade until its maker says it is whole ([`Opened::made`]), as an
-/// import does once filled (TASK-196): opened before, it refuses (`local_cell::Unmade`), and
-/// [`unmade`] says it is no cell.
-pub(crate) async fn create_unmade(
+/// Makes a new cell at `path` on `host`, unmade until its maker says it is whole.
+pub(crate) async fn create_unmade_on(
+    host: &crate::Host,
     path: &Path,
     capacity: u64,
     of: CellOf,
@@ -363,17 +449,17 @@ pub(crate) async fn create_unmade(
         .map_err(|err| Failure::local(err, format!("creating {}", path.display())))?;
     let made = async {
         let url = bucket.map_or_else(|| bucket_for(path), |bucket| Ok(bucket.to_owned()))?;
-        let bucket = self::bucket(&url)?;
+        let bucket = bucket_on(host, &url)?;
         let (cell, initial_head) = match of {
             CellOf::New(tenant) => {
                 let cell = new_cell(&bucket, tenant).await?;
-                make_keys(&bucket, cell).await?;
+                make_keys_on(host, &bucket, cell).await?;
                 (cell, None)
             }
             CellOf::Named(cell) => match learn_taken(&bucket, cell).await? {
                 Some(read) => (cell, Some(read)),
                 None => {
-                    make_keys(&bucket, cell).await?;
+                    make_keys_on(host, &bucket, cell).await?;
                     (cell, None)
                 }
             },
@@ -384,28 +470,42 @@ pub(crate) async fn create_unmade(
         };
         let recovering = upload::blocking(|| -> Result<_, Failure> {
             let description = Description { block_size: BLOCK_SIZE, capacity, cell };
-            local_cell::create_host(path, description, &url, kind)?;
+            local_cell::create_host_on(host.local(), path, description, &url, kind)?;
             let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty());
             let synced = host_fs::File::open(parent.unwrap_or(Path::new(".")))
                 .and_then(|parent| parent.sync_all());
             synced.map_err(|err| Failure::local(err, "syncing a cell directory's parent"))?;
-            Ok(LocalCell::recover_unmade(host_dir(path)?)?)
+            Ok(LocalCell::recover_unmade(host_dir_on(host, path)?)?)
         })?;
-        opened_with_head(recovering, keeping, initial_head).await
+        opened_with_head_on(host, recovering, keeping, initial_head).await
     };
     // Leave nothing half made behind.
     let made = made.await;
     if made.is_err() {
-        upload::blocking(|| discard(path));
+        upload::blocking(|| discard_on(host, path));
     }
     made
 }
 
-/// A new cell made here, a root, its KEK from the host's pool, before its cell first opens
-/// (TASK-515): a tenant the KMS refuses gets nothing made (TASK-411.28); its first taking gives it
-/// its DEK and kind.
-async fn make_keys(bucket: &RoutedBucket, cell: CellId) -> Result<(), Failure> {
-    let kms = crate::bucket::kms()?;
+#[cfg(all(test, not(madsim)))]
+pub(crate) async fn create_unmade(
+    path: &Path,
+    capacity: u64,
+    of: CellOf,
+    kind: cell::Kind,
+    bucket: Option<&str>,
+    keeping: upload::Options,
+) -> Result<Opened, Failure> {
+    create_unmade_on(crate::Host::process(), path, capacity, of, kind, bucket, keeping).await
+}
+
+/// A new cell made on `host`, a root, its KEK from the host's pool, before its cell first opens.
+async fn make_keys_on(
+    host: &crate::Host,
+    bucket: &RoutedBucket,
+    cell: CellId,
+) -> Result<(), Failure> {
+    let kms = crate::bucket::kms_on(host)?;
     bucket_cell::keys::make(bucket, &kms, cell, rand::random()).await?;
     Ok(())
 }
@@ -420,42 +520,47 @@ async fn learn_taken(
     Ok(read.head()?.is_some().then_some(read))
 }
 
-/// Opens the cell directory at `path` as of its last commit, with the bucket it names: its
-/// uploader, as `keeping` says, takes its cell's head, with the token its placement names or
-/// `keeping`'s, and recovers it, the cell's write-ahead log put after its end
-/// (`local_cell::upload::open`, TASK-165.9). Fails as that does: a log another writer's commits
-/// moved past (`ESTALE`), a cell deleted (`ENOENT`) or a later placement's (`ESTALE`); and a cell
-/// never made whole (`Unmade`).
-pub(crate) async fn open(path: &Path, keeping: upload::Options) -> Result<Opened, Failure> {
-    // cladefs: a close of it in this process waited for first, holding no thread (doc-24).
-    closed(path).await?;
-    let recovering =
-        upload::blocking(|| -> Result<_, Failure> { Ok(LocalCell::recover(host_dir(path)?)?) })?;
-    opened(recovering, keeping).await
+/// Opens the cell directory at `path` on `host` as of its last commit, with the bucket it names.
+pub(crate) async fn open_on(
+    host: &crate::Host,
+    path: &Path,
+    keeping: upload::Options,
+) -> Result<Opened, Failure> {
+    // cladefs: a close of it on this host waited for first, holding no thread (doc-24).
+    closed_on(host, path).await?;
+    let recovering = upload::blocking(|| -> Result<_, Failure> {
+        Ok(LocalCell::recover(host_dir_on(host, path)?)?)
+    })?;
+    opened_on(host, recovering, keeping).await
 }
 
-/// cladefs: returns once no cell of the directory at `path` is closing in this process
-/// (`local_cell::closed`), whose opening then finds none: a waiting that gave up, as the opening
-/// would have (`WouldBlock`, which the daemon says `EBUSY`).
-async fn closed(path: &Path) -> Result<(), Failure> {
-    let waited = local_cell::closed(path).await;
+#[cfg(all(test, not(madsim)))]
+pub(crate) async fn open(path: &Path, keeping: upload::Options) -> Result<Opened, Failure> {
+    open_on(crate::Host::process(), path, keeping).await
+}
+
+/// cladefs: returns once no cell of the directory at `path` is closing on `host`.
+async fn closed_on(host: &crate::Host, path: &Path) -> Result<(), Failure> {
+    let waited = local_cell::closed_on(host.local(), path).await;
     waited.map_err(|err| Failure::local(err, format!("{}", path.display())))
 }
 
-/// The host directory of the cell at `path`.
-fn host_dir(path: &Path) -> Result<HostDir, Failure> {
-    HostDir::new(path).map_err(|err| Failure::local(err, format!("{}", path.display())))
+/// The host directory of the cell at `path` on `host`.
+fn host_dir_on(host: &crate::Host, path: &Path) -> Result<HostDir, Failure> {
+    HostDir::new_on(host.local(), path)
+        .map_err(|err| Failure::local(err, format!("{}", path.display())))
 }
 
-/// Opens the cell directory at `path` as [`open`] does, its write-ahead log dropped if another
-/// writer's commits moved its cell past it (`bucket_cell::Error::Diverged`): what `cladefsctl take`
-/// does of a cell that refuses to open so, the commits the log held, never acknowledged, lost
-/// (doc-14, Opening a cell; doc-7, Recovery on the same host).
-pub(crate) async fn take(path: &Path, keeping: upload::Options) -> Result<Opened, Failure> {
-    match open(path, keeping.clone()).await {
+/// Opens the cell directory at `path` on `host`, dropping its WAL if another writer diverged.
+pub(crate) async fn take_on(
+    host: &crate::Host,
+    path: &Path,
+    keeping: upload::Options,
+) -> Result<Opened, Failure> {
+    match open_on(host, path, keeping.clone()).await {
         Err(Failure::Bucket(bucket_cell::Error::Diverged)) => {
             let recovering = upload::blocking(|| -> Result<_, Failure> {
-                let mut recovering = LocalCell::recover(host_dir(path)?)?;
+                let mut recovering = LocalCell::recover(host_dir_on(host, path)?)?;
                 log::warn!(
                     "cladefs: dropping {}'s write-ahead log: another writer moved cell {} past it",
                     path.display(),
@@ -464,22 +569,24 @@ pub(crate) async fn take(path: &Path, keeping: upload::Options) -> Result<Opened
                 recovering.drop_wal()?;
                 Ok(recovering)
             })?;
-            opened(recovering, keeping).await
+            opened_on(host, recovering, keeping).await
         }
         opened => opened,
     }
 }
 
-/// The cell `recovering` recovered, opened with its uploader as `keeping` says.
-async fn opened(
+/// The cell `recovering` recovered, opened on `host` with its uploader as `keeping` says.
+async fn opened_on(
+    host: &crate::Host,
     recovering: Recovering<HostDir>,
     keeping: upload::Options,
 ) -> Result<Opened, Failure> {
-    opened_with_head(recovering, keeping, None).await
+    opened_with_head_on(host, recovering, keeping, None).await
 }
 
-/// Like [`opened`], passing an already-fetched [`bucket_cell::head::Read`] to the uploader.
-async fn opened_with_head(
+/// Like [`opened_on`], passing an already-fetched [`bucket_cell::head::Read`] to the uploader.
+async fn opened_with_head_on(
+    host: &crate::Host,
     recovering: Recovering<HostDir>,
     keeping: upload::Options,
     initial_head: Option<bucket_cell::head::Read>,
@@ -487,8 +594,8 @@ async fn opened_with_head(
     let url = recovering.bucket().map(str::to_owned);
     let path = || recovering_path(&recovering);
     let url = url.ok_or_else(|| Failure::msg(format!("{} names no bucket", path())))?;
-    let bucket = bucket(&url).with_context(|| format!("opening the bucket {url}"))?;
-    let runtime = crate::bucket::runtime()?;
+    let bucket = bucket_on(host, &url).with_context(|| format!("opening the bucket {url}"))?;
+    let runtime = crate::bucket::runtime_on(host)?;
     let holding = (rand::random(), keeping);
     let opening = upload::open_with_head(
         recovering,
@@ -507,50 +614,29 @@ fn recovering_path(recovering: &Recovering<HostDir>) -> String {
     format!("cell {}'s cell directory", recovering.cell())
 }
 
-/// Whether `path` is a directory a cell's making, or a fork's, left unmade, its host crashing:
-/// no cell, as its description, made last, is not there, or it was never made whole
-/// (`local_cell::unmade_host`, TASK-196); deleting it finishes it ([`delete`]).
-pub(crate) fn unmade(path: &Path) -> bool {
-    local_cell::unmade_host(path)
+/// Whether `path` is a directory a cell's making, or a fork's, left unmade on `host`.
+pub(crate) fn unmade_on(host: &crate::Host, path: &Path) -> bool {
+    local_cell::unmade_host_on(host.local(), path)
 }
 
-/// Removes what a making that failed left at `path`, if anything, as a cell directory goes
-/// (`local_cell::remove_cell_dir`): logged if it can't, as the failure the caller returns is
-/// the making's, and no cell from then on in this process, which a making there again removes
-/// first ([`unmade`], `local_cell::left_unmade`, board 10506).
-pub(crate) fn discard(path: &Path) {
+#[cfg(all(test, not(madsim)))]
+pub(crate) fn unmade(path: &Path) -> bool {
+    unmade_on(crate::Host::process(), path)
+}
+
+/// Removes what a making that failed left at `path` on `host`.
+pub(crate) fn discard_on(host: &crate::Host, path: &Path) {
     if host_fs::exists(&path)
-        && let Err(err) = local_cell::remove_cell_dir(path)
+        && let Err(err) = local_cell::remove_cell_dir_on(host.local(), path)
     {
         log::warn!("cladefs: removing {}, which a making left: {err:#}", path.display());
-        local_cell::left_unmade(path);
+        local_cell::left_unmade_on(host.local(), path);
     }
 }
 
-/// Forks `local`, a cell at a version (`uploader.is_at_version`), to `child`, a new cell holding
-/// what the version holds, whose cell is a new directory at `path`, which [`open`] opens:
-/// `EEXIST` if anything is at `path`. The fork is the child's record alone (doc-7, Forks;
-/// `Uploader::forked`), inheriting the version's extents rather than copies, which fails with
-/// `ENOENT` once the version is dropped, and with `EACCES` if the child is of another tenant's
-/// cell than the version, which isn't shared (TASK-395.7). Only then is the child's cell made,
-/// at `path`, holding nothing of its own: opening it recovers the child's state from the bucket,
-/// as any cell's opening does (TASK-165.9). `prepare` writes what the caller keeps beside the
-/// cell into its making first, before its description, which makes it a cell, durable with it
-/// ([`Making`], board 7420). A fork to
-/// another tenant's cell fails with `EACCES` before anything is made, unless the cell is the
-/// default tenant's ([`may_fork_into`], TASK-395.9).
-///
-/// The caller names the child: a fork to a child whose ID another cell has in the bucket fails
-/// with `EEXIST`, making nothing (TASK-79.82). A fork that fails once its record was made is
-/// deleted in the bucket as the fork's alone (`Uploader::unfork`); its host crashing, it stands,
-/// or never was, as the bucket has it.
-///
-/// cladefs: a fork of an encrypted cell into another cell, as every fork here is, gives its child
-/// the keys it inherits, rewrapped under its cell's KEK, from the pool, no KMS call made
-/// (`Remote::inheriting`, `keys::give_inherited`, TASK-411.4): refused before anything is made,
-/// `EACCES` if the child's tenant has no KEK in the KMS (TASK-411.28), or the host heard a tenant
-/// whose keys it inherits, or the child's, revoked or destroyed.
-pub(crate) async fn fork(
+/// Forks `local`, a cell at a version, to `child` on `host`.
+pub(crate) async fn fork_on(
+    host: &crate::Host,
     local: &LocalCell<HostDir>,
     uploader: &Uploader<HostDir>,
     path: &Path,
@@ -571,7 +657,7 @@ pub(crate) async fn fork(
         Err(err) => Err(failed(err)),
         Ok(()) => upload::blocking(|| -> anyhow::Result<()> {
             failpoint!("fork::recorded");
-            make_child(local, path, cell, prepare)
+            make_child_on(host, local, path, cell, prepare)
                 .with_context(|| format!("forking to cell {cell}: making its cell directory"))?;
             failpoint!("fork::made");
             Ok(())
@@ -579,46 +665,49 @@ pub(crate) async fn fork(
     };
     let Err(err) = made else { return Ok(()) };
     // Leave nothing half made behind: no cell, and no fork whose cell went.
-    upload::blocking(|| discard(path));
+    upload::blocking(|| discard_on(host, path));
     if let Err(why) = uploader.unfork(child).await {
         log::warn!("cladefs: leaving cell {cell}, whose fork failed: {why}");
     }
     Err(Error::new(err))
 }
 
-node_local::node_local! {
-    /// cladefs: the cells this process made versions of, by the version (cell and ID): what a cell
-    /// at the version made here inherits of what cladefs keeps beside its cell, what is attached to
-    /// it ([`cell_dir::inherit_attached`]), as a fork of the cell does. In memory alone: a restore
-    /// on another host, or after the process went, inherits none. cladefs: of versions their cells
-    /// name, made here or uploaded, alone: one dropped, by a drop or a later version's window, or
-    /// whose cell was deleted, goes (TASK-610).
-    static VERSIONS_MADE: Mutex<BTreeMap<(CellId, u64), PathBuf>> = Mutex::new(BTreeMap::new());
-}
-
-/// cladefs: the cell directory at `path`, of `cell`, made the version `version` here, `cell`'s
-/// versions now those of `named`, and it: those of `cell`'s it names no more, dropped since, go.
-pub(crate) fn made_version(cell: CellId, version: u64, path: &Path, named: &BTreeSet<u64>) {
-    let mut made = VERSIONS_MADE.get().lock().unwrap();
+/// cladefs: the cell directory at `path`, of `cell`, made the version `version` on `host`.
+pub(crate) fn made_version_on(
+    host: &crate::Host,
+    cell: CellId,
+    version: u64,
+    path: &Path,
+    named: &BTreeSet<u64>,
+) {
+    let mut made = host.host_cells().versions_made.lock().unwrap();
     made.retain(|&(of, id), _| of != cell || named.contains(&id));
     made.insert((cell, version), path.to_owned());
 }
 
-/// cladefs: the versions `ids` of `cell` were dropped.
-pub(crate) fn dropped_versions(cell: CellId, ids: &BTreeSet<u64>) {
-    VERSIONS_MADE.get().lock().unwrap().retain(|&(of, id), _| of != cell || !ids.contains(&id));
+/// cladefs: the versions `ids` of `cell` were dropped on `host`.
+pub(crate) fn dropped_versions_on(host: &crate::Host, cell: CellId, ids: &BTreeSet<u64>) {
+    host.host_cells()
+        .versions_made
+        .lock()
+        .unwrap()
+        .retain(|&(of, id), _| of != cell || !ids.contains(&id));
 }
 
 /// cladefs: how many versions it says this process made, which the tests bound.
 #[cfg(test)]
 pub(crate) fn versions_made() -> usize {
-    VERSIONS_MADE.get().lock().unwrap().len()
+    crate::Host::process().host_cells().versions_made.lock().unwrap().len()
 }
 
-/// cladefs: where the cell this process made the version `version` of `cell` of is, if it did.
+/// cladefs: where the cell `host` made the version `version` of `cell` of is, if it did.
 #[cfg(any(target_os = "linux", madsim))]
-pub(crate) fn version_made_of(cell: CellId, version: u64) -> Option<PathBuf> {
-    VERSIONS_MADE.get().lock().unwrap().get(&(cell, version)).cloned()
+pub(crate) fn version_made_of_on(
+    host: &crate::Host,
+    cell: CellId,
+    version: u64,
+) -> Option<PathBuf> {
+    host.host_cells().versions_made.lock().unwrap().get(&(cell, version)).cloned()
 }
 
 /// cladefs: where a cell at the version `version` of `cell` is kept for forks of it, served by
@@ -634,11 +723,9 @@ pub(crate) fn version_dir(cell: CellId, version: u64, cache: Option<&Cache>) -> 
     root.join(format!("{:x}.{:x}.{:x}", cell.tenant, cell.id, version))
 }
 
-/// Forks `local`, its cell's version `version` made and uploaded, to `child` as [`fork`] does:
-/// from a cell at the version ([`version_dir`]), made, then deleted, and the version dropped, the
-/// child keeping what it inherits by its reference. So a cell with a writer forks: forks are of
-/// versions alone (TASK-508.3).
-pub(crate) async fn fork_through(
+/// Forks `local`, its cell's version `version` made and uploaded, to `child` on `host`.
+pub(crate) async fn fork_through_on(
+    host: &crate::Host,
     local: &LocalCell<HostDir>,
     uploader: &Uploader<HostDir>,
     version: u64,
@@ -653,23 +740,31 @@ pub(crate) async fn fork_through(
         made.and_then(|()| host_fs::create_dir(&at)).map_err(|err| {
             Error::new(anyhow::Error::new(err).context(format!("making {}", at.display())))
         })?;
-        local_cell::create_host_at_version(&at, local.description(), url, kind, version)
-            .and_then(|()| local_cell::made_host(&at))
-            .map_err(Error::new)
+        local_cell::create_host_at_version_on(
+            host.local(),
+            &at,
+            local.description(),
+            url,
+            kind,
+            version,
+        )
+        .and_then(|()| local_cell::made_host_on(host.local(), &at))
+        .map_err(Error::new)
     });
     // The cell at the version closed before it goes, as it held its directory.
     let forked = match made {
         Err(err) => Err(err),
-        Ok(()) => match open(&at, uploader.options().clone()).await {
+        Ok(()) => match open_on(host, &at, uploader.options().clone()).await {
             Err(failure) => Err(Error::from(failure)),
             Ok(opened) => {
-                let forked = fork(&opened.local, &opened.uploader, path, child, prepare).await;
+                let forked =
+                    fork_on(host, &opened.local, &opened.uploader, path, child, prepare).await;
                 opened.close().await;
                 forked
             }
         },
     };
-    upload::blocking(|| discard(&at));
+    upload::blocking(|| discard_on(host, &at));
     // The version, the fork's alone, dropped whether or not it forked. The child made is the
     // fork's last step that can fail it: past it, a drop failing leaves the version named, which
     // the cell's versions list for dropping again, and a fork reported failed would leave a live
@@ -684,6 +779,18 @@ pub(crate) async fn fork_through(
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+pub(crate) async fn fork_through(
+    local: &LocalCell<HostDir>,
+    uploader: &Uploader<HostDir>,
+    version: u64,
+    path: &Path,
+    child: Child,
+    prepare: impl FnOnce(&mut Making<'_, HostDir>) -> anyhow::Result<()> + Send,
+) -> Result<(), Error> {
+    fork_through_on(crate::Host::process(), local, uploader, version, path, child, prepare).await
 }
 
 /// cladefs: the error of a fork to `cell` that failed with `err`: `EEXIST` for an ID another cell
@@ -705,16 +812,9 @@ fn fork_failure(cell: CellId, err: Failure) -> anyhow::Error {
     }
 }
 
-/// cladefs: forks `local`, at a version, its uploader `uploader`, to `child`, an ephemeral cell
-/// kept on this host alone, whose cell is made at `path` (doc-25, TASK-698.3): noted in the
-/// host's journal first ([`crate::ephemeral_host`]), then its reference written in the version's
-/// cell's bucket, whose head must name the version still (`Uploader::forked_ephemeral`), then its
-/// cell made, `prepare` writing what the caller keeps beside it first, its local checkpoint its
-/// version's state with its keys. A fork that fails leaves nothing: its directory gone, its
-/// reference retired, its note forgotten. `ENOTSUP` on a host keeping no ephemeral cells
-/// (`CLADEFSD_EPHEMERAL`); `EINVAL` of a cell not at a version: ephemeral cells are forked from
-/// versions alone.
-pub(crate) async fn fork_ephemeral(
+/// cladefs: forks `local`, at a version, to `child`, an ephemeral cell on `host`.
+pub(crate) async fn fork_ephemeral_on(
+    host_ctx: &crate::Host,
     local: &LocalCell<HostDir>,
     uploader: &Uploader<HostDir>,
     path: &Path,
@@ -723,7 +823,7 @@ pub(crate) async fn fork_ephemeral(
 ) -> Result<(), Error> {
     may_fork_into(local.description().cell, uploader, child.cell.tenant)?;
     let origin = uploader.at_version_origin().ok_or(Errno::EINVAL)?;
-    let host = crate::ephemeral_host::host()?;
+    let host = crate::ephemeral_host::host_on(host_ctx)?;
     let url = local.bucket().map(str::to_owned).ok_or(Errno::EINVAL)?;
     let kind = local.kind().ok_or(Errno::EINVAL)?;
     let inheriting = uploader.inheriting(child).await?;
@@ -744,7 +844,8 @@ pub(crate) async fn fork_ephemeral(
             Ok((checkpoint, ring)) => upload::blocking(|| -> anyhow::Result<()> {
                 let capacity = local.description().capacity;
                 let description = Description { block_size: BLOCK_SIZE, capacity, cell };
-                local_cell::create_host_ephemeral(
+                local_cell::create_host_ephemeral_on(
+                    host_ctx.local(),
                     path,
                     description,
                     &entry.bucket,
@@ -758,14 +859,14 @@ pub(crate) async fn fork_ephemeral(
                     },
                 )
                 .with_context(|| format!("forking to ephemeral cell {cell}: its cell directory"))?;
-                local_cell::made_host(path)?;
+                local_cell::made_host_on(host_ctx.local(), path)?;
                 Ok(())
             }),
         },
     };
     let Err(err) = made else { return Ok(()) };
     log::warn!("cladefs: forking ephemeral cell {cell} at {}: {err:#}", path.display());
-    upload::blocking(|| discard(path));
+    upload::blocking(|| discard_on(host_ctx, path));
     if let Err(why) = host.retire(&entry).await {
         log::warn!("cladefs: retiring ephemeral cell {cell}'s reference, its fork failed: {why:#}");
     }
@@ -782,23 +883,23 @@ fn make_dir(path: &Path) -> Result<(), Error> {
     })
 }
 
-/// cladefs: opens the ephemeral cell at `path` (doc-25, TASK-698.3), with `keeping`'s cache
-/// and held parts, its parent's extents read in the bucket its description names: the cell, and
-/// that bucket. No uploader: nothing of it goes to a bucket.
-pub(crate) async fn open_ephemeral(
+/// cladefs: opens the ephemeral cell at `path` on `host`.
+pub(crate) async fn open_ephemeral_on(
+    host: &crate::Host,
     path: &Path,
     keeping: &upload::Options,
 ) -> Result<
     (Arc<LocalCell<HostDir>>, Arc<RoutedBucket>, bucket_cell::keys::RingHold, upload::Forked),
     Failure,
 > {
-    closed(path).await?;
-    let recovering =
-        upload::blocking(|| -> Result<_, Failure> { Ok(LocalCell::recover(host_dir(path)?)?) })?;
+    closed_on(host, path).await?;
+    let recovering = upload::blocking(|| -> Result<_, Failure> {
+        Ok(LocalCell::recover(host_dir_on(host, path)?)?)
+    })?;
     let url = recovering.bucket().map(str::to_owned);
     let url = url.ok_or_else(|| Failure::msg(format!("{} names no bucket", path.display())))?;
-    let bucket = bucket(&url).with_context(|| format!("opening the bucket {url}"))?;
-    let runtime = crate::bucket::runtime()?;
+    let bucket = bucket_on(host, &url).with_context(|| format!("opening the bucket {url}"))?;
+    let runtime = crate::bucket::runtime_on(host)?;
     let held = (keeping.cache.clone(), keeping.held.clone());
     let opened = upload::open_ephemeral(recovering, options(), bucket.clone(), &runtime, held);
     let (local, keys, forked) = opened.await?;
@@ -816,12 +917,9 @@ fn taken(cell: CellId) -> anyhow::Error {
     anyhow::Error::new(Errno::EEXIST).context(refused)
 }
 
-/// Makes the cell directory of `cell`, a fork of `parent`'s cell the bucket has the record of, in
-/// the directory at `path`, made empty: the cell directory, of the parent's capacity, naming the
-/// parent's bucket, of the parent's kind, its own cell's, `prepare` writing into its making first,
-/// whole (TASK-364, doc-20). It holds nothing of its own: opening it recovers the child from the
-/// bucket, as any cell's opening does (TASK-165.9), and holds its cell, making it.
-fn make_child(
+/// Makes the cell directory of `cell` on `host`.
+fn make_child_on(
+    host: &crate::Host,
     parent: &LocalCell<HostDir>,
     path: &Path,
     cell: CellId,
@@ -834,12 +932,12 @@ fn make_child(
         .kind()
         .ok_or_else(|| anyhow::anyhow!("{} names no cell's kind", parent.dir().path().display()))?;
     let description = Description { block_size: BLOCK_SIZE, capacity, cell };
-    local_cell::create_host_with(path, description, &url, kind, |making| {
+    local_cell::create_host_with_on(host.local(), path, description, &url, kind, |making| {
         prepare(making)?;
         durable_in_parent(making, path);
         Ok(())
     })?;
-    local_cell::made_host(path)?;
+    local_cell::made_host_on(host.local(), path)?;
     Ok(())
 }
 
@@ -851,23 +949,18 @@ fn durable_in_parent(making: &mut Making<'_, HostDir>, path: &Path) {
     making.also("the cell directory's parent", move || host_fs::File::open(&parent)?.sync_all());
 }
 
-/// Deletes the cell directory at `path`, which nothing has open: with `bucket`, its cell there
-/// first, its forks' cells living on, as the placement its copy was placed at, or, never placed, as
-/// the one `token` gives; then its directory. A deletion that stopped partway is finished by
-/// deleting again (TASK-79.71), and a directory a cell's or a fork's making left unmade
-/// ([`unmade`]) goes.
-///
-/// Fails with `ENOENT` if nothing is at `path`, and with `ESTALE` if a later placement of the
-/// cell directory holds its cell in `bucket`.
-pub(crate) async fn delete(
+/// Deletes the cell directory at `path` on `host`, which nothing has open.
+pub(crate) async fn delete_on(
+    host_ctx: &crate::Host,
     path: &Path,
     bucket: Option<&RoutedBucket>,
     token: impl Fn() -> Result<u64, Failure>,
 ) -> Result<(), Error> {
     // cladefs: an ephemeral cell's reference retired, its note forgotten (doc-25, TASK-698.3).
     if upload::blocking(|| is_ephemeral(path)) {
-        return delete_with(path, async |dir, cell| {
-            let checkpoint = upload::blocking(|| local_cell::host_local_checkpoint(dir))?;
+        return delete_with_on(host_ctx, path, async |dir, cell| {
+            let checkpoint =
+                upload::blocking(|| local_cell::host_local_checkpoint_on(host_ctx.local(), dir))?;
             let checkpoint = checkpoint
                 .ok_or_else(|| Failure::msg(format!("{} has no checkpoint", dir.display())))?;
             let parent = checkpoint.parent();
@@ -876,7 +969,7 @@ pub(crate) async fn delete(
                 at: parent.at,
                 epoch: parent.epoch,
             };
-            let host = crate::ephemeral_host::host().map_err(|errno| {
+            let host = crate::ephemeral_host::host_on(host_ctx).map_err(|errno| {
                 Failure::msg(format!(
                     "deleting ephemeral cell {cell}: no CLADEFSD_EPHEMERAL: {errno}"
                 ))
@@ -898,7 +991,7 @@ pub(crate) async fn delete(
     }
     // As this copy's placement, or this host's, deletes it: not from under a later one (`ESTALE`).
     // A cell at a version deletes nothing in the bucket: the version is its cell's.
-    delete_with(path, async |dir, cell| match bucket {
+    delete_with_on(host_ctx, path, async |dir, cell| match bucket {
         Some(_) if upload::blocking(|| local_cell::host_version(dir))?.is_some() => Ok(()),
         Some(bucket) => {
             let placed = upload::blocking(|| local_cell::host_token(dir))?;
@@ -910,13 +1003,19 @@ pub(crate) async fn delete(
     .await
 }
 
-/// Deletes the cell directory at `path` as [`delete`] does, `elsewhere` deleting its cell where
-/// else it is kept, given the cell directory and the cell: once the cell is found open nowhere
-/// here, before it goes here (`local_cell::delete_host`), so that a deletion that stopped partway,
-/// the host crashing or `elsewhere` failing, leaves the cell still, which deleting again finishes,
-/// never a cell kept elsewhere alone. What a cell's making, or a fork's, left unmade, which is
-/// no cell, goes, `elsewhere` called for nothing.
-pub(crate) async fn delete_with(
+#[cfg(all(test, not(madsim)))]
+pub(crate) async fn delete(
+    path: &Path,
+    bucket: Option<&RoutedBucket>,
+    token: impl Fn() -> Result<u64, Failure>,
+) -> Result<(), Error> {
+    delete_on(crate::Host::process(), path, bucket, token).await
+}
+
+/// Deletes the cell directory at `path` on `host`, `elsewhere` deleting its cell where else it is
+/// kept.
+pub(crate) async fn delete_with_on(
+    host: &crate::Host,
     path: &Path,
     elsewhere: impl AsyncFnOnce(&Path, CellId) -> Result<(), Failure>,
 ) -> Result<(), Error> {
@@ -927,7 +1026,7 @@ pub(crate) async fn delete_with(
         failpoint!("delete::elsewhere");
         Ok(elsewhere(path, cell).await?)
     };
-    local_cell::delete_host(path, deleting).await.map_err(|err| {
+    local_cell::delete_host_on(host.local(), path, deleting).await.map_err(|err| {
         // Its errno, if deleting the cell elsewhere failed with one: `ESTALE` for a cell a
         // later placement holds.
         let failure = err.chain().find_map(|cause| cause.downcast_ref::<Failure>());
@@ -937,7 +1036,7 @@ pub(crate) async fn delete_with(
         }
     })?;
     // cladefs: what it made versions of is gone (TASK-610).
-    VERSIONS_MADE.get().lock().unwrap().retain(|_, of| of != path);
+    host.host_cells().versions_made.lock().unwrap().retain(|_, of| of != path);
     Ok(())
 }
 

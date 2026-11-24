@@ -244,10 +244,11 @@ impl Memory {
     /// An arena of its own, and the default one, each read-only.
     fn new(daemon: &Daemon) -> std::io::Result<Self> {
         use std::os::fd::AsFd;
-        let public = reopen_read_only(crate::pages::physical_memory()?.as_fd())?;
-        let arena = crate::pages::Arena::new()?;
-        let memory =
-            reopen_read_only(crate::pages::arena_memory(arena.id()).expect("a new arena").as_fd())?;
+        let public = reopen_read_only(crate::pages::physical_memory_on(&daemon.host)?.as_fd())?;
+        let arena = crate::pages::Arena::new_on(&daemon.host)?;
+        let memory = reopen_read_only(
+            crate::pages::arena_memory_on(&daemon.host, arena.id()).expect("a new arena").as_fd(),
+        )?;
         let connections = Default::default();
         // cladefs: within every tenant's together (board 8465).
         let in_flight = Arc::new(super::memory::InFlight::of_a_tenant(daemon));
@@ -1995,7 +1996,7 @@ impl Connection {
         let mut there = None;
         if let codec::Opening::ForkOf { tenant, cell, version, capacity } = *how
             && local_cell::upload::blocking(|| {
-                host_fs::exists(&path) && !crate::host_cell::unmade(path)
+                host_fs::exists(&path) && !crate::host_cell::unmade_on(&daemon.host, path)
             })
         {
             let open_cell = Arc::new(open_cell_at(daemon, path, None, Some(arena)).await?);
@@ -2018,13 +2019,13 @@ impl Connection {
             // cladefs: or where a cell's making was left unmade, its host crashing, which is no
             // cell: removed first, as deleting it would (TASK-79.84).
             (None, &codec::Opening::ForkOf { tenant, cell, version, capacity }) => {
-                local_cell::upload::blocking(|| cells::removed_if_unmade(path))?;
+                local_cell::upload::blocking(|| cells::removed_if_unmade_on(&daemon.host, path))?;
                 let forked = (crate::CellId { tenant, id: cell }, version);
                 // cladefs: a restore's fork, made and opened syncing nothing: durable by its first
                 // flush or its close, before any commit of its VM is (board 7420, the user's
                 // call). A host crash before leaves it unmade, as if the restore never was.
                 // cladefs: a crash of the daemon's too, its VM processes going with it.
-                let deferring = local_cell::defer_durability(path);
+                let deferring = local_cell::defer_durability_on(daemon.host.local(), path);
                 cells::fork_version(daemon, forked, capacity, (path, self.tenant.granted()))
                     .await?;
                 let open_cell = open_cell_at(daemon, path, None, Some(arena)).await?;

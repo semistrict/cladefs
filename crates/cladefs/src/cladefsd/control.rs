@@ -214,6 +214,7 @@ fn most_answer() -> usize {
 /// cladefs: `stats`, as the API has it (TASK-111.4), the guests' histograms left out if
 /// `leave_out_histograms`, and their stats if `leave_out_guests` (board 8581).
 fn stats_response(
+    host: &crate::Host,
     stats: super::stats::HostStats,
     (leave_out_histograms, leave_out_guests): (bool, bool),
 ) -> GetStatsResponse {
@@ -248,7 +249,7 @@ fn stats_response(
         vms: vms.collect(),
         // cladefs: its ephemeral cells' directory's incarnation (board 8521); none opened
         // (ENOTSUP), it keeps no ephemeral cells, which 0 says.
-        incarnation: crate::ephemeral_host::host().map_or(0, |host| host.incarnation()),
+        incarnation: crate::ephemeral_host::host_on(host).map_or(0, |host| host.incarnation()),
     }
 }
 
@@ -604,7 +605,9 @@ impl Cladefsd for Control {
         let replication = wish(replicas, fsync)?;
         // cladefs: a replicated cell's members are the daemon's peers, in their replica
         // directories (doc-21): without them, refused before anything is made.
-        if replication.is_some_and(|wish| wish.f >= 1) && crate::bucket::members().is_none() {
+        if replication.is_some_and(|wish| wish.f >= 1)
+            && crate::bucket::members_on(&self.daemon.host).is_none()
+        {
             return Err(saying(
                 Errno::ENOTSUP,
                 "a replicated cell needs the daemon's peers and replica directory \
@@ -719,8 +722,8 @@ impl Cladefsd for Control {
             // this daemon's own, whose live cells' references it would retire (board 8519): a
             // mistyped ID, refused before anything is written. Its directory not opened (ENOTSUP),
             // the daemon has no incarnation to be.
-            let own =
-                crate::ephemeral_host::host().is_ok_and(|host| host.incarnation() == incarnation);
+            let own = crate::ephemeral_host::host_on(&self.daemon.host)
+                .is_ok_and(|host| host.incarnation() == incarnation);
             if incarnation % 2 == 0 || own {
                 log::warn!(
                     "cladefsd: decommissioning host {said}: refused, no host's to decommission"
@@ -1012,7 +1015,8 @@ impl Cladefsd for Control {
             ms => std::time::Duration::from_millis(ms.into()),
         };
         let stats = super::stats::take_on(&self.daemon, wait, !leave_out_vms).await;
-        let answer = stats_response(stats, (leave_out_histograms, leave_out_guests));
+        let answer =
+            stats_response(&self.daemon.host, stats, (leave_out_histograms, leave_out_guests));
         let smaller = match (leave_out_histograms, leave_out_guests, leave_out_vms) {
             (false, false, _) => "leave out the guests' histograms (leave_out_histograms)",
             (true, false, _) => "leave out the guests' stats (leave_out_guests)",
@@ -1120,7 +1124,7 @@ impl Cladefsd for Control {
         request: Request<SetPeersRequest>,
     ) -> Result<Response<SetPeersResponse>, Status> {
         let SetPeersRequest { addresses } = request.into_inner();
-        reply(super::peers::set(addresses).map(|()| SetPeersResponse {}))
+        reply(super::peers::set_on(&self.daemon, addresses).map(|()| SetPeersResponse {}))
     }
 
     async fn shred_cell(
@@ -1130,12 +1134,14 @@ impl Cladefsd for Control {
         let ShredCellRequest { tenant, cell } = request.into_inner();
         let cell = crate::CellId { tenant, id: cell };
         let bucket = storage::daemon_bucket_on(&self.daemon).map_err(status)?;
-        let shredded = crate::bucket::shred_cell(&*bucket, cell).await.map_err(|err| {
-            let failure = local_cell::upload::Failure::Bucket(err);
-            let errno = crate::bucket::errno(&failure).unwrap_or(Errno::EIO);
-            log::error!("cladefsd: shredding cell {cell}: {failure}");
-            saying(errno, format!("shredding cell {cell}: {failure}"))
-        })?;
+        let shredded = crate::bucket::shred_cell_on(&self.daemon.host, &*bucket, cell)
+            .await
+            .map_err(|err| {
+                let failure = local_cell::upload::Failure::Bucket(err);
+                let errno = crate::bucket::errno(&failure).unwrap_or(Errno::EIO);
+                log::error!("cladefsd: shredding cell {cell}: {failure}");
+                saying(errno, format!("shredding cell {cell}: {failure}"))
+            })?;
         let (removed, forgotten) = shredded;
         let keks_removed = u32::try_from(removed).unwrap_or(u32::MAX);
         Ok(Response::new(ShredCellResponse {
@@ -1156,7 +1162,9 @@ impl Cladefsd for Control {
             false => why,
         };
         let scope = bucket_cell::keys::Scope::Tenant(tenant);
-        let forgotten = cells::blocking(move || Ok(crate::bucket::forget(scope, &why))).await;
+        let host = Arc::clone(&self.daemon.host);
+        let forgotten =
+            cells::blocking(move || Ok(crate::bucket::forget_on(&host, scope, &why))).await;
         reply(
             forgotten.map(|forgotten| ForgetTenantKeysResponse {
                 forgotten: Some(forgotten_of(forgotten)),
@@ -1169,10 +1177,11 @@ impl Cladefsd for Control {
         request: Request<ShredTenantRequest>,
     ) -> Result<Response<ShredTenantResponse>, Status> {
         let ShredTenantRequest { tenant } = request.into_inner();
-        let (destroyed, forgotten) = crate::bucket::shred_tenant(tenant).await.map_err(|why| {
-            log::error!("cladefsd: shredding tenant {tenant}: {why}");
-            saying(Errno::ENOTSUP, why)
-        })?;
+        let (destroyed, forgotten) =
+            crate::bucket::shred_tenant_on(&self.daemon.host, tenant).await.map_err(|why| {
+                log::error!("cladefsd: shredding tenant {tenant}: {why}");
+                saying(Errno::ENOTSUP, why)
+            })?;
         let shredded_now = destroyed == bucket_cell::bucket_kms::Destroyed::Now;
         Ok(Response::new(ShredTenantResponse {
             shredded_now,
@@ -1186,16 +1195,17 @@ impl Cladefsd for Control {
     ) -> Result<Response<ReloadKmsResponse>, Status> {
         use bucket_cell::bucket_kms::Unreloaded;
         let ReloadKmsRequest {} = request.into_inner();
-        let reloaded = crate::bucket::reload_kms().await.map_err(|refused| {
-            let errno = match &refused {
-                Unreloaded::Malformed(_) => Errno::EINVAL,
-                Unreloaded::InUse(_) => Errno::EBUSY,
-                Unreloaded::Unreached(_) => Errno::EIO,
-                Unreloaded::Unsupported(_) => Errno::ENOTSUP,
-            };
-            log::error!("cladefsd: reloading the KMS: {refused}");
-            saying(errno, format!("reloading the KMS: {refused}"))
-        })?;
+        let reloaded =
+            crate::bucket::reload_kms_on(&self.daemon.host).await.map_err(|refused| {
+                let errno = match &refused {
+                    Unreloaded::Malformed(_) => Errno::EINVAL,
+                    Unreloaded::InUse(_) => Errno::EBUSY,
+                    Unreloaded::Unreached(_) => Errno::EIO,
+                    Unreloaded::Unsupported(_) => Errno::ENOTSUP,
+                };
+                log::error!("cladefsd: reloading the KMS: {refused}");
+                saying(errno, format!("reloading the KMS: {refused}"))
+            })?;
         let ids = |ids: Vec<extent_keys::kms::master::MasterKeyId>| {
             ids.iter().map(ToString::to_string).collect()
         };

@@ -46,9 +46,11 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use storage_device::ExtentId;
 use storage_device::NoExtent;
 
-/// The process's cache of sealed extents (see the module docs): its pager's threads, which read
-/// their pages from the cells, and the extents, by arena and ID.
-struct ExtentCache {
+/// Explicit per-host cache of sealed extents (see the module docs, board 10962): its pager's
+/// threads, which read their pages from the cells, and the extents, by arena and ID.
+pub(crate) struct ExtentCache {
+    /// Physical memory slabs this cache allocates parts in.
+    slabs: Arc<slabs::HostSlabs>,
     /// Dedicated pager runtime (`"cladefs pager"`, [`PAGER_THREADS`] workers), kept separate from
     /// `cladefsd::Daemon`'s consolidated runtime for DAX page-in latency isolation (board 10774):
     /// page-ins execute synchronous disk reads, zstd decompression, and `slab.write` directly on
@@ -70,14 +72,40 @@ struct ExtentCache {
     /// sorted every extent cached, under the cache's lock, and let go of none: an 8 GiB window,
     /// mapping more than the bound, never full, so never reclaiming, made each MAP 3-6 ms.
     trim_at: AtomicUsize,
+    /// The most extents the cache keeps (TASK-104): each its table of pages, and the cells it reads
+    /// through, which an extent nothing maps and whose pages were evicted keeps still. Under
+    /// pgbench, small extents by the hundred thousand, the tables of extents never asked for again
+    /// would be most of what the cache holds. Past this, those asked for longest ago that nothing
+    /// else holds (no window maps them) go, down to seven eighths of it; one asked for again is
+    /// read anew from its cell. Tests lower it.
+    most_cached: AtomicUsize,
     /// cladefs: whether the cap on every arena's memory together is the memory governor's, the
     /// host's memory, not a limit the control API set: what a page-in finding no page waits out
     /// rather than fails (board 5662). Set as the cap is (`cladefsd::memory`); a daemon not
     /// governed has none.
     total_is_the_hosts: std::sync::atomic::AtomicBool,
+    /// Ensures arena relief is registered at most once per host.
+    relief_started: std::sync::Once,
+    /// Shared zero page in this host's default arena for DAX windows to map.
+    zeros: OnceLock<Arc<Zeros>>,
 }
 
 impl ExtentCache {
+    pub(crate) fn new(slabs: Arc<slabs::HostSlabs>) -> Arc<Self> {
+        Arc::new(Self {
+            slabs,
+            pager: OnceLock::new(),
+            extents: SharedLock::new("extent cache", Mutex::default()),
+            arenas: SharedLock::new("extent cache arenas", Mutex::default()),
+            clock: AtomicU64::new(0),
+            trim_at: AtomicUsize::new(0),
+            most_cached: AtomicUsize::new(1 << 16),
+            total_is_the_hosts: std::sync::atomic::AtomicBool::new(false),
+            relief_started: std::sync::Once::new(),
+            zeros: OnceLock::new(),
+        })
+    }
+
     #[cfg(not(feature = "shuttle"))]
     fn pager(&self) -> &tokio::runtime::Runtime {
         self.pager.get_or_init(|| {
@@ -89,6 +117,11 @@ impl ExtentCache {
                 .build()
                 .expect("the extent cache's pager")
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn most_cached(&self) -> &AtomicUsize {
+        &self.most_cached
     }
 }
 
@@ -188,16 +221,6 @@ impl Holders {
     }
 }
 
-node_local::node_local! {
-    /// The most extents the cache keeps (TASK-104): each its table of pages, and the cells it reads
-    /// through, which an extent nothing maps and whose pages were evicted keeps still. Under
-    /// pgbench, small extents by the hundred thousand, the tables of extents never asked for again
-    /// would be most of what the cache holds. Past this, those asked for longest ago that nothing
-    /// else holds (no window maps them) go, down to seven eighths of it; one asked for again is
-    /// read anew from its cell. Tests lower it.
-    pub(crate) static MOST_CACHED: AtomicUsize = AtomicUsize::new(1 << 16);
-}
-
 /// How many threads the cache's pager reads extents' pages on: a read of the cell, and the
 /// decompression of a part, keep one busy, while page-ins of other extents wait for theirs.
 pub(crate) const PAGER_THREADS: usize = 6;
@@ -211,122 +234,268 @@ const RETRY_MOST: std::time::Duration = std::time::Duration::from_millis(100);
 /// How many parts after those a reader reading on asks for are read ahead of its requests.
 pub(crate) const PARTS_AHEAD: u64 = 2;
 
-node_local::node_local! {
-    static EXTENT_CACHE: OnceLock<ExtentCache> = OnceLock::new();
-}
-
-fn extent_cache() -> &'static ExtentCache {
-    EXTENT_CACHE.get().get_or_init(|| ExtentCache {
-        pager: OnceLock::new(),
-        extents: SharedLock::new("extent cache", Mutex::default()),
-        arenas: SharedLock::new("extent cache arenas", Mutex::default()),
-        clock: AtomicU64::new(0),
-        trim_at: AtomicUsize::new(0),
-        total_is_the_hosts: std::sync::atomic::AtomicBool::new(false),
-    })
-}
-
-/// Evicts the pages of the cached extents of `arena`, or of every arena, those no window maps
-/// first, then those used longest ago (`CachedExtent::eviction_order`), until `enough` says, of
-/// the bytes evicted so far, that they are, or none is left to evict: memory an arena past its cap,
-/// or the arenas past the total's, give back (TASK-50.3). Returns the bytes it evicted. Evicted
-/// pages are read in again as they are touched.
-///
-/// cladefs: in a span of its own, `cache.relief` (`bucket_cell::trace`, TASK-258).
-pub(crate) fn evict_least_used(arena: Option<ArenaId>, enough: impl FnMut(u64) -> bool) -> u64 {
-    let span = trace::Span::start("cache.relief");
-    if let Some(arena) = arena {
-        span.set_count(trace::ARENA, u64::from(arena.0));
-    }
-    let (evicted, extents) = evict_in_order(arena, enough);
-    span.set_count(trace::BYTES, evicted);
-    span.set_count(trace::EXTENTS, extents);
-    evicted
-}
-
-/// Evicts as [`evict_least_used`] says: returns the bytes it evicted, and of how many extents.
-fn evict_in_order(arena: Option<ArenaId>, mut enough: impl FnMut(u64) -> bool) -> (u64, u64) {
-    let Some(cache) = EXTENT_CACHE.get().get() else { return (0, 0) };
-    let candidates: Vec<Arc<CachedExtent>> = {
-        let extents = cache.extents.with(Mutex::lock);
-        (extents.iter())
-            .filter(|((of, _), _)| arena.is_none_or(|arena| *of == arena))
-            .map(|(_, cached)| cached.extent.clone())
-            .collect()
-    };
-    // Past the cache's lock, as each takes its own; those evicted already, which stay cached
-    // until freed, left out, each pass having gone through them all (TASK-92.33).
-    let mut candidates: Vec<_> = (candidates.into_iter())
-        .filter_map(|extent| Some((extent.eviction_order()?, extent)))
-        .collect();
-    candidates.sort_unstable_by_key(|(order, _)| *order);
-    let (mut evicted, mut extents) = (0, 0);
-    for (_, extent) in candidates {
-        if enough(evicted) {
-            break;
+impl ExtentCache {
+    /// Evicts the pages of the cached extents of `arena`, or of every arena, those no window maps
+    /// first, then those used longest ago (`CachedExtent::eviction_order`), until `enough` says, of
+    /// the bytes evicted so far, that they are, or none is left to evict: memory an arena past its
+    /// cap, or the arenas past the total's, give back (TASK-50.3). Returns the bytes it evicted.
+    /// Evicted pages are read in again as they are touched.
+    ///
+    /// cladefs: in a span of its own, `cache.relief` (`bucket_cell::trace`, TASK-258).
+    pub(crate) fn evict_least_used(
+        &self,
+        arena: Option<ArenaId>,
+        enough: impl FnMut(u64) -> bool,
+    ) -> u64 {
+        let span = trace::Span::start("cache.relief");
+        if let Some(arena) = arena {
+            span.set_count(trace::ARENA, u64::from(arena.0));
         }
-        let bytes = extent.evict();
-        evicted += bytes;
-        extents += u64::from(bytes > 0);
+        let (evicted, extents) = self.evict_in_order(arena, enough);
+        span.set_count(trace::BYTES, evicted);
+        span.set_count(trace::EXTENTS, extents);
+        evicted
     }
-    (evicted, extents)
-}
 
-/// Gives, once, the relief of arenas under pressure (TASK-50.3) its evictor, which frees parts of
-/// cached extents (`slabs::relieve_with`): before a cell of any arena opens, whose allocations
-/// may wait for it.
-pub(crate) fn relieve_pressure() {
-    node_local::node_local! {
-        static STARTED: std::sync::Once = std::sync::Once::new();
-    }
-    STARTED.get().call_once(|| {
-        let relieved =
-            slabs::relieve_with(|arena, bytes| evict_least_used(arena, |evicted| evicted >= bytes));
-        // Without its thread, an allocation that finds its arena out of memory fails. cladefs:
-        // under madsim, relief is the process's, which another simulated host started already,
-        // and starts no thread (doc-24, TASK-685.14).
-        match relieved {
-            Err(err) if cfg!(madsim) && err.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(err) => log::error!("cladefs: starting the thread that frees capped memory: {err}"),
-            Ok(()) => {}
-        }
-    });
-}
-
-/// Lets go of the extents cached in `arena`: a tenant's, which nothing holds now
-/// (`crate::pages::Arena`, TASK-43.4). Their pages are freed as the last holders of the extents,
-/// page-ins in flight, let them go.
-pub(crate) fn evict_arena(arena: ArenaId) {
-    let Some(cache) = EXTENT_CACHE.get().get() else { return };
-    let evicted: Vec<Cached> = {
-        let mut extents = cache.extents.with(Mutex::lock);
-        cache.arenas.with(Mutex::lock).remove(&arena);
-        extents.extract_if(|(of, _), _| *of == arena).map(|(_, cached)| cached).collect()
-    };
-    drop(evicted);
-}
-
-/// cladefs: forgets the cells whose cells `scope` says are of it, as their host does as it is
-/// told their tenant's KEK is revoked or destroyed, or their cell shredded (doc-16, Shredding;
-/// TASK-411.7): no cached extent's page is read in through them again, and an extent no other open
-/// cell holds goes from the cache, its pages evicted, unmapped from every window that maps them
-/// first, so that what the cells' keys decrypted is no longer in memory, nor read in again: a
-/// window that maps it, faulting, finds no cell to read it through. An extent another cell open
-/// holds stays, its pages theirs to read (another tenant's fork of a shared version, a public
-/// base, a fork that inherited it). Returns the bytes of pages it evicted, and of how many
-/// extents.
-pub(crate) fn forget(scope: impl Fn(crate::CellId) -> bool) -> (u64, u64) {
-    let Some(cache) = EXTENT_CACHE.get().get() else { return (0, 0) };
-    let gone: Vec<Cached> = {
-        let mut extents = cache.extents.with(Mutex::lock);
-        let doomed: Vec<(ArenaId, ExtentId)> = (extents.iter())
-            .filter(|(_, cached)| cached.holders.forget(&scope) && !cached.holders.any_open())
-            .map(|(key, _)| *key)
+    /// Evicts as [`ExtentCache::evict_least_used`] says: returns the bytes it evicted, and of how
+    /// many extents.
+    fn evict_in_order(
+        &self,
+        arena: Option<ArenaId>,
+        mut enough: impl FnMut(u64) -> bool,
+    ) -> (u64, u64) {
+        let candidates: Vec<Arc<CachedExtent>> = {
+            let extents = self.extents.with(Mutex::lock);
+            (extents.iter())
+                .filter(|((of, _), _)| arena.is_none_or(|arena| *of == arena))
+                .map(|(_, cached)| cached.extent.clone())
+                .collect()
+        };
+        // Past the cache's lock, as each takes its own; those evicted already, which stay cached
+        // until freed, left out, each pass having gone through them all (TASK-92.33).
+        let mut candidates: Vec<_> = (candidates.into_iter())
+            .filter_map(|extent| Some((extent.eviction_order()?, extent)))
             .collect();
-        doomed.iter().filter_map(|key| extents.remove(key)).collect()
-    };
-    let evicted = gone.iter().map(|cached| cached.extent.revoke()).sum();
-    (evicted, gone.len() as u64)
+        candidates.sort_unstable_by_key(|(order, _)| *order);
+        let (mut evicted, mut extents) = (0, 0);
+        for (_, extent) in candidates {
+            if enough(evicted) {
+                break;
+            }
+            let bytes = extent.evict();
+            evicted += bytes;
+            extents += u64::from(bytes > 0);
+        }
+        (evicted, extents)
+    }
+
+    /// Gives, once, the relief of arenas under pressure (TASK-50.3) its evictor, which frees parts
+    /// of cached extents (`HostSlabs::relieve_with`): before a cell of any arena opens, whose
+    /// allocations may wait for it.
+    pub(crate) fn relieve_pressure(self: &Arc<Self>) {
+        self.relief_started.call_once(|| {
+            let weak = Arc::downgrade(self);
+            let relieved = self.slabs.relieve_with(move |arena, bytes| {
+                weak.upgrade()
+                    .map_or(0, |cache| cache.evict_least_used(arena, |evicted| evicted >= bytes))
+            });
+            match relieved {
+                Err(err) if cfg!(madsim) && err.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(err) => {
+                    log::error!("cladefs: starting the thread that frees capped memory: {err}")
+                }
+                Ok(()) => {}
+            }
+        });
+    }
+
+    /// Lets go of the extents cached in `arena`: a tenant's, which nothing holds now
+    /// (`crate::pages::Arena`, TASK-43.4). Their pages are freed as the last holders of the
+    /// extents, page-ins in flight, let them go.
+    pub(crate) fn evict_arena(&self, arena: ArenaId) {
+        let evicted: Vec<Cached> = {
+            let mut extents = self.extents.with(Mutex::lock);
+            self.arenas.with(Mutex::lock).remove(&arena);
+            extents.extract_if(|(of, _), _| *of == arena).map(|(_, cached)| cached).collect()
+        };
+        drop(evicted);
+    }
+
+    /// cladefs: forgets the cells whose cells `scope` says are of it, as their host does as it is
+    /// told their tenant's KEK is revoked or destroyed, or their cell shredded (doc-16, Shredding;
+    /// TASK-411.7). Returns the bytes of pages it evicted, and of how many extents.
+    pub(crate) fn forget(&self, scope: impl Fn(crate::CellId) -> bool) -> (u64, u64) {
+        let gone: Vec<Cached> = {
+            let mut extents = self.extents.with(Mutex::lock);
+            let doomed: Vec<(ArenaId, ExtentId)> = (extents.iter())
+                .filter(|(_, cached)| cached.holders.forget(&scope) && !cached.holders.any_open())
+                .map(|(key, _)| *key)
+                .collect();
+            doomed.iter().filter_map(|key| extents.remove(key)).collect()
+        };
+        let evicted = gone.iter().map(|cached| cached.extent.revoke()).sum();
+        (evicted, gone.len() as u64)
+    }
+
+    /// The sealed `extent`, of `len` bytes, in this cache, of `cached_in`'s arena, cached from
+    /// `local` if it isn't.
+    pub(crate) async fn cached(
+        self: &Arc<Self>,
+        local: &Arc<LocalCell<HostDir>>,
+        cached_in: CachedIn,
+        fetcher: Option<Arc<crate::bucket::HostFetcher>>,
+        extent: ExtentId,
+        len: u64,
+    ) -> Result<Arc<CachedExtent>> {
+        let (found, moved) = self.cache_now(local, cached_in, fetcher, extent, len);
+        if let Some(from) = moved {
+            // What of it the tenant's arena holds, moved before the caller maps it, so that its MAP
+            // maps those pages: moved as asked for, each was a fault of the guest's, and the first
+            // sandbox's cold read of the Linux tree took 13.7 s, paging nothing in, 4,422 faults,
+            // against the next sandbox's 5.7 s and none (GCE r991).
+            for page in from.present_parts() {
+                if let Err(errno) = found.clone().bring_in(page).await {
+                    log::warn!("cladefs: moving {:?}'s page {page}: {errno:?}", found.extent);
+                }
+            }
+        }
+        Ok(found)
+    }
+
+    /// cladefs: the cache's part of [`ExtentCache::cached`], under its lock, which holds no await.
+    fn cache_now(
+        self: &Arc<Self>,
+        local: &Arc<LocalCell<HostDir>>,
+        cached_in: CachedIn,
+        fetcher: Option<Arc<crate::bucket::HostFetcher>>,
+        extent: ExtentId,
+        len: u64,
+    ) -> (Arc<CachedExtent>, Option<Arc<CachedExtent>>) {
+        let mut extents = self.extents.with(Mutex::lock);
+        let key = held_key(&extents, cached_in.arena(), extent);
+        let mut moved = None;
+        if !extents.contains_key(&key) {
+            let holders = Arc::new(Holders::default());
+            let stored = StoredExtent::new(holders.clone(), local, extent);
+            let mut contents: Box<dyn Contents> = Box::new(stored);
+            if let CachedIn::Public(reach) = &cached_in {
+                // A tenant's copy, which moves here (TASK-234): of this extent alone.
+                assert_eq!(reach.extent(), extent, "a tenant's copy moved for another extent");
+                let arenas = self.arenas.with(Mutex::lock);
+                let other = arenas.iter().find_map(|of| extents.remove(&(*of, extent)));
+                if let Some(other) = other {
+                    holders.adopt(&other.holders);
+                    moved = Some(other.extent.clone());
+                    let from = SharedLock::new("promoted extent", Mutex::new(Some(other.extent)));
+                    contents = Box::new(Promoted { from, stored: contents });
+                }
+            } else if key.0 != ArenaId::DEFAULT {
+                self.arenas.with(Mutex::lock).insert(key.0);
+            }
+            let new = Arc::new(CachedExtent::new_on(self, key.0, extent, contents, len));
+            extents.insert(key, Cached { extent: new, holders });
+        }
+        let cached = extents.get_mut(&key).expect("cached");
+        cached.extent.used();
+        cached.holders.add(local, fetcher.as_ref());
+        let found = cached.extent.clone();
+        let most = self.most_cached.load(Ordering::Relaxed);
+        let gone = (extents.len() > most.max(self.trim_at.load(Ordering::Relaxed))).then(|| {
+            let started = std::time::Instant::now();
+            let gone = let_go_least_used(&mut extents, most);
+            self.trim_at.store(extents.len() + most / 8, Ordering::Relaxed);
+            stats::count_since(Counter::CacheTrims, Counter::CacheTrimNs, started);
+            gone
+        });
+        drop(extents);
+        // Freed past the cache's lock.
+        drop(gone);
+        if let Some(from) = &moved {
+            // The tenant's windows map it from here from now on, and nothing of the copy: a fault on
+            // it would read it in again. Past the cache's lock, which no window's is taken under.
+            let (from_source, to_source): (Arc<dyn Source>, Arc<dyn Source>) =
+                (from.clone(), found.clone());
+            for window in from.windows() {
+                window.rebind(&from_source, to_source.clone());
+            }
+        }
+        (found, moved)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn find(&self, arena: ArenaId, extent: ExtentId) -> Option<Arc<CachedExtent>> {
+        let extents = self.extents.with(Mutex::lock);
+        extents.get(&(arena, extent)).map(|cached| cached.extent.clone())
+    }
+
+    /// Lets go of the cached `extent` of `arena`, which `local` frees, unless another cell that
+    /// asked for it holds it still.
+    pub(crate) fn freed(
+        &self,
+        local: &Arc<LocalCell<HostDir>>,
+        arena: ArenaId,
+        extent: ExtentId,
+    ) -> Option<Arc<CachedExtent>> {
+        let (key, cached, holders) = {
+            let extents = self.extents.with(Mutex::lock);
+            let key = held_key(&extents, arena, extent);
+            let (cached, holders) =
+                extents.get(&key).map(|cached| (cached.extent.clone(), cached.holders.clone()))?;
+            (key, cached, holders)
+        };
+        if !holders.another_holds(local, extent) {
+            let mut extents = self.extents.with(Mutex::lock);
+            let same = extents.get(&key).is_some_and(|now| Arc::ptr_eq(&now.extent, &cached));
+            let removed = same.then(|| extents.remove(&key));
+            drop(extents);
+            drop(removed);
+        }
+        Some(cached)
+    }
+
+    /// The extents cached, as of now: a pass over them, under the cache's lock.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn entries(&self) -> Entries {
+        let extents = self.extents.with(Mutex::lock);
+        let idle = extents.values().filter(|cached| Arc::strong_count(&cached.extent) == 1).count();
+        Entries { pinned: (extents.len() - idle) as u64, idle: idle as u64 }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn keys(&self) -> Vec<(ArenaId, ExtentId)> {
+        self.extents.with(Mutex::lock).keys().copied().collect()
+    }
+
+    /// cladefs: says whether the cap on every arena's memory together is the host's
+    /// (`ExtentCache::total_is_the_hosts`).
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(dead_code, reason = "the daemon, Linux's alone, sets it")
+    )]
+    pub(crate) fn set_total_is_the_hosts(&self, is: bool) {
+        self.total_is_the_hosts.store(is, Ordering::Relaxed);
+    }
+
+    /// Zeros, for windows on this host to map ([`Zeros`]): made once per host.
+    pub(crate) fn zeros(&self) -> Result<Arc<dyn Source>> {
+        if let Some(zeros) = self.zeros.get() {
+            return Ok(zeros.clone());
+        }
+        let page =
+            self.slabs.alloc(ArenaId::DEFAULT, 1, slabs::Wait::Yes).map_err(|_| Errno::ENOMEM)?;
+        page.write(0, &vec![0; page_size() as usize]).map_err(|err| {
+            log::error!("cladefs: writing the zeros windows map: {err}");
+            Errno::ENOMEM
+        })?;
+        Ok(self.zeros.get_or_init(|| Arc::new(Zeros(page))).clone())
+    }
+}
+
+/// Evicts the pages of the cached extents of `arena`, or of every arena, on the process's default
+/// host.
+#[cfg(all(test, not(madsim)))]
+pub(crate) fn evict_least_used(arena: Option<ArenaId>, enough: impl FnMut(u64) -> bool) -> u64 {
+    crate::Host::process().cache().evict_least_used(arena, enough)
 }
 
 /// Which arena an extent's pages are of, and whether a tenant's copy of it may move to the default
@@ -350,10 +519,8 @@ impl CachedIn {
     }
 }
 
-/// The sealed `extent`, of `len` bytes, in the cache, of `cached_in`'s arena, cached from `local`
-/// if it isn't: read from it, or from `fetcher`; and from any
-/// other cell that asked for it, which `local` is one of from now on (TASK-79.7). cladefs: a copy
-/// of it a tenant's arena held, moved here, has its pages brought in awaited (doc-24, step 5).
+/// The sealed `extent`, of `len` bytes, in the process's default cache.
+#[cfg(test)]
 pub(crate) async fn cached(
     local: &Arc<LocalCell<HostDir>>,
     cached_in: CachedIn,
@@ -361,81 +528,7 @@ pub(crate) async fn cached(
     extent: ExtentId,
     len: u64,
 ) -> Result<Arc<CachedExtent>> {
-    let (found, moved) = cache_now(local, cached_in, fetcher, extent, len);
-    if let Some(from) = moved {
-        // What of it the tenant's arena holds, moved before the caller maps it, so that its MAP
-        // maps those pages: moved as asked for, each was a fault of the guest's, and the first
-        // sandbox's cold read of the Linux tree took 13.7 s, paging nothing in, 4,422 faults,
-        // against the next sandbox's 5.7 s and none (GCE r991).
-        for page in from.present_parts() {
-            if let Err(errno) = found.clone().bring_in(page).await {
-                log::warn!("cladefs: moving {:?}'s page {page}: {errno:?}", found.extent);
-            }
-        }
-    }
-    Ok(found)
-}
-
-/// cladefs: the cache's part of [`cached`], under its lock, which holds no await: the extent
-/// cached, and a tenant's copy of it moved here, if one was, its windows rebound, whose pages its
-/// caller brings in.
-fn cache_now(
-    local: &Arc<LocalCell<HostDir>>,
-    cached_in: CachedIn,
-    fetcher: Option<Arc<crate::bucket::HostFetcher>>,
-    extent: ExtentId,
-    len: u64,
-) -> (Arc<CachedExtent>, Option<Arc<CachedExtent>>) {
-    let cache = extent_cache();
-    let mut extents = cache.extents.with(Mutex::lock);
-    let key = held_key(&extents, cached_in.arena(), extent);
-    let mut moved = None;
-    if !extents.contains_key(&key) {
-        let holders = Arc::new(Holders::default());
-        let stored = StoredExtent::new(holders.clone(), local, extent);
-        let mut contents: Box<dyn Contents> = Box::new(stored);
-        if let CachedIn::Public(reach) = &cached_in {
-            // A tenant's copy, which moves here (TASK-234): of this extent alone.
-            assert_eq!(reach.extent(), extent, "a tenant's copy moved for another extent");
-            let arenas = cache.arenas.with(Mutex::lock);
-            let other = arenas.iter().find_map(|of| extents.remove(&(*of, extent)));
-            if let Some(other) = other {
-                holders.adopt(&other.holders);
-                moved = Some(other.extent.clone());
-                let from = SharedLock::new("promoted extent", Mutex::new(Some(other.extent)));
-                contents = Box::new(Promoted { from, stored: contents });
-            }
-        } else if key.0 != ArenaId::DEFAULT {
-            cache.arenas.with(Mutex::lock).insert(key.0);
-        }
-        let new = Arc::new(CachedExtent::new(key.0, extent, contents, len));
-        extents.insert(key, Cached { extent: new, holders });
-    }
-    let cached = extents.get_mut(&key).expect("cached");
-    cached.extent.used();
-    cached.holders.add(local, fetcher.as_ref());
-    let found = cached.extent.clone();
-    let most = MOST_CACHED.get().load(Ordering::Relaxed);
-    let gone = (extents.len() > most.max(cache.trim_at.load(Ordering::Relaxed))).then(|| {
-        let started = std::time::Instant::now();
-        let gone = let_go_least_used(&mut extents, most);
-        cache.trim_at.store(extents.len() + most / 8, Ordering::Relaxed);
-        stats::count_since(Counter::CacheTrims, Counter::CacheTrimNs, started);
-        gone
-    });
-    drop(extents);
-    // Freed past the cache's lock.
-    drop(gone);
-    if let Some(from) = &moved {
-        // The tenant's windows map it from here from now on, and nothing of the copy: a fault on
-        // it would read it in again. Past the cache's lock, which no window's is taken under.
-        let (from_source, to_source): (Arc<dyn Source>, Arc<dyn Source>) =
-            (from.clone(), found.clone());
-        for window in from.windows() {
-            window.rebind(&from_source, to_source.clone());
-        }
-    }
-    (found, moved)
+    crate::Host::process().cache().cached(local, cached_in, fetcher, extent, len).await
 }
 
 /// The key `extent` of `arena` is cached by: the default arena's, if it holds it, as every VM
@@ -456,36 +549,7 @@ fn held_key(
 /// The cached `extent` of `arena`, if it is cached.
 #[cfg(test)]
 pub(crate) fn find(arena: ArenaId, extent: ExtentId) -> Option<Arc<CachedExtent>> {
-    let cache = EXTENT_CACHE.get().get()?;
-    let extents = cache.extents.with(Mutex::lock);
-    extents.get(&(arena, extent)).map(|cached| cached.extent.clone())
-}
-
-/// Lets go of the cached `extent` of `arena`, which `local` frees, unless another cell that asked
-/// for it holds it still, which reads its pages through itself (TASK-79.7): one that holds it reads
-/// them anew. Returns what keeps its pages, which the window's mappings of it map zeros in place
-/// of, if it was cached.
-pub(crate) fn freed(
-    local: &Arc<LocalCell<HostDir>>,
-    arena: ArenaId,
-    extent: ExtentId,
-) -> Option<Arc<CachedExtent>> {
-    let cache = EXTENT_CACHE.get().get()?;
-    let (key, cached, holders) = {
-        let extents = cache.extents.with(Mutex::lock);
-        let key = held_key(&extents, arena, extent);
-        let (cached, holders) =
-            extents.get(&key).map(|cached| (cached.extent.clone(), cached.holders.clone()))?;
-        (key, cached, holders)
-    };
-    if !holders.another_holds(local, extent) {
-        let mut extents = cache.extents.with(Mutex::lock);
-        let same = extents.get(&key).is_some_and(|now| Arc::ptr_eq(&now.extent, &cached));
-        let removed = same.then(|| extents.remove(&key));
-        drop(extents);
-        drop(removed);
-    }
-    Some(cached)
+    crate::Host::process().cache().find(arena, extent)
 }
 
 /// The extents cached: how many something but the cache holds (`pinned`), as a window's mapping, a
@@ -499,20 +563,10 @@ pub(crate) struct Entries {
     pub idle: u64,
 }
 
-/// The extents cached, as of now: a pass over them, under the cache's lock.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-pub(crate) fn entries() -> Entries {
-    let Some(cache) = EXTENT_CACHE.get().get() else { return Entries::default() };
-    let extents = cache.extents.with(Mutex::lock);
-    let idle = extents.values().filter(|cached| Arc::strong_count(&cached.extent) == 1).count();
-    Entries { pinned: (extents.len() - idle) as u64, idle: idle as u64 }
-}
-
 /// The extents cached, by arena and ID.
 #[cfg(test)]
 pub(crate) fn keys() -> Vec<(ArenaId, ExtentId)> {
-    let Some(cache) = EXTENT_CACHE.get().get() else { return Vec::new() };
-    cache.extents.with(Mutex::lock).keys().copied().collect()
+    crate::Host::process().cache().keys()
 }
 
 /// Takes out of the cache `extents` those asked for longest ago that nothing else holds, down to
@@ -535,32 +589,30 @@ fn let_go_least_used(
     idle.into_iter().take(excess).filter_map(|(_, key)| extents.remove(&key)).collect()
 }
 
-/// cladefs: a run of `pages` pages of `arena` for a page-in, as `slabs::alloc` allocates it,
-/// waiting for relief if it must, off the pager's workers: a wait for relief is one for pages it evicted to
-/// come back from quarantine, as each VM process unmaps them, seconds on a full host, which the
-/// page-ins in flight on those workers, whose pages relief would free next, must not wait behind
-/// (board 5662). At once, with no wait, if it can be; under madsim, inline, as the simulated host's
-/// threads are its runtime's.
-async fn allocate(arena: ArenaId, pages: u64) -> Result<PartSlab, slabs::NoMemory> {
-    if let Ok(slab) = slabs::alloc(arena, pages, slabs::Wait::No) {
+/// cladefs: a run of `pages` pages of `arena` on `slabs` for a page-in, waiting for relief if it
+/// must, off the pager's workers (board 5662).
+async fn allocate(
+    slabs: &Arc<slabs::HostSlabs>,
+    arena: ArenaId,
+    pages: u64,
+) -> Result<PartSlab, slabs::NoMemory> {
+    if let Ok(slab) = slabs.alloc(arena, pages, slabs::Wait::No) {
         return Ok(slab);
     }
     #[cfg(not(madsim))]
-    return tokio::task::spawn_blocking(move || slabs::alloc(arena, pages, slabs::Wait::Yes))
-        .await
-        .expect("a page-in's allocation panicked");
+    {
+        let slabs = slabs.clone();
+        return tokio::task::spawn_blocking(move || slabs.alloc(arena, pages, slabs::Wait::Yes))
+            .await
+            .expect("a page-in's allocation panicked");
+    }
     #[cfg(madsim)]
-    return slabs::alloc(arena, pages, slabs::Wait::Yes);
+    return slabs.alloc(arena, pages, slabs::Wait::Yes);
 }
 
-/// cladefs: says whether the cap on every arena's memory together is the host's
-/// (`ExtentCache::total_is_the_hosts`).
-#[cfg_attr(
-    not(target_os = "linux"),
-    allow(dead_code, reason = "the daemon, Linux's alone, sets it")
-)]
+#[cfg(test)]
 pub(crate) fn set_total_is_the_hosts(is: bool) {
-    extent_cache().total_is_the_hosts.store(is, Ordering::Relaxed);
+    crate::Host::process().cache().set_total_is_the_hosts(is);
 }
 
 /// cladefs: how many times page-ins waited for memory ([`waiting_for_memory`]).
@@ -604,13 +656,21 @@ fn read_errno(error: &anyhow::Error) -> Errno {
     }
 }
 
-/// Runs `page_in` on the pager's threads: under Shuttle, as a task of the test's run, which its
-/// scheduler interleaves with the test's threads.
-fn spawn_page_in(page_in: impl std::future::Future<Output = ()> + Send + 'static) {
+/// Runs `page_in` on `cache`'s pager threads: under Shuttle, as a task of the test's run, which
+/// its scheduler interleaves with the test's threads.
+fn spawn_page_in(
+    cache: &Weak<ExtentCache>,
+    page_in: impl std::future::Future<Output = ()> + Send + 'static,
+) {
     #[cfg(feature = "shuttle")]
-    drop(shuttle::future::spawn(page_in));
+    {
+        let _ = cache;
+        drop(shuttle::future::spawn(page_in));
+    }
     #[cfg(not(feature = "shuttle"))]
-    drop(extent_cache().pager().spawn(page_in));
+    if let Some(cache) = cache.upgrade() {
+        drop(cache.pager().spawn(page_in));
+    }
 }
 
 /// What a cached extent's parts are read from: its contents.
@@ -1010,6 +1070,8 @@ fn window_identity(window: &Window) -> usize {
 
 /// A sealed extent in the cache: a table of its parts. See the module docs.
 pub(crate) struct CachedExtent {
+    cache: Weak<ExtentCache>,
+    slabs: Arc<slabs::HostSlabs>,
     arena: ArenaId,
     extent: ExtentId,
     contents: Box<dyn Contents>,
@@ -1025,8 +1087,9 @@ pub(crate) struct CachedExtent {
 }
 
 impl CachedExtent {
-    /// `extent`, of `len` bytes, read from `contents` into slabs of `arena`.
-    pub(crate) fn new(
+    /// `extent`, of `len` bytes, read from `contents` into slabs of `arena` on `cache`.
+    pub(crate) fn new_on(
+        cache: &Arc<ExtentCache>,
         arena: ArenaId,
         extent: ExtentId,
         contents: Box<dyn Contents>,
@@ -1039,6 +1102,8 @@ impl CachedExtent {
         // A reader from its start reads on.
         let parts = Parts { slots, windows: HashMap::new(), next: 0, revoked: false };
         Self {
+            cache: Arc::downgrade(cache),
+            slabs: cache.slabs.clone(),
             arena,
             extent,
             contents,
@@ -1050,11 +1115,22 @@ impl CachedExtent {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn new(
+        arena: ArenaId,
+        extent: ExtentId,
+        contents: Box<dyn Contents>,
+        len: u64,
+    ) -> Self {
+        Self::new_on(crate::Host::process().cache(), arena, extent, contents, len)
+    }
+
     /// Notes that it is in use now: asked for, or faulted on, as a guest keeping its mapping asks
     /// for it only once (TASK-92.32).
     fn used(&self) {
-        self.used
-            .store(extent_cache().clock.fetch_add(1, Ordering::Relaxed) + 1, Ordering::Relaxed);
+        if let Some(cache) = self.cache.upgrade() {
+            self.used.store(cache.clock.fetch_add(1, Ordering::Relaxed) + 1, Ordering::Relaxed);
+        }
     }
 
     /// When relief evicts it, those first that sort first: whether a window maps it, as what
@@ -1182,7 +1258,7 @@ impl CachedExtent {
         // filling, which a fault would wait on for good.
         for &part in &parts {
             let span = self.page_in_span(part);
-            spawn_page_in(self.clone().read_part(part, span, None));
+            spawn_page_in(&self.cache, self.clone().read_part(part, span, None));
         }
         loop {
             let listener = {
@@ -1399,11 +1475,13 @@ impl CachedExtent {
         // set, it fails, as before.
         let mut pause = RETRY_FIRST;
         let slab = loop {
-            match allocate(self.arena, pages.end - pages.start).await {
+            match allocate(&self.slabs, self.arena, pages.end - pages.start).await {
                 Ok(slab) => break slab,
                 Err(slabs::NoMemory)
-                    if slabs::room_may_come(self.arena)
-                        && extent_cache().total_is_the_hosts.load(Ordering::Relaxed) =>
+                    if self.slabs.room_may_come(self.arena)
+                        && self.cache.upgrade().is_some_and(|cache| {
+                            cache.total_is_the_hosts.load(Ordering::Relaxed)
+                        }) =>
                 {
                     waiting_for_memory();
                     tokio::time::sleep(pause).await;
@@ -1501,7 +1579,10 @@ impl Source for CachedExtent {
                     let span = self.page_in_span(part);
                     let landed = (part == wanted).then(|| landing.insert(Arc::default()).clone());
                     let read = self.clone().read_part(part, span, landed);
-                    spawn_page_in(crate::request::within(crate::request::current(), read));
+                    spawn_page_in(
+                        &self.cache,
+                        crate::request::within(crate::request::current(), read),
+                    );
                 }
                 listener.await;
                 waited = true;
@@ -1551,23 +1632,6 @@ impl Source for Zeros {
     }
 }
 
-/// Zeros, for windows to map ([`Zeros`]): made once, and kept for the process's life. `ENOMEM` if
-/// the first can't be made, which each window has made as it is created (`Dax::new`): a free maps
-/// them holding the cell's locks, memory out, as memory run out finds them.
-pub(crate) fn zeros() -> Result<Arc<dyn Source>> {
-    // The process's zero pages, immutable: the same for every simulated host.
-    static ZEROS: OnceLock<Arc<Zeros>> = OnceLock::new();
-    if let Some(zeros) = ZEROS.get() {
-        return Ok(zeros.clone());
-    }
-    let page = slabs::alloc(ArenaId::DEFAULT, 1, slabs::Wait::Yes).map_err(|_| Errno::ENOMEM)?;
-    page.write(0, &vec![0; page_size() as usize]).map_err(|err| {
-        log::error!("cladefs: writing the zeros windows map: {err}");
-        Errno::ENOMEM
-    })?;
-    Ok(ZEROS.get_or_init(|| Arc::new(Zeros(page))).clone())
-}
-
 /// cladefs: board 5662: page-ins of a host whose memory is full.
 #[cfg(test)]
 mod full_host {
@@ -1599,7 +1663,11 @@ mod full_host {
                 let len = extent_frame::PART;
                 let cached = Arc::new(CachedExtent::new(ArenaId::DEFAULT, extent, contents, len));
                 let entry = Cached { extent: cached.clone(), holders: Arc::default() };
-                extent_cache().extents.with(Mutex::lock).insert((ArenaId::DEFAULT, extent), entry);
+                crate::Host::process()
+                    .cache()
+                    .extents
+                    .with(Mutex::lock)
+                    .insert((ArenaId::DEFAULT, extent), entry);
                 cached
             })
             .collect()
@@ -1609,7 +1677,7 @@ mod full_host {
     /// the parts that many hold.
     fn capped(count: u64) -> u64 {
         let _ = slabs::configure(16 * slabs::SLAB);
-        relieve_pressure();
+        crate::Host::process().cache().relieve_pressure();
         slabs::set_total_cap(Some(count * slabs::SLAB));
         count * slabs::SLAB / extent_frame::PART
     }
@@ -1693,7 +1761,8 @@ mod full_host {
         ));
         let entry = Cached { extent: cached.clone(), holders: Arc::default() };
         entry.holders.0.with(Mutex::lock).push(Holder { cell, local: Weak::new(), fetcher: None });
-        extent_cache().extents.with(Mutex::lock).insert((ArenaId::DEFAULT, extent), entry);
+        let cache = crate::Host::process().cache();
+        cache.extents.with(Mutex::lock).insert((ArenaId::DEFAULT, extent), entry);
 
         let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
         runtime.block_on(async {
@@ -1711,7 +1780,7 @@ mod full_host {
                 assert!(tokio::time::Instant::now() < deadline, "page-in never entered Filling");
                 tokio::time::sleep(std::time::Duration::from_millis(1)).await;
             }
-            assert_eq!(forget(|c| c == cell), (0, 1));
+            assert_eq!(cache.forget(|c| c == cell), (0, 1));
             open.send(true).unwrap();
             assert_eq!(filling.await.unwrap(), Err(Errno::EACCES));
             assert_eq!(cached.held(), 0);

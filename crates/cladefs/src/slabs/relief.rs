@@ -16,17 +16,17 @@
 //! may wait.
 
 use super::sync::Signal;
-use super::{Arena, ArenaId, SLAB, Starved, Wait, node};
+use super::{Arena, ArenaId, HostSlabs, SLAB, Starved, Wait};
 use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Weak};
 
 /// What a pass frees for an arena at least: four slabs, so that the next allocations find room.
 /// What it asks of [`relieve_with`]'s evictor.
 pub const RELIEF_BYTES: u64 = 4 * SLAB;
 
 /// The relief thread's: what wakes it, and whether it runs.
-struct Reliever {
+pub(super) struct Reliever {
     /// Signaled as an allocation asks for relief.
     wanted: Signal,
     /// Whether the thread runs: once it has gone, as its evictor panicked, the allocations it
@@ -34,9 +34,12 @@ struct Reliever {
     running: AtomicBool,
 }
 
-/// The relief thread's, if [`relieve_with`] started it.
-// The process's, started once, by whichever simulated host is first (TASK-685.14); under madsim it starts no thread.
-static RELIEVER: OnceLock<Option<Arc<Reliever>>> = OnceLock::new();
+impl Reliever {
+    pub(super) fn stop(&self) {
+        self.running.store(false, Ordering::Release);
+        self.wanted.signal();
+    }
+}
 
 thread_local! {
     /// On the relief thread, the arena its evictor is evicting for, while it is (TASK-161).
@@ -50,8 +53,27 @@ pub(super) fn relieving() -> Option<ArenaId> {
     RELIEVING.get()
 }
 
-fn reliever() -> Option<&'static Reliever> {
-    RELIEVER.get()?.as_deref()
+/// Starts the relief of starved arenas on `slabs`, on a thread of its own, which frees runs with
+/// `evict`. Starts once per [`HostSlabs`]; under Shuttle or madsim no thread starts.
+pub(super) fn relieve_with_on(
+    slabs: &Arc<HostSlabs>,
+    evict: impl FnMut(Option<ArenaId>, u64) -> u64 + Send + 'static,
+) -> std::io::Result<()> {
+    let mut started = Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "the arenas' relief has started",
+    ));
+    let weak = Arc::downgrade(slabs);
+    slabs.reliever.get_or_init(|| {
+        let reliever = Arc::new(Reliever { wanted: Signal::new(), running: AtomicBool::new(true) });
+        let thread = reliever.clone();
+        let spawned =
+            super::sync::try_spawn("arena-relief-thread", move || relieve(&thread, weak, evict));
+        let installed = spawned.as_ref().is_ok_and(|spawned| *spawned).then_some(reliever);
+        started = spawned.map(drop);
+        installed
+    });
+    started
 }
 
 /// Starts the relief of starved arenas, on a thread of its own, which frees runs with `evict`:
@@ -64,34 +86,30 @@ fn reliever() -> Option<&'static Reliever> {
 /// Relief starts once: a later call fails with `AlreadyExists`, whether or not the first started
 /// its thread. Under Shuttle no thread starts, and starved arenas' allocations fail, as without
 /// relief; nor under madsim.
+#[cfg(not(madsim))]
 pub fn relieve_with(
     evict: impl FnMut(Option<ArenaId>, u64) -> u64 + Send + 'static,
 ) -> std::io::Result<()> {
-    let mut started = Err(std::io::Error::new(
-        std::io::ErrorKind::AlreadyExists,
-        "the arenas' relief has started",
-    ));
-    RELIEVER.get_or_init(|| {
-        let reliever = Arc::new(Reliever { wanted: Signal::new(), running: AtomicBool::new(true) });
-        let thread = reliever.clone();
-        let spawned =
-            super::sync::try_spawn("arena-relief-thread", move || relieve(&thread, evict));
-        let installed = spawned.as_ref().is_ok_and(|spawned| *spawned).then_some(reliever);
-        started = spawned.map(drop);
-        installed
-    });
-    started
+    relieve_with_on(crate::Host::process().slabs(), evict)
 }
 
 /// The relief thread: frees runs with `evict` for each arena asked for since its last pass, starved
 /// still at the cap it was asked at, and owed nothing a pass before quarantined, the arena's own at
 /// its own cap, any arena's at the total's, and records what it freed, which the arena's
 /// allocations waiting then try again with.
-fn relieve(reliever: &Reliever, mut evict: impl FnMut(Option<ArenaId>, u64) -> u64) {
-    let _gone = Gone(reliever);
+fn relieve(
+    reliever: &Reliever,
+    slabs: Weak<HostSlabs>,
+    mut evict: impl FnMut(Option<ArenaId>, u64) -> u64,
+) {
+    let _gone = Gone(reliever, &slabs);
     loop {
         reliever.wanted.wait();
-        let node = node();
+        if !reliever.running.load(Ordering::Acquire) {
+            break;
+        }
+        let Some(slabs) = slabs.upgrade() else { break };
+        let node = slabs.node();
         let asked: Vec<(Arc<Arena>, Starved, u16)> = (node.all().into_iter())
             .filter_map(|arena| {
                 let (starved, pages) = arena.state.lock().unwrap().relief.asked.take()?;
@@ -139,7 +157,7 @@ fn relieved(arena: &Arena, freed: u64, pages: u16) {
     let coming_back = match starved {
         // Any arena's, a removed one's too.
         Some(Starved::Total) => {
-            let node = arena.node;
+            let node = &arena.node;
             node.quarantined.load(Ordering::Relaxed) > node.wedged.load(Ordering::Relaxed)
         }
         _ => {
@@ -157,12 +175,14 @@ fn relieved(arena: &Arena, freed: u64, pages: u16) {
 
 /// Marks relief gone as its thread ends, as its evictor panicked: the allocations it would make
 /// room for fail, those waiting for it now too.
-struct Gone<'a>(&'a Reliever);
+struct Gone<'a>(&'a Reliever, &'a Weak<HostSlabs>);
 
 impl Drop for Gone<'_> {
     fn drop(&mut self) {
         self.0.running.store(false, Ordering::Release);
-        node().pulse();
+        if let Some(slabs) = self.1.upgrade() {
+            slabs.pulse_if_init();
+        }
     }
 }
 
@@ -178,7 +198,7 @@ pub(super) enum Asked {
 /// does: with relief, it asks for it, and one that may `wait` waits for it, unless the arena is
 /// exhausted, or relief gone, when it fails. Without relief it fails.
 pub(super) fn starved(arena: &Arena, starved: Starved, pages: u16, wait: Wait) -> Asked {
-    let Some(reliever) = reliever() else { return Asked::Fail };
+    let Some(reliever) = arena.node.reliever() else { return Asked::Fail };
     if !reliever.running.load(Ordering::Acquire) {
         return Asked::Fail;
     }
@@ -198,7 +218,7 @@ pub(super) fn starved(arena: &Arena, starved: Starved, pages: u16, wait: Wait) -
 mod tests {
     use super::*;
     use crate::slabs::{
-        ArenaId, Quarantined, VmProcessId, alloc, create_arena, page_size, quarantine_with,
+        ArenaId, Quarantined, VmProcessId, alloc, create_arena, node, page_size, quarantine_with,
         remove_arena, set_total_cap,
     };
 

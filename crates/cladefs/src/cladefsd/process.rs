@@ -168,24 +168,30 @@ pub fn anon_budget() -> AnonBudget {
 fn budget(daemon: &Daemon, state: &mut State) -> AnonBudget {
     state.writers = state.writers.max(super::cells::open_count(daemon) as u64);
     state.in_flight = state.in_flight.max(super::memory::in_flight_held_on(daemon));
-    state.extents = state.extents.max(extents_held());
+    state.extents = state.extents.max(extents_held_on(daemon));
     AnonBudget {
-        uploads: crate::bucket::upload_memory().budget,
+        uploads: crate::bucket::upload_memory_on(&daemon.host).budget,
         framings: state.writers * FRAMING,
         fetches: FETCHES,
         in_flight: state.in_flight,
         held: super::memory::held_parts_on(daemon).counts().peak,
-        pages: local_cell::pages::shared().usage().peak,
+        pages: daemon.host.local().pages().usage().peak,
         extents: state.extents,
         page_ins: PAGE_INS,
         own: OWN,
     }
 }
 
+/// What the cells' maps of their extents on `daemon` hold now, at their entries' bounds.
+pub(super) fn extents_held_on(daemon: &Daemon) -> u64 {
+    local_cell::own_held().bytes() + crate::host_cell::decoded_held_on(&daemon.host).bytes()
+}
+
 /// What the cells' maps of their extents hold now, at their entries' bounds ([`AnonBudget`]'s
 /// `extents`): the decoded states they share, each once, and what each holds of its own.
+#[cfg(not(madsim))]
 pub fn extents_held() -> u64 {
-    local_cell::own_held().bytes() + crate::host_cell::decoded_held().bytes()
+    extents_held_on(Daemon::process())
 }
 
 /// Samples what `daemon` holds and spent now, against its budget now; and returns the sample.

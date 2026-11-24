@@ -33,11 +33,11 @@
 // Every unsafe block says why it is sound, other threads included (TASK-444.4).
 #![deny(clippy::undocumented_unsafe_blocks)]
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(madsim)))]
 const USAGE: &str = "usage: cladefs-mount [--allow-other] [--new CAPACITY] CELL_DIR MOUNTPOINT";
 
 /// Mounts a cell as the arguments say, and serves it until it is unmounted.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(madsim)))]
 fn main() -> anyhow::Result<()> {
     use anyhow::Context as _;
     use std::io::Write as _;
@@ -111,8 +111,8 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(any(not(target_os = "linux"), madsim))]
 fn main() {
-    eprintln!("cladefs-mount runs on Linux only: macOS has no open-source FUSE");
+    eprintln!("cladefs-mount runs on Linux only (not under madsim)");
     std::process::exit(2);
 }

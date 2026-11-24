@@ -35,12 +35,12 @@
 //! before guests ran Fxfs in their own kernels (fda9d7d2).
 
 mod abi;
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(madsim)))]
 pub mod control;
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(madsim)))]
 mod mount;
 pub(crate) mod server;
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(madsim)))]
 pub use mount::{CellsMount, Mount, MountOptions, Unmounter};
 pub use server::{Attached, Counts, Notifier, Server};

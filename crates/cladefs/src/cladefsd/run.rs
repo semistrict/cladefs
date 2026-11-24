@@ -49,7 +49,7 @@ where
 pub(super) fn every(
     name: &'static str,
     period: Duration,
-    wait: fn(Duration),
+    wait: impl Fn(Duration) + Send + 'static,
     mut turn: impl FnMut() -> bool + Send + 'static,
 ) -> std::io::Result<()> {
     #[cfg(not(madsim))]

@@ -53,6 +53,17 @@ use std::sync::{Arc, Mutex};
 pub(crate) struct Host {
     dir: PathBuf,
     incarnation: u64,
+    local: Arc<local_cell::Host>,
+    host_cells: Arc<crate::host_cell::State>,
+}
+
+/// Per-host state holding the opened ephemeral cells' directory (board 10962).
+pub(crate) struct State(Mutex<Option<Arc<Host>>>);
+
+impl State {
+    pub(crate) fn new() -> Self {
+        Self(Mutex::new(None))
+    }
 }
 
 /// The family of the files of the host's ephemeral cells' directory (doc-28, board 10048), whose
@@ -120,14 +131,9 @@ pub(crate) fn staging(path: &Path, migration: u64) -> PathBuf {
     path.with_file_name(format!(".{name}.migrating-{migration:x}"))
 }
 
-node_local::node_local! {
-    /// The host's ephemeral cells' directory, once the daemon opened it ([`open`]).
-    static HOST: Mutex<Option<Arc<Host>>> = Mutex::new(None);
-}
-
-/// Opens the host's ephemeral cells' directory at `dir`, made if it is not there with a new
-/// incarnation, as this process's from now on.
-pub(crate) fn open(dir: &Path) -> Result<Arc<Host>, Error> {
+/// Opens the host's ephemeral cells' directory at `dir` on `host_ctx`, made if it is not there
+/// with a new incarnation, as `host_ctx`'s from now on.
+pub(crate) fn open_on(host_ctx: &crate::Host, dir: &Path) -> Result<Arc<Host>, Error> {
     for made in [CELLS, ACCEPTED] {
         let made = dir.join(made);
         host_fs::create_dir_all_durably(&made)
@@ -142,10 +148,22 @@ pub(crate) fn open(dir: &Path) -> Result<Arc<Host>, Error> {
             incarnation
         }
     };
-    let host = Arc::new(Host { dir: dir.to_owned(), incarnation });
-    *HOST.get().lock().unwrap() = Some(host.clone());
+    let host = Arc::new(Host {
+        dir: dir.to_owned(),
+        incarnation,
+        local: host_ctx.local().clone(),
+        host_cells: host_ctx.host_cells().clone(),
+    });
+    *host_ctx.ephemeral.0.lock().unwrap() = Some(host.clone());
     log::info!("{}", opened(dir, incarnation));
     Ok(host)
+}
+
+/// Opens the host's ephemeral cells' directory at `dir`, made if it is not there with a new
+/// incarnation, as this process's from now on.
+#[cfg(all(test, not(madsim)))]
+pub(crate) fn open(dir: &Path) -> Result<Arc<Host>, Error> {
+    open_on(crate::Host::process(), dir)
 }
 
 /// What the daemon logs as it opens the host's ephemeral cells' directory at `dir`, of
@@ -161,10 +179,10 @@ pub(crate) fn said(incarnation: u64) -> base32_id::Short {
     base32_id::Short(incarnation)
 }
 
-/// The host's ephemeral cells' directory, if the daemon opened one: `ENOTSUP` else, as a host
+/// `host_ctx`'s ephemeral cells' directory, if the daemon opened one: `ENOTSUP` else, as a host
 /// without one keeps no ephemeral cell.
-pub(crate) fn host() -> Result<Arc<Host>, crate::Errno> {
-    HOST.get().lock().unwrap().clone().ok_or(crate::Errno::ENOTSUP)
+pub(crate) fn host_on(host_ctx: &crate::Host) -> Result<Arc<Host>, crate::Errno> {
+    host_ctx.ephemeral.0.lock().unwrap().clone().ok_or(crate::Errno::ENOTSUP)
 }
 
 const CELLS: &str = "cells";
@@ -308,7 +326,7 @@ impl Host {
             if !asked.insert(bucket_cell::layout::ephemeral_bucket(parent)) {
                 continue;
             }
-            let bucket = crate::host_cell::bucket(&entry.bucket)?;
+            let bucket = crate::host_cell::bucket_in(&self.host_cells, &entry.bucket)?;
             let found =
                 bucket_cell::lifecycle::decommissioned(&*bucket, self.incarnation, parent).await;
             if found.map_err(bucket_cell::Error::from)? {
@@ -375,7 +393,7 @@ impl Host {
 
     /// Retires the bucket reference, leaving the caller to forget the journal entry.
     pub async fn retire_reference(&self, entry: &Entry) -> Result<(), Error> {
-        let bucket = crate::host_cell::bucket(&entry.bucket)?;
+        let bucket = crate::host_cell::bucket_in(&self.host_cells, &entry.bucket)?;
         let (origin, child) = (entry.origin, entry.child);
         let unreferred =
             bucket_cell::lifecycle::unrefer_ephemeral(&*bucket, origin, self.incarnation, child);
@@ -395,7 +413,8 @@ impl Host {
                 entry.path.display()
             );
             let path = entry.path.clone();
-            local_cell::upload::blocking(move || local_cell::remove_cell_dir(&path))?;
+            let local = self.local.clone();
+            local_cell::upload::blocking(move || local_cell::remove_cell_dir_on(&local, &path))?;
         }
         Ok(())
     }
@@ -404,7 +423,7 @@ impl Host {
     /// Failing to read it says neither (board 5721): an entry retired as a reading of its cell
     /// failed, its disk failing, left a cell this host held with no entry and no reference.
     pub fn holds(&self, entry: &Entry) -> Result<bool, Error> {
-        local_cell::upload::blocking(|| held(entry))
+        local_cell::upload::blocking(|| held(&self.local, entry))
             .with_context(|| format!("reading {}", entry.path.display()))
     }
 }
@@ -423,8 +442,12 @@ const DESCRIPTION_MOST: u64 = 64 << 10;
 /// and only if it is no larger than [`DESCRIPTION_MOST`], never opened as a `HostDir` (which would
 /// count its files in the host's disk, board 8455's review) nor its local checkpoint read whole,
 /// whose length the peer chose.
-pub(crate) fn not_its(dir: &Path, entry: &Entry) -> Result<Option<String>, Error> {
-    if local_cell::unmade_host(dir) {
+pub(crate) fn not_its_on(
+    local: &local_cell::Host,
+    dir: &Path,
+    entry: &Entry,
+) -> Result<Option<String>, Error> {
+    if local_cell::unmade_host_on(local, dir) {
         return Ok(Some(format!("{} is no cell made whole", dir.display())));
     }
     let description = dir.join(local_cell::DESCRIPTION);
@@ -447,11 +470,11 @@ pub(crate) fn not_its(dir: &Path, entry: &Entry) -> Result<Option<String>, Error
 }
 
 /// Whether the cell directory at `entry`'s path is its ephemeral cell's, whole.
-fn held(entry: &Entry) -> Result<bool, Error> {
-    if !host_fs::exists(&entry.path) || local_cell::unmade_host(&entry.path) {
+fn held(local: &Arc<local_cell::Host>, entry: &Entry) -> Result<bool, Error> {
+    if !host_fs::exists(&entry.path) || local_cell::unmade_host_on(local, &entry.path) {
         return Ok(false);
     }
-    if local_cell::host_local_checkpoint(&entry.path)?.is_none() {
+    if local_cell::host_local_checkpoint_on(local, &entry.path)?.is_none() {
         return Ok(false);
     }
     Ok(local_cell::host_cell(&entry.path)? == entry.child)

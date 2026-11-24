@@ -132,7 +132,7 @@ pub async fn drain_daemon(daemon: &Arc<Daemon>, within: Duration) -> Result<(), 
                 log::error!("cladefsd: draining: {err:#}");
             }
             super::cells::close_all_kept(daemon).await;
-            let mut uploaders = crate::bucket::uploaders();
+            let mut uploaders = crate::bucket::uploaders_on(&daemon.host);
             let uploaded = uploaders.wait_for(|uploading| *uploading == 0).await.is_ok();
             mount.is_ok() && uploaded
         })
@@ -144,7 +144,7 @@ pub async fn drain_daemon(daemon: &Arc<Daemon>, within: Duration) -> Result<(), 
             health,
             connections: daemon.connections_work.count(),
             calls: daemon.calls_work.count(),
-            uploaders: *crate::bucket::uploaders().borrow(),
+            uploaders: *crate::bucket::uploaders_on(&daemon.host).borrow(),
             mount: super::mount::left_on(daemon),
         }),
     }

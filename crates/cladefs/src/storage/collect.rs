@@ -77,14 +77,19 @@ fn pace() -> Pace {
     PACE
 }
 
-node_local::node_local! {
-    /// The collectors of the buckets this process has images of open, by their URLs.
-    static COLLECTING: Mutex<BTreeMap<String, Weak<Collecting>>> = Mutex::new(BTreeMap::new());
+/// Per-host registry of image-bucket collectors, owned by [`crate::Host`].
+pub(crate) struct Registry(Mutex<BTreeMap<String, Weak<Collecting>>>);
+
+impl Registry {
+    pub(crate) fn new() -> Self {
+        Self(Mutex::new(BTreeMap::new()))
+    }
 }
 
-/// The collector of `bucket`, at `url`, an image's own, which this process's images of it share.
-pub(crate) fn of(url: &str, bucket: &Arc<RoutedBucket>) -> Arc<Collecting> {
-    let mut collecting = COLLECTING.get().lock().unwrap();
+/// The collector of `bucket` on `host`, at `url`, an image's own, which `host`'s images of it
+/// share.
+pub(crate) fn of_on(host: &crate::Host, url: &str, bucket: &Arc<RoutedBucket>) -> Arc<Collecting> {
+    let mut collecting = host.collectors.0.lock().unwrap();
     collecting.retain(|_, collector| collector.strong_count() > 0);
     if let Some(collector) = collecting.get(url).and_then(Weak::upgrade) {
         return collector;

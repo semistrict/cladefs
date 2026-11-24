@@ -200,7 +200,8 @@ fn counted_member_in(dir: &std::path::Path, with: bool, bucket: Arc<RoutedBucket
     use futures::StreamExt as _;
     let heads = bucket.clone();
     let cache = Arc::new(Cache::open(&dir.join("cache"), u64::MAX).unwrap());
-    let replicas = with.then(|| super::replicas(&dir.join("replicas")).unwrap());
+    let replicas = with
+        .then(|| super::replicas(crate::Host::process().local(), &dir.join("replicas")).unwrap());
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let address = listener.local_addr().unwrap().to_string();
@@ -662,7 +663,7 @@ fn members_refuse_other_incarnations_buckets_and_hosts_without_replicas() {
 fn sweeps_drop_what_heads_name_no_more() {
     use bucket_cell::layout::{Configuration, Fsync, Member, Replication, Wish};
     let dir = tempfile::tempdir().unwrap();
-    let replicas = super::replicas(dir.path()).unwrap();
+    let replicas = super::replicas(crate::Host::process().local(), dir.path()).unwrap();
     let ours = replicas.incarnation();
     let (cell, gone) = (crate::CellId { tenant: 3, id: 9 }, crate::CellId { tenant: 3, id: 10 });
     let unconfigured = crate::CellId { tenant: 3, id: 11 };
@@ -847,7 +848,7 @@ fn takes_refuse_members_answering_more_logs_than_a_member_holds() {
     let dir = tempfile::tempdir().unwrap();
     // Logs a member of this build never holds so many of, its files left as one would, before it
     // opens its directory again.
-    drop(super::replicas(&dir.path().join("replicas")).unwrap());
+    drop(super::replicas(crate::Host::process().local(), &dir.path().join("replicas")).unwrap());
     for log in 0..=replica::LOGS_MOST as u64 {
         let [tenant, cell, number, epoch, log] = [3, 9, 1, 4, log * 2 + 1].map(base32_id::Padded);
         let path = dir.path().join(format!("replicas/{tenant}.{cell}.{number}.{epoch}.{log}"));
@@ -919,7 +920,9 @@ fn peers_are_served_after_accepts_fail() {
         let bucket = crate::bucket::peers::tests::holding(&noise(1)).0;
         let cache = Arc::new(Cache::open(&dir.path().join("cache"), u64::MAX).unwrap());
         let serving = crate::bucket::serving_peers(bucket, cache).unwrap();
-        let replicas = Some(super::replicas(&dir.path().join("replicas")).unwrap());
+        let replicas = Some(
+            super::replicas(crate::Host::process().local(), &dir.path().join("replicas")).unwrap(),
+        );
         let server = Server {
             daemon: Daemon::process().clone(),
             bucket: URL.to_owned(),

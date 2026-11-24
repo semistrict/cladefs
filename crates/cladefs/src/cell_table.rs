@@ -203,6 +203,7 @@ enum Claim<C> {
     /// A connection, to write it.
     Writer(Weak<C>),
     /// cladefs: the daemon's FUSE mount, to attach it (TASK-475.3).
+    #[cfg_attr(madsim, allow(dead_code))]
     Mount,
 }
 
@@ -571,6 +572,7 @@ impl<C: Writer, S, P> CellTable<C, S, P> {
     /// the cell kept open of it, if one was, to close. Until the hold is dropped, every claim of
     /// it fails with `EBUSY` at once, waiting for nothing: the mount lets it go only as it
     /// detaches its cell. Awaited, holding no thread (board 2946).
+    #[cfg_attr(madsim, allow(dead_code))]
     pub async fn hold_mounted(
         &self,
         key: &Path,

@@ -63,7 +63,7 @@ impl OpenCellDevice {
                 Commit::Ordered => cell.commit_ordered(root.as_deref()).await,
             }
         };
-        let runtime = local_cell::upload::bucket_runtime()?;
+        let runtime = local_cell::upload::bucket_runtime_on(self.cell.host.local())?;
         // cladefs: `unconstrained` prevents coop-budget livelock when polled from `block_on` inside
         // a tokio task (board 6525).
         crate::bucket::unconstrained(runtime.spawn(committing)).await??;
@@ -523,7 +523,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("image");
         let keeping = crate::host_cell::keeping().unwrap();
-        let storage = Storage::make(&path, (64 * MIB as u64, 5), true, keeping).await.unwrap();
+        let storage =
+            Storage::make_on(crate::Host::process(), &path, (64 * MIB as u64, 5), true, keeping)
+                .await
+                .unwrap();
         assert!(storage.open_cell().local().keys().encrypts());
         let cell = storage.open_cell().cell().id;
         let (small, large) = (ExtentId::new(cell, 1), ExtentId::new(cell, 2));

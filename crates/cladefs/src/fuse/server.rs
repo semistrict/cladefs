@@ -95,19 +95,17 @@ struct ServerHandle {
     nodes: Arc<Mutex<Nodes>>,
 }
 
-node_local::node_local! {
-    /// cladefs: live FUSE servers in this host/process, held weakly so `bucket::forget` halts any
-    /// mounted cell in scope and invalidates its kernel page cache and dentries (TASK-562,
-    /// board 2520, board 2704).
-    static SERVERS: Mutex<Vec<Weak<ServerHandle>>> = Mutex::new(Vec::new());
-}
+/// cladefs: live FUSE servers in this process (outside the simulation: FUSE mounts do not run under
+/// madsim), held weakly so `bucket::forget` halts any mounted cell in scope and invalidates its
+/// kernel page cache and dentries (TASK-562, board 2520, board 2704).
+static SERVERS: Mutex<Vec<Weak<ServerHandle>>> = Mutex::new(Vec::new());
 
 /// cladefs: halts every FUSE-mounted cell whose [`crate::CellId`] matches `scope`, and asks the
 /// kernel to drop all cached file pages (`off=0, len=0`), attributes, and dentries of those cells
 /// (TASK-562, board 2520, board 2704).
 pub(crate) fn forget_cells(scope: impl Fn(crate::CellId) -> bool) {
     let servers: Vec<Arc<ServerHandle>> = {
-        let mut live = SERVERS.get().lock().unwrap();
+        let mut live = SERVERS.lock().unwrap();
         live.retain(|handle| handle.strong_count() > 0);
         live.iter().filter_map(Weak::upgrade).collect()
     };
@@ -219,6 +217,7 @@ struct Slot {
     name: String,
     /// Its tenant: its path's first name, whose requests the mount's workers bound together
     /// ([`Server::tenant_of`]).
+    #[cfg_attr(madsim, allow(dead_code))]
     tenant: Arc<str>,
     /// The directory of the server's its root is in, and its name there.
     dir: u64,
@@ -480,7 +479,7 @@ impl Server {
             nodes: Arc::clone(&nodes),
         });
         {
-            let mut live = SERVERS.get().lock().unwrap();
+            let mut live = SERVERS.lock().unwrap();
             live.retain(|handle| handle.strong_count() > 0);
             live.push(Arc::downgrade(&registered));
         }
@@ -700,6 +699,7 @@ impl Server {
     /// in the root, a tenant's or a cell's own. None for a server of one filesystem, the root's
     /// other requests, which read no cell, and those that never wait on a cell (`INIT`,
     /// `DESTROY`, `FORGET`, `BATCH_FORGET`, `INTERRUPT`).
+    #[cfg_attr(madsim, allow(dead_code))]
     pub(crate) fn tenant_of(&self, request: &[u8]) -> Option<Arc<str>> {
         let Shape::Many { .. } = self.shape else { return None };
         // Shorter than a header: no cell's, which its handling refuses.
@@ -739,6 +739,7 @@ impl Server {
 
     /// The reply to `request`, as the kernel sent it, whose handling panicked: `EIO`, unless it
     /// takes none, so that the process waiting on it goes on (board 8539).
+    #[cfg_attr(madsim, allow(dead_code))]
     pub(crate) fn panicked(request: &[u8]) -> Option<Vec<u8>> {
         // Shorter than a header: nothing to reply to, as its handling has none.
         let (header, _) = InHeader::read_from_prefix(request).ok()?;

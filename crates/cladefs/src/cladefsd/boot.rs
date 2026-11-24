@@ -42,7 +42,7 @@ pub(super) async fn boot_daemon(
     let host = crate::bucket::Host::from_env().map_err(anyhow::Error::msg)?;
     // cladefs: its KMS, which every cell is encrypted under: none chosen, it refuses to start,
     // naming CLADEFS_KMS and CLADEFS_MASTER_KEY (TASK-411.28).
-    crate::bucket::require_kms().map_err(anyhow::Error::msg)?;
+    crate::bucket::require_kms_on(&daemon.host).map_err(anyhow::Error::msg)?;
     // cladefs: what only failed once it served refused now (board 8595): too few open files for
     // its cells, outside the simulation, whose hosts share its process's; a kernel that can't say
     // which process to kill of a VM process's socket (board 8533); roots it can't resolve; a part
@@ -67,8 +67,9 @@ pub(super) async fn boot_daemon(
     // handed over let go of (board 5730), and the references of those it holds no more retired,
     // before it serves; and how long a migration to it is kept, heard nothing of (board 5734).
     if let Some(dir) = set_os("CLADEFSD_EPHEMERAL") {
-        let ephemeral =
-            local_cell::upload::blocking(|| crate::ephemeral_host::open(Path::new(&dir)))?;
+        let ephemeral = local_cell::upload::blocking(|| {
+            crate::ephemeral_host::open_on(&daemon.host, Path::new(&dir))
+        })?;
         let let_go = super::migration::let_go_handed_over_on(daemon, &ephemeral).await?;
         log::info!("cladefsd: let go of {let_go} ephemeral cells handed over");
         super::migration::idle().map_err(anyhow::Error::msg)?;
@@ -99,16 +100,16 @@ pub(super) async fn boot_daemon(
         // Not UTF-8, or not a number: the error below says what it must be.
         let bytes = bytes.to_str().and_then(|bytes| bytes.parse().ok());
         let bytes = bytes.context("CLADEFSD_UPLOAD_MEMORY must be a number of bytes")?;
-        crate::bucket::set_upload_memory(bytes).map_err(anyhow::Error::msg)?;
+        crate::bucket::set_upload_memory_on(&daemon.host, bytes).map_err(anyhow::Error::msg)?;
     }
     if let Some(memory) = memory {
-        crate::pages::configure(crate::pages::Config::with_memory(memory))?;
+        crate::pages::configure_on(&daemon.host, crate::pages::Config::with_memory(memory))?;
     } else {
         anyhow::ensure!(!cfg!(madsim), "a simulated host is given its memory");
         // cladefs: its memory a page cache, as large as the host's, governed by what is free
         // (TASK-358).
         let memory = super::governor::memory_bytes().map_err(anyhow::Error::msg)?;
-        crate::pages::configure(crate::pages::Config::with_memory(memory))?;
+        crate::pages::configure_on(&daemon.host, crate::pages::Config::with_memory(memory))?;
         super::governor::start_on(daemon).map_err(anyhow::Error::msg)?;
     }
     let control = set_os("CLADEFSD_GRPC");

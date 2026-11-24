@@ -83,19 +83,28 @@ fn ancestry_line(line: &str) -> Option<(u64, PathBuf)> {
     Some((base32_id::parse(cell)?, from.into()))
 }
 
-/// Writes `text` as the record `name` in `dir`, durably: whole or not at all, by a file written
-/// and synced beside it, renamed over it, the directory synced after.
+/// Writes `text` as the record `name` in `dir` on `local`, durably: whole or not at all, by a
+/// file written and synced beside it, renamed over it, the directory synced after.
 /// cladefs: through the cell directory, as every change to it is (`Dir::replace`, TASK-539.3).
-pub(crate) fn write(dir: &Path, name: &str, text: &str) -> io::Result<()> {
-    let dir = local_cell::HostDir::new(dir)?;
+pub(crate) fn write_on(
+    local: &std::sync::Arc<local_cell::Host>,
+    dir: &Path,
+    name: &str,
+    text: &str,
+) -> io::Result<()> {
+    let dir = local_cell::HostDir::new_on(local, dir)?;
     dir.replace(name, text.as_bytes())?;
     dir.sync_dir("")
 }
 
-/// Makes the empty records `names` in `dir`, durably: each synced, then the directory; one there
-/// already is left as it is. Through the cell directory, as every change to it is.
-fn mark(dir: &Path, names: impl IntoIterator<Item = String>) -> io::Result<()> {
-    let dir = local_cell::HostDir::new(dir)?;
+/// Makes the empty records `names` in `dir` on `local`, durably: each synced, then the directory;
+/// one there already is left as it is. Through the cell directory, as every change to it is.
+fn mark_on(
+    local: &std::sync::Arc<local_cell::Host>,
+    dir: &Path,
+    names: impl IntoIterator<Item = String>,
+) -> io::Result<()> {
+    let dir = local_cell::HostDir::new_on(local, dir)?;
     for name in names {
         match dir.create(&name, false) {
             Ok(file) => file.sync()?,
@@ -145,20 +154,35 @@ pub(crate) fn attached(dir: &Path) -> Result<Vec<(Vec<u64>, PathBuf)>> {
     lines(dir, ATTACHED, "what is attached", attached_line)
 }
 
-/// Records `base`, of `cells`, as attached to the cell in `dir`, durably, unless it is.
-pub(crate) fn attach(dir: &Path, base: &Path, cells: &[u64]) -> Result<()> {
+/// Records `base`, of `cells`, as attached to the cell in `dir` on `local`, durably, unless it is.
+pub(crate) fn attach_on(
+    local: &std::sync::Arc<local_cell::Host>,
+    dir: &Path,
+    base: &Path,
+    cells: &[u64],
+) -> Result<()> {
     let mut attached = attached(dir)?;
     if attached.iter().any(|(_, recorded)| recorded == base) {
         return Ok(());
     }
     attached.push((cells.to_vec(), base.to_owned()));
-    write_attached(dir, &attached)
+    write_attached_on(local, dir, &attached)
+}
+
+#[cfg(all(test, not(madsim)))]
+pub(crate) fn attach(dir: &Path, base: &Path, cells: &[u64]) -> Result<()> {
+    attach_on(crate::Host::process().local(), dir, base, cells)
 }
 
 /// Replaces what the cell in `dir` records as attached with `attached`, durably.
-fn write_attached(dir: &Path, attached: &[(Vec<u64>, PathBuf)]) -> Result<()> {
+fn write_attached_on(
+    local: &std::sync::Arc<local_cell::Host>,
+    dir: &Path,
+    attached: &[(Vec<u64>, PathBuf)],
+) -> Result<()> {
     let text = attached_text(attached);
-    write(dir, ATTACHED, &text).map_err(|err| failed(dir, "recording what is attached", err))
+    write_on(local, dir, ATTACHED, &text)
+        .map_err(|err| failed(dir, "recording what is attached", err))
 }
 
 /// The record of `attached`, as [`attached`] reads it.
@@ -197,10 +221,19 @@ pub(crate) fn public_cells(dir: &Path) -> Result<BTreeSet<u64>> {
     listed().map_err(|err| failed(dir, "listing the public cells", err))
 }
 
-/// Marks `cells` public in the cell in `dir`, durably.
-pub(crate) fn mark_public(dir: &Path, cells: &[u64]) -> Result<()> {
-    mark(dir, cells.iter().map(|&cell| public(cell)))
+/// Marks `cells` public in the cell in `dir` on `local`, durably.
+pub(crate) fn mark_public_on(
+    local: &std::sync::Arc<local_cell::Host>,
+    dir: &Path,
+    cells: &[u64],
+) -> Result<()> {
+    mark_on(local, dir, cells.iter().map(|&cell| public(cell)))
         .map_err(|err| failed(dir, "marking cells public", err))
+}
+
+#[cfg(all(test, not(madsim)))]
+pub(crate) fn mark_public(dir: &Path, cells: &[u64]) -> Result<()> {
+    mark_public_on(crate::Host::process().local(), dir, cells)
 }
 
 /// The name of the record marking `cell` public.
@@ -252,14 +285,18 @@ fn ancestry_text(ancestry: &[(u64, PathBuf)]) -> String {
 
 /// What the cell in `to` inherits of the cell in `from` that its guest reads: what is attached
 /// to it, and the cells marked public, its own and those it inherited from ([`inherit`]).
-pub(crate) fn inherit_attached(from: &Path, to: &Path) -> Result<()> {
+pub(crate) fn inherit_attached_on(
+    local: &std::sync::Arc<local_cell::Host>,
+    from: &Path,
+    to: &Path,
+) -> Result<()> {
     let attached = attached(from)?;
     if !attached.is_empty() {
-        write_attached(to, &attached)?;
+        write_attached_on(local, to, &attached)?;
     }
     let public: Vec<u64> = public_cells(from)?.into_iter().collect();
     if !public.is_empty() {
-        mark_public(to, &public)?;
+        mark_public_on(local, to, &public)?;
     }
     Ok(())
 }
