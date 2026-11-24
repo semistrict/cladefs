@@ -153,6 +153,20 @@ pub fn from_url_with(url: &str, vars: &Vars, origin: Origin) -> Result<Shared, S
     }
 }
 
+/// Checks whether a registry entry may reuse an already-open KMS of the same URL and credentials.
+/// The same URL parsers enforce the recorded origin on both a new instance and a reused one.
+pub fn check_recorded_url(url: &str, trust: &Trust) -> Result<(), String> {
+    let origin = Origin::Recorded(trust);
+    match url.split_once("://").map(|(scheme, _)| scheme) {
+        Some("local") => origin.local().map_err(|why| format!("{url:?}: {why}")),
+        Some("openbao" | "openbaos") => openbao::check_url(url, origin),
+        Some("aws-kms") => aws::check_url(url, origin),
+        Some("gcp-kms") => gcp::check_url(url, origin),
+        Some("azure-kv") => azure::check_url(url, origin),
+        _ => Err(format!("{url:?} names no KMS")),
+    }
+}
+
 /// Why a KMS refused, each naming the tenant whose KEK was asked for, so that a cell that cannot
 /// open says whose key it lacks.
 #[derive(Debug, thiserror::Error)]

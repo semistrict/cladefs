@@ -114,6 +114,10 @@ struct Parsed {
     alg: &'static str,
 }
 
+pub(super) fn check_url(url: &str, origin: Origin) -> Result<(), String> {
+    parse(url, origin).map(drop)
+}
+
 /// What `url` says, each name checked; of `origin` the registry of buckets, each host it names (its
 /// vault's, its endpoint's, its template's) one the host allows, and no file of the host's (board
 /// 8525), before any is opened.

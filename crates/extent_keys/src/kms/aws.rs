@@ -23,6 +23,10 @@ pub(super) fn from_url(url: &str, vars: &Vars, origin: Origin) -> Result<super::
     Ok(Arc::new(AwsKms::of(url, credentials, origin)?))
 }
 
+pub(super) fn check_url(url: &str, origin: Origin) -> Result<(), String> {
+    Parsed::of(url, origin).map(drop)
+}
+
 /// The variables its credentials are read from ([`Credentials::of`]), as AWS's SDKs read them: a
 /// bucket's own replace the host's as one (board 8485, `super::vars`).
 pub(super) const CREDENTIAL_VARS: &[&str] = &[
@@ -285,12 +289,16 @@ impl Client {
     }
 }
 
-impl AwsKms {
-    /// The KMS `url` names: `aws-kms://REGION?key=TEMPLATE[&keys=FILE][&endpoint=URL]`, its query
-    /// percent-encoded as any URL's; `endpoint` for a VPC endpoint, or an emulator. It calls with
-    /// `credentials`; `url` is of `origin`: one the registry of buckets records names no file of
-    /// the host's, and an endpoint of AWS's own over HTTPS, or of this host, alone (board 8525).
-    fn of(url: &str, credentials: Credentials, origin: Origin) -> Result<Self, String> {
+struct Parsed {
+    region: String,
+    endpoint: Option<String>,
+    names: KeyNames,
+}
+
+impl Parsed {
+    /// The region, key names and optional endpoint of an AWS KMS URL. A recorded URL names no
+    /// file and reaches only an allowed endpoint (board 8525).
+    fn of(url: &str, origin: Origin) -> Result<Self, String> {
         let parsed = url::Url::parse(url).map_err(|err| format!("{url:?}: {err}"))?;
         let refused = |why: &str| format!("{url:?} names no AWS KMS: {why}");
         if parsed.scheme() != "aws-kms" {
@@ -323,7 +331,14 @@ impl AwsKms {
         let query_pairs = query.iter().map(|(n, v)| (n.as_str(), v.as_str()));
         let names =
             KeyNames::of_query(query_pairs, origin, |_| Ok(())).map_err(|why| refused(&why))?;
-        Ok(Self::with(region, endpoint, names, credentials))
+        Ok(Self { region: region.to_owned(), endpoint, names })
+    }
+}
+
+impl AwsKms {
+    fn of(url: &str, credentials: Credentials, origin: Origin) -> Result<Self, String> {
+        let Parsed { region, endpoint, names } = Parsed::of(url, origin)?;
+        Ok(Self::with(&region, endpoint, names, credentials))
     }
 
     /// The KMS in `region`, at `endpoint` if given, else AWS's own, naming tenants' keys by

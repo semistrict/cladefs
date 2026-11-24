@@ -99,6 +99,10 @@ pub(super) fn from_url(url: &str, vars: &Vars, origin: Origin) -> Result<super::
     Ok(Arc::new(kms.map_err(|why| format!("{url}: {why}"))?))
 }
 
+pub(super) fn check_url(url: &str, origin: Origin) -> Result<(), String> {
+    parse(url, origin).map(drop)
+}
+
 /// The key ring `url` names and its tenants' keys' names, each checked: of `origin` the registry of
 /// buckets, no file of the host's named (board 8525).
 fn parse(url: &str, origin: Origin) -> Result<(String, KeyNames), String> {

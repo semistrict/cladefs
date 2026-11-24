@@ -50,6 +50,7 @@ use futures::future::BoxFuture;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tokio::sync::OnceCell;
 
 /// The variable naming a host's KMS by its URL (`extent_keys::kms::from_url`), which [`from_env`]
 /// takes over a master key.
@@ -525,35 +526,23 @@ pub fn from_vars<B: Bucket>(
     vars: &Vars,
     bucket: impl FnOnce() -> Result<Arc<B>, String>,
 ) -> Result<HostKms<B>, String> {
-    match named(vars, None)? {
-        Some(named) => Ok(named),
+    match vars.get(KMS_VAR) {
+        Some(url) => {
+            let kms = named(vars, url, Origin::Host, KMS_VAR)?;
+            Ok(HostKms::Named(url.to_owned(), kms))
+        }
         None => over_bucket(vars, bucket),
     }
 }
 
-/// cladefs: the KMS chosen by name, if one is: `recorded`'s, a registry's, else [`KMS_VAR`]'s; its
-/// bucket never asked (board 5528). Its credentials are those `vars` give, a bucket's own over the
-/// host's (board 8485). A URL the registry records reaches what `vars` allow alone ([`Trust`],
-/// board 8525): the registry is an object anyone who can write it chooses.
-fn named<B: Bucket>(vars: &Vars, recorded: Option<&str>) -> Result<Option<HostKms<B>>, String> {
-    let trust;
-    let (url, source, origin) = match recorded {
-        Some(url) => {
-            trust = Trust::of(vars)?;
-            (url, "the registry of buckets", Origin::Recorded(&trust))
-        }
-        None => match vars.get(KMS_VAR) {
-            Some(url) => (url, KMS_VAR, Origin::Host),
-            None => return Ok(None),
-        },
-    };
+/// The KMS named by `url`, with the credentials `vars` give.
+fn named(vars: &Vars, url: &str, origin: Origin, source: &str) -> Result<kms::Shared, String> {
     let given =
         [MASTER_KEY_VAR, MASTER_KEY_FILE_VAR].into_iter().find(|name| vars.get(name).is_some());
     if let Some(name) = given {
         log::warn!("cladefs: {name} is set, and unused: {source} names the KMS");
     }
-    let kms = kms::from_url_with(url, vars, origin).map_err(|why| format!("{source}: {why}"))?;
-    Ok(Some(HostKms::Named(url.to_owned(), kms)))
+    kms::from_url_with(url, vars, origin).map_err(|why| format!("{source}: {why}"))
 }
 
 /// cladefs: the bucket KMS over `bucket()`, given master keys, as [`from_vars`] chooses it when no
@@ -596,9 +585,8 @@ pub struct ByBucket {
     vars: Arc<Vars>,
     /// The home bucket's number, cached once it has an identity (board 6400).
     own_number: Mutex<Option<u16>>,
-    chosen: Mutex<HashMap<u16, (KmsKey, kms::Shared)>>,
-    named: Mutex<HashMap<KmsKey, kms::Shared>>,
-    buckets: Mutex<BTreeMap<u16, Arc<BucketKms<ObjectBucket>>>>,
+    chosen: Mutex<BTreeMap<u16, Arc<OnceCell<Chosen>>>>,
+    named: Mutex<HashMap<KmsKey, Arc<OnceCell<kms::Shared>>>>,
     /// How long [`ByBucket::shred`] waits for each other bucket: [`SHRED_WITHIN`], but in tests.
     shred_within: std::time::Duration,
     /// Held by a reload ([`ByBucket::reload`]): one at a time, so that what one checked is what it
@@ -611,7 +599,10 @@ impl ByBucket {
     /// others' chosen from the registry and `vars`, the host's environment ([`Vars::from_env`]).
     pub fn new(home: Arc<RoutedBucket>, own: HostKms<ObjectBucket>, vars: Arc<Vars>) -> Self {
         let named = match &own {
-            HostKms::Named(url, kms) => HashMap::from([(KmsKey(url.as_str().into()), kms.clone())]),
+            HostKms::Named(url, kms) => HashMap::from([(
+                KmsKey(url.as_str().into()),
+                Arc::new(OnceCell::new_with(Some(kms.clone()))),
+            )]),
             HostKms::Bucket(_) => HashMap::new(),
         };
         Self {
@@ -621,7 +612,6 @@ impl ByBucket {
             own_number: Mutex::default(),
             chosen: Mutex::default(),
             named: Mutex::new(named),
-            buckets: Mutex::default(),
             shred_within: SHRED_WITHIN,
             reloading: tokio::sync::Mutex::new(()),
         }
@@ -688,7 +678,13 @@ impl ByBucket {
     /// its bucket KMS's KEK object destroyed, or the KMS it is under named.
     async fn shredding(&self, number: u16, tenant: u64) -> Result<Shred, String> {
         let (key, _) = self.of(number).await?;
-        let kms = self.buckets.lock().unwrap().get(&number).cloned();
+        let kms = self
+            .chosen
+            .lock()
+            .unwrap()
+            .get(&number)
+            .and_then(|chosen| chosen.get())
+            .and_then(|(_, kms)| kms.clone());
         Ok(match kms {
             Some(kms) => Shred::Destroyed(kms.destroy(tenant).await),
             None => Shred::Named(key.0.to_string()),
@@ -733,7 +729,7 @@ impl ByBucket {
             .lock()
             .unwrap()
             .iter()
-            .map(|(key, kms)| (key.clone(), kms.clone()))
+            .filter_map(|(key, kms)| Some((key.clone(), kms.get()?.clone())))
             .collect();
         for (key, kms) in &named {
             let Some(names) = kms.names_dyn() else { continue };
@@ -827,9 +823,10 @@ impl ByBucket {
                 .map_err(|why| Unreloaded::Unreached(format!("{identity}: {why}")))?;
             all.push((own.unwrap_or(NAMED), kms.clone(), true));
         }
-        let others: Vec<_> =
-            self.buckets.lock().unwrap().iter().map(|(n, kms)| (*n, kms.clone(), false)).collect();
-        all.extend(others);
+        all.extend(self.chosen.lock().unwrap().iter().filter_map(|(&number, chosen)| {
+            let (_, kms) = chosen.get()?;
+            Some((number, kms.as_ref()?.clone(), false))
+        }));
         Ok(all)
     }
 
@@ -868,8 +865,10 @@ impl ByBucket {
             buckets.push(("the host's bucket".to_owned(), Ok(self.home.own())));
         }
         let others: Vec<u16> = (self.chosen.lock().unwrap().iter())
-            .filter(|(_, (of, _))| of == key)
-            .map(|(number, _)| *number)
+            .filter_map(|(&number, chosen)| {
+                let ((of, _), _) = chosen.get()?;
+                (of == key).then_some(number)
+            })
             .collect();
         for number in others {
             let name = format!("bucket {number}");
@@ -929,42 +928,71 @@ impl ByBucket {
         let entry = self.entry(number).await;
         let entry = entry.map_err(|err| format!("its entry in the registry: {err}"))?;
         let vars = self.vars.numbered(number);
-        // cladefs: the bucket opened only for its bucket KMS, none named (board 5528).
-        let chosen = match named(&vars, entry.details.kms.as_deref())? {
-            Some(named) => named,
-            None => {
-                let member = self.home.numbered(number).await;
-                over_bucket(&vars, || member.map_err(|err| format!("the bucket: {err}")))?
-            }
-        };
-        match chosen {
-            HostKms::Named(url, kms) => {
-                // The host's credentials' instance, the host's own KMS's if it names the same, is
-                // every such bucket's; one with credentials of its own has its own (board 8485),
-                // named before its URL, as no URL a KMS takes begins, so that no URL's name is
-                // another's with credentials of its own (hotbed review 58).
-                let key = match self.vars.own_credentials(number, &url) {
-                    true => KmsKey(format!("bucket {number}'s credentials: {url}").into()),
-                    false => KmsKey(url.into()),
-                };
-                let kms = self.named.lock().unwrap().entry(key.clone()).or_insert(kms).clone();
-                Ok(((key, kms), None))
-            }
-            HostKms::Bucket(kms) => {
-                if let Some(id) = &entry.details.master_key_id
-                    && !kms.keys().ids().iter().any(|held| held.to_string() == *id)
-                {
-                    return Err(format!(
-                        "its tenants' KEKs are kept under master key {id}, which this host has \
-                         not (it has {}): CLADEFSD_BUCKET_{number}_{MASTER_KEY_VAR}",
-                        kms.keys().named_ids()
-                    ));
-                }
-                kms.identify(entry.id);
-                let key = KmsKey(format!("the bucket KMS of bucket {number}").into());
-                Ok(((key, kms.clone()), Some(kms)))
-            }
+        let recorded = entry.details.kms.as_deref();
+        if let Some(url) = recorded.or_else(|| vars.get(KMS_VAR)) {
+            let trust = recorded.map(|_| Trust::of(&vars)).transpose()?;
+            return self
+                .named(number, &vars, url, trust.as_ref())
+                .await
+                .map(|chosen| (chosen, None));
         }
+        // The bucket is opened only when it keeps its tenants' KEKs (board 5528).
+        let keys = MasterKeys::from_vars(&vars)?.ok_or_else(no_kms)?;
+        if let Some(id) = &entry.details.master_key_id
+            && !keys.ids().iter().any(|held| held.to_string() == *id)
+        {
+            return Err(format!(
+                "its tenants' KEKs are kept under master key {id}, which this host has \
+                 not (it has {}): CLADEFSD_BUCKET_{number}_{MASTER_KEY_VAR}",
+                keys.named_ids()
+            ));
+        }
+        let bucket = self.home.numbered(number).await.map_err(|err| {
+            format!(
+                "{MASTER_KEY_VAR}: the bucket KMS keeps tenants' KEKs in the host's bucket: \
+                 the bucket: {err}"
+            )
+        })?;
+        let kms = Arc::new(BucketKms::new(bucket, keys));
+        kms.identify(entry.id);
+        let key = KmsKey(format!("the bucket KMS of bucket {number}").into());
+        Ok(((key, kms.clone()), Some(kms)))
+    }
+
+    /// The instance for a URL and credentials, constructed once.
+    async fn named(
+        &self,
+        number: u16,
+        vars: &Vars,
+        url: &str,
+        trust: Option<&Trust>,
+    ) -> Result<(KmsKey, kms::Shared), String> {
+        // A bucket's own credentials give it a distinct name (board 8485). The prefix
+        // cannot collide with a KMS URL (hotbed review 58).
+        let key = if self.vars.own_credentials(number, url) {
+            KmsKey(format!("bucket {number}'s credentials: {url}").into())
+        } else {
+            KmsKey(url.into())
+        };
+        let recorded = "the registry of buckets";
+        if let Some(trust) = trust {
+            // This bucket's trust can differ from that of the first caller, including the
+            // host's own configuration. Authorize the recorded URL before sharing it.
+            kms::check_recorded_url(url, trust).map_err(|why| format!("{recorded}: {why}"))?;
+        }
+        let (origin, source) = match trust {
+            Some(trust) => (Origin::Recorded(trust), recorded),
+            None => (Origin::Host, KMS_VAR),
+        };
+        let slot = self.named.lock().unwrap().entry(key.clone()).or_default().clone();
+        let kms = slot.get_or_try_init(|| async { named(vars, url, origin, source) }).await?;
+        Ok((key, kms.clone()))
+    }
+
+    /// Coalesces cold opens of a bucket. Failed or cancelled lookups can be tried again.
+    async fn chosen(&self, number: u16) -> Result<Chosen, String> {
+        let chosen = self.chosen.lock().unwrap().entry(number).or_default().clone();
+        chosen.get_or_try_init(|| self.other(number)).await.cloned()
     }
 }
 
@@ -1091,19 +1119,7 @@ impl Kmses for ByBucket {
             if bucket == NAMED || self.own_number().await?.unwrap_or(identity::ROOT) == bucket {
                 return Ok(self.own());
             }
-            if let Some(chosen) = self.chosen.lock().unwrap().get(&bucket) {
-                return Ok(chosen.clone());
-            }
-            let (chosen, bucket_kms) = self.other(bucket).await?;
-            // Chosen at once by another call, perhaps: that one, the one every caller holds.
-            let mut all = self.chosen.lock().unwrap();
-            if let Some(chosen) = all.get(&bucket) {
-                return Ok(chosen.clone());
-            }
-            if let Some(bucket_kms) = bucket_kms {
-                self.buckets.lock().unwrap().insert(bucket, bucket_kms);
-            }
-            Ok(all.entry(bucket).or_insert(chosen).clone())
+            self.chosen(bucket).await.map(|(chosen, _)| chosen)
         })
     }
 }
@@ -1836,6 +1852,68 @@ mod tests {
         });
     }
 
+    #[test]
+    fn sequential_and_concurrent_bucket_opens_reuse_a_named_kms() {
+        use crate::identity::Details;
+        use extent_keys::kms::openbao::TOKEN_FILE_ENV;
+
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let urls = ["home", "two", "three"].map(|name| {
+                let path = dir.path().join(name);
+                std::fs::create_dir(&path).unwrap();
+                format!("file://{}", path.display())
+            });
+            let [home, two, three] =
+                urls.each_ref().map(|url| ObjectBucket::from_url(url).unwrap());
+            let token = dir.path().join("token");
+            let url = "openbao://127.0.0.1:8200/transit?key=k{tenant}";
+            let details = Details::default();
+            identity::format(&home, &details).await.unwrap();
+            for (number, bucket) in [(1, two), (2, three)] {
+                let member = Details {
+                    url: Some(urls[number].clone()),
+                    kms: Some(url.to_owned()),
+                    ..Details::default()
+                };
+                identity::add(&home, &details, &bucket, member).await.unwrap();
+            }
+            let vars = vars_of(&[
+                (TOKEN_FILE_ENV.to_owned(), token.display().to_string()),
+                (kms::trust::HOSTS_VAR.to_owned(), "127.0.0.1:8200".to_owned()),
+            ]);
+            let home = Arc::new(home.routed(Arc::new(Registered::new(Vec::new()))));
+            let router = || {
+                let own = HostKms::Bucket(Arc::new(BucketKms::new(
+                    home.own(),
+                    keys_of(&[&Secret::random()]),
+                )));
+                ByBucket::new(home.clone(), own, vars.clone())
+            };
+
+            std::fs::write(&token, "s.test").unwrap();
+            let sequential = router();
+            let (key, first) = sequential.of(2).await.unwrap();
+            // A second construction would try to read the token file again.
+            std::fs::remove_file(&token).unwrap();
+            let (other_key, second) = sequential.of(3).await.unwrap();
+            assert_eq!(key, other_key);
+            assert!(Arc::ptr_eq(&first, &second));
+
+            std::fs::write(&token, "s.test").unwrap();
+            let concurrent = router();
+            let (two, three, again) =
+                futures::join!(concurrent.of(2), concurrent.of(3), concurrent.of(2));
+            let (key, first) = two.unwrap();
+            for other in [three, again] {
+                let (other_key, other) = other.unwrap();
+                assert_eq!(key, other_key);
+                assert!(Arc::ptr_eq(&first, &other));
+            }
+        });
+    }
+
     /// board 8525: a KMS URL a bucket's entry in the registry records reaches what the host allows
     /// alone: `local://`, the host allowing no fake, refuses the bucket's cells, its directory never
     /// made; OpenBao in the clear, at a host none names, too, before the host's token goes there.
@@ -1852,11 +1930,10 @@ mod tests {
             let urls = ["home", "two", "three"].map(url);
             let buckets = urls.clone().map(|url| ObjectBucket::from_url(&url).unwrap());
             let local = dir.path().join("kms");
+            let local_url = format!("local://{}", local.display());
             identity::format(&buckets[0], &Details::default()).await.unwrap();
-            let kmses = [
-                format!("local://{}", local.display()),
-                "openbao://10.9.9.9:8200/transit?key=k{tenant}".to_owned(),
-            ];
+            let kmses =
+                [local_url.clone(), "openbao://10.9.9.9:8200/transit?key=k{tenant}".to_owned()];
             for (at, kms) in (1..).zip(kmses) {
                 let details =
                     Details { url: Some(urls[at].clone()), kms: Some(kms), ..Details::default() };
@@ -1876,6 +1953,13 @@ mod tests {
             assert!(refused.starts_with("the registry of buckets: \"local://"), "{refused}");
             assert!(refused.ends_with("only if CLADEFSD_KMS_LOCAL is 1"), "{refused}");
             assert!(!local.exists(), "local:// made its directory");
+            let own = kms::from_url_with(&local_url, &by_bucket.vars, Origin::Host).unwrap();
+            let by_bucket_with_own = ByBucket::new(
+                by_bucket.home.clone(),
+                HostKms::Named(local_url, own),
+                by_bucket.vars.clone(),
+            );
+            assert_eq!(by_bucket_with_own.of(2).await.map(drop).unwrap_err(), refused);
             let refused = by_bucket.of(3).await.map(drop).unwrap_err();
             assert!(
                 refused.ends_with(
