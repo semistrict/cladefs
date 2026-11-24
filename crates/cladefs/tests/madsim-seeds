@@ -26,3 +26,4 @@
 90      board 5748: a host journal note unread (EIO) removed as torn, its cell then noted on no host
 34      board 5748: the same open cell dropped open, in the replicated disk-faults profile
 149     board 10506: board 5668's, its store's removal failing too, the description's rename (EIO): the store, looking made, refused every take after (EEXIST) (Linux)
+145     board 10663: every extent a writer made freed before another host took the cell, the harness's guest minted from 0 again, past its extents alone, not its writer's floor: each write refused (EPERM), none told uploaded

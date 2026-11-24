@@ -5,13 +5,13 @@
 # Killer: cladefsd::tests::hostile::a_compromised_vm_process_harms_no_tenant_beside_it
 --- a/crates/cladefs/src/cladefsd/server.rs
 +++ b/crates/cladefs/src/cladefsd/server.rs
-@@ -1152,11 +1152,15 @@
+@@ -1263,11 +1263,15 @@
          }
          let key = cell_dir_key(path);
          drop(self.0.named.set(key.to_string_lossy().into()));
--        self.0.report.opened(key, open_cell.cell().id);
+-        self.0.report.opened(key, open_cell.cell());
 -        assert!(self.0.open_cell.set(open_cell).is_ok(), "a connection opened a second cell");
-+        let cell = open_cell.cell().id;
++        let cell = open_cell.cell();
 +        if self.0.open_cell.set(open_cell).is_err() {
 +            std::mem::forget(hold);
 +            return;
@@ -24,7 +24,7 @@
      }
  }
  
-@@ -1728,11 +1732,11 @@
+@@ -1851,11 +1855,11 @@
      fn opening(&self) -> Result<Opening<'_>, Errno> {
          let mut phase = self.phase.with(Mutex::lock);
          match *phase {

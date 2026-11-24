@@ -98,10 +98,14 @@ impl Guest {
     }
 
     /// The sequence its cell gives the next extent minted: as a guest that took the cell over
-    /// mints from.
+    /// mints from, past its extents and past its writer's floor, as fxfs's allocator and the
+    /// block device mint (`Device::sequence_floor`). Past its extents alone, a cell whose every
+    /// extent was freed before another host took it over was minted from 0 again, sequences
+    /// spent, every write refused, `EPERM` (board 10663).
     pub async fn next_sequence(&self) -> Result<u64, Errno> {
         let reply = self.call(&Request::Info).await?;
-        Ok(super::codec::Info::decode(&reply.header)?.0.next_sequence)
+        let info = super::codec::Info::decode(&reply.header)?.0;
+        Ok(info.next_sequence.max(info.sequence_floor))
     }
 
     /// Frees `extent`.
