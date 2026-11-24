@@ -590,8 +590,9 @@ fn tenants_encrypted_under_the_bucket_kms_and_shredded_through_the_control_api()
     assert_eq!((read(&vms[0], 1), read(&vms[1], 2)), (Err(Errno::EACCES), Ok(true)));
     assert_eq!(shred(&mut daemon), (false, 0));
 
+    // Once the daemon lets it go, which it does after its VM process's connection went (board 8282).
     drop(vms);
-    assert_eq!(failure(daemon.stat(&ours)), (Code::PermissionDenied, Errno::EACCES));
+    assert_eq!(failure(daemon.stat_once_closed(&ours)), (Code::PermissionDenied, Errno::EACCES));
 }
 
 /// board 8487: a tenant added to the KMS's key overrides file (`keys=FILE`) while the daemon runs
