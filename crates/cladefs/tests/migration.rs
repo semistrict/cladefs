@@ -450,14 +450,31 @@ fn hand_overs_refused_leave_the_source_serving() {
 #[test]
 fn migration_file_rpc_refuses_holes_past_the_file() {
     use cladefs::cladefsd::peers::proto::{MigrateFileRequest, Range, peer_client::PeerClient};
+    use tonic::transport::{Certificate, ClientTlsConfig, Endpoint, Identity};
 
     let forked = forked(4);
     let there = forked.host(1).join("ephemeral-cell");
     let migration = forked.source.migrate(&forked.here, forked.target_at(), &there).unwrap();
 
+    let tls_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/peer-tls");
+    let ca = Certificate::from_pem(std::fs::read(tls_dir.join("ca.crt")).unwrap());
+    let identity = Identity::from_pem(
+        std::fs::read(tls_dir.join("peer.crt")).unwrap(),
+        std::fs::read(tls_dir.join("peer.key")).unwrap(),
+    );
+    let tls =
+        ClientTlsConfig::new().ca_certificate(ca).identity(identity).domain_name("cladefs-peer");
+
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     let status = runtime.block_on(async {
-        let mut peer = PeerClient::connect(format!("http://{}", forked.target_at())).await.unwrap();
+        let channel = Endpoint::from_shared(format!("https://{}", forked.target_at()))
+            .unwrap()
+            .tls_config(tls)
+            .unwrap()
+            .connect()
+            .await
+            .unwrap();
+        let mut peer = PeerClient::new(channel);
         peer.migrate_file(MigrateFileRequest {
             migration,
             path: "invalid-hole/file".to_owned(),
