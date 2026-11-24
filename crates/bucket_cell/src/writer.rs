@@ -360,11 +360,12 @@ impl<B: Bucket> Writer<B> {
             return Err(self.stop(error));
         }
         let key = layout::segment(self.cell, segment, self.epoch);
-        let keys = self.keys.of(self.cell.id);
-        let read = |bytes: &[u8]| layout::Segment::footer_under(bytes, &keys);
-        let taken = |bytes: &[u8]| match read(bytes)? == footer {
-            true => Ok(()),
-            false => Err(Error::Corrupt(format!("{key} ends with another footer than taken"))),
+        let taken = |bytes: &[u8]| {
+            let keys = self.keys.of(self.cell.id);
+            match layout::Segment::footer_under(bytes, &keys)? == footer {
+                true => Ok(()),
+                false => Err(Error::Corrupt(format!("{key} ends with another footer than taken"))),
+            }
         };
         failpoint!("writer::upload");
         match self.create(&key, &framed, taken).await {
@@ -643,7 +644,8 @@ impl<B: Bucket> Writer<B> {
         let key = layout::checkpoint(self.cell, segment, self.epoch);
         // One this writer wrote before, of the same segment, holds the same extents, perhaps
         // elsewhere: it stands, at its key, written once.
-        let (checkpoint, kept) = crate::checkpoint::encode_kept(&state, self.keys.encrypting());
+        let (checkpoint, kept) =
+            crate::checkpoint::encode_kept(&state, self.keys.try_encrypting()?);
         bucket::create(&*self.bucket, &key, checkpoint).await?;
         {
             // Landed, and decided under the head, which acknowledgements hold as they swap it: a

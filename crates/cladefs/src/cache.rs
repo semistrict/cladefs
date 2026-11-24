@@ -116,6 +116,9 @@ impl Default for Holders {
 /// A cell a cached extent's pages are read from, and its object storage, which holds them if the
 /// cell holds them without their data.
 struct Holder {
+    /// Its cell ID, kept so `Holders::forget` still identifies and evicts extents cached by a
+    /// store that has since closed (TASK-601, board 2598, board 2704).
+    cell: crate::CellId,
     local: Weak<LocalCell<HostDir>>,
     fetcher: Option<Weak<crate::bucket::HostFetcher>>,
 }
@@ -133,8 +136,9 @@ impl Holders {
         let mut holders = self.0.with(Mutex::lock);
         holders.retain(|holder| holder.local.strong_count() > 0);
         if !holders.iter().any(|holder| std::ptr::eq(holder.local.as_ptr(), Arc::as_ptr(local))) {
+            let cell = local.description().cell;
             let (local, fetcher) = (Arc::downgrade(local), fetcher.map(Arc::downgrade));
-            holders.push(Holder { local, fetcher });
+            holders.push(Holder { cell, local, fetcher });
         }
     }
 
@@ -155,17 +159,18 @@ impl Holders {
             .collect()
     }
 
-    /// cladefs: lets go of those whose cells `scope` says are of it, and of those closed: no
-    /// page-in reads through them again (TASK-411.7). Returns whether it let go of one of `scope`.
+    /// cladefs: lets go of those whose cells `scope` says are of it, open or closed, and of any
+    /// other closed holder: no page-in reads through them again, and closed stores' cached
+    /// extents are still evicted on forget (TASK-411.7, TASK-601, board 2598, board 2704).
+    /// Returns whether it let go of one of `scope`.
     fn forget(&self, scope: &dyn Fn(crate::CellId) -> bool) -> bool {
         let mut forgot = false;
-        self.0.with(Mutex::lock).retain(|holder| match holder.local.upgrade() {
-            None => false,
-            Some(local) if scope(local.description().cell) => {
+        self.0.with(Mutex::lock).retain(|holder| {
+            if scope(holder.cell) {
                 forgot = true;
-                false
+                return false;
             }
-            Some(_) => true,
+            holder.local.strong_count() > 0
         });
         forgot
     }
@@ -320,7 +325,7 @@ pub(crate) fn forget(scope: impl Fn(crate::CellId) -> bool) -> (u64, u64) {
             .collect();
         doomed.iter().filter_map(|key| extents.remove(key)).collect()
     };
-    let evicted = gone.iter().map(|cached| cached.extent.evict()).sum();
+    let evicted = gone.iter().map(|cached| cached.extent.revoke()).sum();
     (evicted, gone.len() as u64)
 }
 
@@ -585,12 +590,15 @@ fn waiting_for_memory() {
 struct NoPages;
 
 /// The errno a page-in that failed with `error` fails its readers with: `ENOENT` for an extent
-/// the cell doesn't hold, `ENOMEM` for want of memory, `EIO` for the rest.
+/// the cell doesn't hold, `ENOMEM` for want of memory, `EACCES` for revoked keys, `EIO` for the
+/// rest.
 fn read_errno(error: &anyhow::Error) -> Errno {
     if error.downcast_ref::<NoExtent>().is_some() {
         Errno::ENOENT
     } else if error.downcast_ref::<NoPages>().is_some() {
         Errno::ENOMEM
+    } else if let Some(&errno) = error.downcast_ref::<Errno>() {
+        errno
     } else {
         Errno::EIO
     }
@@ -981,6 +989,10 @@ struct Parts {
     windows: HashMap<usize, Weak<Window>>,
     /// The part after the last a page-in asked for: where a reader reading on asks next.
     next: usize,
+    /// cladefs: set by [`CachedExtent::revoke`] when `cache::forget` drops this extent: any
+    /// in-flight `Filling` page-in discards its slab instead of publishing it, and every waiter
+    /// fails with `EACCES` (TASK-630, board 2658, board 5544, board 2704).
+    revoked: bool,
 }
 
 /// The part page `page` of an extent is in: of an object's parts (`extent_frame::PART`), which a
@@ -1025,7 +1037,7 @@ impl CachedExtent {
         let count = pages.checked_sub(1).map_or(0, |last| part_index(last, phase) + 1);
         let slots = std::iter::repeat_with(|| PartSlot::Absent).take(count).collect();
         // A reader from its start reads on.
-        let parts = Parts { slots, windows: HashMap::new(), next: 0 };
+        let parts = Parts { slots, windows: HashMap::new(), next: 0, revoked: false };
         Self {
             arena,
             extent,
@@ -1117,6 +1129,9 @@ impl CachedExtent {
             let page = at / ps;
             {
                 let parts = self.parts.with(Mutex::lock);
+                if parts.revoked {
+                    return Err(Errno::EACCES);
+                }
                 let part = self.part_of(page);
                 if let Some(PartSlot::Present(slab)) = parts.slots.get(part) {
                     let within = at - self.part_pages(part).start * ps;
@@ -1245,6 +1260,18 @@ impl CachedExtent {
         self.evict_pages(0..u64::MAX)
     }
 
+    /// cladefs: permanently revokes this cached extent on `cache::forget`, evicting all present
+    /// pages and ensuring any in-flight `Filling` page-in drops its slab without installing it
+    /// (TASK-630, board 2658, board 5544, board 2704).
+    pub(crate) fn revoke(&self) -> u64 {
+        {
+            let mut parts = self.parts.with(Mutex::lock);
+            parts.revoked = true;
+        }
+        self.changed.notify(usize::MAX);
+        self.evict()
+    }
+
     /// Evicts its parts in memory holding its pages `pages`, as [`CachedExtent::evict`] evicts
     /// them all, each its own (spec rule ownTokens): their slabs moved out of their slots into
     /// evictions of this call's, tokens left in their place; unmapped from each window on its
@@ -1328,20 +1355,31 @@ impl CachedExtent {
         }
         let entered = span.enter();
         let mut table = self.parts.with(Mutex::lock);
+        let revoked = table.revoked;
         let slot = &mut table.slots[part];
         assert!(matches!(slot, PartSlot::Filling), "part {part} of {:?} not filling", self.extent);
-        match read {
-            Ok(slab) => {
-                *slot = PartSlot::Present(slab);
-                self.present.fetch_add(1, Ordering::Relaxed);
-            }
-            Err(error) => {
-                // What the read failed with, not its errno alone, which said nothing of why
-                // (TASK-217).
-                let errno = read_errno(&error);
-                let at = self.part_pages(part).start * page_size();
-                log::error!("cladefs: reading {:?} at {at:#x}: {errno:?}: {error:#}", self.extent);
-                *slot = PartSlot::Failed(errno);
+        if revoked {
+            // Forgotten while this page-in was in flight: drop any filled slab rather than
+            // publishing plaintext (TASK-630, board 5544, board 2704).
+            drop(read);
+            *slot = PartSlot::Failed(Errno::EACCES);
+        } else {
+            match read {
+                Ok(slab) => {
+                    *slot = PartSlot::Present(slab);
+                    self.present.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(error) => {
+                    // What the read failed with, not its errno alone, which said nothing of why
+                    // (TASK-217).
+                    let errno = read_errno(&error);
+                    let at = self.part_pages(part).start * page_size();
+                    log::error!(
+                        "cladefs: reading {:?} at {at:#x}: {errno:?}: {error:#}",
+                        self.extent
+                    );
+                    *slot = PartSlot::Failed(errno);
+                }
             }
         }
         drop(table);
@@ -1400,6 +1438,9 @@ impl CachedExtent {
 impl Source for CachedExtent {
     fn each_present(&self, pages: Range<u64>, found: &mut dyn FnMut(Present<'_>)) {
         let (ps, table) = (page_size(), self.parts.with(Mutex::lock));
+        if table.revoked {
+            return;
+        }
         for part in self.parts_of(pages.clone()) {
             let PartSlot::Present(slab) = &table.slots[part] else { continue };
             let part_pages = self.part_pages(part);
@@ -1423,6 +1464,9 @@ impl Source for CachedExtent {
                 let mut reading = Vec::new();
                 let listener = {
                     let mut table = self.parts.with(Mutex::lock);
+                    if table.revoked {
+                        return Err(Errno::EACCES);
+                    }
                     let slot = (page < self.pages()).then(|| &table.slots[self.part_of(page)]);
                     let done = match slot {
                         None => Some(Err(Errno::ENOENT)),
@@ -1631,6 +1675,51 @@ mod full_host {
             }
         });
         slabs::set_total_cap(None);
+    }
+
+    /// TASK-630 (board 2658) & board 5544: `cache::forget` while a part page-in is in `Filling`
+    /// revokes the extent so the in-flight page-in fails with `EACCES`, drops its slab, and leaves
+    /// zero bytes held in the extent cache.
+    #[test]
+    fn forget_revokes_in_flight_page_in_and_releases_slab() {
+        let cell = crate::CellId { tenant: 77, id: 5544 };
+        let extent = ExtentId { cell: cell.id, sequence: 1 };
+        let (open, gate) = tokio::sync::watch::channel(false);
+        let cached = Arc::new(CachedExtent::new(
+            ArenaId::DEFAULT,
+            extent,
+            Box::new(Gated(gate)),
+            extent_frame::PART,
+        ));
+        let entry = Cached { extent: cached.clone(), holders: Arc::default() };
+        entry.holders.0.with(Mutex::lock).push(Holder { cell, local: Weak::new(), fetcher: None });
+        extent_cache().extents.with(Mutex::lock).insert((ArenaId::DEFAULT, extent), entry);
+
+        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let filling = tokio::spawn(cached.clone().bring_in(0));
+            // Wait until the part enters `Filling`.
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                let is_filling = {
+                    let parts = cached.parts.with(Mutex::lock);
+                    matches!(parts.slots[0], PartSlot::Filling)
+                };
+                if is_filling {
+                    break;
+                }
+                assert!(tokio::time::Instant::now() < deadline, "page-in never entered Filling");
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+            assert_eq!(forget(|c| c == cell), (0, 1));
+            open.send(true).unwrap();
+            assert_eq!(filling.await.unwrap(), Err(Errno::EACCES));
+            assert_eq!(cached.held(), 0);
+            assert!(
+                !keys().contains(&(ArenaId::DEFAULT, extent)),
+                "forgotten extent remained in cache"
+            );
+        });
     }
 }
 

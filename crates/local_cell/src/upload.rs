@@ -572,7 +572,10 @@ pub async fn open_ephemeral<D: Dir>(
     let mut head = Head::of(bucket_cell::record::Made::Clone(origin), owner);
     head.keks.extend(kek);
     (head.deks, head.inherited) = (deks, inherited);
-    let cell_keys = CellKeys::of(cell, &head, runtime.keys.kms.clone());
+    // cladefs: every ephemeral open gets a fresh taking so reopening after a tenant KEK is
+    // destroyed unwraps through the KMS instead of reusing a cached `(0, 0)` taking (board 5410,
+    // board 2704).
+    let cell_keys = CellKeys::fresh(cell, &head, runtime.keys.kms.clone());
     let ring = keys::ring(&*bucket, &cell_keys, cell, &head, true).await?;
     let recovering_parent =
         bucket_cell::recovery::recover_version(&*bucket, parent.cell, parent.at, &ring);
@@ -998,7 +1001,7 @@ impl<D: Dir> Uploader<D> {
         let mut head = Head::of(bucket_cell::record::Made::Clone(at.origin), child.owner);
         head.keks.extend(keys.kek.clone());
         (head.deks, head.inherited) = (keys.deks.clone(), keys.inherited.clone());
-        let cell_keys = CellKeys::of(child.cell, &head, self.shared.keys.kms.clone());
+        let cell_keys = CellKeys::fresh(child.cell, &head, self.shared.keys.kms.clone());
         let ring = keys::ring(&*self.bucket, &cell_keys, child.cell, &head, true).await?;
         let parent = crate::Parent {
             cell: at.origin.parent,
@@ -1757,7 +1760,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         // cladefs: recovered before the taking under its keys, as the taking will hold them,
         // unwrapped once for it (TASK-411.3); a head with none yet, a fork's child's or a new
         // cell's, which its taking gives them, recovered once it is taken.
-        let before = match found.deks.is_empty() {
+        let (before, _pre_ring) = match found.deks.is_empty() {
             false => {
                 let keys = CellKeys::to_take(cell, &found, kms.clone(), holder);
                 let ring = keys::ring(&**bucket, &keys, cell, &found, true).await?;
@@ -1775,9 +1778,9 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                 if !recovering.follows(&TakenCell::of(head, &recovered.state, chain)) {
                     return Err(bucket_cell::Error::Diverged.into());
                 }
-                Some(recovered)
+                (Some(recovered), Some(ring))
             }
-            true => None,
+            true => (None, None),
         };
         // cladefs: its head taken by this placement, in one conditional write that gives the cell
         // what it lacks (TASK-515): a new cell's KEK from the host's pool, wrapped by its tenant's

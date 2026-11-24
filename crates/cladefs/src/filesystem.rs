@@ -176,6 +176,9 @@ pub struct Filesystem {
     volume: Arc<Volume>,
     /// The root directory, which the filesystem holds while it lives.
     root: Node,
+    /// cladefs: the cell this filesystem is backed by, if mounted on an image cell (TASK-562,
+    /// board 2520, board 2704).
+    cell: Option<crate::CellId>,
     /// What the filesystem's storage is. Locked while unmounting, so that concurrent unmounts wait
     /// for an image of its own to close.
     backing: futures::lock::Mutex<Backing>,
@@ -207,6 +210,7 @@ impl Filesystem {
 
     /// Mounts or formats an image of its own on `storage`, and its volume.
     async fn start(options: &Options, storage: Storage, format: bool) -> Result<Self, Error> {
+        let cell = storage.cell();
         let image = Image::start(options, storage, format).await?;
         let filesystem = if format {
             image.create_volume(VOLUME_NAME).await
@@ -215,6 +219,7 @@ impl Filesystem {
         };
         match filesystem {
             Ok(mut filesystem) => {
+                filesystem.cell = cell;
                 *filesystem.backing.get_mut() = Backing::Own(image);
                 Ok(filesystem)
             }
@@ -232,7 +237,12 @@ impl Filesystem {
     pub(crate) fn new(image: Arc<ImageShared>, store: Arc<ObjectStore>) -> Self {
         let (volume, root) = Volume::new(image, store);
         let root = Node(Arc::new(root));
-        Self { volume, root, backing: futures::lock::Mutex::new(Backing::Volume) }
+        Self { volume, root, cell: None, backing: futures::lock::Mutex::new(Backing::Volume) }
+    }
+
+    /// cladefs: the cell this filesystem is backed by, if mounted on an image cell (TASK-562).
+    pub(crate) fn cell(&self) -> Option<crate::CellId> {
+        self.cell
     }
 
     /// Fails with `ENOTCONN` once the filesystem is unmounted, as every operation does.

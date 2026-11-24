@@ -2150,4 +2150,110 @@ mod tests {
              gcp-kms:// or azure-kv:// (doc-16)"
         );
     }
+
+    /// TASK-578 (board 2552): a `BucketKms::kek` read that raced `forget` / `destroy` must not
+    /// cache the pre-forget KEK bytes back into `BucketKms` once the in-flight GET returns.
+    #[test]
+    fn forget_during_inflight_kek_read_does_not_resurrect_destroyed_kek() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use tokio::sync::Notify;
+
+        struct GatedBucket {
+            inner: Direct,
+            armed: AtomicBool,
+            entered: Notify,
+            release: Notify,
+        }
+
+        impl crate::bucket::Bucket for GatedBucket {
+            async fn get(&self, key: &str) -> Result<crate::bucket::Object, crate::bucket::Error> {
+                let result = self.inner.get(key).await;
+                if key == layout::kek(7) && self.armed.swap(false, Ordering::AcqRel) {
+                    self.entered.notify_one();
+                    self.release.notified().await;
+                }
+                result
+            }
+
+            async fn get_range(
+                &self,
+                key: &str,
+                range: crate::bucket::ByteRange,
+            ) -> Result<Vec<u8>, crate::bucket::Error> {
+                self.inner.get_range(key, range).await
+            }
+
+            async fn head(&self, key: &str) -> Result<crate::bucket::Meta, crate::bucket::Error> {
+                self.inner.head(key).await
+            }
+
+            async fn list(
+                &self,
+                prefix: &str,
+            ) -> Result<Vec<crate::bucket::Meta>, crate::bucket::Error> {
+                self.inner.list(prefix).await
+            }
+
+            async fn list_delimited(
+                &self,
+                prefix: &str,
+                page: crate::bucket::Page<'_>,
+            ) -> Result<crate::bucket::Listing, crate::bucket::Error> {
+                self.inner.list_delimited(prefix, page).await
+            }
+
+            async fn put(
+                &self,
+                key: &str,
+                bytes: bytes::Bytes,
+                mode: crate::bucket::PutMode,
+            ) -> Result<crate::bucket::Version, crate::bucket::Error> {
+                self.inner.put(key, bytes, mode).await
+            }
+
+            async fn delete(&self, key: &str) -> Result<(), crate::bucket::Error> {
+                self.inner.delete(key).await
+            }
+
+            fn now(&self) -> u64 {
+                self.inner.now()
+            }
+        }
+
+        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let gated = Arc::new(GatedBucket {
+                inner: Direct(crate::testing::SimBucket::new()),
+                armed: AtomicBool::new(false),
+                entered: Notify::new(),
+                release: Notify::new(),
+            });
+            let master = MasterKeys::new(vec![Secret::random()]).unwrap();
+            let kms = Arc::new(BucketKms::new(gated.clone(), master));
+            let plain = Secret::random();
+            let wrapped = kms.wrap(7, &plain).await.unwrap();
+            // Clear the cache so the next unwrap fetches `layout::kek(7)` from the bucket.
+            kms.forget(7);
+            gated.armed.store(true, Ordering::Release);
+
+            let kms_reader = kms.clone();
+            let wrapped_reader = wrapped.clone();
+            let inflight = tokio::spawn(async move { kms_reader.unwrap(7, &wrapped_reader).await });
+            gated.entered.notified().await;
+
+            // While `inflight` holds the pre-destroy bytes, destroy & forget tenant 7.
+            assert_eq!(kms.destroy(7).await, Ok(Destroyed::Now));
+            gated.release.notify_one();
+
+            let outcome = inflight.await.unwrap();
+            assert!(
+                outcome.is_err(),
+                "in-flight unwrap racing destroy/forget must not succeed or resurrect the KEK"
+            );
+            assert!(
+                kms.unwrap(7, &wrapped).await.is_err(),
+                "a subsequent unwrap must still see tenant 7 destroyed"
+            );
+        });
+    }
 }

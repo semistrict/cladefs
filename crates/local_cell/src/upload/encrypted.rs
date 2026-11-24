@@ -1800,3 +1800,71 @@ async fn sealed_cells_open_through_openbao() {
     assert_eq!(refused.to_string(), "tenant 2: no KEK in the KMS");
     assert_eq!(world.head_of(keyless).await, None);
 }
+
+/// board 5410: `open_ephemeral` uses a fresh taking (`CellKeys::fresh`) on every open, so
+/// destroying a tenant's KEK between close and reopen refuses the reopen instead of reusing a
+/// cached `(0, 0)` taking.
+#[tokio::test(flavor = "multi_thread")]
+async fn ephemeral_cell_reopen_after_tenant_kek_destroyed_is_refused() {
+    let world = World::new();
+    let host = world.host(5);
+    let parent = test_cell(7);
+    let dir = made(parent);
+    let (cell, uploader) = open_on(&world, &host, &dir).await.unwrap();
+    written(&cell, &uploader, ExtentId::new(7, 1), &noise(1, 4 * 4096)).await;
+    let id = 1;
+    let committed = cell
+        .commit_version(extent_frame::segment::NewVersion { id, keep_last: None }, true)
+        .await
+        .unwrap();
+    uploader.uploaded(committed).await.unwrap();
+    drop((cell, uploader));
+
+    let point_dir = made_at_version(parent, id);
+    let (_at, version_uploader) = open_on(&world, &host, &point_dir).await.unwrap();
+    let child_id = test_cell(88);
+    let child = bucket_cell::layout::Child { cell: child_id, owner: 1 };
+    let inheriting = version_uploader.inheriting(child).await.unwrap();
+    let (checkpoint, ring) = version_uploader.forked_ephemeral(child, inheriting, 1).await.unwrap();
+    let ephemeral_dir = MemDir::new();
+    let description = Description { block_size: 4096, capacity: 1 << 20, cell: child_id };
+    LocalCell::make_ephemeral(
+        &ephemeral_dir,
+        description,
+        None,
+        Some(bucket_cell::cell::Kind::Fxfs),
+        &checkpoint,
+        ring.try_encrypting().unwrap(),
+        |_| Ok(()),
+    )
+    .unwrap();
+    drop(ring);
+
+    // First open succeeds.
+    let recovering = LocalCell::recover_unmade(ephemeral_dir.clone()).unwrap();
+    let (opened, holding, _forked) = open_ephemeral(
+        recovering,
+        crate::Options::default(),
+        world.bucket.clone(),
+        &host.runtime,
+        (None, None),
+    )
+    .await
+    .unwrap();
+    opened.made().unwrap();
+    drop((opened, holding));
+
+    // Destroy the tenant's KEK in the KMS (without calling forget on host) and reopen: because
+    // `open_ephemeral` creates a fresh taking, it must unwrap via the KMS and fail.
+    world.kms.inner().destroy(TENANT).unwrap();
+    let recovering = LocalCell::recover(ephemeral_dir).unwrap();
+    let refused = open_ephemeral(
+        recovering,
+        crate::Options::default(),
+        world.bucket.clone(),
+        &host.runtime,
+        (None, None),
+    )
+    .await;
+    assert!(refused.is_err(), "reopening ephemeral cell after KEK destruction must fail");
+}

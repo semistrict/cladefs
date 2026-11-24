@@ -212,8 +212,8 @@ pub struct Unframed {
 impl Unframed {
     /// Its objects, framed: the segment's, and its extents of their own's, at their keys. cladefs:
     /// encrypted as `encrypting` says, its writer's DEK (TASK-411.3).
-    pub fn frame(self, encrypting: layout::EncryptionKey<'_>) -> Objects {
-        self.data.frame(&self.footer, encrypting)
+    pub fn frame(self, encrypting: impl layout::KeyArg) -> Objects {
+        self.data.frame(&self.footer, encrypting.as_key())
     }
 }
 
@@ -232,7 +232,8 @@ impl Data {
     /// The objects of the segment `footer` stamps, holding this data: the segment's, and its
     /// extents of their own's, at the keys `footer` names them at. cladefs: encrypted as
     /// `encrypting` says (TASK-411.3).
-    pub fn frame(&self, footer: &Footer, encrypting: layout::EncryptionKey<'_>) -> Objects {
+    pub fn frame(&self, footer: &Footer, encrypting: impl layout::KeyArg) -> Objects {
+        let encrypting = encrypting.as_key();
         let own = (footer.own())
             .map(|(extent, location)| {
                 let data = self.own.get(&extent.sequence).expect("sealed on its own");

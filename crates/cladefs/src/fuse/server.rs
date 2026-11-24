@@ -43,7 +43,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::mem::size_of;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use zerocopy::{FromBytes, IntoBytes};
 
@@ -71,17 +71,98 @@ pub type Notifier = Box<dyn Fn(&[u8]) -> std::io::Result<()> + Send + Sync>;
 pub struct Server {
     shape: Shape,
     /// Tells the kernel of nodes changed ([`Server::changed`]) and names detached.
-    notify: Notifier,
+    notify: Arc<Notifier>,
     /// The filesystems served, by slot.
-    cells: Mutex<Cells>,
+    cells: Arc<Mutex<Cells>>,
     /// The nodes the kernel holds.
-    nodes: Mutex<Nodes>,
+    nodes: Arc<Mutex<Nodes>>,
     /// The directories open, by handle.
     dirs: Mutex<OpenDirs>,
     /// Notified as the kernel forgets a node: for detaches waiting for it to forget a cell's.
     forgotten: Event,
     /// cladefs: what it did, for the extent daemon's metrics of its mount (board 8565).
     counters: Counters,
+    /// cladefs: registration in [`SERVERS`] so [`forget_cells`] can halt and invalidate mounted
+    /// cells on `ShredCell` / `ForgetTenantKeys` (TASK-562, board 2520, board 2704).
+    _registered: Arc<ServerHandle>,
+}
+
+/// Weakly registered handle of a live [`Server`] for [`forget_cells`].
+struct ServerHandle {
+    many: bool,
+    notify: Arc<Notifier>,
+    cells: Arc<Mutex<Cells>>,
+    nodes: Arc<Mutex<Nodes>>,
+}
+
+node_local::node_local! {
+    /// cladefs: live FUSE servers in this host/process, held weakly so `bucket::forget` halts any
+    /// mounted cell in scope and invalidates its kernel page cache and dentries (TASK-562,
+    /// board 2520, board 2704).
+    static SERVERS: Mutex<Vec<Weak<ServerHandle>>> = Mutex::new(Vec::new());
+}
+
+/// cladefs: halts every FUSE-mounted cell whose [`crate::CellId`] matches `scope`, and asks the
+/// kernel to drop all cached file pages (`off=0, len=0`), attributes, and dentries of those cells
+/// (TASK-562, board 2520, board 2704).
+pub(crate) fn forget_cells(scope: impl Fn(crate::CellId) -> bool) {
+    let servers: Vec<Arc<ServerHandle>> = {
+        let mut live = SERVERS.get().lock().unwrap();
+        live.retain(|handle| handle.strong_count() > 0);
+        live.iter().filter_map(Weak::upgrade).collect()
+    };
+    for server in servers {
+        let (inodes, names) = {
+            let cells = server.cells.lock().unwrap();
+            let matching: Vec<(u16, Option<Name>)> = cells
+                .slots
+                .iter()
+                .filter(|(_, slot)| slot.cell.is_some_and(&scope))
+                .map(|(&slot, entry)| {
+                    let root_name = (server.many && !entry.leaf.is_empty())
+                        .then(|| (entry.dir, entry.leaf.as_bytes().into()));
+                    (slot, root_name)
+                })
+                .collect();
+            if matching.is_empty() {
+                continue;
+            }
+            let mut nodes = server.nodes.lock().unwrap();
+            let mut inodes = Vec::new();
+            let mut names = Vec::new();
+            for (slot, root_name) in matching {
+                nodes.halted.insert(slot);
+                if !server.many {
+                    inodes.push(ROOT_ID);
+                }
+                if let Some(name) = root_name {
+                    names.push(name);
+                }
+                for (&nodeid, looked) in &nodes.looked {
+                    let of_slot = if server.many { (nodeid >> SLOT_SHIFT) as u16 } else { 0 };
+                    if of_slot == slot {
+                        inodes.push(nodeid);
+                        names.extend(looked.names.iter().cloned());
+                    }
+                }
+            }
+            (inodes, names)
+        };
+        for ino in inodes {
+            if let Err(err) = (server.notify)(&inval_inode_pages(ino))
+                && err.raw_os_error() != Some(libc::ENOENT)
+            {
+                log::error!("fuse: invalidating forgotten inode {ino}: {err}");
+            }
+        }
+        for (dir, name) in names {
+            if let Err(err) = (server.notify)(&inval_entry(dir, &name))
+                && err.raw_os_error() != Some(libc::ENOENT)
+            {
+                log::error!("fuse: invalidating forgotten entry in dir {dir}: {err}");
+            }
+        }
+    }
 }
 
 /// cladefs: what a server did since it was made ([`Server::counts`]), for the extent daemon's
@@ -142,6 +223,8 @@ struct Slot {
     /// The directory of the server's its root is in, and its name there.
     dir: u64,
     leaf: String,
+    /// cladefs: the cell backed by this slot's filesystem, if any (TASK-562, board 2520).
+    cell: Option<crate::CellId>,
     state: State,
 }
 
@@ -269,6 +352,9 @@ struct Nodes {
     names: HashMap<Name, u64>,
     /// Many cells': the slots of those being detached, whose nodes are given for no time.
     detaching: HashSet<u16>,
+    /// cladefs: slots whose cell was forgotten/shredded (`forget_cells`): every FUSE request on
+    /// them fails with `EACCES` (TASK-562, board 2520, board 2704).
+    halted: HashSet<u16>,
 }
 
 /// A name in a directory, whose node ID is first.
@@ -366,9 +452,10 @@ impl Server {
     /// the server writes, as a change does ([`Server::changed`]).
     pub fn new(fs: Filesystem, notify: Notifier) -> Self {
         let root = fs.root().clone();
+        let cell = fs.cell();
         let state = State::Attached(Arc::new(fs));
         let (name, tenant, leaf) = (String::new(), Arc::from(""), String::new());
-        let slot = Slot { name, tenant, dir: ROOT_ID, leaf, state };
+        let slot = Slot { name, tenant, dir: ROOT_ID, leaf, cell, state };
         let cells = Cells { slots: BTreeMap::from([(0, slot)]), ..Cells::default() };
         Self::of(Shape::One { root }, cells, notify)
     }
@@ -382,14 +469,30 @@ impl Server {
     }
 
     fn of(shape: Shape, cells: Cells, notify: Notifier) -> Self {
+        let many = matches!(shape, Shape::Many { .. });
+        let notify = Arc::new(notify);
+        let cells = Arc::new(Mutex::new(cells));
+        let nodes = Arc::new(Mutex::default());
+        let registered = Arc::new(ServerHandle {
+            many,
+            notify: Arc::clone(&notify),
+            cells: Arc::clone(&cells),
+            nodes: Arc::clone(&nodes),
+        });
+        {
+            let mut live = SERVERS.get().lock().unwrap();
+            live.retain(|handle| handle.strong_count() > 0);
+            live.push(Arc::downgrade(&registered));
+        }
         Self {
             shape,
             notify,
-            cells: Mutex::new(cells),
-            nodes: Mutex::default(),
+            cells,
+            nodes,
             dirs: Mutex::default(),
             forgotten: Event::new(),
             counters: Counters::default(),
+            _registered: registered,
         }
     }
 
@@ -413,7 +516,7 @@ impl Server {
     /// If the server is of many cells.
     pub fn into_filesystem(self) -> Filesystem {
         assert!(matches!(self.shape, Shape::One { .. }), "a server of many cells");
-        let slots = std::mem::take(&mut self.cells.into_inner().unwrap().slots);
+        let slots = std::mem::take(&mut self.cells.lock().unwrap().slots);
         drop(self.nodes);
         drop(self.dirs);
         match slots.into_values().next().map(|slot| slot.state) {
@@ -480,7 +583,8 @@ impl Server {
         let path: Vec<&str> = name.split('/').collect();
         let (dir, leaf) = cells.put(&path, slot)?;
         let tenant = Arc::from(path[0]);
-        let reserved = Slot { name: name.to_owned(), tenant, dir, leaf, state: State::Opening };
+        let reserved =
+            Slot { name: name.to_owned(), tenant, dir, leaf, cell: None, state: State::Opening };
         cells.slots.insert(slot, reserved);
         cells.names.insert(name.to_owned(), slot);
         Ok(Reserved { server: self, slot: Some(slot) })
@@ -536,7 +640,10 @@ impl Server {
         let unmounted = fs.unmount().await;
         drop(fs);
         self.cells.lock().unwrap().remove(slot);
-        self.nodes.lock().unwrap().detaching.remove(&slot);
+        let mut nodes = self.nodes.lock().unwrap();
+        nodes.detaching.remove(&slot);
+        nodes.halted.remove(&slot);
+        drop(nodes);
         self.counters.detaches.fetch_add(1, Ordering::Relaxed);
         unmounted
     }
@@ -763,7 +870,12 @@ impl Server {
     /// directory of the server's gone: `ESTALE`.
     fn target(&self, nodeid: u64) -> Result<Target> {
         match &self.shape {
-            Shape::One { root } if nodeid == ROOT_ID => return Ok(Target::Node(0, root.clone())),
+            Shape::One { root } if nodeid == ROOT_ID => {
+                if self.nodes.lock().unwrap().halted.contains(&0) {
+                    return Err(Errno::EACCES);
+                }
+                return Ok(Target::Node(0, root.clone()));
+            }
             Shape::Many { .. } if self.slot_of(nodeid) == 0 => {
                 let cells = self.cells.lock().unwrap();
                 return match cells.dirs.contains_key(&nodeid) {
@@ -774,9 +886,13 @@ impl Server {
             _ => {}
         }
         let nodes = self.nodes.lock().unwrap();
+        let slot = self.slot_of(nodeid);
+        if nodes.halted.contains(&slot) {
+            return Err(Errno::EACCES);
+        }
         let looked = nodes.looked.get(&nodeid);
         let node = looked.map(|looked| looked.node.clone()).ok_or(Errno::ESTALE)?;
-        Ok(Target::Node(self.slot_of(nodeid), node))
+        Ok(Target::Node(slot, node))
     }
 
     /// The node whose node ID is `nodeid`, as [`Self::target`] finds it, and its cell's slot:
@@ -835,6 +951,9 @@ impl Server {
                     let State::Attached(fs) = &cells.slots[&slot].state else {
                         return Err(Errno::ENOENT);
                     };
+                    if self.nodes.lock().unwrap().halted.contains(&slot) {
+                        return Err(Errno::EACCES);
+                    }
                     (slot, fs.root().clone())
                 };
                 let attr = root.getattr().await?;
@@ -1427,7 +1546,9 @@ impl Reserved<'_> {
             return Err(Errno::ENOTCONN);
         }
         let slot = self.slot.take().expect("attached once");
-        cells.slots.get_mut(&slot).expect("a reserved slot").state = State::Attached(fs);
+        let entry = cells.slots.get_mut(&slot).expect("a reserved slot");
+        entry.cell = fs.cell();
+        entry.state = State::Attached(fs);
         Ok(())
     }
 }
@@ -1442,6 +1563,15 @@ impl Drop for Reserved<'_> {
 /// A notification that the node `ino`'s attributes are stale, its cached pages left alone.
 fn inval_inode(ino: u64) -> Vec<u8> {
     let body = NotifyInvalInodeOut { ino, off: -1, len: 0 };
+    let len = size_of::<OutHeader>() + size_of::<NotifyInvalInodeOut>();
+    let header = OutHeader { len: len as u32, error: notify::INVAL_INODE, unique: 0 };
+    [header.as_bytes(), body.as_bytes()].concat()
+}
+
+/// cladefs: a notification that both `ino`'s attributes and all of its cached page-cache data
+/// (`off = 0, len = 0`) are stale and must be dropped by the kernel (TASK-562, board 2520).
+fn inval_inode_pages(ino: u64) -> Vec<u8> {
+    let body = NotifyInvalInodeOut { ino, off: 0, len: 0 };
     let len = size_of::<OutHeader>() + size_of::<NotifyInvalInodeOut>();
     let header = OutHeader { len: len as u32, error: notify::INVAL_INODE, unique: 0 };
     [header.as_bytes(), body.as_bytes()].concat()

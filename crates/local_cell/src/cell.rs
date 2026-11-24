@@ -2158,8 +2158,8 @@ impl<D: Dir> LocalCell<D> {
             }
             created => created,
         };
-        let (dek, key) = self.keys.encrypting();
-        let encryption = Arc::new(RawEncryption::new(dek, key));
+        let (dek, key) = self.keys.try_encrypting()?;
+        let encryption = Arc::new(RawEncryption::new(&dek, key));
         Ok(RawFile::new(created.with_context(|| format!("creating {path}"))?, encryption))
     }
 
@@ -2520,6 +2520,7 @@ impl<D: Dir> LocalCell<D> {
     /// cladefs: reads `buf.len()` bytes at `offset` in `extent`, held, or freed and kept: for
     /// the bucket, until the commit that freed it is acknowledged there (TASK-165.9).
     pub fn read_kept(&self, extent: ExtentId, offset: u64, buf: &mut [u8]) -> Result<(), Error> {
+        ensure!(!self.keys.is_revoked(), "cell keys revoked");
         self.read_into_entry(extent, offset, buf, Reader::Kept)
     }
 
@@ -3012,7 +3013,8 @@ impl<D: Dir> LocalCell<D> {
         len: u64,
     ) -> Result<u64, Error> {
         let (raw_path, path) = (open_extent_path(extent), extent_path(extent));
-        let mut packer = extent_frame::Packer::new(self.keys.encrypting());
+        let (dek, key) = self.keys.try_encrypting()?;
+        let mut packer = extent_frame::Packer::new((&dek, key));
         let sectors = raw.sectors();
         // cladefs: in place, whole sectors of its raw file, under the raw file's key (TASK-411.23).
         let in_place = len.is_multiple_of(SECTOR);
@@ -3093,7 +3095,8 @@ impl<D: Dir> LocalCell<D> {
     ) -> Result<(), Error> {
         let path = extent_path(extent);
         let file = self.dir.create(&path, true).with_context(|| format!("creating {path}"))?;
-        let mut packer = extent_frame::Packer::new(self.keys.encrypting());
+        let (dek, key) = self.keys.try_encrypting()?;
+        let mut packer = extent_frame::Packer::new((&dek, key));
         let mut data = Aligned::new(len.min(OWN_CHUNK) as usize);
         for at in (0..len).step_by(OWN_CHUNK as usize) {
             let buf = &mut data.as_mut_slice()[..(len - at).min(OWN_CHUNK) as usize];
@@ -3997,6 +4000,7 @@ impl<D: Dir> LocalCell<D> {
 
     /// Reads `buf.len()` bytes at `offset` in `extent`. Bytes never written read as zeros.
     pub fn read(&self, extent: ExtentId, offset: u64, buf: &mut [u8]) -> Result<(), Error> {
+        ensure!(!self.keys.is_revoked(), "cell keys revoked");
         self.read_into(extent, offset, buf)
     }
 

@@ -363,7 +363,7 @@ pub fn create_host_ephemeral(
     bucket: &str,
     kind: Kind,
     checkpoint: &crate::LocalCheckpoint,
-    encrypting: (&extent_frame::Secret, extent_frame::KeyId),
+    encrypting: impl bucket_cell::layout::KeyArg,
     extra: impl FnOnce(&mut crate::Making<'_, HostDir>) -> Result<(), Error>,
 ) -> Result<(), Error> {
     LocalCell::make_ephemeral(

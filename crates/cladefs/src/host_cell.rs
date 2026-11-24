@@ -750,7 +750,7 @@ pub(crate) async fn fork_ephemeral(
                     &entry.bucket,
                     kind,
                     &checkpoint,
-                    ring.encrypting(),
+                    ring.try_encrypting()?,
                     |making| {
                         prepare(making)?;
                         durable_in_parent(making, path);

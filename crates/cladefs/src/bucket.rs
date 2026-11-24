@@ -437,6 +437,10 @@ pub struct Forgotten {
 pub fn forget(scope: keys::Scope, why: &str) -> Forgotten {
     let halted = format!("as {scope}'s keys are forgotten: {why}");
     let stores = crate::halt::halt_cells(|cell| scope.covers(cell), Errno::EACCES, &halted);
+    // cladefs: halt any FUSE mount slots serving cells in `scope` and invalidate their kernel
+    // inodes and dentries so cached file pages are dropped immediately (TASK-562, board 2520,
+    // board 2704).
+    crate::fuse::server::forget_cells(|cell| scope.covers(cell));
     let (bytes, extents) = crate::cache::forget(|cell| scope.covers(cell));
     // Forget keys before bumping `forget_kept`'s generation so no concurrent read can re-open or
     // re-insert plaintext after `forget_kept` runs (board 6026).
@@ -496,15 +500,20 @@ pub async fn shred_tenant(
              CLADEFS_KMS): destroy the tenant's KEK in its KMS, then have every host forget its keys"
         ));
     }
-    let now = shredded.destroyed.iter().any(|(_, destroyed)| *destroyed == Destroyed::Now);
-    let destroyed = if now { Destroyed::Now } else { Destroyed::Already };
-    let why = extent_keys::kms::Error::Destroyed { tenant }.to_string();
-    let forgotten = forget(keys::Scope::Tenant(tenant), &why);
     // cladefs: the buckets it did not shred in (TASK-633.6): under another KMS, or out of reach.
     let left: Vec<String> = (shredded.named.iter())
         .map(|(number, url)| format!("bucket {number}'s KMS {url} keeps its KEK: destroy it there"))
         .chain(shredded.failed.iter().map(|(number, why)| format!("bucket {number}: {why}")))
         .collect();
+    // cladefs: if no bucket tombstone was confirmed, do not halt open cells or poison the KMS
+    // cache (board 5552, board 2704).
+    if shredded.destroyed.is_empty() {
+        return Err(format!("tenant {tenant}: shredded in no bucket: {}", left.join("; ")));
+    }
+    let now = shredded.destroyed.iter().any(|(_, destroyed)| *destroyed == Destroyed::Now);
+    let destroyed = if now { Destroyed::Now } else { Destroyed::Already };
+    let why = extent_keys::kms::Error::Destroyed { tenant }.to_string();
+    let forgotten = forget(keys::Scope::Tenant(tenant), &why);
     if !left.is_empty() {
         let done: Vec<String> = shredded.destroyed.iter().map(|(n, _)| n.to_string()).collect();
         return Err(format!(
@@ -4275,5 +4284,153 @@ mod tests {
         let parent = reopened(dir.path().join("parent"), idle()).await.unwrap();
         parent.commit(Some(b"later")).await.unwrap();
         assert_eq!(parent.wait_uploaded().await, Ok(()));
+    }
+
+    /// TASK-601 (board 2598): `shred_cell` evicts cached extents of a cell even after every
+    /// `OpenCell` of that cell has already been closed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shred_cell_evicts_cached_extents_of_closed_store() {
+        let keys = tempfile::tempdir().unwrap();
+        let kms = Arc::new(extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap());
+        kms.create(1).unwrap();
+        crate::bucket::set_kms(kms).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "").unrouted());
+        let open_cell = kept_in(
+            dir.path().join("closed"),
+            (1 << 30, Some(crate::host_cell::named(1))),
+            &bucket,
+            idle(),
+        )
+        .await
+        .unwrap();
+        let cell = open_cell.cell();
+        let data = noise(1, 4 * BLOCK);
+        let extent = write(&open_cell, 1, &data).await;
+        open_cell.commit(None).await.unwrap();
+        open_cell.wait_uploaded().await.unwrap();
+        let mut buf = vec![0u8; data.len()];
+        open_cell
+            .read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut buf[..])])
+            .await
+            .unwrap();
+        assert_eq!(buf, data);
+        // Close the store completely before shredding.
+        open_cell.close().await;
+        assert!(
+            crate::cache::keys().iter().any(|(_, e)| *e == extent),
+            "closed store's extent should still be cached before shred_cell"
+        );
+
+        let (removed, forgotten) = crate::bucket::shred_cell(&*bucket, cell).await.unwrap();
+        assert_eq!(removed, 1);
+        assert!(
+            forgotten.extents >= 1,
+            "shred_cell must evict closed store's cached extents: {forgotten:?}"
+        );
+        assert!(
+            !crate::cache::keys().iter().any(|(_, e)| *e == extent),
+            "closed store's extent remained in cache after shred_cell"
+        );
+    }
+
+    /// board 5542: shredding an attached public base refuses subsequent reads of its extents
+    /// through a child `OpenCell` with `EACCES`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shredding_attached_base_refuses_reads_through_child() {
+        let keys = tempfile::tempdir().unwrap();
+        let kms = Arc::new(extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap());
+        for tenant in [0, 1] {
+            kms.create(tenant).unwrap();
+        }
+        crate::bucket::set_kms(kms).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "").unrouted());
+        let base_path = dir.path().join("base");
+        let base =
+            kept_in(&base_path, (1 << 30, Some(crate::host_cell::named(0))), &bucket, idle())
+                .await
+                .unwrap();
+        let base_cell = base.cell();
+        let data = noise(7, 4 * BLOCK);
+        let extent = write(&base, 1, &data).await;
+        base.commit(None).await.unwrap();
+        base.wait_uploaded().await.unwrap();
+        local_cell::upload::blocking(|| base.make_public_attach_only()).unwrap();
+        base.close().await;
+
+        let child = kept_in(
+            dir.path().join("child"),
+            (1 << 30, Some(crate::host_cell::named(1))),
+            &bucket,
+            idle(),
+        )
+        .await
+        .unwrap();
+        local_cell::upload::blocking(|| child.attach_base(&base_path, &[base_cell.id])).unwrap();
+        let mut buf = vec![0u8; data.len()];
+        child.read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut buf[..])]).await.unwrap();
+        assert_eq!(buf, data);
+
+        // Shred the base cell: child reads of the attached base's extent must now return EACCES.
+        crate::bucket::shred_cell(&*bucket, base_cell).await.unwrap();
+        let err = child
+            .read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut buf[..])])
+            .await
+            .unwrap_err();
+        assert_eq!(err, crate::Errno::EACCES);
+        child.close().await;
+    }
+
+    /// board 5552: `shred_tenant` when no bucket destroyed the tenant's KEK (`destroyed` empty)
+    /// must return an error without calling `forget`, leaving live stores serving and the KMS
+    /// cache unpoisoned.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shred_tenant_with_no_destroyed_bucket_does_not_halt_or_poison_cache() {
+        use bucket_cell::s3_server::{BUCKET, S3Server};
+        let server = S3Server::start(None);
+        let url = format!("s3://{BUCKET}/shred-5552");
+        let master: String = (0..32).map(|byte| format!("{byte:02x}")).collect();
+        // SAFETY: this test's process is its own (nextest), no open cell open yet.
+        unsafe {
+            std::env::remove_var("CLADEFS_KMS");
+            std::env::set_var("CLADEFSD_BUCKET", &url);
+            std::env::set_var("CLADEFS_MASTER_KEY", &master);
+            for (name, value) in server.options() {
+                std::env::set_var(name.to_ascii_uppercase(), value);
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let bucket = crate::host_cell::bucket(&url).unwrap();
+        let open_cell = kept_in(
+            dir.path().join("cell"),
+            (1 << 30, Some(crate::host_cell::named(1))),
+            &bucket,
+            idle(),
+        )
+        .await
+        .unwrap();
+        let data = noise(3, 4 * BLOCK);
+        let extent = write(&open_cell, 1, &data).await;
+        open_cell.commit(None).await.unwrap();
+        open_cell.wait_uploaded().await.unwrap();
+
+        // Make the bucket refuse every request with 403 (`Refusal::Denied`, non-retryable) so
+        // `shred_tenant` fails immediately with `destroyed` empty.
+        server.answering(Some(403));
+
+        let err = crate::bucket::shred_tenant(1).await.unwrap_err();
+        assert!(err.contains("tenant 1"), "unexpected error: {err}");
+
+        // Restore bucket: the open cell was NOT halted and the KMS cache was NOT poisoned.
+        server.answering(None);
+        assert_eq!(crate::bucket::kms().unwrap().refuses(open_cell.cell()), None);
+        let mut buf = vec![0u8; data.len()];
+        open_cell
+            .read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut buf[..])])
+            .await
+            .unwrap();
+        assert_eq!(buf, data);
+        open_cell.close().await;
     }
 }

@@ -39,7 +39,7 @@ mod abi;
 pub mod control;
 #[cfg(target_os = "linux")]
 mod mount;
-mod server;
+pub(crate) mod server;
 
 #[cfg(target_os = "linux")]
 pub use mount::{CellsMount, Mount, MountOptions, Unmounter};

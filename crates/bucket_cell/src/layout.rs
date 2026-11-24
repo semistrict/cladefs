@@ -1261,15 +1261,35 @@ pub use extent_frame::{Frame, PART, TRAILER, crc};
 /// ([`crate::keys::Ring::encrypting`], TASK-411.3). Nothing is framed in the clear (TASK-411.28).
 pub type EncryptionKey<'a> = (&'a extent_frame::Secret, extent_frame::KeyId);
 
+/// cladefs: borrowed or owned encryption key accepted by framing helpers so revocable `Ring`s can
+/// hand out owned `Arc<Secret>` keys without breaking borrowed callers (TASK-637, board 2704).
+pub trait KeyArg {
+    fn as_key(&self) -> EncryptionKey<'_>;
+}
+
+impl KeyArg for (&extent_frame::Secret, extent_frame::KeyId) {
+    fn as_key(&self) -> EncryptionKey<'_> {
+        (self.0, self.1)
+    }
+}
+
+impl KeyArg for (std::sync::Arc<extent_frame::Secret>, extent_frame::KeyId) {
+    fn as_key(&self) -> EncryptionKey<'_> {
+        (&self.0, self.1)
+    }
+}
+
+impl KeyArg for &(std::sync::Arc<extent_frame::Secret>, extent_frame::KeyId) {
+    fn as_key(&self) -> EncryptionKey<'_> {
+        (&self.0, self.1)
+    }
+}
+
 /// The bytes of an object of `data` and `footer`, framed (`extent_frame`): the data's parts,
 /// compressed, the footer, the table of where the parts are, then the [`TRAILER`]. cladefs:
 /// encrypted as `encrypting` says (TASK-411.3).
-pub fn with_footer<T: Serialize>(
-    data: &[u8],
-    footer: &T,
-    encrypting: EncryptionKey<'_>,
-) -> Vec<u8> {
-    extent_frame::framed(data, &encode(footer), encrypting)
+pub fn with_footer<T: Serialize>(data: &[u8], footer: &T, encrypting: impl KeyArg) -> Vec<u8> {
+    extent_frame::framed(data, &encode(footer), encrypting.as_key())
 }
 
 /// cladefs: the versioned footer of a segment's object (doc-28, board 10038).
@@ -1298,8 +1318,8 @@ pub fn decode_own_extent_footer(bytes: &[u8]) -> Result<ExtentId, crate::Error> 
 /// cladefs: the object of `extent`, stored on its own, of `data`: its footer names it and its
 /// bucket layout version, so that one copied to another key, encrypted, is refused (TASK-411.3,
 /// doc-28, board 10038), encrypted as `encrypting` says.
-pub fn own_extent(extent: ExtentId, data: &[u8], encrypting: EncryptionKey<'_>) -> Vec<u8> {
-    extent_frame::framed(data, &own_extent_footer(extent), encrypting)
+pub fn own_extent(extent: ExtentId, data: &[u8], encrypting: impl KeyArg) -> Vec<u8> {
+    extent_frame::framed(data, &own_extent_footer(extent), encrypting.as_key())
 }
 
 /// The data of a whole object [`with_footer`] made, checked against its CRCs, by a reader holding
@@ -1312,8 +1332,8 @@ pub fn data_under(bytes: &[u8], keys: &dyn extent_frame::Keys) -> Result<Vec<u8>
 impl Segment {
     /// Its object, cladefs: encrypted as `encrypting` says (TASK-411.3), its footer versioned
     /// (doc-28, board 10038).
-    pub fn encode(&self, encrypting: EncryptionKey<'_>) -> Vec<u8> {
-        extent_frame::framed(&self.data, &encode_segment_footer(&self.footer), encrypting)
+    pub fn encode(&self, encrypting: impl KeyArg) -> Vec<u8> {
+        extent_frame::framed(&self.data, &encode_segment_footer(&self.footer), encrypting.as_key())
     }
 
     /// The footer of a segment's object, checked against its CRC and [`FORMAT`].

@@ -436,3 +436,69 @@ fn cells_attached_at_paths_are_under_directories_of_the_servers() {
         listed.iter().map(|(name, _)| name.as_str()).collect()
     }
 }
+
+/// TASK-562 (board 2520): `forget_cells` halts matching FUSE slots immediately, emits
+/// `INVAL_INODE` (`off=0, len=0` to drop kernel page cache) for every looked-up node in the slot
+/// plus `INVAL_ENTRY` for the slot root, and refuses subsequent FUSE operations with `EACCES`.
+#[test]
+fn forget_cells_halts_fuse_slot_and_invalidates_kernel_page_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    let image = dir.path().join("cell");
+    let storage = block_on(Storage::create(&image, STORAGE_SIZE)).unwrap();
+    let cell = storage.cell().expect("image storage exposes its CellId");
+    let fs = block_on(Filesystem::format(storage)).unwrap();
+    let (file, _) = block_on(fs.root().create(b"secret", 0o644, OWNER)).unwrap();
+    block_on(file.write(0, b"classified")).unwrap();
+    block_on(file.fsync()).unwrap();
+
+    let (sent, notified) = mpsc::channel();
+    let sent = Mutex::new(sent);
+    let server = Server::cells(
+        OWNER,
+        Box::new(move |message: &[u8]| {
+            sent.lock().unwrap().send(message.to_vec()).unwrap();
+            Ok(())
+        }),
+    );
+    block_on(server.attach("t/cell", std::future::ready(Ok(fs)))).unwrap();
+    let t = lookup(&server, ROOT_ID, "t").unwrap();
+    let root = lookup(&server, t.nodeid, "cell").unwrap();
+    let secret = lookup(&server, root.nodeid, "secret").unwrap();
+    assert!(getattr(&server, secret.nodeid).is_ok());
+
+    // Drain any notifications sent during setup.
+    while notified.try_recv().is_ok() {}
+
+    // Forget the cell: the slot must halt and send page-cache + dentry invalidations.
+    super::forget_cells(|c| c == cell);
+
+    let mut page_invals = Vec::new();
+    let mut entry_invals = 0usize;
+    while let Ok(message) = notified.try_recv() {
+        let (header, rest) = OutHeader::read_from_prefix(&message).unwrap();
+        match header.error {
+            notify::INVAL_INODE => {
+                let (inval, _) = NotifyInvalInodeOut::read_from_prefix(rest).unwrap();
+                if inval.off == 0 && inval.len == 0 {
+                    page_invals.push(inval.ino);
+                }
+            }
+            notify::INVAL_ENTRY => entry_invals += 1,
+            _ => {}
+        }
+    }
+    assert!(
+        page_invals.contains(&secret.nodeid) && page_invals.contains(&root.nodeid),
+        "expected INVAL_INODE(off=0,len=0) for root {} and secret {}, got {page_invals:?}",
+        root.nodeid,
+        secret.nodeid
+    );
+    assert!(entry_invals >= 1, "expected INVAL_ENTRY for halted cell root");
+
+    // Subsequent FUSE ops on the halted slot return EACCES.
+    assert_eq!(getattr(&server, secret.nodeid).unwrap_err(), Errno::EACCES);
+    assert_eq!(lookup(&server, root.nodeid, "secret").unwrap_err(), Errno::EACCES);
+    assert_eq!(lookup(&server, t.nodeid, "cell").unwrap_err(), Errno::EACCES);
+
+    block_on(server.unmount()).unwrap();
+}
