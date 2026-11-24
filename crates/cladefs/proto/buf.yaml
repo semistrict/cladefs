@@ -3,12 +3,9 @@
 # found in the LICENSE file.
 
 # The daemon's APIs, as buf reads them: go/generate.sh generates the Go client from them, and
-# go/compat.sh holds them to the last build's by `buf breaking` (doc-28, board 10056). FILE, the
-# strictest rules: a caller's generated code builds against every later build's too.
+# go/compat.sh holds them to the last build's by `buf breaking` (doc-28, boards 10056, 10054). FILE,
+# the strictest rules: a caller's generated code builds against every later build's too.
 version: v2
 breaking:
   use:
     - FILE
-  # The peer service grows its formats' versions first (board 10054), which drops this.
-  ignore:
-    - cladefs/peer

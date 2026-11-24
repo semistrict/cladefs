@@ -6192,7 +6192,9 @@ fn targets_take_a_cells_migrations_by_its_epoch() {
         bucket: "memory:///cells".into(),
         to: path.display().to_string(),
         epoch,
-        formats: super::peers::formats(),
+        #[allow(deprecated)]
+        formats: String::new(),
+        versions: Some(super::peers::current_formats()),
     };
     let bucket = super::cells::daemon_bucket().unwrap();
     let buckets = control(bucket.ephemeral_buckets()).unwrap();

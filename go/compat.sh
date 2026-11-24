@@ -3,12 +3,13 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# Fails if the daemon's control and mount APIs (crates/cladefs/proto) break a caller built from
-# BASE's (doc-28, board 10056): a VM manager is upgraded apart from the daemons it calls, so v1
-# only grows. `buf breaking` holds the working tree's .proto to BASE's by its FILE rules
-# (crates/cladefs/proto/buf.yaml), in the repository of the current directory. The only way past
-# a break is the user's agreement, named in a `Breaks-format:` line by a commit of BASE..HEAD
-# that changes the .proto, as scripts/format-freeze.py takes it of the commit breaking a corpus.
+# Fails if the daemon's control, mount, or peer APIs (crates/cladefs/proto) break a caller built
+# from BASE's (doc-28, boards 10056, 10054): a VM manager is upgraded apart from the daemons it
+# calls, and peer daemons upgrade rolling, so v1 only grows. `buf breaking` holds the working
+# tree's .proto to BASE's by its FILE rules (crates/cladefs/proto/buf.yaml), in the repository of
+# the current directory. The only way past a break is the user's agreement, named in a
+# `Breaks-format:` line by a commit of BASE..HEAD that changes the .proto, as
+# scripts/format-freeze.py takes it of the commit breaking a corpus.
 #
 #   go/compat.sh BASE
 set -euo pipefail

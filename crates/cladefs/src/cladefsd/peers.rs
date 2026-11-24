@@ -120,46 +120,252 @@ const PEER_NAME: &str = "cladefs-peer";
 /// Sweeping stale replica logs).
 const SWEEP_EVERY: Duration = Duration::from_secs(600);
 
-/// cladefs: the version of the peer service's protocol, `peer.proto`'s (board 8455): a change to
-/// what a call means, or to a message's fields, is a new one, which [`formats`] names.
-pub(crate) const PROTOCOL: u32 = 2;
-
-/// cladefs: the formats of what this daemon hands its peers, in a line: its cell directories'
+/// cladefs: the format family versions (current write version and oldest readable version) this
+/// daemon advertises when talking to peers (doc-28, board 10054): its cell directories'
 /// (`local_cell::FORMAT`), its cell records' (`crate::cell_dir::FORMAT`), its replica directory's
-/// (`local_cell::replica::FORMAT`, which versions own-log frames too, board 10046), its extent
-/// frames' (`extent_frame::FORMAT`), its bucket's layout's (`bucket_cell::layout::FORMAT`) and the
-/// protocol's ([`PROTOCOL`]). Two daemons hand each other a cell (a migration's prepare names
-/// them), or a writer's logs (every replication call names them, [`same_formats`]), only if theirs
-/// are the same (boards 8455, 8457): nothing of another build's format is taken until board 10054
-/// moves to per-family versions read by range.
-pub(crate) fn formats() -> String {
-    let named = |cell: &str| {
-        let (frames, layout) = (extent_frame::FORMAT.current, bucket_cell::layout::FORMAT);
-        let records = crate::cell_dir::FORMAT.current;
-        let replicas = local_cell::replica::FORMAT.current;
-        format!(
-            "cell directories {cell:?}, cell records {records}, replica directory {replicas}, \
-             extent frames {frames}, bucket layout {layout}, peers {PROTOCOL}"
-        )
+/// (`local_cell::replica::FORMAT`), its extent frames' (`extent_frame::FORMAT`), and its bucket's
+/// layout's (`bucket_cell::layout::FORMAT`). Receivers check each family in the direction data
+/// flows ([`SupportedFormats`]), so a rolling upgrade across a version bump keeps serving whenever
+/// the reading side reads what the writing/holding side produces.
+pub(crate) fn current_formats() -> proto::Formats {
+    let mut versions = proto::Formats {
+        cell_directory: local_cell::FORMAT.current,
+        cell_records: crate::cell_dir::FORMAT.current,
+        replica_directory: local_cell::replica::FORMAT.current,
+        extent_frame: extent_frame::FORMAT.current,
+        bucket_layout: bucket_cell::layout::FORMAT,
+        cell_directory_oldest: local_cell::FORMAT.oldest,
+        cell_records_oldest: crate::cell_dir::FORMAT.oldest,
+        replica_directory_oldest: local_cell::replica::FORMAT.oldest,
+        extent_frame_oldest: extent_frame::FORMAT.oldest,
+        bucket_layout_oldest: bucket_cell::layout::FORMAT,
     };
-    // A test's daemon of another build's cell directories: `peers::formats=return(FORMAT)`.
-    fail::fail_point!("peers::formats", |cell: Option<String>| named(&cell.unwrap_or_default()));
-    named(&format!("{}{}", local_cell::DESCRIPTION_HEADER, local_cell::FORMAT.current))
+    // A test's daemon of another build's cell directories: `peers::formats=return(15)`.
+    if let Some(cell) = cell_directory_override() {
+        versions.cell_directory = cell;
+        versions.cell_directory_oldest = cell;
+    }
+    versions
 }
 
-/// cladefs: whether `theirs`, the formats a replication call names, are this host's ([`formats`],
-/// board 8457): FAILED_PRECONDITION if not, an asker of a build before them naming none (""), so
-/// that no writer of another format is acked, nor a take of another given logs it would misread.
-fn same_formats(theirs: &str) -> Result<(), Status> {
-    let ours = formats();
-    if theirs == ours {
-        return Ok(());
+/// cladefs: a test failpoint (`peers::formats=return(N)`) overriding this host's cell directory
+/// version for both sending and receiving, simulating a peer of another build.
+fn cell_directory_override() -> Option<u32> {
+    fail::fail_point!("peers::formats", |value: Option<String>| {
+        // Unparseable failpoint text falls back to 0, which is outside every format's range.
+        Some(value.and_then(|v| v.parse::<u32>().ok()).unwrap_or(0))
+    });
+    None
+}
+
+/// Direction of a replication RPC for format compatibility checking (board 10054, hotbed review 89
+/// finding 325).
+#[derive(Clone, Copy, Debug)]
+enum ReplicationCall {
+    /// `Incarnation` and `Append`: writer -> member. This member must read the writer's write
+    /// versions.
+    Write,
+    /// `Fence` and `ReadLog`: member -> taker. The taker's readable range `[oldest..=current]`
+    /// must cover every version this member may hold (`self.oldest..=self.current`).
+    Read,
+    /// `DropLogs`: cleanup, called either by a writer dropping uploaded logs on a newer member
+    /// (`Write`) or by a newer taker dropping superseded logs on an older member (`Read`).
+    Drop,
+}
+
+/// cladefs: the format family ranges a peer receiver reads (doc-28, board 10054).
+#[derive(Clone, Copy, Debug)]
+struct SupportedFormats {
+    cell_directory: formats::Format,
+    cell_records: formats::Format,
+    replica_directory: formats::Format,
+    extent_frame: formats::Format,
+    bucket_layout: u32,
+}
+
+impl SupportedFormats {
+    fn current() -> Self {
+        let cell_directory = match cell_directory_override() {
+            // Struct literal rather than `Format::new`: `scripts/format-freeze.py` requires
+            // literal arguments to `Format::new`, and this is a test-only failpoint override.
+            Some(version) => {
+                formats::Format { name: local_cell::FORMAT.name, oldest: version, current: version }
+            }
+            None => local_cell::FORMAT,
+        };
+        Self {
+            cell_directory,
+            cell_records: crate::cell_dir::FORMAT,
+            replica_directory: local_cell::replica::FORMAT,
+            extent_frame: extent_frame::FORMAT,
+            bucket_layout: bucket_cell::layout::FORMAT,
+        }
     }
-    // Its first 256 characters: a peer's string, said in a log line and an answer.
-    let theirs: String = theirs.chars().take(256).collect();
-    Err(Status::failed_precondition(format!(
-        "the asker's formats ({theirs:?}) are not this host's ({ours:?}): refused"
-    )))
+
+    fn check_bucket_layout(&self, found: u32) -> Result<(), String> {
+        if found == self.bucket_layout {
+            Ok(())
+        } else {
+            Err(format!(
+                "bucket layout version {found}: this build reads version {} alone",
+                self.bucket_layout
+            ))
+        }
+    }
+
+    /// Verifies that a taker's declared readable range `theirs_oldest..=theirs_current` is valid
+    /// and covers every version this member may hold (`ours.oldest..=ours.current`).
+    fn check_taker_covers(
+        ours: formats::Format,
+        theirs_oldest: u32,
+        theirs_current: u32,
+    ) -> Result<(), String> {
+        if theirs_oldest == 0 || theirs_oldest > theirs_current {
+            return Err(format!(
+                "{} readable range {theirs_oldest}..={theirs_current} is invalid",
+                ours.name
+            ));
+        }
+        if theirs_oldest <= ours.oldest && ours.current <= theirs_current {
+            Ok(())
+        } else {
+            Err(format!(
+                "{} readable range {theirs_oldest}..={theirs_current} does not cover this \
+                 member's {}..={}",
+                ours.name, ours.oldest, ours.current
+            ))
+        }
+    }
+
+    /// Checks a writer -> member replication call (`Incarnation`, `Append`): this member must read
+    /// the writer's `cell_directory`, `replica_directory`, `extent_frame`, and `bucket_layout`
+    /// versions (not `cell_records`, which replica logs never carry).
+    fn check_writer(&self, theirs: Option<proto::Formats>) -> Result<(), Status> {
+        let Some(theirs) = theirs else {
+            return Err(Status::failed_precondition(
+                "the asker named no format versions (older build): refused",
+            ));
+        };
+        let reject = |why: String| {
+            Status::failed_precondition(format!("the asker's formats are not read here: {why}"))
+        };
+        self.cell_directory.check(theirs.cell_directory).map_err(|e| reject(e.to_string()))?;
+        self.replica_directory
+            .check(theirs.replica_directory)
+            .map_err(|e| reject(e.to_string()))?;
+        self.extent_frame.check(theirs.extent_frame).map_err(|e| reject(e.to_string()))?;
+        self.check_bucket_layout(theirs.bucket_layout).map_err(reject)?;
+        Ok(())
+    }
+
+    /// Checks a member -> taker replication call (`Fence`, `ReadLog`): the taker's readable range
+    /// must cover every version this member may hold of `cell_directory`, `replica_directory`,
+    /// `extent_frame`, and `bucket_layout` (hotbed review 89 finding 325).
+    fn check_taker(&self, theirs: Option<proto::Formats>) -> Result<(), Status> {
+        let Some(theirs) = theirs else {
+            return Err(Status::failed_precondition(
+                "the asker named no format versions (older build): refused",
+            ));
+        };
+        let reject = |why: String| {
+            Status::failed_precondition(format!(
+                "the asker does not read all formats this member holds: {why}"
+            ))
+        };
+        Self::check_taker_covers(
+            self.cell_directory,
+            theirs.cell_directory_oldest,
+            theirs.cell_directory,
+        )
+        .map_err(reject)?;
+        Self::check_taker_covers(
+            self.replica_directory,
+            theirs.replica_directory_oldest,
+            theirs.replica_directory,
+        )
+        .map_err(reject)?;
+        Self::check_taker_covers(
+            self.extent_frame,
+            theirs.extent_frame_oldest,
+            theirs.extent_frame,
+        )
+        .map_err(reject)?;
+        let bucket = formats::Format {
+            name: "bucket layout",
+            oldest: self.bucket_layout,
+            current: self.bucket_layout,
+        };
+        Self::check_taker_covers(bucket, theirs.bucket_layout_oldest, theirs.bucket_layout)
+            .map_err(reject)?;
+        Ok(())
+    }
+
+    /// Checks a `DropLogs` call: accepted when either this member reads the writer's formats (a
+    /// writer dropping uploaded logs on a newer member) or the taker reads every format this
+    /// member holds (a newer taker dropping superseded logs on an older member).
+    fn check_drop(&self, theirs: Option<proto::Formats>) -> Result<(), Status> {
+        if self.check_writer(theirs).is_ok() || self.check_taker(theirs).is_ok() {
+            Ok(())
+        } else {
+            self.check_writer(theirs)
+        }
+    }
+
+    fn check_replication(
+        &self,
+        theirs: Option<proto::Formats>,
+        call: ReplicationCall,
+    ) -> Result<(), Status> {
+        match call {
+            ReplicationCall::Write => self.check_writer(theirs),
+            ReplicationCall::Read => self.check_taker(theirs),
+            ReplicationCall::Drop => self.check_drop(theirs),
+        }
+    }
+
+    /// Checks a live migration's prepare versions: `cell_directory`, `cell_records`,
+    /// `extent_frame`, and `bucket_layout` (not `replica_directory`, which ephemeral cells do not
+    /// use).
+    fn check_migration(
+        &self,
+        migration: u64,
+        theirs: Option<proto::Formats>,
+    ) -> Result<(), Status> {
+        let Some(theirs) = theirs else {
+            return Err(Status::failed_precondition(format!(
+                "migration {migration:x}: the source named no format versions (older build): \
+                 refused"
+            )));
+        };
+        let reject = |why: String| {
+            Status::failed_precondition(format!(
+                "migration {migration:x}: the source's formats are not read here: {why}"
+            ))
+        };
+        self.cell_directory.check(theirs.cell_directory).map_err(|e| reject(e.to_string()))?;
+        self.cell_records.check(theirs.cell_records).map_err(|e| reject(e.to_string()))?;
+        self.extent_frame.check(theirs.extent_frame).map_err(|e| reject(e.to_string()))?;
+        self.check_bucket_layout(theirs.bucket_layout).map_err(reject)?;
+        Ok(())
+    }
+}
+
+/// cladefs: whether `theirs`, a replication call's format versions, are compatible with this host
+/// for `call` (`FAILED_PRECONDITION` if absent or incompatible; doc-28, board 10054).
+fn check_replication_formats(
+    theirs: Option<proto::Formats>,
+    call: ReplicationCall,
+) -> Result<(), Status> {
+    SupportedFormats::current().check_replication(theirs, call)
+}
+
+/// cladefs: whether `theirs`, a live migration prepare's format versions, are within what this
+/// host reads (`FAILED_PRECONDITION` if absent or outside range; doc-28, board 10054).
+pub(crate) fn check_migration_formats(
+    migration: u64,
+    theirs: Option<proto::Formats>,
+) -> Result<(), Status> {
+    SupportedFormats::current().check_migration(migration, theirs)
 }
 
 /// cladefs: the most a member holds of a configuration's logs, in bytes: the lag bound a writer's
@@ -839,8 +1045,12 @@ impl Server {
     }
 
     /// The replica directory, and what a call of `of` is of.
-    fn of(&self, of: Option<ReplicaOf>) -> Result<(Arc<Replicas<HostDir>>, Of), Status> {
-        of_in(&self.bucket, &self.replicas, of)
+    fn of(
+        &self,
+        of: Option<ReplicaOf>,
+        call: ReplicationCall,
+    ) -> Result<(Arc<Replicas<HostDir>>, Of), Status> {
+        of_in(&self.bucket, &self.replicas, of, call)
     }
 }
 
@@ -863,15 +1073,17 @@ fn replicas_of(
 }
 
 /// The replica directory of a host of the bucket `ours`, and what a call of `of` is of: refused
-/// unless it names this host's formats (board 8457).
+/// unless its formats are compatible for `call` (board 8457, board 10054).
 fn of_in(
     ours: &str,
     replicas: &Option<Arc<Replicas<HostDir>>>,
     of: Option<ReplicaOf>,
+    call: ReplicationCall,
 ) -> Result<(Arc<Replicas<HostDir>>, Of), Status> {
     let of = of.ok_or_else(|| Status::invalid_argument("of what: none said"))?;
-    let ReplicaOf { bucket, tenant, cell, configuration, incarnation, formats } = of;
-    same_formats(&formats)?;
+    #[allow(deprecated)]
+    let ReplicaOf { bucket, tenant, cell, configuration, incarnation, formats: _, versions } = of;
+    check_replication_formats(versions, call)?;
     let configuration =
         configuration.ok_or_else(|| Status::invalid_argument("no configuration"))?;
     let key = Key { number: configuration.number, epoch: configuration.epoch };
@@ -1031,8 +1243,9 @@ impl proto::peer_server::Peer for Server {
         &self,
         request: Request<IncarnationRequest>,
     ) -> Result<Response<IncarnationResponse>, Status> {
-        let IncarnationRequest { bucket, formats } = request.into_inner();
-        same_formats(&formats)?;
+        #[allow(deprecated)]
+        let IncarnationRequest { bucket, formats: _, versions } = request.into_inner();
+        check_replication_formats(versions, ReplicationCall::Write)?;
         let replicas = self.replicas(&bucket)?;
         Ok(Response::new(IncarnationResponse { incarnation: replicas.incarnation() }))
     }
@@ -1062,7 +1275,8 @@ impl proto::peer_server::Peer for Server {
             // Admitted by its cell's head, read as the stream begins, once (board 8445); and what
             // its writer left behind trimmed then (board 8451).
             let begun = async {
-                let (replicas, of) = of_in(&ours, &replicas, first.of.clone())?;
+                let (replicas, of) =
+                    of_in(&ours, &replicas, first.of.clone(), ReplicationCall::Write)?;
                 let read = admitted(&heads, &replicas, of.0, replica::Asked::Append(of.1)).await?;
                 // Trimmed by the head read now alone: a head noted before may name an active
                 // configuration the bucket's names no more, and trimming by it would drop the
@@ -1115,7 +1329,7 @@ impl proto::peer_server::Peer for Server {
         request: Request<FenceRequest>,
     ) -> Result<Response<FenceResponse>, Status> {
         let FenceRequest { of, epoch } = request.into_inner();
-        let (replicas, of) = self.of(of)?;
+        let (replicas, of) = self.of(of, ReplicationCall::Read)?;
         let read =
             admitted(&self.heads, &replicas, of.0, replica::Asked::Fence(of.1, epoch)).await?;
         let fencing = replicas.clone();
@@ -1179,7 +1393,7 @@ impl proto::peer_server::Peer for Server {
         request: Request<ReadLogRequest>,
     ) -> Result<Response<Self::ReadLogStream>, Status> {
         let ReadLogRequest { of, log, offset } = request.into_inner();
-        let (replicas, of) = self.of(of)?;
+        let (replicas, of) = self.of(of, ReplicationCall::Read)?;
         let (answer, answers) = tokio::sync::mpsc::channel(4);
         spawn_in_call(async move {
             let mut at = offset;
@@ -1207,7 +1421,7 @@ impl proto::peer_server::Peer for Server {
         request: Request<DropLogsRequest>,
     ) -> Result<Response<DropLogsResponse>, Status> {
         let DropLogsRequest { of, through } = request.into_inner();
-        let (replicas, of) = self.of(of)?;
+        let (replicas, of) = self.of(of, ReplicationCall::Drop)?;
         admitted(&self.heads, &replicas, of.0, replica::Asked::Drop(of.1, through)).await?;
         blocking(move || replicas.drop_logs(of, through)).await?;
         Ok(Response::new(DropLogsResponse {}))
@@ -1558,7 +1772,9 @@ impl ReplicaMembers {
                 epoch: configuration.epoch,
             }),
             incarnation: member.incarnation,
-            formats: formats(),
+            #[allow(deprecated)]
+            formats: String::new(),
+            versions: Some(current_formats()),
         }
     }
 }
@@ -1568,7 +1784,12 @@ impl ReplicaMembers {
     /// [`DEADLINE`].
     async fn incarnation_of(&self, address: &str) -> Result<u64, String> {
         let mut client = client(&*self.channels.of(address)?);
-        let asked = IncarnationRequest { bucket: self.bucket.clone(), formats: formats() };
+        let asked = IncarnationRequest {
+            bucket: self.bucket.clone(),
+            #[allow(deprecated)]
+            formats: String::new(),
+            versions: Some(current_formats()),
+        };
         match tokio::time::timeout(DEADLINE, client.incarnation(asked)).await {
             Ok(Ok(answer)) => Ok(answer.into_inner().incarnation),
             Ok(Err(status)) => Err(said(&status)),

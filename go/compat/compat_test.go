@@ -157,13 +157,22 @@ func TestAnAgreementToAnotherBreakLetsNoneThrough(t *testing.T) {
 	}
 }
 
-// The peer service is left out until its formats' versions land (board 10054).
-func TestThePeerServiceIsNotChecked(t *testing.T) {
+// The peer service is checked by buf breaking too (doc-28, board 10054).
+func TestAPeerFieldRenumberedIsRefused(t *testing.T) {
 	r := newRepo(t)
 	r.edit("cladefs/peer/v1/peer.proto", "  uint64 migration = 1;\n", "  uint64 migration = 999;\n")
 	r.commit("peer field renumbered")
 	status, said := r.check()
-	if status != 0 || strings.Contains(said, "crates/cladefs/proto") {
+	if status != 1 {
 		t.Fatalf("status %d: %s", status, said)
+	}
+	for _, flagged := range []string{
+		`cladefs/peer/v1/peer.proto:`,
+		`Previously present field "1" with name "migration" on message "MigratePrepareRequest" was deleted.`,
+		"crates/cladefs/proto: breaks a caller of " + r.base + "'s, and no commit since changing it names the user's agreement",
+	} {
+		if !strings.Contains(said, flagged) {
+			t.Errorf("%q not in:\n%s", flagged, said)
+		}
 	}
 }

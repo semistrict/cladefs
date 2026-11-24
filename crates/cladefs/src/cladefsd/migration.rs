@@ -366,7 +366,9 @@ pub(super) async fn migrate(path: PathBuf, peer: String, to: String) -> Result<u
         bucket: entry.bucket.clone(),
         to,
         epoch: entry.epoch,
-        formats: super::peers::formats(),
+        #[allow(deprecated)]
+        formats: String::new(),
+        versions: Some(super::peers::current_formats()),
     };
     let MigratePrepareResponse { incarnation, token } =
         match prepare_retrying(&mut client, prepare).await {
@@ -1306,6 +1308,7 @@ pub(super) mod target {
         /// no migrations; `INVALID_ARGUMENT` if its `to` names no new name in the directory of
         /// migrated cells ([`cell_path`]).
         pub(crate) fn decode(request: MigratePrepareRequest) -> Result<Self, Status> {
+            #[allow(deprecated)]
             let MigratePrepareRequest {
                 migration,
                 tenant,
@@ -1317,17 +1320,10 @@ pub(super) mod target {
                 bucket,
                 to,
                 epoch,
-                formats,
+                formats: _,
+                versions,
             } = request;
-            let ours = crate::cladefsd::peers::formats();
-            if formats != ours {
-                // Its own words, of any length: said in part, as what differs is near their start.
-                let theirs: String = formats.chars().take(256).collect();
-                return Err(Status::failed_precondition(format!(
-                    "migration {migration:x}: the source's formats ({theirs:?}) are not this \
-                     host's ({ours:?}): refused, as nothing of another build's is taken"
-                )));
-            }
+            crate::cladefsd::peers::check_migration_formats(migration, versions)?;
             // Never echoed: the host's bucket's URL is no peer's to learn (board 8437).
             if crate::host_cell::host_bucket_url().as_deref() != Some(bucket.as_str()) {
                 return Err(Status::failed_precondition(format!(
@@ -2086,7 +2082,9 @@ pub(super) mod target {
                 bucket: "memory:///cells".into(),
                 to: to.display().to_string(),
                 epoch: 1,
-                formats: crate::cladefsd::peers::formats(),
+                #[allow(deprecated)]
+                formats: String::new(),
+                versions: Some(crate::cladefsd::peers::current_formats()),
             }
         }
 
@@ -2121,23 +2119,39 @@ pub(super) mod target {
                 prepared.map_err(|status| (status.code(), status.message().to_owned()))
             };
             let cell = root.join("vm");
-            let other = |formats: &str| MigratePrepareRequest {
-                formats: formats.to_owned(),
-                ..prepare_of(0x11, &cell)
+            let ours = crate::cladefsd::peers::current_formats();
+            let other = |versions: Option<crate::cladefsd::peers::proto::Formats>| {
+                MigratePrepareRequest { versions, ..prepare_of(0x11, &cell) }
             };
-            let ours = crate::cladefsd::peers::formats();
-            for formats in ["", "cell directories \"cladefs extent store 15\""] {
-                let theirs = formats.to_owned();
-                assert_eq!(
-                    refused(other(formats)),
-                    Err((
-                        Code::FailedPrecondition,
-                        format!(
-                            "migration 11: the source's formats ({theirs:?}) are not this \
-                             host's ({ours:?}): refused, as nothing of another build's is taken"
-                        )
-                    ))
-                );
+            assert_eq!(
+                refused(other(None)),
+                Err((
+                    Code::FailedPrecondition,
+                    "migration 11: the source named no format versions (older build): refused"
+                        .to_owned()
+                ))
+            );
+            for (versions, family) in [
+                (
+                    crate::cladefsd::peers::proto::Formats { cell_directory: 15, ..ours },
+                    "cell directory version 15",
+                ),
+                (
+                    crate::cladefsd::peers::proto::Formats { cell_records: 99, ..ours },
+                    "cell records version 99",
+                ),
+                (
+                    crate::cladefsd::peers::proto::Formats { extent_frame: 2, ..ours },
+                    "extent frame version 2",
+                ),
+                (
+                    crate::cladefsd::peers::proto::Formats { bucket_layout: 1, ..ours },
+                    "bucket layout version 1",
+                ),
+            ] {
+                let (code, message) = refused(other(Some(versions))).unwrap_err();
+                assert_eq!(code, Code::FailedPrecondition, "{family}: {message}");
+                assert!(message.contains(family), "{family} not in {message:?}");
             }
             let made = outside.path().join("made");
             let file = format!("file://{}/", made.display());

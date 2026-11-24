@@ -409,7 +409,7 @@ fn hand_overs_naming_files_the_target_lacks_are_refused() {
 #[test]
 fn targets_of_another_format_refuse_migrations_at_their_prepare() {
     let mut forked = forked(4);
-    let other = [("FAILPOINTS", "peers::formats=return(cladefs extent store 15)")];
+    let other = [("FAILPOINTS", "peers::formats=return(15)")];
     forked.restart_with(1, &other);
     let there = forked.host(1).join("ephemeral-cell");
     let control = &forked.source.control;
