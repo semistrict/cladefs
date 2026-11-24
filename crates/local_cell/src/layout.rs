@@ -552,8 +552,10 @@ pub(crate) fn frame_salted(payload: &[u8], salt: u64) -> Vec<u8> {
 /// The records at the start of `bytes` that are whole and intact, and how many bytes they take.
 #[cfg(test)]
 pub(crate) fn decode<R: serde::de::DeserializeOwned>(bytes: &[u8]) -> (Vec<R>, usize) {
+    use bincode::Options as _;
+    let options = bincode::DefaultOptions::new().with_fixint_encoding().reject_trailing_bytes();
     // Not whole: the records before it are, as a log a crash cut short holds.
-    decode_with(bytes, 0, |_, payload| bincode::deserialize(payload).ok())
+    decode_with(bytes, 0, |_, payload| options.deserialize(payload).ok())
 }
 
 /// cladefs: the records at the start of `bytes` that are whole and intact, their hashes salted with
@@ -619,6 +621,15 @@ mod tests {
         // Zeros past the records, as a file that grew holds.
         let zeros = [bytes.clone(), vec![0; 4096]].concat();
         assert_eq!(decode::<Contents>(&zeros), (decode(&bytes).0, bytes.len()));
+    }
+
+    #[test]
+    fn records_stop_at_a_payload_with_trailing_bytes() {
+        let first = encode(&commit(1));
+        let mut payload = bincode::serialize(&commit(2)).unwrap();
+        payload.extend([0, 0xff]);
+        let bytes = [first.clone(), frame_salted(&payload, 0), encode(&commit(3))].concat();
+        assert_eq!(decode::<Contents>(&bytes), (vec![commit(1)], first.len()));
     }
 
     /// cladefs: pieces one right after another, in the extent and so in the segment, are one,
