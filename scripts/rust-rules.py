@@ -423,9 +423,9 @@ STATIC = re.compile(r"^\s*(?:pub(?:\([\w:]+\))? )?static (?:mut )?([A-Z_0-9]+)\s
 # number, a flag.
 PLAIN_TYPE = re.compile(r"(?:&'static |&)(?:str|\[)|\[&|\[?(?:u|i)(?:8|16|32|64|128|size)\b|bool\b|"
                         r"f(?:32|64)\b|char\b")
-# A block of statics: node_local's, one per simulated node; task_local's, one per task, each a
-# node's; thread_local's, one per thread, which the simulation's one thread gives every node alike.
-STATICS_BLOCK = re.compile(r"\b(node_local|task_local|thread_local)!\s*\{")
+# A block of statics: task_local's, one per task, each a node's; thread_local's, one per thread,
+# which the simulation's one thread gives every node alike.
+STATICS_BLOCK = re.compile(r"\b(task_local|thread_local)!\s*\{")
 # What says a static is the process's, or per node: its comment's words, or a cfg that leaves it
 # out of the simulation.
 PROCESS_WIDE = ("process", "node", "per thread", "outside the simulation", "not(madsim)")
@@ -444,12 +444,12 @@ def said_above(lines, number, words):
 
 def process_wide_static(path, text):
     """A static of a daemon's that every simulated host shares: madsim runs them all in one
-    process, on one thread, so a static not `node_local!`, a thread_local's among them, is one for
-    every host, and a host's state kept in one leaks to the others and outlives its kill (board
-    5450: a part cache all hosts shared; board 7451: a lost host's replicator, on the process's
-    runtime, went on). Each, of a type that holds what changes, is node_local, or says on its line
-    or in the comments over it why it is the process's or that it is per node (board 7583). Tests
-    aside: their files, modules and harnesses."""
+    process, on one thread, so a mutable static, a thread_local's among them, is one for every
+    host, and a host's state kept in one leaks to the others and outlives its kill (board 5450:
+    a part cache all hosts shared; board 7451: a lost host's replicator, on the process's
+    runtime, went on). Keep per-host state on a Host/Daemon context instead (board 10962), or say
+    on its line or in the comments over it why it is the process's or that it is per node (board
+    7583). Tests aside: their files, modules and harnesses."""
     posix = path.as_posix()
     crate = re.search(r"crates/([^/]+)/src/", posix)
     if crate is None or crate.group(1) not in SIMULATED_CRATES or "/tests/" in posix \
@@ -470,12 +470,13 @@ def process_wide_static(path, text):
             if depth <= 0:
                 block = None
         declared = STATIC.match(code)
-        if declared is None or in_block in ("node_local", "task_local") \
+        if declared is None or in_block == "task_local" \
                 or PLAIN_TYPE.match(declared.group(2)) or said_above(lines, number, PROCESS_WIDE):
             continue
         yield Match(path, number, "process-wide-static",
-                    f"`{declared.group(1)}` is one for every host the simulation runs: make it "
-                    "node_local!, or say why it is the process's (board 7583)")
+                    f"`{declared.group(1)}` is one for every host the simulation runs: keep "
+                    "per-host state on a Host/Daemon instead, or say why it is the process's "
+                    "(board 7583, board 10962)")
 
 
 # Each rule, and the mutants of the bugs it is from.# Each rule, and the mutants of the bugs it is from.

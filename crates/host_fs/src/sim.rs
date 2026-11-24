@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 /// The device every simulated disk is, as `stat` says.
@@ -45,38 +45,34 @@ impl Disk {
 /// A simulated host: the simulation's thread, and its node, as `node_local` keys them.
 type Host = (std::thread::ThreadId, Option<madsim::task::NodeId>);
 
-/// Every simulated host's disk, which outlives its kills: a host's values are let go of as it is
-/// killed (`node_local`), its disk crashed instead, at its first call after.
-static DISKS: Mutex<Vec<(Host, Arc<Disk>)>> = Mutex::new(Vec::new());
-
-node_local::node_local! {
-    /// Set at a host's first call to its disk since it started: one started again finds its disk
-    /// crashed.
-    static STARTED: OnceLock<()> = OnceLock::new();
-}
+/// Every simulated host's disk, which outlives its kills: paired with the node generation
+/// (`node_local::generation()`) at which it was last used, so a host started again after a kill
+/// or restart finds its disk crashed at its first call after.
+static DISKS: Mutex<Vec<(Host, u64, Arc<Disk>)>> = Mutex::new(Vec::new());
 
 /// The current host's disk: outside a simulation's node, its thread's.
 fn disk() -> Arc<Disk> {
     let node = madsim::runtime::Handle::try_current().ok().map(|_| madsim::plugin::node());
     let host = (std::thread::current().id(), node);
-    let started = STARTED.get().set(()).is_ok();
+    let generation = node_local::generation();
     let mut disks = DISKS.lock().unwrap();
-    let found = disks.iter().position(|(of, _)| *of == host);
+    let found = disks.iter().position(|(of, _, _)| *of == host);
     match found {
-        Some(at) if started => {
+        Some(at) if disks[at].1 != generation => {
             let seed = match node {
                 Some(_) => madsim::rand::random::<u64>(),
                 None => 0,
             };
-            let crashed = disks[at].1.fs.lock().unwrap().crashed(seed, true);
-            let opened = disks[at].1.locks.lock().unwrap().opened;
-            disks[at].1 = Disk::new(crashed, opened);
-            disks[at].1.clone()
+            let crashed = disks[at].2.fs.lock().unwrap().crashed(seed, true);
+            let opened = disks[at].2.locks.lock().unwrap().opened;
+            disks[at].1 = generation;
+            disks[at].2 = Disk::new(crashed, opened);
+            disks[at].2.clone()
         }
-        Some(at) => disks[at].1.clone(),
+        Some(at) => disks[at].2.clone(),
         None => {
             let disk = Disk::new(mem::Fs::new(), 0);
-            disks.push((host, disk.clone()));
+            disks.push((host, generation, disk.clone()));
             disk
         }
     }

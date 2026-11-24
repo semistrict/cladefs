@@ -315,11 +315,8 @@ class ProcessWideStatic(unittest.TestCase):
             """), [(2, "process-wide-static"), (4, "process-wide-static"),
                    (7, "process-wide-static")])
 
-    def test_node_local_task_local_plain_and_explained_statics_pass(self):
+    def test_task_local_plain_and_explained_statics_pass(self):
         self.assertEqual(self.matches("""\
-            node_local::node_local! {
-                static UNPACKED: Unpacked = Unpacked::new();
-            }
             tokio::task_local! {
                 static GONE: Shared<Receiver<()>>;
             }
