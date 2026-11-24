@@ -88,6 +88,36 @@ left as it is: its guest, running from the snapshot's memory, would corrupt it (
 A VM's memory restored from a memory cell names the version in `memory_cell`'s `tenant`, `cell`
 and `version`, as the disk's are named in the snapshot file.
 
+### Memory cells: snapshotting and restoring without local memory files
+
+A VM's guest memory can live in a **memory cell** (`CELL_KIND_MEMORY`) instead of a local memory
+file, so every VM restored from the same snapshot on a host shares unmodified pages straight out of
+the extent daemon's cache (copy-on-write on first guest store).
+
+There are two ways to create a snapshot's memory cell version:
+
+1. **Directly from Firecracker (`PUT /snapshot/create`, preferred):** pass `memory_cell` in place of
+   `mem_file_path` — no local memory file is written:
+   - **Cold-booted (or File/Uffd-restored) VM:** pass
+     `"memory_cell": { "path_on_host": "<dir>", "cladefsd_socket": "<tenant.sock>" }`. Firecracker
+     scans resident pages via `mincore` (skipping untouched anonymous RAM), writes non-zero pages,
+     commits, and makes a version.
+   - **VM already restored from a memory cell (`MemBackendType::Cell`):** pass `"memory_cell": {}`
+     (omit both fields). Firecracker writes only the window's private pages into the VM's forked
+     memory cell, commits, reclaims them back to the newly committed extents, and makes a version.
+   - On success, `PUT /snapshot/create` returns `200 OK` with JSON
+     `{"tenant": <u64>, "cell": <u64>, "version": <u64>}`. Call `SyncCell(<mem_cell_dir>)` before
+     restoring on another host.
+2. **Importing an existing Firecracker memory file (`ImportMemory` / `cladefsctl import-memory`):**
+   call `ImportMemory(path, file, tenant, make_version=true)` over the control API (or
+   `cladefsctl import-memory --version DIR FILE`). Zero pages are discarded as holes; call
+   `SyncCell` before cross-host restore.
+
+To restore with KVM dirty-page tracking (for live migration pre-copy), set `"track_dirty_pages": true`
+in `PUT /snapshot/load` alongside `mem_backend.backend_type = "Cell"`: KVM tracks guest stores
+(including first-time COW into private pages and subsequent writes to private pages), while
+unmodified shared pages remain read-only and clean.
+
 ### 3. When the snapshot is finished with, everywhere
 
 ```

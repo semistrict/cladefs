@@ -59,7 +59,7 @@ use storage_device::DeviceHolder;
 /// node of 170 refs a page) and their owners (8 bytes a page), and room for a commit's worth of
 /// pages written again besides its compactions.
 pub fn capacity(size: u64) -> u64 {
-    size + size / 128 + size / 512 + (64 << 20)
+    crate::import::memory_capacity(size)
 }
 
 /// A VM's memory, a cell of its own. See the module docs.
@@ -158,6 +158,21 @@ impl MemoryCell {
         }
     }
 
+    /// Writes `bytes` at `offset`, whole pages: all-zero pages discarded as holes, which store
+    /// nothing, and non-zero runs written, to be committed by [`MemoryCell::commit`].
+    pub fn write_sparse(&self, offset: u64, bytes: &[u8]) -> Result<(), Error> {
+        self.whole(offset, bytes.len() as u64)?;
+        let page = self.page_size() as usize;
+        for (at, run) in crate::import::runs_of_zeros(bytes, page) {
+            let at = offset + at as u64;
+            match run {
+                crate::import::PageRun::Zeros(len) => self.discard(at, len as u64)?,
+                crate::import::PageRun::Data(data) => self.write(at, data)?,
+            }
+        }
+        Ok(())
+    }
+
     /// Writes the memory a file holds, a snapshot's memory file as Firecracker writes it, the
     /// memory's size: its pages, those of zeros as holes, which store nothing, committed at once.
     pub fn import(&self, file: &Path) -> Result<(), Error> {
@@ -168,23 +183,47 @@ impl MemoryCell {
             return Err(Error::new(Errno::EINVAL)
                 .context(format!("a memory file of {held} bytes, not {}", self.size)));
         }
-        let page = self.page_size() as usize;
-        let mut buffer = vec![0; IMPORT_BYTES];
+        let mut buffer = vec![0; crate::import::MEMORY_IMPORT_BYTES];
         let mut offset = 0;
         while offset < self.size {
-            let len = (self.size - offset).min(IMPORT_BYTES as u64) as usize;
+            let len = (self.size - offset).min(crate::import::MEMORY_IMPORT_BYTES as u64) as usize;
             let chunk = &mut buffer[..len];
             file.read_exact(chunk).map_err(Error::new)?;
-            for (at, run) in runs_of_zeros(chunk, page) {
-                let at = offset + at as u64;
-                match run {
-                    Run::Zeros(len) => self.discard(at, len as u64)?,
-                    Run::Data(bytes) => self.write(at, bytes)?,
-                }
-            }
+            self.write_sparse(offset, chunk)?;
             offset += len as u64;
         }
         self.commit()
+    }
+
+    /// Snapshots the memory cell's window (TASK-456.4): writes its window's private pages into the
+    /// cell (all-zero ones discarded as holes), commits them at once, reclaims them back to the
+    /// newly committed extents so no private pages remain, and makes a version of the cell.
+    ///
+    /// # Safety
+    ///
+    /// `base` must be the base address previously passed to [`MemoryCell::window`], and no guest
+    /// vCPU or other thread may be concurrently mutating the window's memory (e.g., the VM is
+    /// paused).
+    pub unsafe fn snapshot_window(&self, base: NonNull<u8>) -> Result<CellVersion, Error> {
+        if self.window.lock().unwrap().is_none() {
+            return Err(Error::new(Errno::EINVAL)
+                .context("snapshotting memory of a memory cell with no window"));
+        }
+        let runs = self.private_runs()?;
+        for run in &runs {
+            let len = (run.end - run.start) as usize;
+            // SAFETY: `run` is a page-aligned range within `0..self.size`, and `base` is the
+            // window's mapping of `self.size` bytes whose private pages are readable and not
+            // concurrently modified while the caller holds the VM paused.
+            let bytes =
+                unsafe { std::slice::from_raw_parts(base.as_ptr().add(run.start as usize), len) };
+            self.write_sparse(run.start, bytes)?;
+        }
+        self.commit()?;
+        for run in &runs {
+            self.reclaim(run.start, run.end - run.start)?;
+        }
+        self.make_version()
     }
 
     /// Makes a version of the cell as of its last commit: a VM snapshot's memory, which any number
@@ -321,31 +360,6 @@ impl MemoryCell {
             ))),
         }
     }
-}
-
-/// The bytes [`MemoryCell::import`] reads of a file at once.
-const IMPORT_BYTES: usize = 16 << 20;
-
-/// A run of pages of a buffer: all zeros, so many bytes of them, or not, these bytes.
-enum Run<'a> {
-    Zeros(usize),
-    Data(&'a [u8]),
-}
-
-/// The runs of `page`-byte pages of `bytes`, whole pages, by their offsets in it.
-fn runs_of_zeros(bytes: &[u8], page: usize) -> Vec<(usize, Run<'_>)> {
-    let mut runs: Vec<(usize, Run<'_>)> = Vec::new();
-    for (index, chunk) in bytes.chunks(page).enumerate() {
-        let at = index * page;
-        let zeros = chunk.iter().all(|byte| *byte == 0);
-        match (runs.last_mut(), zeros) {
-            (Some((_, Run::Zeros(len))), true) => *len += chunk.len(),
-            (Some((start, Run::Data(data))), false) => *data = &bytes[*start..at + chunk.len()],
-            (_, true) => runs.push((at, Run::Zeros(chunk.len()))),
-            (_, false) => runs.push((at, Run::Data(chunk))),
-        }
-    }
-    runs
 }
 
 /// The tree nodes of a memory's window, by the bytes each names: which the daemon has mapped, and
@@ -652,18 +666,121 @@ mod tests {
 
     #[test]
     fn runs_of_zeros_split_pages_of_zeros_from_the_rest() {
+        use crate::import::{PageRun, runs_of_zeros};
         let mut bytes = vec![0; 4 * 8];
         bytes[9] = 1;
         bytes[17] = 2;
         let shape: Vec<_> = (runs_of_zeros(&bytes, 4).into_iter())
             .map(|(at, run)| match run {
-                Run::Zeros(len) => (at, len, true),
-                Run::Data(data) => (at, data.len(), false),
+                PageRun::Zeros(len) => (at, len, true),
+                PageRun::Data(data) => (at, data.len(), false),
             })
             .collect();
         assert_eq!(
             shape,
             vec![(0, 8, true), (8, 4, false), (12, 4, true), (16, 4, false), (20, 12, true)]
         );
+    }
+
+    // TASK-456.4: snapshotting a memory cell's window writes only its private pages (zeroed ones
+    // discarded as holes), commits, reclaims them back to the newly committed extents so no
+    // private pages remain, and supports taking another snapshot after resuming writes.
+    #[test]
+    fn snapshot_window_writes_private_pages_reclaims_and_supports_subsequent_snapshots() {
+        // SAFETY: nextest runs each test in a process of its own, whose other threads don't read
+        // the environment yet.
+        unsafe {
+            std::env::set_var("CLADEFSD_BUCKET", "memory:///cells");
+            std::env::set_var("CLADEFSD_TOKEN", "1");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("cladefsd.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        std::thread::spawn(move || crate::cladefsd::server::serve(listener));
+        let ps = page_size();
+        const PAGES: u64 = 32;
+        let size = PAGES * ps;
+        let base_cell = MemoryCell::open(&socket, &dir.path().join("base"), size).unwrap();
+        let mut expected: Vec<u8> =
+            (0..PAGES).flat_map(|page| pattern(page as u8, ps as usize)).collect();
+        base_cell.write(0, &expected).unwrap();
+        base_cell.commit().unwrap();
+        let v1 = base_cell.make_version().unwrap();
+        let page = base_cell.page_size();
+        base_cell.close().unwrap();
+
+        let fork = dir.path().join("fork");
+        let memory_cell = MemoryCell::open_forked(&socket, &fork, v1, size).unwrap();
+        // SAFETY: Anonymous memory, reserving none, the test's: the window's.
+        let base = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                size as usize,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(base, libc::MAP_FAILED);
+        let base = NonNull::new(base.cast::<u8>()).unwrap();
+        // SAFETY: The memory is the test's, and outlives `memory_cell`.
+        let window = unsafe { memory_cell.window(base, size, None) };
+        if ps > page {
+            assert_eq!(window.unwrap_err().errno(), Some(Errno::EINVAL));
+            return;
+        }
+        window.unwrap();
+        crate::guest_thread_started();
+        let write_page = |p: u64, data: &[u8]| {
+            // SAFETY: Within the window's mapping of `size` bytes.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    data.as_ptr(),
+                    base.as_ptr().add((p * ps) as usize),
+                    ps as usize,
+                );
+            }
+        };
+        // Modify page 2 with new data, and zero page 5 completely (should become a hole).
+        let page2 = pattern(0x99, ps as usize);
+        let zeros = vec![0u8; ps as usize];
+        write_page(2, &page2);
+        write_page(5, &zeros);
+        expected[2 * ps as usize..3 * ps as usize].copy_from_slice(&page2);
+        expected[5 * ps as usize..6 * ps as usize].copy_from_slice(&zeros);
+        assert_eq!(memory_cell.private_pages().unwrap(), 2);
+
+        // SAFETY: `base` is the window's mapping and no other thread touches it.
+        let v2 = unsafe { memory_cell.snapshot_window(base) }.unwrap();
+        assert_eq!(memory_cell.private_pages().unwrap(), 0, "private pages reclaimed after snap");
+        assert_eq!(private_memory_held(size), 0, "private memfd emptied after snap");
+
+        // Verify a child forked from v2 reads the exact snapshot bytes (and still matches expected).
+        let child1 =
+            MemoryCell::open_forked(&socket, &dir.path().join("child1"), v2, size).unwrap();
+        let mut got = vec![0u8; size as usize];
+        child1.read(0, &mut got).unwrap();
+        assert!(got == expected, "v2 bytes match");
+        child1.close().unwrap();
+
+        // Resume writing on the same window, then take a second snapshot v3.
+        let page9 = pattern(0x42, ps as usize);
+        write_page(9, &page9);
+        expected[9 * ps as usize..10 * ps as usize].copy_from_slice(&page9);
+        assert_eq!(memory_cell.private_pages().unwrap(), 1);
+        // SAFETY: `base` is the window's mapping and no other thread touches it.
+        let v3 = unsafe { memory_cell.snapshot_window(base) }.unwrap();
+        assert_eq!(memory_cell.private_pages().unwrap(), 0);
+
+        let child2 =
+            MemoryCell::open_forked(&socket, &dir.path().join("child2"), v3, size).unwrap();
+        child2.read(0, &mut got).unwrap();
+        assert!(got == expected, "v3 bytes match");
+        child2.close().unwrap();
+
+        memory_cell.close().unwrap();
+        // SAFETY: Unmaps the test's memory after `memory_cell` dropped.
+        assert_eq!(unsafe { libc::munmap(base.as_ptr().cast(), size as usize) }, 0);
     }
 }

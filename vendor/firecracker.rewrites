@@ -46,3 +46,6 @@ b6203780198d5f314c5a126523b6426da353ed14 a81a2449e85a9d2f1136a2d719e5f3142351768
 # individual fixes cleanly, and preserve VirtioDevice::device_acked_features() (e.g. vhost-user
 # PROTOCOL_FEATURES) across ack_features_by_page / reset (board 11197).
 a81a2449e85a9d2f1136a2d719e5f31423517687 ca06ec6088bb25ad02aae8887f4dc50a41b3586e
+# cladefs-v1.18.0-r5 (branch cladefs-v1.18.0-r5): add PUT /snapshot/create `memory_cell` support
+# to write guest memory directly into a memory cell without a local memory file (TASK-456.4).
+ca06ec6088bb25ad02aae8887f4dc50a41b3586e de36a381b18679c6f8fc8fde9bee4a303d2f5fea

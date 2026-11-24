@@ -555,6 +555,30 @@ impl Firecracker {
         path: &str,
         body: &serde_json::Value,
     ) -> anyhow::Result<()> {
+        let _ = self.request_raw(method, path, body)?;
+        Ok(())
+    }
+
+    /// Sends Firecracker's API a `method` request of `path`, with `body`, and decodes the JSON
+    /// response body.
+    pub fn request_json<T: serde::de::DeserializeOwned>(
+        &self,
+        method: &str,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> anyhow::Result<T> {
+        let content = self.request_raw(method, path, body)?;
+        serde_json::from_slice(&content).with_context(|| {
+            format!("decoding {method} {path} JSON reply: {}", String::from_utf8_lossy(&content))
+        })
+    }
+
+    fn request_raw(
+        &self,
+        method: &str,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> anyhow::Result<Vec<u8>> {
         use std::io::{BufRead, BufReader, Read, Write};
 
         let body = serde_json::to_vec(body)?;
@@ -593,7 +617,7 @@ impl Firecracker {
             status.trim_end(),
             String::from_utf8_lossy(&content)
         );
-        Ok(())
+        Ok(content)
     }
 
     /// cladefs: its console's file, which a test may read as the VM runs (TASK-665).
