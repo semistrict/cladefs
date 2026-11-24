@@ -214,11 +214,15 @@ impl Images {
                     return;
                 }
                 let path = self.dir.join(format!("fork{}", self.mounted.len()));
-                let Mounted { fs, files, .. } = self.on(on);
-                let files = files.clone();
-                let storage = block_on(fs.fork_storage_to(&path)).unwrap();
+                let len = self.mounted.len();
+                let Mounted { path: src, fs, files } = self.mounted.remove(on % len);
+                let storage = block_on(fs.close()).unwrap();
+                let forked = block_on(super::tests::fork_storage(&storage, &path));
                 let fs = block_on(Filesystem::mount(storage)).unwrap();
-                self.mounted.push(Mounted { path, fs, files });
+                let fork_fs = block_on(Filesystem::mount(forked)).unwrap();
+                let fork_files = files.clone();
+                self.mounted.insert(on % len, Mounted { path: src, fs, files });
+                self.mounted.push(Mounted { path, fs: fork_fs, files: fork_files });
                 return self.check(&what);
             }
             Op::Remount { on } => {

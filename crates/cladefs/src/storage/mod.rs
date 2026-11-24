@@ -275,18 +275,6 @@ impl Storage {
         matches!(self.kind, Kind::Image { .. })
     }
 
-    /// Forks the image to a new image at `path`, which must not exist, and returns its storage.
-    /// The fork's cell is a fork of the image's in its bucket, which the fork keeps its own
-    /// cell in: it takes the same space whatever the image holds, inheriting the image's
-    /// extents rather than copies, read from the bucket (TASK-165.7). `path` is the fork's own
-    /// directory. Memory cannot be forked.
-    ///
-    /// The storage must not be mounted, which it is not while it is the caller's. To fork a mounted
-    /// filesystem's, see [`Filesystem::fork_storage_to`](crate::Filesystem::fork_storage_to).
-    pub async fn fork_to(&self, path: impl AsRef<Path>) -> Result<Storage, Error> {
-        fork_image(&self.kind, path.as_ref()).await
-    }
-
     /// Deletes the image at `path`, which nothing in this process has open, a fork or not: its
     /// cell in its bucket, whose collector reclaims what no other cell inherited from it, and
     /// its directory. Its forks live on: their cells are the bucket's, which an image's own
@@ -399,29 +387,10 @@ impl fmt::Debug for Storage {
     }
 }
 
-/// Forks the image of storage of `kind` to a new image at `path`, a fork of its cell directory,
-/// and of its cell in its bucket, to a new cell of its tenant's ([`OpenCell::fork`]): through a
-/// version of its last commit, as of one time, its writes after the version's commit its own.
-/// Memory cannot be forked; nor an image closed (`ENOTCONN`).
-pub(crate) async fn fork_image(kind: &Kind, path: &Path) -> Result<Storage, Error> {
-    let Kind::Image { cell, .. } = kind else {
-        return Err(Error::msg("memory cannot be forked to an image"));
-    };
-    let cell = cell.upgrade().ok_or(crate::Errno::ENOTCONN)?;
-    let path = path.to_owned();
-    let forking = async move {
-        let forked = cell.fork(&path, cell.cell().tenant).await;
-        let context = format!("forking to {}", path.display());
-        forked.map(|_| path).map_err(|error| error.context(context))
-    };
-    let path = on_bucket_runtime(forking).await?;
-    Storage::open(path).await
-}
-
 /// cladefs: `work`, a task of the bucket runtime's ([`local_cell::upload::bucket_runtime`]): what
-/// makes, opens, forks and deletes images awaits the cell's timers and the bucket's
-/// connections, which that runtime drives, whatever executor awaits it, FUSE's or a test's; as
-/// sync calls of theirs did, waiting on it (board 5614).
+/// makes, opens and deletes images awaits the cell's timers and the bucket's connections, which
+/// that runtime drives, whatever executor awaits it, FUSE's or a test's; as sync calls of theirs
+/// did, waiting on it (board 5614).
 async fn on_bucket_runtime<T: Send + 'static>(
     work: impl Future<Output = Result<T, Error>> + Send + 'static,
 ) -> Result<T, Error> {

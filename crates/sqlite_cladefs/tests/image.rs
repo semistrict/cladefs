@@ -5,12 +5,9 @@
 //! SQLite on a cladefs image: an extent store on disk, its cell kept in a bucket
 //! beside it (TASK-296).
 
-mod common;
-
 use cladefs::Storage;
 use rusqlite::{Connection, OpenFlags, params};
-use sqlite_cladefs::{Database, Options, Registration, register};
-use std::path::Path;
+use sqlite_cladefs::{Database, Options, register};
 use std::sync::Arc;
 
 /// A database on an image survives closing; and, every cell encrypted (TASK-411.28), under the
@@ -109,67 +106,4 @@ async fn survives_closing(name: &str) -> Vec<String> {
     database.close().unwrap();
 
     cladefs::testing::files_holding(dir.path(), &[&marker[..64]])
-}
-
-/// A database on `storage`, registered as the VFS `vfs`, and a connection to its database.
-fn mount(storage: Storage, vfs: &str) -> (Arc<Database>, Registration, Connection) {
-    let database = Database::open(storage.into_device(), Options::default()).unwrap();
-    let registration = register(vfs, database.clone()).unwrap();
-    let connection =
-        Connection::open_with_flags_and_vfs("app.db", OpenFlags::default(), vfs).unwrap();
-    (database, registration, connection)
-}
-
-fn unmount((database, registration, connection): (Arc<Database>, Registration, Connection)) {
-    drop(connection);
-    held(&database);
-    drop(registration);
-    database.close().unwrap();
-}
-
-/// Checks the device holds every extent the database names, those it references and those it has
-/// yet to free: so that none it frees, or failed to, is one the device never held, which it would
-/// try to free again at each commit.
-fn held(database: &Database) {
-    let device = database.device();
-    let mut buffer =
-        futures::executor::block_on(device.allocate_buffer(device.block_size() as usize));
-    for extent in database.extents().unwrap() {
-        futures::executor::block_on(device.read(extent, 0, buffer.as_mut()))
-            .unwrap_or_else(|error| panic!("{extent:?} the database names: {error:#}"));
-    }
-}
-
-async fn open(path: &Path) -> Storage {
-    Storage::open(path).await.unwrap()
-}
-
-/// A fork of an image, its cell forked in its bucket, holds the image's database as it was,
-/// inheriting its extents; the two then change apart, the fork rewriting and so freeing all it
-/// inherited, and each reads its own, before and after opening again.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_fork_and_its_image_go_their_own_ways() {
-    let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
-    let (path, fork_path) = (dir.path().join("image"), dir.path().join("fork"));
-    let mounted = mount(Storage::create(&path, 256 << 20).await.unwrap(), "cladefs-fork-fill");
-    let mut parent_rows = common::fill(&mounted.2);
-    unmount(mounted);
-
-    let forked = futures::executor::block_on(open(&path).await.fork_to(&fork_path)).unwrap();
-    let parent = mount(open(&path).await, "cladefs-fork-parent");
-    let fork = mount(forked, "cladefs-fork-child");
-    let mut fork_rows = parent_rows.clone();
-    common::check(&fork.2, &fork_rows);
-    common::change_parent(&parent.2, &mut parent_rows);
-    common::change_fork(&fork.2, &mut fork_rows);
-    common::check(&parent.2, &parent_rows);
-    common::check(&fork.2, &fork_rows);
-    unmount(fork);
-    unmount(parent);
-
-    for (path, rows) in [(&path, parent_rows), (&fork_path, fork_rows)] {
-        let mounted = mount(open(path).await, "cladefs-fork-reopened");
-        common::check(&mounted.2, &rows);
-        unmount(mounted);
-    }
 }

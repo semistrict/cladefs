@@ -104,11 +104,6 @@
 //! in its directory, which its description names (or, on a host of cladefs's system, the host's).
 //! Its commits are uploaded behind them, and closing it waits for them to be; what it frees, the
 //! process collects there after its commits.
-//!
-//! An image can be forked: [`Storage::fork_to`] forks closed storage, and
-//! [`Image::fork_storage_to`] a mounted image's, after writing back its volumes' dirty data.
-//! Forking forks the image's cell directory, which shares the image's data rather than copies it,
-//! whatever it holds, and its cell in its bucket, which the fork shares.
 
 #![deny(missing_docs)]
 // Every unsafe block says why it is sound, other threads included (TASK-444.4).

@@ -28,7 +28,6 @@ use fxfs::object_store::{ObjectStore, SetExtendedAttributeMode};
 use fxfs_posix::ReaddirStart;
 use std::future::Future;
 use std::num::NonZeroU8;
-use std::path::Path;
 use std::sync::Arc;
 
 /// The errno of `error`, an Fxfs operation's, as Fxfs's VFSs give it (`fxfs_posix::errno`).
@@ -296,14 +295,6 @@ impl Filesystem {
             unchanged => *backing = unchanged,
         }
         Ok(())
-    }
-
-    /// Forks the filesystem's image to a new image at `path`, which must not exist, while it is
-    /// mounted, and returns the fork's storage (see [`Image::fork_storage_to`]).
-    pub async fn fork_storage_to(&self, path: impl AsRef<Path>) -> Result<Storage, Error> {
-        // As every operation does, it fails once the filesystem is unmounted.
-        self.mounted()?;
-        self.volume.image.fork_storage_to(path.as_ref()).await
     }
 
     /// The filesystem's usage.

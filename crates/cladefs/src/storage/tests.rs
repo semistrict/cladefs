@@ -89,6 +89,17 @@ async fn images_keep_their_cells_in_a_file_bucket_of_their_own() {
     assert_eq!((extents, root), held(&storage));
 }
 
+/// Forks closed `storage`'s cell to `path` and opens the fork's storage (board 10612).
+pub(super) async fn fork_storage(storage: &Storage, path: &Path) -> Storage {
+    let cell = storage.open_cell();
+    let path = path.to_owned();
+    let to = path.clone();
+    super::on_bucket_runtime(async move { cell.fork(&to, cell.cell().tenant).await.map(drop) })
+        .await
+        .unwrap();
+    Storage::open(&path).await.unwrap()
+}
+
 /// TASK-165.6: an image's fork forks the image's cell in the image's bucket, where it keeps
 /// its own: a cell of its own there, whose record names the image's as its parent, and which
 /// holds what the fork's cell directory does, closed.
@@ -99,7 +110,7 @@ fn forks_cell_in_their_images_bucket() {
         let (path, fork_path) = (dir.path().join("image"), dir.path().join("fork"));
         let storage = image_with(&path, b"file", b"original").await;
         let parent = storage.open_cell().cell();
-        let fork = storage.fork_to(&fork_path).await.unwrap();
+        let fork = fork_storage(&storage, &fork_path).await;
         let child = fork.open_cell().cell();
         let bucket = bucket_of(&fork_path);
         assert!(Arc::ptr_eq(&bucket, &bucket_of(&path)), "the fork's bucket is another");
@@ -124,7 +135,7 @@ fn deleting_images_deletes_their_cells() {
         let dir = tempfile::tempdir().unwrap();
         let (path, fork_path) = (dir.path().join("image"), dir.path().join("fork"));
         let storage = image_with(&path, b"file", b"original").await;
-        let fork = storage.fork_to(&fork_path).await.unwrap();
+        let fork = fork_storage(&storage, &fork_path).await;
         let child = fork.open_cell().cell();
         fork.close().await;
         storage.close().await;
@@ -152,7 +163,7 @@ fn commits_start_the_collector() {
         node.write(0, b"contents").await.unwrap();
         let storage = fs.close().await.unwrap();
         assert_eq!(collecting.passes(), 1);
-        let fork = storage.fork_to(dir.path().join("fork")).await.unwrap();
+        let fork = fork_storage(&storage, &dir.path().join("fork")).await;
         let shared = fork.collecting().unwrap();
         assert!(Arc::ptr_eq(&shared, &collecting), "the fork's collector is another");
     })
@@ -304,8 +315,9 @@ async fn passes_run_among_an_image_and_its_forks_commits() {
     let (fs, fork) = block_on(async {
         let fs = Filesystem::format(storage).await.unwrap();
         churn(&fs, &mut files, 1, 2).await;
-        let fork = Filesystem::mount(fs.fork_storage_to(&fork_path).await.unwrap());
-        (fs, fork.await.unwrap())
+        let storage = fs.close().await.unwrap();
+        let fork = Filesystem::mount(fork_storage(&storage, &fork_path).await).await.unwrap();
+        (Filesystem::mount(storage).await.unwrap(), fork)
     });
     let mut forked = files.clone();
     std::thread::scope(|scope| {
@@ -352,8 +364,9 @@ fn images_dropped_as_their_pass_runs_leave_their_bucket_whole() {
     block_on(async {
         let fs = Filesystem::format(Storage::create(&path, SIZE).await.unwrap()).await.unwrap();
         churn(&fs, &mut files, 1, 2).await;
-        let fork = Filesystem::mount(fs.fork_storage_to(&fork_path).await.unwrap());
-        let fork = fork.await.unwrap();
+        let storage = fs.close().await.unwrap();
+        let fork = Filesystem::mount(fork_storage(&storage, &fork_path).await).await.unwrap();
+        let fs = Filesystem::mount(storage).await.unwrap();
         forked = files.clone();
         churn(&fork, &mut forked, 2, 1).await;
         // Passes held up from the next commit's on: both closed and dropped as one runs.
