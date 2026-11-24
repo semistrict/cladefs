@@ -119,7 +119,9 @@ incompatible change, where it lacks the means to grow (board 10033's subtasks):
 - **A snapshot's extent device state says its version before bitcode reads it.**
 - **The segment log's fallback to older records goes** (board 10062): a second, unversioned format.
 - **Numbers in keys and file names are base 32**, as every other: the ephemeral index's bucket,
-  holds', replica directories' and the ephemeral host's names.
+  holds', replica directories' and the ephemeral host's names. Replica directories' done (board 10046), with
+  their own logs' frames each saying the directory's version, and the logs they hold read by
+  range, the cell directory's.
 
 Each family freezes when its corpus lands, with `oldest` its version then.
 

@@ -412,6 +412,14 @@ pub(crate) const LOG_MAGIC: &[u8; 8] = &{
 /// What a log of 18 on begins with, its version after it.
 const LOG_KIND: &[u8; 4] = b"FXLG";
 
+/// cladefs: whether `magic`, a segment's log's first eight bytes, say a format this build reads:
+/// `FXLG` and a version of [`FORMAT`]'s.
+pub(crate) fn log_magic_read(magic: &[u8]) -> bool {
+    let Some((kind, version)) = magic.split_first_chunk::<4>() else { return false };
+    let version = version.first_chunk::<4>().map(|version| u32::from_le_bytes(*version));
+    kind == LOG_KIND && version.is_some_and(|version| FORMAT.check(version).is_ok())
+}
+
 /// cladefs: whether `log` begins as a log of a format this build doesn't read does: an older
 /// `FXLOG\0\0*`, or `FXLG` and a version outside [`FORMAT`]'s; its first bytes, if so. Refused
 /// rather than treated as empty and deleted by recovery (board 6902, doc-28).

@@ -156,14 +156,13 @@ pub fn evict_hot_to(target: u64) -> u64 {
     }
 }
 
-/// Seed for `own_frame` rapidhash integrity checks: its last digits the version of the extent
-/// frames its files are, which the replica directory's format names (`replica::magic`, board 8457).
-pub(crate) const OWN_FRAME_SEED: u64 = 0x6678_6461_7832_0003;
+/// Seed for `own_frame` rapidhash integrity checks: fixed for good, as the replica directory is
+/// frozen (doc-28, board 10046).
+const OWN_FRAME_SEED: u64 = 0x6678_6461_7832_0003;
 
-const _: () = assert!(OWN_FRAME_SEED & 0xffff == extent_frame::FORMAT.current as u64);
-
-/// Header bytes of an `own_frame`: sequence (u64), len (u64), hash (u64).
-pub(crate) const OWN_FRAME_HEADER: u64 = 24;
+/// Header bytes of an `own_frame`: its version (u32), its sequence (u64), its file's length (u64),
+/// its hash (u64).
+pub(crate) const OWN_FRAME_HEADER: u64 = 28;
 
 /// The log a member keeps segment `segment`'s replica log in.
 pub fn log_of(segment: u64) -> u64 {
@@ -175,69 +174,75 @@ pub fn own_of(segment: u64) -> u64 {
     (segment << 1) | 1
 }
 
-fn own_frame_hash(sequence: u64, file: &[u8]) -> u64 {
-    let mut header = [0u8; 16];
-    header[..8].copy_from_slice(&sequence.to_le_bytes());
-    header[8..].copy_from_slice(&(file.len() as u64).to_le_bytes());
+fn own_frame_hash(version: u32, sequence: u64, file: &[u8]) -> u64 {
+    let mut header = [0u8; 20];
+    header[..4].copy_from_slice(&version.to_le_bytes());
+    header[4..12].copy_from_slice(&sequence.to_le_bytes());
+    header[12..].copy_from_slice(&(file.len() as u64).to_le_bytes());
     let h = rapidhash::rapidhash_seeded(&header, OWN_FRAME_SEED);
     rapidhash::rapidhash_seeded(file, h) | 1
 }
 
-/// An extent stored on its own as its segment's own log holds it: its sequence (u64), its file's
-/// length (u64), its rapidhash (u64, nonzero so zero-padding never matches), little-endian, then
-/// the file's bytes, the bucket's object byte for byte.
+/// An extent stored on its own as its segment's own log holds it: the replica directory's version
+/// (u32, [`crate::replica::FORMAT`], doc-28), its sequence (u64), its file's length (u64), its
+/// rapidhash, of all of them and the file (u64, nonzero so zero-padding never matches),
+/// little-endian, then the file's bytes, the bucket's object byte for byte: an extent frame, which
+/// says its own version.
 pub fn own_frame(sequence: u64, file: &[u8]) -> Vec<u8> {
+    let version = crate::replica::FORMAT.current;
     let mut frame = Vec::with_capacity(OWN_FRAME_HEADER as usize + file.len());
+    frame.extend_from_slice(&version.to_le_bytes());
     frame.extend_from_slice(&sequence.to_le_bytes());
     frame.extend_from_slice(&(file.len() as u64).to_le_bytes());
-    frame.extend_from_slice(&own_frame_hash(sequence, file).to_le_bytes());
+    frame.extend_from_slice(&own_frame_hash(version, sequence, file).to_le_bytes());
     frame.extend_from_slice(file);
     frame
 }
 
-/// The extents an own log's bytes hold, whole and hash-verified: each sequence and file. A
-/// member's bytes, untrusted: read through [`Cursor`], a frame cut short, corrupted, or of a
-/// length past what is left ending them (board 5408, board 6902).
+/// The frames whole and hash-verified at the start of `bytes`, an own log's, each sequence and
+/// file, and where the last ends. A member's bytes, untrusted: read through [`Cursor`], a frame
+/// cut short, corrupted, or of a length past what is left ending them (board 5408, board 6902).
+/// A frame whole of a version this build doesn't read is refused, never taken for the log's torn
+/// end, which would forget what its member acked (doc-28).
 #[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
-pub fn own_frames(bytes: &[u8]) -> Vec<(u64, Vec<u8>)> {
+fn parse_own(bytes: &[u8]) -> Result<(Vec<(u64, &[u8])>, usize), anyhow::Error> {
+    use anyhow::Context as _;
     let mut cursor = Cursor::new(bytes);
-    let mut frames = Vec::new();
+    let (mut frames, mut end) = (Vec::new(), 0usize);
     // A length past what this host addresses: past what is left, which ends the frames too.
-    while let Some(sequence) = cursor.u64()
+    while let Some(version) = cursor.u32()
+        && let Some(sequence) = cursor.u64()
         && let Some(len) = cursor.u64().and_then(|len| usize::try_from(len).ok())
         && let Some(expected) = cursor.u64()
         && let Some(file) = cursor.take(len)
     {
-        if own_frame_hash(sequence, file) != expected {
+        if own_frame_hash(version, sequence, file) != expected {
             break;
         }
-        frames.push((sequence, file.to_vec()));
-    }
-    frames
-}
-
-/// Byte offset past the last whole, hash-verified frame in an own log (board 6902).
-#[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
-pub(crate) fn own_frames_end(bytes: &[u8]) -> usize {
-    let mut cursor = Cursor::new(bytes);
-    let mut end = 0usize;
-    // A length past what this host addresses: past what is left, which ends the frames too.
-    while let Some(sequence) = cursor.u64()
-        && let Some(len) = cursor.u64().and_then(|len| usize::try_from(len).ok())
-        && let Some(expected) = cursor.u64()
-        && let Some(file) = cursor.take(len)
-    {
-        if own_frame_hash(sequence, file) != expected {
-            break;
-        }
+        crate::replica::FORMAT
+            .check(version)
+            .with_context(|| format!("an own log's frame at {end}"))?;
         let Some(next) =
             end.checked_add(OWN_FRAME_HEADER as usize).and_then(|n| n.checked_add(len))
         else {
             break;
         };
+        frames.push((sequence, file));
         end = next;
     }
-    end
+    Ok((frames, end))
+}
+
+/// The extents an own log's bytes hold, whole and hash-verified: each sequence and file
+/// ([`parse_own`]).
+pub fn own_frames(bytes: &[u8]) -> Result<Vec<(u64, Vec<u8>)>, anyhow::Error> {
+    let (frames, _) = parse_own(bytes)?;
+    Ok(frames.into_iter().map(|(sequence, file)| (sequence, file.to_vec())).collect())
+}
+
+/// Byte offset past the last whole, hash-verified frame in an own log (board 6902).
+pub(crate) fn own_frames_end(bytes: &[u8]) -> Result<usize, anyhow::Error> {
+    parse_own(bytes).map(|(_, end)| end)
 }
 
 /// What of `logs`, what members hold of a replicated cell `cell`'s writer's logs by their numbers,
@@ -395,7 +400,7 @@ pub fn restore<D: crate::Dir>(
                 write(&open_segment_path(segment(*log)), &[], true)?;
             }
             _ => {
-                for (sequence, file) in own_frames(bytes) {
+                for (sequence, file) in own_frames(bytes)? {
                     let extent = storage_device::ExtentId { cell: cell.id, sequence };
                     write(&extent_path(extent), &file, true)?;
                 }

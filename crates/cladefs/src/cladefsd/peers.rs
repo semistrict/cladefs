@@ -125,18 +125,21 @@ const SWEEP_EVERY: Duration = Duration::from_secs(600);
 pub(crate) const PROTOCOL: u32 = 2;
 
 /// cladefs: the formats of what this daemon hands its peers, in a line: its cell directories'
-/// (`local_cell::FORMAT`), its extent frames' (`extent_frame::FORMAT`), its bucket's layout's
-/// (`bucket_cell::layout::FORMAT`) and the protocol's ([`PROTOCOL`]). Two daemons hand each other
-/// a cell (a migration's prepare names them), or a writer's logs (every replication call names
-/// them, [`same_formats`]), only if theirs are the same (boards 8455, 8457): nothing of another
-/// build's format is taken, as nothing migrates (AGENTS.md, "No migrations").
+/// (`local_cell::FORMAT`), its cell records' (`crate::cell_dir::FORMAT`), its replica directory's
+/// (`local_cell::replica::FORMAT`, which versions own-log frames too, board 10046), its extent
+/// frames' (`extent_frame::FORMAT`), its bucket's layout's (`bucket_cell::layout::FORMAT`) and the
+/// protocol's ([`PROTOCOL`]). Two daemons hand each other a cell (a migration's prepare names
+/// them), or a writer's logs (every replication call names them, [`same_formats`]), only if theirs
+/// are the same (boards 8455, 8457): nothing of another build's format is taken until board 10054
+/// moves to per-family versions read by range.
 pub(crate) fn formats() -> String {
     let named = |cell: &str| {
         let (frames, layout) = (extent_frame::FORMAT.current, bucket_cell::layout::FORMAT);
         let records = crate::cell_dir::FORMAT.current;
+        let replicas = local_cell::replica::FORMAT.current;
         format!(
-            "cell directories {cell:?}, cell records {records}, extent frames {frames}, bucket \
-             layout {layout}, peers {PROTOCOL}"
+            "cell directories {cell:?}, cell records {records}, replica directory {replicas}, \
+             extent frames {frames}, bucket layout {layout}, peers {PROTOCOL}"
         )
     };
     // A test's daemon of another build's cell directories: `peers::formats=return(FORMAT)`.

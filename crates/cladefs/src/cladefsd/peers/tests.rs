@@ -377,7 +377,20 @@ fn members_refuse_other_incarnations_buckets_and_hosts_without_replicas() {
         assert!(no.message().contains("CLADEFSD_REPLICAS"), "{no:?}");
 
         let ours = formats();
-        for asked_as in ["", "cell directories \"cladefs extent store 15\"", &ours[1..]] {
+        let replica_part = format!("replica directory {}", replica::FORMAT.current);
+        assert!(ours.contains(&replica_part), "{ours:?}");
+        // Pre-10046 builds advertised no replica directory version, and wrote 24-byte unversioned
+        // own-log frames; a different replica directory version is likewise refused before any
+        // append is acknowledged (hotbed review 88 finding 322).
+        let without_replica = ours.replace(&format!("{replica_part}, "), "");
+        let older_replica = ours.replace(&replica_part, "replica directory 3");
+        for asked_as in [
+            "",
+            "cell directories \"cladefs extent store 15\"",
+            &ours[1..],
+            &without_replica,
+            &older_replica,
+        ] {
             let refusal = format!(
                 "the asker's formats ({asked_as:?}) are not this host's ({ours:?}): refused"
             );
@@ -399,7 +412,12 @@ fn members_refuse_other_incarnations_buckets_and_hosts_without_replicas() {
                 .await
                 .unwrap()
                 .into_inner();
-            let first = AppendRequest { of: named, log: 1, offset: 0, bytes: b"x".to_vec() };
+            let first = AppendRequest {
+                of: named,
+                log: local_cell::replicate::own_of(1),
+                offset: 0,
+                bytes: local_cell::replicate::own_frame(1, b"one"),
+            };
             sending.send(first).await.unwrap();
             let no = answers.message().await.unwrap_err();
             assert_eq!((no.code(), no.message()), (Code::FailedPrecondition, &*refusal));
@@ -617,7 +635,8 @@ fn takes_refuse_members_answering_more_logs_than_a_member_holds() {
     // opens its directory again.
     drop(super::replicas(&dir.path().join("replicas")).unwrap());
     for log in 0..=replica::LOGS_MOST as u64 {
-        let path = dir.path().join(format!("replicas/3.9.1.4.{}", log * 2 + 1));
+        let [tenant, cell, number, epoch, log] = [3, 9, 1, 4, log * 2 + 1].map(base32_id::Padded);
+        let path = dir.path().join(format!("replicas/{tenant}.{cell}.{number}.{epoch}.{log}"));
         std::fs::File::create(path).unwrap();
     }
     let served = counted_member(dir.path(), true);

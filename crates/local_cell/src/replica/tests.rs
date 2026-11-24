@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::MemDir;
-use crate::replicate::{log_of, own_frame, own_of};
+use crate::replicate::{log_of, own_frame, own_frames, own_of};
 
 const CELL: CellId = CellId { tenant: 3, id: 9 };
 const MOST: u64 = 1 << 20;
@@ -165,7 +165,7 @@ fn logs_end_at_their_last_whole_frame_after_corrupting_crashes() {
 #[test]
 fn directories_without_incarnations_are_refused() {
     let dir = MemDir::new();
-    dir.create("3.9.promise.5", false).unwrap();
+    dir.create(&promise_path(CELL, 5), false).unwrap();
     let opened = Replicas::open(dir, MOST);
     assert!(matches!(opened, Err(Error::Io(_))), "{:?}", opened.err());
 
@@ -186,7 +186,7 @@ fn cells_are_fenced_again_by_later_takes() {
     replicas.fence(me, 5).unwrap();
     replicas.fence(me, 7).unwrap();
     assert_eq!(refused(replicas.append(me, 1, 0, b"x")), Refused::Fenced { promise: 7 });
-    dir.create("3.9.promise.6", false).unwrap();
+    dir.create(&promise_path(CELL, 6), false).unwrap();
     let reopened = Replicas::open(dir, MOST).unwrap();
     assert_eq!(refused(reopened.fence(me, 6)), Refused::Fenced { promise: 7 });
 }
@@ -358,12 +358,39 @@ fn logs_of_other_formats_are_refused_as_sent_and_as_held() {
     let reopened = Replicas::open(dir.clone(), MOST).unwrap();
     assert_eq!(reopened.fence(me, 5).unwrap(), [(log_of(1), 0), (own_of(1), own.len() as u64)]);
 
-    // A directory naming other log formats: refused as it opens.
-    let older = MemDir::new();
-    older.replace(INCARNATION, b"cladefs replicas 2\nincarnation 5\n").unwrap();
-    let opened =
-        Replicas::open(older, MOST).err().expect("a directory of other log formats opened");
-    assert_eq!(opened.to_string(), format!("{INCARNATION}: not {:?}", magic()));
+    // A directory of a version this build doesn't read, older or newer, or saying more than an
+    // incarnation file does: refused as it opens (doc-28).
+    for (text, refusal) in [
+        (
+            "cladefs replicas 2\nincarnation 5\n",
+            "\"cladefs replicas 2\": this build reads cladefs replica directory 4 to 4",
+        ),
+        (
+            "cladefs replicas 3, logs FXLOG\\x00\\x00\\x04, own frames 0x6678646178320002\nincarnation 5\n",
+            "\"cladefs replicas 3, logs FXLOG\\\\x00\\\\x00\\\\x04, own frames 0x6678646178320002\": this build reads cladefs replica directory 4 to 4",
+        ),
+        (
+            "cladefs replica directory 5\nincarnation 5\n",
+            "\"cladefs replica directory 5\": this build reads cladefs replica directory 4 to 4",
+        ),
+        (
+            "cladefs replica directory 4\nincarnation 5\nspare\n",
+            "a line past its incarnation: \"spare\"",
+        ),
+    ] {
+        let older = MemDir::new();
+        older.replace(INCARNATION, text.as_bytes()).unwrap();
+        let opened = Replicas::open(older, MOST).err().expect("a directory not read opened");
+        assert_eq!(opened.to_string(), format!("{INCARNATION}: {refusal}"), "{text:?}");
+    }
+    // A segment's log headed `FXLG` and a version this build doesn't read: refused as sent.
+    let mut newer = header.clone();
+    newer[4..8].copy_from_slice(&19u32.to_le_bytes());
+    let dir = MemDir::new();
+    let replicas = Replicas::open(dir.clone(), MOST).unwrap();
+    let me = (CELL, key(1, 4), replicas.incarnation());
+    let refusal = refused(replicas.append(me, log_of(1), 0, &newer));
+    assert_eq!(refusal, format(&at(2, 0), "FXLG\\x13\\x00\\x00\\x00"));
 }
 
 /// Board 8449: a cell gone for good loses every promise, of `u64::MAX` too, durably, and holds 0
@@ -652,4 +679,65 @@ fn streams_trim_the_configurations_they_leave_behind() {
     let held = (CELL, key(0, 4), ours);
     let end = frame.len() as u64;
     assert_eq!(replicas.append(held, 1, end, &frame).unwrap(), 2 * end);
+}
+
+#[test]
+fn every_frozen_version_is_read() {
+    formats::golden::check::<Files>(env!("CARGO_MANIFEST_DIR"));
+}
+
+/// The replica directory's own: its incarnation file, the names of its promises and logs, and an
+/// own log's frames. A segment's log it holds is the cell directory's (`formats/cell-directory`),
+/// an own frame's file an extent frame (`formats/extent-frame`).
+struct Files;
+
+impl formats::golden::Family for Files {
+    const FORMAT: formats::Format = FORMAT;
+
+    fn write() -> Vec<(&'static str, Vec<u8>)> {
+        let cell = CellId { tenant: 0x2f, id: 0x1_0000_0007 };
+        let key = Key { number: 3, epoch: 0x51 };
+        let names = format!("{}\n{}\n", promise_path(cell, 0x51), log_path(cell, key, own_of(4)));
+        let own = [own_frame(7, b"an extent frame"), own_frame(9, b"")].concat();
+        vec![
+            ("incarnation", incarnation_text(0xfedc_ba98_7654_3211).into_bytes()),
+            ("names", names.into_bytes()),
+            ("own-log", own),
+        ]
+    }
+
+    fn written(version: u32, case: &str, bytes: &[u8]) -> Result<String, String> {
+        // Version 4's readers are this build's.
+        if version != 4 {
+            return Err(format!("no reader of version {version}"));
+        }
+        Self::read_as(case, bytes)
+    }
+
+    fn read(case: &str, bytes: &[u8]) -> Result<(), String> {
+        Self::read_as(case, bytes).map(drop)
+    }
+}
+
+impl Files {
+    fn read_as(case: &str, bytes: &[u8]) -> Result<String, String> {
+        let text = || std::str::from_utf8(bytes).map_err(|err| err.to_string());
+        match case {
+            "incarnation" => parse_incarnation(text()?)
+                .map(|incarnation| format!("{incarnation:#x}"))
+                .map_err(|err| format!("{err:#}")),
+            "names" => {
+                let names: Option<Vec<_>> = text()?.lines().map(parse_name).collect();
+                names.map(|names| format!("{names:#?}")).ok_or_else(|| "a name not read".into())
+            }
+            "own-log" => {
+                let frames = own_frames(bytes).map_err(|err| format!("{err:#}"))?;
+                let said: Vec<_> = (frames.iter())
+                    .map(|(sequence, file)| (sequence, file.escape_ascii().to_string()))
+                    .collect();
+                Ok(format!("{said:#?}"))
+            }
+            _ => Err(format!("no file {case}")),
+        }
+    }
 }

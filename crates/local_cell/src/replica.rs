@@ -22,13 +22,16 @@
 //! The directory is flat, as a [`Dir`] removes no directories: `incarnation`, then for each cell
 //! `<tenant>.<cell>.promise.<epoch>`, and its logs `<tenant>.<cell>.<number>.<epoch>.<log>`, keyed by the
 //! configuration's number and the epoch of the writer that made it: two takers racing may both
-//! make the configuration after the active one, each its own.
+//! make the configuration after the active one, each its own. cladefs: every number in base 32,
+//! padded, as every other name of cladefs's (`base32_id`, board 10046).
 //!
-//! Formats (board 8457): what it holds is of its build's formats alone, as nothing migrates. Its
-//! `incarnation` file names the formats of the logs it holds ([`magic`]), so that a build of other
-//! log formats refuses the directory as it opens it rather than read its logs as empty, which
-//! forgot appends it had acked; a writer's segment log whose first bytes are not this build's
-//! `wal::LOG_MAGIC` is refused as it is appended, before any ack, and as it is read back.
+//! Formats: frozen ([`FORMAT`], doc-28, board 10046): every later build reads every version from 4
+//! on. Its `incarnation` file says the directory's version ([`HEADER`]); a promise is a name
+//! alone. The logs it holds are of frozen families of their own, each saying its version, read
+//! by range: a segment's log the cell directory's (`wal::LOG_MAGIC`), an own log's frames extent
+//! frames, framed as [`crate::replicate::own_frame`] says. A writer's segment log whose first
+//! bytes say a format this build doesn't read is refused as it is appended, before any ack, and as
+//! it is read back, never read as holding nothing, which forgot appends it had acked (board 8457).
 //!
 //! What a peer asks is untrusted (AGENTS.md, Trust boundaries; board 8445): a call is admitted only
 //! if the cell's head in the bucket could have asked it ([`admit`]), which the peer service reads
@@ -41,6 +44,7 @@
 
 use crate::dir::{Dir, File};
 use anyhow::{Context as _, anyhow};
+use base32_id::Padded;
 use extent_frame::segment::CellId;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io;
@@ -49,18 +53,51 @@ use std::sync::{Arc, Mutex};
 /// The directory's incarnation file.
 const INCARNATION: &str = "incarnation";
 
-/// The incarnation file's first line: the directory's format (3: the formats of the logs it holds
-/// named, board 8457; 2: logs held as their writers send them, no outer framing, board 6902), and
-/// the formats of the logs it holds, a segment's log's first bytes (`wal::LOG_MAGIC`) and the seed
-/// of its own extents' frames' hashes (`replicate::OWN_FRAME_SEED`), so that a change of either is
-/// a change of the directory's format, refused as it opens (no migrations, ever): a log of another
-/// format reads as holding nothing, which forgot what its member had acked.
-pub(crate) fn magic() -> String {
-    format!(
-        "cladefs replicas 3, logs {}, own frames {:#x}",
-        crate::wal::LOG_MAGIC.escape_ascii(),
-        crate::replicate::OWN_FRAME_SEED
-    )
+/// The replica directory's family: 2, logs held as their writers send them, no outer framing
+/// (board 6902); 3, the formats of the logs it holds named, `cladefs replicas 3, logs ..., own frames
+/// ...` (board 8457), refused but by a build of those alone; 4, frozen (doc-28, board 10046): its
+/// version alone, the logs it holds saying theirs, and its files' numbers in base 32.
+pub const FORMAT: formats::Format = formats::Format::new("replica directory", 4, 4);
+
+/// The incarnation file's first line, before the version.
+pub(crate) const HEADER: &str = "cladefs replica directory ";
+
+/// The version the incarnation file's first line, `line`, says, if this build reads it.
+fn version_of(line: &str) -> Option<u32> {
+    let version = line.strip_prefix(HEADER)?;
+    // Digits alone: `u32::from_str` would take a sign too.
+    if version.is_empty() || !version.bytes().all(|digit| digit.is_ascii_digit()) {
+        return None;
+    }
+    // Not a version this build reads: None, which the caller refuses with the line and range.
+    FORMAT.check(version.parse().ok()?).ok()
+}
+
+/// The incarnation file of incarnation `incarnation`, as this build writes it.
+fn incarnation_text(incarnation: u64) -> String {
+    format!("{HEADER}{}\nincarnation {incarnation}\n", FORMAT.current)
+}
+
+/// The incarnation `text`, an incarnation file, names: refused if its version is one this build
+/// doesn't read, or it says more or less than an incarnation file does.
+fn parse_incarnation(text: &str) -> Result<u64, anyhow::Error> {
+    let mut lines = text.lines();
+    let first = lines.next().unwrap_or_default();
+    if version_of(first).is_none() {
+        return Err(anyhow!(
+            "{INCARNATION}: {first:?}: this build reads {HEADER}{} to {}",
+            FORMAT.oldest,
+            FORMAT.current
+        ));
+    }
+    let line = lines.next().unwrap_or_default();
+    let number = line.strip_prefix("incarnation ").unwrap_or_default();
+    let incarnation =
+        number.parse().with_context(|| format!("{INCARNATION}: bad line {line:?}"))?;
+    if let Some(more) = lines.next() {
+        return Err(anyhow!("{INCARNATION}: a line past its incarnation: {more:?}"));
+    }
+    Ok(incarnation)
 }
 
 /// The most logs a member holds of one configuration (board 8453): a writer sends a segment's two
@@ -339,7 +376,8 @@ impl Log {
                 let segment = crate::layout::SegmentId { cell: cell.id, number: log >> 1 };
                 crate::wal::replica_valid_end(&bytes, segment)
             }
-            _ => crate::replicate::own_frames_end(&bytes) as u64,
+            _ => crate::replicate::own_frames_end(&bytes)
+                .with_context(|| format!("reading {path}"))? as u64,
         };
         Ok(Self { end })
     }
@@ -368,15 +406,7 @@ impl<D: Dir> Replicas<D> {
     pub fn open_as(dir: D, most: u64, new: impl FnOnce() -> u64) -> Result<Self, Error> {
         let names = dir.list("").context("listing the replica directory")?;
         let incarnation = if names.iter().any(|name| name == INCARNATION) {
-            let text = read_text(&dir, INCARNATION)?;
-            let mut lines = text.lines();
-            let magic = magic();
-            if lines.next() != Some(magic.as_str()) {
-                return Err(anyhow!("{INCARNATION}: not {magic:?}").into());
-            }
-            let line = lines.next().unwrap_or_default();
-            let number = line.strip_prefix("incarnation ").unwrap_or_default();
-            number.parse().with_context(|| format!("{INCARNATION}: bad line {line:?}"))?
+            parse_incarnation(&read_text(&dir, INCARNATION)?)?
         } else {
             let held: Vec<&String> =
                 names.iter().filter(|name| parse_name(name).is_some()).collect();
@@ -391,7 +421,7 @@ impl<D: Dir> Replicas<D> {
             }
             let incarnation = new();
             assert_ne!(incarnation, 0, "a replica directory's incarnation is never 0");
-            write_text(&dir, INCARNATION, &format!("{}\nincarnation {incarnation}\n", magic()))?;
+            write_text(&dir, INCARNATION, &incarnation_text(incarnation))?;
             incarnation
         };
         // cladefs: each cell's files, as this one listing found them, read as the cell is first
@@ -489,18 +519,15 @@ impl<D: Dir> Replicas<D> {
         if offset > end || offset + bytes.len() as u64 <= end {
             return Ok(end);
         }
-        // A segment's log's first bytes, this append's of them: this build's format's, or refused
-        // (board 8457). Its own extents' frames name no format: the writer's formats, as its
-        // stream of appends names them, are checked where it enters (`cladefsd::peers`).
-        if log & 1 == 0 {
-            // An offset past what this host addresses is past the magic's bytes: none to check.
-            let magic = usize::try_from(offset).ok().and_then(|at| crate::wal::LOG_MAGIC.get(at..));
-            let magic = magic.unwrap_or_default();
-            let given = &bytes[..magic.len().min(bytes.len())];
-            if given != &magic[..given.len()] {
-                let at = format!("log {log} of {cell} at {offset}");
-                return Err(Refused::format(at, given).into());
-            }
+        // A segment's log's first bytes, this append's of them: of a format this build reads, or
+        // refused (board 8457, doc-28). Its own extents' frames say this directory's version, and
+        // the writer's formats (which name `replica::FORMAT`) are checked where its stream of
+        // appends enters (`cladefsd::peers`).
+        if log & 1 == 0
+            && let Some(given) = log_start_refused(offset, bytes)
+        {
+            let at = format!("log {log} of {cell} at {offset}");
+            return Err(Refused::format(at, given).into());
         }
         let would = held.bytes(key) + (offset + bytes.len() as u64 - end);
         if would > self.most {
@@ -763,17 +790,13 @@ impl<D: Dir> Replicas<D> {
             for name in &names {
                 match parse_name(name) {
                     Some((_, None)) => {
-                        // Not a number: the error below names the file.
-                        let epoch = name.rsplit('.').next().and_then(|epoch| epoch.parse().ok());
-                        let epoch = epoch.ok_or_else(|| anyhow!("bad promise {name:?}"))?;
+                        let epoch = last_number(name).expect("a promise's name, read");
                         // A crash between a promise and the removal of the one before leaves both.
                         read.promise = read.promise.max(epoch);
                         read.promises.insert(epoch);
                     }
                     Some((_, Some(key))) => {
-                        // Not a number: the error below names the file.
-                        let log = name.rsplit('.').next().and_then(|log| log.parse().ok());
-                        let log = log.ok_or_else(|| anyhow!("bad log name {name:?}"))?;
+                        let log = last_number(name).expect("a log's name, read");
                         let file = (self.dir.open(name, false))
                             .with_context(|| format!("opening {name}"))?;
                         read.logs.insert((key, log), Log::read(cell, log, &file, name)?);
@@ -905,19 +928,37 @@ pub enum Swept {
     Gone,
 }
 
+/// The bytes of `bytes`, appended at `offset` of a segment's log, that fall in its first eight, if
+/// they say a format this build doesn't read: `FXLG` and a version of the cell directory's it
+/// reads (`wal::LOG_MAGIC`). A version split across appends is held to this build's own, the most
+/// one append can tell of it.
+fn log_start_refused(offset: u64, bytes: &[u8]) -> Option<&[u8]> {
+    let magic = crate::wal::LOG_MAGIC;
+    // An offset past what this host addresses is past the magic's bytes: none to check.
+    let at = usize::try_from(offset).ok().filter(|at| *at < magic.len())?;
+    let given = &bytes[..(magic.len() - at).min(bytes.len())];
+    let refused = match (at, given.len()) {
+        // The whole of it: its kind and a version read.
+        (0, 8) => !crate::wal::log_magic_read(given),
+        _ => given != &magic[at..at + given.len()],
+    };
+    refused.then_some(given)
+}
+
 fn promise_path(cell: CellId, epoch: u64) -> String {
-    format!("{}.{}.promise.{epoch}", cell.tenant, cell.id)
+    format!("{}.{}.promise.{}", Padded(cell.tenant), Padded(cell.id), Padded(epoch))
 }
 
 fn log_path(cell: CellId, key: Key, log: u64) -> String {
-    format!("{}.{}.{}.{}.{log}", cell.tenant, cell.id, key.number, key.epoch)
+    let (tenant, id) = (Padded(cell.tenant), Padded(cell.id));
+    format!("{tenant}.{id}.{}.{}.{}", Padded(key.number), Padded(key.epoch), Padded(log))
 }
 
 /// The cell a file of the directory is of, and the configuration, if it is a log's.
 fn parse_name(name: &str) -> Option<(CellId, Option<Key>)> {
     let parts: Vec<&str> = name.split('.').collect();
-    // Not a number: not a file of a cell's.
-    let number = |at: usize| parts.get(at).and_then(|part| part.parse::<u64>().ok());
+    // Not a number in base 32, padded: not a file of a cell's.
+    let number = |at: usize| parts.get(at).and_then(|part| base32_id::parse_padded(part));
     let cell = CellId { tenant: number(0)?, id: number(1)? };
     match parts.len() {
         4 if parts[2] == "promise" => {
@@ -930,6 +971,12 @@ fn parse_name(name: &str) -> Option<(CellId, Option<Key>)> {
         }
         _ => None,
     }
+}
+
+/// The number the name of a file of a cell's ends with, [`parse_name`] read: a promise's epoch, a
+/// log's number.
+fn last_number(name: &str) -> Option<u64> {
+    name.rsplit('.').next().and_then(base32_id::parse_padded)
 }
 
 fn read_text<D: Dir>(dir: &D, path: &str) -> Result<String, Error> {

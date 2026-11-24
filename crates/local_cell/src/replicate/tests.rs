@@ -374,31 +374,56 @@ fn trims_keep_what_follows_the_head_and_refuse_forged_logs() {
 #[test]
 fn own_frames_end_at_one_cut_short_or_past_the_end() {
     let whole = [own_frame(1, b"one"), own_frame(2, b"")].concat();
-    assert_eq!(own_frames(&whole), [(1, b"one".to_vec()), (2, Vec::new())]);
-    assert_eq!(own_frames_end(&whole), whole.len());
-    for len in [4, u64::MAX, u64::MAX - 23, 1 << 63] {
+    assert_eq!(own_frames(&whole).unwrap(), [(1, b"one".to_vec()), (2, Vec::new())]);
+    assert_eq!(own_frames_end(&whole).unwrap(), whole.len());
+    for len in [4, u64::MAX, u64::MAX - 27, 1 << 63] {
         let mut bytes = whole.clone();
+        bytes.extend_from_slice(&crate::replica::FORMAT.current.to_le_bytes());
         bytes.extend_from_slice(&3u64.to_le_bytes());
         bytes.extend_from_slice(&len.to_le_bytes());
         bytes.extend_from_slice(&1u64.to_le_bytes());
         bytes.extend_from_slice(b"abc");
-        assert_eq!(own_frames(&bytes).len(), 2, "a frame of {len} bytes");
-        assert_eq!(own_frames_end(&bytes), whole.len());
+        assert_eq!(own_frames(&bytes).unwrap().len(), 2, "a frame of {len} bytes");
+        assert_eq!(own_frames_end(&bytes).unwrap(), whole.len());
     }
     // Corrupted payload byte stops at the frame before it.
     let mut bad = whole.clone();
-    bad[25] ^= 1;
-    assert_eq!(own_frames(&bad), []);
-    assert_eq!(own_frames_end(&bad), 0);
-    // Cut short anywhere: the first frame whole from its 27th byte, the second at the 51st.
+    bad[29] ^= 1;
+    assert_eq!(own_frames(&bad).unwrap(), []);
+    assert_eq!(own_frames_end(&bad).unwrap(), 0);
+    // Cut short anywhere: the first frame whole from its 31st byte, the second at the 59th.
     for cut in 0..=whole.len() {
         let expected = match cut {
-            0..27 => 0,
-            27..51 => 1,
+            0..31 => 0,
+            31..59 => 1,
             _ => 2,
         };
-        assert_eq!(own_frames(&whole[..cut]).len(), expected, "cut at {cut}");
+        assert_eq!(own_frames(&whole[..cut]).unwrap().len(), expected, "cut at {cut}");
     }
+}
+
+/// Doc-28: an own log's frame whole, its hash its own, of a version this build doesn't read, a
+/// newer build's, is refused, never taken for the log's torn end, which would forget what its
+/// member acked; one corrupted in its version is torn, as any corrupted byte.
+#[test]
+fn own_frames_of_versions_not_read_are_refused() {
+    let first = own_frame(1, b"one");
+    let mut newer = 5u32.to_le_bytes().to_vec();
+    newer.extend_from_slice(&2u64.to_le_bytes());
+    newer.extend_from_slice(&3u64.to_le_bytes());
+    newer.extend_from_slice(&own_frame_hash(5, 2, b"two").to_le_bytes());
+    newer.extend_from_slice(b"two");
+    let log = [first.clone(), newer.clone()].concat();
+    let refused = format!("{:#}", own_frames(&log).unwrap_err());
+    let at = first.len();
+    let said = format!(
+        "an own log's frame at {at}: replica directory version 5: this build reads version 4 alone"
+    );
+    assert_eq!(refused, said);
+    assert_eq!(format!("{:#}", own_frames_end(&log).unwrap_err()), said);
+    let mut corrupted = log.clone();
+    corrupted[at] ^= 1;
+    assert_eq!(own_frames_end(&corrupted).unwrap(), at);
 }
 
 /// Board 6902 (Codex review): replication hot buffers across multiple replicators (including
