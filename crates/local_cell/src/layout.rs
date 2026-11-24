@@ -167,6 +167,11 @@ impl CellFile {
         let kind = (fields.get("kind"))
             .map(|kind| Kind::named(kind).ok_or_else(|| anyhow!("bad kind {kind:?}")))
             .transpose()?;
+        let ephemeral = match fields.get("ephemeral").map(String::as_str) {
+            None => false,
+            Some("yes") => true,
+            Some(value) => return Err(anyhow!("bad ephemeral {value:?}")),
+        };
         Ok(Self {
             block_size: number(&fields, "block_size")?.try_into().context("bad block_size")?,
             cell: (fields.get("cell").ok_or_else(|| anyhow!("no cell"))?)
@@ -180,7 +185,7 @@ impl CellFile {
             writer_copies,
             kind,
             version,
-            ephemeral: fields.contains_key("ephemeral"),
+            ephemeral,
         })
     }
 
@@ -756,6 +761,13 @@ mod tests {
         let ephemeral = CellFile { ephemeral: true, ..named.clone() };
         assert!(ephemeral.text().ends_with("\nkind sqlite\nephemeral yes\n"));
         assert_eq!(CellFile::parse(&ephemeral.text()).unwrap(), ephemeral);
+        for value in ["false", "no", "", "yes no"] {
+            let text = format!("{}ephemeral {value}\n", named.text());
+            assert_eq!(
+                CellFile::parse(&text).unwrap_err().to_string(),
+                format!("bad ephemeral {value:?}")
+            );
+        }
         let hex = format!("{}version 00000000000000be\n", kept.text());
         assert_eq!(
             CellFile::parse(&hex).unwrap_err().to_string(),
