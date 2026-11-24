@@ -173,7 +173,7 @@ starting retires the references of cells it holds no more, and `DecommissionHost
 a host gone for good. `MigrateCell` and `HandOverCell` move one live to another host over the
 daemons' peer network (`cladefsd::migration`): its kept segments are copied while its guest runs,
 the rest once its VM process is gone, the source giving the cell up before the target takes it
-over, as `specs/ephemeral` models. A target takes a migration only of a source of its own formats
+over, as `specs/ephemeral` models; `AbortMigration` ends a migration before that. A target takes a migration only of a source of its own formats
 and bucket, the cell going at a new name in its `CLADEFSD_EPHEMERAL_CELLS` directory, and takes it
 into place only once it opens as the cell prepared (boards 8443, 8447, 8455).
 

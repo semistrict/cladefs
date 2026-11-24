@@ -174,9 +174,20 @@ files rather than streaming its log (`cladefsd::migration`):
    entry is a migration's), dropping what it staged, and the cell directory too if the hand-over
    renamed it into place before T remembered it accepted (board 5728), and retiring its reference.
 
+6. **Abort** (`AbortMigration` on S, board 8577): a migration whose hand-over has not begun ends at
+   S's word, its guest running on: S stops the rounds, tells T to give it up (`MigrateAbort`), and
+   the cell may migrate again, to another host too. That is how a migration T gave up (restarted,
+   or idle) is ended, which otherwise kept `MigrateCell` refusing (`EBUSY`). Once the hand-over
+   gave the cell up, the cell's fate is T's: S tells T to give the migration up, then asks it to
+   take the cell over as `HandOverCell` does; T refuses, and S serves the cell again (`EAGAIN`, as
+   `HandOverCell` answers), or, having accepted before, T has the cell (`EEXIST`) and S lets it go.
+
 **One request at a time:** T serves one request of a cell's migrations at a time, each run to its
 end even if its asker goes, and bounds its bucket calls (30 s): a prepare whose reference times out
-gives the migration up (board 5732).
+gives the migration up (board 5732). S bounds each of its requests (board 8577): a piece of a file
+30 s, a hand-over 120 s (T's CRCs, fsyncs and reference), a renewal 5 s; past its bound a round
+fails and goes on later, and a hand-over answers `ENOTCONN`. A round never holds what the
+hand-over needs across a request: the hand-over stops the rounds, then sends alone.
 
 **One writer:** S gives the cell up before T can open it, and T opens only the cell directory S named in full.
 

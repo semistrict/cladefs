@@ -666,6 +666,14 @@ impl Cladefsd for Control {
         reply(super::migration::hand_over(cell_dir).await.map(|()| HandOverCellResponse {}))
     }
 
+    async fn abort_migration(
+        &self,
+        request: Request<AbortMigrationRequest>,
+    ) -> Result<Response<AbortMigrationResponse>, Status> {
+        let cell_dir = path(request.into_inner().path)?;
+        reply(super::migration::abort(cell_dir).await.map(|()| AbortMigrationResponse {}))
+    }
+
     async fn decommission_host(
         &self,
         request: Request<DecommissionHostRequest>,
@@ -1314,6 +1322,14 @@ impl Client {
         let request = HandOverCellRequest { path: name(path)? };
         let what = format!("handing the cell at {} over", path.display());
         self.call(what, |mut c| async move { c.hand_over_cell(request).await })?;
+        Ok(())
+    }
+
+    /// cladefs: ends the migration of the ephemeral cell at `path` (`AbortMigration`, board 8577).
+    pub fn abort_migration(&self, path: &Path) -> Result<(), crate::Error> {
+        let request = AbortMigrationRequest { path: name(path)? };
+        let what = format!("aborting the migration of the cell at {}", path.display());
+        self.call(what, |mut c| async move { c.abort_migration(request).await })?;
         Ok(())
     }
 

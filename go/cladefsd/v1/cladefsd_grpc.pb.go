@@ -128,6 +128,7 @@ const (
 	Cladefsd_ListEphemeralHosts_FullMethodName = "/cladefs.cladefsd.v1.Cladefsd/ListEphemeralHosts"
 	Cladefsd_MigrateCell_FullMethodName        = "/cladefs.cladefsd.v1.Cladefsd/MigrateCell"
 	Cladefsd_HandOverCell_FullMethodName       = "/cladefs.cladefsd.v1.Cladefsd/HandOverCell"
+	Cladefsd_AbortMigration_FullMethodName     = "/cladefs.cladefsd.v1.Cladefsd/AbortMigration"
 )
 
 // CladefsdClient is the client API for Cladefsd service.
@@ -327,7 +328,8 @@ type CladefsdClient interface {
 	// Begins the live migration of the ephemeral cell at `path` to the daemon whose peer
 	// address is `peer`, where it goes at `to` (backlog doc-25, TASK-698.4): that daemon
 	// refers to the cell's origin first, then takes the cell's kept segments as they come, while its
-	// guest runs. Returns the migration's ID. HandOverCell ends it.
+	// guest runs. Returns the migration's ID. HandOverCell ends it, or AbortMigration. EBUSY while
+	// another migration of the cell is under way.
 	MigrateCell(ctx context.Context, in *MigrateCellRequest, opts ...grpc.CallOption) (*MigrateCellResponse, error)
 	// Hands the ephemeral cell at `path` over to the daemon its migration names, once
 	// nothing has it open (EBUSY otherwise: its guest paused, its VM process gone): this daemon gives
@@ -336,6 +338,18 @@ type CladefsdClient interface {
 	// (EAGAIN). Asked again after a failure or a restart, it asks the other again, which answers as
 	// it did.
 	HandOverCell(ctx context.Context, in *HandOverCellRequest, opts ...grpc.CallOption) (*HandOverCellResponse, error)
+	// Ends the live migration of the ephemeral cell at `path` (board 8577). Its hand-over not
+	// begun: its rounds stop, the other daemon is told to give it up, and MigrateCell may migrate the
+	// cell again, to another daemon too, while its guest runs on; so too a migration the other gave
+	// up (restarted, or hearing nothing of it for CLADEFSD_MIGRATION_IDLE). Its hand-over begun, the
+	// cell given up (refused while open, EBUSY), the cell's fate is the other daemon's to say: told
+	// to give the migration up, then asked to take the cell over as HandOverCell asks, it refuses,
+	// and this daemon serves the cell again, answering as HandOverCell does, EAGAIN; not answering,
+	// ENOTCONN, the cell given up still, to be asked again; or, having accepted it before, the cell
+	// is the other's, ALREADY_EXISTS (EEXIST), and goes here. No migration of the cell under way,
+	// NOT_FOUND (ENOENT); one being prepared, EBUSY; a daemon keeping no ephemeral cells (started
+	// without CLADEFSD_EPHEMERAL), FAILED_PRECONDITION (ENOTSUP).
+	AbortMigration(ctx context.Context, in *AbortMigrationRequest, opts ...grpc.CallOption) (*AbortMigrationResponse, error)
 }
 
 type cladefsdClient struct {
@@ -706,6 +720,16 @@ func (c *cladefsdClient) HandOverCell(ctx context.Context, in *HandOverCellReque
 	return out, nil
 }
 
+func (c *cladefsdClient) AbortMigration(ctx context.Context, in *AbortMigrationRequest, opts ...grpc.CallOption) (*AbortMigrationResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AbortMigrationResponse)
+	err := c.cc.Invoke(ctx, Cladefsd_AbortMigration_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // CladefsdServer is the server API for Cladefsd service.
 // All implementations must embed UnimplementedCladefsdServer
 // for forward compatibility.
@@ -903,7 +927,8 @@ type CladefsdServer interface {
 	// Begins the live migration of the ephemeral cell at `path` to the daemon whose peer
 	// address is `peer`, where it goes at `to` (backlog doc-25, TASK-698.4): that daemon
 	// refers to the cell's origin first, then takes the cell's kept segments as they come, while its
-	// guest runs. Returns the migration's ID. HandOverCell ends it.
+	// guest runs. Returns the migration's ID. HandOverCell ends it, or AbortMigration. EBUSY while
+	// another migration of the cell is under way.
 	MigrateCell(context.Context, *MigrateCellRequest) (*MigrateCellResponse, error)
 	// Hands the ephemeral cell at `path` over to the daemon its migration names, once
 	// nothing has it open (EBUSY otherwise: its guest paused, its VM process gone): this daemon gives
@@ -912,6 +937,18 @@ type CladefsdServer interface {
 	// (EAGAIN). Asked again after a failure or a restart, it asks the other again, which answers as
 	// it did.
 	HandOverCell(context.Context, *HandOverCellRequest) (*HandOverCellResponse, error)
+	// Ends the live migration of the ephemeral cell at `path` (board 8577). Its hand-over not
+	// begun: its rounds stop, the other daemon is told to give it up, and MigrateCell may migrate the
+	// cell again, to another daemon too, while its guest runs on; so too a migration the other gave
+	// up (restarted, or hearing nothing of it for CLADEFSD_MIGRATION_IDLE). Its hand-over begun, the
+	// cell given up (refused while open, EBUSY), the cell's fate is the other daemon's to say: told
+	// to give the migration up, then asked to take the cell over as HandOverCell asks, it refuses,
+	// and this daemon serves the cell again, answering as HandOverCell does, EAGAIN; not answering,
+	// ENOTCONN, the cell given up still, to be asked again; or, having accepted it before, the cell
+	// is the other's, ALREADY_EXISTS (EEXIST), and goes here. No migration of the cell under way,
+	// NOT_FOUND (ENOENT); one being prepared, EBUSY; a daemon keeping no ephemeral cells (started
+	// without CLADEFSD_EPHEMERAL), FAILED_PRECONDITION (ENOTSUP).
+	AbortMigration(context.Context, *AbortMigrationRequest) (*AbortMigrationResponse, error)
 	mustEmbedUnimplementedCladefsdServer()
 }
 
@@ -1029,6 +1066,9 @@ func (UnimplementedCladefsdServer) MigrateCell(context.Context, *MigrateCellRequ
 }
 func (UnimplementedCladefsdServer) HandOverCell(context.Context, *HandOverCellRequest) (*HandOverCellResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method HandOverCell not implemented")
+}
+func (UnimplementedCladefsdServer) AbortMigration(context.Context, *AbortMigrationRequest) (*AbortMigrationResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AbortMigration not implemented")
 }
 func (UnimplementedCladefsdServer) mustEmbedUnimplementedCladefsdServer() {}
 func (UnimplementedCladefsdServer) testEmbeddedByValue()                  {}
@@ -1699,6 +1739,24 @@ func _Cladefsd_HandOverCell_Handler(srv interface{}, ctx context.Context, dec fu
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Cladefsd_AbortMigration_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AbortMigrationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CladefsdServer).AbortMigration(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Cladefsd_AbortMigration_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CladefsdServer).AbortMigration(ctx, req.(*AbortMigrationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Cladefsd_ServiceDesc is the grpc.ServiceDesc for Cladefsd service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1849,6 +1907,10 @@ var Cladefsd_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "HandOverCell",
 			Handler:    _Cladefsd_HandOverCell_Handler,
+		},
+		{
+			MethodName: "AbortMigration",
+			Handler:    _Cladefsd_AbortMigration_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

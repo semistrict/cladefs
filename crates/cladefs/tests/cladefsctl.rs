@@ -869,7 +869,8 @@ fn memory_and_disks_through_the_daemon() {
 }
 
 /// board 8585: `set-peers`, `migrate` and `hand-over` reach the daemon's calls, which say what they
-/// refuse: no peers, a cell no migration's, a migration of none.
+/// refuse: no peers, a cell no migration's, a migration of none; board 8577: `abort-migration` too,
+/// of a daemon keeping no ephemeral cells (`ENOTSUP`).
 #[cfg(target_os = "linux")]
 #[test]
 fn peers_and_migrations_through_the_daemon() {
@@ -902,6 +903,10 @@ fn peers_and_migrations_through_the_daemon() {
     assert!(refused.contains(&format!("migrating the cell at {}", path.display())), "{refused}");
     let refused = run(&["hand-over", path.to_str().unwrap()]).unwrap_err();
     assert!(refused.contains(&format!("handing the cell at {} over", path.display())), "{refused}");
+    let refused = run(&["abort-migration", path.to_str().unwrap()]).unwrap_err();
+    let aborting = format!("aborting the migration of the cell at {}", path.display());
+    assert!(refused.contains(&aborting), "{refused}");
+    assert!(refused.contains("ENOTSUP"), "{refused}");
 }
 
 /// board 8585: `--timeout`, or CLADEFSCTL_TIMEOUT, bounds a call the daemon holds, here a GetStats
@@ -957,6 +962,7 @@ fn calls_of_the_daemon_need_it() {
         &["set-peers", "a:1"],
         &["migrate", "d", "a:1", "e"],
         &["hand-over", "d"],
+        &["abort-migration", "d"],
         &["memory-limit", "none"],
         &["memory-weight", "a", "1"],
         &["in-flight", "default"],

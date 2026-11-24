@@ -578,3 +578,77 @@ fn migrations_their_sources_renew_outlast_the_idle_bound() {
     forked.source.control.hand_over_cell(&forked.here).unwrap();
     forked.assert_handed_over(&there, 4);
 }
+
+/// Board 8577: a migration whose target restarted during its rounds, giving it up, keeps the cell
+/// from migrating elsewhere (`EBUSY`) until AbortMigration ends it, its guest writing on
+/// meanwhile; the cell then migrates to a second target while its guest runs, that target's
+/// hand-over accepted, and the first holds nothing of it.
+#[test]
+fn migrations_their_targets_gave_up_are_aborted_and_go_elsewhere() {
+    let mut forked = forked(4);
+    let there = forked.host(1).join("ephemeral-cell");
+    let control = &forked.source.control;
+    let first = control.migrate_cell(&forked.here, forked.target_at(), &there).unwrap();
+    let client = CellClient::connect(&forked.source.vms, &forked.here, CAPACITY).unwrap();
+    let cell = forked.child.id;
+    let own = move |sequence| ExtentId { cell, sequence };
+    write(&client, own(5));
+    forked.restart(1);
+    assert!(!staging(&forked.host(1), first).exists(), "the target restarted gives it up");
+
+    let second_dir = forked.dir.path().join("second");
+    std::fs::create_dir(&second_dir).unwrap();
+    let [second_at, _] = addresses();
+    let peers = [second_at.clone(), forked.source_at().to_owned()];
+    let second = daemon(&second_dir, &forked.bucket(), &peers);
+    let elsewhere = second_dir.join("ephemeral-cell");
+    let control = &forked.source.control;
+    let busy = control.migrate_cell(&forked.here, &second_at, &elsewhere).unwrap_err();
+    assert_eq!(busy.errno(), Some(cladefs::Errno::EBUSY), "{busy}");
+    control.abort_migration(&forked.here).unwrap();
+    write(&client, own(6));
+    // Ended: nothing of it to end, the cell open or not.
+    let again = control.abort_migration(&forked.here).unwrap_err();
+    assert_eq!(again.errno(), Some(cladefs::Errno::ENOENT), "{again}");
+
+    control.migrate_cell(&forked.here, &second_at, &elsewhere).unwrap();
+    write(&client, own(7));
+    drop(client);
+    control.hand_over_cell(&forked.here).unwrap();
+    assert!(!forked.here.exists(), "the source's cell directory goes once handed over");
+    assert!(!there.exists(), "the first target took it");
+    let noted =
+        |daemon: &Daemon| std::fs::read_dir(daemon.ephemeral.join("cells")).unwrap().count();
+    assert_eq!(forked.noted(), (0, 0), "the cell is neither the source's nor the first target's");
+    assert_eq!(noted(&second), 1, "the cell is the second target's");
+    assert_eq!(referring(&forked.bucket()).len(), 1, "the second target's reference alone");
+    let client = CellClient::connect(&second.vms, &elsewhere, CAPACITY).unwrap();
+    assert!(read(&client, forked.inherited) == data(1), "the parent's extent read otherwise");
+    for sequence in 1..=7 {
+        assert!(read(&client, own(sequence)) == data(sequence), "extent {sequence} read otherwise");
+    }
+}
+
+/// Board 8577 (the verifying review, hotbed review 84): a hand-over whose marker's write fails
+/// (failpoint `migration::marking`) gives the cell up not, and leaves its migration under way, its
+/// rounds going on: AbortMigration then ends it while the guest runs, where it answered EBUSY, and
+/// the cell migrates again and is handed over.
+#[test]
+fn hand_overs_failing_to_give_the_cell_up_leave_it_migrating() {
+    let mut forked = forked(4);
+    let there = forked.host(1).join("ephemeral-cell");
+    forked.restart_with(0, &[("FAILPOINTS", "migration::marking=1*return")]);
+    let control = &forked.source.control;
+    control.migrate_cell(&forked.here, forked.target_at(), &there).unwrap();
+    let failed = control.hand_over_cell(&forked.here).unwrap_err();
+    assert_eq!(failed.errno(), Some(cladefs::Errno::EIO), "{failed}");
+    let client = CellClient::connect(&forked.source.vms, &forked.here, CAPACITY).unwrap();
+    let cell = forked.child.id;
+    write(&client, ExtentId { cell, sequence: 5 });
+    control.abort_migration(&forked.here).unwrap();
+    control.migrate_cell(&forked.here, forked.target_at(), &there).unwrap();
+    write(&client, ExtentId { cell, sequence: 6 });
+    drop(client);
+    control.hand_over_cell(&forked.here).unwrap();
+    forked.assert_handed_over(&there, 6);
+}

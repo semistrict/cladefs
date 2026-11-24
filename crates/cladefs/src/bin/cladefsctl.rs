@@ -30,6 +30,7 @@
 //! cladefsctl set-peers [ADDRESS...]
 //! cladefsctl migrate DIR PEER TO
 //! cladefsctl hand-over DIR
+//! cladefsctl abort-migration DIR
 //! cladefsctl memory-limit [--tenant TENANT] BYTES|none
 //! cladefsctl memory-weight TENANT WEIGHT
 //! cladefsctl in-flight [--tenant TENANT] BYTES|default
@@ -151,8 +152,9 @@
 //! be those at the ADDRESSes, each `HOST:PORT`, none without any (`SetPeers`). `migrate` begins the
 //! live migration of the ephemeral cell at DIR to the daemon whose peer address is PEER, its cell
 //! going at TO there, and prints `migration ID` (`MigrateCell`); `hand-over` hands it over to its
-//! target (`HandOverCell`). `memory-limit` limits the memory the daemon holds extents' pages in to
-//! BYTES, or lifts the limit with `none` (`SetMemoryLimit`); `memory-weight` weighs a tenant's
+//! target (`HandOverCell`); `abort-migration` ends its migration, the cell then free to migrate
+//! again (`AbortMigration`). `memory-limit` limits the memory the daemon holds extents' pages in
+//! to BYTES, or lifts the limit with `none` (`SetMemoryLimit`); `memory-weight` weighs a tenant's
 //! memory against the others' (`SetMemoryWeight`); `in-flight` sets the bytes in flight a tenant's
 //! connections share, or the default with `default` (`SetTenantInFlight`); `shrink-memory` evicts
 //! pages down to TARGET bytes, and prints `bytes`, what is held then (`ShrinkMemory`).
@@ -355,7 +357,8 @@ fn usage() -> anyhow::Error {
          cladefsctl stats [--json] [--wait SECONDS] [--leave-out histograms|guests|vms]... | \
          cladefsctl cells [--json] | cladefsctl counters [--json] | \
          cladefsctl set-peers [ADDRESS...] | cladefsctl migrate DIR PEER TO | \
-         cladefsctl hand-over DIR | cladefsctl memory-limit [--tenant TENANT] BYTES|none | \
+         cladefsctl hand-over DIR | cladefsctl abort-migration DIR | \
+         cladefsctl memory-limit [--tenant TENANT] BYTES|none | \
          cladefsctl memory-weight TENANT WEIGHT | \
          cladefsctl in-flight [--tenant TENANT] BYTES|default | \
          cladefsctl shrink-memory [--tenant TENANT] TARGET | \
@@ -510,6 +513,10 @@ enum Command {
     },
     /// cladefs: an ephemeral cell migrating handed over to its target (board 8585).
     HandOver {
+        dir: PathBuf,
+    },
+    /// cladefs: an ephemeral cell's migration ended (board 8577).
+    AbortMigration {
         dir: PathBuf,
     },
     /// cladefs: a tenant's memory limited, or every tenant's without one, or lifted without
@@ -750,6 +757,7 @@ impl Command {
                 Self::Migrate { dir: dir.into(), peer: peer.to_owned(), to: to.into() }
             }
             ["hand-over", dir] => Self::HandOver { dir: dir.into() },
+            ["abort-migration", dir] => Self::AbortMigration { dir: dir.into() },
             ["memory-limit", ref rest @ ..] => {
                 let (tenant, bytes) = of_tenant(rest)?;
                 Self::MemoryLimit { tenant, bytes: bytes_or(bytes, "none")? }
@@ -911,6 +919,7 @@ impl Command {
                 println!("migration {}", daemon.migrate_cell(&dir, &peer, &to)?);
             }
             Self::HandOver { dir } => daemon.hand_over_cell(&dir)?,
+            Self::AbortMigration { dir } => daemon.abort_migration(&dir)?,
             Self::MemoryLimit { tenant, bytes } => daemon.set_memory_limit(tenant, bytes)?,
             Self::MemoryWeight { tenant, weight } => daemon.set_memory_weight(tenant, weight)?,
             Self::InFlight { tenant, bytes } => daemon.set_tenant_in_flight(tenant, bytes)?,
@@ -1039,7 +1048,9 @@ impl Command {
             Self::Cells { .. } => Some("the cells VM processes have open are"),
             Self::Counters { .. } => Some("its counters are"),
             Self::SetPeers { .. } => Some("its peers are"),
-            Self::Migrate { .. } | Self::HandOver { .. } => Some("migrations are"),
+            Self::Migrate { .. } | Self::HandOver { .. } | Self::AbortMigration { .. } => {
+                Some("migrations are")
+            }
             Self::MemoryLimit { .. }
             | Self::MemoryWeight { .. }
             | Self::InFlight { .. }
@@ -1191,6 +1202,7 @@ impl Command {
             | Self::SetPeers { .. }
             | Self::Migrate { .. }
             | Self::HandOver { .. }
+            | Self::AbortMigration { .. }
             | Self::MemoryLimit { .. }
             | Self::MemoryWeight { .. }
             | Self::InFlight { .. }

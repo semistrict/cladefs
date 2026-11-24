@@ -42,8 +42,18 @@
 //!    restart too, sends again what the target lacks and asks it again, naming every file as
 //!    before; the target answers as it did.
 //!
+//! 5. **Abort** (`AbortMigration`, board 8577): a migration whose hand-over has not begun ends at
+//!    the source's word, as one whose prepare went unanswered does (`SourceLoses`): its rounds
+//!    stopped, its target told to give it up by its ID, and the cell free to migrate again, to
+//!    another target too, its guest running on. Its hand-over begun, the cell given up, its end is
+//!    the target's to say: told to give the migration up, then asked to take the cell over as
+//!    `HandOverCell` asks, a target that gave it up refuses, and the cell is served here again;
+//!    one that accepted before says so again, and the cell is let go of here.
+//!
 //! The target serves one request of a cell's migrations at a time, each run to its end however
-//! its asker goes, its bucket calls bounded (board 5732).
+//! its asker goes, its bucket calls bounded (board 5732). The source bounds each of its requests
+//! (board 8577): a target whose handler is wedged (a stalled disk, a lock) answers the HTTP/2
+//! layer's pings, its connection alive, and a request with no deadline waited on it for ever.
 
 use super::peers::proto::{
     FileDigest, MigrateAbortRequest, MigrateFileRequest, MigrateHandOverRequest,
@@ -92,6 +102,33 @@ const PREPARE_BOUND: Duration = Duration::from_secs(45);
 
 /// How often a source tries its prepare, its answer lost, before it gives the migration up.
 const PREPARE_TRIES: u32 = 3;
+
+/// How long a source waits for its target to take each piece of a file (`MigrateFile`), at most
+/// [`PIECE`] bytes, and a directory or a file's holes alone (board 8577): the target admits what
+/// the piece adds to its disk and writes it bypassing its page cache, a loaded disk's second or
+/// two at worst. Past it the round fails, its file sent again whole at the next; a hand-over's
+/// last files failing so, it answers `ENOTCONN`, to be asked again. The source's bounds are
+/// hotbed question 520.
+const PIECE_BOUND: Duration = Duration::from_secs(30);
+
+/// How long a source waits for its target's answer to a hand-over (`MigrateHandOver`, board 8577):
+/// the target reads every file but the kept segments whole for its CRC (the raw segments past the
+/// local checkpoint, their logs, a few hundred MiB at most: seconds of a disk's reading), opens the
+/// cell staged, syncs every file and directory of it (thousands of fsyncs at a few milliseconds
+/// each on a loaded disk: tens of seconds), renames it into place, and writes its reference in its
+/// bucket within [`BUCKET_BOUND`]. Past it, the hand-over answers `ENOTCONN`, the cell given up
+/// still: the target runs the request to its end however its asker goes, and asked again it
+/// answers as it did, so a bound too short costs a retry, never the cell.
+const HAND_OVER_BOUND: Duration = Duration::from_secs(120);
+
+/// How long a source waits for its target's answer to a renewal (`MigrateRenew`), which reads its
+/// journal and writes nothing: past it, the renewal is said and sent again at the next round, well
+/// within any `CLADEFSD_MIGRATION_IDLE`.
+const RENEW_BOUND: Duration = Duration::from_secs(5);
+
+/// How long a source waits for its target to give a migration up (`MigrateAbort`): as long as a
+/// prepare, the target retiring its reference within [`BUCKET_BOUND`].
+const ABORT_BOUND: Duration = PREPARE_BOUND;
 
 /// What a cell given up to a migration says of it, in its marker: what asking the target again
 /// takes, after a restart too.
@@ -151,16 +188,21 @@ pub(crate) fn marker_said(bytes: &[u8]) -> Result<String, String> {
     Marker::read(bytes).map(|marker| format!("{marker:#?}")).map_err(|err| format!("{err:#}"))
 }
 
-/// A migration from this host under way: its target, its prepare's answer, and what of each kept
-/// segment it sent, its length and the bytes it took of the disk then.
+/// A migration from this host under way: its target, its prepare's answer, what of each kept
+/// segment it sent, its length and the bytes it took of the disk then, and its rounds.
+///
+/// One sender at a time: its rounds, until [`stop`](Self::stop) ends them, then its hand-over
+/// alone, which holds the cell. `sent` is locked only between requests, never across one (board
+/// 8577): a round waiting on its target held it across its sends, and the hand-over, the cell held
+/// alone and its guest paused, waited on the round for as long.
 struct Outgoing {
     migration: u64,
     peer: String,
     incarnation: u64,
     token: u64,
     client: super::peers::Client,
-    sent: tokio::sync::Mutex<HashMap<String, (u64, u64)>>,
-    stopped: std::sync::atomic::AtomicBool,
+    sent: Mutex<HashMap<String, (u64, u64)>>,
+    rounds: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl Outgoing {
@@ -168,30 +210,51 @@ impl Outgoing {
         Marker { migration, peer, incarnation, token }: Marker,
         client: super::peers::Client,
     ) -> Self {
-        let sent = tokio::sync::Mutex::default();
-        let stopped = std::sync::atomic::AtomicBool::new(false);
-        Outgoing { migration, peer, incarnation, token, client, sent, stopped }
+        let (sent, rounds) = (Mutex::default(), Mutex::default());
+        Outgoing { migration, peer, incarnation, token, client, sent, rounds }
     }
 
-    /// The migration a cell's marker names, asked again with nothing known sent, as after a
-    /// restart.
+    /// The migration a cell's marker names, asked again with nothing known sent and no rounds, as
+    /// after a restart.
     fn resumed(marker: Marker) -> Result<Self, Errno> {
         let client = client(&marker.peer)?;
-        let resumed = Self::new(marker, client);
-        resumed.stopped.store(true, std::sync::atomic::Ordering::Release);
-        Ok(resumed)
+        Ok(Self::new(marker, client))
     }
 
     fn marker(&self) -> Marker {
         let (migration, peer) = (self.migration, self.peer.clone());
         Marker { migration, peer, incarnation: self.incarnation, token: self.token }
     }
+
+    /// Ends its rounds, if they run, once their task is gone: a request of theirs cancelled, its
+    /// file unnoted in `sent`, which the next sender sends again whole.
+    async fn stop(&self) {
+        let rounds = self.rounds.lock().unwrap().take();
+        let Some(rounds) = rounds else { return };
+        rounds.abort();
+        match rounds.await {
+            Ok(()) => {}
+            Err(ended) if ended.is_cancelled() => {}
+            Err(ended) => log::error!("cladefsd: migration {:x}'s rounds: {ended}", self.migration),
+        }
+    }
+
+    /// Tells its target to give it up (`MigrateAbort`), within [`ABORT_BOUND`].
+    async fn abort(&self) -> Result<(), Status> {
+        let abort = MigrateAbortRequest { migration: self.migration };
+        within(ABORT_BOUND, self.client.clone().migrate_abort(abort)).await.map(drop)
+    }
 }
 
-/// A migration from this host of a cell: being prepared, or under way.
+/// A migration from this host of a cell, in [`OUTGOING`].
 enum Underway {
+    /// Being prepared ([`Reserved`]).
     Preparing,
+    /// Under way, its rounds sending kept segments while the guest runs: [`abort`] ends it.
     Moving(Arc<Outgoing>),
+    /// Its hand-over begun ([`hand_over`]): its rounds stopped, its cell given up or about to be,
+    /// its end its target's answer.
+    Handing(Arc<Outgoing>),
 }
 
 node_local::node_local! {
@@ -279,6 +342,19 @@ fn status(what: impl std::fmt::Display, err: impl std::fmt::Display) -> Status {
     Status::internal(format!("{what}: {err:#}"))
 }
 
+/// What `call`, a request of a peer's, answers within `bound`: `DEADLINE_EXCEEDED` past it, the
+/// request dropped (board 8577).
+async fn within<T>(
+    bound: Duration,
+    call: impl std::future::Future<Output = Result<tonic::Response<T>, Status>>,
+) -> Result<T, Status> {
+    match tokio::time::timeout(bound, call).await {
+        Ok(answered) => answered.map(tonic::Response::into_inner),
+        // Unanswered within its bound: a failure, as the request's own are.
+        Err(_) => Err(Status::deadline_exceeded(format!("no answer within {bound:?}"))),
+    }
+}
+
 /// A client of the peer at `address`.
 fn client(address: &str) -> Result<super::peers::Client, Errno> {
     let runtime = crate::bucket::bucket_runtime().map_err(|_| Errno::EIO)?;
@@ -360,7 +436,7 @@ pub(super) async fn migrate(path: PathBuf, peer: String, to: String) -> Result<u
                 // cell's next prepare there (specs/ephemeral, `SourceLoses`, `TargetAbort`,
                 // `supersedes`).
                 let abort = MigrateAbortRequest { migration };
-                if let Err(err) = client.migrate_abort(abort).await {
+                if let Err(err) = within(ABORT_BOUND, client.migrate_abort(abort)).await {
                     log::info!("cladefsd: aborting migration {migration:x} at {peer}: {err}");
                 }
                 count(&COUNTS.aborted, 1);
@@ -370,23 +446,37 @@ pub(super) async fn migrate(path: PathBuf, peer: String, to: String) -> Result<u
     count(&COUNTS.prepared, 1);
     let marker = Marker { migration, peer, incarnation, token };
     let outgoing = Arc::new(Outgoing::new(marker, client));
-    reserved.begin(outgoing.clone());
+    // Its rounds' task noted before the migration is the cell's, with nothing awaited between: a
+    // hand-over or an abort finding it stops them.
+    start_rounds(&outgoing, path)?;
+    reserved.begin(outgoing);
+    Ok(migration)
+}
+
+/// Starts the rounds of `outgoing`, the migration of the cell at `path`, noting their task in it.
+fn start_rounds(outgoing: &Arc<Outgoing>, path: PathBuf) -> Result<(), Errno> {
     let runtime = crate::bucket::bucket_runtime().map_err(|_| Errno::EIO)?;
-    runtime.spawn(async move {
+    let moving = outgoing.clone();
+    let rounds = runtime.spawn(async move {
         let mut renewed = tokio::time::Instant::now();
-        while !outgoing.stopped.load(std::sync::atomic::Ordering::Acquire) {
-            if let Err(err) = round(&outgoing, &path).await {
-                log::warn!("cladefsd: migration {:x}'s round: {err}", outgoing.migration);
+        loop {
+            // Failed, a request of it unanswered within its bound among them: what it did not
+            // send, sent at the next (board 8577).
+            if let Err(err) = round(&moving, &path).await {
+                log::warn!("cladefsd: migration {:x}'s round: {err}", moving.migration);
             }
             count(&COUNTS.rounds, 1);
             if renewed.elapsed() >= RENEW {
-                renew(&outgoing).await;
+                if !renew(&moving).await {
+                    break;
+                }
                 renewed = tokio::time::Instant::now();
             }
             tokio::time::sleep(ROUND).await;
         }
     });
-    Ok(migration)
+    *outgoing.rounds.lock().unwrap() = Some(rounds);
+    Ok(())
 }
 
 /// Asks a target to prepare a migration, `prepare`, again with the same migration while its answer
@@ -399,13 +489,9 @@ async fn prepare_retrying(
     let mut tries = 0;
     loop {
         tries += 1;
-        let asked = tokio::time::timeout(PREPARE_BOUND, client.migrate_prepare(prepare.clone()));
         // Unanswered within its bound: a failure, tried again below as the others are.
-        let answered = asked.await.unwrap_or_else(|_| {
-            Err(Status::deadline_exceeded(format!("no answer within {PREPARE_BOUND:?}")))
-        });
-        match answered {
-            Ok(prepared) => return Ok(prepared.into_inner()),
+        match within(PREPARE_BOUND, client.migrate_prepare(prepare.clone())).await {
+            Ok(prepared) => return Ok(prepared),
             Err(lost) if tries < PREPARE_TRIES && unanswered(&lost) => {
                 log::info!("cladefsd: migration {:x}'s prepare, again: {lost}", prepare.migration);
                 tokio::time::sleep(ROUND * tries).await;
@@ -446,32 +532,32 @@ fn is_segment(relative: &str) -> bool {
 
 /// A round of `outgoing`: the finalized segments of the cell at `path` not sent yet, each whole.
 async fn round(outgoing: &Outgoing, path: &Path) -> Result<(), Status> {
-    let mut sent = outgoing.sent.lock().await;
     for (relative, len) in files(path).map_err(|err| status("listing", err))? {
-        if !is_segment(&relative) || sent.contains_key(&relative) {
+        if !is_segment(&relative) || outgoing.sent.lock().unwrap().contains_key(&relative) {
             continue;
         }
-        if outgoing.stopped.load(std::sync::atomic::Ordering::Acquire) {
-            break;
-        }
         let allocated = send(outgoing, path, &relative, len).await?;
-        sent.insert(relative, (len, allocated));
+        outgoing.sent.lock().unwrap().insert(relative, (len, allocated));
     }
     Ok(())
 }
 
-/// Tells `outgoing`'s target the migration goes on (board 5734). Given up there, its rounds stop:
-/// its hand-over will be refused, the cell served here again.
-async fn renew(outgoing: &Outgoing) {
+/// Tells `outgoing`'s target the migration goes on (board 5734): whether its rounds go on. Given
+/// up there, they end: its hand-over will be refused, the cell served here again, or
+/// `AbortMigration` ends it.
+async fn renew(outgoing: &Outgoing) -> bool {
     let renewal = MigrateRenewRequest { migration: outgoing.migration };
-    match outgoing.client.clone().migrate_renew(renewal).await {
-        Ok(_) => {}
+    match within(RENEW_BOUND, outgoing.client.clone().migrate_renew(renewal)).await {
+        Ok(_) => true,
         Err(gone) if gone.code() == tonic::Code::NotFound => {
             log::warn!("cladefsd: migration {:x} given up by its target", outgoing.migration);
-            outgoing.stopped.store(true, std::sync::atomic::Ordering::Release);
             count(&COUNTS.given_up, 1);
+            false
         }
-        Err(err) => log::info!("cladefsd: renewing migration {:x}: {err}", outgoing.migration),
+        Err(err) => {
+            log::info!("cladefsd: renewing migration {:x}: {err}", outgoing.migration);
+            true
+        }
     }
 }
 
@@ -573,7 +659,7 @@ async fn send(outgoing: &Outgoing, path: &Path, relative: &str, len: u64) -> Res
             len,
             holes: if piece == last { holes.clone() } else { Vec::new() },
         };
-        client.migrate_file(request).await?;
+        within(PIECE_BOUND, client.migrate_file(request)).await?;
         count(&COUNTS.sent_bytes, sent);
     }
     Ok(allocated)
@@ -632,65 +718,123 @@ pub(super) async fn hand_over(path: PathBuf) -> Result<(), Errno> {
     let host = ephemeral_host::host()?;
     let _held = super::cells::hold_cell_alone(&path).await?;
     // Handed over before, and asked again: what is left of letting it go (board 5730).
-    let handed = host.handed_over(&path).map_err(|err| {
+    if let_go_handed_over_at(&host, &path).await? {
+        return Ok(());
+    }
+    let marked = marker_at(&path)?;
+    let Handing { outgoing, under_way, unmarked } = handing(&path, marked)?;
+    // Held alone, the cell changes no more: rounds are over.
+    if let Some(under_way) = under_way {
+        under_way.stop().await;
+    }
+    if unmarked {
+        give_up_to(&path, &outgoing)?;
+    }
+    ask(&host, &path, &outgoing).await
+}
+
+/// Gives the cell at `path`, held alone, up to `outgoing`, its migration, its marker written
+/// durably. Failing so, the cell not given up (no marker there, its write failing before its
+/// rename), the migration is under way again ([`Underway::Moving`]), its rounds going on, so that
+/// it may be aborted, or handed over again, its guest running meanwhile (board 8577's review: left
+/// [`Underway::Handing`], every abort, migration and hand-over answered `EBUSY` while the guest
+/// ran). A marker there, renamed into place, its directory's sync failing, gives the cell up still.
+fn give_up_to(path: &Path, outgoing: &Arc<Outgoing>) -> Result<(), Errno> {
+    let bytes = outgoing.marker().bytes();
+    let Err(err) = write_marker(&path.join(MARKER), &bytes) else { return Ok(()) };
+    log::warn!("cladefsd: giving {} up: {err}", path.display());
+    if marker_at(path)?.is_none() {
+        start_rounds(outgoing, path.to_owned())?;
+        let moving = Underway::Moving(outgoing.clone());
+        OUTGOING.get().lock().unwrap().insert(path.to_owned(), moving);
+    }
+    Err(Errno::EIO)
+}
+
+/// Writes a cell's marker, `bytes`, at `path`, durably ([`write_durably`]); failpoint
+/// `migration::marking` fails it before anything is written.
+fn write_marker(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    fail::fail_point!("migration::marking", |_| {
+        Err(std::io::Error::other("failpoint migration::marking"))
+    });
+    write_durably(path, bytes)
+}
+
+/// The hand-over of the migration of the cell at `path`, begun ([`handing`]).
+struct Handing {
+    /// The migration to hand over.
+    outgoing: Arc<Outgoing>,
+    /// The migration under way, whose rounds to stop: `outgoing`, or one its marker's replaces.
+    under_way: Option<Arc<Outgoing>>,
+    /// Whether the cell is to be given up: no marker says so yet.
+    unmarked: bool,
+}
+
+/// Begins the hand-over of the migration of the cell at `path`, held alone, its marker `marked`
+/// if it has one: the migration under way, or the one its marker names, under way again, after a
+/// restart too, until its marker goes durably (board 5721), noted [`Underway::Handing`], which an
+/// abort leaves to the target's answer. `EBUSY` while its prepare is unanswered, `ENOENT` if no
+/// migration of it is under way.
+fn handing(path: &Path, marked: Option<Marker>) -> Result<Handing, Errno> {
+    let mut outgoing = OUTGOING.get().lock().unwrap();
+    let under_way = match outgoing.get(path) {
+        // Its prepare not answered yet: nothing to hand over.
+        Some(Underway::Preparing) => return Err(Errno::EBUSY),
+        Some(Underway::Moving(under_way) | Underway::Handing(under_way)) => Some(under_way.clone()),
+        None => None,
+    };
+    let (handed, unmarked) = match (marked, &under_way) {
+        (None, Some(under_way)) => (under_way.clone(), true),
+        // Given up before: asked again, the marker naming the migration.
+        (Some(marker), Some(under_way)) if under_way.migration == marker.migration => {
+            (under_way.clone(), false)
+        }
+        (Some(marker), _) => (Arc::new(Outgoing::resumed(marker)?), false),
+        (None, None) => return Err(Errno::ENOENT),
+    };
+    outgoing.insert(path.to_owned(), Underway::Handing(handed.clone()));
+    Ok(Handing { outgoing: handed, under_way, unmarked })
+}
+
+/// The marker of the cell at `path`, if it has one. cladefs: a marker there but unread, its disk
+/// failing, or not whole, which its durable write never leaves, fails it (`EIO`): taken for none,
+/// a migration under way after a restart would be answered as none (board 6908).
+fn marker_at(path: &Path) -> Result<Option<Marker>, Errno> {
+    let marker_path = path.join(MARKER);
+    let read = match host_fs::read(&marker_path) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        read => read,
+    };
+    let marker = read.map_err(anyhow::Error::from).and_then(|bytes| Marker::read(&bytes));
+    let marker = marker.map_err(|err| {
+        log::error!("cladefsd: {}: {err:#}", marker_path.display());
+        Errno::EIO
+    })?;
+    Ok(Some(marker))
+}
+
+/// Lets go of the cell at `path`, held, if this host's journal notes it handed over: whether it
+/// did, asked again after a failure or a crash letting it go (board 5730).
+async fn let_go_handed_over_at(host: &ephemeral_host::Host, path: &Path) -> Result<bool, Errno> {
+    let handed = host.handed_over(path).map_err(|err| {
         log::error!("cladefsd: the journal: {err:#}");
         Errno::EIO
     })?;
-    if !handed.is_empty() {
-        for entry in &handed {
-            log::info!("cladefsd: {} handed over: letting it go", entry.child);
-            let_go(&host, entry).await?;
-        }
-        return Ok(());
+    for entry in &handed {
+        log::info!("cladefsd: {} handed over: letting it go", entry.child);
+        let_go(host, entry).await?;
     }
-    let marker_path = path.join(MARKER);
-    // cladefs: a marker there but unread, its disk failing, or not whole, which its durable write
-    // never leaves, fails it: taken for none, a migration under way after a restart would be
-    // answered as none (board 6908).
-    let marked: Option<Marker> = match host_fs::read(&marker_path) {
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
-        read => {
-            let marker = read.map_err(anyhow::Error::from).and_then(|bytes| Marker::read(&bytes));
-            Some(marker.map_err(|err| {
-                log::error!("cladefsd: {}: {err:#}", marker_path.display());
-                Errno::EIO
-            })?)
-        }
-    };
-    let under_way = match OUTGOING.get().lock().unwrap().get(&path) {
-        // Its prepare not answered yet: nothing to hand over.
-        Some(Underway::Preparing) => return Err(Errno::EBUSY),
-        Some(Underway::Moving(outgoing)) => Some(outgoing.clone()),
-        None => None,
-    };
-    // Held alone, the cell changes no more: rounds are over.
-    if let Some(under_way) = &under_way {
-        under_way.stopped.store(true, std::sync::atomic::Ordering::Release);
-    }
-    let outgoing = match (marked, under_way) {
-        (None, Some(outgoing)) => {
-            let bytes = outgoing.marker().bytes();
-            write_durably(&marker_path, &bytes).map_err(|err| {
-                log::warn!("cladefsd: giving {} up: {err}", path.display());
-                Errno::EIO
-            })?;
-            outgoing
-        }
-        // Given up before: asked again, the marker naming the migration.
-        (Some(marker), Some(outgoing)) if outgoing.migration == marker.migration => outgoing,
-        // Under way again, after a restart too, until its marker goes durably (board 5721).
-        (Some(marker), _) => {
-            let resumed = Arc::new(Outgoing::resumed(marker)?);
-            let under_way = Underway::Moving(resumed.clone());
-            OUTGOING.get().lock().unwrap().insert(path.clone(), under_way);
-            resumed
-        }
-        (None, None) => return Err(Errno::ENOENT),
-    };
+    Ok(!handed.is_empty())
+}
+
+/// Asks the target of `outgoing`, the migration of the cell at `path`, held alone and given up, to
+/// take the cell over: what it lacks sent first, then the hand-over. Accepted, the cell is let go
+/// of here; refused, served here again (`EAGAIN`); unanswered, given up still (`ENOTCONN`).
+async fn ask(host: &ephemeral_host::Host, path: &Path, outgoing: &Outgoing) -> Result<(), Errno> {
     let migration = outgoing.migration;
     // What the target lacks, sent again however often asked; staged there no more, the target
     // accepted the migration or gave it up, as its answer says.
-    match finish(&outgoing, &path).await {
+    match finish(outgoing, path).await {
         Ok(()) => {}
         Err(gone) if gone.code() == tonic::Code::NotFound => {
             log::info!("cladefsd: migration {migration:x} staged no more: {}", gone.message());
@@ -702,14 +846,15 @@ pub(super) async fn hand_over(path: PathBuf) -> Result<(), Errno> {
     }
     // The hand-over names every file of the cell, so that the target takes it only whole
     // (`openAtNamed`), and the take its prepare answered (`boundToPrepare`).
-    let files = named(&path).map_err(|err| {
+    let files = named(path).map_err(|err| {
         log::warn!("cladefsd: naming {}'s files: {err}", path.display());
         Errno::EIO
     })?;
     let (incarnation, token) = (outgoing.incarnation, outgoing.token);
     let request = MigrateHandOverRequest { migration, incarnation, files, token };
-    let accepted = match outgoing.client.clone().migrate_hand_over(request).await {
-        Ok(answer) => answer.into_inner().accepted,
+    let mut client = outgoing.client.clone();
+    let accepted = match within(HAND_OVER_BOUND, client.migrate_hand_over(request)).await {
+        Ok(answer) => answer.accepted,
         Err(unanswered) => {
             log::warn!("cladefsd: migration {migration:x}'s hand-over: {unanswered}");
             return Err(Errno::ENOTCONN);
@@ -721,19 +866,19 @@ pub(super) async fn hand_over(path: PathBuf) -> Result<(), Errno> {
         // (board 5721): its marker unlinked, its directory's sync failing, asking again finds the
         // migration under way, writes its marker again, is refused again, and removes it again,
         // where it would find neither and answer ENOENT.
-        remove_durably(&marker_path).map_err(|err| {
+        remove_durably(&path.join(MARKER)).map_err(|err| {
             log::warn!("cladefsd: serving {} again: {err}", path.display());
             Errno::EIO
         })?;
-        OUTGOING.get().lock().unwrap().remove(&path);
+        OUTGOING.get().lock().unwrap().remove(path);
         count(&COUNTS.refused, 1);
         return Err(Errno::EAGAIN);
     }
-    OUTGOING.get().lock().unwrap().remove(&path);
+    OUTGOING.get().lock().unwrap().remove(path);
     count(&COUNTS.accepted, 1);
     // Accepted: noted so in the cell's entry, durably, then let go of, as asking again, or the
     // daemon starting again, finds it noted (board 5730).
-    let cell = local_cell::host_cell(&path).map_err(|_| Errno::EIO)?;
+    let cell = local_cell::host_cell(path).map_err(|_| Errno::EIO)?;
     let entry = host.entry(cell).map_err(|err| {
         log::warn!("cladefsd: the journal: {err:#}");
         Errno::EIO
@@ -745,7 +890,90 @@ pub(super) async fn hand_over(path: PathBuf) -> Result<(), Errno> {
         log::warn!("cladefsd: noting {} handed over: {err:#}", path.display());
         Errno::EIO
     })?;
-    let_go(&host, &handed).await
+    let_go(host, &handed).await
+}
+
+/// Ends the migration of the ephemeral cell at `path` (`AbortMigration`, board 8577), as the
+/// module's docs say. Its hand-over not begun: its rounds stopped, its target told to give it up,
+/// and the cell free to migrate again, its guest running on; told not, the target gives it up idle,
+/// or at the cell's next prepare there (`SourceLoses`, `TargetAbort`, `supersedes`). Its hand-over
+/// begun, the cell held alone as a hand-over holds it (`EBUSY` while open), its marker's migration
+/// is told to give up, then asked to take the cell over, as `HandOverCell` asks: refused, the cell
+/// served here again (`EAGAIN`, as `HandOverCell` answers); unanswered, given up still
+/// (`ENOTCONN`); accepted before the target heard the abort, or handed over before, the cell let
+/// go of here, the target's (`EEXIST`). `EBUSY` while its prepare is unanswered, `ENOENT` if no
+/// migration of the cell is under way.
+pub(super) async fn abort(path: PathBuf) -> Result<(), Errno> {
+    // While its guest runs, the cell open: no hold, which an open cell refuses.
+    if let Some(moving) = take_moving(&path, false)? {
+        return abort_moving(&moving).await;
+    }
+    let host = ephemeral_host::host()?;
+    // Nothing of it under way, given up or handed over: nothing to end, its guest running or not.
+    // A hand-over gives it up only under way, which a migration begun since is.
+    let under_way = OUTGOING.get().lock().unwrap().contains_key(&path);
+    let handed = host.handed_over(&path).map_err(|err| {
+        log::error!("cladefsd: the journal: {err:#}");
+        Errno::EIO
+    })?;
+    if !under_way && handed.is_empty() && marker_at(&path)?.is_none() {
+        return Err(Errno::ENOENT);
+    }
+    let _held = super::cells::hold_cell_alone(&path).await?;
+    if let_go_handed_over_at(&host, &path).await? {
+        return Err(Errno::EEXIST);
+    }
+    let Some(marker) = marker_at(&path)? else {
+        // Held alone, no hand-over goes on: its hand-over failed before giving the cell up, if
+        // it began, which leaves it not given up, a migration under way still.
+        return match take_moving(&path, true)? {
+            Some(moving) => abort_moving(&moving).await,
+            None => Err(Errno::ENOENT),
+        };
+    };
+    let Handing { outgoing, under_way, .. } = handing(&path, Some(marker))?;
+    if let Some(under_way) = under_way {
+        under_way.stop().await;
+    }
+    // Unheard, the target may yet accept: the cell given up still, asked again.
+    if let Err(err) = outgoing.abort().await {
+        log::warn!("cladefsd: aborting migration {:x}: {err}", outgoing.migration);
+        return Err(Errno::ENOTCONN);
+    }
+    match ask(&host, &path, &outgoing).await {
+        // Accepted before the abort: handed over, the cell the target's, which an abort answering
+        // Ok would hide (hotbed question 519).
+        Ok(()) => Err(Errno::EEXIST),
+        Err(errno) => Err(errno),
+    }
+}
+
+/// The migration of the cell at `path` taken out of [`OUTGOING`], if its hand-over has not begun,
+/// or, `handing`, the cell held alone, whose hand-over then went no further than stopping its
+/// rounds: `EBUSY` while its prepare is unanswered.
+fn take_moving(path: &Path, handing: bool) -> Result<Option<Arc<Outgoing>>, Errno> {
+    let mut outgoing = OUTGOING.get().lock().unwrap();
+    let taken = match outgoing.get(path) {
+        Some(Underway::Preparing) => return Err(Errno::EBUSY),
+        Some(Underway::Moving(moving)) => moving.clone(),
+        Some(Underway::Handing(begun)) if handing => begun.clone(),
+        Some(Underway::Handing(_)) | None => return Ok(None),
+    };
+    outgoing.remove(path);
+    Ok(Some(taken))
+}
+
+/// Ends `moving`, a migration out of [`OUTGOING`] whose cell is not given up: its rounds stopped,
+/// its target told to give it up. Told not, the target gives it up idle, or at the cell's next
+/// prepare there: this host pursues it no more either way.
+async fn abort_moving(moving: &Outgoing) -> Result<(), Errno> {
+    moving.stop().await;
+    let migration = moving.migration;
+    match moving.abort().await {
+        Ok(()) => log::info!("cladefsd: migration {migration:x} aborted"),
+        Err(err) => log::warn!("cladefsd: aborting migration {migration:x}, unheard: {err}"),
+    }
+    Ok(())
 }
 
 /// Lets go of the cell `entry` notes handed over: its cell directory goes, if it is the cell's
@@ -809,12 +1037,9 @@ async fn let_go(host: &ephemeral_host::Host, entry: &Entry) -> Result<(), Errno>
 async fn release(peer: &str, migration: u64) {
     let Ok(mut client) = client(peer) else { return };
     let released = MigrateReleaseRequest { migration };
-    let asked = tokio::time::timeout(BUCKET_BOUND, client.migrate_release(released));
-    match asked.await {
-        Ok(Ok(_)) => {}
-        Ok(Err(err)) => log::info!("cladefsd: releasing migration {migration:x} at {peer}: {err}"),
-        // Unanswered: said; the target forgets the migration when it is idle as long.
-        Err(_) => log::info!("cladefsd: releasing migration {migration:x} at {peer}: no answer"),
+    // Unanswered: said; the target forgets the migration when it is idle as long.
+    if let Err(err) = within(BUCKET_BOUND, client.migrate_release(released)).await {
+        log::info!("cladefsd: releasing migration {migration:x} at {peer}: {err}");
     }
 }
 
@@ -837,9 +1062,8 @@ pub(super) async fn let_go_handed_over(host: &ephemeral_host::Host) -> anyhow::R
 
 /// Sends what `outgoing` has not sent of the cell at `path`, given up: its directories; the kept
 /// segments not sent, and the holes of those sent that gave back more since; and every other file,
-/// whole.
+/// whole. Its rounds stopped, it is the one sender ([`Outgoing`]).
 async fn finish(outgoing: &Outgoing, path: &Path) -> Result<(), Status> {
-    let mut sent = outgoing.sent.lock().await;
     // Its directories first, the empty ones among them: a directory's path ends with `/`.
     for dir in dirs(path).map_err(|err| status("listing", err))? {
         let request = MigrateFileRequest {
@@ -850,11 +1074,12 @@ async fn finish(outgoing: &Outgoing, path: &Path) -> Result<(), Status> {
             len: 0,
             holes: Vec::new(),
         };
-        outgoing.client.clone().migrate_file(request).await?;
+        within(PIECE_BOUND, outgoing.client.clone().migrate_file(request)).await?;
     }
     for (relative, len) in files(path).map_err(|err| status("listing", err))? {
-        match sent.get(&relative) {
-            Some(&(was, allocated)) if is_segment(&relative) && was == len => {
+        let sent = outgoing.sent.lock().unwrap().get(&relative).copied();
+        match sent {
+            Some((was, allocated)) if is_segment(&relative) && was == len => {
                 let file =
                     host_fs::File::open(path.join(&relative)).map_err(|e| status(&relative, e))?;
                 let (data, now) = layout_of(&file, len).map_err(|err| status(&relative, err))?;
@@ -867,13 +1092,13 @@ async fn finish(outgoing: &Outgoing, path: &Path) -> Result<(), Status> {
                         len,
                         holes: gaps(&data, len),
                     };
-                    outgoing.client.clone().migrate_file(request).await?;
-                    sent.insert(relative, (len, now));
+                    within(PIECE_BOUND, outgoing.client.clone().migrate_file(request)).await?;
+                    outgoing.sent.lock().unwrap().insert(relative, (len, now));
                 }
             }
             _ => {
                 let allocated = send(outgoing, path, &relative, len).await?;
-                sent.insert(relative, (len, allocated));
+                outgoing.sent.lock().unwrap().insert(relative, (len, allocated));
             }
         }
     }
@@ -1356,13 +1581,34 @@ pub(super) mod target {
         }
     }
 
-    /// Writes the piece of a file `request` carries into its migration's staging directory.
+    /// Writes the piece of a file `request` carries into its migration's staging directory. It
+    /// waits its turn for the cell as its asker does, a request given up on before its turn holding
+    /// nothing, its piece let go of (Codex's review, hotbed review 86: waiting detached, a peer's
+    /// requests given up on piled up behind a stalled write, their pieces with them); its turn
+    /// come, it runs to its end however its asker goes, holding the cell until written: its source
+    /// giving up on it at its bound (board 8577) dropped the request, and the cell's hold, while
+    /// its write went on off the runtime, the next request, a hand-over's last copy of the file
+    /// among them, overtaking it (hotbed review 83).
     pub(crate) async fn file(request: MigrateFileRequest) -> Result<(), Status> {
+        if wedged() {
+            std::future::pending::<()>().await;
+        }
         let host = host()?;
         let migration = request.migration;
-        let Some((_taking, entry)) = held(&host, migration).await? else {
+        let Some((taking, entry)) = held(&host, migration).await? else {
             return Err(Status::not_found(format!("no migration {migration:x}")));
         };
+        to_the_end(write_held(taking, entry, request)).await
+    }
+
+    /// Writes the piece of a file `request` carries into the staging directory of `entry`'s
+    /// migration, its cell held, `_taking`, until written.
+    async fn write_held(
+        _taking: Taking,
+        entry: Entry,
+        request: MigrateFileRequest,
+    ) -> Result<(), Status> {
+        let migration = request.migration;
         heard(migration);
         let staged = staging(&entry.path, migration);
         let written = super::super::run::off_the_runtime(move || {
@@ -1376,6 +1622,14 @@ pub(super) mod target {
         written.await.map_err(|err| status("writing", err))?
     }
 
+    /// Whether this target is wedged, taking a file's piece and never answering, as a stalled disk
+    /// or a lock leaves its handler (failpoint `migration::file_unanswered`): its source's bound
+    /// ends the wait (board 8577's tests).
+    fn wedged() -> bool {
+        fail::fail_point!("migration::file_unanswered", |_| true);
+        false
+    }
+
     /// Writes the piece of a file `request` carries into `staging`, its migration's staging
     /// directory: what it adds to the disk admitted by the disk governor first (board 8451),
     /// `RESOURCE_EXHAUSTED` if it has no room, and counted in the directory's footprint as it is
@@ -1383,6 +1637,7 @@ pub(super) mod target {
     /// be any.
     fn write(staging: &local_cell::HostDir, request: MigrateFileRequest) -> Result<(), Status> {
         use local_cell::{Dir as _, File as _};
+        fail::fail_point!("migration::writing");
         let MigrateFileRequest { migration, path, offset, bytes, len, holes } = request;
         let staged = staging.path();
         // A directory, empty or not, its path ending with `/`.
@@ -1565,8 +1820,12 @@ pub(super) mod target {
             }
         }
         off(move || {
+            fail::fail_point!("migration::accepting");
             host.accept(migration, taken.child)
                 .map_err(|err| status("remembering it accepted", err))?;
+            fail::fail_point!("migration::noting_taken", |_| {
+                Err(status("noting the cell", "failpoint migration::noting_taken"))
+            });
             host.note(&taken).map_err(|err| status("noting the cell", err))
         })
         .await?;
@@ -1597,6 +1856,7 @@ pub(super) mod target {
         if host.accepted(migration) {
             return Ok(());
         }
+        // Accepted while this waited its turn: refused not ([`refuse`]).
         let Some((_taking, entry)) = held(&host, migration).await? else { return Ok(()) };
         refuse(&host, &entry).await?;
         count(&COUNTS.taken_given_up, 1);
@@ -1607,7 +1867,27 @@ pub(super) mod target {
     /// entry and reference, then its files. Dropped part way, a staging an entry names is one a
     /// retry of its migration may take for whole, a kept segment's file made again of holes alone
     /// (board 5721).
+    ///
+    /// A migration this host accepted is never given up, its entry a migration's still, its noting
+    /// of the cell taken having failed after it was accepted: the cell taken into place is the one
+    /// copy once its source hears so. It is noted taken instead. An abort, or the reaper, waiting
+    /// behind that hand-over dropped it (Codex's review, hotbed review 83; board 5372).
     async fn refuse(host: &ephemeral_host::Host, entry: &Entry) -> Result<(), Status> {
+        if let Some((migration, _)) = entry.receiving()
+            && host.accepted(migration)
+        {
+            log::warn!("cladefsd: migration {migration:x} accepted: noted taken, not given up");
+            // Its acceptance made durable again first, as a hand-over asked again makes it: its
+            // writing may have failed past its rename, before its directory's sync, which a crash
+            // then undid, the cell noted taken here while its source, refused, served it again
+            // (Codex's review, hotbed review 86).
+            host.accept(migration, entry.child)
+                .map_err(|err| status("remembering it accepted", err))?;
+            let taken = Entry { migrating: None, ..entry.clone() };
+            host.note(&taken).map_err(|err| status("noting the cell", err))?;
+            forget(migration);
+            return Ok(());
+        }
         host.drop_moved(entry).map_err(journal)?;
         retire(host, entry).await?;
         if let Some((migration, _)) = entry.receiving() {
@@ -2014,6 +2294,140 @@ pub(super) mod target {
                 assert_eq!(host.entries().unwrap(), vec![], "its entry kept");
                 assert!(!host.accepted(migration));
             }
+        }
+
+        /// The cell 1/7's locks held, by requests of its migrations and those waiting for it.
+        fn holders() -> usize {
+            let child = CellId { tenant: 1, id: 7 };
+            TAKING.get().lock().unwrap().get(&child).map_or(0, Arc::strong_count)
+        }
+
+        /// Waits until `done` holds, 30 s at most.
+        fn until(what: &str, done: impl Fn() -> bool) {
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            while !done() {
+                assert!(std::time::Instant::now() < deadline, "{what}");
+                std::thread::yield_now();
+            }
+        }
+
+        /// Codex's reviews of board 8577 (hotbed reviews 83, 86): a request of a migration's file
+        /// its source gave up on at its bound, dropped as its write runs off the runtime, holds the
+        /// cell until the write ends: the next request of the migration waits its turn rather than
+        /// overtaking it, as a hand-over's last copy of the file would, the late write then landing
+        /// in the cell taken over. Requests given up on while they wait their turn hold nothing.
+        #[test]
+        fn file_requests_given_up_on_hold_the_cell_until_written() {
+            use std::sync::Barrier;
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            let dir = tempfile::tempdir().unwrap();
+            let (_host, root) = target_host(dir.path());
+            let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+            let (migration, cell) = (0x41, root.join("vm"));
+            runtime.block_on(prepare(prepare_of(migration, &cell))).unwrap();
+            let (entered, release) = (Arc::new(Barrier::new(2)), Arc::new(Barrier::new(2)));
+            let writes = Arc::new(AtomicUsize::new(0));
+            let (entering, releasing) = (entered.clone(), release.clone());
+            fail::cfg_callback("migration::writing", move || {
+                // The first write held until let go; the others as they come.
+                if writes.fetch_add(1, Ordering::SeqCst) == 0 {
+                    entering.wait();
+                    releasing.wait();
+                }
+            })
+            .unwrap();
+            let piece = |path: &str| MigrateFileRequest {
+                migration,
+                path: path.to_owned(),
+                offset: 0,
+                bytes: vec![7; 100],
+                len: 100,
+                holes: Vec::new(),
+            };
+            let first = runtime.spawn(file(piece("first")));
+            entered.wait();
+            first.abort();
+            until("the first request, given up on, never ended", || first.is_finished());
+            // Requests given up on before their turn hold nothing, their pieces let go of (hotbed
+            // review 86): the cell's lock is the first write's alone again.
+            let mut waiting = Vec::new();
+            for queued in 0..3 {
+                waiting.push(runtime.spawn(file(piece(&format!("waiting{queued}")))));
+                until("a request never waited its turn", || holders() == 3 + queued);
+            }
+            for given_up in &waiting {
+                given_up.abort();
+            }
+            until("requests given up on before their turn wait still", || holders() == 2);
+            let second = runtime.spawn(file(piece("second")));
+            until("the second neither waited nor ended", || holders() == 3 || second.is_finished());
+            let overtook = second.is_finished();
+            release.wait();
+            let second = runtime.block_on(second).unwrap().map_err(|status| status.code());
+            fail::remove("migration::writing");
+            assert!(!overtook, "the second request overtook the first's write");
+            assert_eq!(second, Ok(()));
+            let staged = staging(&cell, migration);
+            assert_eq!(std::fs::read(staged.join("first")).unwrap(), vec![7; 100]);
+        }
+
+        /// Codex's review of board 8577 (hotbed review 83; board 5372): a migration accepted is
+        /// never given up. An abort waiting behind a hand-over that accepts the migration, whose
+        /// noting of the cell taken then fails (failpoint `migration::noting_taken`), its entry a
+        /// migration's still, gave up the cell taken into place, the one copy once its source heard
+        /// the hand-over accepted again. It is noted taken instead, and accepted again.
+        #[test]
+        fn migrations_accepted_are_never_given_up() {
+            use std::sync::Barrier;
+            use tonic::Code;
+            let dir = tempfile::tempdir().unwrap();
+            let (host, root) = target_host(dir.path());
+            let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+            let (migration, cell) = (0x43, root.join("vm"));
+            let prepared = runtime.block_on(prepare(prepare_of(migration, &cell)));
+            let (incarnation, token) = prepared.unwrap();
+            let child = CellId { tenant: 1, id: 7 };
+            let description = format!(
+                "{}{}\nblock_size 4096\ncell {child}\ncapacity 4096\nbucket memory:///cells\n\
+                 ephemeral yes\n",
+                local_cell::DESCRIPTION_HEADER,
+                local_cell::FORMAT.current,
+            )
+            .into_bytes();
+            let (len, crc) = (description.len() as u64, Some(extent_frame::crc(&description)));
+            let path = local_cell::DESCRIPTION.to_owned();
+            let holes = Vec::new();
+            let bytes = description;
+            let piece = MigrateFileRequest { migration, path, offset: 0, bytes, len, holes };
+            runtime.block_on(file(piece)).unwrap();
+            let files = vec![FileDigest { path: local_cell::DESCRIPTION.to_owned(), len, crc }];
+            let request = MigrateHandOverRequest { migration, incarnation, files, token };
+            let (entered, release) = (Arc::new(Barrier::new(2)), Arc::new(Barrier::new(2)));
+            let (entering, releasing) = (entered.clone(), release.clone());
+            fail::cfg_callback("migration::accepting", move || {
+                entering.wait();
+                releasing.wait();
+            })
+            .unwrap();
+            fail::cfg("migration::noting_taken", "1*return").unwrap();
+            let handing = runtime.spawn(hand_over(request.clone()));
+            entered.wait();
+            let aborting = runtime.spawn(abort(MigrateAbortRequest { migration }));
+            until("the abort never waited behind the hand-over", || holders() == 3);
+            fail::remove("migration::accepting");
+            release.wait();
+            let handed = runtime.block_on(handing).unwrap().map_err(|status| status.code());
+            let aborted = runtime.block_on(aborting).unwrap().map_err(|status| status.code());
+            fail::remove("migration::noting_taken");
+            assert_eq!(handed, Err(Code::Internal), "its noting of the cell taken failing");
+            assert_eq!(aborted, Ok(()));
+            assert!(host.accepted(migration));
+            assert!(cell.exists(), "the cell accepted, given up");
+            let noted = host.entry(child).unwrap();
+            assert!(matches!(noted, Some(Entry { migrating: None, .. })), "{noted:?}");
+            let again = runtime.block_on(hand_over(request)).map_err(|status| status.code());
+            assert_eq!(again, Ok(true));
+            assert!(cell.exists());
         }
 
         /// Board 5374: a hand-over naming a file outside its staging directory lacks it, as named,

@@ -36,11 +36,14 @@
 (*   holds and from the migrations it accepted (`accepted`, on its disk),  *)
 (*   until their sources release them, having let the cell go (board       *)
 (*   5734). A source may lose a migration it prepared before its           *)
-(*   hand-over (its prepare's answer lost, or its daemon crashed): it      *)
-(*   aborts it by ID, a message that may arrive late, or never; a target   *)
-(*   may give up a migration of its own accord (TargetAbort: one idle too  *)
-(*   long, or whose bucket calls time out). Migration IDs grow, as the     *)
-(*   cell's epoch, which the code's prepares carry, does.                  *)
+(*   hand-over (its prepare's answer lost, or its daemon crashed), or end  *)
+(*   it (AbortMigration, board 8577): it aborts it by ID, a message that   *)
+(*   may arrive late, or never. Its hand-over asked, the cell given up, it *)
+(*   may abort it too, the target's answer then saying where the cell is   *)
+(*   (SourceAbortsHanding); a target may give up a migration of its own    *)
+(*   accord (TargetAbort: one idle too long, or whose bucket calls time    *)
+(*   out). Migration IDs grow, as the cell's epoch, which the code's       *)
+(*   prepares carry, does.                                                 *)
 (*                                                                         *)
 (* The rules, each a member of Rules; specs/ephemeral/mutations removes    *)
 (* one each, and must find the violation it prevents:                      *)
@@ -69,6 +72,9 @@
 (*   its take of the migration: a late prepare taken again after the       *)
 (*   target answered no, a late request of the first take refused         *)
 (*   (NoBoundToPrepare).                                                   *)
+(* - abortAsksTarget: a source given up that aborts serves again only on  *)
+(*   its target's answer, never on its own word: the target may have      *)
+(*   accepted (NoAbortAsksTarget, of EphemeralAborts).                    *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets, TLC
 
@@ -81,13 +87,15 @@ CONSTANTS
     MaxCrashes,     \* daemons crashed at most
     MaxLosses,      \* disks lost at most
     MaxPasses,      \* collector passes at most
+    AbortsHanding,  \* whether a source given up may abort (SourceAbortsHanding)
     Rules           \* the rules in force (all, but in a mutation)
 
 AllRules == {"forksReferFirst", "targetRefersFirst", "sourceGivesUpFirst", "sourceRetiresLast",
              "retireOnlyUnheld", "refuseFinal", "openAtNamed", "remembersAccepted", "supersedes",
-             "boundToPrepare"}
+             "boundToPrepare", "abortAsksTarget"}
 
 ASSUME Rules \subseteq AllRules
+ASSUME AbortsHanding \in BOOLEAN
 ASSUME NoHost \notin Hosts
 
 States == {"none", "forking", "failing", "early", "writer", "handing", "receiving", "gaveup"}
@@ -290,14 +298,31 @@ TargetAbort(t, c) ==
     /\ UNCHANGED <<log, took, accepted, msgs, told, migrations, handovers, retired>>
     /\ MigUnchanged
 
-\* The source loses a migration it prepared, before its hand-over: its prepare's answer lost. It
-\* aborts it by ID, a message that may arrive late, or never, and serves on.
+\* The source loses a migration it prepared, before its hand-over: its prepare's answer lost, or
+\* AbortMigration ends it (board 8577). It aborts it by ID, a message that may arrive late, or
+\* never, and serves on.
 SourceLoses(s, c) ==
     /\ phase[s] = "serving" /\ st[s][c] = "writer" /\ mig[s][c] # 0
     /\ mig' = [mig EXCEPT ![s][c] = 0]
     /\ partner' = [partner EXCEPT ![s][c] = NoHost]
     /\ msgs' = msgs \cup {[kind |-> "abort", cell |-> c, id |-> mig[s][c], to |-> partner[s][c]]}
     /\ UNCHANGED <<refs, st, log, tok, took, accepted, told, migrations, handovers, retired>>
+    /\ MigUnchanged
+
+\* The source, its hand-over asked, the cell given up, aborts the migration (AbortMigration, board
+\* 8577): it tells the target to give it up, by ID, and stays given up, asking again as before, the
+\* target's answer saying where the cell is: refused, served here again; accepted, the target's.
+\* Only in the models that set AbortsHanding (EphemeralAborts): it triples the states.
+SourceAbortsHanding(s, c) ==
+    /\ AbortsHanding
+    /\ phase[s] = "serving" /\ st[s][c] = "handing"
+    /\ msgs' = msgs \cup {[kind |-> "abort", cell |-> c, id |-> mig[s][c], to |-> partner[s][c]]}
+    /\ IF On("abortAsksTarget")
+       THEN UNCHANGED <<st, mig, partner>>
+       ELSE /\ SetSt(s, c, "writer")
+            /\ mig' = [mig EXCEPT ![s][c] = 0]
+            /\ partner' = [partner EXCEPT ![s][c] = NoHost]
+    /\ UNCHANGED <<refs, log, tok, took, accepted, told, migrations, handovers, retired>>
     /\ MigUnchanged
 
 \* The target hears an abort: taking that migration still, it gives it up, its reference too.
@@ -463,7 +488,7 @@ Next ==
     \/ \E h \in Hosts, c \in Cells :
         \/ ForkBegin(h, c) \/ ForkRead(h, c) \/ ForkLate(h, c) \/ ForkFail(h, c)
         \/ Commit(h, c) \/ Round(h, c) \/ TargetAbort(h, c) \/ Hand(h, c) \/ SourceGone(h, c)
-        \/ SourceLoses(h, c)
+        \/ SourceLoses(h, c) \/ SourceAbortsHanding(h, c)
         \/ \E t \in Hosts : SourcePrepares(h, t, c)
         \/ \E a \in msgs : SourceHears(h, c, a)
     \/ \E m \in msgs :
