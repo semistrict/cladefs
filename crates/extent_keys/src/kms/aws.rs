@@ -247,9 +247,8 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// `NotFoundException` for it as for a key never made: the tenant reads as one with no KEK
 /// ([`Error::NoSuchTenant`]), not as destroyed (doc-16, Real KMSes: AWS KMS).
 ///
-/// Its calls run on a runtime of its own ([`Background`]), its HTTPS client made there as first
-/// needed: so its futures run on any executor, and the client's connections are never another
-/// runtime's, gone when it is.
+/// Its calls run on the shared KMS runtime ([`Background`]), which makes its HTTPS client on
+/// demand and keeps its connections alive across callers' runtimes.
 pub struct AwsKms {
     names: KeyNames,
     client: Arc<Client>,
@@ -354,7 +353,7 @@ impl AwsKms {
         names: KeyNames,
         credentials: Credentials,
     ) -> Self {
-        let runtime = Background::new("cladefs-aws-kms").expect("a runtime for AWS KMS's calls");
+        let runtime = Background::shared().expect("a runtime for AWS KMS's calls");
         let made = tokio::sync::OnceCell::new();
         let region = region.to_owned();
         let client = Arc::new(Client { region, endpoint, credentials, made });

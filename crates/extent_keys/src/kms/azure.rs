@@ -316,8 +316,8 @@ enum Seconds {
     String(String),
 }
 
-/// Azure Key Vault, its tenants' keys in a vault, or named whole ([`self`]). Its calls run on a
-/// runtime of its own (board 8477, [`Background`]).
+/// Azure Key Vault, its tenants' keys in a vault, or named whole ([`self`]). Its calls run on
+/// the shared KMS runtime ([`Background`]).
 struct AzureKms {
     inner: Arc<Inner>,
     runtime: Background,
@@ -426,8 +426,7 @@ impl AzureKms {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|err| format!("an HTTP client: {err}"))?;
-        let runtime =
-            Background::new("cladefs-azure-kv").map_err(|err| format!("its runtime: {err}"))?;
+        let runtime = Background::shared().map_err(|err| format!("its runtime: {err}"))?;
         let Parsed { vault, audience, names, alg } = parsed;
         let fetcher = Arc::new(Fetcher { http: http.clone(), source });
         let tokens = Tokens { fetcher, slots: Mutex::default() };

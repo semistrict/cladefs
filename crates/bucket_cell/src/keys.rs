@@ -617,7 +617,13 @@ struct Ledger {
     /// wrapped for and the revocation epoch it was wrapped in: given back, or kept for a made
     /// cell's first taking, only if no revocation came since, though one lifted since. A
     /// revocation takes its tenant's off, as no longer to be given back or kept.
-    issued: HashMap<Vec<u8>, (Tenancy, Epoch)>,
+    issued: HashMap<Vec<u8>, Issued>,
+}
+
+struct Issued {
+    tenancy: Tenancy,
+    epoch: Epoch,
+    prewrap: bool,
 }
 
 impl Ledger {
@@ -626,11 +632,12 @@ impl Ledger {
     /// KEK made into a cell is given out here first ([`CachingKms::new_kek`],
     /// [`CachingKms::wrap`]): one not among them, taken off by a revocation since, is neither given
     /// back nor kept.
-    fn issued_now(&mut self, wrapped: &Wrapped) -> Option<Tenancy> {
-        let ((key, tenant), epoch) = self.issued.remove(&wrapped.0)?;
-        let current = epoch == self.refused.epoch(&key, tenant)
-            && self.refused.of(Some(&key), tenant).is_none();
-        current.then_some((key, tenant))
+    fn issued_now(&mut self, wrapped: &Wrapped) -> Option<Issued> {
+        let issued = self.issued.remove(&wrapped.0)?;
+        let (key, tenant) = &issued.tenancy;
+        let current = issued.epoch == self.refused.epoch(key, *tenant)
+            && self.refused.of(Some(key), *tenant).is_none();
+        current.then_some(issued)
     }
 
     /// Drops every pool of `tenant`'s, of the KMSes named `keys` and any other, a refill of one
@@ -816,7 +823,7 @@ impl CachingKms {
             *ledger.refused.by_epochs.entry((key.clone(), tenant)).or_default() += 1;
             let tenancy = (key.clone(), tenant);
             ledger.pools.pools.remove(&tenancy);
-            ledger.issued.retain(|_, (of, _)| *of != tenancy);
+            ledger.issued.retain(|_, issued| issued.tenancy != tenancy);
             *ledger.pools.eras.entry(tenancy).or_default() += 1;
         }
         // What the KMS itself keeps of the tenant's KEK: the bucket KMS's (TASK-411.27).
@@ -841,7 +848,7 @@ impl CachingKms {
             ledger.refused.told.insert(tenant, (why.into(), BTreeSet::new()));
             *ledger.refused.told_epochs.entry(tenant).or_default() += 1;
             ledger.drop_pools(tenant, known.keys().cloned());
-            ledger.issued.retain(|_, ((_, of), _)| *of != tenant);
+            ledger.issued.retain(|_, issued| issued.tenancy.1 != tenant);
         }
         for kms in known.values() {
             kms.forget_dyn(tenant);
@@ -858,7 +865,7 @@ impl CachingKms {
         let known = self.known();
         let mut ledger = self.ledger.lock().unwrap();
         ledger.drop_pools(tenant, known.keys().cloned());
-        ledger.issued.retain(|_, ((_, of), _)| *of != tenant);
+        ledger.issued.retain(|_, issued| issued.tenancy.1 != tenant);
     }
 
     /// Forgets what it holds of `scope`, as a host told so does (TASK-411.7): a tenant's, its KEK
@@ -912,18 +919,23 @@ impl CachingKms {
     pub async fn new_kek(self: &Arc<Self>, cell: CellId) -> Result<(Arc<Secret>, Wrapped), Error> {
         let (key, kms) = self.kms_of(cell).await?;
         let tenancy = (key.clone(), cell.tenant);
+        let prewrap = kms.prewrap_dyn();
         // From the pool, in one step with giving it out: none of a tenant refused there, whose new
         // KEK the KMS is asked for (TASK-633.6's review).
-        let pooled = {
+        let pooled = if prewrap {
             let mut ledger = self.ledger.lock().unwrap();
             let pooled = match ledger.refused.of(Some(&key), cell.tenant) {
                 Some(_) => None,
                 None => ledger.pools.pools.get_mut(&tenancy).and_then(|pool| pool.keks.pop()),
             };
             pooled.map(|(secret, wrapped, epoch)| {
-                ledger.issued.insert(wrapped.0.clone(), (tenancy.clone(), epoch));
+                ledger
+                    .issued
+                    .insert(wrapped.0.clone(), Issued { tenancy: tenancy.clone(), epoch, prewrap });
                 (secret, wrapped)
             })
+        } else {
+            None
         };
         if let Some(kek) = pooled {
             self.refill_at((&key, &kms), cell.tenant);
@@ -933,7 +945,11 @@ impl CachingKms {
         let asked = self.epoch(&key, cell.tenant);
         let answer = kms.wrap_dyn(cell.tenant, &kek).await;
         let wrapped = self.heard((&key, &kms), (cell.tenant, asked), answer).map_err(refused)?;
-        self.ledger.lock().unwrap().issued.insert(wrapped.0.clone(), (tenancy, asked));
+        self.ledger
+            .lock()
+            .unwrap()
+            .issued
+            .insert(wrapped.0.clone(), Issued { tenancy, epoch: asked, prewrap });
         self.refill_at((&key, &kms), cell.tenant);
         Ok((Arc::new(kek), wrapped))
     }
@@ -946,8 +962,9 @@ impl CachingKms {
     pub fn give_back(&self, cell: CellId, (secret, wrapped): (Arc<Secret>, Wrapped)) {
         let _ = cell;
         let mut ledger = self.ledger.lock().unwrap();
-        let Some(tenancy) = ledger.issued_now(&wrapped) else { return };
-        let epoch = ledger.refused.epoch(&tenancy.0, tenancy.1);
+        let Some(Issued { tenancy, epoch, prewrap: true }) = ledger.issued_now(&wrapped) else {
+            return;
+        };
         ledger.pools.pools.entry(tenancy).or_default().keks.push((secret, wrapped, epoch));
     }
 
@@ -992,6 +1009,9 @@ impl CachingKms {
     /// Refills `tenant`'s pool of `kms`, named `key` ([`CachingKms::refill`]).
     fn refill_at(self: &Arc<Self>, (key, kms): (&KmsKey, &kms::Shared), tenant: u64) {
         let Some(pooling) = &self.pooling else { return };
+        if !kms.prewrap_dyn() {
+            return;
+        }
         let tenancy = (key.clone(), tenant);
         let refill = {
             // Checked in one step with the refill's start ([`Ledger`]).
@@ -1085,7 +1105,10 @@ impl CachingKms {
         let answer = kms.wrap_dyn(cell.tenant, secret).await;
         let wrapped = self.heard((&key, &kms), (cell.tenant, asked), answer).map_err(refused)?;
         let tenancy = (key, cell.tenant);
-        self.ledger.lock().unwrap().issued.insert(wrapped.0.clone(), (tenancy, asked));
+        self.ledger.lock().unwrap().issued.insert(
+            wrapped.0.clone(),
+            Issued { tenancy, epoch: asked, prewrap: kms.prewrap_dyn() },
+        );
         Ok(wrapped)
     }
 
@@ -2001,6 +2024,33 @@ mod tests {
         let keys = CellKeys::of(child, &rotated, fresh);
         let rung = block_on(ring(&bucket, &keys, child, &rotated, true)).unwrap();
         assert_eq!(rung.of(TEST_CELL.id).dek(id).unwrap().expose(), dek.expose());
+    }
+
+    #[test]
+    fn a_bucket_kms_wraps_on_demand_even_with_pooling_enabled() {
+        use crate::bucket_kms::BucketKms;
+        use extent_keys::kms::master::MasterKeys;
+
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let bucket = Arc::new(Direct(SimBucket::new()));
+        let keys = MasterKeys::new(vec![Secret::random()]).unwrap();
+        let bucket_kms = Arc::new(BucketKms::new(bucket, keys));
+        let cache = CachingKms::pooled(bucket_kms.clone(), Pooling::on(runtime.handle().clone()));
+        let tenant = TEST_CELL.tenant;
+        runtime.block_on(async {
+            let given = cache.new_kek(TEST_CELL).await.unwrap();
+            cache.refill(TEST_CELL);
+            cache.filled(tenant).await;
+            assert_eq!(cache.in_pool(tenant), 0);
+            cache.give_back(TEST_CELL, given);
+            assert_eq!(cache.in_pool(tenant), 0);
+
+            bucket_kms.destroy(tenant).await.unwrap();
+            assert_eq!(
+                cache.new_kek(TEST_CELL).await.map(drop),
+                Err(Error::Kms(format!("tenant {tenant}: its KEK is destroyed")))
+            );
+        });
     }
 
     /// TASK-411.4: a host's pools. A take from a pooled host refills a pool left low, a batch of

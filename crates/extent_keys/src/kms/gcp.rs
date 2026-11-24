@@ -213,7 +213,7 @@ fn crc32c(bytes: &[u8]) -> u64 {
 }
 
 /// Google Cloud KMS, its tenants' keys in a key ring, or named whole ([`self`]). Its calls run on
-/// a runtime of its own (board 8477, [`Background`]).
+/// the shared KMS runtime (board 8477, [`Background`]).
 struct GcpKms {
     inner: Arc<Inner>,
     runtime: Background,
@@ -249,8 +249,7 @@ impl GcpKms {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|err| format!("an HTTP client: {err}"))?;
-        let runtime =
-            Background::new("cladefs-gcp-kms").map_err(|err| format!("its runtime: {err}"))?;
+        let runtime = Background::shared().map_err(|err| format!("its runtime: {err}"))?;
         let endpoint = endpoint.to_owned();
         let inner = Inner { endpoint, ring, names, http, credentials, quota_project };
         Ok(Self { inner: Arc::new(inner), runtime })
@@ -1066,7 +1065,7 @@ mod tests {
         assert_eq!(*asked.lock().unwrap(), [route(1), route(2), route(3)]);
     }
 
-    /// board 8477: its calls run on a runtime of its own: made on a runtime then dropped, then
+    /// board 8477: its calls run on the shared KMS runtime: made on a runtime then dropped, then
     /// polled by an executor that is no runtime at all, they succeed, the client's connections
     /// never the dropped runtime's. Polled by `block_on` on its caller's runtime, reqwest would
     /// find no reactor; on the dropped one's connections, a transport error.

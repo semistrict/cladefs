@@ -146,7 +146,7 @@ impl std::fmt::Debug for Token {
 ///
 /// A call failing as the network does, or with a 412, 429 or 5xx, is made again, [`TRIES`] times
 /// in all, after [`BACKOFF`], then four times that; each connection may take [`CONNECT_TIMEOUT`],
-/// each request [`REQUEST_TIMEOUT`]. Its calls run on a Tokio runtime of its own, a thread, so that
+/// each request [`REQUEST_TIMEOUT`]. Its calls run on the shared KMS runtime, so that
 /// whatever polls its futures, of any executor or none, waits for them alone. It logs nothing, and
 /// no error says its token; the bytes of keys and of OpenBao's replies it holds are zeroed when
 /// dropped, as far as its HTTP client lets it (not that client's own buffers).
@@ -271,8 +271,7 @@ impl OpenBao {
         }
         let client = client.build().map_err(|err| at(&err))?;
         let token = Credentials::new(token).map_err(|why| at(&why))?;
-        let runtime =
-            Background::new("cladefs-openbao").map_err(|err| at(&format!("its runtime: {err}")))?;
+        let runtime = Background::shared().map_err(|err| at(&format!("its runtime: {err}")))?;
         let inner = Inner { client, origin, mount, namespace, names, token, shown };
         Ok(Self { inner: Arc::new(inner), runtime })
     }

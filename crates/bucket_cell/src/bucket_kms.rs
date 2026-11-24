@@ -288,6 +288,10 @@ impl<B: Bucket> Kms for BucketKms<B> {
         held.generation += 1;
         held.tenants.remove(&tenant);
     }
+
+    fn prewrap(&self) -> bool {
+        false
+    }
 }
 
 /// cladefs: what the KMS answers when the bucket refuses `tenant`'s KEK object's request for good

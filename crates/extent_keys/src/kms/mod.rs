@@ -65,6 +65,11 @@ pub trait Kms: Send + Sync + 'static {
         let _ = tenant;
     }
 
+    /// Whether wrapping a cell KEK ahead of time can save a KMS request on its creation path.
+    fn prewrap(&self) -> bool {
+        true
+    }
+
     /// cladefs: how it names tenants' KEKs, if by [`KeyNames`]: what a reload of its `keys` file
     /// changes (board 8487). A KMS naming them otherwise has none, as here.
     fn names(&self) -> Option<&KeyNames> {
@@ -84,6 +89,9 @@ pub trait Dyn: Send + Sync + 'static {
     /// [`Kms::forget`].
     fn forget_dyn(&self, tenant: u64);
 
+    /// [`Kms::prewrap`].
+    fn prewrap_dyn(&self) -> bool;
+
     /// [`Kms::names`].
     fn names_dyn(&self) -> Option<&KeyNames>;
 }
@@ -102,6 +110,10 @@ impl<K: Kms> Dyn for K {
 
     fn forget_dyn(&self, tenant: u64) {
         self.forget(tenant)
+    }
+
+    fn prewrap_dyn(&self) -> bool {
+        self.prewrap()
     }
 
     fn names_dyn(&self) -> Option<&KeyNames> {

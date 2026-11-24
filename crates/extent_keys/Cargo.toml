@@ -20,12 +20,12 @@ aws-lc-sys.workspace = true
 formats.workspace = true
 fprint.workspace = true
 libc.workspace = true
-# cladefs: AWS KMS (kms/aws.rs, TASK-411.17), its calls on a runtime of its own.
+# cladefs: AWS KMS (kms/aws.rs, TASK-411.17), its calls on the shared KMS runtime.
 aws-config.workspace = true
 aws-sdk-kms.workspace = true
 # cladefs: OpenBao's Transit engine as a KMS (TASK-411.16), over HTTP(S): reqwest (MIT OR
 # Apache-2.0) with rustls (Apache-2.0 OR ISC OR MIT) over aws-lc-rs, the system's roots verified by
-# rustls-platform-verifier (MIT OR Apache-2.0); on a Tokio runtime of its own (tokio, MIT); its
+# rustls-platform-verifier (MIT OR Apache-2.0); on the shared KMS runtime (tokio, MIT); its
 # requests and replies JSON (serde_json, MIT OR Apache-2.0) holding base64 (MIT OR Apache-2.0),
 # their bodies' buffers zeroed (bytes, MIT), its URL parsed by url (MIT OR Apache-2.0). Each is in
 # the build already, through object_store and bucket_cell.
