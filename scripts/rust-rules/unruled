@@ -29,7 +29,6 @@ versions-named-past-their-cuts: arithmetic (a term added to the segment a versio
 a-batch-loses-its-last-run: a batch's last flush taken out whole (Fxfs's graveyard)
 a-create-leaves-its-directorys-times: a flag negated
 a-create-times-its-directory-on-the-guest: a flag forced true
-a-directory-folds-case-once-reopened: a commit's callback dropped: what one commit must do is the directory's
 a-directory-moved-stays-counted: a count left at 0
 a-directory-replaced-may-have-names: a check taken out whole (NotEmpty)
 a-held-back-free-frees-what-is-frozen: a check taken out whole (frozen ranges)
@@ -44,7 +43,6 @@ a-transaction-never-fills: a bound replaced by a huge value
 a-trim-goes-past-the-room: a bound replaced by a count
 a-volume-frees-what-its-snapshot-shares: a condition narrowed and a check taken out whole (frozen owners)
 allocate-ignores-the-room: a condition widened
-allocate-preallocates: one implementation for another: what fallocate does is the protocol's
 allocate-shrinks-to-its-end: a comparison changed
 an-xattr-made-replaces-one-there: a condition forced false
 clone-counts-holes: a bound added to arithmetic
