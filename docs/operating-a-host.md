@@ -409,29 +409,51 @@ What a host can tell from a VM process's status (TASK-70):
 
 ## Building a release daemon
 
-A host runs a release build of one commit, of the Rust `rust-toolchain.toml` pins (board 8603):
+A host runs a static `musl` release build of one commit, of the Rust `rust-toolchain.toml` pins
+(board 8603). Linux release builds of `cladefsd`, `cladefsctl`, `cladefs-mount`, and `cladefs-gc`
+are `musl`-only (non-`musl` Linux release builds fail at compile time) so one static binary per
+architecture runs across Ubuntu, Debian, Fedora Asahi (16 KiB pages), etc. with zero glibc
+version coupling:
 
 ```sh
 git submodule update --init
-cargo build --release --locked -p cladefs --bins
+scripts/build-musl.sh                  # native $(uname -m)-unknown-linux-musl (or: make build-musl)
+# or for a specific target / output directory:
+scripts/build-musl.sh --target x86_64-unknown-linux-musl --out dist/x86_64
+scripts/build-musl.sh --target aarch64-unknown-linux-musl --out dist/aarch64
 ```
 
-- `-p cladefs` alone, never across the workspace: other crates' dev-dependencies turn on
-  `testing` and `tests-kms`, which a release build refuses to compile (TASK-320, TASK-411.28),
-  and never `--features failpoints`, a test build's (`scripts/test-e2e.sh` builds one in the
-  `sim` profile).
+This builds `cladefsd`, `cladefsctl`, `cladefs-mount`, and `cladefs-gc` statically against `musl`
+(matching how `scripts/test-e2e.sh` builds Firecracker for `musl`), verifies with `readelf` that
+each binary has no `PT_INTERP` dynamic linker or `DT_NEEDED` shared libraries (accepting both
+static and static-PIE ELFs) and retains `.debug_line`, and uses `mimalloc` as `#[global_allocator]`
+on `target_env = "musl"` (hotbed question 533):
+
+- `musl`'s default `mallocng` allocator contends heavily under multi-threaded allocation;
+  `mimalloc` uses lock-free per-thread heaps and detects the OS page size at runtime (so one
+  `aarch64-unknown-linux-musl` binary runs on both 4 KiB and 16 KiB kernels).
+- On `musl`, `cladefsd::memory::return_large_allocations()` caps `mimalloc`'s arena object size
+  just below `MMAP_THRESHOLD` (1 MiB) and lowers `purge_delay` to 10 ms so freed 32 MiB segment
+  buffers and 1 MiB parts return to the OS immediately (`RssAnon` stays within `AnonBudget`).
+- Native `musl` builds need `musl-tools` (`musl-gcc`); cross-compilation uses
+  `<arch>-linux-musl-gcc` (or `CC_<target_underscored>`).
+- `-p cladefs` and `-p bucket_cell` alone, never across the workspace: other crates'
+  dev-dependencies turn on `testing` and `tests-kms`, which a release build refuses to compile
+  (TASK-320, TASK-411.28), and never `--features failpoints`, a test build's (`scripts/test-e2e.sh`
+  builds one in the `sim` profile).
 - `--locked`: Cargo.lock as committed, never re-resolved.
 - No `RUSTFLAGS`: it replaces `.cargo/config.toml`'s `-Cforce-frame-pointers=yes`, which perf and
   `/z/pprof` unwind the daemon's stacks by, and the build refuses a release without them
   (`crates/cladefs/build/stamp.rs`, board 8597). A build that needs flags of its own adds that one.
 - The release profile (root `Cargo.toml`) keeps line tables, so that `/z/pprof`
-  name each frame's file and line (the binary 281 MB, 41 MB stripped), unwinds panics, as a
+  name each frame's file and line (the binary ~280 MB, ~41 MB stripped), unwinds panics, as a
   cell's halt needs, and checks arithmetic for overflow, as every test's build does.
 
 Telling it is right: `cladefsctl --version`, and `cladefsd_build_info{commit}` once it runs, name
 the commit it was built of, with no `-dirty` (the stamp follows every crate's files and the lock,
-board 8599); `readelf -S target/release/cladefsd` lists `.debug_line`; and it built at all, which
-it doesn't without frame pointers or with a test feature.
+board 8599); `readelf -S` lists `.debug_line`; `ldd` reports `not a dynamic executable` (or
+`statically linked`); and it built at all, which it doesn't without `musl`, without frame pointers,
+or with a test feature.
 
 ## Running under systemd
 

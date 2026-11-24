@@ -125,6 +125,10 @@ tonic-health = "0.14.6"
 tonic-prost = "0.14.6"
 tower = "0.5.3"
 
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc = { workspace = true, features = ["extended"] }
+libmimalloc-sys.workspace = true
+
 # Firecracker's seccompiler (Apache-2.0, vendor/firecracker), which compiles its production seccomp
 # filters, to run the VMM's side of DAX windows under them (tests/seccomp.rs, TASK-149.28). It
 # links libseccomp (LGPL-2.1), which macOS lacks.

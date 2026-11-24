@@ -94,13 +94,25 @@ case $(uname) in
 esac
 
 # build TREE TARGET builds TREE's cladefs-gc and cladefs-gc-fill into TARGET, unless the sweeps run
-# what --prepare built.
+# what --prepare built. On Linux, release cladefs-gc builds target musl only.
+release_sub=release
+if [[ $(uname) == Linux ]]; then
+    release_sub="$(uname -m)-unknown-linux-musl/release"
+fi
 build() {
     [[ $phase != prepared ]] || return 0
     measurement_refuses "Building cladefs-gc"
     echo "== building cladefs-gc and cladefs-gc-fill of $1" >&2
-    CARGO_TARGET_DIR=$2 cargo build --release -q --manifest-path "$1/Cargo.toml" -p bucket_cell \
-        --bin cladefs-gc --bin cladefs-gc-fill
+    if [[ $(uname) == Linux ]]; then
+        source "$repo/scripts/lib/musl.sh"
+        musl_setup
+        CARGO_TARGET_DIR=$2 env "${MUSL_ENV[@]}" cargo build --release -q \
+            --manifest-path "$1/Cargo.toml" --target "$MUSL_TARGET" -p bucket_cell \
+            --bin cladefs-gc --bin cladefs-gc-fill
+    else
+        CARGO_TARGET_DIR=$2 cargo build --release -q --manifest-path "$1/Cargo.toml" -p bucket_cell \
+            --bin cladefs-gc --bin cladefs-gc-fill
+    fi
 }
 
 # The sides, and the directory each's binaries are in.
@@ -109,7 +121,7 @@ bins=()
 if (( $# == 0 )); then
     build "$repo" "${CARGO_TARGET_DIR:-$repo/target}"
     sides=(this)
-    bins=("${CARGO_TARGET_DIR:-$repo/target}/release")
+    bins=("${CARGO_TARGET_DIR:-$repo/target}/$release_sub")
 fi
 for pair in "$@"; do
     side=${pair%%=*}
@@ -119,7 +131,7 @@ for pair in "$@"; do
     # A target of its own, as two trees sharing one would link each other's crates.
     build "$tree" "$work/target-$side"
     sides+=("$side")
-    bins+=("$work/target-$side/release")
+    bins+=("$work/target-$side/$release_sub")
 done
 for bin in "${bins[@]}"; do
     [[ -x $bin/cladefs-gc && -x $bin/cladefs-gc-fill ]] ||

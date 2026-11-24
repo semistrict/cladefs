@@ -8,7 +8,11 @@
 //! none of them (`bucket`'s tests, TASK-317). nextest runs each test in a process of its own, so
 //! that what one counts is its own.
 
-use std::alloc::{GlobalAlloc, Layout, System};
+#[cfg(target_env = "musl")]
+use mimalloc::MiMalloc as Underlying;
+#[cfg(not(target_env = "musl"))]
+use std::alloc::System as Underlying;
+use std::alloc::{GlobalAlloc, Layout};
 use std::cell::Cell;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -80,33 +84,33 @@ impl Bounded {
     }
 }
 
-// SAFETY: each method is `System`'s, with the caller's arguments, the contract `GlobalAlloc` asks
-// of the caller passed on unchanged; what it adds, counting, touches no memory but atomics, and
-// can't unwind: HELD counts what `System` holds, refusals taken back, so it stays below
-// `usize::MAX`, and past the limit it aborts.
+// SAFETY: each method is `Underlying`'s (`System`, or `MiMalloc` on musl), with the caller's
+// arguments, the contract `GlobalAlloc` asks of the caller passed on unchanged; what it adds,
+// counting, touches no memory but atomics, and can't unwind: HELD counts what `Underlying` holds,
+// refusals taken back, so it stays below `usize::MAX`, and past the limit it aborts.
 unsafe impl GlobalAlloc for Bounded {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         // SAFETY: the caller's `layout`, of nonzero size, as `GlobalAlloc::alloc` asks of it.
-        Self::counted(layout.size(), || unsafe { System.alloc(layout) })
+        Self::counted(layout.size(), || unsafe { Underlying.alloc(layout) })
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         // SAFETY: as `alloc`.
-        Self::counted(layout.size(), || unsafe { System.alloc_zeroed(layout) })
+        Self::counted(layout.size(), || unsafe { Underlying.alloc_zeroed(layout) })
     }
 
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
         HELD.fetch_sub(layout.size(), Ordering::Relaxed);
-        // SAFETY: the caller's `pointer`, allocated by this allocator (`System`, as each method
+        // SAFETY: the caller's `pointer`, allocated by this allocator (`Underlying`, as each method
         // delegates to it) with `layout`, as `GlobalAlloc::dealloc` asks of it.
-        unsafe { System.dealloc(pointer, layout) }
+        unsafe { Underlying.dealloc(pointer, layout) }
     }
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
         // SAFETY: the caller's `pointer` and `layout`, as `dealloc`, and `size`, nonzero and
         // not overflowing `isize` once rounded to `layout`'s alignment, as `GlobalAlloc::realloc`
         // asks of it.
-        let grown = Self::counted(size, || unsafe { System.realloc(pointer, layout, size) });
+        let grown = Self::counted(size, || unsafe { Underlying.realloc(pointer, layout, size) });
         // Refused, the old allocation is still held, as `realloc` leaves it.
         if !grown.is_null() {
             HELD.fetch_sub(layout.size(), Ordering::Relaxed);

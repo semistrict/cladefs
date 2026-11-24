@@ -26,6 +26,11 @@ unexpected_cfgs = { level = "warn", check-cfg = [
 
 [workspace.dependencies]
 anyhow = "1.0.104"
+# High-performance allocator for static musl binaries: musl's default mallocng contends heavily
+# under multi-threaded allocation, and mimalloc detects the OS page size at runtime so one arm64
+# binary runs across both 4 KiB (Ubuntu/Debian) and 16 KiB (Fedora Asahi) kernels (MIT).
+mimalloc = { version = "0.1.52", default-features = false }
+libmimalloc-sys = { version = "0.1.49", default-features = false, features = ["extended"] }
 libc = { version = "0.2.189", features = ["extra_traits"] }
 aes = "0.9.1"
 # AES-256-GCM, AES-KW, HKDF and HMAC for encryption at rest (aws/aws-lc-rs, ISC AND (Apache-2.0 OR

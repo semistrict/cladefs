@@ -76,9 +76,10 @@ class PjdfstestFuseTest(unittest.TestCase):
         job = re.search(r"^  pjdfstest-fuse:\n(.*?)(?=^  \S|\Z)", ci, re.MULTILINE | re.DOTALL)
         self.assertIsNotNone(job, "no pjdfstest-fuse job")
         job = job.group(1)
-        self.assertIn("cargo build --locked -p cladefs --bin cladefs-mount", job)
-        self.assertRegex(job, r"sudo .*scripts/pjdfstest-fuse\.py target/debug/cladefs-mount")
-        for package in ["fuse3", "autoconf", "automake"]:
+        self.assertIn('cargo build --locked --target "$MUSL_TARGET" -p cladefs --bin cladefs-mount', job)
+        self.assertRegex(
+            job, r"sudo .*scripts/pjdfstest-fuse\.py target/x86_64-unknown-linux-musl/debug/cladefs-mount")
+        for package in ["musl-tools", "fuse3", "autoconf", "automake"]:
             self.assertIn(package, job)
 
 

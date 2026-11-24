@@ -7,6 +7,7 @@ TASK-368): a process in hotbed run --bench's slice, as its cgroup says (CLADEFS_
 /proc/self/cgroup), is refused each way a build would start there, before it starts, saying why;
 one in work's slice, or on a host of no such cgroups, goes on."""
 
+import os
 import subprocess
 import tempfile
 import unittest
@@ -136,8 +137,10 @@ class Guard(unittest.TestCase):
         self.assertEqual(self.bash(f"{sweep} {work} {results}"),
                          (2, "", refusal("Building cladefs-gc")))
         # What --prepare made is swept; with nothing made, refused before a sweep.
+        uname = os.uname()
+        release_sub = f"{uname.machine}-unknown-linux-musl/release" if uname.sysname == "Linux" else "release"
         self.assertEqual(self.bash(f"{sweep} --prepared {work} {results} a={SCRIPTS.parent}"),
-                         (2, "", f"{work}/target-a/release holds no cladefs-gc and "
+                         (2, "", f"{work}/target-a/{release_sub} holds no cladefs-gc and "
                                  "cladefs-gc-fill: --prepare builds them\n"))
 
 

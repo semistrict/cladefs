@@ -62,20 +62,23 @@ if [[ $host_phase != measure ]]; then
         mv "$layer.new" "$layer"
         rm -r -- "$made"
     fi
+    source "$here/musl.sh"
+    musl_setup
     for pair in "$@"; do
         label=${pair%%=*}
         tree=$(cd "${pair#*=}" && pwd)
         echo "== $label: building $tree" >&2
-        (cd "$tree" && CARGO_TARGET_DIR=$scratch/target-$label host_cargo build --release -q \
-            -p cladefs --bin cladefsd --bin cladefsctl)
+        (cd "$tree" && CARGO_TARGET_DIR=$scratch/target-$label env "${MUSL_ENV[@]}" host_cargo build \
+            --release -q --target "$MUSL_TARGET" -p cladefs --bin cladefsd --bin cladefsctl)
     done
     if [[ $host_phase == build ]]; then exit 0; fi
 fi
 [[ -f $layer ]] || { echo "$layer: no image: CLADEFS_TEST_HOST_PHASE=build makes it" >&2; exit 2; }
 
+musl_target="$(uname -m)-unknown-linux-musl"
 for pair in "$@"; do
     label=${pair%%=*}
-    bin=$scratch/target-$label/release
+    bin=$scratch/target-$label/$musl_target/release
     [[ -x $bin/cladefsd && -x $bin/cladefsctl ]] ||
         { echo "$label: not built in $bin: CLADEFS_TEST_HOST_PHASE=build builds it" >&2; exit 2; }
     dir=$scratch/$label

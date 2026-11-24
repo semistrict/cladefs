@@ -184,16 +184,21 @@ fi
 # (fxfs-guest-soak).
 export CLADEFS_E2E_RUN="$results"
 if [[ -z $prebuilt ]]; then
-(cd "$root" && cargo build --locked --profile "$cladefsd_profile" -p cladefs --bin cladefsd \
-    --bin cladefsctl ${cladefsd_features[@]+"${cladefsd_features[@]}"})
+source "$root/scripts/lib/musl.sh"
+musl_setup
+(cd "$root" && env "${MUSL_ENV[@]}" cargo build --locked --profile "$cladefsd_profile" \
+    --target "$MUSL_TARGET" -p cladefs --bin cladefsd --bin cladefsctl \
+    ${cladefsd_features[@]+"${cladefsd_features[@]}"})
 root_target=$(target_dir "$root")
-cladefsd_bin="$root_target/$cladefsd_profile/cladefsd"
+cladefsd_bin="$root_target/$MUSL_TARGET/$cladefsd_profile/cladefsd"
 # cladefs: cladefsctl, beside it, for cases that run it against the daemon (fxfs-guest-stats,
 # TASK-111.4); and the bucket's collector, cladefs-gc, for those that collect their bucket
-# (fxfs-guest-soak).
-export CLADEFSCTL_BIN="$root_target/$cladefsd_profile/cladefsctl"
-(cd "$root" && cargo build --locked --release -p bucket_cell --bin cladefs-gc)
-export CLADEFS_GC_BIN="$root_target/release/cladefs-gc"
+# (fxfs-guest-soak). All Linux binaries are static musl builds.
+export CLADEFSCTL_BIN="$root_target/$MUSL_TARGET/$cladefsd_profile/cladefsctl"
+(cd "$root" && env "${MUSL_ENV[@]}" cargo build --locked --release --target "$MUSL_TARGET" \
+    -p bucket_cell --bin cladefs-gc)
+export CLADEFS_GC_BIN="$root_target/$MUSL_TARGET/release/cladefs-gc"
+musl_verify_static "$cladefsd_bin" "$CLADEFSCTL_BIN" "$CLADEFS_GC_BIN"
 # As cladefs builds it, with its cladefs feature (scripts/firecracker-cargo.sh), in the copy of
 # vendor/firecracker that builds in, whose .cargo/config.toml sets its target directory, unless
 # CARGO_TARGET_DIR does, and build environment. CLADEFS_FIRECRACKER_SECCOMP builds Firecracker as production does, for musl, which compiles in its

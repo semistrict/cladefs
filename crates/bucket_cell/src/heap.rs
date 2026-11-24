@@ -7,7 +7,11 @@
 //! (`recovery::tests::changes_bound_what_maps_made_of_others_copy`, TASK-453). nextest runs each
 //! test in a process of its own, so that what one counts is its own.
 
-use std::alloc::{GlobalAlloc, Layout, System};
+#[cfg(target_env = "musl")]
+use mimalloc::MiMalloc as Underlying;
+#[cfg(not(target_env = "musl"))]
+use std::alloc::System as Underlying;
+use std::alloc::{GlobalAlloc, Layout};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Counts what the process holds of its heap ([`held`]).
@@ -23,30 +27,30 @@ pub(crate) fn held() -> usize {
     HELD.load(Ordering::Relaxed)
 }
 
-// SAFETY: this only counts what `System` does.
+// SAFETY: this only counts what `Underlying` (`System`, or `MiMalloc` on musl) does.
 unsafe impl GlobalAlloc for Counted {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         HELD.fetch_add(layout.size(), Ordering::Relaxed);
         // SAFETY: As the caller promises.
-        unsafe { System.alloc(layout) }
+        unsafe { Underlying.alloc(layout) }
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         HELD.fetch_add(layout.size(), Ordering::Relaxed);
         // SAFETY: As the caller promises.
-        unsafe { System.alloc_zeroed(layout) }
+        unsafe { Underlying.alloc_zeroed(layout) }
     }
 
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
         HELD.fetch_sub(layout.size(), Ordering::Relaxed);
         // SAFETY: As the caller promises.
-        unsafe { System.dealloc(pointer, layout) }
+        unsafe { Underlying.dealloc(pointer, layout) }
     }
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
         HELD.fetch_add(size, Ordering::Relaxed);
         HELD.fetch_sub(layout.size(), Ordering::Relaxed);
         // SAFETY: As the caller promises.
-        unsafe { System.realloc(pointer, layout, size) }
+        unsafe { Underlying.realloc(pointer, layout, size) }
     }
 }

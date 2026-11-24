@@ -153,6 +153,22 @@
 //! storage. A record about a VM's request names it, `request_id`, the guest's number of it, with
 //! its `store` (TASK-260).
 
+// cladefs: Linux release binaries of cladefsd are static musl builds only (with mimalloc) so one
+// binary per architecture runs across Ubuntu, Debian, Fedora Asahi, etc. with zero glibc version
+// coupling. Debug/sim/test builds still compile for the host target for nextest and clippy.
+#[cfg(all(target_os = "linux", not(target_env = "musl"), not(debug_assertions)))]
+compile_error!(
+    "Linux release builds of cladefsd must target musl (use scripts/build-musl.sh or \
+     --target <arch>-unknown-linux-musl)"
+);
+
+// cladefs: musl's default mallocng allocator contends heavily under multi-threaded allocation;
+// mimalloc uses lock-free per-thread heaps and detects OS page size at runtime so a single static
+// arm64 binary runs across 4 KiB (Ubuntu/Debian) and 16 KiB (Fedora Asahi) kernels.
+#[cfg(target_env = "musl")]
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[cfg(all(target_os = "linux", not(madsim)))]
 fn main() -> anyhow::Result<()> {
     use anyhow::Context;

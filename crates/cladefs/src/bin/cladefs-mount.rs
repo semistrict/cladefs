@@ -33,6 +33,19 @@
 // Every unsafe block says why it is sound, other threads included (TASK-444.4).
 #![deny(clippy::undocumented_unsafe_blocks)]
 
+// cladefs: Linux release binaries of cladefs-mount are static musl builds only (with mimalloc).
+#[cfg(all(target_os = "linux", not(target_env = "musl"), not(debug_assertions)))]
+compile_error!(
+    "Linux release builds of cladefs-mount must target musl (use scripts/build-musl.sh or \
+     --target <arch>-unknown-linux-musl)"
+);
+
+// cladefs: musl's default mallocng allocator contends heavily under multi-threaded FUSE serving;
+// mimalloc uses lock-free per-thread heaps and detects OS page size at runtime.
+#[cfg(target_env = "musl")]
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[cfg(all(target_os = "linux", not(madsim)))]
 const USAGE: &str = "usage: cladefs-mount [--allow-other] [--new CAPACITY] CELL_DIR MOUNTPOINT";
 

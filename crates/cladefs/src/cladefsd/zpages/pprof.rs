@@ -206,8 +206,11 @@ mod tests {
         let clock = {
             use std::os::unix::thread::JoinHandleExt as _;
             let mut clock: libc::clockid_t = 0;
-            // SAFETY: the thread is alive until it is joined, below.
-            let got = unsafe { libc::pthread_getcpuclockid(spinning.as_pthread_t(), &mut clock) };
+            // SAFETY: the thread is alive until it is joined, below. `as libc::pthread_t`
+            // bridges `RawPthread` (u64) to musl's `pthread_t` (`*mut c_void`).
+            let got = unsafe {
+                libc::pthread_getcpuclockid(spinning.as_pthread_t() as libc::pthread_t, &mut clock)
+            };
             assert_eq!(got, 0, "the spinning thread's CPU clock");
             clock
         };

@@ -1126,6 +1126,19 @@ impl log::Log for Stderr {
     fn flush(&self) {}
 }
 
+// cladefs: Linux release binaries of cladefs-gc are static musl builds only (with mimalloc).
+#[cfg(all(target_os = "linux", not(target_env = "musl"), not(debug_assertions)))]
+compile_error!(
+    "Linux release builds of cladefs-gc must target musl (use scripts/build-musl.sh or \
+     --target <arch>-unknown-linux-musl)"
+);
+
+// cladefs: musl's default mallocng allocator contends heavily under concurrent GC passes;
+// mimalloc uses lock-free per-thread heaps and detects OS page size at runtime.
+#[cfg(target_env = "musl")]
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() -> Result<(), String> {
     let Args { url, command } = parse(std::env::args().skip(1))?;
     // cladefs: before any thread starts, which would take them else (board 8513). Nothing asks

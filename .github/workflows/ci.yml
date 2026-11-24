@@ -66,6 +66,8 @@ jobs:
             packages: coccinelle
           - parts: guest
             packages: xfsprogs
+          - parts: go
+            packages: musl-tools
           - parts: firecracker
             packages: libclang-dev
     env:
@@ -207,7 +209,7 @@ jobs:
       - name: Install the build's tools
         uses: ./.github/actions/apt-install
         with:
-          packages: clang fuse3 autoconf automake gcc make perl
+          packages: clang musl-tools fuse3 autoconf automake gcc make perl
       - name: Rust, as rust-toolchain.toml pins it
         run: rustup toolchain install
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -219,9 +221,12 @@ jobs:
           key: cargo-${{ runner.os }}-pjdfstest-fuse-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-pjdfstest-fuse-
       - name: Build cladefs-mount
-        run: cargo build --locked -p cladefs --bin cladefs-mount
+        run: |
+          source scripts/lib/musl.sh
+          musl_setup x86_64-unknown-linux-musl
+          env "${MUSL_ENV[@]}" cargo build --locked --target "$MUSL_TARGET" -p cladefs --bin cladefs-mount
       - name: pjdfstest on FUSE mounts of new stores, as root
-        run: sudo --preserve-env env "PATH=$PATH" scripts/pjdfstest-fuse.py target/debug/cladefs-mount
+        run: sudo --preserve-env env "PATH=$PATH" scripts/pjdfstest-fuse.py target/x86_64-unknown-linux-musl/debug/cladefs-mount
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: failure()
         with:
@@ -596,3 +601,47 @@ jobs:
         with:
           name: guest-sim-sweep-logs
           path: target/sim/sweep
+
+  # Static Linux musl release binaries (cladefsd, cladefsctl, cladefs-mount, cladefs-gc) for both
+  # x86-64 and arm64, built with mimalloc so one binary per architecture runs across Ubuntu,
+  # Debian, and Fedora Asahi (16 KiB pages) with zero glibc version coupling.
+  musl-release:
+    name: musl release (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+      - name: Install the build's tools
+        uses: ./.github/actions/apt-install
+        with:
+          packages: clang musl-tools binutils
+      - name: Rust, as rust-toolchain.toml pins it
+        run: rustup toolchain install
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ matrix.target }}-release-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ matrix.target }}-release-
+      - name: Build and verify static musl binaries
+        run: |
+          scripts/build-musl.sh --target "${{ matrix.target }}"
+          for bin in cladefsd cladefsctl cladefs-mount cladefs-gc; do
+            path="target/${{ matrix.target }}/release/$bin"
+            out="$(ldd "$path" 2>&1 || true)"
+            echo "$bin: $out"
+            grep -qE 'not a dynamic executable|statically linked' <<< "$out"
+          done
+          "target/${{ matrix.target }}/release/cladefsctl" --version

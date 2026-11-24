@@ -165,10 +165,13 @@ if part go; then
     [[ -z $unformatted ]] || { echo "not gofmt'd: $unformatted" >&2; exit 1; }
     go -C "$root/go" vet -tags cladefsd ./...
     if [[ $(uname) == Linux ]]; then
-        cargo build --locked --manifest-path "$root/Cargo.toml" -p cladefs --bin cladefsd
+        source "$root/scripts/lib/musl.sh"
+        musl_setup
+        env "${MUSL_ENV[@]}" cargo build --locked --manifest-path "$root/Cargo.toml" \
+            --target "$MUSL_TARGET" -p cladefs --bin cladefsd
         # No headroom, as cargo's tests' daemons have (.cargo/config.toml): a cell refused only
         # once the host's memory is really full (board 5662).
-        CLADEFSD="${CARGO_TARGET_DIR:-$root/target}/debug/cladefsd" \
+        CLADEFSD="${CARGO_TARGET_DIR:-$root/target}/$MUSL_TARGET/debug/cladefsd" \
             CLADEFSD_HEADROOM=${CLADEFSD_HEADROOM:-0} go -C "$root/go" test -tags cladefsd ./...
     else
         go -C "$root/go" test ./...

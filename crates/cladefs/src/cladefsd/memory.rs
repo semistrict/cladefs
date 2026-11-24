@@ -416,15 +416,26 @@ pub(super) fn reserved_connections_left_on(daemon: &Daemon, reserved: usize) -> 
 /// unmaps it as it is freed ([`return_large_allocations`], TASK-317).
 pub const MMAP_THRESHOLD: usize = 1 << 20;
 
-/// cladefs: has the C library's allocator give back what the daemon frees of its large buffers at
+/// cladefs: mimalloc v3's `mi_option_t` indices used by [`return_large_allocations`] on musl
+/// (from `libmimalloc-sys`'s bundled `v3/include/mimalloc.h`, which `libmimalloc-sys` does not
+/// re-export as named constants). Verified by `tests::large_buffers_freed_go_back` on musl.
+#[cfg(target_env = "musl")]
+const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
+#[cfg(target_env = "musl")]
+const MI_OPTION_ARENA_MAX_OBJECT_SIZE: libmimalloc_sys::mi_option_t = 45;
+
+/// cladefs: has the process's allocator give back what the daemon frees of its large buffers at
 /// once, each allocation of [`MMAP_THRESHOLD`] or more mapped on its own (glibc's
-/// `M_MMAP_THRESHOLD`), before any thread but the caller's is made: the segments it frames and
-/// uploads, 32 MiB each, the parts it fetches, of a MiB. By default glibc raises that threshold to
-/// the largest allocation freed, up to 32 MiB, and keeps buffers below it in its arenas, one a
-/// thread at most eight times the CPUs: under an upload backlog on the test host, 134 of them,
-/// 64 MiB each, held 2.6 GB of anonymous memory the daemon had freed, twice its heap at its peak
-/// (TASK-317), what the host's OOM killer took it for. Nothing elsewhere: another C library's
-/// allocator is left as it is.
+/// `M_MMAP_THRESHOLD`; on musl, mimalloc's `mi_option_arena_max_object_size` and
+/// `mi_option_purge_delay`), before any thread but the caller's is made: the segments it frames
+/// and uploads, 32 MiB each, the parts it fetches, of a MiB. By default glibc raises that
+/// threshold to the largest allocation freed, up to 32 MiB, and keeps buffers below it in its
+/// arenas, one a thread at most eight times the CPUs: under an upload backlog on the test host,
+/// 134 of them, 64 MiB each, held 2.6 GB of anonymous memory the daemon had freed, twice its heap
+/// at its peak (TASK-317), what the host's OOM killer took it for. On musl, mimalloc v3's arenas
+/// likewise hold objects up to 2 GiB for 1000 ms before purging; setting the arena cap just below
+/// [`MMAP_THRESHOLD`] routes large buffers straight to OS `mmap`/`munmap` on free, and lowering
+/// `purge_delay` to 10 ms returns freed sub-threshold arena slices promptly.
 pub fn return_large_allocations() {
     #[cfg(target_env = "gnu")]
     {
@@ -432,6 +443,21 @@ pub fn return_large_allocations() {
         let set = unsafe { libc::mallopt(libc::M_MMAP_THRESHOLD, MMAP_THRESHOLD as libc::c_int) };
         if set != 1 {
             log::warn!("cladefsd: glibc refused M_MMAP_THRESHOLD {MMAP_THRESHOLD}");
+        }
+    }
+    #[cfg(target_env = "musl")]
+    {
+        // mimalloc's arena slice granularity is 64 KiB and `arena.c` checks
+        // `slice_count <= arena_max_object_size / 64 KiB`, so 960 KiB sends >= 1 MiB allocations
+        // directly to OS mmap/munmap.
+        const ARENA_SLICE_KIB: usize = 64;
+        const MAX_ARENA_OBJECT_KIB: std::ffi::c_long =
+            ((MMAP_THRESHOLD >> 10) - ARENA_SLICE_KIB) as std::ffi::c_long;
+        // SAFETY: Called from `main` before worker threads start (and idempotently in tests);
+        // `mi_option_set` writes mimalloc's process-wide option table for subsequent allocations.
+        unsafe {
+            libmimalloc_sys::mi_option_set(MI_OPTION_ARENA_MAX_OBJECT_SIZE, MAX_ARENA_OBJECT_KIB);
+            libmimalloc_sys::mi_option_set(MI_OPTION_PURGE_DELAY, 10);
         }
     }
 }
@@ -696,13 +722,30 @@ mod tests {
     /// TASK-317: buffers of a segment's size, written and freed on many threads at once, as the
     /// daemon frames and uploads segments, leave no memory behind them once
     /// [`super::return_large_allocations`] has the allocator give them back: glibc's arenas kept
-    /// 2.6 GB of them in the daemon otherwise.
-    #[cfg(target_env = "gnu")]
+    /// 2.6 GB of them in the daemon otherwise, and mimalloc v3's arenas keep them for 1 s.
+    #[cfg(any(target_env = "gnu", target_env = "musl"))]
     #[test]
     fn large_buffers_freed_go_back() {
         const THREADS: usize = 32;
         const BUFFERS: usize = 8;
         const SEGMENT: usize = 32 << 20;
+        #[cfg(target_env = "musl")]
+        {
+            // Verify our mimalloc v3 option indices still match `libmimalloc-sys`'s defaults before
+            // overriding them so a future mimalloc bump cannot silently shift an enum index.
+            // SAFETY: Single-threaded before spawning worker threads; reads mimalloc's version and
+            // option defaults.
+            let (version, purge_delay, max_arena_kib) = unsafe {
+                (
+                    libmimalloc_sys::mi_version(),
+                    libmimalloc_sys::mi_option_get(super::MI_OPTION_PURGE_DELAY),
+                    libmimalloc_sys::mi_option_get(super::MI_OPTION_ARENA_MAX_OBJECT_SIZE),
+                )
+            };
+            assert!(version >= 300, "expected mimalloc v3+, got {version}");
+            assert_eq!(purge_delay, 1000, "mi_option_purge_delay index drifted");
+            assert_eq!(max_arena_kib, 2 << 20, "mi_option_arena_max_object_size index drifted");
+        }
         super::return_large_allocations();
         let before = anonymous();
         let threads: Vec<_> = (0..THREADS)

@@ -25,9 +25,10 @@ UBUNTU_COM = ["azure.archive.ubuntu.com", "archive.ubuntu.com", "security.ubuntu
 FALLBACKS = ["mirrors.edge.kernel.org", "mirrors.mit.edu"]
 TEST_SH = ROOT / "scripts" / "test.sh"
 # The packages only some parts' tests run, and the parts: Coccinelle's spatch, which the scripts'
-# tests run (test_cocci_guest.py); mkfs.xfs, which the guest tests' own do; libclang, which the
-# VMM's build needs (userfaultfd-sys's bindgen).
-OWN = {"coccinelle": {"clippy scripts"}, "xfsprogs": {"guest"}, "libclang-dev": {"firecracker"}}
+# tests run (test_cocci_guest.py); mkfs.xfs, which the guest tests' own do; musl-tools, which the
+# go part's static musl cladefsd build needs; libclang, which the VMM's build needs
+# (userfaultfd-sys's bindgen).
+OWN = {"coccinelle": {"clippy scripts"}, "xfsprogs": {"guest"}, "musl-tools": {"go"}, "libclang-dev": {"firecracker"}}
 
 
 def job():
