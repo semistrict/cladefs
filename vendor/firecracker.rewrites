@@ -34,3 +34,7 @@ e27792aef7c3a7084bd014469edf0eedd60cc0a0 e103560286ee3e1255ecc93077de118acfa5726
 # Firecracker v1.18.0 (eaf83bb71) as 3 commits (dropping the dependency backport, PCI restore
 # activation error, and PCI reset deadlock now upstream).
 d8022b23e3fad4a1ee258c4d87145cbbc5f301da 190406ee1b467c133314da1fcecea0dc00bd5c73
+# cladefs-v1.18.0-r2 (branch cladefs-v1.18.0-r2): fold 99921a773 (live followers / read_only gone,
+# virtio_extent protocol v2; board 8237) into 190406ee1 so every commit in the series builds with
+# the cladefs feature (board 10811).
+99921a773063eebf0a9eff520e29c05532a81073 b6203780198d5f314c5a126523b6426da353ed14
