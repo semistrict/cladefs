@@ -502,3 +502,43 @@ fn forget_cells_halts_fuse_slot_and_invalidates_kernel_page_cache() {
 
     block_on(server.unmount()).unwrap();
 }
+
+/// An interrupted FUSE reply (where `/dev/fuse` returns `ENOENT` on `write`) never reaches the
+/// kernel, so the kernel never sends `FORGET` for the lookups the reply recorded. `undelivered`
+/// must release both single-entry (`LOOKUP`, `CREATE`, ...) and multi-entry (`READDIRPLUS`)
+/// lookups so a clean `detach(..., false)` completes instead of hanging forever.
+#[test]
+fn undelivered_replies_release_lookups_so_detach_completes() {
+    let server = Server::cells(OWNER, Box::new(|_| Ok(())));
+    let fs = block_on(filesystem()).unwrap();
+    block_on(fs.root().create(b"a", 0o644, OWNER)).unwrap();
+    block_on(fs.root().create(b"b", 0o644, OWNER)).unwrap();
+    block_on(server.attach("t/cell", std::future::ready(Ok(fs)))).unwrap();
+
+    let t = lookup(&server, ROOT_ID, "t").unwrap();
+    let root = lookup(&server, t.nodeid, "cell").unwrap();
+
+    // Simulate an interrupted LOOKUP reply for "a".
+    let lookup_req = request(opcode::LOOKUP, root.nodeid, b"a\0");
+    let lookup_reply = block_on(server.handle(&lookup_req)).unwrap().unwrap();
+    server.undelivered(&lookup_req, &lookup_reply);
+
+    // Simulate an interrupted READDIRPLUS reply on the cell root (returns ".", "..", "a", "b").
+    let open_req = request(opcode::OPENDIR, root.nodeid, &[]);
+    let open_reply = block_on(server.handle(&open_req)).unwrap().unwrap();
+    let (_, open_body) = OutHeader::read_from_prefix(&open_reply).unwrap();
+    let (open_out, _) = OpenOut::read_from_prefix(open_body).unwrap();
+    let read_in = ReadIn { fh: open_out.fh, offset: 0, size: 4096, ..Default::default() };
+    let rdp_req = request(opcode::READDIRPLUS, root.nodeid, read_in.as_bytes());
+    let rdp_reply = block_on(server.handle(&rdp_req)).unwrap().unwrap();
+    server.undelivered(&rdp_req, &rdp_reply);
+
+    let rel_in = ReleaseIn { fh: open_out.fh, ..Default::default() };
+    let _ = block_on(server.handle(&request(opcode::RELEASEDIR, root.nodeid, rel_in.as_bytes())))
+        .unwrap();
+
+    // Only the delivered root lookup remains; once forgotten, non-forced detach must finish cleanly.
+    forget(&server, root.nodeid, 1);
+    block_on(server.detach("t/cell", false)).unwrap();
+    block_on(server.unmount()).unwrap();
+}

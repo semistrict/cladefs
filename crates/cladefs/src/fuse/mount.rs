@@ -448,13 +448,24 @@ fn answer(device: &File, server: &Server, request: &[u8]) {
             }
         }
     };
-    // A reply is written whole, in one write, or not at all.
+    // A reply is written whole, in one write, or not at all. If the kernel never accepted it (e.g.
+    // ENOENT because the request was interrupted before the reply arrived), undo any node lookups
+    // the reply recorded so a clean `Server::detach` does not wait forever for a FORGET the kernel
+    // will never send.
     match (&*device).write(&reply) {
         Ok(written) if written == reply.len() => {}
-        Ok(written) => log::error!("fuse: {written} bytes of a {}-byte reply", reply.len()),
+        Ok(written) => {
+            log::error!("fuse: {written} bytes of a {}-byte reply", reply.len());
+            server.undelivered(request, &reply);
+        }
         // The request was interrupted, and its reply is not wanted.
-        Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {}
-        Err(error) => log::error!("fuse: writing a reply: {error}"),
+        Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {
+            server.undelivered(request, &reply);
+        }
+        Err(error) => {
+            log::error!("fuse: writing a reply: {error}");
+            server.undelivered(request, &reply);
+        }
     }
 }
 

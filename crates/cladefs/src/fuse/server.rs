@@ -737,6 +737,51 @@ impl Server {
         Some(Arc::from(dir.name.as_str()))
     }
 
+    /// Undoes the lookups that `reply` to `request` recorded when `/dev/fuse` did not accept the
+    /// reply (for instance `ENOENT` on an interrupted request; board 11377). The kernel never took
+    /// those lookups and will never send `FORGET` for them, so leaving them in [`Nodes::looked`]
+    /// would wedge a non-forced [`Self::detach`] forever waiting for `forgotten_all`.
+    #[cfg_attr(madsim, allow(dead_code))]
+    pub(crate) fn undelivered(&self, request: &[u8], reply: &[u8]) {
+        let Ok((in_header, _)) = InHeader::read_from_prefix(request) else { return };
+        let Ok((out_header, mut payload)) = OutHeader::read_from_prefix(reply) else { return };
+        if out_header.error != 0 {
+            return;
+        }
+        match in_header.opcode {
+            opcode::LOOKUP
+            | opcode::SYMLINK
+            | opcode::MKNOD
+            | opcode::MKDIR
+            | opcode::LINK
+            | opcode::CREATE => {
+                let Ok((entry, _)) = EntryOut::read_from_prefix(payload) else { return };
+                if entry.nodeid != 0 {
+                    self.forget(entry.nodeid, 1);
+                }
+            }
+            opcode::READDIRPLUS => {
+                while !payload.is_empty() {
+                    let Ok((entry, rest)) = EntryOut::read_from_prefix(payload) else { break };
+                    let Ok((dirent, rest)) = Dirent::read_from_prefix(rest) else { break };
+                    let Some(name_and_pad) = (dirent.namelen as usize)
+                        .checked_add(size_of::<Dirent>())
+                        .and_then(|n| n.checked_next_multiple_of(8))
+                        .and_then(|n| n.checked_sub(size_of::<Dirent>()))
+                    else {
+                        break;
+                    };
+                    let Some((_, next)) = rest.split_at_checked(name_and_pad) else { break };
+                    if entry.nodeid != 0 {
+                        self.forget(entry.nodeid, 1);
+                    }
+                    payload = next;
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// The reply to `request`, as the kernel sent it, whose handling panicked: `EIO`, unless it
     /// takes none, so that the process waiting on it goes on (board 8539).
     #[cfg_attr(madsim, allow(dead_code))]
