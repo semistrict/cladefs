@@ -204,10 +204,16 @@ fi
 if part firecracker; then
     tests='test(/extent::/) | test(/vcpu::tests::(efaults_|test_exit_code_)/)'
     tests+=' | test(/device::tests::test_features_/)'
+    tests+=' | test(/block::vhost_user::device::tests::/)'
+    tests+=' | test(/transport::mmio::tests::test_ack_features_by_page$/)'
+    tests+=' | test(/vsock::device::tests::(test_virtio_device|test_prepare_save_|test_kick_signals_)/)'
     tests+=' | test(/signal_handler::/)'
     tests+=' | test(/transport::pci::device::tests::test_(shm_bar|pci_device_ids)$/)'
     CLADEFSD_BUCKET=memory:///vmm CLADEFSD_TOKEN=1 \
         "$root/scripts/firecracker-cargo.sh" nextest run -p vmm --lib --features cladefs -E "$tests"
+    # The jailer's /proc/misc parsing tests (no KVM or root needed).
+    "$root/scripts/firecracker-cargo.sh" nextest run -p jailer --bin jailer \
+        -E 'test(/test_(parse_)?misc_dev_minor/)'
     # The API's parsing of the device's configuration, PUT /cladefs/{id} (TASK-503).
     "$root/scripts/firecracker-cargo.sh" nextest run -p firecracker --bin firecracker \
         --features cladefs -E 'test(/request::cladefs::/)'
