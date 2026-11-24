@@ -64,11 +64,15 @@ use crate::frames::{Frame, Frames};
 #[cfg(not(madsim))]
 use crate::shared::Holding;
 use crate::sync::{Condvar, Mutex, MutexGuard};
+#[cfg(feature = "shuttle")]
+use shuttle::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io;
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
+#[cfg(not(feature = "shuttle"))]
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 
 /// The cache's page: what it holds, writes back and evicts. A cell's data files are written in
@@ -614,11 +618,10 @@ pub(crate) struct Shared<F: File> {
     /// (board 5995).
     disk: Option<Arc<bucket_cell::host_disk::HostDisk>>,
     pages: Mutex<Pages>,
-    /// Held by its write-back, one at a time (`I_SYNC`): what a sync, or a dropping of pages, waits
-    /// on for the write-back in flight to end. A lock, not a condition variable, so that whatever
-    /// wakes a thread waiting on it, it waits on (Shuttle's scoped threads wake the scope's thread
-    /// as the last ends, whatever it waits on). Taken before its pages' lock.
-    writeback: Mutex<()>,
+    /// Keeps the file's bytes stable while readers miss the cache. Write-back, punching and
+    /// dropping dirty pages take it exclusively. Taken before the pages' lock: a cache hit, or a
+    /// write needing no disk read, need not take it.
+    backing: RwLock<()>,
     used: AtomicU64,
     /// Whether the file is at no name any more ([`Cached::unlink`]): its last opening drops its
     /// pages unwritten.
@@ -675,7 +678,7 @@ impl<F: File> Cached<F> {
                 failed: None,
                 failing: None,
             }),
-            writeback: Mutex::new(()),
+            backing: RwLock::new(()),
             used: AtomicU64::new(cache.used()),
             unlinked: AtomicBool::new(false),
         });
@@ -810,8 +813,12 @@ impl<F: File> Shared<F> {
     }
 
     /// Its write-back, taken: none other of it in flight.
-    fn writeback(&self) -> MutexGuard<'_, ()> {
-        self.writeback.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    fn writeback(&self) -> RwLockWriteGuard<'_, ()> {
+        self.backing.write().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn read_backing(&self) -> RwLockReadGuard<'_, ()> {
+        self.backing.read().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Its pages, locked, a use of it; as a panic left them, if one did ([`InFlight`]).
@@ -868,12 +875,22 @@ impl<F: File> Shared<F> {
         &self,
         range: Range<u64>,
         through: Option<u64>,
+        most: Option<u64>,
+    ) -> io::Result<()> {
+        let exclusive = self.writeback();
+        self.write_locked_runs(range, through, most, &exclusive)
+    }
+
+    fn write_locked_runs(
+        &self,
+        range: Range<u64>,
+        through: Option<u64>,
         mut most: Option<u64>,
+        _exclusive: &RwLockWriteGuard<'_, ()>,
     ) -> io::Result<()> {
         let (mut first, last) = (range.start / PAGE, range.end.div_ceil(PAGE));
         let covers =
             |page: &Page| page.dirty.is_some_and(|dirty| through.is_none_or(|t| dirty <= t));
-        let _writeback = self.writeback();
         let mut pages = self.lock();
         loop {
             if most.is_some_and(|most| most == 0) {
@@ -1062,7 +1079,8 @@ impl<F: File> Paged for Shared<F> {
 impl<F: File> File for Cached<F> {
     fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
         let shared = &*self.shared;
-        let pages = shared.lock();
+        let mut backing = None;
+        let mut pages = shared.lock();
         let end = offset + buf.len() as u64;
         let mut at = offset;
         while at < end {
@@ -1073,18 +1091,39 @@ impl<F: File> File for Cached<F> {
             match pages.pages.get(&index) {
                 Some(page) => buf[to].copy_from_slice(&page.bytes[within..within + take]),
                 None => {
+                    if backing.is_none() {
+                        drop(pages);
+                        backing = Some(shared.read_backing());
+                        pages = shared.lock();
+                        // The cached prefix could have changed or been written back while waiting.
+                        at = offset;
+                        continue;
+                    }
                     // The run of pages it holds not, read at once from the file.
                     let mut miss_end = at + take as u64;
                     while miss_end < end && !pages.pages.contains_key(&(miss_end / PAGE)) {
                         miss_end = ((miss_end / PAGE + 1) * PAGE).min(end);
                     }
                     let to = (at - offset) as usize..(miss_end - offset) as usize;
+                    drop(pages);
                     shared.file.read_at(&mut buf[to], at)?;
+                    pages = shared.lock();
                     at = miss_end;
                     continue;
                 }
             }
             at += take as u64;
+        }
+        if backing.is_some() {
+            // Write-back and dropping dirty pages waited for this read. A newly written page
+            // is still cached, and any evicted clean page still agrees with the file.
+            for (&index, page) in pages.pages.range(offset / PAGE..end.div_ceil(PAGE)) {
+                let start = index * PAGE;
+                let from = start.max(offset);
+                let to = (start + PAGE).min(end);
+                buf[(from - offset) as usize..(to - offset) as usize]
+                    .copy_from_slice(&page.bytes[(from - start) as usize..(to - start) as usize]);
+            }
         }
         // Past the end of what was written, as the file reads: zeros.
         let size = pages.size;
@@ -1098,17 +1137,49 @@ impl<F: File> File for Cached<F> {
     fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<()> {
         let shared = &*self.shared;
         shared.cache.throttle(|| shared.failing())?;
+        let mut backing = None;
         let mut pages = shared.lock();
+        let mut end = offset + buf.len() as u64;
+        let partial = [
+            (offset % PAGE != 0).then_some(offset / PAGE),
+            (end % PAGE != 0).then_some(end / PAGE),
+        ];
+        let mut loaded = Vec::new();
+        let mut failed = None;
+        // Only partial pages need the old bytes. Read them before applying the write, then
+        // prefer bytes another writer has put in the cache while a read was in flight.
+        while let Some(index) = partial.into_iter().flatten().find(|&index| {
+            offset < end
+                && index * PAGE < end.min(pages.size)
+                && !pages.pages.contains_key(&index)
+                && !loaded.iter().any(|(loaded, _)| *loaded == index)
+        }) {
+            drop(pages);
+            if backing.is_none() {
+                backing = Some(shared.read_backing());
+                pages = shared.lock();
+                continue;
+            }
+            let mut bytes = shared.cache.frames.zeroed();
+            let read = shared.file.read_at(&mut bytes, index * PAGE);
+            pages = shared.lock();
+            match read {
+                Ok(()) => loaded.push((index, bytes)),
+                // The rest of the page can come from a concurrent writer.
+                Err(_) if pages.pages.contains_key(&index) => {}
+                Err(err) => {
+                    end = offset.max(index * PAGE);
+                    failed = Some(err);
+                }
+            }
+        }
         let number = shared.cache.writes.fetch_add(1, Ordering::Relaxed) + 1;
-        let end = offset + buf.len() as u64;
         let mut at = offset;
         let (mut added, mut dirtied) = (0, 0);
-        let mut failed = None;
         while at < end {
             let index = at / PAGE;
             let within = (at % PAGE) as usize;
             let take = ((PAGE - at % PAGE).min(end - at)) as usize;
-            let size = pages.size;
             let written = &buf[(at - offset) as usize..(at - offset) as usize + take];
             let page = match pages.pages.entry(index) {
                 std::collections::btree_map::Entry::Occupied(page) => {
@@ -1123,13 +1194,11 @@ impl<F: File> File for Cached<F> {
                     let bytes = if take == PAGE as usize {
                         shared.cache.frames.copied(written)
                     } else {
-                        let mut bytes = shared.cache.frames.zeroed();
-                        if index * PAGE < size
-                            && let Err(err) = shared.file.read_at(&mut bytes, index * PAGE)
-                        {
-                            failed = Some(err);
-                            break;
-                        }
+                        let mut bytes = loaded
+                            .iter()
+                            .position(|(loaded, _)| *loaded == index)
+                            .map(|at| loaded.swap_remove(at).1)
+                            .unwrap_or_else(|| shared.cache.frames.zeroed());
                         bytes[within..within + take].copy_from_slice(written);
                         bytes
                     };
@@ -1155,6 +1224,7 @@ impl<F: File> File for Cached<F> {
         shared.cache.peak.fetch_max(held, Ordering::Relaxed);
         shared.dirty_add(dirtied * PAGE, pages.failing.is_some());
         drop(pages);
+        drop(backing);
         shared.cache.dirtied();
         failed.map_or(Ok(()), Err)
     }
@@ -1200,20 +1270,24 @@ impl<F: File> File for Cached<F> {
     fn punch(&self, offset: u64, len: u64) -> io::Result<()> {
         let shared = &*self.shared;
         let range = offset..offset + len;
-        shared.flush(range.clone(), None)?;
-        {
+        let blocks = offset / PAGE..range.end.div_ceil(PAGE);
+        let exclusive = shared.writeback();
+        loop {
+            shared.write_locked_runs(range.clone(), None, None, &exclusive)?;
             let mut pages = shared.lock();
-            let blocks = offset / PAGE..range.end.div_ceil(PAGE);
-            let gone: Vec<u64> = (pages.pages.range(blocks))
-                .filter(|(_, page)| page.dirty.is_none() && !page.writing)
-                .map(|(&index, _)| index)
-                .collect();
+            // If a write landed during write-back, write it back before giving the blocks back.
+            // Keep the pages locked across the punch so a partial write sees the hole's zeros.
+            if pages.pages.range(blocks.clone()).any(|(_, page)| page.dirty.is_some()) {
+                continue;
+            }
+            shared.file.punch(offset, len)?;
+            let gone: Vec<u64> = pages.pages.range(blocks).map(|(&index, _)| index).collect();
             for index in &gone {
                 pages.pages.remove(index);
             }
             shared.cache.held.fetch_sub(gone.len() as u64 * PAGE, Ordering::Relaxed);
+            return Ok(());
         }
-        shared.file.punch(offset, len)
     }
 
     /// cladefs: its pages written back first, which the file takes once they are.
@@ -1326,6 +1400,83 @@ mod tests {
         let mut under = vec![0; model.len()];
         file.file().read_at(&mut under, 0).unwrap();
         assert_eq!(under, model);
+    }
+
+    #[cfg(feature = "shuttle")]
+    #[test]
+    fn a_cold_read_or_partial_write_rechecks_a_page_written_during_its_read() {
+        use shuttle::sync::mpsc::{Receiver, Sender, channel};
+
+        struct PausedRead<F> {
+            file: F,
+            pause: Mutex<Option<(Sender<()>, Receiver<()>)>>,
+        }
+
+        impl<F: File> File for PausedRead<F> {
+            fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
+                self.file.read_at(buf, offset)?;
+                let pause = self.pause.lock().unwrap().take();
+                if let Some((started, resume)) = pause {
+                    started.send(()).unwrap();
+                    resume.recv().unwrap();
+                }
+                Ok(())
+            }
+
+            fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<()> {
+                self.file.write_at(buf, offset)
+            }
+
+            fn size(&self) -> io::Result<u64> {
+                self.file.size()
+            }
+
+            fn sync(&self) -> io::Result<()> {
+                self.file.sync()
+            }
+        }
+
+        for partial in [false, true] {
+            shuttle::check_random(
+                move || {
+                    let dir = MemDisk::new();
+                    let raw = dir.create("f", true).unwrap();
+                    raw.write_at(&[1; PAGE as usize], 0).unwrap();
+                    let (started, entered) = channel();
+                    let (resume, resumed) = channel();
+                    let backing =
+                        PausedRead { file: raw, pause: Mutex::new(Some((started, resumed))) };
+                    let file =
+                        Cached::new(backing, &PageCache::without_flusher(Options::default()))
+                            .unwrap();
+
+                    let cold = file.clone();
+                    let reader = shuttle::thread::spawn(move || {
+                        if partial {
+                            cold.write_at(&[3; 10], 100).unwrap();
+                        } else {
+                            let mut read = [0; PAGE as usize];
+                            cold.read_at(&mut read, 0).unwrap();
+                            assert_eq!(read, [2; PAGE as usize]);
+                        }
+                    });
+                    entered.recv().unwrap();
+                    file.write_at(&[2; PAGE as usize], 0).unwrap();
+                    resume.send(()).unwrap();
+                    reader.join().unwrap();
+
+                    file.sync().unwrap();
+                    let mut expected = [2; PAGE as usize];
+                    if partial {
+                        expected[100..110].fill(3);
+                    }
+                    let mut backed = [0; PAGE as usize];
+                    file.file().read_at(&mut backed, 0).unwrap();
+                    assert_eq!(backed, expected);
+                },
+                10,
+            );
+        }
     }
 
     /// Pages dirtied go unwritten past a crash before a sync, as the host's page cache's did; a
