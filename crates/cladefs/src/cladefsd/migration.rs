@@ -83,6 +83,9 @@ const MARKER_STAGED: &str = "migrating.new";
 /// How much of a file a request carries at most.
 pub(super) const PIECE: usize = 4 << 20;
 
+/// Bounds the number of hole punches a peer can request in one piece (board 10559).
+const HOLES_MOST: usize = 4096;
+
 /// How long a round of the source waits for the next.
 const ROUND: Duration = Duration::from_millis(500);
 
@@ -615,6 +618,7 @@ async fn send(outgoing: &Outgoing, path: &Path, relative: &str, len: u64) -> Res
     .map_err(|err| status(&label, err))?
     .map_err(|err| status(&label, err))?;
     let holes = gaps(&data, len);
+    let mut holes = holes.chunks(HOLES_MOST);
     let mut pieces: Vec<(u64, usize)> = Vec::new();
     for &(start, end) in &data {
         let mut at = start;
@@ -650,12 +654,39 @@ async fn send(outgoing: &Outgoing, path: &Path, relative: &str, len: u64) -> Res
             offset,
             bytes,
             len,
-            holes: if piece == last { holes.clone() } else { Vec::new() },
+            holes: if piece == last {
+                holes.next().unwrap_or_default().to_vec()
+            } else {
+                Vec::new()
+            },
         };
         within(PIECE_BOUND, client.migrate_file(request)).await?;
         count(&COUNTS.sent_bytes, sent);
     }
+    send_holes(outgoing, relative, len, holes).await?;
     Ok(allocated)
+}
+
+/// Sends batches of holes separately from the bytes they clear in the target's copy.
+async fn send_holes(
+    outgoing: &Outgoing,
+    relative: &str,
+    len: u64,
+    holes: std::slice::Chunks<'_, Range>,
+) -> Result<(), Status> {
+    let mut client = outgoing.client.clone();
+    for holes in holes {
+        let request = MigrateFileRequest {
+            migration: outgoing.migration,
+            path: relative.to_owned(),
+            offset: 0,
+            bytes: Vec::new(),
+            len,
+            holes: holes.to_vec(),
+        };
+        within(PIECE_BOUND, client.migrate_file(request)).await?;
+    }
+    Ok(())
 }
 
 /// The ranges of data of `file`, `len` bytes long, by its holes, and the bytes it takes of the
@@ -1144,15 +1175,8 @@ async fn finish(outgoing: &Outgoing, path: &Path) -> Result<(), Status> {
                 .map_err(|err| status(&label, err))?
                 .map_err(|err| status(&label, err))?;
                 if now != allocated {
-                    let request = MigrateFileRequest {
-                        migration: outgoing.migration,
-                        path: relative.clone(),
-                        offset: 0,
-                        bytes: Vec::new(),
-                        len,
-                        holes: gaps(&data, len),
-                    };
-                    within(PIECE_BOUND, outgoing.client.clone().migrate_file(request)).await?;
+                    send_holes(outgoing, &relative, len, gaps(&data, len).chunks(HOLES_MOST))
+                        .await?;
                     outgoing.sent.lock().unwrap().insert(relative, (len, now));
                 }
             }
@@ -1694,8 +1718,8 @@ pub(super) mod target {
     /// Writes the piece of a file `request` carries into `staging`, its migration's staging
     /// directory: what it adds to the disk admitted by the disk governor first (board 8451),
     /// `RESOURCE_EXHAUSTED` if it has no room, and counted in the directory's footprint as it is
-    /// written: its bytes, and the length it gives the file, holes and all, as a peer's length may
-    /// be any.
+    /// written: its bytes, and the length it gives the file, holes and all.
+    #[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
     fn write(staging: &local_cell::HostDir, request: MigrateFileRequest) -> Result<(), Status> {
         use local_cell::{Dir as _, File as _};
         fail::fail_point!("migration::writing");
@@ -1705,20 +1729,33 @@ pub(super) mod target {
         let left = || Status::invalid_argument(format!("{path:?} leaves the cell"));
         if let Some(dir) = path.strip_suffix('/') {
             within(staged, dir).ok_or_else(left)?;
+            if offset != 0 || len != 0 || !bytes.is_empty() || !holes.is_empty() {
+                return Err(Status::invalid_argument(format!("{path:?}: directory has file data")));
+            }
             return made_dirs(staging, dir).map_err(|err| status(&path, err));
         }
         within(staged, &path).ok_or_else(left)?;
-        // Validate untrusted peer offset and length before `direct::write_at` rounds end up to
-        // `DIRECT_BLOCK` (4096) and writes at `offset` (board 5997 / AGENTS.md trust boundary).
-        // cladefs: and its piece within the file's length (board 8451).
+        // Direct writes, including the last byte of a sparse file, round up to DIRECT_BLOCK.
         let end = offset.checked_add(bytes.len() as u64);
-        let valid_end = end
-            .and_then(|end| end.checked_next_multiple_of(bucket_cell::direct::DIRECT_BLOCK))
+        let valid_len = len
+            .checked_next_multiple_of(bucket_cell::direct::DIRECT_BLOCK)
             .is_some_and(|end| end <= i64::MAX as u64);
-        if !valid_end || len > i64::MAX as u64 || end.is_none_or(|end| end > len) {
+        if !valid_len || bytes.len() > PIECE || end.is_none_or(|end| end > len) {
             return Err(Status::invalid_argument(format!(
                 "{path:?}: offset {offset} or len {len} out of range"
             )));
+        }
+        if holes.len() > HOLES_MOST {
+            return Err(Status::invalid_argument(format!("{path:?}: too many holes")));
+        }
+        // Validate the whole list before making directories, changing bytes, or punching a hole.
+        for hole in &holes {
+            if hole.len == 0 || hole.offset.checked_add(hole.len).is_none_or(|end| end > len) {
+                return Err(Status::invalid_argument(format!(
+                    "{path:?}: hole at {} of length {} outside {len} bytes or empty",
+                    hole.offset, hole.len
+                )));
+            }
         }
         let failed = |err: std::io::Error| status(&path, err);
         if let Some((dir, _)) = path.rsplit_once('/') {
@@ -1760,8 +1797,10 @@ pub(super) mod target {
             count(&COUNTS.taken_bytes, bytes.len() as u64);
         }
         // Its length, past its last data a hole, which its holes' punching gives back.
-        if len > file.size().map_err(failed)? {
-            file.write_at(&[0], len - 1).map_err(failed)?;
+        if let Some(last) = len.checked_sub(1)
+            && len > file.size().map_err(failed)?
+        {
+            file.write_at(&[0], last).map_err(failed)?;
         }
         for Range { offset, len } in holes {
             file.punch(offset, len).map_err(failed)?;
@@ -2446,6 +2485,64 @@ pub(super) mod target {
             });
             fail::remove("migration::marking");
             assert_ne!(marked.try_recv().unwrap(), worker);
+        }
+
+        /// A malformed hole must refuse the entire piece, even after a valid hole in the list.
+        #[test]
+        fn invalid_holes_are_refused_before_staged_files_change() {
+            use local_cell::{Dir as _, File as _};
+
+            let daemon = Daemon::new();
+            let dir = tempfile::tempdir().unwrap();
+            let (_host, root) = target_host(dir.path());
+            let runtime =
+                tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            let (migration, cell) = (0x29, root.join("vm"));
+            runtime.block_on(prepare(&daemon, prepare_of(migration, &cell))).unwrap();
+            let staged = staging(&cell, migration);
+            let path = "segments/one";
+            let len = 8192;
+            let piece = |path: &str, value, holes| MigrateFileRequest {
+                migration,
+                path: path.to_owned(),
+                offset: 0,
+                bytes: vec![value; len as usize],
+                len,
+                holes,
+            };
+            runtime.block_on(file(&daemon, piece(path, 7, Vec::new()))).unwrap();
+            let first = Range { offset: 0, len: 4096 };
+            let short = Range { offset: len, len: 1 };
+            let excess = vec![first.clone(); HOLES_MOST + 1];
+            for holes in [
+                vec![first.clone(), short.clone()],
+                vec![first.clone(), Range { offset: 1, len: u64::MAX }],
+                vec![first.clone(), Range { offset: len - 1, len: 2 }],
+                vec![first.clone(), Range { offset: 0, len: 0 }],
+                excess,
+            ] {
+                let refused = runtime.block_on(file(&daemon, piece(path, 9, holes))).unwrap_err();
+                assert_eq!(refused.code(), tonic::Code::InvalidArgument, "{refused:?}");
+                let staging = staging_dir(&daemon, migration, &staged).unwrap();
+                let mut bytes = vec![0; len as usize];
+                let written = staging.open(path, false).unwrap();
+                assert_eq!(written.size().unwrap(), len);
+                written.read_at(&mut bytes, 0).unwrap();
+                assert_eq!(bytes, vec![7; len as usize]);
+            }
+            let refused =
+                runtime.block_on(file(&daemon, piece("new/two", 9, vec![short]))).unwrap_err();
+            assert_eq!(refused.code(), tonic::Code::InvalidArgument);
+            assert!(!staged.join("new").exists());
+
+            let mut punch = piece(path, 0, vec![Range { offset: 4096, len: 4096 }]);
+            punch.bytes.clear();
+            runtime.block_on(file(&daemon, punch)).unwrap();
+            let staging = staging_dir(&daemon, migration, &staged).unwrap();
+            let mut bytes = vec![0; len as usize];
+            staging.open(path, false).unwrap().read_at(&mut bytes, 0).unwrap();
+            assert_eq!(&bytes[..4096], &[7; 4096]);
+            assert_eq!(&bytes[4096..], &[0; 4096]);
         }
 
         /// The cell 1/7's locks held, by requests of its migrations and those waiting for it.

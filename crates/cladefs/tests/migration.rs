@@ -446,6 +446,34 @@ fn hand_overs_refused_leave_the_source_serving() {
     forked.assert_served_again(&there, 4);
 }
 
+/// A target rejects malformed hole ranges over gRPC without creating the path they name.
+#[test]
+fn migration_file_rpc_refuses_holes_past_the_file() {
+    use cladefs::cladefsd::peers::proto::{MigrateFileRequest, Range, peer_client::PeerClient};
+
+    let forked = forked(4);
+    let there = forked.host(1).join("ephemeral-cell");
+    let migration = forked.source.migrate(&forked.here, forked.target_at(), &there).unwrap();
+
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let status = runtime.block_on(async {
+        let mut peer = PeerClient::connect(format!("http://{}", forked.target_at())).await.unwrap();
+        peer.migrate_file(MigrateFileRequest {
+            migration,
+            path: "invalid-hole/file".to_owned(),
+            offset: 0,
+            bytes: vec![5],
+            len: 1,
+            holes: vec![Range { offset: 1, len: 1 }],
+        })
+        .await
+        .unwrap_err()
+    });
+    assert_eq!(status.code(), tonic::Code::InvalidArgument, "{status:?}");
+    let staged = staging(&forked.host(1), migration);
+    assert!(!staged.join("invalid-hole").exists());
+}
+
 /// A target missing a file the hand-over names refuses it, dropping what it took and its
 /// reference, and the source serves the cell again: a kept segment the rounds sent, gone from the
 /// target's staging before the hand-over.
