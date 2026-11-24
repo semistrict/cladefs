@@ -302,12 +302,18 @@ const VERSIONS: &str = "cladefs-versions";
 const BLOCK: u64 = extent_frame::ALIGN;
 
 impl Cache {
-    /// The cache in `dir`, keeping at most `budget` bytes of objects (`u64::MAX`, none), and what
-    /// the disk governor leaves it, once it says ([`Cache::set_limit`]): what an earlier one kept,
-    /// read from its files, those that fail their checks removed, then evicted, those read least
-    /// recently first, as far as `budget` needs; and its directory of cells at versions emptied
-    /// ([`Cache::versions`]). Fails while another cache has the directory.
+    /// The cache in `dir` on the process's default host outside `madsim` ([`Cache::open_on`]).
+    #[cfg(not(madsim))]
     pub fn open(dir: &Path, budget: u64) -> io::Result<Self> {
+        Self::open_on(crate::Host::process(), dir, budget)
+    }
+
+    /// The cache in `dir` on `host`, keeping at most `budget` bytes of objects (`u64::MAX`, none),
+    /// and what the disk governor leaves it, once it says ([`Cache::set_limit`]): what an earlier
+    /// one kept, read from its files, those that fail their checks removed, then evicted, those
+    /// read least recently first, as far as `budget` needs; and its directory of cells at versions
+    /// emptied ([`Cache::versions`]). Fails while another cache has the directory.
+    pub fn open_on(host: &crate::Host, dir: &Path, budget: u64) -> io::Result<Self> {
         let versions = dir.join(VERSIONS);
         let dir = dir.join(FILES);
         host_fs::create_dir_all(&dir)?;
@@ -318,7 +324,7 @@ impl Cache {
             Err(err) if err.kind() != io::ErrorKind::NotFound => return Err(err),
             _ => host_fs::create_dir(&versions)?,
         }
-        let files = Files::new(dir)?;
+        let files = Files::new_on(host, dir)?;
         let mut found = Vec::new();
         files.walk(Path::new(""), &mut found)?;
         // By when each was written last: it was read then, if not since.
@@ -823,10 +829,10 @@ struct Files {
 }
 
 impl Files {
-    fn new(dir: PathBuf) -> io::Result<Self> {
+    fn new_on(host: &crate::Host, dir: PathBuf) -> io::Result<Self> {
         Ok(Self {
             holes: probed(&dir)?,
-            disk: HostDisk::of(&dir)?,
+            disk: HostDisk::of_on(host, &dir)?,
             dir,
             #[cfg(test)]
             cut: None,

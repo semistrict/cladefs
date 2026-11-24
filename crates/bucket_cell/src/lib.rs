@@ -71,7 +71,9 @@ mod golden;
 pub mod head;
 #[cfg(test)]
 mod heap;
+pub mod host;
 pub mod host_disk;
+pub use host::Host;
 pub mod identity;
 pub mod keys;
 pub mod layout;

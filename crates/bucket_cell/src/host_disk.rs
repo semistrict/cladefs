@@ -230,38 +230,55 @@ pub struct HostDisk {
     full: AtomicBool,
     /// What it urges under pressure ([`HostDisk::urge`]).
     urged: Mutex<Vec<Weak<dyn Urge>>>,
+    /// Its host's governor wakeup signal, so writes refused on this disk wake its host's governor
+    /// directly without global lookup.
+    woken: Option<Arc<(Mutex<bool>, Condvar)>>,
 }
 
-node_local::node_local! {
-    /// The host's filesystems' disks alive, so that two directories of one filesystem share one: a
-    /// daemon's, each simulated node's its own (doc-24).
-    static DISKS: Mutex<Vec<Weak<HostDisk>>> = Mutex::new(Vec::new());
+/// Per-host registry of alive filesystems' disks and governor wakeup signal, owned by
+/// [`crate::Host`].
+pub(crate) struct Disks {
+    disks: Mutex<Vec<Weak<HostDisk>>>,
+    woken: Arc<(Mutex<bool>, Condvar)>,
+}
+
+impl Disks {
+    pub(crate) fn new() -> Self {
+        Self { disks: Mutex::new(Vec::new()), woken: Arc::new((Mutex::new(false), Condvar::new())) }
+    }
 }
 
 impl HostDisk {
-    /// The disk of the filesystem `path` is on: the one alive already, if any is.
-    pub fn of(path: &Path) -> io::Result<Arc<Self>> {
+    /// The disk of the filesystem `path` is on for `host`: the one alive already, if any is.
+    pub fn of_on(host: &crate::Host, path: &Path) -> io::Result<Arc<Self>> {
         use host_fs::MetadataExt as _;
         let dev = host_fs::metadata(path)?.dev();
-        let mut disks = DISKS.get().lock().unwrap();
+        let mut disks = host.disks.disks.lock().unwrap();
         disks.retain(|disk| disk.strong_count() > 0);
         let found = disks.iter().filter_map(Weak::upgrade).find(|disk| disk.dev() == Some(dev));
         if let Some(disk) = found {
             return Ok(disk);
         }
         let dir = host_fs::File::open(path)?;
-        let disk = Arc::new(Self::with(Sampler::Fs { dev, dir }));
+        let disk =
+            Arc::new(Self::with(Sampler::Fs { dev, dir }, Some(Arc::clone(&host.disks.woken))));
         disks.push(Arc::downgrade(&disk));
         Ok(disk)
     }
 
-    /// A disk in memory, which `sample` says the space of: a cell directory in memory's
-    /// (`local_cell::MemDisk`). It is no host's filesystem: [`HostDisk::all`] leaves it out.
-    pub fn in_memory(sample: impl Fn() -> Sample + Send + Sync + 'static) -> Arc<Self> {
-        Arc::new(Self::with(Sampler::Memory(Box::new(sample))))
+    /// The disk of the filesystem `path` is on for the process's default host outside `madsim`.
+    #[cfg(not(madsim))]
+    pub fn of(path: &Path) -> io::Result<Arc<Self>> {
+        Self::of_on(crate::Host::process(), path)
     }
 
-    fn with(sampler: Sampler) -> Self {
+    /// A disk in memory, which `sample` says the space of: a cell directory in memory's
+    /// (`local_cell::MemDisk`). It is no host's filesystem: [`HostDisk::all_on`] leaves it out.
+    pub fn in_memory(sample: impl Fn() -> Sample + Send + Sync + 'static) -> Arc<Self> {
+        Arc::new(Self::with(Sampler::Memory(Box::new(sample)), None))
+    }
+
+    fn with(sampler: Sampler, woken: Option<Arc<(Mutex<bool>, Condvar)>>) -> Self {
         Self {
             sampler,
             cells: Tally::default(),
@@ -273,12 +290,27 @@ impl HostDisk {
             pressure: AtomicBool::new(false),
             full: AtomicBool::new(false),
             urged: Mutex::new(Vec::new()),
+            woken,
         }
     }
 
-    /// The host's filesystems' disks alive.
+    /// Wakes this disk's host's governor to look at disks again at once.
+    pub fn wake_governor(&self) {
+        if let Some(woken) = &self.woken {
+            *woken.0.lock().unwrap() = true;
+            woken.1.notify_all();
+        }
+    }
+
+    /// The filesystems' disks alive on `host`.
+    pub fn all_on(host: &crate::Host) -> Vec<Arc<Self>> {
+        host.disks.disks.lock().unwrap().iter().filter_map(Weak::upgrade).collect()
+    }
+
+    /// The host's filesystems' disks alive on the process's default host outside `madsim`.
+    #[cfg(not(madsim))]
     pub fn all() -> Vec<Arc<Self>> {
-        DISKS.get().lock().unwrap().iter().filter_map(Weak::upgrade).collect()
+        Self::all_on(crate::Host::process())
     }
 
     /// The filesystem's device, if it is a host's.
@@ -385,24 +417,31 @@ fn fs_sample(dir: &host_fs::File) -> io::Result<Sample> {
     Ok(Sample { size: blocks * size, free: available * size, used: (blocks - free) * size })
 }
 
-node_local::node_local! {
-    /// Whether the governor is to look again at once, and what tells it so: a daemon's.
-    static WOKEN: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
-}
-
-/// Has the governor look at the disks again at once: a write refused, or the part cache past what
-/// the cells leave it.
-pub fn wake_governor() {
-    let (woken, wake) = WOKEN.get();
+/// Has `host`'s governor look at its disks again at once: a write refused, or the part cache past
+/// what the cells leave it.
+pub fn wake_governor_on(host: &crate::Host) {
+    let (woken, wake) = &*host.disks.woken;
     *woken.lock().unwrap() = true;
     wake.notify_all();
 }
 
-/// Waits, the governor, until it is woken ([`wake_governor`]) or `most` has passed.
-pub fn wait_for_governor(most: Duration) {
-    let (woken, wake) = WOKEN.get();
+/// Has the process's default host's governor look at the disks again at once outside `madsim`.
+#[cfg(not(madsim))]
+pub fn wake_governor() {
+    wake_governor_on(crate::Host::process());
+}
+
+/// Waits, `host`'s governor, until it is woken ([`wake_governor_on`]) or `most` has passed.
+pub fn wait_for_governor_on(host: &crate::Host, most: Duration) {
+    let (woken, wake) = &*host.disks.woken;
     let waited = wake.wait_timeout_while(woken.lock().unwrap(), most, |woken| !*woken);
     *waited.unwrap().0 = false;
+}
+
+/// Waits, the process's default host's governor, until woken or `most` has passed outside `madsim`.
+#[cfg(not(madsim))]
+pub fn wait_for_governor(most: Duration) {
+    wait_for_governor_on(crate::Host::process(), most);
 }
 
 #[cfg(test)]

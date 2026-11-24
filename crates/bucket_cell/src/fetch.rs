@@ -668,12 +668,10 @@ impl Default for PartMemory {
     }
 }
 
-/// The process's (or simulated node's) unified recent/unpacked part cache (board 6026).
+/// The process's default host's unified recent/unpacked part cache outside `madsim` (board 6026).
+#[cfg(not(madsim))]
 pub fn shared_parts() -> &'static Arc<PartMemory> {
-    node_local::node_local! {
-        static SHARED: Arc<PartMemory> = PartMemory::new(RECENT);
-    }
-    SHARED.get()
+    crate::Host::process().parts()
 }
 
 impl PartMemory {
