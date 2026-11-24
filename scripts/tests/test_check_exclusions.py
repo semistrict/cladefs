@@ -32,6 +32,13 @@ class CheckExclusionsTest(unittest.TestCase):
         text = "// Copyright 2022 The Fuchsia Authors. All rights reserved.\n#[ignore]\nfn a() {}\n"
         self.assertEqual(check.bare_ignores(Path("crates/fxfs/src/a.rs"), text), [])
 
+    def test_nextest_names_only_tests_there_are(self):
+        text = "(package(a) & (\n  test(=tests::kept)\n  | test(=tests::gone) | test(=other)))\n"
+        self.assertEqual(
+            check.nextest_names(".config/nextest.toml", text, {"kept", "other"}),
+            [".config/nextest.toml:3: names tests::gone, no test there is: drop it, or name what it became"],
+        )
+
     def test_known_failures_name_an_open_task(self):
         text = (
             "# A comment.\n\nTASK-143 chmod/00.t\nTASK-150.21 WARN at fs/dax.c:416\n"

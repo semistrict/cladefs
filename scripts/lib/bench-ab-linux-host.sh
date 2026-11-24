@@ -60,7 +60,7 @@ ab_order() {
 }
 
 # ab_key TREE prints what a side's artifacts are kept by in CLADEFS_AB_KEEP: TREE's source
-# revision (its source-revision.txt, scripts/lib/host-remote.sh's) and the guest kernel's build;
+# revision (its source-revision.txt, scripts/lib/host-workspace.sh's) and the guest kernel's build;
 # nothing for a tree whose revision doesn't name its source alone (changed from its commit, or
 # unknown), whose artifacts are not kept.
 ab_key() {

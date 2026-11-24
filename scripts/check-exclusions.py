@@ -17,6 +17,9 @@ check covering a data loss bug had been switched off on DAX). So each of these s
   names open.
 - A hand mutant no test can kill (guest/mutants, `Killer: none`): its header says why, equivalent
   or out of every oracle's reach, as guest/mutants/README.md has it.
+- A test .config/nextest.toml names (`test(=path::name)`, its slow tests', the unit profile leaves
+  out): one there is, a `fn name` of cladefs's. A test deleted or renamed left its filter behind,
+  matching nothing, and its successor ran where it was meant not to (board 10525).
 
 A task is cited as `board 812`, or, for a task from Backlog.md, as its TASK-N (its label `task` on
 the board). It is open while the board has it waiting, ready, claimed or blocked: completed,
@@ -46,6 +49,7 @@ KNOWN_LISTS = [
 XFSTESTS = "guest/tests/test_cases/src/test_xfstests.rs"
 PJDFSTEST = "guest/tests/test_cases/src/test_pjdfstest.rs"
 MUTANTS = "guest/mutants"
+NEXTEST = ".config/nextest.toml"
 # Where cladefs's Rust tests are: not vendor/, Firecracker's and the guest kernel's sources.
 RUST = ["crates", "guest/tests", "guest/rust"]
 
@@ -55,6 +59,8 @@ CLOSED = ("completed", "canceled", "failed")
 PAGE = 500
 BARE_IGNORE = re.compile(r"#\[ignore\]|#\[cfg_attr\([^]]*,\s*ignore\s*\)\]")
 FUCHSIA = re.compile(r"Copyright \d{4} The Fuchsia Authors")
+NEXTEST_TEST = re.compile(r"test\(=([\w:]+)\)")
+TEST_FN = re.compile(r"\bfn (\w+)")
 
 
 def vb(*args):
@@ -165,15 +171,29 @@ def unkillable(path, text):
     return [f"{path}: Killer: none, and its header says no why (equivalent, or out of every oracle's reach)"]
 
 
+def nextest_names(path, text, fns):
+    """The tests `text`, nextest's configuration at `path`, names exactly that no `fn` of FNS, the
+    names of cladefs's Rust functions, is."""
+    return [
+        f"{path}:{number}: names {name}, no test there is: drop it, or name what it became"
+        for number, line in enumerate(text.splitlines(), 1)
+        for name in NEXTEST_TEST.findall(line)
+        if name.rsplit("::", 1)[-1] not in fns
+    ]
+
+
 def check(root, states):
     """Every problem of the tree at `root`, each a line, tasks' states as STATES has them (None:
     unchecked)."""
-    problems = []
+    problems, fns = [], set()
     for directory in RUST:
         for path in sorted((root / directory).rglob("*.rs")):
             if "target" in path.relative_to(root).parts:
                 continue
-            problems += bare_ignores(path.relative_to(root), path.read_text(errors="replace"))
+            text = path.read_text(errors="replace")
+            problems += bare_ignores(path.relative_to(root), text)
+            fns.update(TEST_FN.findall(text))
+    problems += nextest_names(NEXTEST, (root / NEXTEST).read_text(), fns)
     for name in KNOWN_LISTS:
         problems += known_list(name, (root / name).read_text(), states)
     problems += xfstests_known(XFSTESTS, (root / XFSTESTS).read_text(), states)

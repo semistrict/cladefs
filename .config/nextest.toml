@@ -38,11 +38,7 @@ not (
     | (package(cladefs) & (
         test(=bucket::tests::cells_make_so_many_versions_at_most)
         | test(=bucket::tests::commits_stalled_on_the_lag_end_with_their_segment_closed_for_room)
-        | test(=bucket::tests::extents_compacted_read_once_their_host_died_and_its_cache_went)
-        | test(=bucket::tests::extents_compacted_twice_read_where_the_cell_names_them)
         | test(=bucket::tests::forks_open_at_once_share_what_they_inherited)
-        | test(=bucket::tests::forks_read_what_they_inherited_compacted_twice)
-        | test(=bucket::tests::forks_read_what_they_inherited_compacted_twice_their_checkpoint_late)
         | test(=bucket::tests::reads_of_inherited_extents_allocate_nothing)
         | test(=bucket::tests::uploads_a_bucket_takes_none_of_hold_no_more_than_their_budget)
         | test(=bucket::tests::uploads_waited_for_end_with_their_segment_closed_for_room)
@@ -75,9 +71,7 @@ not (
         & test(=random_calls_on_a_mount_come_to_what_they_do_on_tmpfs))
     | (binary_id(cladefs::handover) & test(=cells_open_whole_in_another_process_once_their_vm_goes))
     | (package(extent_frame) & test(=tests::objects_of_raw_files_sectors_read_under_their_key_alone))
-    | (package(fxfs) & (
-        test(=object_store::allocator::tests::test_compaction_of_middle_layer_keeps_its_removals)
-        | test(=object_store::tests::test_key_rolled_when_unlocked)))
+    | (package(fxfs) & test(=object_store::allocator::tests::test_compaction_of_middle_layer_keeps_its_removals))
     | (package(local_cell) & (
         test(=footprint::tests::footprints_count_what_directories_of_the_hosts_hold)
         | test(=upload::encrypted::encrypted_cells_frame_in_place_writing_what_clear_cells_write)

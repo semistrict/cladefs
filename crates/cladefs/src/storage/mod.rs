@@ -73,8 +73,8 @@ impl Storage {
     /// The size of the blocks storage is read and written in. Storage sizes are multiples of it.
     pub const BLOCK_SIZE: u32 = host_cell::BLOCK_SIZE;
 
-    /// The image at `path`: a cell directory (see `image`), a fork's or not,
-    /// its cell kept in the bucket its description names (see `kept`).
+    /// The image at `path`: a cell directory, a fork's or not, its cell kept in the bucket its
+    /// description names ([`host_cell::open`]).
     ///
     /// Its cell's files bypass the host's page cache where the host filesystem allows, as the
     /// cell's page cache, and the in-process kernel's, cache their pages already (one memory

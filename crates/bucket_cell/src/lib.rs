@@ -10,7 +10,8 @@
 //! writer taken over can add nothing to the cell once the next one's first segment, its fence,
 //! is in it. Forks
 //! record where they were made, and inherit the parent's extents without copying them. The
-//! collector, alone, deletes: what no live cell can reach, and objects it compacts.
+//! collector, alone, deletes: what no live cell can reach. It compacts nothing and holds no key:
+//! writers relocate what their cells keep (doc-27).
 //!
 //! The object store is anything with conditional writes ([`Bucket`]): S3 and GCS through the
 //! `object_store` crate ([`object_bucket::ObjectBucket`]) over cladefs's HTTP client ([`client`]),
@@ -134,8 +135,7 @@ pub enum Error {
     #[error("corrupt: {0}")]
     Corrupt(String),
     /// cladefs: an object's data, encrypted under a DEK its reader doesn't hold (TASK-411.2): its
-    /// key unwrapped by none, or revoked; or the collector's marking, which reads none of the data
-    /// of objects encrypted, its compaction reading them under their keys (TASK-411.6).
+    /// key unwrapped by none, or revoked (TASK-411.6).
     #[error("{}", extent_frame::Error::NoKey(*.0))]
     NoKey(extent_frame::KeyId),
     /// cladefs: what a KMS refused, naming the tenant whose KEK was asked for (TASK-411.3): its KEK

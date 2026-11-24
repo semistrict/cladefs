@@ -7,7 +7,7 @@
 //! has uploaded them, after the commits that made them returned. A collector's pass that lists the
 //! bucket before the checkpoint lands reads the cell's state from before it, and keeps what the
 //! checkpoint frees: tests that collected at once raced it, and lost on a loaded host (main's macOS
-//! CI, `forks_read_what_they_inherited_compacted_twice`).
+//! CI).
 
 use crate::OpenCell;
 use bucket_cell::object_bucket::RoutedBucket;

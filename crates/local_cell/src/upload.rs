@@ -362,7 +362,8 @@ pub struct Options {
     /// The fencing token of a cell never placed: its host's placement's.
     pub token: u64,
     /// cladefs: how many segments go between checkpoints, which recoveries start from: the segments
-    /// a checkpoint covers are no longer read by them, and the collector may compact them.
+    /// a checkpoint covers are no longer read by them, and the writer's relocation rounds run at
+    /// checkpoints (doc-27).
     pub checkpoint_every: u64,
     /// cladefs: how long the commits in a segment the guest is filling wait past the interval for
     /// its next commit, which seals what it writes in it in place, before the interval closes it

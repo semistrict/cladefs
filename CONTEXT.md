@@ -482,14 +482,14 @@ A host's dropping the keys of a shredded tenant or cell, fencing its open cells.
 ### Testing and measurement
 
 **Test host**:
-A Linux machine of one's own that runs cladefs's Linux tests over ssh, named by `CLADEFS_TEST_HOST`. Its drivers keep the `-host.sh` suffix, short for "on the test host"; its env vars say `TEST_HOST` (`CLADEFS_TEST_HOST*`).
+A Linux machine of one's own that runs cladefs's Linux tests through hotbed, named by `CLADEFS_TEST_HOST`. Its drivers keep the `-host.sh` suffix, short for "on the test host"; its env vars say `TEST_HOST` (`CLADEFS_TEST_HOST*`).
 _Avoid_: host alone
 
 **Driver**:
 A `scripts/*-host.sh` script that runs a job on the test host and copies its results back.
 
 **Job**:
-One fxjob cgroup on the test host: **work** (builds, tests) or a **measurement** (`--bench`, alone on its cores).
+One hotbed command on the test host: **work** (builds, tests) or a **measurement** (`hotbed run --bench`, alone on its cores).
 
 **Run**:
 One driver's job on the test host, in a worktree of its own, numbered like `r1040`.

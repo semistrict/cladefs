@@ -1,3 +1,0 @@
-# Clippy's configuration for local_cell, in place of the workspace's (../../clippy.toml): its
-# The extent store is synchronous, its blocking calls its own API, which the workspace's
-# disallows elsewhere.
