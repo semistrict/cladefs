@@ -4,12 +4,12 @@
 # Killer: sim::versions_mirrored_across_regions
 --- a/crates/bucket_cell/src/collector.rs
 +++ b/crates/bucket_cell/src/collector.rs
-@@ -510,7 +510,7 @@
+@@ -483,7 +483,7 @@ impl Collector {
                  report.retired += retired;
              }
          }
--        if alive || pinned || !stale.is_empty() || standing {
-+        if alive || pinned || !stale.is_empty() || standing || true {
+-        if !whole {
++        if !whole || true {
              return Ok(report);
          }
-         // Nothing of it needed: its mirrors' holds there first, which keep there what it inherits,
+         bucket::delete_all(bucket, &holds).await?;

@@ -4,11 +4,11 @@
 # Killer: sim::versions_mirrored_across_regions
 --- a/crates/bucket_cell/src/collector.rs
 +++ b/crates/bucket_cell/src/collector.rs
-@@ -531,7 +531,6 @@ impl Collector {
-         // its mirrors'; then its markers here, then what they named, then the marks.
-         let holds: Vec<String> = ats.iter().map(|&at| layout::hold(cell, at, number)).collect();
-         let holds: Vec<&str> = holds.iter().map(String::as_str).collect();
+@@ -486,7 +486,6 @@ impl Collector {
+         if !whole {
+             return Ok(report);
+         }
 -        bucket::delete_all(bucket, &holds).await?;
-         let of = |kind: fn(&Kind) -> bool| -> Vec<&Meta> {
-             listed.iter().filter(|meta| kind(&layout::kind(&meta.key))).collect()
-         };
+         for metas in [&markers, &copied] {
+             let keys: Vec<&str> = metas.iter().map(|meta| meta.key.as_str()).collect();
+             bucket::delete_all(own, &keys).await?;
