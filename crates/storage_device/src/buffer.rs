@@ -291,6 +291,10 @@ impl<'a> BufferRef<'a> {
         dest[..self.0.len()].copy_from_slice(self.0);
     }
 
+    /// Appends the view's bytes to `dest`.
+    pub fn append_to(&self, dest: &mut Vec<u8>) {
+        dest.extend_from_slice(self.0);
+    }
 }
 
 /// A view of a buffer's bytes.

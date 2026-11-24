@@ -56,7 +56,6 @@ use crate::errors::FxfsError;
 use crate::filesystem::{
     ApplyContext, FxFilesystem, JournalingObject, MAX_FILE_SIZE, TruncateGuard,
 };
-use crate::log::*;
 use crate::lsm_tree::cache::ObjectCache;
 use crate::lsm_tree::types::{ItemRef, LayerIterator};
 use crate::lsm_tree::{LSMTree, Query, layers_from_handles};

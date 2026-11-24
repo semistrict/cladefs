@@ -13,7 +13,7 @@ use futures::future::BoxFuture;
 use futures::try_join;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
-use std::fmt::{Debug, Write};
+use std::fmt::Debug;
 use std::ops::{Bound, Deref, DerefMut};
 use std::sync::{Arc, atomic};
 

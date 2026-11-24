@@ -33,7 +33,6 @@ use fuchsia_sync::Mutex;
 use futures::future::BoxFuture;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
-use std::time::Duration;
 use storage_device::{Device, DeviceHolder};
 use storage_units::BlockSize;
 

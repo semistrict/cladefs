@@ -11,7 +11,6 @@
 // This module is responsible for flushing (a.k.a. compacting) the object store trees.
 
 use crate::filesystem::{FlushReason, ForceMajor};
-use crate::log::*;
 use crate::lsm_tree::types::{ItemRef, LayerIterator};
 use crate::lsm_tree::{KeptContents, KeptWriter, LSMTree, layer_from_written_handle};
 use crate::object_handle::{ObjectHandle, ReadObjectHandle};
@@ -25,7 +24,6 @@ use crate::object_store::{
 use crate::serialized_types::{LATEST_VERSION, Version};
 use anyhow::{Context, Error};
 use std::sync::OnceLock;
-use std::sync::atomic::Ordering;
 
 /// cladefs: the largest layer a compaction keeps what it wrote of, cached (`KeptWriter`): as much
 /// as a few journals' worth of changes merged.

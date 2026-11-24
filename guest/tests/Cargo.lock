@@ -1380,6 +1380,7 @@ dependencies = [
  "aes",
  "aws-config",
  "aws-lc-rs",
+ "aws-lc-sys",
  "aws-sdk-kms",
  "base32_id",
  "base64 0.22.1",
@@ -1392,7 +1393,6 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "storage_ptr_slice",
  "storage_xts",
  "tempfile",
  "thiserror",
@@ -1679,7 +1679,6 @@ dependencies = [
  "futures",
  "fxfs-unicode",
  "fxfs_macros",
- "fxfs_trace",
  "getrandom 0.4.3",
  "linked-hash-map",
  "log",
@@ -1691,7 +1690,6 @@ dependencies = [
  "serde",
  "static_assertions",
  "storage_device",
- "storage_ptr_slice",
  "storage_units",
  "thiserror",
  "uuid",
@@ -1744,23 +1742,6 @@ version = "0.1.0"
 
 [[package]]
 name = "fxfs_macros"
-version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "fxfs_trace"
-version = "0.1.0"
-dependencies = [
- "fxfs_trace_macros",
- "storage_trace",
-]
-
-[[package]]
-name = "fxfs_trace_macros"
 version = "0.1.0"
 dependencies = [
  "proc-macro2",
@@ -4071,25 +4052,12 @@ dependencies = [
  "fprint",
  "fuchsia-sync",
  "futures",
- "libc",
  "log",
  "num",
  "rand 0.10.3",
  "serde",
- "storage_ptr_slice",
  "thiserror",
 ]
-
-[[package]]
-name = "storage_ptr_slice"
-version = "0.1.0"
-dependencies = [
- "zerocopy",
-]
-
-[[package]]
-name = "storage_trace"
-version = "0.1.0"
 
 [[package]]
 name = "storage_units"
@@ -4101,7 +4069,6 @@ version = "0.1.0"
 dependencies = [
  "cipher",
  "static_assertions",
- "storage_ptr_slice",
  "zerocopy",
 ]
 

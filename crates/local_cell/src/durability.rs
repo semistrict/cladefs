@@ -13,7 +13,6 @@ use crate::dir::{Dir, File};
 use crate::sync::Mutex;
 use anyhow::{Context as _, Error};
 use std::collections::{BTreeSet, HashSet, VecDeque};
-use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 

@@ -15,7 +15,7 @@
 -        }
 +        }?;
 +        let mut again = vec![0; len as usize];
-+        self.read_cached(&mut again, offset)?;
++        self.read_at(&mut again, offset)?;
 +        self.under().write_at(&again, offset)
      }
  

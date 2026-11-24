@@ -1561,7 +1561,6 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "storage_ptr_slice",
  "storage_xts",
  "tempfile",
  "thiserror",
@@ -1691,9 +1690,6 @@ version = "0.1.0"
 dependencies = [
  "bit-vec 0.10.1",
  "fprint-macros",
- "proc-macro2",
- "quote",
- "syn 2.0.119",
 ]
 
 [[package]]
@@ -1724,7 +1720,6 @@ dependencies = [
  "linux-rt",
  "madsim",
  "pin-project-lite",
- "rand 0.10.3",
  "smallvec",
  "tokio",
 ]
@@ -1890,7 +1885,6 @@ dependencies = [
  "futures",
  "fxfs-unicode",
  "fxfs_macros",
- "fxfs_trace",
  "getrandom 0.4.3",
  "linked-hash-map",
  "log",
@@ -1903,7 +1897,6 @@ dependencies = [
  "serde",
  "static_assertions",
  "storage_device",
- "storage_ptr_slice",
  "storage_units",
  "test-case",
  "thiserror",
@@ -1988,23 +1981,6 @@ version = "0.1.0"
 
 [[package]]
 name = "fxfs_macros"
-version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "fxfs_trace"
-version = "0.1.0"
-dependencies = [
- "fxfs_trace_macros",
- "storage_trace",
-]
-
-[[package]]
-name = "fxfs_trace_macros"
 version = "0.1.0"
 dependencies = [
  "proc-macro2",
@@ -2168,7 +2144,6 @@ dependencies = [
  "log",
  "madsim",
  "node_local",
- "tempfile",
 ]
 
 [[package]]
@@ -4502,27 +4477,11 @@ dependencies = [
  "fuchsia-async",
  "fuchsia-sync",
  "futures",
- "libc",
  "log",
  "num",
  "rand 0.10.3",
  "serde",
- "storage_ptr_slice",
  "thiserror",
-]
-
-[[package]]
-name = "storage_ptr_slice"
-version = "0.1.0"
-dependencies = [
- "zerocopy",
-]
-
-[[package]]
-name = "storage_trace"
-version = "0.1.0"
-dependencies = [
- "fuchsia-async",
 ]
 
 [[package]]
@@ -4535,7 +4494,6 @@ version = "0.1.0"
 dependencies = [
  "cipher",
  "static_assertions",
- "storage_ptr_slice",
  "test-case",
  "zerocopy",
 ]
@@ -4700,10 +4658,6 @@ dependencies = [
  "syn 3.0.6",
  "test-case-core",
 ]
-
-[[package]]
-name = "test_util"
-version = "0.1.0"
 
 [[package]]
 name = "thiserror"

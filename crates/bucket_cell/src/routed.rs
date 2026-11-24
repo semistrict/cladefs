@@ -247,14 +247,6 @@ impl RoutedBucket<ObjectBucket> {
     pub async fn probed(&self, nonce: u64) -> Result<(), String> {
         self.home.probed(nonce).await
     }
-
-    pub async fn refresh_marks(&self, cell: layout::CellId) {
-        self.home.refresh_marks(cell).await
-    }
-
-    pub async fn refresh_marking(&self) {
-        self.home.refresh_marking().await
-    }
 }
 
 impl From<ObjectBucket> for RoutedBucket<ObjectBucket> {

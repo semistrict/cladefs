@@ -74,7 +74,7 @@ use serde::{Deserialize, Serialize};
 use static_assertions::const_assert;
 use std::clone::Clone;
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::task::{Poll, Waker};
 use storage_device::{Device, ExtentId, ExtentRange};

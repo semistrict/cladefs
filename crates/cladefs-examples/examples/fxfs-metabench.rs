@@ -77,7 +77,7 @@ impl Bench {
     }
 
     fn handle(&self, ino: u64) -> StoreObjectHandle<ObjectStore> {
-        StoreObjectHandle::new(self.store.clone(), ino, HandleOptions::default(), false)
+        StoreObjectHandle::new(self.store.clone(), ino, HandleOptions::default())
     }
 
     async fn mkdir(&self, parent: &Directory<ObjectStore>, name: &str) -> Directory<ObjectStore> {

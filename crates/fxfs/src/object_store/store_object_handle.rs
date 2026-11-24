@@ -41,7 +41,6 @@ use futures::{Stream, TryStreamExt, try_join};
 use std::cmp::min;
 use std::ops::Range;
 use std::sync::Arc;
-use std::sync::atomic::{self, AtomicBool};
 use storage_device::buffer::{Buffer, BufferFuture, BufferRef, MutableBufferRef};
 use storage_device::{ExtentId, ExtentRange, NoExtent, WriteOptions};
 use storage_units::BlockSize;
@@ -779,7 +778,9 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
         debug_assert!(block_size.is_aligned(offset));
         debug_assert!(block_size.is_aligned(buf.len() as u64));
         let device_block_size = self.store().device.block_size() as u64;
-        debug_assert!(buf.range().start as u64 % device_block_size == 0);
+        debug_assert!(
+            (buf.as_ptr() as usize).is_multiple_of((device_block_size as usize).min(4096))
+        );
 
         let mut reads = Vec::new();
         loop {

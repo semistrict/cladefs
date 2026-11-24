@@ -11,7 +11,6 @@
 //   `DataObjectHandle`, `root_parent` extent records, or allocator mutations).
 
 use crate::errors::FxfsError;
-use crate::log::*;
 use crate::object_handle::{INVALID_OBJECT_ID, ObjectHandle, ReadObjectHandle};
 use crate::object_store::journal::super_block::JournalSpan;
 use crate::object_store::journal::{BLOCK_SIZE, JournalHandle};
@@ -24,7 +23,6 @@ use futures::stream::FuturesOrdered;
 use std::cmp::min;
 use std::ops::Range;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use storage_device::buffer::{BufferFuture, MutableBufferRef};
 use storage_device::{Device, ExtentId, ExtentRange, NoExtent, WriteFlags, WriteOptions};
 use storage_units::BlockSize;
