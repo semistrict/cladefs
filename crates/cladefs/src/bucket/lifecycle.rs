@@ -478,13 +478,15 @@ async fn based(
         }
     }
     base.commit(None).await.unwrap();
-    drop(base);
+    base.close().await;
     let base = open(&made.join("base")).await;
     let (version, asked, _) =
         run.asked(async || base.uploaded_version_at(made.join("copy")).await.unwrap()).await;
     let line = asked.line(Duration::ZERO, &run.names);
     println!("SETUP extents={extents} version of the base: {line}");
-    (base.cell(), version)
+    let cell = base.cell();
+    base.close().await;
+    (cell, version)
 }
 
 /// Has `bucket` be the measured host's, as the daemon's open cells are made in it, and does what a
@@ -792,7 +794,7 @@ async fn uploads_after_restores() {
 /// its cell's holding), a TCP handshake, and on a bucket elsewhere a TLS one too, before the
 /// request, the connection closed as the fork returned. Against the S3 server in memory, which
 /// counts the connections it accepts, the host a client of its own, as another host is.
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test]
 async fn restores_connect_to_the_bucket_no_more() {
     let server = bucket_cell::s3_server::S3Server::start(None);
     let (objects, mut run) = recorded(server.objects(), 16, Duration::ZERO);
@@ -800,18 +802,40 @@ async fn restores_connect_to_the_bucket_no_more() {
     // The host measured: a client of its own, its own pool of connections, as another host's.
     let bucket = Arc::new(ObjectBucket::new(server.objects(), "").unrouted());
     host(&bucket).await;
+    // Current-thread runtime (as board 7058) and three pooled connections opened on it before the
+    // restores: `open` runs on the separate multi-threaded `bucket_runtime()`, so its next request
+    // (or `Evidence::opened`'s background listing on the first restore) can check out a connection
+    // before hyper's connection task on this runtime has returned the previous response's
+    // connection to the idle pool (boards 9642, 9973, 10979).
+    let warm = || bucket_cell::head::get(&*bucket, made.version.0);
+    let (a, b, c) = tokio::join!(warm(), warm(), warm());
+    a.unwrap();
+    b.unwrap();
+    c.unwrap();
     let taken = made.copied(&bucket, "copy").await;
+    let drain = async || {
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+    };
     let restore = async |name: &str| {
+        drain().await;
         let before = server.connections();
         taken.fork(made.at(name), DEFAULT_TENANT).await.unwrap();
+        drain().await;
         let forked = server.connections();
-        drop(open(&made.at(name)).await);
+        let opened = open(&made.at(name)).await;
+        if let Some(predicted) = opened.predicted() {
+            predicted.await.unwrap();
+        }
+        opened.close().await;
         (forked - before, server.connections() - forked)
     };
     let mut connected = Vec::new();
     for name in ["first", "second", "third"] {
         connected.push(restore(name).await);
     }
+    taken.close().await;
     assert_eq!(connected, [(0, 0); 3]);
 }
 
