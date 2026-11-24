@@ -10,6 +10,7 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
+formats.workspace = true
 futures.workspace = true
 log.workspace = true
 storage_device.workspace = true

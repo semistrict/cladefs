@@ -87,8 +87,10 @@ pub struct Child {
 /// relocating out of their sparse segments (doc-27 step 2): no moves, and a cell holding the moves
 /// of 27's is refused ([`Kind::Former`]); nothing reads 27's. 29: a cell's head is one object,
 /// swapped in place (doc-27 step 4): no slots, no marks, and a bucket's identity holds no settings;
-/// a cell holding the head slots of 28's is refused ([`Kind::Former`]); nothing reads 28's.
-pub const FORMAT: u32 = 29;
+/// a cell holding the head slots of 28's is refused ([`Kind::Former`]); nothing reads 28's. 30: its
+/// framed objects are extent frames of version 3, their version a number (board 10040); nothing
+/// reads 29's, whose frames were of 2.
+pub const FORMAT: u32 = 30;
 
 /// cladefs: the prefix of every tenant's cells' objects: all the bucket's cells (TASK-364).
 pub const TENANTS: &str = "tenants/";

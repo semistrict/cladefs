@@ -630,6 +630,25 @@ fn devices_are_snapshotted_and_restored() {
     assert!(restored.state().frozen);
 }
 
+/// Resetting an activated device releases every `ConfigInterrupt` reference it kept (resizing,
+/// following and stats notices), so a PCI transport reset can tear down its old MSI-X vector
+/// group and free its KVM GSIs and irqfds before the device is activated again.
+#[test]
+fn reset_drops_interrupt_references() {
+    let dir = daemon();
+    let lost: virtio_extent::OnLost = Arc::new(|| panic!("the daemon went"));
+    let vm: Arc<dyn WindowVm> = Arc::new(FakeVm::default());
+    let mut device = Device::new(config(&dir, "reset-int"), 2, vm, lost).unwrap();
+
+    let interrupt = Arc::new(Counted::default());
+    let weak = Arc::downgrade(&interrupt);
+    device.activate(device.features() | (1 << 32), interrupt).unwrap();
+    assert!(weak.upgrade().is_some());
+
+    device.reset();
+    assert!(weak.upgrade().is_none(), "reset kept a reference to the transport's interrupt");
+}
+
 /// TASK-575: a snapshot a device took, dropped as the VMM drops it when the VM's snapshot fails
 /// after it, is gone: the device has none, and takes the next, of another version. (The daemon's
 /// side, the version dropped, is cladefsd's `vm_processes_drop_the_versions_they_made_alone`.)

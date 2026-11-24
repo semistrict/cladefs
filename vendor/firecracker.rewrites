@@ -30,3 +30,7 @@ e27792aef7c3a7084bd014469edf0eedd60cc0a0 e103560286ee3e1255ecc93077de118acfa5726
 # submission: the dependency backport, the general fixes, the PCI transport's shared memory regions and
 # device IDs, and the cladefs feature; its tree r10's less bac96b047 (the old `extent` key refused).
 99b3b968ac2a42a141ffe7c769598583cd6e5389 35d9ba276aa564516e90c4a3a5947c816607e0c2
+# cladefs-v1.18.0-r1 (branch cladefs-v1.18.0-r1), rebased from cladefs-v1.16.1-r11 onto upstream
+# Firecracker v1.18.0 (eaf83bb71) as 3 commits (dropping the dependency backport, PCI restore
+# activation error, and PCI reset deadlock now upstream).
+d8022b23e3fad4a1ee258c4d87145cbbc5f301da 190406ee1b467c133314da1fcecea0dc00bd5c73

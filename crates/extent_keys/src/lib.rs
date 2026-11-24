@@ -107,14 +107,26 @@ impl Secret {
 
     /// The HMAC-SHA256 of `bytes` under it.
     pub fn mac(&self, bytes: &[u8]) -> [u8; MAC_LEN] {
-        let key = hmac::Key::new(hmac::HMAC_SHA256, &self.0[..]);
-        hmac::sign(&key, bytes).as_ref().try_into().expect("HMAC-SHA256 is 32 bytes")
+        self.mac_of(&[bytes])
     }
 
     /// Checks `mac` is the HMAC-SHA256 of `bytes` under it, in constant time.
     pub fn verify(&self, bytes: &[u8], mac: &[u8; MAC_LEN]) -> Result<(), Unauthentic> {
-        let key = hmac::Key::new(hmac::HMAC_SHA256, &self.0[..]);
-        hmac::verify(&key, bytes, mac).map_err(|_| Unauthentic("bytes, by their MAC"))
+        self.verify_of(&[bytes], mac)
+    }
+
+    /// The HMAC-SHA256 under it of `pieces`, one after another.
+    pub fn mac_of(&self, pieces: &[&[u8]]) -> [u8; MAC_LEN] {
+        let mut context = hmac::Context::with_key(&hmac::Key::new(hmac::HMAC_SHA256, &self.0[..]));
+        pieces.iter().for_each(|piece| context.update(piece));
+        context.sign().as_ref().try_into().expect("HMAC-SHA256 is 32 bytes")
+    }
+
+    /// Checks `mac` is the HMAC-SHA256 of `pieces` under it ([`Secret::mac_of`]), in constant
+    /// time.
+    pub fn verify_of(&self, pieces: &[&[u8]], mac: &[u8; MAC_LEN]) -> Result<(), Unauthentic> {
+        aws_lc_rs::constant_time::verify_slices_are_equal(&self.mac_of(pieces), mac)
+            .map_err(|_| Unauthentic("bytes, by their MAC"))
     }
 
     /// cladefs: the HMAC-SHA256 under it of `pieces`, one after another, truncated to its first
@@ -123,10 +135,7 @@ impl Secret {
     /// (TASK-411.23). A MAC needing no nonce: tagging the same bytes twice gives the same tag, and
     /// other bytes tell nothing of the key.
     pub fn tag(&self, pieces: &[&[u8]]) -> [u8; TAG_LEN] {
-        let mut context = hmac::Context::with_key(&hmac::Key::new(hmac::HMAC_SHA256, &self.0[..]));
-        pieces.iter().for_each(|piece| context.update(piece));
-        let mac = context.sign();
-        mac.as_ref()[..TAG_LEN].try_into().expect("HMAC-SHA256 is longer than a tag")
+        self.mac_of(pieces)[..TAG_LEN].try_into().expect("HMAC-SHA256 is longer than a tag")
     }
 
     /// cladefs: checks `tag` is the tag of `pieces` under it ([`Secret::tag`]), in constant time.

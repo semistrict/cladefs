@@ -113,6 +113,16 @@ fn parts_of(suffix: &[u8], keys: &dyn Keys) -> Result<Option<Parts>, Error> {
     }
 }
 
+/// cladefs: none, of a framed file not whole, whose last bytes are `suffix`; unless they are a
+/// frame's of a version this build doesn't read: refused, never taken for a file a crash left torn,
+/// which recovery deletes (hotbed review 85), as a rollback past a frame's version would have it.
+fn not_whole<T>(suffix: &[u8]) -> Result<Option<T>, Error> {
+    match extent_frame::refused(suffix) {
+        Some(refused) => bail!("a framed file of another build: {refused}"),
+        None => Ok(None),
+    }
+}
+
 /// The parts of the framed file `file`, and its footer, if it is whole: its trailer, table and
 /// footer pass their checks. Its parts are checked as they are read. cladefs: by a reader holding
 /// `keys`, the cell's (TASK-411.3).
@@ -123,7 +133,9 @@ pub(crate) fn read_frame<F: File>(
     let size = file.size()?;
     let Some(at) = size.checked_sub(TRAILER) else { return Ok(None) };
     let trailer = read_aligned(file, at, TRAILER as usize)?;
-    let Ok(frame) = Frame::of_trailer(trailer.as_slice()) else { return Ok(None) };
+    let Ok(frame) = Frame::of_trailer(trailer.as_slice()) else {
+        return not_whole(trailer.as_slice());
+    };
     if frame.size() != size {
         return Ok(None);
     }
@@ -146,7 +158,9 @@ pub(crate) fn read_parts<F: File>(file: &F, keys: &dyn Keys) -> Result<Option<Pa
     let Some(trailer) = size.checked_sub(TRAILER) else { return Ok(None) };
     let last = trailer / ALIGN * ALIGN;
     let suffix = read_aligned(file, last, (size - last) as usize)?;
-    let Ok(frame) = Frame::of_trailer(suffix.as_slice()) else { return Ok(None) };
+    let Ok(frame) = Frame::of_trailer(suffix.as_slice()) else {
+        return not_whole(suffix.as_slice());
+    };
     if frame.size() != size {
         return Ok(None);
     }
@@ -576,6 +590,39 @@ mod tests {
         assert_eq!(parts.len(), 0);
         source.locate(0, 4096, &Unpacked::default(), &mut parts).unwrap();
         assert_eq!(parts.len(), 1);
+    }
+
+    /// A framed file of a frame version this build doesn't read, a newer build's, is refused, never
+    /// taken for one a crash left torn, which recovery deletes, its commits with it (hotbed review
+    /// 85); one cut short still reads as not whole.
+    #[test]
+    fn framed_files_of_another_version_are_refused_not_torn() {
+        let dir = MemDir::new();
+        let bytes = extent_frame::framed(
+            &[7; 4096],
+            b"footer",
+            bucket_cell::testing::encrypting(bucket_cell::layout::test_cell(1)),
+        );
+        let mut newer = bytes.clone();
+        let version = newer.len() - 12;
+        newer[version..version + 4].copy_from_slice(&4u32.to_le_bytes());
+        let file = dir.create("newer", true).unwrap();
+        file.write_at(&newer, 0).unwrap();
+        let refused = "a framed file of another build: extent frame version 4: this build reads \
+                       version 3 alone";
+        let error = read_frame(&file, &extent_frame::NoKeys).err().unwrap();
+        assert_eq!(error.to_string(), refused);
+        let error = read_parts(&file, &extent_frame::NoKeys).err().unwrap();
+        assert_eq!(error.to_string(), refused);
+
+        let file = dir.create("torn", true).unwrap();
+        file.write_at(&bytes[..bytes.len() - 1], 0).unwrap();
+        assert!(read_frame(&file, &extent_frame::NoKeys).unwrap().is_none());
+        assert!(read_parts(&file, &extent_frame::NoKeys).unwrap().is_none());
+        let file = dir.create("whole", true).unwrap();
+        file.write_at(&bytes, 0).unwrap();
+        let (_, footer) = read_frame(&file, &extent_frame::NoKeys).unwrap().unwrap();
+        assert_eq!(footer, b"footer");
     }
 
     /// cladefs: of the files kept open, the least lately read closes as one more opens past the

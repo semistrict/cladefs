@@ -374,17 +374,38 @@ jobs:
             BEFORE=$(git merge-base origin/main "$AFTER")
           fi
           scripts/test-weakening.py "$BEFORE..$AFTER"
-      # A commit breaking a frozen format (a corpus case changed or gone, a family's oldest raised)
-      # names the user's agreement in a 'Breaks-format:' line (scripts/format-freeze.py, doc-28).
-      - name: Commits that break frozen formats name the user's agreement
-        env:
-          BEFORE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
-          AFTER: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+  # Frozen formats (doc-28): every later build reads what an earlier wrote, and serves what an
+  # earlier calls. A break names the user's agreement in a 'Breaks-format:' line.
+  formats:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    if: github.event_name != 'workflow_dispatch'
+    env:
+      BEFORE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+      AFTER: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      # A new branch's push has no before: what it brings beyond main.
+      - name: What the push brings
         run: |
           if [[ $BEFORE == 0000000000000000000000000000000000000000 ]]; then
-            BEFORE=$(git merge-base origin/main "$AFTER")
+            echo "BEFORE=$(git merge-base origin/main "$AFTER")" >> "$GITHUB_ENV"
           fi
-          scripts/format-freeze.py "$BEFORE..$AFTER"
+      # A corpus case changed or gone, a family's oldest raised (scripts/format-freeze.py).
+      - name: Commits that break frozen formats name the user's agreement
+        run: scripts/format-freeze.py "$BEFORE..$AFTER"
+      # buf's, which go/buf.sh runs in Go.
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: stable
+          cache-dependency-path: go/go.sum
+      # The control and mount APIs only grow: a VM manager is upgraded apart from its daemons
+      # (go/compat.sh, board 10056).
+      - name: The daemon's APIs break no caller of the last build's
+        run: go/compat.sh "$BEFORE"
 
   # TASK-330.1: the sandboxes' short mode, LangSmith's CI's topology on the runner's KVM (two extent
   # daemons, an S3 bucket on one ext4 disk, more vCPUs than CPUs), which found TASK-310 and TASK-311

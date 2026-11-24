@@ -308,8 +308,10 @@ impl Device {
     /// Resets the device, its VMM's workers stopped: as before the driver activated it. On a
     /// thread under the VMM's seccomp filter, as activation.
     pub fn reset(&mut self) {
-        // cladefs: no guest is asked for its stats until a driver activates it again, the cell
-        // answering meanwhile (TASK-111.4).
+        // cladefs: release the transport's interrupt references so a PCI reset can tear down its
+        // MSI-X vector group and no notice fires while inactive; no guest is asked for its stats
+        // until a driver activates it again, the cell answering meanwhile (TASK-111.4).
+        self.notices.resizing.set_interrupt(None);
         self.notices.stats.set_interrupt(None);
     }
 
