@@ -513,7 +513,7 @@ mod host {
         test_setup: &'a TestSetup,
         root: PathBuf,
         socket: PathBuf,
-        base: PathBuf,
+        base: cladefs::CellId,
         daemon: std::process::Child,
         memory: HostMemory,
         settings: Settings,
@@ -568,13 +568,12 @@ mod host {
         /// Boots the VM `name` on a fork of the base of its own: none if the daemon refused the
         /// fork, the host's memory full.
         fn boot(&self, name: String) -> anyhow::Result<Option<Started>> {
-            let fork = self.test_setup.tmp_dir.join(format!("{name}.root"));
-            match control(&self.socket)?
+            let fork = match control(&self.socket)?
                 .call(async |client| {
                     client
                         .fork_cell(ForkCellRequest {
-                            from: control_path(&self.base),
-                            to: control_path(&fork),
+                            tenant: self.base.tenant,
+                            cell: self.base.id,
                             ..Default::default()
                         })
                         .await
@@ -590,7 +589,7 @@ mod host {
             let listening = Listening::new(&name)?;
             let mut machine = Vm::new(1, self.settings.vm_mib)?;
             machine.guest_kernel()?;
-            machine.cell_served("root", &fork, CAPACITY, self.window, &self.socket);
+            machine.cell_id_served("root", fork, CAPACITY, self.window, &self.socket);
             machine.fxfs_root("root");
             machine.vsock(&listening.uds);
             let firecracker = machine
@@ -600,9 +599,8 @@ mod host {
         }
 
         /// Restores `zygote` as the VM `name`: its root a fork of the zygote's version, its
-        /// memory a fork of the zygote's memory cell's, each at a path of its own.
+        /// memory a fork of the zygote's memory cell's, each placed by the daemon.
         fn restore(&self, name: String, zygote: &Zygote) -> anyhow::Result<Started> {
-            let dir = &self.test_setup.tmp_dir;
             let listening = Listening::new(&name)?;
             let api = Vm::api_socket(&name);
             let firecracker = Firecracker::spawn(self.vm_dir()?, &name, &api, None, &[])?;
@@ -611,7 +609,7 @@ mod host {
                 "snapshot_path": zygote.snapshot,
                 "mem_backend": {
                     "backend_type": "Cell",
-                    "backend_path": dir.join(format!("{name}-memory.root")),
+                    "backend_path": "0/0",
                 },
                 "memory_cell": {
                     "tenant": version.tenant,
@@ -622,7 +620,7 @@ mod host {
                 "resume_vm": true,
                 "vsock_override": { "uds_path": listening.uds },
                 "cladefs_overrides": [
-                    { "id": "root", "path_on_host": dir.join(format!("{name}.root")) },
+                    { "id": "root", "path_on_host": "0/0" },
                 ],
             });
             let restoring = Instant::now();
@@ -662,7 +660,7 @@ mod host {
             drop(stream);
             std::fs::remove_file(Vm::api_socket(&name))?;
             let size = std::fs::metadata(&memory)?.len();
-            let cell = MemoryCell::open(&self.socket, &dir.join("zygote-memory.root"), size)?;
+            let cell = MemoryCell::create_cell(&self.socket, 0, size)?;
             cell.import(&memory)?;
             let version = cell.make_version()?;
             cell.close()?;
@@ -804,13 +802,11 @@ mod host {
             let env = [("CLADEFSD_METRICS", OsStr::new(&metrics_at))];
             // Governed, as production's: its memory what is free (TASK-358).
             let daemon = crate::common::spawn_daemon(test_setup, &socket, "cladefsd", &env, None)?;
-            let base = dir.join("base");
             let imported = Instant::now();
-            control(&socket)?
+            let base = control(&socket)?
                 .call(async |client| {
                     client
                         .import_image(ImportImageRequest {
-                            path: control_path(&base),
                             capacity: CAPACITY,
                             image: control_path(&layout),
                             reference: String::new(),
@@ -846,8 +842,9 @@ mod host {
             for entry in std::fs::read_dir(dir)? {
                 let path = entry?.path();
                 let name = path.file_name().unwrap_or_default().to_string_lossy();
-                let bulky = [".root", "-cache", ".bucket"].iter().any(|end| name.ends_with(end))
-                    || ["base", "cells-image", "rootfs"].contains(&&*name);
+                let bulky =
+                    [".root", "-cache", ".bucket", "-disk0"].iter().any(|end| name.ends_with(end))
+                        || ["base", "cells-image", "rootfs"].contains(&&*name);
                 if bulky && path.is_dir() {
                     std::fs::remove_dir_all(&path)
                         .with_context(|| format!("removing {}", path.display()))?;

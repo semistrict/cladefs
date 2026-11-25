@@ -153,7 +153,6 @@ mod host {
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
     use anyhow::Context;
     use cladefs::cladefsd::control::proto::{ForkCellRequest, StatCellRequest};
-    use cladefs::testing::control_path;
     use std::ffi::{CString, OsStr};
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -235,9 +234,9 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
 
     /// Where a VM's filesystem is.
     enum Device<'a> {
-        /// The cell at `cell_dir`, which the daemon at `cladefsd` serves, with a DAX window of
+        /// `cell`, which the daemon at `cladefsd` serves, with a DAX window of
         /// `window` bytes if not 0.
-        Cell { cell_dir: &'a Path, cladefsd: &'a Path, window: u64 },
+        Cell { cell: cladefs::CellId, cladefsd: &'a Path, window: u64 },
         /// The image at `image`, on writable virtio-pmem, which the guest mounts ext4 on, with DAX.
         Pmem(&'a Path),
         /// cladefs: the image at `image`, on a writable virtio-blk disk whose flushes go as `cache`
@@ -276,8 +275,8 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
         let mut vm = Vm::new(vcpus()?, memory)?;
         vm.guest_kernel()?;
         match device {
-            Device::Cell { cell_dir, cladefsd, window } => {
-                vm.cell_served("extents", cell_dir, CAPACITY, window, cladefsd);
+            Device::Cell { cell, cladefsd, window } => {
+                vm.cell_id_served("extents", cell, CAPACITY, window, cladefsd);
             }
             Device::Pmem(image) => {
                 let device = vm.pmem("pgbench", image)?;
@@ -328,7 +327,7 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
     /// VM's exits, faults and flushes, what they cost the guest (TASK-91.16).
     fn sample(
         socket: PathBuf,
-        cell_dir: PathBuf,
+        cell: cladefs::CellId,
         stats: PathBuf,
         samples: PathBuf,
         vmm: u32,
@@ -342,7 +341,7 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
             while !stop.load(Ordering::Relaxed) {
                 std::thread::sleep(Duration::from_secs(2));
                 let stat = control.call(async |client| {
-                    client.stat_cell(StatCellRequest { path: control_path(&cell_dir) }).await
+                    client.stat_cell(StatCellRequest { tenant: cell.tenant, cell: cell.id }).await
                 })?;
                 writeln!(
                     out,
@@ -520,7 +519,7 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
         socket: PathBuf,
         /// Its stats file (CLADEFSD_STATS).
         stats: PathBuf,
-        base: PathBuf,
+        base: cladefs::CellId,
         /// The DAX window of the VMs on forks of the base, if not 0.
         window: u64,
     }
@@ -620,11 +619,11 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
             let daemon_memory = daemon_memory()?;
             let mut daemon =
                 crate::common::spawn_daemon(test_setup, &socket, "cladefsd", &env, daemon_memory)?;
-            let base = dir.join("base");
+            let base = crate::common::create_cell(&socket, CAPACITY)?;
             let forked = self.database != Database::Made;
             // cladefs: the base's VM, making the database, as much memory as a VM loading it needs.
             let memory = if forked { load_memory()? } else { 512 };
-            let device = Device::Cell { cell_dir: &base, cladefsd: &socket, window: 0 };
+            let device = Device::Cell { cell: base, cladefsd: &socket, window: 0 };
             let mut machine = machine("base", device, memory)?;
             if forked {
                 machine.env(c"CLADEFS_PGBENCH_BASE_DATABASE=1");
@@ -716,20 +715,19 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
             requests: Option<&crate::measure::Requests>,
         ) -> anyhow::Result<Running> {
             let dir = &served.test_setup.tmp_dir;
-            let fork = dir.join(nth("fork", vm));
-            crate::common::control(&served.socket)?
+            let fork = crate::common::control(&served.socket)?
                 .call(async |client| {
                     client
                         .fork_cell(ForkCellRequest {
-                            from: control_path(&served.base),
-                            to: control_path(&fork),
+                            tenant: served.base.tenant,
+                            cell: served.base.id,
                             ..Default::default()
                         })
                         .await
                 })
                 .map(|response| cladefs::CellId { tenant: response.tenant, id: response.cell })?;
             let device =
-                Device::Cell { cell_dir: &fork, cladefsd: &served.socket, window: served.window };
+                Device::Cell { cell: fork, cladefsd: &served.socket, window: served.window };
             let mut machine = machine(role, device, memory)?;
             if let Some(requests) = requests {
                 machine.vsock(requests.uds());

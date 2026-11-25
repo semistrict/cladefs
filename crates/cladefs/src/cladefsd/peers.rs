@@ -417,7 +417,17 @@ pub(super) async fn start_on(
                 )
             }
         }
-        None => None,
+        None => {
+            let pool_dirs = daemon.disk_pool().map(|pool| pool.replica_dirs()).unwrap_or_default();
+            if pool_dirs.is_empty() {
+                None
+            } else {
+                Some(
+                    local_cell::upload::blocking(|| replicas(daemon.host.local(), &pool_dirs))
+                        .map_err(|err| failed(&err))?,
+                )
+            }
+        }
     };
     if let Some(replicas) = &replicas {
         sweeping(replicas.clone(), bucket.clone(), &runtime);

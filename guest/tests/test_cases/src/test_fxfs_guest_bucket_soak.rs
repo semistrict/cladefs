@@ -51,7 +51,6 @@ const KEPT: u64 = 16;
 mod host {
     use super::*;
     use cladefs::cladefsd::control::proto::SyncCellRequest;
-    use cladefs::testing::control_path;
 
     use crate::common::{Measured, ProcessCosts, cladefs_guest_should_run, setup_rootfs};
     use crate::faulty_s3::FaultyS3;
@@ -115,19 +114,19 @@ mod host {
         line.iter().filter(|(name, _)| name.starts_with("failed-")).map(|(_, count)| count).sum()
     }
 
-    /// Boots VM `vm` on the cell at `cell_dir`, served by the daemon at `socket`, writing at `rate`
+    /// Boots VM `vm` on `cell`, served by the daemon at `socket`, writing at `rate`
     /// bytes a second for `secs` seconds.
     fn boot(
         test_setup: &TestSetup,
         root: &Path,
         socket: &Path,
-        cell_dir: &Path,
+        cell: cladefs::CellId,
         (vm, rate, secs): (u64, u64, u64),
     ) -> anyhow::Result<Firecracker> {
         let name = format!("vm-{vm}");
         let mut machine = Vm::new(2, VM_MEMORY_MIB)?;
         machine.guest_kernel()?;
-        machine.cell_served("extents", cell_dir, CAPACITY, 0, socket);
+        machine.cell_id_served("extents", cell, CAPACITY, 0, socket);
         for (var, value) in [
             ("CLADEFS_BUCKET_SOAK_SEED", vm),
             ("CLADEFS_BUCKET_SOAK_RATE", rate),
@@ -201,15 +200,16 @@ mod host {
             let failing: f64 = PHASES.iter().filter(|phase| phase.3).map(|phase| phase.1).sum();
             let rate = (WRITTEN_WHILE_FAILING as f64 / (vms as f64 * failing * secs as f64)) as u64;
             eprintln!("bucket-soak: {secs} s, {vms} VMs writing {} MiB/s each", rate >> 20);
-            let cell_dirs: Vec<_> = (0..vms).map(|vm| dir.join(format!("store-{vm}"))).collect();
+            let cells: Vec<cladefs::CellId> = (0..vms)
+                .map(|_| crate::common::create_cell(&socket, CAPACITY))
+                .collect::<anyhow::Result<_>>()?;
             // Each VM's, and when it booted: its guest writes for the run's seconds from its own
             // start, after its boot, and may end once they're up, before the phases do (TASK-386).
             let mut running = Vec::new();
-            for (vm, cell_dir) in cell_dirs.iter().enumerate() {
+            for (vm, &cell) in cells.iter().enumerate() {
                 let booted = Instant::now();
                 let vm = vm as u64;
-                running
-                    .push((boot(test_setup, &root, &socket, cell_dir, (vm, rate, secs))?, booted));
+                running.push((boot(test_setup, &root, &socket, cell, (vm, rate, secs))?, booted));
             }
             let began = Instant::now();
             let mut ended = 0.0;
@@ -222,19 +222,20 @@ mod host {
                 if name == "answering again" {
                     // Every cell's commits made so far uploaded, each sync says, within the bound.
                     let since = Instant::now();
-                    for cell_dir in &cell_dirs {
-                        let (socket, cell_dir) = (socket.clone(), cell_dir.clone());
+                    for &cell in &cells {
+                        let socket = socket.clone();
                         syncs.push(std::thread::spawn(move || {
                             let synced = crate::common::control(&socket)?
                                 .call(async |client| {
                                     client
                                         .sync_cell(SyncCellRequest {
-                                            path: control_path(&cell_dir),
+                                            tenant: cell.tenant,
+                                            cell: cell.id,
                                         })
                                         .await
                                 })
                                 .map(drop);
-                            synced.with_context(|| format!("syncing {}", cell_dir.display()))?;
+                            synced.with_context(|| format!("syncing {cell}"))?;
                             anyhow::Ok(since.elapsed())
                         }));
                     }

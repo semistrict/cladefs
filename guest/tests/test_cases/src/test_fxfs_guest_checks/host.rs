@@ -20,7 +20,7 @@ use std::time::Duration;
 
 fn create_image(path: &Path) -> anyhow::Result<()> {
     block_on(async {
-        let fs = Filesystem::format(Storage::create(path, IMAGE_SIZE).await?).await?;
+        let fs = Filesystem::format(Storage::open(path).await?).await?;
         let owner = Owner { uid: 0, gid: 0 };
         let (file, _) = fs.root().create(b"from-host", 0o644, owner).await?;
         file.write(0, HOST_CONTENT).await?;
@@ -199,7 +199,8 @@ impl Test for TestFxfsGuestChecks {
     }
 
     fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
-        let image = test_setup.tmp_dir.join("cladefs.img");
+        let (cell, image) =
+            crate::common::create_shared_cell(&test_setup.tmp_dir, "cladefs", IMAGE_SIZE)?;
         create_image(&image)?;
         // cladefs: a window as large as the data, or a small one's, that fills (-small); either
         // CLADEFS_DAX_WINDOW_MIB's if set (TASK-227).
@@ -210,7 +211,7 @@ impl Test for TestFxfsGuestChecks {
         };
         let mut vm = Vm::new(2, 512)?;
         vm.guest_kernel()?;
-        vm.cell("cladefs", &image, IMAGE_SIZE, window)?;
+        vm.cell_id("cladefs", cell, IMAGE_SIZE, window)?;
         // CLADEFS_CHECKS names the checks to run, separated by commas (such as
         // `seal_race,sparse`), for a quick run: all of them otherwise. cladefs: and the guest
         // their budgets' scale (TASK-168).
@@ -260,7 +261,9 @@ impl Test for TestFxfsGuestChecks {
             return TestOutcome::Fail(format!("seed {seed}: {failed}"));
         }
         // cladefs: fsck, whichever checks ran.
-        let fs = open_image(&test_setup.tmp_dir.join("cladefs.img"));
+        let image_path = crate::common::shared_cell_path(&test_setup.tmp_dir, "cladefs")
+            .expect("shared cell path");
+        let fs = open_image(&image_path);
         // cladefs: what a coverage kernel counted, under the directory the run says (TASK-119.14).
         if let Some(coverage) = std::env::var_os("CLADEFS_COVERAGE") {
             let vm = format!("{}-{}", test_setup.test_case, std::process::id());

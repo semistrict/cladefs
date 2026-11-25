@@ -12,15 +12,14 @@
 
 mod common;
 
-use cladefs::Errno;
 use cladefs::cladefsd::control::proto::*;
+use cladefs::{CellClient, CellId, Errno};
 use common::daemon::{CAPACITY, Daemon, NEW, failure, name, write};
 use common::pattern;
-use std::path::Path;
 use tonic::Code;
 
-/// A cell made, written by a VM, grown, forked, made a public base, synced to object storage and
-/// taken from there to a new cell directory, placed, and deleted, through the API.
+/// A cell made, written by a VM, grown, forked, made a public base, synced to object storage,
+/// dropped locally and taken back from object storage, placed, and deleted, through the API.
 #[test]
 fn cells_through_the_control_api() {
     // SAFETY: nextest runs each test in a process of its own, whose other threads don't read the
@@ -31,16 +30,14 @@ fn cells_through_the_control_api() {
     }
     let dir = tempfile::tempdir().unwrap();
     let mut daemon = Daemon::new(dir.path());
-    let (base, fork, taken) =
-        (dir.path().join("base"), dir.path().join("fork"), dir.path().join("taken"));
 
-    let cell = daemon.create(&base, NEW, None).unwrap();
+    let cell = daemon.create(NEW, None).unwrap();
     assert_ne!(cell.id, 0);
-    let vm = daemon.open(&base, CAPACITY);
+    let vm = daemon.open(cell);
     assert_eq!(vm.cell(), cell.id);
     write(&vm, &pattern(1), b"base");
     drop(vm);
-    let stat = daemon.wait_closed(&base);
+    let stat = daemon.wait_closed(cell);
     assert_eq!(
         stat,
         StatCellResponse {
@@ -77,34 +74,35 @@ fn cells_through_the_control_api() {
         }
     );
 
-    daemon.resize(&base, 2 * CAPACITY).unwrap();
-    assert_eq!(daemon.stat(&base).unwrap().capacity, 2 * CAPACITY);
+    daemon.resize(cell, 2 * CAPACITY).unwrap();
+    assert_eq!(daemon.stat(cell).unwrap().capacity, 2 * CAPACITY);
     // Its guest, which would have to agree, isn't there.
-    assert_eq!(failure(daemon.resize(&base, CAPACITY)), (Code::FailedPrecondition, Errno::EBUSY));
+    assert_eq!(failure(daemon.resize(cell, CAPACITY)), (Code::FailedPrecondition, Errno::EBUSY));
 
-    let forked = daemon.fork(&base, &fork).unwrap();
+    let forked = daemon.fork(cell, None).unwrap();
     assert_ne!(forked, cell);
-    let stat = daemon.stat(&fork).unwrap();
+    let stat = daemon.stat(forked).unwrap();
     assert_eq!((stat.cell, stat.used, stat.public), (forked.id, 64 << 10, false));
     // TASK-49: all it holds, it inherited; TASK-454: the extent too.
     assert_eq!((stat.own, stat.inherited), (0, 64 << 10));
     assert_eq!((stat.own_extents, stat.inherited_extents), (0, 1));
-    daemon.make_public(&base).unwrap();
-    assert!(daemon.stat(&base).unwrap().public);
-    assert!(!daemon.stat(&fork).unwrap().public, "a fork of a public base is its own");
+    daemon.make_public(cell).unwrap();
+    assert!(daemon.stat(cell).unwrap().public);
+    assert!(!daemon.stat(forked).unwrap().public, "a fork of a public base is its own");
 
-    // The fork's commits in object storage, another host takes its cell, placed after this
-    // one's: what it holds there.
-    daemon.sync(&fork).unwrap();
-    assert_eq!(daemon.create(&taken, forked, Some(2)).unwrap(), forked);
-    let vm = daemon.open(&taken, CAPACITY);
+    // The fork's commits in object storage, dropped locally and taken again from object storage,
+    // placed after this one's: what it holds there.
+    daemon.sync(forked).unwrap();
+    daemon.drop_cell(forked).unwrap();
+    assert_eq!(daemon.create(forked, Some(2)).unwrap(), forked);
+    let vm = daemon.open(forked);
     assert_eq!(vm.root().unwrap(), b"base");
     drop(vm);
-    daemon.wait_closed(&taken);
+    daemon.wait_closed(forked);
 
-    daemon.place(&base, 3).unwrap();
-    daemon.delete(&taken).unwrap();
-    assert_eq!(failure(daemon.stat(&taken)), (Code::NotFound, Errno::ENOENT));
+    daemon.place(cell, 3).unwrap();
+    daemon.delete(forked).unwrap();
+    assert_eq!(failure(daemon.stat(forked)), (Code::NotFound, Errno::ENOENT));
 
     let counters = daemon.counters();
     let object_storage = counters.object_storage.expect("the daemon has a bucket");
@@ -118,24 +116,24 @@ fn cells_through_the_control_api() {
 fn open_cells_are_listed_with_their_takings_and_uploads() {
     let dir = tempfile::tempdir().unwrap();
     let mut daemon = Daemon::new(dir.path());
-    let (first, second) = (dir.path().join("first"), dir.path().join("second"));
     let before = std::time::SystemTime::now();
-    let one = daemon.open(&first, CAPACITY);
+    let (first, one) = daemon.open_new(0, CAPACITY);
     write(&one, &pattern(1), b"one");
-    let two = daemon.open(&second, CAPACITY);
-    daemon.sync(&first).unwrap();
-    daemon.sync(&second).unwrap();
+    let (second, two) = daemon.open_new(0, CAPACITY);
+    daemon.sync(first).unwrap();
+    daemon.sync(second).unwrap();
     let after = std::time::SystemTime::now();
 
     let listed = daemon.list();
-    let paths: Vec<_> = listed.iter().map(|(path, _)| path.clone()).collect();
-    let canonical = |path: &Path| path.canonicalize().unwrap();
-    assert_eq!(paths, [canonical(&first), canonical(&second)]);
+    let mut expected = [(first, 1u64), (second, 0u64)];
+    expected.sort_by_key(|(id, _)| (id.tenant, id.id));
+    let ids: Vec<_> = listed.iter().map(|(id, _)| *id).collect();
+    assert_eq!(ids, [expected[0].0, expected[1].0]);
     let millis = |time: std::time::SystemTime| {
         time.duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64
     };
-    for (((_, stat), cell), extents) in listed.iter().zip([one.cell(), two.cell()]).zip([1, 0]) {
-        assert_eq!((stat.cell, stat.open, stat.uploading), (cell, true, true));
+    for ((_, stat), (cell, extents)) in listed.iter().zip(expected) {
+        assert_eq!((stat.cell, stat.open, stat.uploading), (cell.id, true, true));
         // TASK-454: the extent the first wrote; none, the second.
         assert_eq!((stat.own_extents, stat.inherited_extents), (extents, 0));
         assert_eq!((stat.taken_token, stat.taken_epoch), (1, 1));
@@ -143,7 +141,7 @@ fn open_cells_are_listed_with_their_takings_and_uploads() {
         assert_eq!(stat.uploaded, stat.committed, "{stat:?}");
         assert_eq!((stat.pending_upload_bytes, stat.oldest_pending_ms), (0, 0));
     }
-    assert_eq!(daemon.stat(&first).unwrap(), listed[0].1);
+    assert_eq!(daemon.stat(expected[0].0).unwrap(), listed[0].1);
     drop((one, two));
 }
 
@@ -153,37 +151,35 @@ fn open_cells_are_listed_with_their_takings_and_uploads() {
 fn extents_are_counted_through_the_control_api() {
     let dir = tempfile::tempdir().unwrap();
     let mut daemon = Daemon::new(dir.path());
-    let (base, fork) = (dir.path().join("base"), dir.path().join("fork"));
-    let write = |vm: &cladefs::CellClient, sequence: u64| {
+    let write = |vm: &CellClient, sequence: u64| {
         let extent = cladefs::ExtentId { cell: vm.cell(), sequence };
         vm.write(extent, 0, &[cladefs::VolatileSlice::from(&pattern(sequence)[..4096])]).unwrap();
         extent
     };
     let counts = |stat: &StatCellResponse| (stat.own_extents, stat.inherited_extents);
 
-    let vm = daemon.open(&base, CAPACITY);
-    assert_eq!(counts(&daemon.stat(&base).unwrap()), (0, 0));
+    let (base, vm) = daemon.open_new(0, CAPACITY);
+    assert_eq!(counts(&daemon.stat(base).unwrap()), (0, 0));
     let written: Vec<_> = (1..=3).map(|sequence| write(&vm, sequence)).collect();
     vm.commit(None).unwrap();
-    assert_eq!(counts(&daemon.stat(&base).unwrap()), (3, 0));
+    assert_eq!(counts(&daemon.stat(base).unwrap()), (3, 0));
     drop(vm);
-    assert_eq!(counts(&daemon.stat(&base).unwrap()), (3, 0));
+    assert_eq!(counts(&daemon.stat(base).unwrap()), (3, 0));
 
-    daemon.fork(&base, &fork).unwrap();
-    assert_eq!(counts(&daemon.stat(&fork).unwrap()), (0, 3));
-    let vm = daemon.open(&fork, CAPACITY);
+    let fork = daemon.fork(base, None).unwrap();
+    assert_eq!(counts(&daemon.stat(fork).unwrap()), (0, 3));
+    let vm = daemon.open(fork);
     let own = [write(&vm, 1), write(&vm, 2)];
     vm.free(written[0]).unwrap();
     vm.free(own[1]).unwrap();
     // Open, as its VM has it, committed or not.
-    assert_eq!(counts(&daemon.stat(&fork).unwrap()), (1, 2));
+    assert_eq!(counts(&daemon.stat(fork).unwrap()), (1, 2));
     vm.commit(None).unwrap();
-    let canonical = fork.canonicalize().unwrap();
-    let listed = daemon.list().into_iter().find(|(path, _)| *path == canonical);
+    let listed = daemon.list().into_iter().find(|(id, _)| *id == fork);
     assert_eq!(listed.map(|(_, stat)| counts(&stat)), Some((1, 2)));
     drop(vm);
-    assert_eq!(counts(&daemon.stat(&fork).unwrap()), (1, 2));
-    assert_eq!(counts(&daemon.stat(&base).unwrap()), (3, 0));
+    assert_eq!(counts(&daemon.stat(fork).unwrap()), (1, 2));
+    assert_eq!(counts(&daemon.stat(base).unwrap()), (3, 0));
 }
 
 /// A cell a VM process has open is its: the API refuses what would change it under its guest,
@@ -192,37 +188,33 @@ fn extents_are_counted_through_the_control_api() {
 fn open_cells_are_their_vms() {
     let dir = tempfile::tempdir().unwrap();
     let mut daemon = Daemon::new(dir.path());
-    let (cell_dir, fork) = (dir.path().join("store"), dir.path().join("fork"));
-    let vm = daemon.open(&cell_dir, CAPACITY);
+    let (cell, vm) = daemon.open_new(0, CAPACITY);
     write(&vm, &pattern(2), b"open");
 
-    assert!(daemon.stat(&cell_dir).unwrap().open);
+    assert!(daemon.stat(cell).unwrap().open);
     let busy = (Code::FailedPrecondition, Errno::EBUSY);
-    assert_eq!(failure(daemon.delete(&cell_dir)), busy);
-    assert_eq!(failure(daemon.make_public(&cell_dir)), busy);
-    assert_eq!(failure(daemon.place(&cell_dir, 1)), busy);
-    assert_eq!(failure(daemon.create(&cell_dir, NEW, None)), busy);
+    assert_eq!(failure(daemon.delete(cell)), busy);
+    assert_eq!(failure(daemon.make_public(cell)), busy);
+    assert_eq!(failure(daemon.place(cell, 1)), busy);
+    assert_eq!(failure(daemon.create(cell, None)), (Code::AlreadyExists, Errno::EEXIST));
     // Grown at once, as its VM process sees.
-    daemon.resize(&cell_dir, 2 * CAPACITY).unwrap();
+    daemon.resize(cell, 2 * CAPACITY).unwrap();
     assert_eq!(vm.info().unwrap().capacity, 2 * CAPACITY);
     // Forked live: nothing is open on it.
-    let cell = daemon.fork(&cell_dir, &fork).unwrap();
-    assert_eq!(daemon.cell(&fork).unwrap(), cell);
+    let forked = daemon.fork(cell, None).unwrap();
+    assert_eq!(daemon.stat(forked).unwrap().cell, forked.id);
 
-    assert_eq!(failure(daemon.create(&fork, NEW, None)), (Code::AlreadyExists, Errno::EEXIST));
-    let none = dir.path().join("none");
-    assert_eq!(failure(daemon.stat(&none)), (Code::NotFound, Errno::ENOENT));
-    assert_eq!(
-        failure(daemon.create(Path::new(""), NEW, None)),
-        (Code::InvalidArgument, Errno::EINVAL)
-    );
+    assert_eq!(failure(daemon.create(forked, None)), (Code::AlreadyExists, Errno::EEXIST));
+    let none = CellId { tenant: 0, id: 0xdead_beef };
+    assert_eq!(failure(daemon.stat(none)), (Code::NotFound, Errno::ENOENT));
+    assert_eq!(failure(daemon.stat(NEW)), (Code::InvalidArgument, Errno::EINVAL));
     // Synced as its VM process goes on.
-    daemon.sync(&cell_dir).unwrap();
+    daemon.sync(cell).unwrap();
 
     // Gone with its VM process, once the daemon finds it gone, it is the API's.
     drop(vm);
-    daemon.wait_closed(&cell_dir);
-    daemon.delete(&cell_dir).unwrap();
+    daemon.wait_closed(cell);
+    daemon.delete(cell).unwrap();
 }
 
 /// A container image imported is a cell holding its files.
@@ -234,11 +226,10 @@ fn imports_images() {
     let image = dir.path().join("layer.tar");
     let hello = b"hello from the image\n";
     std::fs::write(&image, layer(&[Entry::new("hello", Kind::File(hello))]).unwrap()).unwrap();
-    let cell_dir = dir.path().join("store");
 
-    let cell = daemon.import(&cell_dir, &image).unwrap();
-    assert_eq!(daemon.cell(&cell_dir).unwrap(), cell);
-    assert_eq!(failure(daemon.import(&cell_dir, &image)), (Code::AlreadyExists, Errno::EEXIST));
+    let cell = daemon.import(0, &image).unwrap();
+    assert_eq!(daemon.stat(cell).unwrap().cell, cell.id);
+    let cell_dir = daemon.cell_path(cell);
 
     let size = futures::executor::block_on(async {
         let fs = cladefs::Filesystem::mount(cladefs::Storage::open(&cell_dir).await.unwrap())
@@ -251,9 +242,8 @@ fn imports_images() {
     assert_eq!(size, hello.len() as u64);
 }
 
-/// An image that cannot be made into a cell leaves none behind, so that its path takes another:
-/// one whose entry's time is out of range panicked the import, which left the cell half made,
-/// and every import to the path after failed with `EEXIST`.
+/// An image that cannot be made into a cell leaves none behind: one whose entry's time is out of
+/// range panicked the import, which left the cell half made.
 #[test]
 fn imports_that_fail_leave_no_cell() {
     use cladefs::import::testing::{Entry, Kind, layer};
@@ -266,32 +256,28 @@ fn imports_that_fail_leave_no_cell() {
     };
     let out_of_range = image("out-of-range.tar", Entry::new("f", Kind::File(b"f")).mtime(u64::MAX));
     let whole = image("whole.tar", Entry::new("f", Kind::File(b"f")));
-    let cell_dir = dir.path().join("store");
 
-    assert_eq!(
-        failure(daemon.import(&cell_dir, &out_of_range)),
-        (Code::InvalidArgument, Errno::EINVAL)
-    );
-    assert!(!cell_dir.exists(), "the cell_dir is left half made");
-    let cell = daemon.import(&cell_dir, &whole).unwrap();
-    assert_eq!(daemon.cell(&cell_dir).unwrap(), cell);
+    assert_eq!(failure(daemon.import(0, &out_of_range)), (Code::InvalidArgument, Errno::EINVAL));
+    let tenant0 = dir.path().join("disk0/cells").join(base32_id::Padded(0).to_string());
+    if tenant0.exists() {
+        assert_eq!(std::fs::read_dir(&tenant0).unwrap().count(), 0, "left half-made cell");
+    }
+    let cell = daemon.import(0, &whole).unwrap();
+    assert_eq!(daemon.stat(cell).unwrap().cell, cell.id);
 }
 
-/// An import its caller gave up on runs to its end, its path held until then (board 5599, board
-/// 5384): stopped at the await its caller left it in, it let go of its path while its blocking
-/// work went on, and a CreateCell of the path made a cell there beside the import's.
+/// An import its caller gave up on runs to its end cleanly (board 5599, board 5384).
 #[test]
 fn imports_given_up_on_hold_their_paths_to_their_end() {
     use cladefs::import::testing::{Entry, Kind, layer};
     use std::sync::{Mutex, mpsc};
     let dir = tempfile::tempdir().unwrap();
-    let mut daemon = Daemon::new(dir.path());
+    let daemon = Daemon::new(dir.path());
     let image = dir.path().join("layer.tar");
     let hello = b"hello from the image\n";
     std::fs::write(&image, layer(&[Entry::new("hello", Kind::File(hello))]).unwrap()).unwrap();
-    let cell_dir = dir.path().join("store");
 
-    // The import held under way, its path held, saying so, until let go.
+    // The import held under way until let go.
     let (under_way, seen) = mpsc::channel();
     let (go, gone) = mpsc::channel::<()>();
     let gone = Mutex::new(gone);
@@ -302,7 +288,6 @@ fn imports_given_up_on_hold_their_paths_to_their_end() {
     .unwrap();
     // Its caller gives up once it is under way: the call dropped, its stream reset.
     let request = ImportImageRequest {
-        path: name(&cell_dir),
         capacity: CAPACITY,
         image: name(&image),
         reference: String::new(),
@@ -315,14 +300,25 @@ fn imports_given_up_on_hold_their_paths_to_their_end() {
         call.abort();
         assert!(call.await.unwrap_err().is_cancelled());
     });
-    // The path is the import's still: a CreateCell of it waits its turn, and gives up.
-    let busy = failure(daemon.create(&cell_dir, NEW, None));
-    assert_eq!(busy, (Code::FailedPrecondition, Errno::EBUSY));
 
-    // Let go, the import ends, the cell the image's.
+    // Let go, the import ends and publishes the completed cell into disk0/cells/<tenant0>/<cell>.
     fail::remove("cladefsd::import");
     go.send(()).unwrap();
-    assert_eq!(failure(daemon.import(&cell_dir, &image)), (Code::AlreadyExists, Errno::EEXIST));
+    let tenant0 = dir.path().join("disk0/cells").join(base32_id::Padded(0).to_string());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let cell_dir = loop {
+        let found = std::fs::read_dir(&tenant0).ok().and_then(|entries| {
+            entries
+                .flatten()
+                .map(|e| e.path())
+                .find(|p| p.is_dir() && !p.file_name().unwrap().to_string_lossy().starts_with('.'))
+        });
+        if let Some(found) = found {
+            break found;
+        }
+        assert!(std::time::Instant::now() < deadline, "aborted import never finished");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
     let size = futures::executor::block_on(async {
         let fs = cladefs::Filesystem::mount(cladefs::Storage::open(&cell_dir).await.unwrap())
             .await
@@ -346,20 +342,17 @@ fn forks_of_cells_never_had_here() {
     }
     let dir = tempfile::tempdir().unwrap();
     let mut daemon = Daemon::new(dir.path());
-    let (written, taken, fork) =
-        (dir.path().join("written"), dir.path().join("taken"), dir.path().join("fork"));
     // Another host's: written, synced, and gone from here.
-    let vm = daemon.open(&written, CAPACITY);
+    let (cell, vm) = daemon.open_new(0, CAPACITY);
     write(&vm, &pattern(7), b"elsewhere");
     drop(vm);
-    daemon.sync(&written).unwrap();
-    // As the VM manager keeps it: its tenant, its cell and its ID (TASK-364).
-    let cell = daemon.cell(&written).unwrap();
-    std::fs::remove_dir_all(&written).unwrap();
+    daemon.wait_closed(cell);
+    daemon.sync(cell).unwrap();
+    daemon.drop_cell(cell).unwrap();
 
-    assert_eq!(daemon.create(&taken, cell, Some(2)).unwrap(), cell);
-    let forked = daemon.fork(&taken, &fork).unwrap();
-    let vm = daemon.open(&fork, CAPACITY);
+    assert_eq!(daemon.create(cell, Some(2)).unwrap(), cell);
+    let forked = daemon.fork(cell, None).unwrap();
+    let vm = daemon.open(forked);
     assert_eq!(vm.cell(), forked.id);
     assert_eq!(vm.root().unwrap(), b"elsewhere");
     let extent = cladefs::ExtentId { cell: cell.id, sequence: 1 };
@@ -377,14 +370,12 @@ fn shrinks_waiting_for_their_guests_hold_no_threads() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let dir = tempfile::tempdir().unwrap();
     let mut daemon = Daemon::new(dir.path());
-    let idle = dir.path().join("idle");
-    daemon.create(&idle, NEW, None).unwrap();
+    let idle = daemon.create(NEW, None).unwrap();
     let count = cladefs::cladefsd::control::BLOCKING_THREADS + 16;
     let asked = Arc::new(AtomicUsize::new(0));
-    let (vms, paths): (Vec<_>, Vec<_>) = (0..count)
-        .map(|vm| {
-            let path = dir.path().join(format!("vm-{vm}"));
-            let client = daemon.open(&path, CAPACITY);
+    let (vms, cells): (Vec<_>, Vec<_>) = (0..count)
+        .map(|_| {
+            let (cell, client) = daemon.open_new(0, CAPACITY);
             // A guest that never answers.
             let asked = asked.clone();
             client.on_capacity(move |_, ask| {
@@ -392,14 +383,15 @@ fn shrinks_waiting_for_their_guests_hold_no_threads() {
                     asked.fetch_add(1, Ordering::Relaxed);
                 }
             });
-            (client, path)
+            (client, cell)
         })
         .collect();
 
-    let shrinks: Vec<_> = (paths.iter())
-        .map(|path| {
+    let shrinks: Vec<_> = (cells.iter())
+        .map(|&cell| {
             let mut client = daemon.client.clone();
-            let request = ResizeCellRequest { path: name(path), capacity: CAPACITY / 2 };
+            let request =
+                ResizeCellRequest { tenant: cell.tenant, cell: cell.id, capacity: CAPACITY / 2 };
             daemon.runtime.spawn(async move { client.resize_cell(request).await })
         })
         .collect();
@@ -411,7 +403,7 @@ fn shrinks_waiting_for_their_guests_hold_no_threads() {
         }
     });
     let start = std::time::Instant::now();
-    assert_eq!(daemon.stat(&idle).unwrap().capacity, CAPACITY);
+    assert_eq!(daemon.stat(idle).unwrap().capacity, CAPACITY);
     assert!(start.elapsed() < std::time::Duration::from_secs(2), "{:?}", start.elapsed());
 
     for shrink in shrinks {
@@ -486,27 +478,27 @@ fn encrypted_cells_served_and_shredded_through_the_control_api() {
     unsafe { std::env::set_var("CLADEFS_KMS", format!("local://{}", kms_dir.display())) };
     let dir = tempfile::tempdir().unwrap();
     let mut daemon = Daemon::new(dir.path());
-    let (ours, sibling) = (dir.path().join("ours"), dir.path().join("sibling"));
-    let of_tenant = cladefs::CellId { tenant: 1, id: 0 };
-    let cell = daemon.create(&ours, of_tenant, None).unwrap();
-    let other = daemon.create(&sibling, of_tenant, None).unwrap();
+    let of_tenant = CellId { tenant: 1, id: 0 };
+    let cell = daemon.create(of_tenant, None).unwrap();
+    let other = daemon.create(of_tenant, None).unwrap();
     assert_ne!(cell, other);
-    let vms = [daemon.open(&ours, CAPACITY), daemon.open(&sibling, CAPACITY)];
+    let vms = [daemon.open(cell), daemon.open(other)];
     for (seed, vm) in (1..).zip(&vms) {
         write(vm, &pattern(seed), b"encrypted");
     }
-    let read = |vm: &cladefs::CellClient, seed: u64| {
+    let read = |vm: &CellClient, seed: u64| {
         let mut data = vec![0; 64 << 10];
         let extent = cladefs::ExtentId { cell: vm.cell(), sequence: 1 };
         let done = vm.read(extent, 0, &mut [cladefs::VolatileSliceMut::from(&mut data[..])]);
         done.map(|()| data == pattern(seed))
     };
     assert_eq!((read(&vms[0], 1), read(&vms[1], 2)), (Ok(true), Ok(true)));
-    daemon.sync(&ours).unwrap();
-    daemon.sync(&sibling).unwrap();
+    daemon.sync(cell).unwrap();
+    daemon.sync(other).unwrap();
     // Beside the daemon's cells, which work on behind its API (TASK-463).
-    for (seed, path) in (1..).zip([&ours, &sibling]) {
-        let held = cladefs::testing::files_holding_beside(path, &[&pattern(seed)[..64]]);
+    for (seed, id) in (1..).zip([cell, other]) {
+        let path = daemon.cell_path(id);
+        let held = cladefs::testing::files_holding_beside(&path, &[&pattern(seed)[..64]]);
         assert_eq!(held, Vec::<String>::new(), "files holding what their VM wrote");
     }
 
@@ -529,8 +521,8 @@ fn encrypted_cells_served_and_shredded_through_the_control_api() {
     // Once the daemon lets them go, which it does after their VM processes' connections went.
     drop(vms);
     let denied = (Code::PermissionDenied, Errno::EACCES);
-    assert_eq!(failure(daemon.stat_once_closed(&ours)), denied);
-    assert_eq!(failure(daemon.stat_once_closed(&sibling)), denied);
+    assert_eq!(failure(daemon.stat_once_closed(cell)), denied);
+    assert_eq!(failure(daemon.stat_once_closed(other)), denied);
 }
 
 /// TASK-411.27: a daemon given a master key (`CLADEFS_MASTER_KEY`) and no `CLADEFS_KMS` encrypts
@@ -550,25 +542,24 @@ fn tenants_encrypted_under_the_bucket_kms_and_shredded_through_the_control_api()
     }
     let dir = tempfile::tempdir().unwrap();
     let mut daemon = Daemon::new(dir.path());
-    let (ours, theirs) = (dir.path().join("ours"), dir.path().join("theirs"));
-    let of = |tenant| cladefs::CellId { tenant, id: 0 };
-    daemon.create(&ours, of(1), None).unwrap();
-    daemon.create(&theirs, of(2), None).unwrap();
-    let vms = [daemon.open(&ours, CAPACITY), daemon.open(&theirs, CAPACITY)];
+    let of = |tenant| CellId { tenant, id: 0 };
+    let ours = daemon.create(of(1), None).unwrap();
+    let theirs = daemon.create(of(2), None).unwrap();
+    let vms = [daemon.open(ours), daemon.open(theirs)];
     for (seed, vm) in (1..).zip(&vms) {
         write(vm, &pattern(seed), b"encrypted");
     }
-    let read = |vm: &cladefs::CellClient, seed: u64| {
+    let read = |vm: &CellClient, seed: u64| {
         let mut data = vec![0; 64 << 10];
         let extent = cladefs::ExtentId { cell: vm.cell(), sequence: 1 };
         let done = vm.read(extent, 0, &mut [cladefs::VolatileSliceMut::from(&mut data[..])]);
         done.map(|()| data == pattern(seed))
     };
     assert_eq!((read(&vms[0], 1), read(&vms[1], 2)), (Ok(true), Ok(true)));
-    daemon.sync(&ours).unwrap();
-    daemon.sync(&theirs).unwrap();
-    for (seed, path) in (1..).zip([&ours, &theirs]) {
-        let mut paths = vec![path.to_path_buf()];
+    daemon.sync(ours).unwrap();
+    daemon.sync(theirs).unwrap();
+    for (seed, id) in (1..).zip([ours, theirs]) {
+        let mut paths = vec![daemon.cell_path(id)];
         while let Some(at) = paths.pop() {
             if at.is_dir() {
                 paths.extend(std::fs::read_dir(&at).unwrap().map(|entry| entry.unwrap().path()));
@@ -592,7 +583,7 @@ fn tenants_encrypted_under_the_bucket_kms_and_shredded_through_the_control_api()
 
     // Once the daemon lets it go, which it does after its VM process's connection went (board 8282).
     drop(vms);
-    assert_eq!(failure(daemon.stat_once_closed(&ours)), (Code::PermissionDenied, Errno::EACCES));
+    assert_eq!(failure(daemon.stat_once_closed(ours)), (Code::PermissionDenied, Errno::EACCES));
 
     // Default tenant 0 is refused with INVALID_ARGUMENT / EINVAL.
     let zero =
@@ -617,15 +608,14 @@ fn standalone_shred_halts_open_cells_on_uncalled_daemon_via_events() {
     let mut daemon = Daemon::new(dir.path());
     cladefs::cladefsd::events::start().unwrap();
     let bucket_url = std::env::var("CLADEFSD_BUCKET").unwrap();
-    let (victim, survivor) = (dir.path().join("victim"), dir.path().join("survivor"));
-    let of = |tenant| cladefs::CellId { tenant, id: 0 };
-    daemon.create(&victim, of(11), None).unwrap();
-    daemon.create(&survivor, of(12), None).unwrap();
-    let vms = [daemon.open(&victim, CAPACITY), daemon.open(&survivor, CAPACITY)];
+    let of = |tenant| CellId { tenant, id: 0 };
+    let victim = daemon.create(of(11), None).unwrap();
+    let survivor = daemon.create(of(12), None).unwrap();
+    let vms = [daemon.open(victim), daemon.open(survivor)];
     for (seed, vm) in (1..).zip(&vms) {
         write(vm, &pattern(seed), b"events");
     }
-    let read = |vm: &cladefs::CellClient, seed: u64| {
+    let read = |vm: &CellClient, seed: u64| {
         let mut data = vec![0; 64 << 10];
         let extent = cladefs::ExtentId { cell: vm.cell(), sequence: 1 };
         let done = vm.read(extent, 0, &mut [cladefs::VolatileSliceMut::from(&mut data[..])]);
@@ -686,25 +676,24 @@ fn key_overrides_reload_without_a_restart_openbao() {
         std::env::set_var("CLADEFSD_BUCKET", format!("file://{}", bucket.display()));
     }
     let mut daemon = Daemon::new(dir.path());
-    let of = |tenant| cladefs::CellId { tenant, id: 0 };
+    let of = |tenant| CellId { tenant, id: 0 };
     let reload = |daemon: &mut Daemon| {
         let reloaded = daemon.runtime.block_on(daemon.client.reload_kms(ReloadKmsRequest {}));
         reloaded.map(tonic::Response::into_inner)
     };
     let seven = base32_id::Short(7).to_string();
-    daemon.create(&dir.path().join("one"), of(1), None).unwrap();
-    let early = daemon.create(&dir.path().join("early"), of(7), None);
+    daemon.create(of(1), None).unwrap();
+    let early = daemon.create(of(7), None);
     assert_eq!(failure(early).0, Code::PermissionDenied);
 
     std::fs::write(&keys, format!("# tenants with keys of their own\n{seven} byok-7\n")).unwrap();
     let reloaded = reload(&mut daemon).unwrap();
     assert_eq!(reloaded, ReloadKmsResponse { renamed: vec![7], master_keys: vec![] });
-    let byok = dir.path().join("byok");
-    daemon.create(&byok, of(7), None).unwrap();
-    let vm = daemon.open(&byok, CAPACITY);
+    let byok = daemon.create(of(7), None).unwrap();
+    let vm = daemon.open(byok);
     write(&vm, &pattern(7), b"byok");
     drop(vm);
-    daemon.sync(&byok).unwrap();
+    daemon.sync(byok).unwrap();
     assert_eq!(reload(&mut daemon).unwrap(), ReloadKmsResponse::default());
 
     let refusal = |daemon: &mut Daemon| {
@@ -728,7 +717,7 @@ fn key_overrides_reload_without_a_restart_openbao() {
     }
     // Every refusal kept the overrides in use: tenant 7's next cell is under byok-7 still, which
     // OpenBao has, byok-7b not.
-    daemon.create(&dir.path().join("still"), of(7), None).unwrap();
+    daemon.create(of(7), None).unwrap();
 }
 
 /// board 8487: master keys added to `CLADEFS_MASTER_KEY_FILE` while the daemon runs are its from
@@ -760,7 +749,7 @@ fn master_keys_reload_without_a_restart_keeping_those_in_use() {
         std::env::set_var("CLADEFSD_BUCKET", &url);
     }
     let mut daemon = Daemon::new(dir.path());
-    let of = |tenant| cladefs::CellId { tenant, id: 0 };
+    let of = |tenant| CellId { tenant, id: 0 };
     let reload = |daemon: &mut Daemon| {
         let reloaded = daemon.runtime.block_on(daemon.client.reload_kms(ReloadKmsRequest {}));
         reloaded.map(tonic::Response::into_inner)
@@ -778,11 +767,11 @@ fn master_keys_reload_without_a_restart_keeping_those_in_use() {
             removed: removed.iter().map(|key| id(key)).collect(),
         }],
     };
-    daemon.create(&dir.path().join("one"), of(1), None).unwrap();
+    daemon.create(of(1), None).unwrap();
 
     std::fs::write(&file, format!("{b}\n{a}\n")).unwrap();
     assert_eq!(reload(&mut daemon).unwrap(), changed(&[&b], &[]));
-    daemon.create(&dir.path().join("two"), of(2), None).unwrap();
+    daemon.create(of(2), None).unwrap();
 
     let busy = |why: String| (Code::FailedPrecondition, Errno::EBUSY, why);
     std::fs::write(&file, &a).unwrap();
@@ -807,7 +796,7 @@ fn master_keys_reload_without_a_restart_keeping_those_in_use() {
     let recorded = runtime.block_on(identity::record_master_key(&bucket, 1, &id(&b)));
     assert!(recorded.unwrap().is_some());
     assert_eq!(reload(&mut daemon).unwrap(), changed(&[], &[&a]));
-    daemon.create(&dir.path().join("three"), of(3), None).unwrap();
+    daemon.create(of(3), None).unwrap();
 
     std::fs::write(&file, &c).unwrap();
     let recorded = format!(
@@ -824,7 +813,7 @@ fn master_keys_reload_without_a_restart_keeping_those_in_use() {
         file.display()
     );
     assert_eq!(refusal(&mut daemon), (Code::InvalidArgument, Errno::EINVAL, malformed));
-    daemon.create(&dir.path().join("four"), of(4), None).unwrap();
+    daemon.create(of(4), None).unwrap();
 }
 
 /// TASK-537.3.1 (doc-21): CreateCell gives a cell its replication, its f and what its fsync waits
@@ -840,63 +829,61 @@ fn cells_are_made_replicated_through_the_control_api() {
     }
     let dir = tempfile::tempdir().unwrap();
     let mut daemon = Daemon::new(dir.path());
-    let request =
-        |path: &Path, cell: u64, replicas: Option<u32>, fsync: FsyncLevel| CreateCellRequest {
-            path: name(path),
-            capacity: CAPACITY,
-            cell,
-            replicas,
-            fsync: fsync.into(),
-            ..CreateCellRequest::default()
-        };
+    let request = |cell: u64, replicas: Option<u32>, fsync: FsyncLevel| CreateCellRequest {
+        capacity: CAPACITY,
+        cell,
+        replicas,
+        fsync: fsync.into(),
+        ..CreateCellRequest::default()
+    };
     let create = |daemon: &mut Daemon, request: CreateCellRequest| {
         daemon.runtime.block_on(daemon.client.create_cell(request)).map(|made| made.into_inner())
     };
-    let replicated = |daemon: &mut Daemon, path: &Path| {
-        let client = daemon.open(path, CAPACITY);
-        let stat = daemon.stat(path).unwrap();
+    let replicated = |daemon: &mut Daemon, cell: CellId| {
+        let client = daemon.open(cell);
+        let stat = daemon.stat(cell).unwrap();
         drop(client);
+        daemon.wait_closed(cell);
         (stat.replicas, stat.fsync(), stat.configuration)
     };
 
     // This daemon has no peers, nor a replica directory: an f of 1 or more is refused before
     // anything is made (TASK-537.3.3's fail-hard rule), and the head keeps what an f of 0 asks.
-    let first = dir.path().join("first");
-    let refused = create(&mut daemon, request(&first, 0, Some(1), FsyncLevel::Replicated));
+    let refused = create(&mut daemon, request(0, Some(1), FsyncLevel::Replicated));
     // Board 8583: what the daemon said of it, as a client of the API, cladefsctl's, says it, its
     // errno with it; an errno said alone, not said twice.
     let said = cladefs::cladefsd::control::failed("making the cell".into(), refused.unwrap_err());
     assert_eq!(
         format!("{said:#}"),
         "making the cell: a replicated cell needs the daemon's peers and replica directory \
-         (CLADEFSD_PEER_ADDRESS, CLADEFSD_PEERS, CLADEFSD_REPLICAS): ENOTSUP (errno 95)"
+         (peers.address, peers.addresses, peers.replicas): ENOTSUP (errno 95)"
     );
     assert_eq!(said.errno(), Some(Errno::ENOTSUP));
-    let bare = create(&mut daemon, request(&first, 0, Some(4), FsyncLevel::Ordered));
+    let bare = create(&mut daemon, request(0, Some(4), FsyncLevel::Ordered));
     let said = cladefs::cladefsd::control::failed("making the cell".into(), bare.unwrap_err());
     assert_eq!(format!("{said:#}"), "making the cell: EINVAL (errno 22)");
     assert_eq!(said.errno(), Some(Errno::EINVAL));
-    assert!(!first.exists());
     // Deprecated FSYNC_LEVEL_LOCAL maps to FSYNC_LEVEL_ORDERED with a warning for backwards
     // compatibility.
     #[allow(deprecated)]
-    let made = create(&mut daemon, request(&first, 0, Some(0), FsyncLevel::Local)).unwrap();
-    assert_eq!(replicated(&mut daemon, &first), (0, FsyncLevel::Ordered, 0));
-    daemon.sync(&first).unwrap();
+    let made = create(&mut daemon, request(0, Some(0), FsyncLevel::Local)).unwrap();
+    let first = CellId { tenant: made.tenant, id: made.cell };
+    assert_eq!(replicated(&mut daemon, first), (0, FsyncLevel::Ordered, 0));
+    daemon.sync(first).unwrap();
 
-    // Taken into another directory, asking for nothing: kept. Then asking for another: changed.
-    let second = dir.path().join("second");
-    create(&mut daemon, request(&second, made.cell, None, FsyncLevel::Ordered)).unwrap();
-    assert_eq!(replicated(&mut daemon, &second), (0, FsyncLevel::Ordered, 0));
-    daemon.sync(&second).unwrap();
-    let third = dir.path().join("third");
-    create(&mut daemon, request(&third, made.cell, Some(0), FsyncLevel::Ordered)).unwrap();
-    assert_eq!(replicated(&mut daemon, &third), (0, FsyncLevel::Ordered, 0));
+    // Dropped locally and taken back, asking for nothing: kept. Then asking for another: changed.
+    daemon.drop_cell(first).unwrap();
+    create(&mut daemon, request(made.cell, None, FsyncLevel::Ordered)).unwrap();
+    assert_eq!(replicated(&mut daemon, first), (0, FsyncLevel::Ordered, 0));
+    daemon.sync(first).unwrap();
+    daemon.drop_cell(first).unwrap();
+    create(&mut daemon, request(made.cell, Some(0), FsyncLevel::Ordered)).unwrap();
+    assert_eq!(replicated(&mut daemon, first), (0, FsyncLevel::Ordered, 0));
 
     // A cell made asking for nothing is not replicated.
-    let plain = dir.path().join("plain");
-    create(&mut daemon, request(&plain, 0, None, FsyncLevel::Ordered)).unwrap();
-    assert_eq!(replicated(&mut daemon, &plain), (0, FsyncLevel::Ordered, 0));
+    let plain = create(&mut daemon, request(0, None, FsyncLevel::Ordered)).unwrap();
+    let plain = CellId { tenant: plain.tenant, id: plain.cell };
+    assert_eq!(replicated(&mut daemon, plain), (0, FsyncLevel::Ordered, 0));
 
     // No f past 3, no fsync level without replicas, no fsync waiting for copies an f of 0 never
     // makes: refused, nothing made.
@@ -908,14 +895,12 @@ fn cells_are_made_replicated_through_the_control_api() {
         (Some(0), FsyncLevel::Replicated),
     ];
     for (replicas, fsync) in refused_cases {
-        let path = dir.path().join("refused");
-        let refused = create(&mut daemon, request(&path, 0, replicas, fsync));
+        let refused = create(&mut daemon, request(0, replicas, fsync));
         assert_eq!(
             failure(refused),
             (Code::InvalidArgument, Errno::EINVAL),
             "{replicas:?} {fsync:?}"
         );
-        assert!(!path.exists());
     }
 }
 
@@ -971,9 +956,10 @@ fn stats_of_many_vms_are_taken_and_bounded() {
     let dir = tempfile::tempdir().unwrap();
     let mut daemon = Daemon::new(dir.path());
     let (today, full) = (todays_guest(), full_guest());
-    let vms: Vec<Arc<cladefs::CellClient>> = (0..=VMS)
+    let vms: Vec<Arc<CellClient>> = (0..=VMS)
         .map(|n| {
-            let vm = Arc::new(daemon.open(&dir.path().join(format!("vm{n:03}")), CAPACITY));
+            let (_, vm) = daemon.open_new(0, CAPACITY);
+            let vm = Arc::new(vm);
             let guest = if n == 0 { today.clone() } else { full.clone() };
             // Its guest answers each ask, off the thread the ask comes on.
             let answering = Arc::downgrade(&vm);
@@ -989,8 +975,7 @@ fn stats_of_many_vms_are_taken_and_bounded() {
             vm
         })
         .collect();
-    let client = cladefs::testing::Control::connect(dir.path().join("control.sock"));
-    let client = client.unwrap();
+    let client = cladefs::testing::Control::connect(dir.path().join("control.sock")).unwrap();
     let asking = GetStatsRequest { wait_ms: 30_000, ..GetStatsRequest::default() };
 
     let stats = client.call(async |client| client.get_stats(asking.clone()).await).unwrap();
@@ -1045,7 +1030,7 @@ fn stats_of_many_vms_are_taken_and_bounded() {
 
 /// board 11222: memory cells imported, versioned, synced and forked through the control API alone,
 /// without touching `MemoryCell::import` in Rust: zero pages stored as holes, contents read back
-/// intact through a fork, and bad files / existing paths / mismatched tenants refused.
+/// intact through a fork, and bad files / missing files refused.
 #[test]
 fn memory_cells_through_the_control_api() {
     // SAFETY: nextest runs each test in a process of its own, whose other threads don't read the
@@ -1071,11 +1056,9 @@ fn memory_cells_through_the_control_api() {
     std::fs::write(&mem_file, &expected).unwrap();
 
     // Import with `make_version: true` in one call.
-    let cell_dir = dir.path().join("mem-cell");
     let imported = daemon
         .runtime
         .block_on(daemon.client.import_memory(ImportMemoryRequest {
-            path: name(&cell_dir),
             file: name(&mem_file),
             tenant: 0,
             make_version: true,
@@ -1085,19 +1068,18 @@ fn memory_cells_through_the_control_api() {
     assert_eq!(imported.tenant, 0);
     assert_ne!(imported.cell, 0);
     assert_ne!(imported.version, 0);
+    let mem_cell = CellId { tenant: imported.tenant, id: imported.cell };
 
     // Zero pages are discarded as holes: used bytes are far smaller than the memory file size.
-    let stat = daemon.stat(&cell_dir).unwrap();
+    let stat = daemon.stat(mem_cell).unwrap();
     assert_eq!(stat.cell, imported.cell);
     assert!(stat.used < size / 2, "expected zero pages discarded as holes, got used={}", stat.used);
 
     // Sync to the bucket and fork the version through the control API, then read back every byte.
-    daemon.sync(&cell_dir).unwrap();
-    let fork_dir = dir.path().join("mem-fork");
+    daemon.sync(mem_cell).unwrap();
     let forked = daemon
         .runtime
         .block_on(daemon.client.fork_cell(ForkCellRequest {
-            to: name(&fork_dir),
             tenant: imported.tenant,
             cell: imported.cell,
             version: imported.version,
@@ -1106,18 +1088,18 @@ fn memory_cells_through_the_control_api() {
         .unwrap()
         .into_inner();
     assert_ne!(forked.cell, imported.cell);
-    let opened = cladefs::memory_cell::MemoryCell::open(&daemon.vms, &fork_dir, size).unwrap();
+    let forked_cell = CellId { tenant: forked.tenant, id: forked.cell };
+    let opened =
+        cladefs::memory_cell::MemoryCell::open_cell(&daemon.vms, forked_cell, size).unwrap();
     let mut got = vec![0u8; size as usize];
     opened.read(0, &mut got).unwrap();
     assert!(got == expected, "forked memory cell contents differ from imported file");
     opened.close().unwrap();
 
     // Import without `make_version`, then call `MakeVersion` via the control API.
-    let cell_dir2 = dir.path().join("mem-cell-2");
     let imported2 = daemon
         .runtime
         .block_on(daemon.client.import_memory(ImportMemoryRequest {
-            path: name(&cell_dir2),
             file: name(&mem_file),
             tenant: 0,
             make_version: false,
@@ -1127,26 +1109,18 @@ fn memory_cells_through_the_control_api() {
     assert_eq!(imported2.version, 0);
     let ver = daemon
         .runtime
-        .block_on(
-            daemon.client.make_version(MakeVersionRequest { path: name(&cell_dir2), keep_last: 0 }),
-        )
+        .block_on(daemon.client.make_version(MakeVersionRequest {
+            tenant: imported2.tenant,
+            cell: imported2.cell,
+            keep_last: 0,
+        }))
         .unwrap()
         .into_inner()
         .version;
     assert_ne!(ver, 0);
 
-    // Error cases: existing target (EEXIST), missing file (ENOENT), unaligned/empty file (EINVAL),
-    // and mismatched tenant in a granted tenant directory (EPERM).
-    let exists = daemon.runtime.block_on(daemon.client.import_memory(ImportMemoryRequest {
-        path: name(&cell_dir),
-        file: name(&mem_file),
-        tenant: 0,
-        make_version: false,
-    }));
-    assert_eq!(failure(exists), (Code::AlreadyExists, Errno::EEXIST));
-
+    // Error cases: missing file (ENOENT), unaligned/empty file (EINVAL).
     let missing = daemon.runtime.block_on(daemon.client.import_memory(ImportMemoryRequest {
-        path: name(&dir.path().join("missing-dst")),
         file: name(&dir.path().join("no-such-file.mem")),
         tenant: 0,
         make_version: false,
@@ -1156,42 +1130,199 @@ fn memory_cells_through_the_control_api() {
     let bad_file = dir.path().join("unaligned.mem");
     std::fs::write(&bad_file, vec![1u8; 123]).unwrap();
     let bad = daemon.runtime.block_on(daemon.client.import_memory(ImportMemoryRequest {
-        path: name(&dir.path().join("bad-dst")),
         file: name(&bad_file),
         tenant: 0,
         make_version: false,
     }));
     assert_eq!(failure(bad), (Code::InvalidArgument, Errno::EINVAL));
 
-    let tenant_dir = dir.path().join("tenant-7");
-    std::fs::create_dir_all(&tenant_dir).unwrap();
-    daemon
-        .runtime
-        .block_on(daemon.client.grant(GrantRequest {
-            tenant: 7,
-            dir: name(&tenant_dir),
-            dirs: Vec::new(),
-            uid: None,
-            gid: None,
-        }))
-        .unwrap();
-    let wrong_tenant = daemon.runtime.block_on(daemon.client.import_memory(ImportMemoryRequest {
-        path: name(&tenant_dir.join("mem")),
-        file: name(&mem_file),
-        tenant: 9,
-        make_version: false,
-    }));
-    assert_eq!(failure(wrong_tenant), (Code::PermissionDenied, Errno::EPERM));
+    // Importing directly for tenant 7 assigns tenant 7 on a daemon-chosen disk.
+    daemon.grant(7, None).unwrap();
     let right_tenant = daemon
         .runtime
         .block_on(daemon.client.import_memory(ImportMemoryRequest {
-            path: name(&tenant_dir.join("mem")),
             file: name(&mem_file),
-            tenant: 0,
+            tenant: 7,
             make_version: true,
         }))
         .unwrap()
         .into_inner();
     assert_eq!(right_tenant.tenant, 7);
     assert_ne!(right_tenant.version, 0);
+}
+
+/// hotbed question 547: multi-disk JBOD governance via `ListDisks` and `SetDiskGovernance`:
+/// draining a disk routes new cells strictly to the remaining `READ_WRITE` disk while keeping
+/// existing cells writable; marking all disks non-writable refuses new placements (`ENOSPC`);
+/// per-disk caps/cache caps/dirty budgets update live; raw host paths on VM `OPEN` are refused
+/// (`EINVAL`).
+#[test]
+fn disk_pool_governs_multiple_disks_placement_and_caps() {
+    let dir = tempfile::tempdir().unwrap();
+    let disk0 = dir.path().join("disk0");
+    let disk1 = dir.path().join("disk1");
+    let mut daemon = Daemon::with_disks(dir.path(), &[disk0.clone(), disk1.clone()]);
+
+    let disks = daemon.list_disks().unwrap();
+    assert_eq!(disks.len(), 2);
+    assert_eq!(disks[0].id, "disk-0");
+    assert_eq!(disks[1].id, "disk-1");
+    assert_eq!(disks[0].placement(), DiskPlacementMode::DiskPlacementReadWrite);
+    assert_eq!(disks[0].state(), DiskHealthMode::DiskHealthOnline);
+
+    // Raw host paths on VM socket OPEN are refused with EINVAL when DiskPool is active.
+    let raw = CellClient::connect(&daemon.vms, dir.path().join("sneaky-host-path"), CAPACITY);
+    assert_eq!(raw.err().and_then(|e| e.errno()), Some(Errno::EINVAL));
+
+    // Drain disk-0: all new cells must land on disk-1.
+    daemon
+        .set_disk_governance(SetDiskGovernanceRequest {
+            id: "disk-0".into(),
+            placement: Some(DiskPlacementMode::DiskPlacementDrain.into()),
+            cap_bytes: Some(512 << 20),
+            cache_cap_bytes: Some(128 << 20),
+            dirty_budget_bytes: Some(64 << 20),
+            ..Default::default()
+        })
+        .unwrap();
+    let updated = daemon.list_disks().unwrap().into_iter().find(|d| d.id == "disk-0").unwrap();
+    assert_eq!(updated.placement(), DiskPlacementMode::DiskPlacementDrain);
+    assert_eq!(updated.cap_bytes, 512 << 20);
+    assert_eq!(updated.cache_cap_bytes, 128 << 20);
+    assert_eq!(updated.dirty_budget_bytes, 64 << 20);
+
+    let c1 = daemon.create(NEW, None).unwrap();
+    let p1 = daemon.cell_path(c1);
+    assert!(p1.starts_with(disk1.canonicalize().unwrap()), "expected disk1, got {}", p1.display());
+
+    // Mark disk-1 READ_ONLY as well: no disk accepts new cells -> ENOSPC.
+    daemon
+        .set_disk_governance(SetDiskGovernanceRequest {
+            id: "disk-1".into(),
+            placement: Some(DiskPlacementMode::DiskPlacementReadOnly.into()),
+            ..Default::default()
+        })
+        .unwrap();
+    let full = daemon.create(NEW, None);
+    assert_eq!(failure(full), (Code::ResourceExhausted, Errno::ENOSPC));
+
+    // Unknown disk ID -> ENOENT.
+    let missing = daemon.set_disk_governance(SetDiskGovernanceRequest {
+        id: "nvme99".into(),
+        placement: Some(DiskPlacementMode::DiskPlacementDrain.into()),
+        ..Default::default()
+    });
+    assert_eq!(failure(missing), (Code::NotFound, Errno::ENOENT));
+
+    // Restore disk-0 to READ_WRITE and clear cap_bytes -> new cells land on disk-0.
+    daemon
+        .set_disk_governance(SetDiskGovernanceRequest {
+            id: "disk-0".into(),
+            placement: Some(DiskPlacementMode::DiskPlacementReadWrite.into()),
+            clear_cap: true,
+            ..Default::default()
+        })
+        .unwrap();
+    let restored = daemon.list_disks().unwrap().into_iter().find(|d| d.id == "disk-0").unwrap();
+    assert_eq!(restored.placement(), DiskPlacementMode::DiskPlacementReadWrite);
+    assert_eq!(restored.cap_bytes, 0);
+    let c2 = daemon.create(NEW, None).unwrap();
+    let p2 = daemon.cell_path(c2);
+    assert!(p2.starts_with(disk0.canonicalize().unwrap()), "expected disk0, got {}", p2.display());
+}
+
+/// hotbed question 547: `cladefsd --config cladefs.toml` boots from a TOML config file with
+/// multiple `[[disks]]`, enforces per-disk caps and placement modes on startup, and exposes them
+/// through `ListDisks`.
+#[test]
+fn cladefsd_boots_from_toml_config_with_per_disk_governance() {
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    let dir = tempfile::tempdir().unwrap();
+    let vm_sock = dir.path().join("cladefsd.sock");
+    let ctl_sock = dir.path().join("control.sock");
+    let nvme0 = dir.path().join("nvme0");
+    let nvme1 = dir.path().join("nvme1");
+    let config_path = dir.path().join("cladefs.toml");
+    let toml = format!(
+        r#"
+[daemon]
+vm_socket = "{vm}"
+control_socket = "{ctl}"
+token = 1
+
+[bucket]
+url = "memory:///toml-boot"
+
+[disk]
+headroom = "64 MiB"
+part_cache = false
+
+[[disks]]
+id = "nvme0"
+path = "{d0}"
+cap = "1 GiB"
+cache_cap = "256 MiB"
+dirty_budget = "64 MiB"
+placement = "read_write"
+
+[[disks]]
+id = "nvme1"
+path = "{d1}"
+cap = "2 GiB"
+placement = "drain"
+"#,
+        vm = vm_sock.display(),
+        ctl = ctl_sock.display(),
+        d0 = nvme0.display(),
+        d1 = nvme1.display(),
+    );
+    std::fs::write(&config_path, toml).unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_cladefsd"))
+        .args(["--config", config_path.to_str().unwrap()])
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while std::os::unix::net::UnixStream::connect(&ctl_sock).is_err() {
+        assert!(child.try_wait().unwrap().is_none(), "cladefsd exited early");
+        assert!(Instant::now() < deadline, "cladefsd never served");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let control = cladefs::testing::Control::connect(&ctl_sock).unwrap();
+    let disks =
+        control.call(async |client| client.list_disks(ListDisksRequest {}).await).unwrap().disks;
+    assert_eq!(disks.len(), 2);
+    assert_eq!(disks[0].id, "nvme0");
+    assert_eq!(disks[0].cap_bytes, 1 << 30);
+    assert_eq!(disks[0].cache_cap_bytes, 256 << 20);
+    assert_eq!(disks[0].dirty_budget_bytes, 64 << 20);
+    assert_eq!(disks[0].placement(), DiskPlacementMode::DiskPlacementReadWrite);
+    assert_eq!(disks[1].id, "nvme1");
+    assert_eq!(disks[1].cap_bytes, 2 << 30);
+    assert_eq!(disks[1].placement(), DiskPlacementMode::DiskPlacementDrain);
+
+    // Creating a cell must land on nvme0 (nvme1 is draining).
+    let made = control
+        .call(async |client| {
+            client
+                .create_cell(CreateCellRequest {
+                    capacity: CAPACITY,
+                    ..CreateCellRequest::default()
+                })
+                .await
+        })
+        .unwrap();
+    assert_ne!(made.cell, 0);
+    let expected_dir = nvme0
+        .join("cells")
+        .join(base32_id::Padded(made.tenant).to_string())
+        .join(base32_id::Padded(made.cell).to_string());
+    assert!(expected_dir.is_dir(), "expected cell under nvme0 at {}", expected_dir.display());
+
+    // Cleanup daemon process.
+    let _ = child.kill();
+    let _ = child.wait();
 }

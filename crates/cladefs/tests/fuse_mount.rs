@@ -20,7 +20,6 @@
 
 use cladefs::cladefsd::control::proto::ForkCellRequest;
 use cladefs::fuse::MountOptions;
-use cladefs::testing::control_path;
 use cladefs::{Filesystem, SetAttr, Storage};
 use futures::executor::block_on;
 use std::ffi::CString;
@@ -759,24 +758,37 @@ fn a_daemon_mounting_no_cells_serves_no_mount_calls() {
 #[test]
 fn a_cell_mounted_is_the_mounts_alone() {
     let dir = tempfile::tempdir().unwrap();
-    let (child, socket, m) = cladefsd_mounting(dir.path(), &dir.path().join("bucket"), 1);
+    let bucket = dir.path().join("bucket");
+    let disk0 = dir.path().join("disk0");
+    let cells_dir = disk0.join("cells");
+    let m = dir.path().join("mnt");
+    let socket = dir.path().join("control");
+    std::fs::create_dir_all(&bucket).unwrap();
+    std::fs::create_dir_all(&disk0).unwrap();
+    std::fs::create_dir_all(&m).unwrap();
+    let mut command = cladefsd(&dir.path().join("vm.sock"), &bucket, 1);
+    command
+        .env("CLADEFSD_GRPC", &socket)
+        .env("CLADEFSD_ROOTS", &disk0)
+        .env("CLADEFSD_MOUNT", &m)
+        .env("CLADEFSD_MOUNT_STORES", &cells_dir);
+    let child = serving(command, &socket);
     let socket = socket.to_str().unwrap();
     let created = cladefsctl_mount(socket, &["create", "1", &CELL_SIZE.to_string()]);
     let cell = created.lines().next().unwrap().to_owned();
-    let cell_dir = dir.path().join("cells").join("0000000000001").join(&cell);
+    let cell_id = base32_id::parse(&cell).unwrap();
 
     let started = std::time::Instant::now();
-    let vm = cladefs::CellClient::connect(dir.path().join("vm.sock"), &cell_dir, CELL_SIZE);
+    let vm = cladefs::CellClient::connect_cell(
+        dir.path().join("vm.sock"),
+        cladefs::CellId { tenant: 1, id: cell_id },
+    );
     assert_eq!(vm.err().and_then(|err| err.errno()), Some(cladefs::Errno::EBUSY));
     let control = cladefs::testing::Control::connect(socket).unwrap();
     let forked = control
         .call(async |client| {
             client
-                .fork_cell(ForkCellRequest {
-                    from: control_path(&cell_dir),
-                    to: control_path(&dir.path().join("fork")),
-                    ..Default::default()
-                })
+                .fork_cell(ForkCellRequest { tenant: 1, cell: cell_id, ..Default::default() })
                 .await
         })
         .map(|response| cladefs::CellId { tenant: response.tenant, id: response.cell });
@@ -788,11 +800,7 @@ fn a_cell_mounted_is_the_mounts_alone() {
     control
         .call(async |client| {
             client
-                .fork_cell(ForkCellRequest {
-                    from: control_path(&cell_dir),
-                    to: control_path(&dir.path().join("fork")),
-                    ..Default::default()
-                })
+                .fork_cell(ForkCellRequest { tenant: 1, cell: cell_id, ..Default::default() })
                 .await
         })
         .map(|response| cladefs::CellId { tenant: response.tenant, id: response.cell })
@@ -1026,17 +1034,18 @@ fn ephemeral_cells_attach_to_fuse_without_uploading_to_the_bucket() {
     let dir = tempfile::tempdir().unwrap();
     let bucket = dir.path().join("bucket");
     let ephemeral = dir.path().join("ephemeral");
-    let cells_dir = dir.path().join("cells");
-    let ws_dir = dir.path().join("ws");
+    let disk0 = dir.path().join("disk0");
+    let cells_dir = disk0.join("cells");
     let m = dir.path().join(".gvfs");
     let socket = dir.path().join("control");
     std::fs::create_dir_all(&ephemeral).unwrap();
-    std::fs::create_dir_all(&ws_dir).unwrap();
+    std::fs::create_dir_all(&disk0).unwrap();
     std::fs::create_dir_all(&m).unwrap();
 
     let mut command = cladefsd(&dir.path().join("vm.sock"), &bucket, 1);
     command
         .env("CLADEFSD_GRPC", &socket)
+        .env("CLADEFSD_ROOTS", &disk0)
         .env("CLADEFSD_MOUNT", &m)
         .env("CLADEFSD_MOUNT_STORES", &cells_dir)
         .env("CLADEFSD_EPHEMERAL", &ephemeral);
@@ -1051,13 +1060,13 @@ fn ephemeral_cells_attach_to_fuse_without_uploading_to_the_bucket() {
     std::fs::write(base_mount.join("base.txt"), b"from-base").unwrap();
     cladefsctl_mount(sock_s, &["detach", "1", &base_cell_b32]);
 
-    let base_store = cells_dir.join("0000000000001").join(&base_cell_b32);
     let control = cladefs::testing::Control::connect(sock_s).unwrap();
     let version = control
         .call(async |client| {
             client
                 .make_version(MakeVersionRequest {
-                    path: control_path(&base_store),
+                    tenant: 1,
+                    cell: base_cell_id,
                     ..Default::default()
                 })
                 .await
@@ -1066,17 +1075,15 @@ fn ephemeral_cells_attach_to_fuse_without_uploading_to_the_bucket() {
         .version;
     control
         .call(async |client| {
-            client.sync_cell(SyncCellRequest { path: control_path(&base_store) }).await
+            client.sync_cell(SyncCellRequest { tenant: 1, cell: base_cell_id }).await
         })
         .unwrap();
 
     // 2. Fork an ephemeral workspace cell from the base version.
-    let eph_path = ws_dir.join("ws-eph-1");
     let forked = control
         .call(async |client| {
             client
                 .fork_cell(ForkCellRequest {
-                    to: control_path(&eph_path),
                     tenant: 1,
                     cell: base_cell_id,
                     version,
@@ -1087,6 +1094,7 @@ fn ephemeral_cells_attach_to_fuse_without_uploading_to_the_bucket() {
         })
         .unwrap();
     let eph_cell_b32 = base32_id::Padded(forked.cell).to_string();
+    let eph_path = cells_dir.join("0000000000001").join(&eph_cell_b32);
 
     // 3. Attach the ephemeral cell to the FUSE mount, read inherited data, and write new data.
     cladefsctl_mount(sock_s, &["attach", "1", &eph_cell_b32]);
@@ -1094,9 +1102,9 @@ fn ephemeral_cells_attach_to_fuse_without_uploading_to_the_bucket() {
     assert_eq!(std::fs::read(eph_mount.join("base.txt")).unwrap(), b"from-base");
     std::fs::write(eph_mount.join("scratch.txt"), b"host-local-only").unwrap();
 
-    // While attached, DeleteCell on the ephemeral cell directory must fail EBUSY (held by mount).
+    // While attached, DeleteCell on the ephemeral cell must fail EBUSY (held by mount).
     let busy = control.call(async |client| {
-        client.delete_cell(DeleteCellRequest { path: control_path(&eph_path) }).await
+        client.delete_cell(DeleteCellRequest { tenant: 1, cell: forked.cell }).await
     });
     assert_eq!(busy.err().and_then(|err| err.errno()), Some(cladefs::Errno::EBUSY));
 
@@ -1118,7 +1126,7 @@ fn ephemeral_cells_attach_to_fuse_without_uploading_to_the_bucket() {
     cladefsctl_mount(sock_s, &["detach", "1", &eph_cell_b32]);
     control
         .call(async |client| {
-            client.delete_cell(DeleteCellRequest { path: control_path(&eph_path) }).await
+            client.delete_cell(DeleteCellRequest { tenant: 1, cell: forked.cell }).await
         })
         .unwrap();
     assert!(!eph_path.exists());
@@ -1130,7 +1138,6 @@ fn ephemeral_cells_attach_to_fuse_without_uploading_to_the_bucket() {
     let invalid_create = control.call(async |client| {
         client
             .create_cell(CreateCellRequest {
-                path: control_path(&ws_dir.join("bad-interval")),
                 capacity: 64 << 20,
                 tenant: 1,
                 upload_interval_ms: Some(0),
@@ -1143,7 +1150,6 @@ fn ephemeral_cells_attach_to_fuse_without_uploading_to_the_bucket() {
         .call(async |client| {
             client
                 .create_cell(CreateCellRequest {
-                    path: control_path(&ws_dir.join("custom-interval")),
                     capacity: 64 << 20,
                     tenant: 1,
                     upload_interval_ms: Some(15_000),
@@ -1155,11 +1161,7 @@ fn ephemeral_cells_attach_to_fuse_without_uploading_to_the_bucket() {
     assert_ne!(ok_create.cell, 0);
     control
         .call(async |client| {
-            client
-                .delete_cell(DeleteCellRequest {
-                    path: control_path(&ws_dir.join("custom-interval")),
-                })
-                .await
+            client.delete_cell(DeleteCellRequest { tenant: 1, cell: ok_create.cell }).await
         })
         .unwrap();
 

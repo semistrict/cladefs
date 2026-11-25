@@ -990,7 +990,15 @@ impl Shard {
     }
 
     fn capacity(&self) -> u64 {
-        self.budget.load(Ordering::Relaxed).min(self.governed.load(Ordering::Relaxed))
+        let base = self.budget.load(Ordering::Relaxed).min(self.governed.load(Ordering::Relaxed));
+        match self.files.disk.cache_cap() {
+            Some(cap) => base.min(cap),
+            None => base,
+        }
+    }
+
+    fn allows_fills(&self) -> bool {
+        !self.health.is_offline() && self.files.disk.accepts_writes()
     }
 
     fn bytes(&self) -> u64 {
@@ -1147,8 +1155,9 @@ impl Cache {
     }
 
     /// cladefs: governs the part-cache shard(s) living on `disk`, setting their governed limit to
-    /// `bytes` (what `disk`'s cells leave of its allowance, doc-22) and updating `disk_size` for
-    /// weighted JBOD placement. Returns `Ok(None)` if no shard lives on `disk`.
+    /// `bytes` (what `disk`'s cells leave of its allowance, doc-22), capped by any per-disk
+    /// `cache_cap`, and updating `disk_size` to the disk's effective capped capacity for weighted
+    /// JBOD placement. Returns `Ok(None)` if no shard lives on `disk`.
     pub fn set_limit_on(
         &self,
         disk: &Arc<HostDisk>,
@@ -1160,12 +1169,20 @@ impl Cache {
         if matching.is_empty() {
             return Ok(None);
         }
+        let capped_bytes = match disk.cache_cap() {
+            Some(cap) => bytes.min(cap),
+            None => bytes,
+        };
+        let effective_weight = match disk.cache_cap() {
+            Some(cap) => disk.effective_capacity(disk_size).min(cap),
+            None => disk.effective_capacity(disk_size),
+        };
         let n = matching.len() as u64;
-        let per = if bytes == u64::MAX { u64::MAX } else { bytes / n };
+        let per = if capped_bytes == u64::MAX { u64::MAX } else { capped_bytes / n };
         let mut kept = 0u64;
         for shard in matching {
-            if disk_size > 0 {
-                shard.disk_size.store(disk_size, Ordering::Relaxed);
+            if effective_weight > 0 {
+                shard.disk_size.store(effective_weight, Ordering::Relaxed);
             }
             kept += shard.set_limit(per)?;
         }
@@ -1335,13 +1352,16 @@ impl Cache {
     /// order so a full or failing shard transparently fails over to the next healthy shard.
     pub fn keep_tail(&self, key: &str, tail: &object::Tail) -> io::Result<()> {
         if self.shards.len() == 1 {
+            if !self.shards[0].allows_fills() {
+                return Ok(());
+            }
             self.shards[0].keep_tail(key, tail)?;
             return Ok(());
         }
-        // If any non-offline shard already holds `key`, update/touch it in place rather than
-        // duplicating across shards.
+        // If any writable non-offline shard already holds `key`, update/touch it in place rather
+        // than duplicating across shards.
         for shard in &self.shards {
-            if !shard.health.is_offline() && shard.has_key(key) {
+            if shard.allows_fills() && shard.has_key(key) {
                 shard.keep_tail(key, tail)?;
                 return Ok(());
             }
@@ -1352,6 +1372,9 @@ impl Cache {
         }
         let mut last_err = None;
         for idx in ranked {
+            if !self.shards[idx].allows_fills() {
+                continue;
+            }
             match self.shards[idx].keep_tail(key, tail) {
                 Ok(true) => return Ok(()),
                 Ok(false) => continue,
@@ -1368,10 +1391,13 @@ impl Cache {
     /// holds its tail.
     pub fn keep_part(&self, key: &str, part: u64, bytes: &[u8]) -> io::Result<()> {
         if self.shards.len() == 1 {
+            if !self.shards[0].allows_fills() {
+                return Ok(());
+            }
             return self.shards[0].keep_part(key, part, bytes);
         }
         for shard in &self.shards {
-            if !shard.health.is_offline() && shard.has_key(key) {
+            if shard.allows_fills() && shard.has_key(key) {
                 return shard.keep_part(key, part, bytes);
             }
         }

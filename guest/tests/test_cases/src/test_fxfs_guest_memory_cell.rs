@@ -74,9 +74,8 @@ mod host {
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
     use anyhow::{Context, ensure};
     use cladefs::cladefsd::control::proto::{
-        ShrinkMemoryRequest, StatCellRequest, SyncCellRequest,
+        ListCellsRequest, ShrinkMemoryRequest, StatCellRequest, SyncCellRequest,
     };
-    use cladefs::testing::control_path;
     use nix::libc;
     use std::collections::{BTreeMap, BTreeSet};
     use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
@@ -165,9 +164,8 @@ mod host {
             let listen_boot = listen(&uds_boot)?;
             let mut vm = Vm::new(2, RAM_MIB)?;
             vm.guest_kernel()?;
-            vm.cell_served(
+            vm.new_cell_served(
                 "extents",
-                &dir.join("store-boot"),
                 CAPACITY,
                 crate::common::dax_window(crate::common::Window::Large)?,
                 &cladefsd,
@@ -184,7 +182,6 @@ mod host {
 
             boot_fc.request("PATCH", "/vm", &serde_json::json!({ "state": "Paused" }))?;
             let snap1 = dir.join("snap1.state");
-            let mem_boot = dir.join("mem-boot");
             let v1: MemoryCellSnapshot = boot_fc.request_json(
                 "PUT",
                 "/snapshot/create",
@@ -192,7 +189,7 @@ mod host {
                     "snapshot_type": "Full",
                     "snapshot_path": snap1,
                     "memory_cell": {
-                        "path_on_host": mem_boot,
+                        "path_on_host": "0/0",
                         "cladefsd_socket": cladefsd,
                     },
                 }),
@@ -201,7 +198,7 @@ mod host {
             boot_fc.kill()?;
 
             let boot_stat = control.call(async |client| {
-                client.stat_cell(StatCellRequest { path: control_path(&mem_boot) }).await
+                client.stat_cell(StatCellRequest { tenant: v1.tenant, cell: v1.cell }).await
             })?;
             eprintln!("cold-boot memory cell: used={} bytes (RAM={} MiB)", boot_stat.used, RAM_MIB);
             ensure!(
@@ -210,19 +207,23 @@ mod host {
                 boot_stat.used
             );
             control.call(async |client| {
-                client.sync_cell(SyncCellRequest { path: control_path(&mem_boot) }).await
+                client.sync_cell(SyncCellRequest { tenant: v1.tenant, cell: v1.cell }).await
             })?;
             control.call(async |client| {
                 client.shrink_memory(ShrinkMemoryRequest { tenant: None, target_bytes: 0 }).await
             })?;
 
             // 2. Restore `child` with MemBackendType::Cell + track_dirty_pages: true.
+            let cells_before_child: BTreeSet<(u64, u64)> = control
+                .call(async |client| client.list_cells(ListCellsRequest {}).await)?
+                .stores
+                .into_iter()
+                .map(|c| (c.tenant, c.cell))
+                .collect();
             let uds_child = uds("child");
             let listen_child = listen(&uds_child)?;
             let mut child_fc =
                 Firecracker::spawn(dir, "child", &Vm::api_socket("child"), None, &[])?;
-            let mem_child = dir.join("mem-child");
-            let store_child = dir.join("store-child");
             child_fc.request(
                 "PUT",
                 "/snapshot/load",
@@ -230,7 +231,7 @@ mod host {
                     "snapshot_path": snap1,
                     "mem_backend": {
                         "backend_type": "Cell",
-                        "backend_path": mem_child,
+                        "backend_path": "0/0",
                     },
                     "memory_cell": {
                         "tenant": v1.tenant,
@@ -243,7 +244,7 @@ mod host {
                     "vsock_override": { "uds_path": uds_child },
                     "cladefs_overrides": [{
                         "id": "extents",
-                        "path_on_host": store_child,
+                        "path_on_host": "0/0",
                     }],
                 }),
             )?;
@@ -340,7 +341,7 @@ mod host {
             child_fc.kill()?;
 
             let child_stat = control.call(async |client| {
-                client.stat_cell(StatCellRequest { path: control_path(&mem_child) }).await
+                client.stat_cell(StatCellRequest { tenant: v2.tenant, cell: v2.cell }).await
             })?;
             eprintln!(
                 "child forked memory cell: own={} bytes, inherited={} bytes",
@@ -352,11 +353,20 @@ mod host {
                 child_stat.own
             );
             control.call(async |client| {
-                client.sync_cell(SyncCellRequest { path: control_path(&mem_child) }).await
+                client.sync_cell(SyncCellRequest { tenant: v2.tenant, cell: v2.cell }).await
             })?;
-            control.call(async |client| {
-                client.sync_cell(SyncCellRequest { path: control_path(&store_child) }).await
-            })?;
+            // Sync the child's forked Fxfs cell too.
+            let cells_after_child =
+                control.call(async |client| client.list_cells(ListCellsRequest {}).await)?.stores;
+            for c in cells_after_child {
+                if !cells_before_child.contains(&(c.tenant, c.cell))
+                    && (c.tenant, c.cell) != (v2.tenant, v2.cell)
+                {
+                    control.call(async |client| {
+                        client.sync_cell(SyncCellRequest { tenant: c.tenant, cell: c.cell }).await
+                    })?;
+                }
+            }
 
             // 4. Restore `grandchild` from `v2` and verify every page across both buffers & Fxfs.
             let uds_gc = uds("gc");
@@ -376,7 +386,7 @@ mod host {
                     "snapshot_path": snap2,
                     "mem_backend": {
                         "backend_type": "Cell",
-                        "backend_path": dir.join("mem-grandchild"),
+                        "backend_path": "0/0",
                     },
                     "memory_cell": {
                         "tenant": v2.tenant,
@@ -388,7 +398,7 @@ mod host {
                     "vsock_override": { "uds_path": uds_gc },
                     "cladefs_overrides": [{
                         "id": "extents",
-                        "path_on_host": dir.join("store-grandchild"),
+                        "path_on_host": "0/0",
                     }],
                 }),
             )?;

@@ -783,6 +783,9 @@ pub enum DiskFull {
 /// Whether `disk` has no room for what is pledged on it: its cells' bytes, reserves and pledges,
 /// and its part cache past a band of it, which the governor evicts at once, past its allowance.
 fn disk_full(disk: &HostDisk) -> Option<DiskFull> {
+    if !disk.accepts_writes() {
+        return Some(DiskFull::Disk);
+    }
     let (allowance, cache) = (disk.allowance(), disk.cache.get());
     let committed = disk.cells.committed();
     if committed.saturating_add(cache) > allowance {

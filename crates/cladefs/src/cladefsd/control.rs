@@ -223,8 +223,8 @@ fn stats_response(
     };
     let vms = stats.vms.into_iter().map(|vm| VmStats {
         connection: vm.connection,
+        tenant: vm.cell.tenant,
         cell: vm.cell.id,
-        path: vm.path.to_string_lossy().into_owned(),
         build: vm.build.clone().unwrap_or_default(),
         counters: named(&vm.counters()),
         gauges: named(&vm.gauges()),
@@ -552,33 +552,128 @@ fn reply<T>(done: Result<T, Errno>) -> Result<Response<T>, Status> {
     done.map(Response::new).map_err(status)
 }
 
-/// The cell a request names by `path`.
-fn path(path: String) -> Result<PathBuf, Status> {
+/// A non-empty host path (used for input image/memory files on import, never cell directories).
+fn input_path(path: String) -> Result<PathBuf, Status> {
     if path.is_empty() {
         return Err(status(Errno::EINVAL));
     }
     Ok(PathBuf::from(path))
 }
 
-/// The API's calls, served from `daemon`'s cells, and its grants.
+/// Validates a `(tenant, cell)` cell identifier from a control RPC (`cell == 0` -> `EINVAL`).
+fn cell_id(tenant: u64, cell: u64) -> Result<crate::CellId, Status> {
+    if cell == 0 {
+        return Err(status(Errno::EINVAL));
+    }
+    Ok(crate::CellId { tenant, id: cell })
+}
+
+/// Best-effort removal of a failed staging directory under `daemon`.
+async fn cleanup_staging(daemon: &Daemon, staging: PathBuf) {
+    let local = Arc::clone(daemon.host.local());
+    // Best-effort cleanup after an earlier failure; the primary error is returned to the caller.
+    let _ = cells::blocking(move || {
+        if host_fs::exists(&staging) {
+            // Best-effort cleanup of failed staging directory.
+            let _ = local_cell::remove_cell_dir_on(&local, &staging);
+        }
+        Ok(())
+    })
+    .await;
+}
+
+/// The API's calls, served from `daemon`'s cells, its managed disk pool, and its grants.
 struct Control {
     daemon: Arc<Daemon>,
     grants: Arc<Grants>,
 }
 
 impl Control {
-    /// The tenant of a new cell made at `path`, that the caller names `tenant`
-    /// (TASK-364): in a granted tenant's directory, that tenant's, which `tenant` is or is 0 for
-    /// (`EPERM` otherwise); elsewhere, `tenant`. A cell there already, a version the VM
-    /// manager gives a tenant to restore from (TASK-154), may be another tenant's: the tenant's VM
-    /// processes write none of it (`Tenant::reaches`), and its restores are of their own.
-    fn new_cell_at(&self, path: &Path, tenant: u64) -> Result<u64, Status> {
-        match self.grants.tenant_at(path) {
-            Some(granted) if tenant == crate::host_cell::DEFAULT_TENANT || tenant == granted => {
-                Ok(granted)
+    /// Returns the daemon's managed [`super::disks::DiskPool`], or `ENOTSUP` if unconfigured.
+    fn disk_pool(&self) -> Result<&Arc<super::disks::DiskPool>, Status> {
+        self.daemon.disk_pool().ok_or_else(|| {
+            saying(
+                Errno::ENOTSUP,
+                "no managed disks configured (configure [[disks]] in TOML)".to_owned(),
+            )
+        })
+    }
+
+    /// Resolves `(tenant, cell)` to its canonical local cell directory across the managed disk
+    /// pool, returning `ENOENT` if no disk on this host holds it.
+    async fn resolve_cell(
+        &self,
+        tenant: u64,
+        cell: u64,
+    ) -> Result<(crate::CellId, PathBuf), Status> {
+        let id = cell_id(tenant, cell)?;
+        let pool = Arc::clone(self.disk_pool()?);
+        let path = cells::blocking(move || pool.find_cell(id).ok_or(Errno::ENOENT))
+            .await
+            .map_err(status)?;
+        Ok((id, path))
+    }
+
+    /// Resolves `(tenant, cell)` for migration hand-over / abort, falling back to the ephemeral
+    /// host journal's recorded path when a prior crash already deleted the local cell directory.
+    async fn resolve_migrating_cell(
+        &self,
+        tenant: u64,
+        cell: u64,
+    ) -> Result<(crate::CellId, PathBuf), Status> {
+        let id = cell_id(tenant, cell)?;
+        let pool = Arc::clone(self.disk_pool()?);
+        let host = Arc::clone(&self.daemon.host);
+        let path = cells::blocking(move || {
+            if let Some(found) = pool.find_cell(id) {
+                return Ok(found);
             }
-            Some(_) => Err(status(Errno::EPERM)),
-            None => Ok(tenant),
+            if let Ok(ephemeral) = crate::ephemeral_host::host_on(&host)
+                && let Ok(Some(entry)) = ephemeral.entry(id)
+            {
+                return Ok(entry.path);
+            }
+            Err(Errno::ENOENT)
+        })
+        .await
+        .map_err(status)?;
+        Ok((id, path))
+    }
+
+    /// Picks a managed disk and allocates a fresh staging path inside `<disk>/cells/<TENANT>`.
+    async fn stage_for(
+        &self,
+        tenant: u64,
+    ) -> Result<(Arc<super::disks::ManagedDisk>, PathBuf), Status> {
+        let pool = Arc::clone(self.disk_pool()?);
+        let disk = pool.pick_disk().map_err(status)?;
+        let disk_for_stage = Arc::clone(&disk);
+        let staging =
+            cells::blocking(move || super::disks::DiskPool::staging_path(&disk_for_stage, tenant))
+                .await
+                .map_err(status)?;
+        Ok((disk, staging))
+    }
+
+    /// Atomically moves `staging` into `<disk>/cells/<TENANT>/<CELL>`, registering `made` in the
+    /// pool and migrating any per-cell upload interval entry.
+    async fn commit_staged(
+        &self,
+        disk: Arc<super::disks::ManagedDisk>,
+        made: crate::CellId,
+        staging: PathBuf,
+    ) -> Result<PathBuf, Status> {
+        let pool = Arc::clone(self.disk_pool()?);
+        let staging_for_commit = staging.clone();
+        match cells::blocking(move || pool.commit_staged(&disk, made, &staging_for_commit)).await {
+            Ok(final_path) => {
+                cells::move_upload_interval(&self.daemon, &staging, &final_path);
+                Ok(final_path)
+            }
+            Err(err) => {
+                cleanup_staging(&self.daemon, staging).await;
+                Err(status(err))
+            }
         }
     }
 }
@@ -590,7 +685,6 @@ impl Cladefsd for Control {
         request: Request<CreateCellRequest>,
     ) -> Result<Response<CreateCellResponse>, Status> {
         let CreateCellRequest {
-            path: cell_dir,
             capacity,
             token,
             tenant,
@@ -601,7 +695,6 @@ impl Cladefsd for Control {
             force,
             upload_interval_ms,
         } = request.into_inner();
-        let cell_dir = path(cell_dir)?;
         let upload_interval =
             cells::parse_upload_interval_ms(upload_interval_ms).map_err(status)?;
         room_for_a_cell(&self.daemon)?;
@@ -614,7 +707,7 @@ impl Cladefsd for Control {
             return Err(saying(
                 Errno::ENOTSUP,
                 "a replicated cell needs the daemon's peers and replica directory \
-                 (CLADEFSD_PEER_ADDRESS, CLADEFSD_PEERS, CLADEFSD_REPLICAS)"
+                 (peers.address, peers.addresses, peers.replicas)"
                     .to_owned(),
             ));
         }
@@ -624,46 +717,112 @@ impl Cladefsd for Control {
             Ok(CellKind::Memory) => Kind::Memory,
             Err(_) => return Err(status(Errno::EINVAL)),
         };
-        let tenant = match cell {
-            0 => self.new_cell_at(&cell_dir, tenant)?,
-            _ => tenant,
-        };
-        let cell = crate::CellId { tenant, id: cell };
-        let made = cells::create(
+        let pool = Arc::clone(self.disk_pool()?);
+        if cell != 0 {
+            let target_id = crate::CellId { tenant, id: cell };
+            let pool_check = Arc::clone(&pool);
+            let host = Arc::clone(&self.daemon.host);
+            let exists = cells::blocking(move || {
+                if let Some(existing) = pool_check.find_cell(target_id) {
+                    cells::removed_if_unmade_on(&host, &existing)?;
+                    if host_fs::exists(&existing) {
+                        return Ok(true);
+                    }
+                    pool_check.forget_cell(target_id);
+                }
+                Ok(false)
+            })
+            .await
+            .map_err(status)?;
+            if exists {
+                return Err(status(Errno::EEXIST));
+            }
+            let disk = pool.pick_disk().map_err(status)?;
+            let disk_dir = Arc::clone(&disk);
+            let final_path = cells::blocking(move || {
+                super::disks::DiskPool::ensure_tenant_dir(&disk_dir, tenant)?;
+                Ok(super::disks::DiskPool::cell_path(&disk_dir, target_id))
+            })
+            .await
+            .map_err(status)?;
+            let made = cells::create(
+                &self.daemon,
+                final_path.clone(),
+                capacity,
+                target_id,
+                (token, kind, replication, force, upload_interval),
+            )
+            .await
+            .map_err(status)?;
+            pool.register_cell(made, final_path);
+            return Ok(Response::new(CreateCellResponse { tenant: made.tenant, cell: made.id }));
+        }
+        let (disk, staging) = self.stage_for(tenant).await?;
+        let made = match cells::create(
             &self.daemon,
-            cell_dir,
+            staging.clone(),
             capacity,
-            cell,
+            crate::CellId { tenant, id: 0 },
             (token, kind, replication, force, upload_interval),
         )
-        .await;
-        reply(made.map(|made| CreateCellResponse { tenant: made.tenant, cell: made.id }))
+        .await
+        {
+            Ok(made) => made,
+            Err(err) => {
+                cleanup_staging(&self.daemon, staging).await;
+                return Err(status(err));
+            }
+        };
+        let _ = self.commit_staged(disk, made, staging).await?;
+        Ok(Response::new(CreateCellResponse { tenant: made.tenant, cell: made.id }))
     }
 
     async fn import_image(
         &self,
         request: Request<ImportImageRequest>,
     ) -> Result<Response<ImportImageResponse>, Status> {
-        let ImportImageRequest { path: cell_dir, capacity, image, reference, tenant } =
-            request.into_inner();
-        let (cell_dir, image) = (path(cell_dir)?, path(image)?);
+        let ImportImageRequest { capacity, image, reference, tenant } = request.into_inner();
+        let image = input_path(image)?;
         let reference = Some(reference).filter(|reference| !reference.is_empty());
-        let tenant = self.new_cell_at(&cell_dir, tenant)?;
-        let made = cells::import(&self.daemon, cell_dir, capacity, image, reference, tenant).await;
-        reply(made.map(|made| ImportImageResponse { tenant: made.tenant, cell: made.id }))
+        let (disk, staging) = self.stage_for(tenant).await?;
+        let made =
+            match cells::import(&self.daemon, staging.clone(), capacity, image, reference, tenant)
+                .await
+            {
+                Ok(made) => made,
+                Err(err) => {
+                    cleanup_staging(&self.daemon, staging).await;
+                    return Err(status(err));
+                }
+            };
+        let _ = self.commit_staged(disk, made, staging).await?;
+        Ok(Response::new(ImportImageResponse { tenant: made.tenant, cell: made.id }))
     }
 
     async fn import_memory(
         &self,
         request: Request<ImportMemoryRequest>,
     ) -> Result<Response<ImportMemoryResponse>, Status> {
-        let ImportMemoryRequest { path: cell_dir, file, tenant, make_version } =
-            request.into_inner();
-        let (cell_dir, file) = (path(cell_dir)?, path(file)?);
+        let ImportMemoryRequest { file, tenant, make_version } = request.into_inner();
+        let file = input_path(file)?;
         room_for_a_cell(&self.daemon)?;
-        let tenant = self.new_cell_at(&cell_dir, tenant)?;
-        let made = cells::import_memory(&self.daemon, cell_dir, file, tenant, make_version).await;
-        reply(made.map(|(made, version)| ImportMemoryResponse {
+        let (disk, staging) = self.stage_for(tenant).await?;
+        let (made, version) =
+            match cells::import_memory(&self.daemon, staging.clone(), file, tenant, make_version)
+                .await
+            {
+                Ok(imported) => imported,
+                Err(err) => {
+                    cleanup_staging(&self.daemon, staging).await;
+                    return Err(status(err));
+                }
+            };
+        let final_path = self.commit_staged(disk, made, staging).await?;
+        if let Some(ver) = version {
+            let named = std::collections::BTreeSet::from([ver]);
+            crate::host_cell::made_version_on(&self.daemon.host, made, ver, &final_path, &named);
+        }
+        Ok(Response::new(ImportMemoryResponse {
             tenant: made.tenant,
             cell: made.id,
             version: version.unwrap_or(0),
@@ -674,32 +833,65 @@ impl Cladefsd for Control {
         &self,
         request: Request<ForkCellRequest>,
     ) -> Result<Response<ForkCellResponse>, Status> {
-        let ForkCellRequest { from, to, version, tenant: of, cell, ephemeral } =
+        let ForkCellRequest { version, tenant: of_tenant, cell, ephemeral, target_tenant } =
             request.into_inner();
-        let to = path(to)?;
+        let of = cell_id(of_tenant, cell)?;
         room_for_a_cell(&self.daemon)?;
-        let tenant = self.grants.tenant_at(&to);
-        let of = crate::CellId { tenant: of, id: cell };
+        if version == 0 && ephemeral {
+            return Err(status(Errno::EINVAL));
+        }
+        let explicit_tenant = target_tenant.filter(|&t| t != 0);
+        let dest_tenant = explicit_tenant.unwrap_or(of.tenant);
+        let pool = Arc::clone(self.disk_pool()?);
+        if version != 0 && ephemeral {
+            let disk = pool.pick_disk().map_err(status)?;
+            let disk_dir = Arc::clone(&disk);
+            let tenant_dir = cells::blocking(move || {
+                super::disks::DiskPool::ensure_tenant_dir(&disk_dir, dest_tenant)
+            })
+            .await
+            .map_err(status)?;
+            let (forked, final_path) = cells::fork_ephemeral_of_version_in(
+                &self.daemon,
+                of,
+                version,
+                tenant_dir,
+                explicit_tenant,
+            )
+            .await
+            .map_err(status)?;
+            pool.register_cell(forked, final_path);
+            return Ok(Response::new(ForkCellResponse { tenant: forked.tenant, cell: forked.id }));
+        }
+        let (disk, staging) = self.stage_for(dest_tenant).await?;
         let forked = match version {
-            // cladefs: ephemeral cells are forked from versions alone (doc-25, TASK-698.3).
-            0 if ephemeral => Err(Errno::EINVAL),
-            0 => cells::fork(&self.daemon, path(from)?, to, tenant).await,
-            _ if !from.is_empty() || cell == 0 => Err(Errno::EINVAL),
-            _ if ephemeral => {
-                cells::fork_ephemeral_of_version(&self.daemon, of, version, to, tenant).await
+            0 => {
+                let (_, from_path) = self.resolve_cell(of.tenant, of.id).await?;
+                cells::fork(&self.daemon, from_path, staging.clone(), explicit_tenant).await
             }
-            _ => cells::fork_of_version(&self.daemon, of, version, to, tenant).await,
+            _ => {
+                cells::fork_of_version(&self.daemon, of, version, staging.clone(), explicit_tenant)
+                    .await
+            }
         };
-        reply(forked.map(|forked| ForkCellResponse { tenant: forked.tenant, cell: forked.id }))
+        let forked = match forked {
+            Ok(forked) => forked,
+            Err(err) => {
+                cleanup_staging(&self.daemon, staging).await;
+                return Err(status(err));
+            }
+        };
+        let _ = self.commit_staged(disk, forked, staging).await?;
+        Ok(Response::new(ForkCellResponse { tenant: forked.tenant, cell: forked.id }))
     }
 
     async fn migrate_cell(
         &self,
         request: Request<MigrateCellRequest>,
     ) -> Result<Response<MigrateCellResponse>, Status> {
-        let MigrateCellRequest { path: cell_dir, peer, to } = request.into_inner();
-        let cell_dir = path(cell_dir)?;
-        let migrating = super::migration::migrate_on(&self.daemon, cell_dir, peer, to).await;
+        let MigrateCellRequest { peer, tenant, cell } = request.into_inner();
+        let (_, cell_dir) = self.resolve_cell(tenant, cell).await?;
+        let migrating = super::migration::migrate_on(&self.daemon, cell_dir, peer).await;
         reply(migrating.map(|migration| MigrateCellResponse { migration }))
     }
 
@@ -707,25 +899,30 @@ impl Cladefsd for Control {
         &self,
         request: Request<HandOverCellRequest>,
     ) -> Result<Response<HandOverCellResponse>, Status> {
-        let HandOverCellRequest { path: cell_dir, token } = request.into_inner();
-        let cell_dir = path(cell_dir)?;
-        reply(
-            super::migration::hand_over_on(&self.daemon, cell_dir, token)
-                .await
-                .map(|()| HandOverCellResponse {}),
-        )
+        let HandOverCellRequest { token, tenant, cell } = request.into_inner();
+        let (id, cell_dir) = self.resolve_migrating_cell(tenant, cell).await?;
+        let done = super::migration::hand_over_on(&self.daemon, cell_dir, token).await;
+        if done.is_ok()
+            && let Some(pool) = self.daemon.disk_pool()
+        {
+            pool.forget_cell(id);
+        }
+        reply(done.map(|()| HandOverCellResponse {}))
     }
 
     async fn abort_migration(
         &self,
         request: Request<AbortMigrationRequest>,
     ) -> Result<Response<AbortMigrationResponse>, Status> {
-        let cell_dir = path(request.into_inner().path)?;
-        reply(
-            super::migration::abort_on(&self.daemon, cell_dir)
-                .await
-                .map(|()| AbortMigrationResponse {}),
-        )
+        let AbortMigrationRequest { tenant, cell } = request.into_inner();
+        let (id, cell_dir) = self.resolve_migrating_cell(tenant, cell).await?;
+        let done = super::migration::abort_on(&self.daemon, cell_dir).await;
+        if done == Err(Errno::EEXIST)
+            && let Some(pool) = self.daemon.disk_pool()
+        {
+            pool.forget_cell(id);
+        }
+        reply(done.map(|()| AbortMigrationResponse {}))
     }
 
     async fn decommission_host(
@@ -805,24 +1002,38 @@ impl Cladefsd for Control {
         &self,
         request: Request<DeleteCellRequest>,
     ) -> Result<Response<DeleteCellResponse>, Status> {
-        let cell_dir = path(request.into_inner().path)?;
-        reply(cells::delete(&self.daemon, cell_dir).await.map(|()| DeleteCellResponse {}))
+        let DeleteCellRequest { tenant, cell } = request.into_inner();
+        let (id, cell_dir) = self.resolve_cell(tenant, cell).await?;
+        let done = cells::delete(&self.daemon, cell_dir).await;
+        if done.is_ok()
+            && let Some(pool) = self.daemon.disk_pool()
+        {
+            pool.forget_cell(id);
+        }
+        reply(done.map(|()| DeleteCellResponse {}))
     }
 
     async fn drop_cell(
         &self,
         request: Request<DropCellRequest>,
     ) -> Result<Response<DropCellResponse>, Status> {
-        let cell_dir = path(request.into_inner().path)?;
-        reply(cells::drop_here(&self.daemon, cell_dir).await.map(|()| DropCellResponse {}))
+        let DropCellRequest { tenant, cell } = request.into_inner();
+        let (id, cell_dir) = self.resolve_cell(tenant, cell).await?;
+        let done = cells::drop_here(&self.daemon, cell_dir).await;
+        if done.is_ok()
+            && let Some(pool) = self.daemon.disk_pool()
+        {
+            pool.forget_cell(id);
+        }
+        reply(done.map(|()| DropCellResponse {}))
     }
 
     async fn resize_cell(
         &self,
         request: Request<ResizeCellRequest>,
     ) -> Result<Response<ResizeCellResponse>, Status> {
-        let ResizeCellRequest { path: cell_dir, capacity } = request.into_inner();
-        let cell_dir = path(cell_dir)?;
+        let ResizeCellRequest { capacity, tenant, cell } = request.into_inner();
+        let (_, cell_dir) = self.resolve_cell(tenant, cell).await?;
         reply(cells::resize(&self.daemon, cell_dir, capacity).await.map(|()| ResizeCellResponse {}))
     }
 
@@ -830,8 +1041,8 @@ impl Cladefsd for Control {
         &self,
         request: Request<PlaceCellRequest>,
     ) -> Result<Response<PlaceCellResponse>, Status> {
-        let PlaceCellRequest { path: cell_dir, token, force } = request.into_inner();
-        let cell_dir = path(cell_dir)?;
+        let PlaceCellRequest { token, force, tenant, cell } = request.into_inner();
+        let (_, cell_dir) = self.resolve_cell(tenant, cell).await?;
         reply(
             cells::place(&self.daemon, cell_dir, token, force).await.map(|()| PlaceCellResponse {}),
         )
@@ -841,8 +1052,8 @@ impl Cladefsd for Control {
         &self,
         request: Request<MakePublicRequest>,
     ) -> Result<Response<MakePublicResponse>, Status> {
-        let MakePublicRequest { path: cell_dir, attach_only } = request.into_inner();
-        let cell_dir = path(cell_dir)?;
+        let MakePublicRequest { attach_only, tenant, cell } = request.into_inner();
+        let (_, cell_dir) = self.resolve_cell(tenant, cell).await?;
         reply(
             cells::make_public(&self.daemon, cell_dir, attach_only)
                 .await
@@ -854,8 +1065,8 @@ impl Cladefsd for Control {
         &self,
         request: Request<MakeVersionRequest>,
     ) -> Result<Response<MakeVersionResponse>, Status> {
-        let MakeVersionRequest { path: cell_dir, keep_last } = request.into_inner();
-        let cell_dir = path(cell_dir)?;
+        let MakeVersionRequest { keep_last, tenant, cell } = request.into_inner();
+        let (_, cell_dir) = self.resolve_cell(tenant, cell).await?;
         let keep_last = Some(keep_last).filter(|&keep| keep > 0);
         let made = cells::make_version(&self.daemon, cell_dir, keep_last).await;
         reply(made.map(|version| MakeVersionResponse { version }))
@@ -865,7 +1076,8 @@ impl Cladefsd for Control {
         &self,
         request: Request<ListVersionsRequest>,
     ) -> Result<Response<ListVersionsResponse>, Status> {
-        let cell_dir = path(request.into_inner().path)?;
+        let ListVersionsRequest { tenant, cell } = request.into_inner();
+        let (_, cell_dir) = self.resolve_cell(tenant, cell).await?;
         let versions = cells::versions(&self.daemon, cell_dir).await.map_err(status)?;
         let listed = ListVersionsResponse {
             versions: (versions.into_iter())
@@ -879,8 +1091,8 @@ impl Cladefsd for Control {
         &self,
         request: Request<DropVersionsRequest>,
     ) -> Result<Response<DropVersionsResponse>, Status> {
-        let DropVersionsRequest { path: cell_dir, versions } = request.into_inner();
-        let cell_dir = path(cell_dir)?;
+        let DropVersionsRequest { versions, tenant, cell } = request.into_inner();
+        let (_, cell_dir) = self.resolve_cell(tenant, cell).await?;
         let dropped =
             cells::drop_versions(&self.daemon, cell_dir, versions.into_iter().collect()).await;
         reply(dropped.map(|()| DropVersionsResponse {}))
@@ -890,8 +1102,8 @@ impl Cladefsd for Control {
         &self,
         request: Request<ShareVersionRequest>,
     ) -> Result<Response<ShareVersionResponse>, Status> {
-        let ShareVersionRequest { path: cell_dir, version, shared } = request.into_inner();
-        let cell_dir = path(cell_dir)?;
+        let ShareVersionRequest { version, shared, tenant, cell } = request.into_inner();
+        let (_, cell_dir) = self.resolve_cell(tenant, cell).await?;
         let shared = cells::share_version(&self.daemon, cell_dir, version, shared).await;
         reply(shared.map(|()| ShareVersionResponse {}))
     }
@@ -900,12 +1112,12 @@ impl Cladefsd for Control {
         &self,
         request: Request<AttachBaseRequest>,
     ) -> Result<Response<AttachBaseResponse>, Status> {
-        let AttachBaseRequest { path: cell_dir, base } = request.into_inner();
-        let (cell_dir, base) = (path(cell_dir)?, path(base)?);
-        let grants = self.grants.clone();
-        let allowed = move |cell_dir: &Path, base: &Path| grants.same_tenant(cell_dir, base);
+        let AttachBaseRequest { tenant, cell, base_tenant, base_cell } = request.into_inner();
+        let (id, cell_dir) = self.resolve_cell(tenant, cell).await?;
+        let (base_id, base_dir) = self.resolve_cell(base_tenant, base_cell).await?;
+        let allowed = move |_: &Path, _: &Path| id.tenant == base_id.tenant;
         reply(
-            cells::attach(&self.daemon, cell_dir, base, allowed)
+            cells::attach(&self.daemon, cell_dir, base_dir, allowed)
                 .await
                 .map(|()| AttachBaseResponse {}),
         )
@@ -915,7 +1127,8 @@ impl Cladefsd for Control {
         &self,
         request: Request<SyncCellRequest>,
     ) -> Result<Response<SyncCellResponse>, Status> {
-        let cell_dir = path(request.into_inner().path)?;
+        let SyncCellRequest { tenant, cell } = request.into_inner();
+        let (_, cell_dir) = self.resolve_cell(tenant, cell).await?;
         reply(cells::sync(&self.daemon, cell_dir).await.map(|()| SyncCellResponse {}))
     }
 
@@ -923,7 +1136,8 @@ impl Cladefsd for Control {
         &self,
         request: Request<StatCellRequest>,
     ) -> Result<Response<StatCellResponse>, Status> {
-        let cell_dir = path(request.into_inner().path)?;
+        let StatCellRequest { tenant, cell } = request.into_inner();
+        let (_, cell_dir) = self.resolve_cell(tenant, cell).await?;
         reply(cells::stat(&self.daemon, cell_dir).await.map(stat_response))
     }
 
@@ -931,9 +1145,13 @@ impl Cladefsd for Control {
         &self,
         _request: Request<ListCellsRequest>,
     ) -> Result<Response<ListCellsResponse>, Status> {
+        let pool = self.daemon.disk_pool();
         let cells = cells::list(&self.daemon).map_err(status)?.into_iter().map(|(path, state)| {
+            let disk_id = pool.and_then(|pool| pool.disk_id_for_path(&path)).unwrap_or_default();
             ListedCell {
-                path: path.to_string_lossy().into_owned(),
+                tenant: state.cell.tenant,
+                cell: state.cell.id,
+                disk_id,
                 stat: Some(stat_response(state)),
             }
         });
@@ -1059,19 +1277,11 @@ impl Cladefsd for Control {
         &self,
         request: Request<GrantRequest>,
     ) -> Result<Response<GrantResponse>, Status> {
-        let GrantRequest { tenant, dir, dirs, uid, gid } = request.into_inner();
-        let mut all_dirs = Vec::with_capacity(dirs.len() + usize::from(!dir.is_empty()));
-        if !dir.is_empty() {
-            all_dirs.push(path(dir)?);
-        }
-        for extra in dirs {
-            all_dirs.push(path(extra)?);
-        }
-        if all_dirs.is_empty() {
-            return reply(Err(Errno::EINVAL));
-        }
+        let GrantRequest { tenant, uid, gid } = request.into_inner();
+        let pool = Arc::clone(self.disk_pool()?);
         let grants = self.grants.clone();
         let granted = cells::blocking(move || {
+            let all_dirs = pool.ensure_tenant_dirs(tenant)?;
             let socket = grants.grant_many(tenant, &all_dirs, (uid, gid))?;
             let socket = socket.into_os_string().into_string().map_err(|_| Errno::EINVAL)?;
             Ok(GrantResponse { socket })
@@ -1262,6 +1472,122 @@ impl Cladefsd for Control {
             })
             .collect();
         Ok(Response::new(ReloadKmsResponse { renamed: reloaded.renamed, master_keys }))
+    }
+
+    async fn list_disks(
+        &self,
+        _request: Request<ListDisksRequest>,
+    ) -> Result<Response<ListDisksResponse>, Status> {
+        use bucket_cell::host_disk::{DiskHealthState, DiskPlacement};
+        let pool = Arc::clone(self.disk_pool()?);
+        let disks = cells::blocking(move || {
+            let mut out = Vec::with_capacity(pool.disks().len());
+            for disk in pool.disks() {
+                let hd = &disk.host_disk;
+                let device = hd.dev().map_or_else(String::new, |dev| {
+                    format!(
+                        "{}:{}",
+                        libc::major(dev as libc::dev_t),
+                        libc::minor(dev as libc::dev_t)
+                    )
+                });
+                // Sample failure on an offline/broken disk reports 0 size/free without failing the
+                // whole ListDisks RPC.
+                let (size_bytes, free_bytes) =
+                    hd.sample().map_or((0, 0), |sample| (sample.size, sample.free));
+                let state = match hd.health() {
+                    DiskHealthState::Online => DiskHealthMode::DiskHealthOnline,
+                    DiskHealthState::Suspect => DiskHealthMode::DiskHealthSuspect,
+                    DiskHealthState::Offline => DiskHealthMode::DiskHealthOffline,
+                    DiskHealthState::Returning => DiskHealthMode::DiskHealthReturning,
+                } as i32;
+                let placement = match disk.placement() {
+                    DiskPlacement::ReadWrite => DiskPlacementMode::DiskPlacementReadWrite,
+                    DiskPlacement::Drain => DiskPlacementMode::DiskPlacementDrain,
+                    DiskPlacement::ReadOnly => DiskPlacementMode::DiskPlacementReadOnly,
+                } as i32;
+                out.push(DiskInfo {
+                    id: disk.id.clone(),
+                    device,
+                    state,
+                    placement,
+                    size_bytes,
+                    free_bytes,
+                    cap_bytes: disk.cap().unwrap_or(0),
+                    headroom_bytes: hd.headroom(),
+                    allowance_bytes: hd.allowance(),
+                    cells_bytes: hd.cells.bytes(),
+                    reserved_bytes: hd.cells.reserved() + hd.cells.pledged(),
+                    cache_bytes: hd.cache.get(),
+                    cache_cap_bytes: disk.cache_cap().unwrap_or(0),
+                    spare_bytes: disk.spare(),
+                    under_pressure: hd.under_pressure(),
+                    dirty_budget_bytes: disk.dirty_budget().unwrap_or(0),
+                });
+            }
+            Ok(out)
+        })
+        .await
+        .map_err(status)?;
+        bounded("ListDisks", ListDisksResponse { disks }, "fewer managed disks")
+    }
+
+    async fn set_disk_governance(
+        &self,
+        request: Request<SetDiskGovernanceRequest>,
+    ) -> Result<Response<SetDiskGovernanceResponse>, Status> {
+        use bucket_cell::host_disk::{DiskHeadroom, DiskPlacement};
+        let SetDiskGovernanceRequest {
+            id,
+            cap_bytes,
+            clear_cap,
+            cache_cap_bytes,
+            clear_cache_cap,
+            headroom_bytes,
+            headroom_percent,
+            clear_headroom,
+            dirty_budget_bytes,
+            clear_dirty_budget,
+            placement,
+        } = request.into_inner();
+        if id.is_empty()
+            || (cap_bytes.is_some() && clear_cap)
+            || (cache_cap_bytes.is_some() && clear_cache_cap)
+            || (headroom_bytes.is_some() && headroom_percent.is_some())
+            || ((headroom_bytes.is_some() || headroom_percent.is_some()) && clear_headroom)
+            || (dirty_budget_bytes.is_some() && clear_dirty_budget)
+        {
+            return Err(status(Errno::EINVAL));
+        }
+        let placement = match placement {
+            None => None,
+            Some(raw) => Some(match DiskPlacementMode::try_from(raw) {
+                Ok(DiskPlacementMode::DiskPlacementReadWrite) => DiskPlacement::ReadWrite,
+                Ok(DiskPlacementMode::DiskPlacementDrain) => DiskPlacement::Drain,
+                Ok(DiskPlacementMode::DiskPlacementReadOnly) => DiskPlacement::ReadOnly,
+                Err(_) => return Err(status(Errno::EINVAL)),
+            }),
+        };
+        let headroom = if clear_headroom {
+            Some(None)
+        } else if let Some(bytes) = headroom_bytes {
+            Some(Some(DiskHeadroom::Bytes(bytes)))
+        } else {
+            headroom_percent.map(|pct| Some(DiskHeadroom::Percent(u64::from(pct))))
+        };
+        let update = super::disks::GovernanceUpdate {
+            cap: if clear_cap { Some(None) } else { cap_bytes.map(Some) },
+            cache_cap: if clear_cache_cap { Some(None) } else { cache_cap_bytes.map(Some) },
+            headroom,
+            dirty_budget: if clear_dirty_budget {
+                Some(None)
+            } else {
+                dirty_budget_bytes.map(Some)
+            },
+            placement,
+        };
+        let pool = self.disk_pool()?;
+        reply(pool.update_governance(&id, update).map(|()| SetDiskGovernanceResponse {}))
     }
 }
 

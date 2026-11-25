@@ -212,27 +212,27 @@ RUN git clone --bare --depth 1 --branch v6.18 https://github.com/torvalds/linux 
     /// sandboxes attach.
     fn fxfs(vms: &Vms, dir: &Path) -> anyhow::Result<()> {
         let control = control(&vms.cladefsd)?;
-        let publisher = dir.join("publisher");
-        format(&publisher, CAPACITY)?;
-        let (vm, stream) = vms.run("checkout", &publisher, true)?;
+        let disk_root = crate::common::disk_root_for(dir, "cladefsd");
+        let publisher = format(&vms.cladefsd, &disk_root, CAPACITY)?;
+        let (vm, stream) = vms.run("checkout", publisher, true)?;
         let mut stream = stream.context("the first VM's connection")?;
-        let path = dir.join("generation");
-        let generation = next_generation(&mut stream, &control, &publisher, path)?;
+        let generation = next_generation(&mut stream, &control, publisher)?;
         vm.wait()?;
-        measure_metadata(&publisher)?;
+        measure_metadata(&crate::common::cell_disk_path(&disk_root, publisher))?;
         measure_disk(dir, "checkout")?;
-        vms.run("reopened", &publisher, false)?.0.wait()?;
+        vms.run("reopened", publisher, false)?.0.wait()?;
 
         let generations = [generation];
         for sandbox in 0..SANDBOXES {
             let role = format!("sandbox-{sandbox}");
-            vms.run_consumer(&role, &dir.join(&role), &control, &generations)?;
+            let cell = crate::common::create_cell(&vms.cladefsd, CAPACITY)?;
+            vms.run_consumer(&role, cell, &control, &generations)?;
             measure_disk(dir, &role)?;
         }
-        let cell_dir = dir.join("hundreds");
-        vms.run_consumer("hundreds", &cell_dir, &control, &generations)?;
+        let hundreds = crate::common::create_cell(&vms.cladefsd, CAPACITY)?;
+        vms.run_consumer("hundreds", hundreds, &control, &generations)?;
         measure_disk(dir, "hundreds")?;
-        vms.run("rebooted", &cell_dir, false)?.0.wait()
+        vms.run("rebooted", hundreds, false)?.0.wait()
     }
 
     impl Test for TestLinuxCheckout {

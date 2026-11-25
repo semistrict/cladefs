@@ -41,10 +41,10 @@ mod host {
     const WINDOW: crate::common::Window = crate::common::Window::Large;
     const VOLUMES: [&str; 4] = ["default", "a", "b", "c"];
 
-    /// Makes the cell at `path`, with `VOLUMES`, empty.
+    /// Formats the empty cell at `path` with `VOLUMES`.
     fn format(path: &Path) -> anyhow::Result<()> {
         block_on(async {
-            let image = Image::format(Storage::create(path, CAPACITY).await?).await?;
+            let image = Image::format(Storage::open(path).await?).await?;
             for volume in VOLUMES {
                 image.create_volume(volume).await?.unmount().await?;
             }
@@ -77,13 +77,14 @@ mod host {
         }
 
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
-            let path = test_setup.tmp_dir.join("extents");
+            let (cell, path) =
+                crate::common::create_shared_cell(&test_setup.tmp_dir, "extents", CAPACITY)?;
             format(&path)?;
             let mut vm = Vm::new(2, 512)?;
             vm.guest_kernel()?;
-            vm.cell(
+            vm.cell_id(
                 "extents",
-                &path,
+                cell,
                 CAPACITY,
                 if self.dax { crate::common::dax_window(WINDOW)? } else { 0 },
             )?;
@@ -95,7 +96,8 @@ mod host {
             if output != "OK\n" {
                 return TestOutcome::Fail(format!("expected exactly \"OK\\n\", got {output:?}"));
             }
-            let path = test_setup.tmp_dir.join("extents");
+            let path = crate::common::shared_cell_path(&test_setup.tmp_dir, "extents")
+                .expect("shared cell path");
             for volume in ["a", "b"] {
                 match read(&path, volume) {
                     Ok(data) if data == contents(volume) => {}

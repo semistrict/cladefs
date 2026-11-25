@@ -98,6 +98,7 @@ mod daemon;
 #[cfg(target_os = "linux")]
 mod device;
 pub mod disk;
+pub(crate) mod disks;
 pub mod drain;
 #[cfg(any(target_os = "linux", madsim))]
 pub mod events;

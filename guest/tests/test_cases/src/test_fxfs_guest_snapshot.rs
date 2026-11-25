@@ -227,11 +227,10 @@ mod host {
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
     use anyhow::Context;
     use cladefs::cladefsd::control::proto::{
-        GetStatsRequest, GrantRequest, ListVersionsRequest, ResizeCellRequest, ShrinkMemoryRequest,
-        StatCellRequest,
+        GetStatsRequest, GrantRequest, ListCellsRequest, ListVersionsRequest, ResizeCellRequest,
+        ShrinkMemoryRequest, StatCellRequest,
     };
     use cladefs::memory_cell::MemoryCell;
-    use cladefs::testing::control_path;
     use cladefs::{Filesystem, Image, Storage};
     use futures::executor::block_on;
     use std::io::{BufRead, BufReader, Write};
@@ -330,15 +329,10 @@ mod host {
         Ok(())
     }
 
-    /// The cell directory the test's restore `name` opens.
-    fn cell_dir(dir: &Path, name: &str) -> PathBuf {
-        dir.join(format!("store-{name}"))
-    }
-
-    /// Makes the cell at `path`, with the default volume, `volumes` others and `RO_VOLUME`, empty.
+    /// Formats the empty cell at `path`, with the default volume, `volumes` others and `RO_VOLUME`.
     fn format(path: &Path, volumes: usize) -> anyhow::Result<()> {
         block_on(async {
-            let image = Image::format(Storage::create(path, CAPACITY).await?).await?;
+            let image = Image::format(Storage::open(path).await?).await?;
             image.create_volume("default").await?.unmount().await?;
             for volume in 0..volumes {
                 image.create_volume(&format!("v{volume}")).await?.unmount().await?;
@@ -350,29 +344,24 @@ mod host {
         })
     }
 
-    /// What a VM manager does for a tenant's VM to restore the snapshot at `snapshot` where its
-    /// version isn't (TASK-154): the tenant granted `dir`, and the version's cell, as the daemon
-    /// says it, not as the snapshot does, made a cell directory at `version` in it. Returns the
-    /// tenant's socket, given to the jail's user, if Firecracker runs in one. The tenant is its ID
-    /// in the bucket (TASK-364); the version stays the snapshot's tenant's, and the restores are
-    /// the tenant's. Grants `tenant` a socket in `dir`, and shares the snapshot's version of the
-    /// VM's cell at `source` with it, as its VM manager does for another tenant's restores
-    /// (TASK-395.7).
+    /// Grants `tenant` a socket on `cladefsd` and shares the snapshot's version of `source` with it.
     fn share_with_tenant(
         cladefsd: &Path,
-        source: &Path,
-        dir: &Path,
+        source: cladefs::CellId,
         tenant: u64,
     ) -> anyhow::Result<PathBuf> {
         let control = crate::common::control(cladefsd)?;
         let versions = control
             .call(async |client| {
-                client.list_versions(ListVersionsRequest { path: control_path(source) }).await
+                client
+                    .list_versions(ListVersionsRequest { tenant: source.tenant, cell: source.id })
+                    .await
             })
             .map(|response| response.versions)?;
         let version = versions.last().context("the snapshot made no version")?;
         let share = cladefs::cladefsd::control::proto::ShareVersionRequest {
-            path: control_path(source),
+            tenant: source.tenant,
+            cell: source.id,
             version: version.id,
             shared: true,
         };
@@ -381,17 +370,7 @@ mod host {
         let uid = id("CLADEFS_JAIL_UID")?;
         let gid = id("CLADEFS_JAIL_GID")?;
         Ok(control
-            .call(async |client| {
-                client
-                    .grant(GrantRequest {
-                        tenant: tenant,
-                        dir: control_path(dir),
-                        dirs: Vec::new(),
-                        uid: uid,
-                        gid: gid,
-                    })
-                    .await
-            })
+            .call(async |client| client.grant(GrantRequest { tenant, uid, gid }).await)
             .map(|response| std::path::PathBuf::from(response.socket))?)
     }
 
@@ -455,6 +434,7 @@ mod host {
                 _ => std::env::var_os("CLADEFSD").context("CLADEFSD not set")?.into(),
             };
             let (snapshot, memory) = (dir.join("snapshot"), dir.join("memory"));
+            let mut source_cell = None;
             if phase == Some(Phase::Target) {
                 // The VM as the source host left it, where it was there.
                 let bundle = bundle()?;
@@ -463,8 +443,17 @@ mod host {
                         .with_context(|| format!("taking {name} from the bundle"))?;
                 }
             } else {
+                let cell = crate::common::create_cell(&cladefsd, CAPACITY)?;
+                crate::common::save_cell_id(dir, "source", cell)?;
+                source_cell = Some(cell);
                 if self.volumes > 0 || self.read_only == ReadOnly::Volume {
-                    format(&cell_dir(dir, "source"), self.volumes)?;
+                    let disk_root = match self.mode {
+                        Mode::Migrate | Mode::TenantMigrate => {
+                            crate::common::disk_root_for(dir, "cladefsd")
+                        }
+                        _ => crate::common::shared_disk_root()?,
+                    };
+                    format(&crate::common::cell_disk_path(&disk_root, cell), self.volumes)?;
                 }
                 let mut vm = Vm::new(2, 512)?;
                 vm.guest_kernel()?;
@@ -478,7 +467,7 @@ mod host {
                 } else {
                     0
                 };
-                vm.cell_served("extents", &cell_dir(dir, "source"), CAPACITY, window, &cladefsd);
+                vm.cell_id_served("extents", cell, CAPACITY, window, &cladefsd);
                 vm.read_only_root();
                 let source_uds = uds("source");
                 vm.vsock(&source_uds);
@@ -507,7 +496,7 @@ mod host {
             let mut memory_version = None;
             if self.memory == Memory::Cell {
                 let size = std::fs::metadata(&memory)?.len();
-                let memory_cell = MemoryCell::open(&cladefsd, &dir.join("memory-cell"), size)?;
+                let memory_cell = MemoryCell::create_cell(&cladefsd, 0, size)?;
                 let start = std::time::Instant::now();
                 memory_cell.import(&memory)?;
                 eprintln!("memory: imported in {:?}", start.elapsed());
@@ -534,8 +523,22 @@ mod host {
             }
 
             if self.mode == Mode::Suspend {
-                resize_once_let_go(&cladefsd, &cell_dir(dir, "source"))?;
+                resize_once_let_go(&cladefsd, source_cell.context("no source cell")?)?;
             }
+
+            // Record cells present before Zygote restores so `check()` can locate the restored
+            // cells placed by the daemon.
+            let cells_before_restore: std::collections::BTreeSet<(u64, u64)> =
+                if self.mode == Mode::Zygote {
+                    crate::common::control(&cladefsd)?
+                        .call(async |client| client.list_cells(ListCellsRequest {}).await)?
+                        .stores
+                        .into_iter()
+                        .map(|c| (c.tenant, c.cell))
+                        .collect()
+                } else {
+                    std::collections::BTreeSet::new()
+                };
 
             // Restored, told its name: each into its own cell, but resuming.
             let mut restored = Vec::new();
@@ -544,31 +547,26 @@ mod host {
             let mut gives_back = None;
             // Each restore's tenant, of an ID of its own (TASK-364), where it has one.
             for (&name, id) in self.restores(phase).iter().zip(1..) {
-                let elsewhere = dir.join(format!("elsewhere-{name}"));
                 let overrides = match self.mode {
                     Mode::Zygote => serde_json::json!([
-                        { "id": "extents", "path_on_host": cell_dir(dir, name) },
+                        { "id": "extents", "path_on_host": "0/0" },
                     ]),
                     Mode::Suspend => serde_json::json!([]),
-                    Mode::Migrate => {
-                        std::fs::create_dir_all(&elsewhere)?;
-                        serde_json::json!([{
-                            "id": "extents",
-                            "path_on_host": cell_dir(&elsewhere, name),
-                            "cladefsd_socket": cladefsd,
-                        }])
-                    }
+                    Mode::Migrate => serde_json::json!([{
+                        "id": "extents",
+                        "path_on_host": "0/0",
+                        "cladefsd_socket": cladefsd,
+                    }]),
                     // The snapshot's own tenant's: only the cell to name.
                     Mode::TenantMigrate if name == "here" => serde_json::json!([
-                        { "id": "extents", "path_on_host": cell_dir(dir, name) },
+                        { "id": "extents", "path_on_host": "0/0" },
                     ]),
                     Mode::TenantMigrate => {
-                        std::fs::create_dir_all(&elsewhere)?;
-                        let source = cell_dir(dir, "source");
-                        let socket = share_with_tenant(&cladefsd, &source, &elsewhere, id)?;
+                        let source = source_cell.context("no source cell")?;
+                        let socket = share_with_tenant(&cladefsd, source, id)?;
                         serde_json::json!([{
                             "id": "extents",
-                            "path_on_host": cell_dir(&elsewhere, name),
+                            "path_on_host": format!("{id}/0"),
                             "cladefsd_socket": socket,
                         }])
                     }
@@ -589,7 +587,7 @@ mod host {
                 if self.memory == Memory::Cell {
                     load["mem_backend"] = serde_json::json!({
                         "backend_type": "Cell",
-                        "backend_path": dir.join(format!("memory-{name}")),
+                        "backend_path": "0/0",
                     });
                     let version = memory_version.context("the memory cell made no version")?;
                     load["memory_cell"] = serde_json::json!({
@@ -721,13 +719,23 @@ mod host {
                 crate::vm::split_console(std::fs::File::open(&console)?)?;
                 anyhow::ensure!(status.success(), "a restored VM exited {status}");
             }
+            if self.mode == Mode::Zygote {
+                let created: Vec<String> = crate::common::control(&cladefsd)?
+                    .call(async |client| client.list_cells(ListCellsRequest {}).await)?
+                    .stores
+                    .into_iter()
+                    .filter(|c| !cells_before_restore.contains(&(c.tenant, c.cell)))
+                    .map(|c| cladefs::CellId { tenant: c.tenant, id: c.cell }.to_string())
+                    .collect();
+                std::fs::write(dir.join("restored.cells"), created.join("\n"))?;
+            }
             Ok(())
         }
     }
 
-    /// Grows the cell at `path` to `GROWN`, once the daemon lets go of the VM killed just now: it
+    /// Grows `cell` to `GROWN`, once the daemon lets go of the VM killed just now: it
     /// refuses a resize (`EBUSY`) while a connection whose VM process is gone holds the cell.
-    fn resize_once_let_go(cladefsd: &Path, path: &Path) -> anyhow::Result<()> {
+    fn resize_once_let_go(cladefsd: &Path, cell: cladefs::CellId) -> anyhow::Result<()> {
         let control = crate::common::control(cladefsd)?;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
@@ -735,7 +743,8 @@ mod host {
                 .call(async |client| {
                     client
                         .resize_cell(ResizeCellRequest {
-                            path: control_path(path),
+                            tenant: cell.tenant,
+                            cell: cell.id,
                             capacity: GROWN,
                         })
                         .await
@@ -784,41 +793,51 @@ mod host {
             }
             // Each cell holds what its guest wrote, checked, and not another's: but a migrated
             // one, whose data the daemon that served it took from its bucket, gone with it.
-            let cell_dirs: Vec<(&str, PathBuf)> = match self.mode {
-                Mode::Zygote => restores
-                    .iter()
-                    .map(|name| (*name, cell_dir(&test_setup.tmp_dir, name)))
-                    .collect(),
-                Mode::Suspend => vec![(restores[0], cell_dir(&test_setup.tmp_dir, "source"))],
-                Mode::Migrate | Mode::TenantMigrate => vec![],
+            let disk_root = crate::common::shared_disk_root().ok();
+            let check_cells: Vec<cladefs::CellId> = match self.mode {
+                Mode::Zygote if self.memory != Memory::Cell => {
+                    let text = std::fs::read_to_string(test_setup.tmp_dir.join("restored.cells"))
+                        .expect("restored.cells");
+                    text.lines()
+                        .filter(|l| !l.trim().is_empty())
+                        .map(|l| l.trim().parse().expect("cell id"))
+                        .collect()
+                }
+                Mode::Suspend => {
+                    vec![
+                        crate::common::load_cell_id(&test_setup.tmp_dir, "source").expect("source"),
+                    ]
+                }
+                _ => vec![],
             };
-            // The daemon keeps the snapshot's version open for the restores after these
-            // (TASK-92.5), and with it the directory of the cells forked from it, which this
-            // process may not open meanwhile: a look at the version through the daemon's control
-            // API, which works on the version alone, closes it first.
-            if !cell_dirs.is_empty() {
+            if !check_cells.is_empty() {
                 let cladefsd = std::env::var_os("CLADEFSD").expect("CLADEFSD");
-                let mut version = test_setup.tmp_dir.join("snapshot").into_os_string();
-                version.push(".extent-extents");
                 let control = crate::common::control(Path::new(&cladefsd)).expect("control API");
-                control
-                    .call(async |client| {
-                        client
-                            .stat_cell(StatCellRequest { path: control_path(Path::new(&version)) })
-                            .await
+                let disk_root = disk_root.expect("CLADEFSD_ROOTS");
+                let mut seen = std::collections::BTreeSet::new();
+                for cell in check_cells {
+                    control
+                        .call(async |client| {
+                            client
+                                .stat_cell(StatCellRequest { tenant: cell.tenant, cell: cell.id })
+                                .await
+                        })
+                        .expect("stat restored cell");
+                    let path = crate::common::cell_disk_path(&disk_root, cell);
+                    let fs = block_on(async {
+                        let storage = Storage::open(&path).await.expect("open cell");
+                        Filesystem::mount(storage.check().await?).await
                     })
-                    .expect("the snapshot's version");
-            }
-            for (name, path) in cell_dirs {
-                let fs = block_on(async {
-                    let storage = Storage::open(path).await.expect("open cell");
-                    Filesystem::mount(storage.check().await?).await
-                })
-                .expect("mount cell");
-                assert_eq!(read_file(&fs, "before"), BEFORE, "cell {name}: before");
-                assert_eq!(read_file(&fs, "who"), name.as_bytes(), "cell {name}: who");
-                assert_eq!(read_file(&fs, "after").len(), 4 << 20, "cell {name}: after");
-                assert!(read_file(&fs, "pieces") == pieces_stored(), "cell {name}: pieces");
+                    .expect("mount cell");
+                    let who = String::from_utf8(read_file(&fs, "who")).expect("who utf-8");
+                    assert_eq!(read_file(&fs, "before"), BEFORE, "cell {who}: before");
+                    assert_eq!(read_file(&fs, "after").len(), 4 << 20, "cell {who}: after");
+                    assert!(read_file(&fs, "pieces") == pieces_stored(), "cell {who}: pieces");
+                    seen.insert(who);
+                }
+                let expected_who: std::collections::BTreeSet<String> =
+                    restores.iter().map(|s| (*s).to_owned()).collect();
+                assert_eq!(seen, expected_who, "restored cells' who markers");
             }
             TestOutcome::Pass
         }

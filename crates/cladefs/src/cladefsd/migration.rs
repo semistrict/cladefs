@@ -494,15 +494,15 @@ enum SourceKind {
 }
 
 /// Begins the migration of the cell at `path` (ephemeral or bucket-backed) to the daemon whose peer
-/// address is `peer`, its cell going at `to` there (`MigrateCell`, board 11369): prepared there,
-/// then rounds sending its unacknowledged finalized segments as they come, until its hand-over.
-/// Returns the migration's ID.
+/// address is `peer` (`MigrateCell`, board 11369, hotbed question 547): the target picks its own
+/// managed JBOD disk (`to` empty), refers to an ephemeral cell's origin first, then rounds stream
+/// unacknowledged finalized segments until hand-over. Returns the migration's ID.
 pub(super) async fn migrate_on(
     daemon: &Arc<Daemon>,
     path: PathBuf,
     peer: String,
-    to: String,
 ) -> Result<u64, Errno> {
+    let to = String::new();
     let path = super::cells::cell_dir_key(&path);
     let reserved = Reserved::new(daemon, &path)?;
     let read = path.clone();
@@ -1128,6 +1128,12 @@ async fn finish_deleting_bucket(daemon: &Daemon, path: &Path) -> Result<bool, Er
         return Ok(false);
     }
     daemon.migrations.outgoing.lock().unwrap().remove(path);
+    if let Some(pool) = daemon.disk_pool() {
+        // Best-effort index cleanup; source cell directory is already gone.
+        if let Ok(cell) = local_cell::upload::blocking(|| local_cell::host_cell(path)) {
+            pool.forget_cell(cell);
+        }
+    }
     let remove = path.to_owned();
     let local = Arc::clone(daemon.host.local());
     super::cells::blocking(move || {
@@ -1527,6 +1533,12 @@ async fn let_go_bucket(
     peer: &str,
     migration: u64,
 ) -> Result<(), Errno> {
+    if let Some(pool) = daemon.disk_pool() {
+        // Best-effort index cleanup; source cell directory is already gone.
+        if let Ok(cell) = local_cell::upload::blocking(|| local_cell::host_cell(path)) {
+            pool.forget_cell(cell);
+        }
+    }
     let remove = path.to_owned();
     let local = Arc::clone(daemon.host.local());
     super::cells::blocking(move || {
@@ -1721,6 +1733,9 @@ async fn let_go(
         })
     })
     .await?;
+    if let Some(pool) = daemon.disk_pool() {
+        pool.forget_cell(child);
+    }
     crate::faults::crashpoint!("migration::let_go");
     release(daemon, peer, *migration).await;
     let retired = host.retire_reference(entry).await;
@@ -2083,16 +2098,20 @@ pub(super) mod target {
     }
 
     /// The directories bucket-backed cells migrated to this host may go in (board 11369):
-    /// `CLADEFSD_ROOTS` if configured, falling back to `CLADEFSD_EPHEMERAL_CELLS`.
+    /// `DiskPool::cell_roots()` when configured, else `CLADEFSD_ROOTS`, falling back to
+    /// `CLADEFSD_EPHEMERAL_CELLS`.
     fn bucket_cells_roots(daemon: &Daemon) -> Result<Vec<PathBuf>, String> {
+        if let Some(pool) = daemon.disk_pool() {
+            return Ok(pool.cell_roots());
+        }
         if let Some(roots) = super::super::server::resolve_roots_on(daemon)? {
             return Ok(roots.to_vec());
         }
         if node_local::env::var_os("CLADEFSD_EPHEMERAL_CELLS").is_some_and(|set| !set.is_empty()) {
             return cells_roots();
         }
-        Err("neither CLADEFSD_ROOTS nor CLADEFSD_EPHEMERAL_CELLS names a directory for migrated \
-             cells"
+        Err("neither [[disks]], CLADEFSD_ROOTS, nor CLADEFSD_EPHEMERAL_CELLS names a directory for \
+             migrated cells"
             .into())
     }
 
@@ -2290,7 +2309,62 @@ pub(super) mod target {
                     "migration {migration:x}: its bucket is not this host's"
                 )));
             }
-            let path = if bucket_backed {
+            let child = CellId { tenant, id: cell };
+            let path = if to.is_empty() {
+                if !bucket_backed && parent_cell == 0 {
+                    return Err(Status::invalid_argument(format!(
+                        "migration {migration:x}: ephemeral prepare names no parent cell"
+                    )));
+                }
+                // Reuse the already-chosen destination path on idempotent retries of `Prepare`
+                // so a multi-disk `pick_disk()` never changes the path between retries.
+                let existing = if bucket_backed {
+                    daemon
+                        .migrations
+                        .bucket_migrations
+                        .lock()
+                        .unwrap()
+                        .receiving
+                        .get(&migration)
+                        .filter(|r| r.child == child)
+                        .map(|r| r.path.clone())
+                } else {
+                    match ephemeral_host::host_on(&daemon.host) {
+                        Ok(host) => host
+                            .entry(child)
+                            .map_err(|err| status("reading ephemeral host entry", err))?
+                            .filter(|e| {
+                                matches!(e.migrating, Some(Migrating::Receiving { id, .. }) if id == migration)
+                            })
+                            .map(|e| e.path),
+                        // Ephemeral host is not configured; fall through to normal target path
+                        // allocation (prepare_ephemeral will fail cleanly below if required).
+                        Err(_) => None,
+                    }
+                };
+                if let Some(existing) = existing {
+                    existing
+                } else {
+                    let pool = daemon.disk_pool().ok_or_else(|| {
+                        Status::failed_precondition(
+                            "no managed disks configured for incoming migrations",
+                        )
+                    })?;
+                    let disk = pool.pick_disk().map_err(|_| {
+                        Status::resource_exhausted(format!(
+                            "migration {migration:x}: no writable disk with spare space"
+                        ))
+                    })?;
+                    super::super::disks::DiskPool::ensure_tenant_dir(&disk, tenant).map_err(
+                        |errno| {
+                            Status::internal(format!(
+                                "migration {migration:x}: creating tenant dir: {errno}"
+                            ))
+                        },
+                    )?;
+                    super::super::disks::DiskPool::cell_path(&disk, child)
+                }
+            } else if bucket_backed {
                 let roots = bucket_cells_roots(daemon).map_err(Status::failed_precondition)?;
                 bucket_cell_path(daemon, &roots, &to).ok_or_else(|| {
                     Status::invalid_argument(format!(
@@ -2312,7 +2386,6 @@ pub(super) mod target {
                     ))
                 })?
             };
-            let child = CellId { tenant, id: cell };
             let parent = CellId { tenant: parent_tenant, id: parent_cell };
             let origin = Origin { parent, at, epoch: parent_epoch };
             Ok(Prepare { migration, child, origin, bucket, path, epoch, bucket_backed })
@@ -3005,6 +3078,7 @@ pub(super) mod target {
             return Ok(false);
         }
         let into = entry.path.clone();
+        let into_for_move = into.clone();
         // Its staging directory closed before it goes into place, its footprint the cell's.
         daemon.migrations.staging.lock().unwrap().remove(&migration);
         let moved = move || -> std::io::Result<()> {
@@ -3013,9 +3087,9 @@ pub(super) mod target {
                 // 5376), plus any unlisted control files, before syncing and renaming into place.
                 prune_extra_files(&staged, &files)?;
                 sync_tree(&staged)?;
-                host_fs::rename(&staged, &into)?;
+                host_fs::rename(&staged, &into_for_move)?;
             }
-            host_fs::File::open(into.parent().unwrap_or(Path::new(".")))?.sync_all()
+            host_fs::File::open(into_for_move.parent().unwrap_or(Path::new(".")))?.sync_all()
         };
         off(move || moved().map_err(|err| status("taking the cell", err))).await?;
         crate::faults::crashpoint!("migration::renamed");
@@ -3043,6 +3117,9 @@ pub(super) mod target {
             host.note(&taken).map_err(|err| status("noting the cell", err))
         })
         .await?;
+        if let Some(pool) = daemon.disk_pool() {
+            pool.register_cell(child, into);
+        }
         forget(&daemon, migration);
         Ok(true)
     }
@@ -3282,6 +3359,9 @@ pub(super) mod target {
                 }
                 open_cell.close().await;
                 drop(hold);
+                if let Some(pool) = daemon.disk_pool() {
+                    pool.register_cell(receiving.child, into);
+                }
                 crate::faults::crashpoint!("migration::after_bucket_open");
                 {
                     let mut state = daemon.migrations.bucket_migrations.lock().unwrap();

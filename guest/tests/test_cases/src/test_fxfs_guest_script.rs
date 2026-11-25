@@ -70,12 +70,16 @@ mod host {
     const SMALL_IMAGE_SIZE: u64 = 64 << 20;
     const WINDOW: crate::common::Window = crate::common::Window::Large;
 
-    fn create_image(path: &Path, size: u64) -> anyhow::Result<()> {
+    fn create_image(path: &Path) -> anyhow::Result<()> {
         block_on(async {
-            let fs = Filesystem::format(Storage::create(path, size).await?).await?;
+            let fs = Filesystem::format(Storage::open(path).await?).await?;
             fs.close().await?;
             Ok(())
         })
+    }
+
+    fn image_path(dir: &Path) -> std::path::PathBuf {
+        crate::common::shared_cell_path(dir, "cladefs").unwrap_or_else(|_| dir.join("cladefs.img"))
     }
 
     /// cladefs: how the killed run in `dir`, which said `stdout`, failed, if it did: as a run does,
@@ -102,7 +106,7 @@ mod host {
             Some(Failure { op: Some(kill), kind: kind.to_owned(), what })
         };
         let fs = block_on(async {
-            let storage = Storage::open(dir.join("cladefs.img")).await?;
+            let storage = Storage::open(image_path(dir)).await?;
             anyhow::Ok(Filesystem::mount(storage.check().await?).await?)
         });
         let fs = match fs {
@@ -145,7 +149,7 @@ mod host {
             return Some(Failure { op: None, kind: kind::DIED.to_owned(), what });
         }
         let files: Vec<_> = (0..SEVERAL_FILES.files).map(|n| (file(n), model(n))).collect();
-        script_vm::stored_as_modelled(&dir.join("cladefs.img"), &files).or_else(|| {
+        script_vm::stored_as_modelled(&image_path(dir), &files).or_else(|| {
             crate::vm::complaints(&dir.join("console.txt")).err().map(|err| Failure {
                 op: None,
                 kind: kind::COMPLAINT.to_owned(),
@@ -230,14 +234,15 @@ mod host {
         }
 
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
-            let image = test_setup.tmp_dir.join("cladefs.img");
             let size = if self.full { SMALL_IMAGE_SIZE } else { IMAGE_SIZE };
-            create_image(&image, size)?;
+            let (cell, image) =
+                crate::common::create_shared_cell(&test_setup.tmp_dir, "cladefs", size)?;
+            create_image(&image)?;
             let mut vm = Vm::new(2, 512)?;
             vm.guest_kernel()?;
-            vm.cell(
+            vm.cell_id(
                 "cladefs",
-                &image,
+                cell,
                 size,
                 if self.dax { crate::common::dax_window(WINDOW)? } else { 0 },
             )?;

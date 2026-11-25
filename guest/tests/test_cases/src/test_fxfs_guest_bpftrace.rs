@@ -45,10 +45,9 @@ mod host {
         }
 
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
-            let path = test_setup.tmp_dir.join("extents");
             let mut vm = Vm::new(2, 1024)?;
             vm.guest_kernel()?;
-            vm.cell("extents", &path, CAPACITY, dax_window(Window::Large)?)?;
+            vm.new_cell("extents", CAPACITY, dax_window(Window::Large)?)?;
             vm.enter(&setup_rootfs(&test_setup)?, &test_setup.test_case)
         }
     }

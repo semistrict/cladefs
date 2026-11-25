@@ -323,6 +323,30 @@ pub(super) fn part_cache(daemon: &Daemon) -> Result<Option<Arc<Cache>>, Errno> {
     })
 }
 
+/// Opens `daemon`'s part cache explicitly over `dirs` with aggregate `capacity` (used by TOML
+/// `boot_with_config` via `DiskPool`).
+pub(super) fn open_part_cache_with(
+    daemon: &Daemon,
+    dirs: &[PathBuf],
+    capacity: u64,
+) -> Result<Option<Arc<Cache>>, String> {
+    let mut opened = daemon.part_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(cache) = &*opened {
+        return Ok(cache.clone());
+    }
+    if dirs.is_empty() {
+        return Ok(opened.insert(None).clone());
+    }
+    let cache = local_cell::upload::blocking(|| {
+        Cache::open_all_on(daemon.host.bucket_host(), dirs, capacity)
+    })
+    .map_err(|err| {
+        let shown = dirs.iter().map(|d| d.display().to_string()).collect::<Vec<_>>().join(":");
+        format!("part cache ({shown}): {err}")
+    })?;
+    Ok(opened.insert(Some(Arc::new(cache))).clone())
+}
+
 /// cladefs: the part cache, as [`part_cache`] opens it, or why it can't be, naming the variable
 /// that configures it and the cause (board 8595).
 pub(super) fn open_part_cache(daemon: &Daemon) -> Result<Option<Arc<Cache>>, String> {

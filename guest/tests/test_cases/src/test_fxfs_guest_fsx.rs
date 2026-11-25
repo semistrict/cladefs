@@ -213,10 +213,11 @@ mod host {
             )
         }
 
-        fn create_images(test_setup: &TestSetup) -> anyhow::Result<()> {
-            let image = test_setup.tmp_dir.join("cladefs.img");
+        fn create_images(test_setup: &TestSetup) -> anyhow::Result<cladefs::CellId> {
+            let (cell, image) =
+                crate::common::create_shared_cell(&test_setup.tmp_dir, "cladefs", IMAGE_SIZE)?;
             block_on(async {
-                let fs = Filesystem::format(Storage::create(&image, IMAGE_SIZE).await?).await?;
+                let fs = Filesystem::format(Storage::open(&image).await?).await?;
                 fs.close().await?;
                 anyhow::Ok(())
             })?;
@@ -228,7 +229,7 @@ mod host {
                 .status()
                 .context("running mkfs.ext4")?;
             anyhow::ensure!(status.success(), "mkfs.ext4 of {}: {status}", reference.display());
-            Ok(())
+            Ok(cell)
         }
     }
 
@@ -254,11 +255,11 @@ mod host {
         }
 
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
-            Self::create_images(&test_setup)?;
+            let cell = Self::create_images(&test_setup)?;
             let mut vm = Vm::new(2, 1024)?;
             vm.guest_kernel()?;
             let window = if self.dax { crate::common::dax_window(WINDOW)? } else { 0 };
-            vm.cell("cladefs", &test_setup.tmp_dir.join("cladefs.img"), IMAGE_SIZE, window)?;
+            vm.cell_id("cladefs", cell, IMAGE_SIZE, window)?;
             let device = vm.disk("reference", &test_setup.tmp_dir.join("ext4.img"))?;
             vm.env(&CString::new(format!("{REFERENCE}={device}"))?);
             vm.env(&CString::new(format!("{SECS}={}", secs(SECS, DEFAULT_SECS)))?);
@@ -297,7 +298,9 @@ mod host {
                 ));
             }
             let files: Vec<_> = (0..HOSTILE.files).map(|n| (file(n), model(n))).collect();
-            match script_vm::stored_as_modelled(&test_setup.tmp_dir.join("cladefs.img"), &files) {
+            let image_path = crate::common::shared_cell_path(&test_setup.tmp_dir, "cladefs")
+                .expect("shared cell path");
+            match script_vm::stored_as_modelled(&image_path, &files) {
                 Some(failure) => TestOutcome::Fail(format!("the last script's files: {failure}")),
                 None => TestOutcome::Pass,
             }

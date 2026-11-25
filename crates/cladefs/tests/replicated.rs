@@ -25,7 +25,6 @@
 use cladefs::cladefsd::control::proto::{CellKind, CreateCellRequest, FsyncLevel};
 use cladefs::cladefsd::control::proto::{StatCellRequest, SyncCellRequest};
 use cladefs::testing::Control;
-use cladefs::testing::control_path;
 use cladefs::{CellClient, CellId, ExtentId, VolatileSlice, VolatileSliceMut};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
@@ -55,13 +54,11 @@ struct Daemon {
 }
 
 impl Daemon {
-    fn stat(&self, path: &Path) -> cladefs::cladefsd::control::proto::StatCellResponse {
-        let request = StatCellRequest { path: control_path(path) };
+    fn stat(&self, cell: CellId) -> cladefs::cladefsd::control::proto::StatCellResponse {
+        let request = StatCellRequest { tenant: cell.tenant, cell: cell.id };
         self.control.call(async |client| client.stat_cell(request).await).unwrap()
     }
-}
 
-impl Daemon {
     /// Kills its process at once, as a host's crash does.
     fn kill(&mut self) {
         drop(self.process.take());
@@ -71,13 +68,15 @@ impl Daemon {
 /// A daemon serving in `dir`, keeping its cells in the file bucket at `bucket`, its replica
 /// directory in `dir`, serving its peers at `peers`' first address, and asking them all.
 fn daemon(dir: &Path, bucket: &Path, peers: &[String]) -> Daemon {
-    std::fs::create_dir_all(dir).unwrap();
+    let disk = dir.join("disk0");
+    std::fs::create_dir_all(&disk).unwrap();
     let (vms, control) = (dir.join("cladefsd.sock"), dir.join("control.sock"));
     let mut command = Command::new(env!("CARGO_BIN_EXE_cladefsd"));
     command
         .arg(&vms)
         .env("CLADEFSD_BUCKET", format!("file://{}/", bucket.display()))
         .env("CLADEFSD_TOKEN", "1")
+        .env("CLADEFSD_ROOTS", &disk)
         .env("CLADEFSD_PART_CACHE", dir.join("cache"))
         .env("CLADEFSD_STATS", dir.join("stats"))
         .env("CLADEFSD_GRPC", &control)
@@ -122,14 +121,13 @@ fn hosts(root: &Path, bucket: &Path, count: usize) -> (Vec<String>, Vec<Daemon>)
     (addresses, daemons)
 }
 
-/// Makes a cell at `path` on `daemon`, a new cell replicated with f = 1, its guest's fsync and
-/// sync waiting for Replicated.
-fn create_replicated(daemon: &Daemon, path: &Path) -> CellId {
+/// Makes a cell on `daemon`, a new cell replicated with f = 1, its guest's fsync and sync waiting
+/// for Replicated.
+fn create_replicated(daemon: &Daemon) -> CellId {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     let made = runtime.block_on(async {
         let mut client = cladefs::cladefsd::control::connect(&daemon.control_socket).await.unwrap();
         let request = CreateCellRequest {
-            path: path.to_str().unwrap().to_owned(),
             capacity: CAPACITY,
             kind: CellKind::Fxfs.into(),
             replicas: Some(1),
@@ -207,18 +205,18 @@ fn configuration(bucket: &Path, cell: CellId) -> (u64, u8, Vec<String>) {
     (configuration.number, configuration.f, members)
 }
 
-/// A VM's connection to the cell at `path` on `daemon`: once the daemon, which made or took it
-/// through its control API, has let it go (EBUSY until then).
-fn connect(daemon: &Daemon, path: &Path) -> CellClient {
+/// A VM's connection to `cell` on `daemon`: once the daemon, which made or took it through its
+/// control API, has let it go (EBUSY until then).
+fn connect(daemon: &Daemon, cell: CellId) -> CellClient {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        match CellClient::connect(&daemon.vms, path, CAPACITY) {
+        match CellClient::connect_cell(&daemon.vms, cell) {
             Ok(client) => return client,
             Err(err) if err.errno() == Some(cladefs::Errno::EBUSY) => {
-                assert!(Instant::now() < deadline, "{}: {err}", path.display());
+                assert!(Instant::now() < deadline, "{cell}: {err}");
                 std::thread::sleep(Duration::from_millis(50));
             }
-            Err(err) => panic!("{}: {err}", path.display()),
+            Err(err) => panic!("{cell}: {err}"),
         }
     }
 }
@@ -241,12 +239,11 @@ fn replicated_commits_survive_their_writer_and_its_disk() {
     let bucket = root.path().join("bucket");
     std::fs::create_dir(&bucket).unwrap();
     let (addresses, mut daemons) = hosts(root.path(), &bucket, 3);
-    let cell_dir = daemons[0].dir.join("store");
-    let cell = create_replicated(&daemons[0], &cell_dir);
+    let cell = create_replicated(&daemons[0]);
     let (number, f, members) = configuration(&bucket, cell);
     assert_eq!((number, f, members.len()), (1, 1, 3));
 
-    let client = connect(&daemons[0], &cell_dir);
+    let client = connect(&daemons[0], cell);
     write(&client, 1..=2);
     // The bucket out of reach: what is told durable from now on is on the members alone.
     let before = head(&bucket, cell).end;
@@ -277,13 +274,11 @@ fn replicated_commits_survive_their_writer_and_its_disk() {
     reachable(&bucket, true);
     assert_eq!(head(&bucket, cell).end, before, "commits after 2 uploaded: nothing to recover");
 
-    let taken = daemons[1].dir.join("taken");
     daemons[1]
         .control
         .call(async |client| {
             client
                 .create_cell(CreateCellRequest {
-                    path: control_path(&taken),
                     capacity: CAPACITY,
                     tenant: cell.tenant,
                     cell: cell.id,
@@ -294,21 +289,21 @@ fn replicated_commits_survive_their_writer_and_its_disk() {
                 })
                 .await
         })
-        .map(|response| cladefs::CellId { tenant: response.tenant, id: response.cell })
+        .map(|response| CellId { tenant: response.tenant, id: response.cell })
         .unwrap();
-    let client = connect(&daemons[1], &taken);
+    let client = connect(&daemons[1], cell);
     check(&client, 1..=acked);
     // One host of three lost, no configuration of f = 1 is to be had: the taker serves degraded,
     // its commits told durable once the bucket holds them, and, the bucket holding all it
     // recovered, drops to f = 0.
     write(&client, 101..=102);
-    let stat = daemons[1].stat(&taken);
+    let stat = daemons[1].stat(cell);
     assert!(stat.degraded && stat.active_replicas == 0, "{stat:?}");
     until("dropped to f = 0", || configuration(&bucket, cell).1 == 0);
     let (number, _, alone) = configuration(&bucket, cell);
     assert_eq!(alone, [addresses[1].clone()]);
     // As StatCell says, the head naming it (Codex's review).
-    until("the configuration said", || daemons[1].stat(&taken).configuration == number);
+    until("the configuration said", || daemons[1].stat(cell).configuration == number);
 
     // The lost host back, a disk of its own new: the cell is replicated again, of all three.
     let mut peers = vec![addresses[0].clone()];
@@ -319,7 +314,7 @@ fn replicated_commits_survive_their_writer_and_its_disk() {
     let (_, _, members) = configuration(&bucket, cell);
     assert_eq!(members[0], addresses[1]);
     assert_eq!(members.len(), 3);
-    until("degraded no more", || !daemons[1].stat(&taken).degraded);
+    until("degraded no more", || !daemons[1].stat(cell).degraded);
     let before = head(&bucket, cell).end;
     reachable(&bucket, false);
     write(&client, 105..=106);
@@ -340,9 +335,8 @@ fn replicated_commits_survive_their_daemon_killed_and_reopened() {
     let bucket = root.path().join("bucket");
     std::fs::create_dir(&bucket).unwrap();
     let (addresses, mut daemons) = hosts(root.path(), &bucket, 3);
-    let cell_dir = daemons[0].dir.join("store");
-    let cell = create_replicated(&daemons[0], &cell_dir);
-    let client = connect(&daemons[0], &cell_dir);
+    let cell = create_replicated(&daemons[0]);
+    let client = connect(&daemons[0], cell);
     write(&client, 1..=2);
     let before = head(&bucket, cell).end;
     let (first, _, _) = configuration(&bucket, cell);
@@ -376,7 +370,7 @@ fn replicated_commits_survive_their_daemon_killed_and_reopened() {
     std::fs::remove_file(&daemons[0].control_socket).unwrap();
     daemons[0] = daemon(&daemons[0].dir.clone(), &bucket, &addresses);
 
-    let client = connect(&daemons[0], &cell_dir);
+    let client = connect(&daemons[0], cell);
     check(&client, 1..=acked);
     let (number, f, members) = configuration(&bucket, cell);
     assert!(number > first && f == 1, "the reopening took it: {number} after {first}, f {f}");
@@ -385,7 +379,7 @@ fn replicated_commits_survive_their_daemon_killed_and_reopened() {
     // configuration need hold (`Replicator::base`); then replicated again, told durable with the
     // bucket out of reach.
     write(&client, 101..=102);
-    until("degraded no more", || !daemons[0].stat(&cell_dir).degraded);
+    until("degraded no more", || !daemons[0].stat(cell).degraded);
     let before = head(&bucket, cell).end;
     reachable(&bucket, false);
     write(&client, 103..=104);
@@ -405,10 +399,9 @@ fn lost_members_are_replaced_then_the_bucket_releases_commits() {
     let bucket = root.path().join("bucket");
     std::fs::create_dir(&bucket).unwrap();
     let (addresses, mut daemons) = hosts(root.path(), &bucket, 4);
-    let cell_dir = daemons[0].dir.join("store");
-    let cell = create_replicated(&daemons[0], &cell_dir);
+    let cell = create_replicated(&daemons[0]);
     // Its VM's opening takes it again, in a configuration of its own.
-    let client = connect(&daemons[0], &cell_dir);
+    let client = connect(&daemons[0], cell);
     let (first, _, members) = configuration(&bucket, cell);
     let host = |address: &String| addresses.iter().position(|a| a == address).unwrap();
     let lost = host(&members[1]);
@@ -423,7 +416,7 @@ fn lost_members_are_replaced_then_the_bucket_releases_commits() {
     assert_eq!(f, 1);
     assert!(now.contains(&addresses[spare]) && !now.contains(&addresses[lost]), "{now:?}");
     until("degraded no more", || {
-        let stat = daemons[0].stat(&cell_dir);
+        let stat = daemons[0].stat(cell);
         !stat.degraded && stat.members_up == 2 && stat.configuration > first
     });
     let before = head(&bucket, cell).end;
@@ -447,10 +440,10 @@ fn lost_members_are_replaced_then_the_bucket_releases_commits() {
     reachable(&bucket, true);
     let client = waiting.join().unwrap();
     write(&client, 10..=12);
-    let stat = daemons[0].stat(&cell_dir);
+    let stat = daemons[0].stat(cell);
     assert!(stat.degraded, "{stat:?}");
     until("dropped to f = 0", || configuration(&bucket, cell).1 == 0);
-    until("f = 0 said", || daemons[0].stat(&cell_dir).active_replicas == 0);
+    until("f = 0 said", || daemons[0].stat(cell).active_replicas == 0);
     write(&client, 13..=14);
     check(&client, 1..=14);
 }
@@ -466,18 +459,17 @@ fn takes_of_cells_whose_members_are_lost_go_on_by_force() {
     let bucket = root.path().join("bucket");
     std::fs::create_dir(&bucket).unwrap();
     let (addresses, mut daemons) = hosts(root.path(), &bucket, 4);
-    let cell_dir = daemons[0].dir.join("store");
-    let cell = create_replicated(&daemons[0], &cell_dir);
-    let client = connect(&daemons[0], &cell_dir);
+    let cell = create_replicated(&daemons[0]);
+    let client = connect(&daemons[0], cell);
     write(&client, 1..=2);
     daemons[0]
         .control
         .call(async |client| {
-            client.sync_cell(SyncCellRequest { path: control_path(&cell_dir) }).await
+            client.sync_cell(SyncCellRequest { tenant: cell.tenant, cell: cell.id }).await
         })
         .map(drop)
         .unwrap();
-    let uploaded = daemons[0].stat(&cell_dir).uploaded;
+    let uploaded = daemons[0].stat(cell).uploaded;
     let (_, _, members) = configuration(&bucket, cell);
     reachable(&bucket, false);
     write(&client, 3..=4);
@@ -493,13 +485,11 @@ fn takes_of_cells_whose_members_are_lost_go_on_by_force() {
     reachable(&bucket, true);
     let spare = (0..4).find(|host| !lost.contains(host)).unwrap();
 
-    let refused = daemons[spare].dir.join("refused");
     let failure = daemons[spare]
         .control
         .call(async |client| {
             client
                 .create_cell(CreateCellRequest {
-                    path: control_path(&refused),
                     capacity: CAPACITY,
                     tenant: cell.tenant,
                     cell: cell.id,
@@ -510,17 +500,15 @@ fn takes_of_cells_whose_members_are_lost_go_on_by_force() {
                 })
                 .await
         })
-        .map(|response| cladefs::CellId { tenant: response.tenant, id: response.cell });
+        .map(|response| CellId { tenant: response.tenant, id: response.cell });
     let failure = failure.err().unwrap();
     assert_eq!(failure.errno(), Some(cladefs::Errno::EIO), "{failure}");
 
-    let taken = daemons[spare].dir.join("taken");
     daemons[spare]
         .control
         .call(async |client| {
             client
                 .create_cell(CreateCellRequest {
-                    path: control_path(&taken),
                     capacity: CAPACITY,
                     tenant: cell.tenant,
                     cell: cell.id,
@@ -531,11 +519,11 @@ fn takes_of_cells_whose_members_are_lost_go_on_by_force() {
                 })
                 .await
         })
-        .map(|response| cladefs::CellId { tenant: response.tenant, id: response.cell })
+        .map(|response| CellId { tenant: response.tenant, id: response.cell })
         .unwrap();
-    let client = connect(&daemons[spare], &taken);
+    let client = connect(&daemons[spare], cell);
     check(&client, 1..=2);
-    let stat = daemons[spare].stat(&taken);
+    let stat = daemons[spare].stat(cell);
     assert_eq!(stat.forced_after, Some(uploaded), "{stat:?}");
     write(&client, 5..=6);
     check(&client, 5..=6);
@@ -552,9 +540,8 @@ fn pre_barrier_does_not_wait_for_replication() {
     let bucket = root.path().join("bucket");
     std::fs::create_dir(&bucket).unwrap();
     let (_addresses, mut daemons) = hosts(root.path(), &bucket, 3);
-    let cell_dir = daemons[0].dir.join("store");
-    let cell = create_replicated(&daemons[0], &cell_dir);
-    let client = connect(&daemons[0], &cell_dir);
+    let cell = create_replicated(&daemons[0]);
+    let client = connect(&daemons[0], cell);
     write(&client, 1..=1);
     until("replicated with f = 1", || configuration(&bucket, cell).1 == 1);
 

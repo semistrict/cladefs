@@ -169,6 +169,46 @@ impl Vm {
         Ok(())
     }
 
+    /// Adds an extent-store device tagged `tag` on the daemon-managed cell `cell` (or a new
+    /// daemon-placed cell when `cell.id == 0`), served by the extent daemon at `CLADEFSD`.
+    pub fn cell_id(
+        &mut self,
+        tag: &str,
+        cell: cladefs::CellId,
+        capacity: u64,
+        window: u64,
+    ) -> anyhow::Result<()> {
+        let cladefsd = std::env::var_os("CLADEFSD").context("CLADEFSD not set")?;
+        self.cell_id_served(tag, cell, capacity, window, Path::new(&cladefsd));
+        Ok(())
+    }
+
+    /// Adds an extent-store device tagged `tag` on a fresh daemon-placed cell of the default
+    /// tenant, served by `CLADEFSD`.
+    pub fn new_cell(&mut self, tag: &str, capacity: u64, window: u64) -> anyhow::Result<()> {
+        self.cell_id(tag, cladefs::CellId { tenant: 0, id: 0 }, capacity, window)
+    }
+
+    /// Adds an extent-store device tagged `tag` on the daemon-managed cell `cell` (or a new
+    /// daemon-placed cell when `cell.id == 0`), served by the extent daemon at `cladefsd`.
+    pub fn cell_id_served(
+        &mut self,
+        tag: &str,
+        cell: cladefs::CellId,
+        capacity: u64,
+        window: u64,
+        cladefsd: &Path,
+    ) {
+        let spec = cell.to_string();
+        self.cell_served(tag, Path::new(&spec), capacity, window, cladefsd);
+    }
+
+    /// Adds an extent-store device tagged `tag` on a fresh daemon-placed cell of the default
+    /// tenant, served by `cladefsd`.
+    pub fn new_cell_served(&mut self, tag: &str, capacity: u64, window: u64, cladefsd: &Path) {
+        self.cell_id_served(tag, cladefs::CellId { tenant: 0, id: 0 }, capacity, window, cladefsd);
+    }
+
     /// cladefs: has the extent-store device added last answer the guest's asks for durability once
     /// ordered (`cache_type` Unsafe, TASK-363), as a drive whose flushes the host drops does.
     pub fn cell_unsafe(&mut self) {

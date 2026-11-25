@@ -47,7 +47,8 @@ compile_error!(
 static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[cfg(all(target_os = "linux", not(madsim)))]
-const USAGE: &str = "usage: cladefs-mount [--allow-other] [--new CAPACITY] CELL_DIR MOUNTPOINT";
+const USAGE: &str =
+    "usage: cladefs-mount [--config PATH] [--allow-other] [--new CAPACITY] CELL_DIR MOUNTPOINT";
 
 /// Mounts a cell as the arguments say, and serves it until it is unmounted.
 #[cfg(all(target_os = "linux", not(madsim)))]
@@ -55,6 +56,32 @@ fn main() -> anyhow::Result<()> {
     use anyhow::Context as _;
     use std::io::Write as _;
     use std::path::PathBuf;
+    let raw_args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    let mut filtered_args = Vec::with_capacity(raw_args.len());
+    let mut config_path: Option<PathBuf> = None;
+    let mut iter = raw_args.into_iter();
+    while let Some(arg) = iter.next() {
+        match arg.to_str() {
+            Some("--config" | "-c") => {
+                let p = iter.next().with_context(|| format!("--config PATH? {USAGE}"))?;
+                config_path = Some(PathBuf::from(p));
+            }
+            Some(flag) if flag.starts_with("--config=") => {
+                config_path = Some(PathBuf::from(flag.trim_start_matches("--config=")));
+            }
+            _ => filtered_args.push(arg),
+        }
+    }
+    if config_path.is_none() {
+        config_path = std::env::var_os(cladefs::config::CONFIG_ENV)
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from);
+    }
+    if let Some(path) = config_path {
+        let cfg = cladefs::config::Config::from_toml_file(&path).map_err(anyhow::Error::msg)?;
+        // SAFETY: single-threaded startup before spawning any threads.
+        unsafe { cfg.apply_process_env() };
+    }
     cladefs::cladefsd::logging::to_stderr()?;
     // Before any thread is started, which would take the signals otherwise.
     cladefs::stacks::on_sigquit().context("handling SIGQUIT")?;
@@ -67,7 +94,7 @@ fn main() -> anyhow::Result<()> {
     cladefs::bucket::require_kms().map_err(anyhow::Error::msg)?;
     let mut options = cladefs::fuse::MountOptions::new();
     let (mut paths, mut new) = (Vec::new(), None);
-    let mut args = std::env::args_os().skip(1);
+    let mut args = filtered_args.into_iter();
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--allow-other") => {

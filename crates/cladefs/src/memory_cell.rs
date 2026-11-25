@@ -78,6 +78,32 @@ impl MemoryCell {
         Self::over(daemon.open_memory(cell_dir, capacity(size))?, size)
     }
 
+    /// Opens an existing managed memory cell `cell` served by the daemon listening at `socket`
+    /// (hotbed question 547).
+    pub fn open_cell(socket: &Path, cell: crate::CellId, size: u64) -> Result<Self, Error> {
+        let daemon = DaemonConnection::connect(socket)?;
+        Self::over(daemon.open_memory(&cell.to_string(), capacity(size))?, size)
+    }
+
+    /// Creates and opens a new managed memory cell for `tenant` of `size` bytes on a disk chosen
+    /// by the daemon listening at `socket` (hotbed question 547).
+    pub fn create_cell(socket: &Path, tenant: u64, size: u64) -> Result<Self, Error> {
+        let daemon = DaemonConnection::connect(socket)?;
+        Self::over(daemon.create_memory_cell(tenant, capacity(size))?, size)
+    }
+
+    /// Forks a memory cell version `from` into a new managed memory cell for `tenant` of `size`
+    /// bytes on a disk chosen by the daemon listening at `socket` (hotbed question 547).
+    pub fn open_forked_cell(
+        socket: &Path,
+        tenant: u64,
+        from: CellVersion,
+        size: u64,
+    ) -> Result<Self, Error> {
+        let daemon = DaemonConnection::connect(socket)?;
+        Self::over(daemon.open_forked_cell(tenant, from, capacity(size))?, size)
+    }
+
     /// The memory cell at `cell_dir`, forked from the version `from` of a memory cell if it doesn't
     /// exist: a VM's memory restored from a snapshot, on any host, as its disks are
     /// (docs/integrator-guide.md). `EINVAL` for a memory of another size.

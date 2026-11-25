@@ -478,6 +478,8 @@ pub(super) struct New {
     pub kind: Kind,
     /// The tenant whose new cell it is the one cell of (TASK-364): the connection's.
     pub tenant: u64,
+    /// Pre-allocated cell ID (for direct `DiskPool` placement without double-taking).
+    pub cell: Option<CellId>,
 }
 
 /// The cell at `path` on `daemon`, made as `new` says if given and it doesn't exist, keeping it in
@@ -494,10 +496,13 @@ pub(super) async fn open_cell_at(
     let open_cell = attached(daemon, path, async |keeping| {
         let opening = Opening::keeping_on(daemon.host.clone(), keeping).arena(own);
         match new {
-            Some(New { capacity, kind, tenant })
+            Some(New { capacity, kind, tenant, cell })
                 if !local_cell::upload::blocking(|| host_fs::exists(&path)) =>
             {
-                let of = CellOf::New(tenant);
+                let of = match cell {
+                    Some(named) => CellOf::Named(named),
+                    None => CellOf::New(tenant),
+                };
                 OpenCell::create_kind_with(path, capacity, (of, kind), opening).await
             }
             _ => OpenCell::open_with(path, opening).await,
@@ -893,9 +898,21 @@ pub(super) fn removed_if_unmade_on(host: &crate::Host, path: &Path) -> Result<()
 }
 
 /// cladefs: where `daemon` keeps the version `version` of `cell`'s cell open for the forks of it
-/// made here ([`host_cell::version_dir`]).
+/// made here ([`host_cell::version_dir`]). When no part cache is active, prefers the daemon's own
+/// managed [`DiskPool`] root so multiple daemons in one process never collide on `/tmp`.
 fn version_dir(daemon: &Daemon, cell: CellId, version: u64) -> Result<PathBuf, Errno> {
-    Ok(crate::host_cell::version_dir(cell, version, part_cache(daemon)?.as_deref()))
+    if let Some(cache) = part_cache(daemon)? {
+        return Ok(crate::host_cell::version_dir(cell, version, Some(&cache)));
+    }
+    if let Some(pool) = daemon.disk_pool()
+        && let Some(disk) = pool.disks().first()
+    {
+        return Ok(disk
+            .part_cache_dir
+            .join("versions")
+            .join(format!("{:x}.{:x}.{:x}", cell.tenant, cell.id, version)));
+    }
+    Ok(crate::host_cell::version_dir(cell, version, None))
 }
 
 /// cladefs: the directory the version `version` of `cell` is kept open in for forks here.
@@ -1005,8 +1022,47 @@ pub(super) async fn fork_of_version(
     local_cell::upload::blocking(|| local_cell::host_cell(&to)).map_err(|_| Errno::EIO)
 }
 
+/// Moves a per-cell upload-interval override from `from` to `to` after a staged cell directory is
+/// renamed into its canonical `DiskPool` path.
+pub(super) fn move_upload_interval(daemon: &Daemon, from: &Path, to: &Path) {
+    let mut intervals =
+        daemon.upload_intervals.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(interval) = intervals.remove(&cell_dir_key(from)) {
+        intervals.insert(cell_dir_key(to), interval);
+    }
+}
+
+/// cladefs: forks the version `version` of `cell` on `daemon` directly into
+/// `parent_dir/<CHILD_PADDED>`, returning the new ephemeral cell ID and its final path.
+pub(super) async fn fork_ephemeral_of_version_in(
+    daemon: &Arc<Daemon>,
+    cell: CellId,
+    version: u64,
+    parent_dir: PathBuf,
+    tenant: Option<u64>,
+) -> Result<(CellId, PathBuf), Errno> {
+    let capacity = OpenCell::BLOCK_SIZE as u64;
+    let from = opened_version(daemon, cell, version, capacity).await.inspect_err(|errno| {
+        log::warn!("cladefsd: version {version:x} of {cell} for an ephemeral fork: {errno:?}")
+    })?;
+    let (kept, _) = kept_or_open(daemon, &from, capacity).await.inspect_err(|errno| {
+        log::warn!("cladefsd: opening {} for an ephemeral fork: {errno:?}", from.display())
+    })?;
+    let tenant = tenant.unwrap_or(kept.open_cell.cell().tenant);
+    let forked = kept.open_cell.fork_ephemeral_in(&parent_dir, tenant).await.map_err(|err| {
+        errno_of(
+            format_args!("forking {} ephemerally in {}", from.display(), parent_dir.display()),
+            err,
+        )
+    });
+    release_held(kept).await;
+    forked
+}
+
 /// cladefs: forks the version `version` of `cell` on `daemon` to `to`, an ephemeral cell kept on
 /// this host alone (doc-25, TASK-698.3; `ForkCell`'s `ephemeral`).
+#[cfg(test)]
+#[allow(dead_code)]
 pub(super) async fn fork_ephemeral_of_version(
     daemon: &Arc<Daemon>,
     cell: CellId,

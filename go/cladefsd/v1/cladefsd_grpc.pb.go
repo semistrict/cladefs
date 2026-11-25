@@ -35,9 +35,11 @@
 // host at a time. A base forked on many hosts is given a version first, and its version forked on
 // each (ForkCell's `version`).
 //
-// Cells are named by the paths of their directories on the daemon's host, UTF-8. A cell a VM
-// process has open is its connection's: what would change it under the guest's feet fails with
-// FAILED_PRECONDITION and errno EBUSY, unless the call says otherwise.
+// Cells are named by `(tenant, cell)` alone (hotbed question 547): the daemon owns its managed
+// JBOD disks (`[[disks]]` in TOML config) and chooses where each cell directory lives on the host.
+// Callers never choose or pass host directories for cells. A cell a VM process has open is its
+// connection's: what would change it under the guest's feet fails with FAILED_PRECONDITION and
+// errno EBUSY, unless the call says otherwise.
 //
 // Errors are gRPC statuses whose code follows the errno the daemon failed with, which the
 // `cladefs-errno` metadata entry carries, as a decimal number (Linux's): ENOENT is NOT_FOUND,
@@ -130,6 +132,8 @@ const (
 	Cladefsd_MigrateCell_FullMethodName        = "/cladefs.cladefsd.v1.Cladefsd/MigrateCell"
 	Cladefsd_HandOverCell_FullMethodName       = "/cladefs.cladefsd.v1.Cladefsd/HandOverCell"
 	Cladefsd_AbortMigration_FullMethodName     = "/cladefs.cladefsd.v1.Cladefsd/AbortMigration"
+	Cladefsd_ListDisks_FullMethodName          = "/cladefs.cladefsd.v1.Cladefsd/ListDisks"
+	Cladefsd_SetDiskGovernance_FullMethodName  = "/cladefs.cladefsd.v1.Cladefsd/SetDiskGovernance"
 )
 
 // CladefsdClient is the client API for Cladefsd service.
@@ -346,17 +350,14 @@ type CladefsdClient interface {
 	// retiring an ephemeral cell's reference); refused, it serves the cell again (EAGAIN). Asked
 	// again after a failure or a restart, it asks the other again, which answers as it did.
 	HandOverCell(ctx context.Context, in *HandOverCellRequest, opts ...grpc.CallOption) (*HandOverCellResponse, error)
-	// Ends the live migration of the cell at `path` (board 8577, board 11369). Its hand-over not
-	// begun: its rounds stop, the other daemon is told to give it up, and MigrateCell may migrate the
-	// cell again, to another daemon too, while its guest runs on; so too a migration the other gave
-	// up (restarted, or hearing nothing of it for CLADEFSD_MIGRATION_IDLE). Its hand-over begun, the
-	// cell given up (refused while open, EBUSY), the cell's fate is the other daemon's to say: told
-	// to give the migration up, then asked to take the cell over as HandOverCell asks, it refuses,
-	// and this daemon serves the cell again, answering as HandOverCell does, EAGAIN; not answering,
-	// ENOTCONN, the cell given up still, to be asked again; or, having accepted it before, the cell
-	// is the other's, ALREADY_EXISTS (EEXIST), and goes here. No migration of the cell under way,
-	// NOT_FOUND (ENOENT); one being prepared, EBUSY.
+	// Ends the live migration of a cell (board 8577, board 11369).
 	AbortMigration(ctx context.Context, in *AbortMigrationRequest, opts ...grpc.CallOption) (*AbortMigrationResponse, error)
+	// Lists all managed host disks and their live per-disk governance state (caps, headroom,
+	// allowance, usage, spare, pressure, health, placement; hotbed question 547).
+	ListDisks(ctx context.Context, in *ListDisksRequest, opts ...grpc.CallOption) (*ListDisksResponse, error)
+	// Updates per-disk governance (hard cap, part-cache cap, headroom, dirty budget, placement mode)
+	// live at runtime for one managed disk identified by its configured `id` (hotbed question 547).
+	SetDiskGovernance(ctx context.Context, in *SetDiskGovernanceRequest, opts ...grpc.CallOption) (*SetDiskGovernanceResponse, error)
 }
 
 type cladefsdClient struct {
@@ -747,6 +748,26 @@ func (c *cladefsdClient) AbortMigration(ctx context.Context, in *AbortMigrationR
 	return out, nil
 }
 
+func (c *cladefsdClient) ListDisks(ctx context.Context, in *ListDisksRequest, opts ...grpc.CallOption) (*ListDisksResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListDisksResponse)
+	err := c.cc.Invoke(ctx, Cladefsd_ListDisks_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *cladefsdClient) SetDiskGovernance(ctx context.Context, in *SetDiskGovernanceRequest, opts ...grpc.CallOption) (*SetDiskGovernanceResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetDiskGovernanceResponse)
+	err := c.cc.Invoke(ctx, Cladefsd_SetDiskGovernance_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // CladefsdServer is the server API for Cladefsd service.
 // All implementations must embed UnimplementedCladefsdServer
 // for forward compatibility.
@@ -961,17 +982,14 @@ type CladefsdServer interface {
 	// retiring an ephemeral cell's reference); refused, it serves the cell again (EAGAIN). Asked
 	// again after a failure or a restart, it asks the other again, which answers as it did.
 	HandOverCell(context.Context, *HandOverCellRequest) (*HandOverCellResponse, error)
-	// Ends the live migration of the cell at `path` (board 8577, board 11369). Its hand-over not
-	// begun: its rounds stop, the other daemon is told to give it up, and MigrateCell may migrate the
-	// cell again, to another daemon too, while its guest runs on; so too a migration the other gave
-	// up (restarted, or hearing nothing of it for CLADEFSD_MIGRATION_IDLE). Its hand-over begun, the
-	// cell given up (refused while open, EBUSY), the cell's fate is the other daemon's to say: told
-	// to give the migration up, then asked to take the cell over as HandOverCell asks, it refuses,
-	// and this daemon serves the cell again, answering as HandOverCell does, EAGAIN; not answering,
-	// ENOTCONN, the cell given up still, to be asked again; or, having accepted it before, the cell
-	// is the other's, ALREADY_EXISTS (EEXIST), and goes here. No migration of the cell under way,
-	// NOT_FOUND (ENOENT); one being prepared, EBUSY.
+	// Ends the live migration of a cell (board 8577, board 11369).
 	AbortMigration(context.Context, *AbortMigrationRequest) (*AbortMigrationResponse, error)
+	// Lists all managed host disks and their live per-disk governance state (caps, headroom,
+	// allowance, usage, spare, pressure, health, placement; hotbed question 547).
+	ListDisks(context.Context, *ListDisksRequest) (*ListDisksResponse, error)
+	// Updates per-disk governance (hard cap, part-cache cap, headroom, dirty budget, placement mode)
+	// live at runtime for one managed disk identified by its configured `id` (hotbed question 547).
+	SetDiskGovernance(context.Context, *SetDiskGovernanceRequest) (*SetDiskGovernanceResponse, error)
 	mustEmbedUnimplementedCladefsdServer()
 }
 
@@ -1095,6 +1113,12 @@ func (UnimplementedCladefsdServer) HandOverCell(context.Context, *HandOverCellRe
 }
 func (UnimplementedCladefsdServer) AbortMigration(context.Context, *AbortMigrationRequest) (*AbortMigrationResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method AbortMigration not implemented")
+}
+func (UnimplementedCladefsdServer) ListDisks(context.Context, *ListDisksRequest) (*ListDisksResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListDisks not implemented")
+}
+func (UnimplementedCladefsdServer) SetDiskGovernance(context.Context, *SetDiskGovernanceRequest) (*SetDiskGovernanceResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetDiskGovernance not implemented")
 }
 func (UnimplementedCladefsdServer) mustEmbedUnimplementedCladefsdServer() {}
 func (UnimplementedCladefsdServer) testEmbeddedByValue()                  {}
@@ -1801,6 +1825,42 @@ func _Cladefsd_AbortMigration_Handler(srv interface{}, ctx context.Context, dec 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Cladefsd_ListDisks_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListDisksRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CladefsdServer).ListDisks(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Cladefsd_ListDisks_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CladefsdServer).ListDisks(ctx, req.(*ListDisksRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Cladefsd_SetDiskGovernance_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetDiskGovernanceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CladefsdServer).SetDiskGovernance(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Cladefsd_SetDiskGovernance_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CladefsdServer).SetDiskGovernance(ctx, req.(*SetDiskGovernanceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Cladefsd_ServiceDesc is the grpc.ServiceDesc for Cladefsd service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1959,6 +2019,14 @@ var Cladefsd_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "AbortMigration",
 			Handler:    _Cladefsd_AbortMigration_Handler,
+		},
+		{
+			MethodName: "ListDisks",
+			Handler:    _Cladefsd_ListDisks_Handler,
+		},
+		{
+			MethodName: "SetDiskGovernance",
+			Handler:    _Cladefsd_SetDiskGovernance_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

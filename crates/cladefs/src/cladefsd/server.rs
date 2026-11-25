@@ -1663,9 +1663,21 @@ impl Connection {
         }
     }
 
-    /// Whether it may name the cell at `path`: `EACCES` unless the cell is where its tenant's
-    /// VM processes name cells (TASK-43.4).
+    /// Whether it may name the cell at `path`: when a managed [`DiskPool`] is active, `path` must
+    /// be a `TENANT/CELL` cell ID (raw host paths are refused with `EINVAL`), and granted tenants
+    /// may only address cells of their own tenant (`EACCES`). Without a `DiskPool` (standalone unit
+    /// tests), falls back to directory containment (`self.tenant.holds`).
     fn authorize(&self, path: &Path) -> Result<(), Errno> {
+        if self.daemon().disk_pool().is_some() {
+            let cell_str = path.to_str().ok_or(Errno::EINVAL)?;
+            let cell = cell_str.parse::<crate::CellId>().map_err(|_| Errno::EINVAL)?;
+            if let Some(granted) = self.tenant.granted() {
+                if cell.tenant != granted {
+                    return Err(Errno::EACCES);
+                }
+            }
+            return Ok(());
+        }
         self.tenant.holds(path)
     }
 
@@ -1984,14 +1996,124 @@ impl Connection {
     /// if it is shared (`EACCES`, TASK-395.7).
     async fn open(&self, path: &Path, how: codec::Opening) -> Result<u64, Errno> {
         let opening = self.opening()?;
-        let hold =
-            cells::hold_to_write(self.daemon(), &cell_dir_key(path), self.this.clone()).await?;
+        let (resolved, effective_how, named_cell) = if let Some(pool) = self.daemon().disk_pool() {
+            let req_str = path.to_str().ok_or(Errno::EINVAL)?;
+            let req_cell: crate::CellId = req_str.parse().map_err(|_| Errno::EINVAL)?;
+            let effective_tenant = self.tenant.granted().unwrap_or(req_cell.tenant);
+            if req_cell.id != 0 {
+                let pool = Arc::clone(pool);
+                let found =
+                    cells::blocking(move || pool.find_cell(req_cell).ok_or(Errno::ENOENT)).await?;
+                (found, how, None)
+            } else {
+                let daemon = self.daemon();
+                let disk = pool.pick_disk()?;
+                match how {
+                    codec::Opening::Existing => return Err(Errno::EINVAL),
+                    codec::Opening::Create(_, _) => {
+                        // Allocate the cell ID up front so `open_held` creates and takes the cell
+                        // directly at its canonical `<disk>/cells/<TENANT>/<CELL>` path in a
+                        // single taking (epoch = 1) with no staging rename.
+                        let bucket = super::storage::daemon_bucket_on(daemon)?;
+                        let cell = crate::host_cell::new_cell(&*bucket, effective_tenant)
+                            .await
+                            .map_err(|_| Errno::EIO)?;
+                        let disk_prep = Arc::clone(&disk);
+                        let final_path = cells::blocking(move || {
+                            drop(super::disks::DiskPool::ensure_tenant_dir(
+                                &disk_prep,
+                                cell.tenant,
+                            )?);
+                            Ok(super::disks::DiskPool::cell_path(&disk_prep, cell))
+                        })
+                        .await?;
+                        (final_path, how, Some(cell))
+                    }
+                    codec::Opening::ForkOf { tenant, cell, version, capacity } => {
+                        let disk_for_stage = Arc::clone(&disk);
+                        let staging = cells::blocking(move || {
+                            super::disks::DiskPool::staging_path(&disk_for_stage, effective_tenant)
+                        })
+                        .await?;
+                        let forked = (crate::CellId { tenant, id: cell }, version);
+                        let made = match cells::fork_version(
+                            daemon,
+                            forked,
+                            capacity,
+                            (&staging, Some(effective_tenant)),
+                        )
+                        .await
+                        {
+                            Ok(()) => {
+                                let read = staging.clone();
+                                cells::blocking(move || {
+                                    local_cell::host_cell(&read).map_err(|_| Errno::EIO)
+                                })
+                                .await
+                            }
+                            Err(err) => Err(err),
+                        };
+                        let made = match made {
+                            Ok(made) => made,
+                            Err(err) => {
+                                let cleanup = staging.clone();
+                                let local = Arc::clone(daemon.host.local());
+                                // Best-effort cleanup of failed staging dir; returning primary error.
+                                let _ = cells::blocking(move || {
+                                    if host_fs::exists(&cleanup) {
+                                        // Best-effort cleanup of failed staging dir; primary error wins.
+                                        let _ = local_cell::remove_cell_dir_on(&local, &cleanup);
+                                    }
+                                    Ok(())
+                                })
+                                .await;
+                                return Err(err);
+                            }
+                        };
+                        let pool_commit = Arc::clone(pool);
+                        let disk_commit = Arc::clone(&disk);
+                        let staging_commit = staging.clone();
+                        let final_path = match cells::blocking(move || {
+                            pool_commit.commit_staged(&disk_commit, made, &staging_commit)
+                        })
+                        .await
+                        {
+                            Ok(final_path) => final_path,
+                            Err(err) => {
+                                let cleanup = staging;
+                                let local = Arc::clone(daemon.host.local());
+                                // Best-effort cleanup of failed staging dir; returning primary error.
+                                let _ = cells::blocking(move || {
+                                    if host_fs::exists(&cleanup) {
+                                        // Best-effort cleanup of failed staging dir; primary error wins.
+                                        let _ = local_cell::remove_cell_dir_on(&local, &cleanup);
+                                    }
+                                    Ok(())
+                                })
+                                .await;
+                                return Err(err);
+                            }
+                        };
+                        (final_path, codec::Opening::Existing, None)
+                    }
+                }
+            }
+        } else {
+            (path.to_owned(), how, None)
+        };
+        let hold = cells::hold_to_write(self.daemon(), &cell_dir_key(&resolved), self.this.clone())
+            .await?;
         // cladefs: nor one of another tenant's cells (TASK-364).
-        self.tenant.reaches(path)?;
+        self.tenant.reaches(&resolved)?;
         // cladefs: a cell it makes, within its disk and its tenant's limits, as its making admits
         // it (doc-22).
         // Closed before its hold lets its path go, if it fails here.
-        let open_cell = self.open_held(path, &hold, &how).await?;
+        let open_cell = self.open_held(&resolved, &hold, &effective_how, named_cell).await?;
+        if let Some(pool) = self.daemon().disk_pool()
+            && let Some(cell) = named_cell
+        {
+            pool.register_cell(cell, resolved.clone());
+        }
         let flushed = open_cell.clone();
         let flushing_daemon = Arc::clone(self.daemon());
         self.start_behind(move |stopped| flush_behind(flushing_daemon, flushed, stopped));
@@ -2001,7 +2123,7 @@ impl Connection {
         if let Some(cut_short) = open_cell.cut_short() {
             hold.when_wanted(cut_short);
         }
-        opening.opened(path, open_cell, hold);
+        opening.opened(&resolved, open_cell, hold);
         Ok(cell)
     }
 
@@ -2012,6 +2134,7 @@ impl Connection {
         path: &Path,
         hold: &cells::Hold,
         how: &codec::Opening,
+        named_cell: Option<crate::CellId>,
     ) -> Result<Arc<OpenCell>, Errno> {
         let daemon = self.daemon();
         let arena = self.arena();
@@ -2057,7 +2180,12 @@ impl Connection {
                 Arc::new(open_cell)
             }
             (None, codec::Opening::Create(capacity, kind)) => {
-                let new = cells::New { capacity: *capacity, kind: *kind, tenant: self.tenant.id };
+                let new = cells::New {
+                    capacity: *capacity,
+                    kind: *kind,
+                    tenant: self.tenant.id,
+                    cell: named_cell,
+                };
                 Arc::new(open_cell_at(daemon, path, Some(new), Some(arena)).await?)
             }
             (None, _) => Arc::new(open_cell_at(daemon, path, None, Some(arena)).await?),

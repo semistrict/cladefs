@@ -47,28 +47,26 @@ mod host {
 
     impl TestFxfsGuestSharedVolumes {
         fn run(&self, test_setup: &TestSetup) -> anyhow::Result<()> {
-            let dir = &test_setup.tmp_dir;
             let cladefsd: PathBuf =
                 std::env::var_os("CLADEFSD").context("CLADEFSD not set")?.into();
+            let disk_root = crate::common::shared_disk_root()?;
             let control = control(&cladefsd)?;
             let window = if self.dax { crate::common::dax_window(WINDOW)? } else { 0 };
             let root = setup_rootfs(test_setup)?;
-            let vms = Vms::new(test_setup, root, cladefsd, CAPACITY, window);
-            let publisher = dir.join("publisher");
-            let consumer = dir.join("consumer");
-            format(&publisher, CAPACITY)?;
+            let vms = Vms::new(test_setup, root, cladefsd.clone(), CAPACITY, window);
+            let publisher = format(&cladefsd, &disk_root, CAPACITY)?;
+            let consumer = crate::common::create_cell(&cladefsd, CAPACITY)?;
 
-            let (vm, stream) = vms.run("publisher", &publisher, true)?;
+            let (vm, stream) = vms.run("publisher", publisher, true)?;
             let mut stream = stream.context("the publisher's connection")?;
             let mut generations = Vec::new();
-            for number in 0..GENERATIONS {
-                let path = dir.join(format!("generation-{number}"));
-                generations.push(next_generation(&mut stream, &control, &publisher, path)?);
+            for _ in 0..GENERATIONS {
+                generations.push(next_generation(&mut stream, &control, publisher)?);
             }
             vm.wait()?;
 
-            vms.run_consumer("consumer", &consumer, &control, &generations)?;
-            vms.run("rebooted", &consumer, false)?.0.wait()
+            vms.run_consumer("consumer", consumer, &control, &generations)?;
+            vms.run("rebooted", consumer, false)?.0.wait()
         }
     }
 

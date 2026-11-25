@@ -95,7 +95,7 @@ const mount = "cladefs/mount/v1/mount.proto"
 
 func TestAFieldAddedBreaksNoCaller(t *testing.T) {
 	r := newRepo(t)
-	r.edit(cladefsd, "  string to = 3;\n", "  string to = 3;\n  uint64 deadline = 4;\n")
+	r.edit(cladefsd, "  string peer = 2;\n", "  string peer = 2;\n  uint64 deadline = 6;\n")
 	r.commit("MigrateCell takes a deadline")
 	status, said := r.check()
 	if status != 0 || strings.Contains(said, "crates/cladefs/proto") {
@@ -105,7 +105,7 @@ func TestAFieldAddedBreaksNoCaller(t *testing.T) {
 
 func TestARenamedOrRenumberedFieldIsRefused(t *testing.T) {
 	r := newRepo(t)
-	r.edit(cladefsd, "  string to = 3;\n", "  string destination = 3;\n")
+	r.edit(cladefsd, "  string peer = 2;\n", "  string target_peer = 2;\n")
 	r.edit(mount, "  uint64 capacity = 4;\n", "  uint64 capacity = 99;\n")
 	r.commit("fields moved")
 	status, said := r.check()
@@ -114,7 +114,7 @@ func TestARenamedOrRenumberedFieldIsRefused(t *testing.T) {
 	}
 	for _, flagged := range []string{
 		`cladefs/cladefsd/v1/cladefsd.proto:`,
-		`Field "3" with name "destination" on message "MigrateCellRequest" changed option "json_name" from "to" to "destination".`,
+		`Field "2" with name "target_peer" on message "MigrateCellRequest" changed option "json_name" from "peer" to "targetPeer".`,
 		`cladefs/mount/v1/mount.proto:`,
 		`Previously present field "4" with name "capacity" on message "AttachRequest" was deleted.`,
 		"crates/cladefs/proto: breaks a caller of " + r.base + "'s, and no commit since changing it names the user's agreement",
@@ -127,7 +127,7 @@ func TestARenamedOrRenumberedFieldIsRefused(t *testing.T) {
 
 func TestTheUsersAgreementLetsABreakThrough(t *testing.T) {
 	r := newRepo(t)
-	r.edit(cladefsd, "  string to = 3;\n", "  string destination = 3;\n")
+	r.edit(cladefsd, "  string peer = 2;\n", "  string target_peer = 2;\n")
 	r.commit("MigrateCell names its destination\n\nBreaks-format:  hotbed question 512")
 	r.commit("something else")
 	status, said := r.check()
@@ -149,7 +149,7 @@ func TestAnAgreementToAnotherBreakLetsNoneThrough(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.commit("a corpus case changed\n\nBreaks-format: hotbed question 512")
-	r.edit(cladefsd, "  string to = 3;\n", "  string destination = 3;\n")
+	r.edit(cladefsd, "  string peer = 2;\n", "  string target_peer = 2;\n")
 	r.commit("MigrateCell names its destination")
 	status, said := r.check()
 	if status != 1 || !strings.Contains(said, "no commit since changing it names the user's agreement") {

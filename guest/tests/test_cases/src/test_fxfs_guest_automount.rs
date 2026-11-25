@@ -41,27 +41,26 @@ mod host {
 
     impl TestFxfsGuestAutomount {
         fn run(&self, test_setup: &TestSetup) -> anyhow::Result<()> {
-            let dir = &test_setup.tmp_dir;
             let cladefsd: PathBuf =
                 std::env::var_os("CLADEFSD").context("CLADEFSD not set")?.into();
+            let disk_root = crate::common::shared_disk_root()?;
             let control = control(&cladefsd)?;
             let window = if self.dax { crate::common::dax_window(WINDOW)? } else { 0 };
             let root = setup_rootfs(test_setup)?;
             let vms = Vms::new(test_setup, root, cladefsd.clone(), CAPACITY, window);
-            let (publisher, consumer) = (dir.join("publisher"), dir.join("consumer"));
-            format(&publisher, CAPACITY)?;
+            let publisher = format(&cladefsd, &disk_root, CAPACITY)?;
+            let consumer = crate::common::create_cell(&cladefsd, CAPACITY)?;
 
-            let (vm, stream) = vms.run("publisher", &publisher, true)?;
+            let (vm, stream) = vms.run("publisher", publisher, true)?;
             let mut stream = stream.context("the publisher's connection")?;
-            let path = dir.join("generation");
-            let generation = next_generation(&mut stream, &control, &publisher, path)?;
+            let generation = next_generation(&mut stream, &control, publisher)?;
             vm.wait()?;
 
             let names = ["repo", "other"].map(|name| (name.to_owned(), generation.clone()));
             let manager = Manager::new(cladefsd, BTreeMap::from(names), BTreeMap::new());
             for role in ["consumer", "rebooted"] {
-                manager.serve(role, &consumer)?;
-                vms.run(role, &consumer, false)?.0.wait()?;
+                manager.serve(role, consumer)?;
+                vms.run(role, consumer, false)?.0.wait()?;
             }
             let asked = manager.asked();
             let expected = [("other", 1), ("refused", 1), ("repo", 1)];

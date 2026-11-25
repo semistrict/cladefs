@@ -29,7 +29,6 @@ mod host {
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
     use anyhow::Context;
     use cladefs::cladefsd::control::proto::ForkCellRequest;
-    use cladefs::testing::control_path;
     use std::ffi::CString;
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixListener;
@@ -37,20 +36,20 @@ mod host {
 
     const CAPACITY: u64 = 256 << 20;
 
-    /// A VM of the guest's `role`, on the cell at `cell_dir`, run to its end in Firecracker; its
+    /// A VM of the guest's `role`, on `cell`, run to its end in Firecracker; its
     /// vsock's socket `uds`, if any.
     fn run(
         test_setup: &TestSetup,
         root: &Path,
         role: &str,
-        cell_dir: &Path,
+        cell: cladefs::CellId,
         uds: Option<&Path>,
     ) -> anyhow::Result<Firecracker> {
         let mut vm = Vm::new(2, 512)?;
         vm.guest_kernel()?;
-        vm.cell(
+        vm.cell_id(
             "extents",
-            cell_dir,
+            cell,
             CAPACITY,
             crate::common::dax_window(crate::common::Window::Large)?,
         )?;
@@ -71,28 +70,27 @@ mod host {
 
     impl TestFxfsGuestLiveFork {
         fn run(&self, test_setup: &TestSetup) -> anyhow::Result<()> {
-            let dir = &test_setup.tmp_dir;
             let root = setup_rootfs(test_setup)?;
             let cladefsd: PathBuf =
                 std::env::var_os("CLADEFSD").context("CLADEFSD not set")?.into();
-            let (cell_dir, fork) = (dir.join("store"), dir.join("fork"));
+            let source_cell = crate::common::create_cell(&cladefsd, CAPACITY)?;
             // Short, as Unix sockets' paths must be.
             let uds =
                 std::env::temp_dir().join(format!("cladefs-fork-{}.vsock", std::process::id()));
             let listener = UnixListener::bind(format!("{}_{PORT}", uds.display()))?;
 
-            let mut source = run(test_setup, &root, "source", &cell_dir, Some(&uds))?;
+            let mut source = run(test_setup, &root, "source", source_cell, Some(&uds))?;
             let stream = source.accept(&listener)?;
             let mut said = String::new();
             let mut answers = stream.try_clone()?;
             BufReader::new(stream).read_line(&mut said)?;
             anyhow::ensure!(said == "frozen\n", "the guest said {said:?}");
-            crate::common::control(&cladefsd)?
+            let fork = crate::common::control(&cladefsd)?
                 .call(async |client| {
                     client
                         .fork_cell(ForkCellRequest {
-                            from: control_path(&cell_dir),
-                            to: control_path(&fork),
+                            tenant: source_cell.tenant,
+                            cell: source_cell.id,
                             ..Default::default()
                         })
                         .await
@@ -101,7 +99,7 @@ mod host {
             writeln!(answers, "forked")?;
             // One after the other: they boot from the same root filesystem's image.
             wait(source)?;
-            wait(run(test_setup, &root, "fork", &fork, None)?)
+            wait(run(test_setup, &root, "fork", fork, None)?)
         }
     }
 

@@ -480,21 +480,19 @@ RUN find / -xdev -name '*.pyc' -delete
         Ok(hosts)
     }
 
-    /// Imports the image at `layout` as the base, at `base` on `host`, makes a version of it and
+    /// Imports the image at `layout` as the base on `host`, makes a version of it and
     /// syncs it to the bucket, for every host to fork; says how long each took in `measured`.
     fn make_base(
         host: &Host,
-        base: &Path,
         layout: &Path,
         measured: &mut Measured,
     ) -> anyhow::Result<cladefs::CellVersion> {
         let control = control(&host.socket)?;
         let began = Instant::now();
-        control
+        let cell = control
             .call(async |client| {
                 client
                     .import_image(ImportImageRequest {
-                        path: control_path(base),
                         capacity: ROOT_CAPACITY,
                         image: control_path(layout),
                         reference: String::new(),
@@ -508,18 +506,20 @@ RUN find / -xdev -name '*.pyc' -delete
         let version = control
             .call(async |client| {
                 client
-                    .make_version(MakeVersionRequest { path: control_path(base), keep_last: 0 })
+                    .make_version(MakeVersionRequest {
+                        tenant: cell.tenant,
+                        cell: cell.id,
+                        keep_last: 0,
+                    })
                     .await
             })
             .map(|response| response.version)?;
-        let cell = control
-            .call(async |client| {
-                client.stat_cell(StatCellRequest { path: control_path(base) }).await
-            })
-            .map(|response| cladefs::CellId { tenant: response.tenant, id: response.cell })?;
+        let _ = control.call(async |client| {
+            client.stat_cell(StatCellRequest { tenant: cell.tenant, cell: cell.id }).await
+        })?;
         control
             .call(async |client| {
-                client.sync_cell(SyncCellRequest { path: control_path(base) }).await
+                client.sync_cell(SyncCellRequest { tenant: cell.tenant, cell: cell.id }).await
             })
             .map(drop)?;
         let synced = began.elapsed().as_secs_f64();
@@ -573,14 +573,12 @@ RUN find / -xdev -name '*.pyc' -delete
         machine.env(&std::ffi::CString::new(format!("{WORKLOAD}={}", workload.name()))?);
         let (began, fork) = match disk {
             Disk::Fork(host) => {
-                let fork_path = test_setup.tmp_dir.join(format!("{name}.root"));
                 let began = Instant::now();
-                control(&host.socket)?
+                let fork_cell = control(&host.socket)?
                     .call(async |client| {
                         let cladefs::CellVersion { tenant, cell, version } = version;
                         client
                             .fork_cell(ForkCellRequest {
-                                to: control_path(&fork_path),
                                 tenant,
                                 cell,
                                 version,
@@ -593,7 +591,7 @@ RUN find / -xdev -name '*.pyc' -delete
                         id: response.cell,
                     })?;
                 let fork = ms_since(began);
-                machine.cell_served("root", &fork_path, ROOT_CAPACITY, WINDOW, &host.socket);
+                machine.cell_id_served("root", fork_cell, ROOT_CAPACITY, WINDOW, &host.socket);
                 machine.fxfs_root("root");
                 (began, Some(fork))
             }
@@ -774,7 +772,7 @@ RUN find / -xdev -name '*.pyc' -delete
             // Short, as a Unix socket's path is: the test's directory, named after its case, isn't.
             let sockets = tempfile::Builder::new().prefix("cladefs-pysandbox").tempdir()?;
             let mut hosts = start_hosts(test_setup, &bucket.endpoint(), sockets.path())?;
-            let version = make_base(&hosts[0], &dir.join("python.base"), &layout, measured)?;
+            let version = make_base(&hosts[0], &layout, measured)?;
 
             let workloads = workloads()?;
             let kept = dir.join("traces");

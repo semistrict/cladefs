@@ -74,16 +74,22 @@ mod host {
     }
 
     /// Checks the stats `json` hold the daemon's and the VM process's builds, one commit, and
-    /// the VM's cell, at `cell_dir`, its process's and its guest's counters; and returns those of
+    /// the VM's cell `cell`, its process's and its guest's counters; and returns those of
     /// its guest's `asked` names, and when it was taken.
-    fn check(json: &Value, cell_dir: &Path, asked: &[&str]) -> anyhow::Result<(Vec<u64>, u64)> {
+    fn check(
+        json: &Value,
+        cell: cladefs::CellId,
+        asked: &[&str],
+    ) -> anyhow::Result<(Vec<u64>, u64)> {
         let build = json["cladefsd"]["build"].as_str().context("the daemon's build")?;
         ensure!(is_commit(build), "the daemon's build: {build:?}");
         ensure!(json["cladefsd"]["counters"]["maps"].as_u64().is_some(), "the daemon's counters");
         let vms = json["vms"].as_array().context("vms")?;
         let vm = (vms.iter())
-            .find(|vm| vm["path"].as_str().map(PathBuf::from).as_deref() == Some(cell_dir))
-            .with_context(|| format!("no VM of {}", cell_dir.display()))?;
+            .find(|vm| {
+                vm["tenant"].as_u64() == Some(cell.tenant) && vm["cell"].as_u64() == Some(cell.id)
+            })
+            .with_context(|| format!("no VM of {cell}"))?;
         ensure!(vm["answered"] == true, "it answered: {vm}");
         ensure!(vm["vmm"]["build"].as_str() == Some(build), "the VM process's build: {vm}");
         ensure!(vm["vmm"]["counters"]["stage_ops"].as_u64() > Some(0), "stage operations: {vm}");
@@ -109,12 +115,11 @@ mod host {
     fn takings(
         listener: UnixListener,
         cladefsd: &Path,
-        cell_dir: &Path,
+        cell: cladefs::CellId,
         dir: &Path,
     ) -> anyhow::Result<()> {
         let (stream, _) = listener.accept()?;
         let mut answers = stream.try_clone()?;
-        let cell_dir = cell_dir.canonicalize()?;
         let mut taken_before = 0;
         for (round, line) in BufReader::new(stream).lines().enumerate() {
             let line = line?;
@@ -129,7 +134,7 @@ mod host {
                 std::fs::write(dir.join(format!("stats-{}.json", round + 1)), &text)?;
                 eprintln!("cladefsctl stats --json, taking {}:\n{text}", round + 1);
                 let names: Vec<&str> = read.iter().map(|(name, _)| *name).collect();
-                let (counters, taken) = check(&json, &cell_dir, &names)?;
+                let (counters, taken) = check(&json, cell, &names)?;
                 ensure!(taken > taken_before, "taken at {taken}, before {taken_before}");
                 taken_before = taken;
                 for ((name, before), counted) in read.iter().zip(&counters) {
@@ -166,13 +171,13 @@ mod host {
         }
 
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
-            let cell_dir = test_setup.tmp_dir.join("extents");
             let root = setup_rootfs(&test_setup)?;
             let cladefsd =
                 PathBuf::from(std::env::var_os("CLADEFSD").expect("CLADEFSD names the daemon"));
+            let cell = crate::common::create_cell(&cladefsd, CAPACITY)?;
             let mut vm = Vm::new(2, 512)?;
             vm.guest_kernel()?;
-            vm.cell("extents", &cell_dir, CAPACITY, crate::common::dax_window(WINDOW)?)?;
+            vm.cell_id("extents", cell, CAPACITY, crate::common::dax_window(WINDOW)?)?;
             // Short, as Unix sockets' paths must be: the test's directory may be deep.
             let uds =
                 std::env::temp_dir().join(format!("cladefs-stats-{}.vsock", std::process::id()));
@@ -181,7 +186,7 @@ mod host {
             let dir = test_setup.tmp_dir.clone();
             std::thread::spawn(move || {
                 // Created as the guest mounts it, before it asks.
-                if let Err(err) = takings(listener, &cladefsd, &cell_dir, &dir) {
+                if let Err(err) = takings(listener, &cladefsd, cell, &dir) {
                     eprintln!("stats: {err:#}");
                 }
             });

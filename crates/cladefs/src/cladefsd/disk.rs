@@ -368,6 +368,11 @@ pub struct DiskConfig {
 }
 
 impl DiskConfig {
+    /// Builds a [`DiskConfig`] from the TOML `[disk]` section.
+    pub fn from_toml(cfg: &crate::config::DiskDefaultsConfig) -> Self {
+        Self { headroom: cfg.headroom.map(|h| h.0), fixed: cfg.cap.map(|c| c.bytes()) }
+    }
+
     /// As the environment says it: refused, naming the variable, if it says what isn't one.
     pub fn from_env() -> Result<Self, String> {
         // Unset, or not UTF-8, which no value it takes is: none.
@@ -433,6 +438,40 @@ pub fn govern_once(config: DiskConfig, errors: &mut std::collections::HashSet<u6
     govern_once_on(Daemon::process(), config, errors);
 }
 
+/// Apportions a global fixed cap `total` across `weights` proportionally without overflow so no
+/// single busy disk starves peer JBOD disks.
+fn apportion_cap(total: u64, weights: &[u64]) -> Vec<u64> {
+    let n = weights.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    if n == 1 {
+        return vec![total];
+    }
+    let sum: u128 = weights.iter().map(|&w| u128::from(w)).sum();
+    if sum == 0 {
+        let base = total / (n as u64);
+        let rem = total % (n as u64);
+        return (0..n).map(|i| base + u64::from((i as u64) < rem)).collect();
+    }
+    let mut shares = Vec::with_capacity(n);
+    let mut assigned = 0u64;
+    for &w in weights {
+        let share = ((u128::from(total) * u128::from(w)) / sum) as u64;
+        shares.push(share);
+        assigned += share;
+    }
+    let mut rem = total.saturating_sub(assigned);
+    for share in &mut shares {
+        if rem == 0 {
+            break;
+        }
+        *share += 1;
+        rem -= 1;
+    }
+    shares
+}
+
 fn govern_disks(
     daemon: &Daemon,
     disks: &[Arc<HostDisk>],
@@ -440,36 +479,59 @@ fn govern_disks(
     errors: &mut std::collections::HashSet<u64>,
 ) {
     let cache = super::storage::opened_cache(daemon);
+    // Sample every disk first so global cap apportioning uses each disk's effective capacity
+    // fairly without one busy disk starving its JBOD peers.
+    let mut sampled: Vec<(&Arc<HostDisk>, u64, host_disk::Sample)> =
+        Vec::with_capacity(disks.len());
     for disk in disks {
         let dev = disk.dev().unwrap_or_default();
-        let sample = match disk.sample() {
+        match disk.sample() {
             Ok(sample) => {
                 errors.remove(&dev);
-                sample
+                disk.record_sample_ok();
+                sampled.push((disk, dev, sample));
             }
             Err(err) => {
+                let state = disk.record_sample_error();
                 if errors.insert(dev) {
-                    log::error!("cladefsd: reading the space of disk {dev:#x}: {err}");
+                    log::error!(
+                        "cladefsd: reading the space of disk {dev:#x} (state={}): {err}",
+                        state.as_str()
+                    );
                 }
-                continue;
             }
-        };
-        let headroom = super::governor::disk_headroom(sample.size, config.headroom);
+        }
+    }
+    let global_shares: Option<Vec<u64>> = config.fixed.map(|fixed| {
+        let weights: Vec<u64> =
+            sampled.iter().map(|(disk, _, sample)| disk.effective_capacity(sample.size)).collect();
+        apportion_cap(fixed, &weights)
+    });
+    for (idx, (disk, dev, sample)) in sampled.into_iter().enumerate() {
+        let headroom_spec = disk.policy_headroom().or(config.headroom);
+        let fs_headroom = super::governor::disk_headroom(sample.size, headroom_spec);
         // What it counts that its filesystem doesn't hold yet: this disk's cells' pages dirty in
         // the cell page cache (board 5995), and the cache's fills in flight.
         let in_flight = disk.dirty.get() + disk.cache_writing.get();
-        let mut allowance =
-            super::governor::disk_allowance(disk.held(), sample.free, in_flight, headroom);
-        if let Some(fixed) = config.fixed {
-            let others: u64 = (disks.iter())
-                .filter(|other| !Arc::ptr_eq(other, disk))
-                .map(|other| other.held())
-                .sum();
-            allowance = allowance.min(fixed.saturating_sub(others));
+        let fs_allowance =
+            super::governor::disk_allowance(disk.held(), sample.free, in_flight, fs_headroom);
+        // Per-disk cap applies independently on top of filesystem free space, and when a cap is
+        // smaller than the underlying filesystem, pressure headroom scales to the capped size so a
+        // capped shared OS disk is not perpetually under pressure.
+        let mut allowance = match disk.cap() {
+            Some(cap) => fs_allowance.min(cap),
+            None => fs_allowance,
+        };
+        if let Some(shares) = &global_shares {
+            allowance = allowance.min(shares[idx]);
         }
+        let effective_size = disk.effective_capacity(sample.size);
+        let cap_headroom = super::governor::disk_headroom(effective_size, headroom_spec);
+        let headroom = fs_headroom.min(cap_headroom);
         let spare = allowance.saturating_sub(disk.cells.committed());
-        // Derived first: each part cache shard on this disk keeps what the cells leave, down a
-        // band below it once it must give back, so that it doesn't evict at every look.
+        // Derived first: each part cache shard on this disk keeps what the cells leave (capped by
+        // any per-disk `cache_cap`), down a band below it once it must give back, so that it
+        // doesn't evict at every look.
         if let Some(cache) = &cache
             && let Some(held) = cache.bytes_on(disk)
         {
@@ -510,7 +572,7 @@ pub(super) fn host_disks_on(
     daemon: &Daemon,
 ) -> Vec<(&'static str, &'static str, Vec<(String, u64)>)> {
     type Gauge = (&'static str, &'static str, fn(&HostDisk, &host_disk::Sample) -> u64);
-    let gauges: [Gauge; 12] = [
+    let gauges: [Gauge; 16] = [
         ("cladefsd_host_disk_size_bytes", "A disk's filesystem's size.", |_, sample| sample.size),
         ("cladefsd_host_disk_free_bytes", "What a disk's filesystem has free.", |_, sample| {
             sample.free
@@ -524,6 +586,16 @@ pub(super) fn host_disks_on(
             "cladefsd_host_disk_allowance_bytes",
             "What the disk governor allows the daemon on a disk.",
             |disk, _| disk.allowance(),
+        ),
+        (
+            "cladefsd_host_disk_cap_bytes",
+            "Configured per-disk hard byte cap (0 if uncapped).",
+            |disk, _| disk.cap().unwrap_or(0),
+        ),
+        (
+            "cladefsd_host_disk_cache_cap_bytes",
+            "Configured per-disk part-cache byte cap (0 if uncapped).",
+            |disk, _| disk.cache_cap().unwrap_or(0),
         ),
         ("cladefsd_host_disk_stores_bytes", "What the cells on a disk take.", |disk, _| {
             disk.cells.bytes()
@@ -557,6 +629,16 @@ pub(super) fn host_disks_on(
         ("cladefsd_host_disk_pressure", "Whether a disk is under pressure: 1 if so.", |disk, _| {
             u64::from(disk.under_pressure())
         }),
+        (
+            "cladefsd_host_disk_state",
+            "Disk runtime health state (0=online, 1=suspect, 2=offline, 3=returning).",
+            |disk, _| u64::from(disk.health().as_u8()),
+        ),
+        (
+            "cladefsd_host_disk_placement",
+            "Disk placement policy (0=read_write, 1=drain, 2=read_only).",
+            |disk, _| u64::from(disk.placement().as_u8()),
+        ),
     ];
     let sampled: Vec<_> = (HostDisk::all_on(daemon.host.bucket_host()).into_iter())
         .filter_map(|disk| {
@@ -864,5 +946,102 @@ mod tests {
         // Syncing file_a clears Disk A's dirty count cleanly.
         file_a.sync().unwrap();
         assert_eq!(disk_a.dirty.get(), 0);
+    }
+
+    /// Per-disk caps bound each disk independently on top of free space, scale pressure headroom
+    /// to the capped capacity on shared OS disks, and apportion global fixed caps fairly by each
+    /// disk's effective capacity instead of letting one disk starve another.
+    #[test]
+    fn per_disk_caps_and_fair_global_cap_govern_independently() {
+        use bucket_cell::host_disk::{
+            DiskHealthState, DiskPlacement, DiskPolicy, HostDisk, Sample,
+        };
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        // Shared 100 MiB OS disk (80 MiB free) capped at 40 MiB, plus dedicated 100 MiB scratch
+        // disk (90 MiB free) capped at 80 MiB.
+        let os_free = Arc::new(AtomicU64::new(80 * MIB));
+        let os_free_sample = os_free.clone();
+        let disk_os = HostDisk::in_memory(move || {
+            let free = os_free_sample.load(Ordering::Relaxed);
+            Sample { size: 100 * MIB, free, used: 100 * MIB - free }
+        });
+        disk_os.set_policy(DiskPolicy {
+            id: Some("os".into()),
+            cap: Some(40 * MIB),
+            headroom: Some(super::DiskHeadroom::Percent(10)),
+            cache_cap: Some(10 * MIB),
+            dirty_budget: Some(4 * MIB),
+            placement: DiskPlacement::ReadWrite,
+        });
+        let disk_scratch =
+            HostDisk::in_memory(move || Sample { size: 100 * MIB, free: 90 * MIB, used: 10 * MIB });
+        disk_scratch.set_policy(DiskPolicy {
+            id: Some("scratch".into()),
+            cap: Some(80 * MIB),
+            headroom: Some(super::DiskHeadroom::Percent(10)),
+            cache_cap: None,
+            dirty_budget: None,
+            placement: DiskPlacement::ReadWrite,
+        });
+
+        let daemon = Daemon::new();
+        let mut errors = std::collections::HashSet::new();
+        super::govern_disks(
+            &daemon,
+            &[disk_os.clone(), disk_scratch.clone()],
+            super::DiskConfig::default(),
+            &mut errors,
+        );
+        // OS disk capped at 40 MiB; pressure headroom is 10% of 40 MiB = 4 MiB (not 10 MiB).
+        assert_eq!(disk_os.allowance(), 40 * MIB);
+        assert_eq!(disk_os.headroom(), 4 * MIB);
+        assert!(!disk_os.under_pressure());
+        assert_eq!(disk_scratch.allowance(), 80 * MIB);
+        assert_eq!(disk_scratch.headroom(), 8 * MIB);
+        assert!(!disk_scratch.under_pressure());
+
+        // If external processes fill the OS disk down to 25 MiB free (10 MiB fs headroom =>
+        // 15 MiB fs_allowance < 40 MiB cap), cladefs yields below the cap to protect the OS!
+        os_free.store(25 * MIB, Ordering::Relaxed);
+        super::govern_disks(
+            &daemon,
+            &[disk_os.clone(), disk_scratch.clone()],
+            super::DiskConfig::default(),
+            &mut errors,
+        );
+        assert_eq!(disk_os.allowance(), 15 * MIB);
+        assert_eq!(disk_scratch.allowance(), 80 * MIB);
+
+        // Restore OS free space and apply a 60 MiB global cap: apportioned 1:2 across 40 MiB and
+        // 80 MiB effective capacities => 20 MiB and 40 MiB.
+        os_free.store(80 * MIB, Ordering::Relaxed);
+        super::govern_disks(
+            &daemon,
+            &[disk_os.clone(), disk_scratch.clone()],
+            super::DiskConfig { headroom: None, fixed: Some(60 * MIB) },
+            &mut errors,
+        );
+        assert_eq!(disk_os.allowance(), 20 * MIB);
+        assert_eq!(disk_scratch.allowance(), 40 * MIB);
+
+        // Placement & health checks: Drain refuses new cells but allows writes; ReadOnly refuses
+        // writes; repeated sample errors degrade to Suspect -> Offline and recover on ok.
+        disk_os.set_placement(DiskPlacement::Drain);
+        assert!(!disk_os.accepts_new_cells());
+        assert!(disk_os.accepts_writes());
+        disk_os.set_placement(DiskPlacement::ReadOnly);
+        assert!(!disk_os.accepts_new_cells());
+        assert!(!disk_os.accepts_writes());
+        disk_os.set_placement(DiskPlacement::ReadWrite);
+
+        assert_eq!(disk_os.record_sample_error(), DiskHealthState::Suspect);
+        assert!(!disk_os.accepts_new_cells());
+        assert_eq!(disk_os.record_sample_error(), DiskHealthState::Suspect);
+        assert_eq!(disk_os.record_sample_error(), DiskHealthState::Offline);
+        assert!(!disk_os.accepts_writes());
+        disk_os.record_sample_ok();
+        assert_eq!(disk_os.health(), DiskHealthState::Online);
+        assert!(disk_os.accepts_new_cells());
     }
 }

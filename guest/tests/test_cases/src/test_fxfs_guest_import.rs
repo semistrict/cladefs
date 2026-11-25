@@ -111,26 +111,45 @@ mod host {
         }
 
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
+            use cladefs::cladefsd::control::proto::{ForkCellRequest, ImportImageRequest};
+            use cladefs::testing::control_path;
+
             let dir = &test_setup.tmp_dir;
             let layout = dir.join("image");
             oci_layout(&layout, "cladefs/test:import", &layers()?)?;
-            let base = dir.join("base");
-            block_on(cladefs::import::make_base(
-                &base,
-                CAPACITY,
-                &layout,
-                Some("cladefs/test:import"),
-            ))?;
-            // A cell of each case's own, as each fork's is, its ID its bucket's to give:
-            // a new cell of the base's tenant's (TASK-364).
-            let base = local_cell::upload::wait_on(cladefs::OpenCell::open(&base))?;
-            local_cell::upload::wait_on(base.fork(dir.join("extents"), base.cell().tenant))?;
-            drop(base);
+            let cladefsd =
+                std::path::PathBuf::from(std::env::var_os("CLADEFSD").expect("CLADEFSD not set"));
+            let control = crate::common::control(&cladefsd)?;
+            let base = control
+                .call(async |client| {
+                    client
+                        .import_image(ImportImageRequest {
+                            capacity: CAPACITY,
+                            image: control_path(&layout),
+                            reference: "cladefs/test:import".into(),
+                            tenant: 0,
+                        })
+                        .await
+                })
+                .map(|r| cladefs::CellId { tenant: r.tenant, id: r.cell })?;
+            let fork = control
+                .call(async |client| {
+                    client
+                        .fork_cell(ForkCellRequest {
+                            tenant: base.tenant,
+                            cell: base.id,
+                            ..Default::default()
+                        })
+                        .await
+                })
+                .map(|r| cladefs::CellId { tenant: r.tenant, id: r.cell })?;
+            crate::common::save_cell_id(dir, "base", base)?;
+            crate::common::save_cell_id(dir, "extents", fork)?;
 
             let mut vm = Vm::new(2, 512)?;
             vm.guest_kernel()?;
             let window = if self.dax { crate::common::dax_window(WINDOW)? } else { 0 };
-            vm.cell("extents", &dir.join("extents"), CAPACITY, window)?;
+            vm.cell_id("extents", fork, CAPACITY, window)?;
             vm.enter(&setup_rootfs(&test_setup)?, &test_setup.test_case)
         }
 
@@ -141,7 +160,9 @@ mod host {
             }
             // The guest wrote to the fork, not the base.
             let dir = &test_setup.tmp_dir;
-            match (has_written(&dir.join("extents")), has_written(&dir.join("base"))) {
+            let fork_path = crate::common::shared_cell_path(dir, "extents").expect("fork path");
+            let base_path = crate::common::shared_cell_path(dir, "base").expect("base path");
+            match (has_written(&fork_path), has_written(&base_path)) {
                 (Ok(true), Ok(false)) => TestOutcome::Pass,
                 outcome => TestOutcome::Fail(format!(
                     "expected the fork to have {WRITTEN} and the base not to, got {outcome:?}"

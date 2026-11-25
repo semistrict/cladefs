@@ -4,10 +4,9 @@
 
 //! TASK-94: the host's disk a tenant takes, what its cells' files take, counted as they write
 //! (TASK-539.5), and limited at runtime through the control API, a tenant's and every tenant's
-//! together. Past a limit the
-//! tenant's writes fail with ENOSPC, and the cells its VMs make; the daemon goes on, and other
-//! tenants' writes do; what leaves the disk lets the tenant write again. Its metrics show each
-//! tenant's disk by its ID.
+//! together. Past a limit the tenant's writes fail with ENOSPC, and the cells its VMs make; the
+//! daemon goes on, and other tenants' writes do; what leaves the disk lets the tenant write again.
+//! Its metrics show each tenant's disk by its ID.
 
 #![cfg(target_os = "linux")]
 
@@ -15,7 +14,7 @@ mod common;
 
 use cladefs::cladefsd::disk::STORE_MADE;
 use cladefs::cladefsd::metrics::render;
-use cladefs::{CellClient, Errno, ExtentId, VolatileSlice};
+use cladefs::{CellClient, CellId, Errno, ExtentId, VolatileSlice};
 use common::daemon::{CAPACITY, Daemon, failure};
 use common::pattern;
 use std::path::Path;
@@ -102,39 +101,34 @@ fn until(what: &str, mut done: impl FnMut() -> bool) {
 fn tenants_past_their_disk_limits_are_refused_while_others_write() {
     let dir = tempfile::tempdir().unwrap();
     let mut daemon = Daemon::new(dir.path());
-    let (acme, globex) = (dir.path().join("acme"), dir.path().join("globex"));
-    std::fs::create_dir(&acme).unwrap();
-    std::fs::create_dir(&globex).unwrap();
-    let acme_socket = daemon.grant(1, &acme, None).unwrap();
-    let globex_socket = daemon.grant(2, &globex, None).unwrap();
+    let acme_socket = daemon.grant(1, None).unwrap();
+    let globex_socket = daemon.grant(2, None).unwrap();
+    let acme_dir = dir.path().join("disk0/cells").join(base32_id::Padded(1).to_string());
 
     // Acme's base, which its VMs' cells are forks of, uploaded, as its VM manager makes them.
-    let base = acme.join("base");
-    let vm = CellClient::connect(&acme_socket, &base, CAPACITY).unwrap();
+    let vm = CellClient::connect_new(&acme_socket, 1, CAPACITY).unwrap();
+    let base = CellId { tenant: 1, id: vm.cell() };
     for sequence in 1..=8 {
         write(&vm, sequence, sequence).unwrap();
     }
     vm.commit(None).unwrap();
     drop(vm);
-    daemon.sync(&base).unwrap();
-    let forks: Vec<_> = (0..4).map(|fork| acme.join(format!("fork-{fork}"))).collect();
-    for fork in &forks {
-        daemon.fork(&base, fork).unwrap();
-    }
+    daemon.sync(base).unwrap();
+    let forks: Vec<_> = (0..4).map(|_| daemon.fork(base, None).unwrap()).collect();
     // What it takes is what its cells' files do.
     let (taken, limit) = daemon.tenant_disk(Some(1)).unwrap();
-    assert_eq!((taken, limit), (cells(&acme), None));
+    assert_eq!((taken, limit), (cells(&acme_dir), None));
     // Each fork takes little of its own, the base's data in the bucket: no more than a cell made
     // is admitted as.
-    for fork in &forks {
-        assert!(counted(fork) <= STORE_MADE, "{} takes {} bytes", fork.display(), counted(fork));
+    for &fork in &forks {
+        let path = daemon.cell_path(fork);
+        assert!(counted(&path) <= STORE_MADE, "{} takes {} bytes", path.display(), counted(&path));
     }
 
     // 16 MiB more, its VMs writing its forks, uncommitted, which none uploads: room for them as
     // admitted, past what its cells, open, take and reserve.
-    let vms: Vec<_> = (forks.iter())
-        .map(|fork| CellClient::connect(&acme_socket, fork, CAPACITY).unwrap())
-        .collect();
+    let vms: Vec<_> =
+        forks.iter().map(|&fork| CellClient::connect_cell(&acme_socket, fork).unwrap()).collect();
     let (open, _) = daemon.tenant_disk(Some(1)).unwrap();
     let limit = open + daemon.tenant_reserved(Some(1)) + 16 * ADMITTED;
     daemon.set_disk_limit(Some(1), Some(limit)).unwrap();
@@ -152,25 +146,29 @@ fn tenants_past_their_disk_limits_are_refused_while_others_write() {
     // log, which its cell makes as it opens to write (backlog doc-14, `wal`), and the header of
     // its open segment's log (TASK-301): its metrics name it by its ID, with its limit.
     let (full, _) = daemon.tenant_disk(Some(1)).unwrap();
-    let wal = |fork: &Path| std::fs::metadata(fork.join("wal")).unwrap().len();
-    let wals: u64 = forks.iter().map(|fork| bucket_cell::host_disk::counted(wal(fork))).sum();
+    let wal = |fork: CellId| std::fs::metadata(daemon.cell_path(fork).join("wal")).unwrap().len();
+    let wals: u64 = forks.iter().map(|&fork| bucket_cell::host_disk::counted(wal(fork))).sum();
     let opened = wals + forks.len() as u64 * LOG_HEADER;
-    assert_eq!((full, cells(&acme)), (taken + 16 * EXTENT + opened, taken + 16 * EXTENT + opened));
+    assert_eq!(
+        (full, cells(&acme_dir)),
+        (taken + 16 * EXTENT + opened, taken + 16 * EXTENT + opened)
+    );
     let tenant = "{tenant=\"1\"}";
     assert_eq!(metric(&format!("cladefsd_tenant_disk_limit_bytes{tenant}")), limit);
     assert_eq!(metric(&format!("cladefsd_tenant_disk_bytes{tenant}")), full);
     // A cell its VM makes is refused too.
-    let made = CellClient::connect(&acme_socket, acme.join("more"), CAPACITY);
+    let before_count = std::fs::read_dir(&acme_dir).unwrap().count();
+    let made = CellClient::connect_new(&acme_socket, 1, CAPACITY);
     assert_eq!(made.map(drop).map_err(|error| error.errno()), Err(Some(Errno::ENOSPC)));
-    assert!(!acme.join("more").exists());
+    assert_eq!(std::fs::read_dir(&acme_dir).unwrap().count(), before_count);
 
     // Globex writes, past what acme's limit would allow, as the daemon's own VMs do.
-    let theirs = CellClient::connect(&globex_socket, globex.join("vm"), CAPACITY).unwrap();
+    let theirs = CellClient::connect_new(&globex_socket, 2, CAPACITY).unwrap();
     for sequence in 1..=24 {
         write(&theirs, sequence, 1000 + sequence).unwrap();
     }
     theirs.commit(None).unwrap();
-    let ours = daemon.open(&dir.path().join("vm"), CAPACITY);
+    let (_, ours) = daemon.open_new(0, CAPACITY);
     write(&ours, 1, 2000).unwrap();
     ours.commit(None).unwrap();
     // And acme's VMs commit, refused as they write: their commits, sealing their extents, free the

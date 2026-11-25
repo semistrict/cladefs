@@ -393,8 +393,10 @@ fn shrinks_dropped_by_their_callers_stop_waiting() {
     use super::control::proto::ResizeCellRequest;
     host();
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store");
-    let (client, served) = connect(&path, 2 << 20);
+    super::Daemon::process().configure_disks(&[dir.path().join("disk0")]).unwrap();
+    let (client, served) = connect(Path::new("0/0"), 2 << 20);
+    let cell = crate::CellId { tenant: 0, id: client.cell() };
+    let path = super::Daemon::process().cell_path(cell).unwrap();
     let (asks, asked) = std::sync::mpsc::channel();
     client.on_capacity(move |capacity, ask| asks.send((capacity, ask)).unwrap());
     let socket = dir.path().join("control.sock");
@@ -406,8 +408,7 @@ fn shrinks_dropped_by_their_callers_stop_waiting() {
 
     control(async {
         let mut api = super::control::connect(&socket).await.unwrap();
-        let request =
-            ResizeCellRequest { path: path.to_str().unwrap().to_owned(), capacity: 1 << 20 };
+        let request = ResizeCellRequest { tenant: cell.tenant, cell: cell.id, capacity: 1 << 20 };
         let asking = tokio::task::spawn_blocking(move || (asked.recv().unwrap(), asked));
         let asked = tokio::select! {
             shrunk = api.resize_cell(request) => panic!("{shrunk:?}"),

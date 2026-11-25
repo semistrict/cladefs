@@ -35,9 +35,11 @@
 // host at a time. A base forked on many hosts is given a version first, and its version forked on
 // each (ForkCell's `version`).
 //
-// Cells are named by the paths of their directories on the daemon's host, UTF-8. A cell a VM
-// process has open is its connection's: what would change it under the guest's feet fails with
-// FAILED_PRECONDITION and errno EBUSY, unless the call says otherwise.
+// Cells are named by `(tenant, cell)` alone (hotbed question 547): the daemon owns its managed
+// JBOD disks (`[[disks]]` in TOML config) and chooses where each cell directory lives on the host.
+// Callers never choose or pass host directories for cells. A cell a VM process has open is its
+// connection's: what would change it under the guest's feet fails with FAILED_PRECONDITION and
+// errno EBUSY, unless the call says otherwise.
 //
 // Errors are gRPC statuses whose code follows the errno the daemon failed with, which the
 // `cladefs-errno` metadata entry carries, as a decimal number (Linux's): ENOENT is NOT_FOUND,
@@ -288,27 +290,25 @@ service Cladefsd {
   // retiring an ephemeral cell's reference); refused, it serves the cell again (EAGAIN). Asked
   // again after a failure or a restart, it asks the other again, which answers as it did.
   rpc HandOverCell(HandOverCellRequest) returns (HandOverCellResponse);
-  // Ends the live migration of the cell at `path` (board 8577, board 11369). Its hand-over not
-  // begun: its rounds stop, the other daemon is told to give it up, and MigrateCell may migrate the
-  // cell again, to another daemon too, while its guest runs on; so too a migration the other gave
-  // up (restarted, or hearing nothing of it for CLADEFSD_MIGRATION_IDLE). Its hand-over begun, the
-  // cell given up (refused while open, EBUSY), the cell's fate is the other daemon's to say: told
-  // to give the migration up, then asked to take the cell over as HandOverCell asks, it refuses,
-  // and this daemon serves the cell again, answering as HandOverCell does, EAGAIN; not answering,
-  // ENOTCONN, the cell given up still, to be asked again; or, having accepted it before, the cell
-  // is the other's, ALREADY_EXISTS (EEXIST), and goes here. No migration of the cell under way,
-  // NOT_FOUND (ENOENT); one being prepared, EBUSY.
+  // Ends the live migration of a cell (board 8577, board 11369).
   rpc AbortMigration(AbortMigrationRequest) returns (AbortMigrationResponse);
+  // Lists all managed host disks and their live per-disk governance state (caps, headroom,
+  // allowance, usage, spare, pressure, health, placement; hotbed question 547).
+  rpc ListDisks(ListDisksRequest) returns (ListDisksResponse);
+  // Updates per-disk governance (hard cap, part-cache cap, headroom, dirty budget, placement mode)
+  // live at runtime for one managed disk identified by its configured `id` (hotbed question 547).
+  rpc SetDiskGovernance(SetDiskGovernanceRequest) returns (SetDiskGovernanceResponse);
 }
 
-// A live migration of a cell to begin.
+// A live migration of a cell to begin. The target daemon chooses its own managed JBOD disk.
 message MigrateCellRequest {
-  // The directory of the cell.
-  string path = 1;
+  reserved 1, 3;
   // The peer address of the daemon it goes to.
   string peer = 2;
-  // Where it goes there.
-  string to = 3;
+  // The cell's tenant.
+  uint64 tenant = 4;
+  // The cell's ID.
+  uint64 cell = 5;
 }
 
 // A migration begun.
@@ -319,12 +319,15 @@ message MigrateCellResponse {
 
 // A migration's hand-over.
 message HandOverCellRequest {
-  // The directory of the cell being migrated.
-  string path = 1;
+  reserved 1;
   // For a bucket-backed cell: the fencing token to place the cell at on the target before taking
   // its head in the bucket (board 11369). Unset keeps the cell's existing placement token (or the
-  // target's CLADEFSD_TOKEN). Refused (INVALID_ARGUMENT, EINVAL) if 0 or set on an ephemeral cell.
+  // target's daemon token). Refused (INVALID_ARGUMENT, EINVAL) if 0 or set on an ephemeral cell.
   optional uint64 token = 2;
+  // The cell's tenant.
+  uint64 tenant = 3;
+  // The cell's ID.
+  uint64 cell = 4;
 }
 
 // A migration handed over.
@@ -332,12 +335,111 @@ message HandOverCellResponse {}
 
 // A migration to end.
 message AbortMigrationRequest {
-  // The directory of the cell being migrated.
-  string path = 1;
+  reserved 1;
+  // The cell's tenant.
+  uint64 tenant = 2;
+  // The cell's ID.
+  uint64 cell = 3;
 }
 
 // A migration ended.
 message AbortMigrationResponse {}
+
+// Administrative placement/write policy for a managed disk.
+enum DiskPlacementMode {
+  // Normal operation: accepts new cells, writes, and part-cache fills.
+  DISK_PLACEMENT_READ_WRITE = 0;
+  // Draining: no new cells placed here; existing cells keep running.
+  DISK_PLACEMENT_DRAIN = 1;
+  // Read-only: refuses new cells, cell writes, and part-cache fills.
+  DISK_PLACEMENT_READ_ONLY = 2;
+}
+
+// Runtime health state of a managed disk.
+enum DiskHealthMode {
+  // Healthy: serving reads, writes, and new cell placements.
+  DISK_HEALTH_ONLINE = 0;
+  // Experiencing consecutive I/O or statvfs errors; excluded from new placements.
+  DISK_HEALTH_SUSPECT = 1;
+  // Unreachable or failed past threshold; quarantined from writes and placements.
+  DISK_HEALTH_OFFLINE = 2;
+  // Recovering from offline after a healthy probe; awaiting consecutive successes.
+  DISK_HEALTH_RETURNING = 3;
+}
+
+// Asks for all managed disks and their governance state.
+message ListDisksRequest {}
+
+// All managed disks and their live governance state.
+message ListDisksResponse {
+  // Configured managed disks in configuration order.
+  repeated DiskInfo disks = 1;
+}
+
+// Live governance and usage state of one managed disk.
+message DiskInfo {
+  // Configured disk ID (from TOML `[[disks]].id`).
+  string id = 1;
+  // Kernel device `MAJOR:MINOR`.
+  string device = 2;
+  // Runtime health state.
+  DiskHealthMode state = 3;
+  // Administrative placement mode.
+  DiskPlacementMode placement = 4;
+  // Filesystem total size in bytes.
+  uint64 size_bytes = 5;
+  // Filesystem free bytes available to unprivileged writers.
+  uint64 free_bytes = 6;
+  // Configured per-disk hard cap in bytes (0 if uncapped).
+  uint64 cap_bytes = 7;
+  // Effective governor headroom in bytes.
+  uint64 headroom_bytes = 8;
+  // Current governed allowance in bytes (cells + reserve + pledged + cache).
+  uint64 allowance_bytes = 9;
+  // Bytes taken by cells on this disk.
+  uint64 cells_bytes = 10;
+  // Reserved + pledged bytes held against this disk's allowance.
+  uint64 reserved_bytes = 11;
+  // Bytes held by the part-cache shard on this disk.
+  uint64 cache_bytes = 12;
+  // Configured per-disk part-cache hard cap in bytes (0 if uncapped).
+  uint64 cache_cap_bytes = 13;
+  // Spare bytes left by cells under `allowance_bytes`.
+  uint64 spare_bytes = 14;
+  // Whether this disk is currently under governor pressure.
+  bool under_pressure = 15;
+  // Configured per-disk dirty-page hard ceiling in bytes (0 if auto-divided).
+  uint64 dirty_budget_bytes = 16;
+}
+
+// Live runtime governance update for one managed disk.
+message SetDiskGovernanceRequest {
+  // Configured disk ID (`DiskInfo.id`).
+  string id = 1;
+  // New per-disk hard cap in bytes (must be > 0).
+  optional uint64 cap_bytes = 2;
+  // Clears the per-disk hard cap when true.
+  bool clear_cap = 3;
+  // New per-disk part-cache hard cap in bytes (must be > 0).
+  optional uint64 cache_cap_bytes = 4;
+  // Clears the per-disk part-cache cap when true.
+  bool clear_cache_cap = 5;
+  // New per-disk headroom in bytes (mutually exclusive with `headroom_percent`).
+  optional uint64 headroom_bytes = 6;
+  // New per-disk headroom percentage `0..100` (mutually exclusive with `headroom_bytes`).
+  optional uint32 headroom_percent = 7;
+  // Clears the per-disk headroom override when true.
+  bool clear_headroom = 8;
+  // New per-disk dirty-page hard ceiling in bytes (must be > 0).
+  optional uint64 dirty_budget_bytes = 9;
+  // Clears the per-disk dirty-page ceiling override when true.
+  bool clear_dirty_budget = 10;
+  // New placement mode, if set.
+  optional DiskPlacementMode placement = 11;
+}
+
+// Per-disk governance updated.
+message SetDiskGovernanceResponse {}
 
 // A host's incarnation to decommission.
 message DecommissionHostRequest {
@@ -374,10 +476,9 @@ message EphemeralHost {
   bool decommissioned = 3;
 }
 
-// Makes an empty cell.
+// Makes an empty cell. The daemon chooses the managed JBOD disk automatically.
 message CreateCellRequest {
-  // Where to make it: a directory that must not exist (ALREADY_EXISTS).
-  string path = 1;
+  reserved 1;
   // The most bytes it holds.
   uint64 capacity = 2;
   // Once the branch to take: a cell named is taken.
@@ -385,8 +486,7 @@ message CreateCellRequest {
   // The fencing token to place it at (PlaceCell), if any: of a placement no earlier than the
   // last writer's of the cell to take, or the take fails (FAILED_PRECONDITION, ESTALE).
   optional uint64 token = 4;
-  // The cell's tenant. Of a new cell in a granted tenant's directory, that tenant's ID (Grant's
-  // `tenant`), or 0 for it; another is refused (PERMISSION_DENIED, EPERM).
+  // The cell's tenant (0 for the default tenant).
   uint64 tenant = 5;
   // The cell kept in the daemon's bucket to take (NOT_FOUND, ENOENT, if it has none), or 0 for a
   // new one, its ID, unique in the daemon's bucket, the bucket's to give (TASK-364), which the
@@ -447,10 +547,9 @@ message CreateCellResponse {
   uint64 cell = 3;
 }
 
-// Makes a cell of a container image.
+// Makes a cell of a container image. The daemon chooses the managed JBOD disk automatically.
 message ImportImageRequest {
-  // Where to make it: a directory that must not exist (ALREADY_EXISTS).
-  string path = 1;
+  reserved 1;
   // The most bytes it holds.
   uint64 capacity = 2;
   // The image, on the daemon's host: an OCI image layout (as `skopeo copy` makes, or
@@ -459,8 +558,7 @@ message ImportImageRequest {
   string image = 3;
   // The image in the layout to import, by its reference; empty for its only image.
   string reference = 4;
-  // The tenant of the new cell. In a granted tenant's directory,
-  // that tenant's ID, or 0 for it; another is refused (PERMISSION_DENIED, EPERM).
+  // The tenant of the new cell (0 for the default tenant).
   uint64 tenant = 5;
 }
 
@@ -473,14 +571,13 @@ message ImportImageResponse {
   uint64 cell = 3;
 }
 
-// Makes a memory cell of a snapshot's memory file (board 11222).
+// Makes a memory cell of a snapshot's memory file (board 11222). The daemon chooses the managed
+// JBOD disk automatically.
 message ImportMemoryRequest {
-  // Where to make it: a directory that must not exist (ALREADY_EXISTS).
-  string path = 1;
+  reserved 1;
   // The memory file, on the daemon's host: non-empty, a whole number of 4 KiB pages.
   string file = 2;
-  // The tenant of the new cell. In a granted tenant's directory, that tenant's ID, or 0 for it;
-  // another is refused (PERMISSION_DENIED, EPERM).
+  // The tenant of the new cell (0 for the default tenant).
   uint64 tenant = 3;
   // Whether to make an initial version of the memory cell as part of the import.
   bool make_version = 4;
@@ -496,43 +593,29 @@ message ImportMemoryResponse {
   uint64 version = 3;
 }
 
-// Forks a cell.
+// Forks a cell (or a version of a cell). The daemon chooses the managed JBOD disk automatically.
 message ForkCellRequest {
-  // The cell to fork; empty to fork `version`.
-  string from = 1;
-  // Where the fork goes: a directory that must not exist (ALREADY_EXISTS), made a cell of its
-  // own, holding the fork's branch alone. The fork is made in the daemon's bucket (backlog doc-7,
-  // Forks): `from`'s commit naming the fork, once acknowledged there, gives the fork's branch its
-  // record, inheriting `from`'s extents rather than copies; only then is `to` made, taking the
-  // branch's state from the bucket. A fork that fails deletes `to`, and its branch in the bucket
-  // if its commit was made; its host crashing part way, `to` is left unmade, which DeleteCell of
-  // `to` deletes, and the fork stands or never was, as the bucket has it.
-  string to = 2;
-  // Once the fork's branch, named; now always a new one, its ID the bucket's to give (TASK-364):
-  // the branch of a new cell of the granted tenant's whose directory `to` is in, or else of
-  // `from`'s tenant.
-  reserved 3;
-  reserved 4, 5;
-  // If not 0, the version to fork, of the cell `cell` of `tenant`'s, on this host or any other: a
-  // base forked on many hosts. One of another tenant's than the fork's forks only if shared
-  // (PERMISSION_DENIED, EACCES); one the cell's head names not, NOT_FOUND.
+  reserved 1, 2, 3, 4, 5;
+  // If not 0, the version to fork of `(tenant, cell)` on this host or any other; if 0, forks the
+  // local cell `(tenant, cell)` directly.
   uint64 version = 6;
-  // The tenant of the cell whose version is forked.
+  // The source cell's tenant.
   uint64 tenant = 7;
-  // The cell whose version is forked, by its ID.
+  // The source cell's ID.
   uint64 cell = 8;
   // Whether the fork is an ephemeral cell (backlog doc-25): kept on the daemon's host alone, never
   // uploaded, lost with the host's disk, with no versions of its own. Of `version` alone
-  // (INVALID_ARGUMENT otherwise); refused by a daemon keeping no ephemeral cells
-  // (CLADEFSD_EPHEMERAL; UNIMPLEMENTED, ENOTSUP). Its reference in the version's cell's bucket,
-  // naming the daemon's incarnation, keeps the version while it lives; DeleteCell retires it.
+  // (INVALID_ARGUMENT otherwise); refused by a daemon keeping no ephemeral cells (ENOTSUP).
   bool ephemeral = 9;
+  // Optional destination tenant for the forked cell; unset or 0 inherits the source cell's tenant.
+  // Cross-tenant forks of a non-default-tenant cell require a shared version (PERMISSION_DENIED).
+  optional uint64 target_tenant = 10;
 }
 
 // The fork made.
 message ForkCellResponse {
   reserved 1;
-  // Its tenant: `from`'s.
+  // Its tenant.
   uint64 tenant = 2;
   // Its cell, a new one.
   uint64 cell = 3;
@@ -540,8 +623,11 @@ message ForkCellResponse {
 
 // Deletes a cell.
 message DeleteCellRequest {
-  // The cell, or the fork, to delete.
-  string path = 1;
+  reserved 1;
+  // The cell's tenant.
+  uint64 tenant = 2;
+  // The cell's ID.
+  uint64 cell = 3;
 }
 
 // The cell deleted.
@@ -549,8 +635,11 @@ message DeleteCellResponse {}
 
 // Deletes this host's copy of a cell.
 message DropCellRequest {
-  // The cell, or the fork, to delete here.
-  string path = 1;
+  reserved 1;
+  // The cell's tenant.
+  uint64 tenant = 2;
+  // The cell's ID.
+  uint64 cell = 3;
 }
 
 // This host's copy deleted.
@@ -558,10 +647,13 @@ message DropCellResponse {}
 
 // Sets a cell's capacity.
 message ResizeCellRequest {
-  // The cell to resize.
-  string path = 1;
+  reserved 1;
   // Its new capacity, in bytes.
   uint64 capacity = 2;
+  // The cell's tenant.
+  uint64 tenant = 3;
+  // The cell's ID.
+  uint64 cell = 4;
 }
 
 // The cell resized.
@@ -569,16 +661,15 @@ message ResizeCellResponse {}
 
 // Places a cell.
 message PlaceCellRequest {
-  // The cell, or the fork, to place.
-  string path = 1;
+  reserved 1;
   // The placement's fencing token, its boot ID: greater than every earlier placement's.
   uint64 token = 2;
-  // Whether this placement's takings of a replicated cell are forced (doc-21, TASK-681): a taking
-  // goes on with the members of the configuration the cell's head names that answer, fewer than
-  // a take needs, as when f+1 of them are gone for good, and recovers what they hold. Commits told
-  // replicated that only the others held are lost; StatCell's forced_after says past which
-  // commit. A later placement is not forced unless it asks.
+  // Whether this placement's takings of a replicated cell are forced (doc-21, TASK-681).
   bool force = 3;
+  // The cell's tenant.
+  uint64 tenant = 4;
+  // The cell's ID.
+  uint64 cell = 5;
 }
 
 // The cell placed.
@@ -586,13 +677,14 @@ message PlaceCellResponse {}
 
 // Makes a version of a cell.
 message MakeVersionRequest {
-  // The cell, a VM's or not.
-  string path = 1;
+  reserved 1, 3;
   // If not 0, how many versions of the cell to keep, this one the newest: the rest are dropped
   // once the head names it.
   uint32 keep_last = 2;
-  // Once where to copy the version: versions fork straight, ForkCell's `version`.
-  reserved 3;
+  // The cell's tenant.
+  uint64 tenant = 4;
+  // The cell's ID.
+  uint64 cell = 5;
 }
 
 // The version made.
@@ -603,8 +695,11 @@ message MakeVersionResponse {
 
 // Lists the versions of a cell.
 message ListVersionsRequest {
-  // The cell.
-  string path = 1;
+  reserved 1;
+  // The cell's tenant.
+  uint64 tenant = 2;
+  // The cell's ID.
+  uint64 cell = 3;
 }
 
 // A version of a cell.
@@ -625,10 +720,13 @@ message ListVersionsResponse {
 
 // Drops versions of a cell.
 message DropVersionsRequest {
-  // The cell.
-  string path = 1;
+  reserved 1;
   // The versions to drop.
   repeated uint64 versions = 2;
+  // The cell's tenant.
+  uint64 tenant = 3;
+  // The cell's ID.
+  uint64 cell = 4;
 }
 
 // The versions dropped.
@@ -636,12 +734,15 @@ message DropVersionsResponse {}
 
 // Shares a version, or no longer.
 message ShareVersionRequest {
-  // The cell whose version it is.
-  string path = 1;
+  reserved 1;
   // The version, uploaded.
   uint64 version = 2;
   // Whether other tenants' forks of it are made from now on.
   bool shared = 3;
+  // The cell's tenant.
+  uint64 tenant = 4;
+  // The cell's ID.
+  uint64 cell = 5;
 }
 
 // The version shared, or no longer.
@@ -649,11 +750,14 @@ message ShareVersionResponse {}
 
 // Makes a cell a public base.
 message MakePublicRequest {
-  // The cell, which no VM may have open.
-  string path = 1;
+  reserved 1;
   // Its branch alone, not those it inherited: a fork pinning a state of a cell that goes on being
   // written, to attach to cells (AttachBase), not to fork.
   bool attach_only = 2;
+  // The cell's tenant.
+  uint64 tenant = 3;
+  // The cell's ID.
+  uint64 cell = 4;
 }
 
 // The cell made public.
@@ -661,10 +765,15 @@ message MakePublicResponse {}
 
 // Attaches a fork to a cell.
 message AttachBaseRequest {
-  // The cell to attach it to.
-  string path = 1;
-  // The fork.
-  string base = 2;
+  reserved 1, 2;
+  // The cell's tenant.
+  uint64 tenant = 3;
+  // The cell's ID.
+  uint64 cell = 4;
+  // The attached base fork's tenant.
+  uint64 base_tenant = 5;
+  // The attached base fork's cell ID.
+  uint64 base_cell = 6;
 }
 
 // Attached, durably.
@@ -672,8 +781,11 @@ message AttachBaseResponse {}
 
 // Waits for a cell's commits to be in object storage.
 message SyncCellRequest {
-  // The cell to wait for.
-  string path = 1;
+  reserved 1;
+  // The cell's tenant.
+  uint64 tenant = 2;
+  // The cell's ID.
+  uint64 cell = 3;
 }
 
 // The cell's commits, as of the call, are in object storage.
@@ -681,8 +793,11 @@ message SyncCellResponse {}
 
 // Asks what a cell is, and holds.
 message StatCellRequest {
-  // The cell to look at.
-  string path = 1;
+  reserved 1;
+  // The cell's tenant.
+  uint64 tenant = 2;
+  // The cell's ID.
+  uint64 cell = 3;
 }
 
 // What a cell is, and holds.
@@ -766,10 +881,15 @@ message ListCellsResponse {
 
 // A cell the daemon serves.
 message ListedCell {
-  // Its directory, as the daemon has it: without symbolic links.
-  string path = 1;
+  reserved 1;
   // What StatCell says of it.
   StatCellResponse stat = 2;
+  // Its tenant.
+  uint64 tenant = 3;
+  // Its cell ID.
+  uint64 cell = 4;
+  // The managed disk ID (`DiskInfo.id`) holding its local copy on this host.
+  string disk_id = 5;
 }
 
 // Asks what the daemon did.
@@ -866,8 +986,7 @@ message VmStats {
   uint64 connection = 1;
   // Its cell.
   uint64 cell = 2;
-  // Its cell's directory, without symbolic links.
-  string path = 3;
+  reserved 3;
   // cladefs: 4, whether it followed its cell, read-only, is not reused (board 8237).
   reserved 4;
   // The commit it said it was built of, empty if it didn't.
@@ -888,6 +1007,8 @@ message VmStats {
   uint64 answer_ns = 10;
   // Its guest's, if a guest answered.
   optional GuestStats guest = 11;
+  // Its cell's tenant.
+  uint64 tenant = 12;
 }
 
 // What a guest's Fxfs counted, as its /proc/fs/cladefs/TAG says.
@@ -921,24 +1042,19 @@ message ObjectStorageStats {
   map<string, uint64> failures = 4;
 }
 
-// Grants a tenant.
+// Grants a tenant a VM socket. The daemon manages the tenant's storage across all configured
+// JBOD disks automatically (hotbed question 547).
 message GrantRequest {
-  // Its ID in the bucket (TASK-364), not the default tenant's, 0 (INVALID_ARGUMENT): the cells in
-  // its directory are its own, under its prefix, and its VM processes open none of
-  // another tenant's cells (PERMISSION_DENIED, EACCES). Its socket is named by it, in base 32
-  // (Crockford's digits, lower case, no leading zeros): `<tenant>.sock`.
+  // Its ID in the bucket (TASK-364), not the default tenant's, 0 (INVALID_ARGUMENT): its VM
+  // processes open cells of this tenant alone (PERMISSION_DENIED, EACCES). Its socket is named by
+  // it, in base 32 (Crockford's digits, lower case, no leading zeros): `<tenant>.sock`.
   uint64 tenant = 1;
-  // The directory its cells are in, which must exist: its VM processes name cells in it
-  // alone (or in `dir` and `dirs` together when multiple JBOD directories are granted).
-  string dir = 2;
+  reserved 2, 5;
   // The user to give its socket to, its jails': the socket is theirs and its group's alone. The
   // daemon's own user, if not given.
   optional uint32 uid = 3;
   // The group to give its socket to; the daemon's own, if not given.
   optional uint32 gid = 4;
-  // Additional directories its cells may live in across JBOD disks, each of which must exist.
-  // Combined with `dir` when both are non-empty; `dir` may be empty when `dirs` is non-empty.
-  repeated string dirs = 5;
 }
 
 // The tenant's VM socket.

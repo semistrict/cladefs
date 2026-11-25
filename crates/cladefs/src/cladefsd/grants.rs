@@ -8,7 +8,9 @@
 //! on. Grants live as long as the daemon: after a restart, the VM manager grants again.
 
 use super::Daemon;
-use super::server::{Tenant, key_in_dir, serve_tenant_on};
+#[cfg(test)]
+use super::server::key_in_dir;
+use super::server::{Tenant, serve_tenant_on};
 use crate::Errno;
 use std::collections::HashMap;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
@@ -111,6 +113,7 @@ impl Grants {
 
     /// The ID in the bucket of the granted tenant whose directory the cell at `path` is in, if
     /// any (TASK-364).
+    #[cfg(test)]
     pub fn tenant_at(&self, path: &Path) -> Option<u64> {
         let key = super::cells::cell_dir_key(path);
         let granted = self.granted.lock().unwrap();
@@ -124,6 +127,7 @@ impl Grants {
 
     /// Whether the cells at `one` and `other` are of one tenant, or of none: their paths in one
     /// tenant's directory (or JBOD directories), as VM processes name them.
+    #[cfg(test)]
     pub fn same_tenant(&self, one: &Path, other: &Path) -> bool {
         let one = super::cells::cell_dir_key(one);
         let other = super::cells::cell_dir_key(other);

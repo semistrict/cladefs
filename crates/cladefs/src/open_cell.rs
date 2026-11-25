@@ -674,6 +674,37 @@ impl OpenCell {
         Ok(cell)
     }
 
+    /// cladefs: forks the open cell, at a version, to a new ephemeral cell of `tenant`'s placed
+    /// directly inside `parent_dir/<CELL_PADDED>` so the ephemeral host journal records its final
+    /// canonical path without a post-create rename (hotbed question 547).
+    pub(crate) async fn fork_ephemeral_in(
+        &self,
+        parent_dir: impl AsRef<Path>,
+        tenant: u64,
+    ) -> Result<(CellId, std::path::PathBuf), Error> {
+        let admitted = self.admit(Changing::Cell)?;
+        let uploader = admitted.uploader().ok_or(Errno::EROFS)?;
+        if !uploader.is_at_version() {
+            return Err(Errno::EINVAL.into());
+        }
+        let cell = self.new_child(tenant).await?;
+        let path = parent_dir.as_ref().join(base32_id::Padded(cell.id).to_string());
+        let child = bucket_cell::layout::Child { cell, owner: rand::random() };
+        let inherited = |making: &mut local_cell::Making<'_, HostDir>| -> anyhow::Result<()> {
+            Ok(cell_dir::inherit(&self.path, self.cell().id, &self.forked_from, making)?)
+        };
+        let forking = host_cell::fork_ephemeral_on(
+            &self.host,
+            admitted.local(),
+            uploader,
+            &path,
+            child,
+            inherited,
+        );
+        self.fork_span(cell).run_async(forking).await?;
+        Ok((cell, path))
+    }
+
     /// cladefs: a fork's child, the cell of a new cell of `tenant`'s, its ID the open cell's
     /// bucket's to give. One with no uploader forks nothing (`EROFS`). An open cell with a writer
     /// forks to no

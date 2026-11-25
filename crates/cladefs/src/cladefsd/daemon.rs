@@ -89,6 +89,9 @@ pub struct Daemon {
     pub(super) governor: governor::State,
     /// Per-tenant disk limits, weights, and disk governor startup state.
     pub(super) disk: disk::State,
+    /// Managed JBOD disk pool (`[[disks]]`), cell-ID index, and per-disk governance (hotbed
+    /// question 547).
+    pub(super) disk_pool: OnceLock<Arc<super::disks::DiskPool>>,
     /// Mutual TLS credentials for peer gRPC (`CLADEFSD_PEER_TLS`).
     pub(super) peer_credentials: Mutex<Option<peers::Credentials>>,
     /// Shared HTTP/2 peer gRPC channel pool across GetPart, replication, and migration (board
@@ -146,6 +149,7 @@ impl Daemon {
             memory: memory::State::new(),
             governor: governor::State::default(),
             disk: disk::State::new(),
+            disk_pool: OnceLock::new(),
             peer_credentials: Mutex::new(None),
             peer_channels: OnceLock::new(),
             migrations: migration::State::new(),
@@ -241,10 +245,50 @@ impl Daemon {
         }
     }
 
+    /// The managed JBOD disk pool configured for this daemon, if initialized.
+    pub(crate) fn disk_pool(&self) -> Option<&Arc<super::disks::DiskPool>> {
+        self.disk_pool.get()
+    }
+
+    /// Returns the daemon-owned host directory for `cell` in this daemon's [`super::disks::DiskPool`],
+    /// if configured and known (for white-box tests inspecting encryption at rest or footprint).
+    pub fn cell_path(&self, cell: crate::CellId) -> Option<PathBuf> {
+        self.disk_pool.get()?.find_cell(cell)
+    }
+
+    /// Starts the disk governor for this daemon instance with `config`.
+    pub fn start_disk_governor(
+        self: &Arc<Self>,
+        config: super::disk::DiskConfig,
+    ) -> Result<(), String> {
+        super::disk::start_on(self, config)
+    }
+
+    /// Initializes the daemon's managed [`super::disks::DiskPool`] from `roots` (for tests or
+    /// embedded daemons that serve the control API without calling [`Self::boot_with_config`]).
+    pub fn configure_disks(&self, roots: &[PathBuf]) -> Result<(), String> {
+        let pool = Arc::new(super::disks::DiskPool::from_roots(self.host.bucket_host(), roots)?);
+        let cell_roots: Arc<[PathBuf]> = pool.cell_roots().into();
+        // OnceLock: repeated test calls keep the first configured roots.
+        let _ = self.roots.set(Ok(Some(cell_roots)));
+        // OnceLock: repeated test calls keep the first configured disk pool.
+        let _ = self.disk_pool.set(pool);
+        Ok(())
+    }
+
     /// Boots this daemon serving VM processes at `socket`, with `memory` bytes fixed or governed.
     #[cfg(any(target_os = "linux", madsim))]
     pub async fn boot(self: &Arc<Self>, socket: &Path, memory: Option<u64>) -> anyhow::Result<()> {
         super::boot::boot_daemon(self, socket, memory).await
+    }
+
+    /// Boots this daemon from a validated TOML [`crate::config::Config`] (hotbed question 547).
+    #[cfg(any(target_os = "linux", madsim))]
+    pub async fn boot_with_config(
+        self: &Arc<Self>,
+        config: crate::config::Config,
+    ) -> anyhow::Result<()> {
+        super::boot::boot_with_config(self, config).await
     }
 
     /// Drains this daemon within `within`.

@@ -70,6 +70,33 @@ impl CellClient {
         DaemonConnection::connect(socket)?.open(cell_dir, capacity)
     }
 
+    /// Opens an existing managed cell `cell` served by the daemon listening at `socket`
+    /// ([`DaemonConnection::open_cell`], hotbed question 547).
+    pub fn connect_cell(socket: impl AsRef<Path>, cell: crate::CellId) -> Result<Self, Error> {
+        DaemonConnection::connect(socket)?.open_cell(cell)
+    }
+
+    /// Creates and opens a new managed cell for `tenant` with `capacity` bytes on a disk chosen by
+    /// the daemon listening at `socket` ([`DaemonConnection::create_cell`], hotbed question 547).
+    pub fn connect_new(
+        socket: impl AsRef<Path>,
+        tenant: u64,
+        capacity: u64,
+    ) -> Result<Self, Error> {
+        DaemonConnection::connect(socket)?.create_cell(tenant, capacity)
+    }
+
+    /// Forks version `from` into a new managed cell for `tenant` on a disk chosen by the daemon
+    /// listening at `socket` ([`DaemonConnection::open_forked_cell`], hotbed question 547).
+    pub fn connect_forked_cell(
+        socket: impl AsRef<Path>,
+        tenant: u64,
+        from: CellVersion,
+        capacity: u64,
+    ) -> Result<Self, Error> {
+        DaemonConnection::connect(socket)?.open_forked_cell(tenant, from, capacity)
+    }
+
     /// The cell at `cell_dir` that the daemon listening at `socket` serves, forked from the version
     /// `from` if it doesn't exist ([`DaemonConnection::open_forked`]).
     pub fn connect_forked(
@@ -701,6 +728,49 @@ impl DaemonConnection {
     /// The cell at `cell_dir`, created with `capacity` bytes if it doesn't exist.
     pub fn open(self, cell_dir: impl AsRef<Path>, capacity: u64) -> Result<CellClient, Error> {
         self.opening(cell_dir.as_ref(), Opening::Create(capacity, Kind::Fxfs))
+    }
+
+    /// Opens an existing managed cell `cell` by its `(tenant, cell)` ID without passing a host
+    /// directory (hotbed question 547).
+    pub fn open_cell(self, cell: crate::CellId) -> Result<CellClient, Error> {
+        self.opening(Path::new(&cell.to_string()), Opening::Existing)
+    }
+
+    /// Creates and opens a new managed Fxfs cell for `tenant` with `capacity` bytes on a disk
+    /// chosen automatically by the daemon (hotbed question 547).
+    pub fn create_cell(self, tenant: u64, capacity: u64) -> Result<CellClient, Error> {
+        let target = crate::CellId { tenant, id: 0 }.to_string();
+        self.opening(Path::new(&target), Opening::Create(capacity, Kind::Fxfs))
+    }
+
+    /// Creates and opens a new managed SQLite cell for `tenant` with `capacity` bytes on a disk
+    /// chosen automatically by the daemon (hotbed question 547).
+    pub fn create_sqlite_cell(self, tenant: u64, capacity: u64) -> Result<CellClient, Error> {
+        let target = crate::CellId { tenant, id: 0 }.to_string();
+        self.opening(Path::new(&target), Opening::Create(capacity, Kind::Sqlite))
+    }
+
+    /// Creates and opens a new managed memory cell for `tenant` with `capacity` bytes on a disk
+    /// chosen automatically by the daemon (hotbed question 547).
+    pub fn create_memory_cell(self, tenant: u64, capacity: u64) -> Result<CellClient, Error> {
+        let target = crate::CellId { tenant, id: 0 }.to_string();
+        self.opening(Path::new(&target), Opening::Create(capacity, Kind::Memory))
+    }
+
+    /// Forks version `from` into a new managed cell for `tenant` on a disk chosen automatically by
+    /// the daemon (hotbed question 547).
+    pub fn open_forked_cell(
+        self,
+        tenant: u64,
+        from: CellVersion,
+        capacity: u64,
+    ) -> Result<CellClient, Error> {
+        let target = crate::CellId { tenant, id: 0 }.to_string();
+        let CellVersion { tenant: from_tenant, cell, version } = from;
+        self.opening(
+            Path::new(&target),
+            Opening::ForkOf { tenant: from_tenant, cell, version, capacity },
+        )
     }
 
     /// cladefs: the cell at `cell_dir`, as [`DaemonConnection::open`] has it, made, if it doesn't
