@@ -142,6 +142,25 @@ pub fn halt_cells_on(
     halts.iter().filter(|halt| halt.halt(errno, || why.to_owned())).count()
 }
 
+/// cladefs: the [`CellId`]s of every currently open, unhalted cell on `host`, used by
+/// `cladefsd::events` to reconcile missed `CellShredded` events when the event tail was trimmed
+/// (board 11665).
+#[cfg(any(target_os = "linux", madsim))]
+pub fn live_cells_on(host: &crate::Host) -> Vec<CellId> {
+    let mut halts = host.halts.0.lock().unwrap();
+    let mut cells = Vec::new();
+    halts.retain(|(cell, halt)| match halt.upgrade() {
+        Some(state) => {
+            if state.why.get().is_none() {
+                cells.push(*cell);
+            }
+            true
+        }
+        None => false,
+    });
+    cells
+}
+
 /// A guard of an open cell's lock: which halts the open cell if a panic drops it, holding the lock.
 pub struct CellGuard<'a, G> {
     guard: G,

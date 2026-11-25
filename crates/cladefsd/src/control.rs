@@ -1513,6 +1513,31 @@ impl Cladefsd for Control {
         request: Request<SetPeersRequest>,
     ) -> Result<Response<SetPeersResponse>, Status> {
         let SetPeersRequest { addresses } = request.into_inner();
+        if let Err(errno) = crate::peers::check_on(&self.daemon, &addresses) {
+            return reply(Err(errno));
+        }
+        // cladefs: thin v1 gRPC shim over global `events` (board 11711): publish `PeersUpdated`
+        // so all daemons sharing the bucket converge without fan-out, then apply locally.
+        let bucket = storage::daemon_bucket_on(&self.daemon).map_err(status)?;
+        let published = async {
+            let number = bucket_cell::events::bucket_number(&bucket).await?;
+            let auth = bucket_cell::events::authority(&bucket).await?;
+            bucket_cell::events::publish(
+                &*auth,
+                bucket_cell::events::Publish::PeersUpdated {
+                    bucket: number,
+                    addresses: addresses.clone(),
+                },
+            )
+            .await
+        }
+        .await;
+        if let Err(err) = published {
+            let failure = local_cell::upload::Failure::Bucket(err);
+            let errno = cladefs_core::bucket::errno(&failure).unwrap_or(Errno::EIO);
+            log::error!("cladefsd: publishing SetPeers to events: {failure}");
+            return Err(saying(errno, format!("publishing SetPeers to events: {failure}")));
+        }
         reply(crate::peers::set_on(&self.daemon, addresses).map(|()| SetPeersResponse {}))
     }
 
@@ -1523,15 +1548,14 @@ impl Cladefsd for Control {
         let ShredCellRequest { tenant, cell } = request.into_inner();
         let cell = cladefs_core::CellId { tenant, id: cell };
         let bucket = storage::daemon_bucket_on(&self.daemon).map_err(status)?;
-        let shredded =
-            cladefs_core::bucket::shred_cell_and_publish_on(&self.daemon.host, &bucket, cell)
-                .await
-                .map_err(|err| {
-                    let failure = local_cell::upload::Failure::Bucket(err);
-                    let errno = cladefs_core::bucket::errno(&failure).unwrap_or(Errno::EIO);
-                    log::error!("cladefsd: shredding cell {cell}: {failure}");
-                    saying(errno, format!("shredding cell {cell}: {failure}"))
-                })?;
+        let shredded = cladefs_core::bucket::shred_cell_on(&self.daemon.host, &bucket, cell)
+            .await
+            .map_err(|err| {
+                let failure = local_cell::upload::Failure::Bucket(err);
+                let errno = cladefs_core::bucket::errno(&failure).unwrap_or(Errno::EIO);
+                log::error!("cladefsd: shredding cell {cell}: {failure}");
+                saying(errno, format!("shredding cell {cell}: {failure}"))
+            })?;
         let (removed, forgotten) = shredded;
         let keks_removed = u32::try_from(removed).unwrap_or(u32::MAX);
         Ok(Response::new(ShredCellResponse {

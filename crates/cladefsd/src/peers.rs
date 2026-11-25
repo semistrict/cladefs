@@ -491,15 +491,24 @@ pub type Listening = std::net::TcpListener;
 #[cfg(madsim)]
 pub type Listening = std::net::SocketAddr;
 
-/// Has the hosts sharing the bucket on `daemon` be those at `addresses` (`SetPeers`).
-pub(super) fn set_on(daemon: &Daemon, addresses: Vec<String>) -> Result<(), cladefs_core::Errno> {
-    let peers = cladefs_core::bucket::peers_on(&daemon.host).ok_or(cladefs_core::Errno::ENOTSUP)?;
-    for address in &addresses {
+/// Validates that `daemon` serves peers and every entry in `addresses` is `HOST:PORT`
+/// (`SetPeers`, board 11711).
+pub(super) fn check_on(daemon: &Daemon, addresses: &[String]) -> Result<(), cladefs_core::Errno> {
+    let _peers =
+        cladefs_core::bucket::peers_on(&daemon.host).ok_or(cladefs_core::Errno::ENOTSUP)?;
+    for address in addresses {
         check_address(address).map_err(|err| {
             log::warn!("cladefsd: SetPeers: {err}");
             cladefs_core::Errno::EINVAL
         })?;
     }
+    Ok(())
+}
+
+/// Has the hosts sharing the bucket on `daemon` be those at `addresses` (`SetPeers`).
+pub(super) fn set_on(daemon: &Daemon, addresses: Vec<String>) -> Result<(), cladefs_core::Errno> {
+    check_on(daemon, &addresses)?;
+    let peers = cladefs_core::bucket::peers_on(&daemon.host).ok_or(cladefs_core::Errno::ENOTSUP)?;
     log::info!("cladefsd: peers: {}", addresses.join(","));
     peers.set(addresses.clone());
     if let Some(channels) = daemon.peer_channels.get() {

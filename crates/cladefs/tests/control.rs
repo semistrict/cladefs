@@ -654,6 +654,94 @@ fn standalone_shred_halts_open_cells_on_uncalled_daemon_via_events() {
     assert_eq!(read(&vms[1], 2), Ok(true));
 }
 
+/// board 11665: when `CellShredded` events are trimmed from the bounded `events` tail before a
+/// daemon polls (`update.skipped == true`), the daemon reconciles its open cells against their
+/// bucket heads (`head.shredded`) and halts shredded cells with `EACCES` while healthy cells stay
+/// open.
+#[test]
+fn trimmed_cell_shred_event_reconciles_open_cell_via_head_get() {
+    let dir = tempfile::tempdir().unwrap();
+    let bucket_dir = dir.path().join("bucket");
+    std::fs::create_dir(&bucket_dir).unwrap();
+    let bucket_url = format!("file://{}", bucket_dir.display());
+    let master: String = (0..32).map(|byte| format!("{byte:02x}")).collect();
+    // SAFETY: nextest runs each test in a process of its own before daemon threads start.
+    unsafe {
+        std::env::remove_var("CLADEFS_KMS");
+        std::env::set_var("CLADEFS_MASTER_KEY", &master);
+        std::env::set_var("CLADEFSD_BUCKET", &bucket_url);
+        std::env::set_var("CLADEFSD_TOKEN", "1");
+        std::env::set_var("CLADEFSD_EVENTS_POLL_MS", "50");
+    }
+    let mut daemon = Daemon::new(dir.path());
+    cladefs::cladefsd::events::start().unwrap();
+    let of = |tenant| CellId { tenant, id: 0 };
+    let victim_cell = daemon.create(of(13), None).unwrap();
+    let survivor_cell = daemon.create(of(13), None).unwrap();
+    let vms = [daemon.open(victim_cell), daemon.open(survivor_cell)];
+    for (seed, vm) in (1..).zip(&vms) {
+        write(vm, &pattern(seed), b"events");
+    }
+    daemon.sync(victim_cell).unwrap();
+    daemon.sync(survivor_cell).unwrap();
+    let read = |vm: &cladefs::CellClient, seed: u64| {
+        let mut data = vec![0; 64 << 10];
+        let extent = cladefs::ExtentId { cell: vm.cell(), sequence: 1 };
+        let done = vm.read(extent, 0, &mut [cladefs::VolatileSliceMut::from(&mut data[..])]);
+        done.map(|()| data == pattern(seed))
+    };
+    assert_eq!((read(&vms[0], 1), read(&vms[1], 2)), (Ok(true), Ok(true)));
+
+    // First publish an unrelated event so the daemon's poller advances `last_seq = 1`.
+    let bucket = bucket_cell::object_bucket::ObjectBucket::from_url(&bucket_url).unwrap();
+    daemon.runtime.block_on(async {
+        bucket_cell::events::publish(
+            &bucket,
+            bucket_cell::events::Publish::CellShredded(cladefs::CellId { tenant: 99, id: 1 }),
+        )
+        .await
+        .unwrap();
+    });
+    std::thread::sleep(std::time::Duration::from_millis(150));
+
+    // Shred `victim_cell`'s head directly and advance `events` past `MAX_EVENTS` so `victim_cell`'s
+    // `CellShredded` event is trimmed out of the tail (`oldest_seq = 2000 > last_seq + 1`).
+    daemon.runtime.block_on(async {
+        use bucket_cell::bucket::{Bucket as _, PutMode};
+        let removed = bucket_cell::keys::shred(&bucket, victim_cell).await.unwrap();
+        assert_eq!(removed, 1);
+        let trimmed = bucket_cell::events::EventLog {
+            latest_seq: 2000,
+            oldest_seq: 2000,
+            events: vec![bucket_cell::events::Event {
+                seq: 2000,
+                unix_ms: 1,
+                kind: Some(bucket_cell::events::EventKind::CellShredded(
+                    bucket_cell::events::CellShredded { tenant: 99, cell: 2 },
+                )),
+            }],
+            ..Default::default()
+        };
+        let bytes = bucket_cell::events::encode(&trimmed);
+        bucket.put(bucket_cell::layout::EVENTS, bytes.into(), PutMode::Overwrite).await.unwrap();
+    });
+
+    // The poller sees `update.skipped == true`, reconciles open cells via `head::get`, and halts
+    // `victim` while leaving `survivor` unaffected.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if read(&vms[0], 1) == Err(Errno::EACCES) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "daemon events poller did not reconcile trimmed CellShredded within 5s"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(read(&vms[1], 2), Ok(true));
+}
+
 /// board 8487: a tenant added to the KMS's key overrides file (`keys=FILE`) while the daemon runs
 /// wraps under its own key (BYOK) from the next call on, `ReloadKms` reading the file again, no
 /// restart: before it, tenant 7's cells are refused, as the template names a key OpenBao lacks.

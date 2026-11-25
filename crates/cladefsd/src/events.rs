@@ -81,7 +81,8 @@ async fn run(
         }
         if let Some((auth, my_bucket)) = &resolved {
             match poller.poll(&**auth).await {
-                Ok(Some(update)) => state.apply(&daemon, update, *my_bucket),
+                Ok(Some(update)) => state.apply(&daemon, &bucket, update, *my_bucket).await,
+                Ok(None) if state.reconcile_cells => state.reconcile(&daemon, &bucket).await,
                 Ok(None) => {}
                 Err(err) => {
                     log::warn!("cladefsd: polling events: {err}");
@@ -98,10 +99,20 @@ struct Applied {
     shredded_tenants: BTreeSet<u64>,
     peers_generation: u64,
     decommissioned_logged: bool,
+    seen_initial: bool,
+    reconcile_cells: bool,
 }
 
 impl Applied {
-    fn apply(&mut self, daemon: &Daemon, update: Update, my_bucket: u32) {
+    async fn apply(
+        &mut self,
+        daemon: &Daemon,
+        bucket: &bucket_cell::object_bucket::RoutedBucket,
+        update: Update,
+        my_bucket: u32,
+    ) {
+        let trimmed_before_start = !self.seen_initial && update.log.oldest_seq > 1;
+        self.seen_initial = true;
         for tenant in update.log.shredded_set() {
             if self.shredded_tenants.insert(tenant) {
                 let why = format!("tenant {tenant}: shredded (bucket events)");
@@ -114,6 +125,15 @@ impl Applied {
                 let why = bucket_cell::keys::shredded(cell).to_string();
                 cladefs_core::bucket::forget_on(&daemon.host, Scope::Cell(cell), &why);
             }
+        }
+        // cladefs: `CellShredded` events are only retained in the bounded `events` tail, so when
+        // events were trimmed between polls (or before our first poll), reconcile every live or
+        // cached cell against its authoritative head in the bucket (board 11665).
+        if update.skipped || trimmed_before_start {
+            self.reconcile_cells = true;
+        }
+        if self.reconcile_cells {
+            self.reconcile(daemon, bucket).await;
         }
         if !self.decommissioned_logged
             && let Ok(host) = cladefs_core::ephemeral_host::host_on(&daemon.host)
@@ -147,5 +167,39 @@ impl Applied {
             }
             self.peers_generation = peers.generation;
         }
+    }
+
+    /// Reconciles every live open cell, mounted FUSE cell, held key ring, and cached-extent cell
+    /// on `daemon` against its bucket head (`head.shredded`), forgetting any shredded cell whose
+    /// `CellShredded` event was trimmed before this daemon saw it (board 11665). Keeps
+    /// `reconcile_cells = true` on transient bucket errors so the next poll retries.
+    async fn reconcile(
+        &mut self,
+        daemon: &Daemon,
+        bucket: &bucket_cell::object_bucket::RoutedBucket,
+    ) {
+        let mut cells: BTreeSet<cladefs_core::CellId> = BTreeSet::new();
+        cells.extend(cladefs_core::halt::live_cells_on(&daemon.host));
+        cells.extend(cladefs_fs::fuse::server::live_cells());
+        cells.extend(daemon.host.bucket_state().keys().cells());
+        cells.extend(daemon.host.cache().cached_cells());
+        let mut all_ok = true;
+        for cell in cells {
+            match bucket_cell::head::get(bucket, cell).await {
+                Ok(Some(head)) if head.shredded => {
+                    let why = bucket_cell::keys::shredded(cell).to_string();
+                    cladefs_core::bucket::forget_on(&daemon.host, Scope::Cell(cell), &why);
+                }
+                Ok(_) => {}
+                Err(bucket_cell::Error::NoBucket(_)) => {}
+                Err(err) => {
+                    log::warn!(
+                        "cladefsd: reconciling shredded state of cell {cell} after events gap: {err}"
+                    );
+                    all_ok = false;
+                }
+            }
+        }
+        self.reconcile_cells = !all_ok;
     }
 }

@@ -530,6 +530,17 @@ impl HostRing {
         self.held.lock().unwrap().union.clone()
     }
 
+    /// The owning [`CellId`]s of every non-revoked ring currently held in this host's ring
+    /// (board 11665).
+    pub fn cells(&self) -> Vec<CellId> {
+        let held = self.held.lock().unwrap();
+        held.rings
+            .values()
+            .filter(|ring| !ring.is_revoked())
+            .filter_map(|ring| ring.owner)
+            .collect()
+    }
+
     /// Forgets the rings of `scope`'s cells ([`Ring`]'s owner), revoking them in place so any
     /// holder still keeping an `Arc<Ring>` drops its DEKs immediately, and removing them from the
     /// fetchers' union (TASK-411.7, TASK-637, board 2704): the keys other cells hold stay, those
