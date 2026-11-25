@@ -1095,7 +1095,7 @@ impl<C: Bucket, F: Bucket> FastWalWriter<C, F> {
                     let sleep = tokio::time::sleep_until(retry_at);
                     tokio::pin!(sleep);
                     // Either a new wakeup or the backoff deadline fired; loop re-checks state.
-                    drop(futures::future::select(notified, sleep).await);
+                    let _ = futures::future::select(notified, sleep).await;
                     continue;
                 }
                 notified.await;
