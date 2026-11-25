@@ -226,6 +226,18 @@ impl Budget {
         }
     }
 
+    /// Removes a queued waiter (`ticket`) whose callers all gave up so it leaves the queue
+    /// immediately (TASK-542, board 2480).
+    fn cancel(self: &Arc<Self>, ticket: u64) {
+        let mut queues = self.queues.lock().unwrap();
+        for queue in &mut queues.waiting {
+            if let Some(at) = queue.iter().position(|waiter| waiter.ticket == ticket) {
+                queue.remove(at);
+                return;
+            }
+        }
+    }
+
     /// Lets the requests waiting first go, as far as the limits allow.
     fn admit(self: &Arc<Self>, queues: &mut Queues) {
         while let Some(queue) = queues.waiting.iter_mut().find(|queue| !queue.is_empty()) {
@@ -841,9 +853,12 @@ impl std::fmt::Debug for Budgets {
 }
 
 struct Waited {
-    /// The budget it has its place in, the fetcher's that sent it, and its place there.
+    /// The budget it enters if it must GET from the bucket, its current priority, and its ticket
+    /// once entered (deferred until after any peer ask so peer RPCs never hold GET budget slots,
+    /// TASK-542 / board 2480).
     budget: Arc<Budget>,
-    ticket: u64,
+    priority: Priority,
+    ticket: Option<u64>,
     readers: usize,
     flight: Flight<FetchedPart>,
 }
@@ -1250,14 +1265,17 @@ impl<B: Bucket> Fetcher<B> {
             let waited = parts.flights.entry(id.clone()).or_insert_with(|| {
                 new = true;
                 let budget = self.shared.budgets.of(key);
-                let (ticket, given) = budget.enter(priority, PART);
-                let (shared, tail, key) = (self.shared.clone(), tail.clone(), key.to_owned());
+                let (shared, tail, key, id) =
+                    (self.shared.clone(), tail.clone(), key.to_owned(), id.clone());
                 let flight =
-                    async move { shared.part(&key, part, &tail, given, owner, need_stored).await };
-                Waited { budget, ticket, readers: 0, flight: fly(flight) }
+                    async move { shared.part(&key, part, &tail, id, owner, need_stored).await };
+                Waited { budget, priority, ticket: None, readers: 0, flight: fly(flight) }
             });
             if priority == Priority::Demand {
-                waited.budget.promote(waited.ticket);
+                waited.priority = Priority::Demand;
+                if let Some(ticket) = waited.ticket {
+                    waited.budget.promote(ticket);
+                }
             }
             waited.readers += 1;
             waited.flight.clone()
@@ -1297,7 +1315,10 @@ impl Drop for Reading<'_> {
         let waited = parts.flights.get_mut(&self.id).expect("a flight its readers keep");
         waited.readers -= 1;
         if waited.readers == 0 {
-            parts.flights.remove(&self.id);
+            let removed = parts.flights.remove(&self.id).expect("a flight its readers keep");
+            if let Some(ticket) = removed.ticket {
+                removed.budget.cancel(ticket);
+            }
         }
     }
 }
@@ -1305,15 +1326,16 @@ impl Drop for Reading<'_> {
 impl<B: Bucket> Fetching<B> {
     /// Part `part` of the object at `key`, whose tail is `tail`, checked against the CRC the tail
     /// gives: kept, in memory, as one fetched since its first reader looked there is, or in the
-    /// cache; or fetched once `given` lets its GET go, from `owner`, the host that owns it, if
-    /// another does, or from the bucket ([`Fetching::fetch`]), and kept then; unpacked only once a
-    /// read wants it ([`Fetched`]).
+    /// cache; or fetched from `owner`, the host that owns it, if another does (without holding a
+    /// local GET budget slot so two hosts asking each other cannot deadlock, TASK-542 / board
+    /// 2480), or from the bucket once the budget lets its GET go, and kept then; unpacked only
+    /// once a read wants it ([`Fetched`]).
     async fn part(
         self: &Arc<Self>,
         key: &str,
         part: u64,
         tail: &Tail,
-        given: impl Future<Output = Slot>,
+        id: Flown,
         owner: Option<Arc<dyn Peer>>,
         need_stored: bool,
     ) -> Result<FetchedPart, Error> {
@@ -1334,10 +1356,46 @@ impl<B: Bucket> Fetching<B> {
                 bytes
             }
             None => {
-                let slot = given.await;
-                let fetched = self.fetch(key, part, &stored, owner).await;
-                drop(slot);
-                let Some(fetched) = fetched? else { return Ok(FetchedPart::Gone) };
+                let from_peer = match owner {
+                    Some(owner) => match owner.part(key, part).await {
+                        Some(bytes)
+                            if bytes.len() as u64 == stored.len && stored.check(&bytes).is_ok() =>
+                        {
+                            trace::note(Some(Source::Peer));
+                            Some(bytes)
+                        }
+                        Some(_) => {
+                            log::warn!(
+                                "cladefs: part {part} of {key}, from its owner, fails its CRC"
+                            );
+                            owner.failed();
+                            None
+                        }
+                        None => None,
+                    },
+                    None => None,
+                };
+                let fetched = match from_peer {
+                    Some(bytes) => Some(bytes),
+                    None => {
+                        let budget = self.budgets.of(key);
+                        let given = {
+                            let mut parts = self.memory.parts.lock().unwrap();
+                            let priority =
+                                parts.flights.get(&id).map_or(Priority::Demand, |w| w.priority);
+                            let (ticket, given) = budget.enter(priority, PART);
+                            if let Some(waited) = parts.flights.get_mut(&id) {
+                                waited.ticket = Some(ticket);
+                            }
+                            given
+                        };
+                        let slot = given.await;
+                        let fetched = self.fetch_bucket(key, part, &stored).await;
+                        drop(slot);
+                        fetched?
+                    }
+                };
+                let Some(fetched) = fetched else { return Ok(FetchedPart::Gone) };
                 self.keep(key, part, &fetched);
                 fetched
             }
@@ -1353,28 +1411,16 @@ impl<B: Bucket> Fetching<B> {
         Ok(FetchedPart::Data(fetched))
     }
 
-    /// The stored bytes of part `part` of the object at `key`, stored as `stored` says, checked
-    /// against its CRC: from `owner`, the host that owns it, if another does and gives them; else
-    /// by a GET of the bucket's. None if the object is gone. The bucket's failing the CRC, or past
-    /// the object's end, are corrupt: the object at a key is the one its tail is of, for good
-    /// (TASK-407).
-    async fn fetch(
+    /// The stored bytes of part `part` of the object at `key`, stored as `stored` says, fetched by
+    /// a GET of the bucket's and checked against its CRC. None if the object is gone. The bucket's
+    /// failing the CRC, or past the object's end, are corrupt: the object at a key is the one its
+    /// tail is of, for good (TASK-407).
+    async fn fetch_bucket(
         &self,
         key: &str,
         part: u64,
         stored: &extent_frame::Stored,
-        owner: Option<Arc<dyn Peer>>,
     ) -> Result<Option<Vec<u8>>, Error> {
-        if let Some(owner) = owner
-            && let Some(bytes) = owner.part(key, part).await
-        {
-            if bytes.len() as u64 == stored.len && stored.check(&bytes).is_ok() {
-                trace::note(Some(Source::Peer));
-                return Ok(Some(bytes));
-            }
-            log::warn!("cladefs: part {part} of {key}, from its owner, fails its CRC");
-            owner.failed();
-        }
         let range = ByteRange::Bounded(stored.range());
         trace::note(Some(Source::Bucket));
         match bucket::get_range(&*self.bucket, key, range).await {
@@ -3167,5 +3213,102 @@ mod tests {
         assert_eq!(&*served, &object[stored.range().start as usize..][..stored.len as usize]);
         let past = serving(2);
         assert_eq!(pool.run_until(past), Ok(None), "the tail kept: no GET");
+    }
+
+    /// TASK-542 (board 2480): two hosts that each share one GET budget (`requests: 2`) between
+    /// their local fetcher and their peer-serving fetcher, and each queue 4 demand reads of parts
+    /// the other host serves (no timeout), must finish every read without deadlocking.
+    #[test]
+    fn peers_reading_each_others_parts_do_not_deadlock_their_budgets() {
+        const PARTS: u64 = 8;
+        let data = noise(PARTS * PART);
+        let bucket = bucket(&data);
+
+        let budget_a = Budget::new(Limits { requests: 2, bytes: 2 * PART });
+        let budget_b = Budget::new(Limits { requests: 2, bytes: 2 * PART });
+        let mem_a = memory();
+        let mem_b = memory();
+
+        let serve_a = Arc::new(Fetcher::new(bucket.clone(), budget_a.clone(), mem_a.clone(), None));
+        let serve_b = Arc::new(Fetcher::new(bucket.clone(), budget_b.clone(), mem_b.clone(), None));
+        let owner_a = Owner::of(Some(serve_a));
+        let owner_b = Owner::of(Some(serve_b));
+
+        // Host A asks Host B for every part; Host B asks Host A for every part.
+        let local_a = Rc::new(
+            Fetcher::new(bucket.clone(), budget_a, mem_a, None).asking(Arc::new(owner_b.clone())),
+        );
+        let local_b = Rc::new(
+            Fetcher::new(bucket.clone(), budget_b, mem_b, None).asking(Arc::new(owner_a.clone())),
+        );
+
+        let mut reads = Reads::new();
+        let mut handles_a = Vec::new();
+        let mut handles_b = Vec::new();
+        for part in 0..4u64 {
+            handles_a.push((
+                part,
+                reads.read(&local_a, location(PARTS * PART), part * PART, PART, Priority::Demand),
+            ));
+            handles_b.push((
+                part + 4,
+                reads.read(
+                    &local_b,
+                    location(PARTS * PART),
+                    (part + 4) * PART,
+                    PART,
+                    Priority::Demand,
+                ),
+            ));
+        }
+
+        complete_all(&bucket, &mut reads);
+
+        for (part, handle) in handles_a.into_iter().chain(handles_b) {
+            let expected = data[(part * PART) as usize..((part + 1) * PART) as usize].to_vec();
+            assert_eq!(reads.result(handle), Some(Ok(expected)), "part {part} did not finish");
+        }
+        assert_eq!(owner_a.counts(), (4, 0));
+        assert_eq!(owner_b.counts(), (4, 0));
+    }
+
+    /// TASK-542 (board 2480, AC #2): dropping a queued `stored_part` future cancels its waiter in
+    /// the serving host's GET budget immediately so no orphaned bucket GET fires after the
+    /// blocking slot releases.
+    #[test]
+    fn dropped_peer_part_request_leaves_its_budget_without_getting() {
+        let data = noise(2 * PART);
+        let bucket = bucket(&data);
+        let budget = Budget::new(Limits { requests: 1, bytes: PART });
+        let fetcher = Arc::new(Fetcher::new(bucket.clone(), budget.clone(), memory(), None));
+        let mut pool = LocalPool::new();
+        let spawner = pool.spawner();
+
+        // Warm the object's tail first so `stored_part` goes straight to part GET budgeting.
+        let warm = {
+            let fetcher = fetcher.clone();
+            spawner
+                .spawn_local_with_handle(async move { fetcher.stored_part(KEY, 0).await })
+                .unwrap()
+        };
+        pool.run_until_stalled();
+        bucket.complete(0, Fault::None); // tail
+        pool.run_until_stalled();
+        bucket.complete(0, Fault::None); // part 0
+        assert!(pool.run_until(warm).unwrap().is_some());
+
+        // Occupy the single budget slot, queue a `stored_part(KEY, 1)`, then drop it before the
+        // slot frees.
+        let slot = pool.run_until(budget.hold(Priority::Demand, PART));
+        let mut queued = Box::pin(fetcher.stored_part(KEY, 1));
+        let waker = futures::task::noop_waker();
+        let mut cx = std::task::Context::from_waker(&waker);
+        assert!(queued.as_mut().poll(&mut cx).is_pending());
+        drop(queued);
+
+        // Releasing the blocking slot must not trigger any bucket GET for the cancelled part 1.
+        drop(slot);
+        pool.run_until_stalled();
+        assert_eq!(bucket.waiting(), 0, "cancelled stored_part issued an orphaned GET");
     }
 }

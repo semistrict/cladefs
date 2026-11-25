@@ -1179,16 +1179,27 @@ pub struct Serving {
 impl Serving {
     /// The stored bytes of the part `asked` names, if the host has it: kept, or
     /// fetched from the bucket once, however many ask, on the bucket runtime.
+    ///
+    /// Aborts the spawned task if the caller drops this future (e.g., peer RPC deadline expired),
+    /// so a timed-out peer request releases its queued place in the GET budget rather than
+    /// issuing an orphaned bucket GET later (TASK-542, board 2480).
     pub async fn part(&self, asked: peers::Asked) -> Result<Option<Arc<[u8]>>, Failure> {
+        struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+        impl<T> Drop for AbortOnDrop<T> {
+            fn drop(&mut self) {
+                self.0.abort();
+            }
+        }
         let parts = self.parts.clone();
         // cladefs: in the trace context current, the peer's call's, the parent of its bucket
         // requests' spans (board 8569, hotbed review 80).
-        let serving =
-            self.runtime.spawn(bucket_cell::trace::Parent::current().around(async move {
+        let mut serving = AbortOnDrop(self.runtime.spawn(
+            bucket_cell::trace::Parent::current().around(async move {
                 let peers::Asked { key, part } = asked;
                 Ok(parts.stored_part(&key, part).await?)
-            }));
-        serving.await.map_err(|err| Failure::local(err, "serving a peer"))?
+            }),
+        ));
+        (&mut serving.0).await.map_err(|err| Failure::local(err, "serving a peer"))?
     }
 }
 
