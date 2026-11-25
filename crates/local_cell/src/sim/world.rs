@@ -1539,6 +1539,7 @@ impl World {
         };
         let options = upload::Options {
             interval: INTERVAL,
+            upload_closed: true,
             max_lag: u64::MAX,
             max_lag_bytes: u64::MAX,
             cache: None,

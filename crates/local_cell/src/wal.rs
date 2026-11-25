@@ -1370,6 +1370,7 @@ impl Queue {
     }
 
     /// The WAL's start: the cell's commit before its first segment.
+    #[cfg(test)]
     pub fn start(&self) -> Option<u64> {
         self.start
     }
@@ -1400,6 +1401,44 @@ impl Queue {
         taken
     }
 
+    /// Numbers of untaken durable segments (up to `limit`) whose framed files are still being
+    /// written (`writing`), in order.
+    pub fn pending_writing(
+        &self,
+        durable: u64,
+        limit: usize,
+        writing: impl Fn(u64) -> bool,
+    ) -> Vec<u64> {
+        let mut pending = Vec::new();
+        let mut seen = 0;
+        for queued in self.segments.iter().filter(|queued| !queued.taken) {
+            if seen == limit || footer_last(&queued.footer) > durable {
+                break;
+            }
+            seen += 1;
+            if writing(queued.number) {
+                pending.push(queued.number);
+            }
+        }
+        pending
+    }
+
+    /// If the queue begins with `numbers` in exact order, returns the WAL start commit after
+    /// acknowledging all of them (the last commit in `numbers`, falling back to `self.start`).
+    pub fn start_after(&self, numbers: &[u64]) -> Option<Option<u64>> {
+        if self.segments.len() < numbers.len() {
+            return None;
+        }
+        let mut after = self.start;
+        for (queued, &number) in self.segments.iter().zip(numbers) {
+            if queued.number != number {
+                return None;
+            }
+            after = queued.footer.contents.commits.last().copied().or(after);
+        }
+        Some(after)
+    }
+
     /// cladefs: the segments, from the first, whose commits are `durable` or before, ending where
     /// no commit goes on past them, by their numbers, with their footers: what an ephemeral cell's
     /// checkpoint covers (doc-25, TASK-698.2).
@@ -1412,11 +1451,6 @@ impl Queue {
             covering.pop();
         }
         covering
-    }
-
-    /// The first segment, if any.
-    pub fn first(&self) -> Option<&Queued> {
-        self.segments.front()
     }
 
     /// Segment `number`, the first, is acknowledged: it leaves the queue, which goes on from its

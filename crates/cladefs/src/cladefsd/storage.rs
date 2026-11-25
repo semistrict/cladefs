@@ -76,6 +76,16 @@ pub(super) fn upload_interval() -> std::time::Duration {
     local_cell::upload::Options::default().interval
 }
 
+/// Whether closed segments wake cell uploaders immediately without waiting for `upload_interval`:
+/// true in production, false when a test paused background uploads via [`uploads_when_asked`].
+pub(super) fn upload_closed() -> bool {
+    #[cfg(test)]
+    if UPLOADS_WHEN_ASKED.load(std::sync::atomic::Ordering::Relaxed) {
+        return false;
+    }
+    true
+}
+
 /// Makes `bucket` `daemon`'s, before any cell opens: for tests that put themselves between the
 /// daemon's cells and their objects. The cells naming `CLADEFSD_BUCKET`'s bucket open it
 /// (`host_cell::use_bucket`).

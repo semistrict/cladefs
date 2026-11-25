@@ -112,8 +112,11 @@ impl Host {
             keys: bucket_cell::keys::testing::host(),
         };
         // Nothing uploaded but what is asked for: the members hold the rest.
-        let options =
-            upload::Options { interval: Duration::from_secs(3600), ..upload::Options::default() };
+        let options = upload::Options {
+            interval: Duration::from_secs(3600),
+            upload_closed: false,
+            ..upload::Options::default()
+        };
         upload::open(recovering, OPTIONS, self.bucket.clone(), (holder, options), &runtime)
             .await
             .unwrap()
@@ -425,6 +428,7 @@ impl Host {
         };
         let options = upload::Options {
             interval: Duration::from_secs(3600),
+            upload_closed: false,
             replication,
             members: Some(upload::MembersOf(Arc::new(peers))),
             // Members replaced, and cells dropped to f = 0, within the tests' patience.
@@ -1454,6 +1458,7 @@ async fn take_past(how: Misreport) {
     };
     let options = upload::Options {
         interval: Duration::from_secs(3600),
+        upload_closed: false,
         members: Some(upload::MembersOf(Arc::new(misreporting))),
         replace_after: Duration::from_secs(1),
         ..upload::Options::default()
@@ -1604,6 +1609,7 @@ async fn taken_through(
     };
     let options = upload::Options {
         interval: Duration::from_secs(3600),
+        upload_closed: false,
         members: Some(upload::MembersOf(members)),
         replace_after: Duration::from_secs(1),
         ..upload::Options::default()
@@ -1861,6 +1867,7 @@ async fn takeover_seeded_with_continued_only_segment_preserves_new_commits() {
     };
     let options = upload::Options {
         interval: Duration::from_secs(3600),
+        upload_closed: false,
         replication: bucket_cell::layout::Wish::new(1, bucket_cell::layout::Fsync::Replicated),
         members: Some(upload::MembersOf(Arc::new(OnlyFirstLogPeers {
             peers: peers("a"),

@@ -412,8 +412,12 @@ impl Host {
         making.await.unwrap();
         let recovering = LocalCell::recover_unmade(dir).unwrap();
         let interval = Duration::from_secs(3600);
-        let uploading =
-            local_cell::upload::Options { interval, held: Some(held), ..Default::default() };
+        let uploading = local_cell::upload::Options {
+            interval,
+            upload_closed: false,
+            held: Some(held),
+            ..Default::default()
+        };
         let holding = (id, uploading);
         let bucket = self.bucket.clone();
         let (cell, uploader) =

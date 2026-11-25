@@ -38,7 +38,7 @@ use std::time::Duration;
 use tokio::time::{Instant, Sleep};
 
 /// The slices a request's body goes to its connection in.
-pub const SLICE: usize = 16 << 10;
+pub const SLICE: usize = 64 << 10;
 
 /// The client of buckets: how long a connection may take to open, and a request to move no bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

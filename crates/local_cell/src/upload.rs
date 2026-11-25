@@ -71,22 +71,19 @@ use bucket_cell::{Body, Objects, Recovered, Writer, head, lifecycle};
 use event_listener::Event;
 use fprint::TypeFingerprint;
 use futures::StreamExt as _;
-use futures::future::{BoxFuture, Either, FutureExt as _, TryFutureExt as _};
-use futures::stream::FuturesOrdered;
+use futures::future::{BoxFuture, FutureExt as _};
+use futures::stream::FuturesUnordered;
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
 use std::time::{Duration, SystemTime};
 
-/// How many of a cell's segments upload at once: as many of a segment's size as the host's
-/// uploads may hold at once ([`UPLOAD_BYTES`]), so that a cell catching up uploads as many at once
-/// as the host's budget lets it, about ten keeping 1 GB/s going with PUTs of 0.35 s, and holds no
-/// more of its segments' files open for them (TASK-79.19).
-pub const IN_FLIGHT: usize = (UPLOAD_BYTES / SEGMENT) as usize;
-
-/// About the most bytes of a segment: a cell's segments' size
-/// (`local_cell::Options::segment_size`).
-const SEGMENT: u64 = 32 << 20;
+/// How many of a cell's segments upload at once. Compressed segments average ~7.5 MiB on build
+/// workloads (~5x smaller than the 32 MiB raw `segment_size`), so 32 concurrent PUTs per cell
+/// sustain full object-storage line rate across parallel HTTP/1.1 connections while the host's
+/// `UPLOAD_BYTES` budget (`Writer::create`) still caps total bytes held in memory before reading
+/// any body from disk (TASK-79.19).
+pub const IN_FLIGHT: usize = 32;
 
 /// How many segments go between checkpoints, by default ([`Options::checkpoint_every`]).
 pub const CHECKPOINT_EVERY: u64 = 64;
@@ -371,6 +368,10 @@ impl From<bucket_cell::bucket::Refused> for Failure {
 pub struct Options {
     /// How long local commits wait at most before they are uploaded.
     pub interval: Duration,
+    /// Whether already-closed segments wake the uploader immediately without waiting for
+    /// `interval` (closing no open segment). True in production; tests that pause background
+    /// uploads set this to false.
+    pub upload_closed: bool,
     /// How many commits may wait to be uploaded: the next waits, while object storage is out of
     /// reach, rather than the lag grow without bound (doc-7, decision 3).
     pub max_lag: u64,
@@ -462,6 +463,7 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             interval: Duration::from_secs(1),
+            upload_closed: true,
             max_lag: 4096,
             max_lag_bytes: 1 << 30,
             cache: None,
@@ -780,6 +782,9 @@ pub(crate) struct Shared<D: Dir, B: bucket_cell::Bucket = RoutedBucket> {
     changed: Arc<Event>,
     /// Wakes the uploader: a commit waits, or it is to stop.
     wake: tokio::sync::Notify,
+    /// Wakes the uploader when a closed segment finishes writing its framed file, without closing
+    /// the open segment or resetting the open-segment `interval` timer.
+    segment_ready: Arc<tokio::sync::Notify>,
     options: Options,
     /// The host's budget of uploads, which its writer uploads within.
     uploads: Arc<Budget>,
@@ -1454,6 +1459,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             progress: Mutex::new(Progress::default()),
             changed: Arc::new(Event::new()),
             wake: tokio::sync::Notify::new(),
+            segment_ready: Arc::new(tokio::sync::Notify::new()),
             options,
             uploads,
             clock,
@@ -1520,16 +1526,14 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         self.wake.notify_one();
     }
 
-    /// Waits until the uploader is woken, or `interval` runs out first: whether it was woken.
-    async fn woken(&self, interval: Duration) -> bool {
-        // cladefs: in a simulation, the interval run out at once, uploading what it holds now, of
-        // any size (doc-24).
+    /// A sleep for the open-segment close interval, or immediate in a buggified simulation turn.
+    fn interval_sleep(&self, interval: Duration) -> BoxFuture<'static, ()> {
+        // cladefs: in a simulation, the interval runs out at once, uploading what it holds now,
+        // of any size (doc-24).
         if bucket_cell::buggify!() {
-            return false;
+            return futures::future::ready(()).boxed();
         }
-        let notified = std::pin::pin!(self.wake.notified());
-        let ran_out = (self.clock)(interval);
-        matches!(futures::future::select(notified, ran_out).await, Either::Left(_))
+        (self.clock)(interval)
     }
 
     fn cell(&self) -> &Arc<LocalCell<D>> {
@@ -1756,16 +1760,20 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         // whether any segment since the last checkpoint freed extents (hotbed question 535).
         let (mut segments, mut checkpointed, mut freed_since_checkpoint) = (0u64, 0u64, false);
         let mut in_flight = InFlight::default();
-        // cladefs: the work with the cell's head under way, an acknowledgement or a checkpoint, one
-        // at a time, beside the uploads, which go on meanwhile as it waits for the bucket's object
-        // store to take the head's next write: an acknowledgement then names all they uploaded
-        // (`Writer::acknowledge`, TASK-690). And whether an upload since it began wants an
-        // acknowledgement, plus an optional coalescing timer when no waiter is blocked (hotbed
-        // question 535).
-        let mut head_work: Option<BoxFuture<'static, Result<HeadWork, bucket_cell::Error>>> = None;
+        // cladefs: head acknowledgements (`Writer::acknowledge`) and periodic checkpoint uploads
+        // (`Writer::checkpoint`) run in separate slots beside segment uploads: checkpoint PUTs
+        // hold no head lock while uploading and piggyback on the next acknowledgement swap
+        // (`Writer::write_checkpoint`), so multi-second checkpoint uploads never stall head swaps
+        // or WAL release (TASK-690).
+        let mut ack_work: Option<BoxFuture<'static, Result<Option<u64>, bucket_cell::Error>>> =
+            None;
+        let mut checkpoint_work: Option<BoxFuture<'static, ()>> = None;
         let mut ack_wanted = false;
         let mut ack_wait: Option<BoxFuture<'static, ()>> = None;
         let mut ack_urgent = false;
+        // Persistent open-segment close interval timer: survives upload/ack completions so steady
+        // upload traffic never starves or resets the open-segment close cadence.
+        let mut interval_wait: Option<BoxFuture<'static, ()>> = None;
         // cladefs: the relocation round under way, if one is, with what it was allowed; what the
         // next may copy; and the keys the states the cell keeps read (doc-27, board 6214).
         let mut relocating: Option<(u64, Round)> = None;
@@ -1773,12 +1781,11 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         let mut credit = relocations::Credit::default();
         let pins = Arc::new(relocations::Pins::default());
         // Whether the next gather closes the cell's open segment: for a commit waiting for its
-        // upload, or a fork, or as the interval is up, or the uploader stops; and whether the last
-        // took segments, after which the cell may hold more closed, which the next takes,
-        // closing none for them (TASK-92.15).
+        // upload, or a fork, or as the interval is up, or the uploader stops; and whether the cell
+        // may hold closed segments ready to upload without closing the open segment (TASK-92.15).
         // cladefs: and whether a commit waits for it, or a fork, or the uploader stops: closing
         // whatever it holds, not only once the guest is filling it no more (TASK-92.41).
-        let (mut close, mut more, mut urgent) = (false, false, false);
+        let (mut close, mut more, mut urgent) = (false, self.options.upload_closed, false);
         loop {
             // cladefs: a test's uploader panicking (board 8507).
             fail::fail_point!("upload::turn");
@@ -1823,6 +1830,9 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                 };
                 // Done with once closed; the segments the cell had closed taking the room, it
                 // closes the next time.
+                if gathered.closed {
+                    interval_wait = None;
+                }
                 close &= !gathered.closed;
                 urgent &= !gathered.closed;
                 more = gathered.took;
@@ -1833,7 +1843,8 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                 }
                 if stop
                     && in_flight.is_empty()
-                    && head_work.is_none()
+                    && ack_work.is_none()
+                    && checkpoint_work.is_none()
                     && !ack_wanted
                     && relocating.is_none()
                 {
@@ -1857,15 +1868,14 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                 || stop
                 || self.options.ack_coalesce.is_zero()
                 || ack_wait.is_none();
-            if ack_wanted && head_work.is_none() && ack_due {
+            if ack_wanted && ack_work.is_none() && ack_due {
                 ack_wanted = false;
                 ack_wait = None;
                 if in_flight.is_empty() {
                     ack_urgent = false;
                 }
                 let writer = writer.clone();
-                let acknowledging = async move { writer.acknowledge().await };
-                head_work = Some(acknowledging.map_ok(HeadWork::Acknowledged).boxed());
+                ack_work = Some(async move { writer.acknowledge().await }.boxed());
             }
             // cladefs: a relocation round after a checkpoint, once any earlier round is done, the
             // uploader isn't stopping and the cell's disk has room (doc-27, board 10918).
@@ -1880,14 +1890,24 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                     relocating = Some((allowance, round));
                 }
             }
-            let mut woken = std::pin::pin!(self.woken(interval));
+            if interval_wait.is_none() && !close && !stop {
+                interval_wait = Some(self.interval_sleep(interval));
+            }
+            let watch_closed = self.options.upload_closed && !more;
+            let mut wake = std::pin::pin!(self.wake.notified());
+            let mut segment_ready = std::pin::pin!(self.segment_ready.notified());
             let happened = futures::future::poll_fn(|cx| {
-                if let Some(work) = head_work.as_mut()
+                if let Some(work) = ack_work.as_mut()
                     && let Poll::Ready(done) = work.poll_unpin(cx)
                 {
-                    return Poll::Ready(Happened::Headed(done));
+                    return Poll::Ready(Happened::Acknowledged(done));
                 }
-                if let Poll::Ready(Some(uploaded)) = in_flight.next().poll_unpin(cx) {
+                if let Some(work) = checkpoint_work.as_mut()
+                    && let Poll::Ready(()) = work.poll_unpin(cx)
+                {
+                    return Poll::Ready(Happened::Checkpointed);
+                }
+                if let Poll::Ready(Some(uploaded)) = in_flight.poll_next(cx) {
                     return Poll::Ready(Happened::Uploaded(uploaded));
                 }
                 if let Some(wait) = ack_wait.as_mut()
@@ -1901,12 +1921,29 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                     let ended = ended.unwrap_or_else(|_| Err(anyhow::anyhow!("its task dropped")));
                     return Poll::Ready(Happened::Relocated(*allowance, ended));
                 }
-                woken.as_mut().poll(cx).map(Happened::Woken)
+                if watch_closed && let Poll::Ready(()) = segment_ready.as_mut().poll(cx) {
+                    return Poll::Ready(Happened::SegmentReady);
+                }
+                if let Poll::Ready(()) = wake.as_mut().poll(cx) {
+                    return Poll::Ready(Happened::Woken);
+                }
+                if let Some(wait) = interval_wait.as_mut()
+                    && let Poll::Ready(()) = wait.poll_unpin(cx)
+                {
+                    return Poll::Ready(Happened::Interval);
+                }
+                Poll::Pending
             })
             .await;
             let done = match happened {
-                Happened::Woken(woken) => {
-                    close |= !woken;
+                Happened::Woken => Ok(()),
+                Happened::SegmentReady => {
+                    more = true;
+                    Ok(())
+                }
+                Happened::Interval => {
+                    interval_wait = None;
+                    close = true;
                     Ok(())
                 }
                 Happened::AckDue => {
@@ -1915,39 +1952,55 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                 }
                 Happened::Uploaded(uploaded) => uploaded.map_err(Failure::from).map(|()| {
                     segments += 1;
-                    ack_wanted = true;
-                    if ack_wait.is_none()
-                        && !self.options.ack_coalesce.is_zero()
-                        && !ack_urgent
-                        && !urgent
-                        && !stop
-                    {
-                        ack_wait = Some((self.clock)(self.options.ack_coalesce));
+                    if in_flight.ready_to_ack() {
+                        ack_wanted = true;
+                        if ack_wait.is_none()
+                            && !self.options.ack_coalesce.is_zero()
+                            && !ack_urgent
+                            && !urgent
+                            && !stop
+                        {
+                            ack_wait = Some((self.clock)(self.options.ack_coalesce));
+                        }
                     }
                 }),
-                Happened::Headed(done) => {
-                    head_work = None;
+                Happened::Acknowledged(done) => {
+                    ack_work = None;
                     match done {
-                        Ok(HeadWork::Acknowledged(through)) => {
-                            let acked = self.acknowledged(through, &mut in_flight);
+                        Ok(through) => {
+                            let acked = self.acknowledged(through, &mut in_flight).await;
                             // A checkpoint every so many segments, after the commits it covers
-                            // returned.
-                            if segments - checkpointed >= self.options.checkpoint_every {
+                            // returned, running concurrently with subsequent acknowledgements.
+                            if segments - checkpointed >= self.options.checkpoint_every
+                                && checkpoint_work.is_none()
+                                && !stop
+                            {
                                 checkpointed = segments;
                                 freed_since_checkpoint = false;
-                                head_work = Some(Self::checkpointing(writer.clone()));
+                                checkpoint_work = Some(Self::checkpointing(writer.clone()));
                             }
-                            acked.await
-                        }
-                        Ok(HeadWork::Checkpointed) => {
-                            // cladefs: queue a relocation round for after this checkpoint
-                            // (started at the top of the loop once any earlier round has ended,
-                            // doc-27, board 10918).
-                            relocate_wanted = true;
-                            Ok(())
+                            if in_flight.ready_to_ack() {
+                                ack_wanted = true;
+                                if ack_wait.is_none()
+                                    && !self.options.ack_coalesce.is_zero()
+                                    && !ack_urgent
+                                    && !urgent
+                                    && !stop
+                                {
+                                    ack_wait = Some((self.clock)(self.options.ack_coalesce));
+                                }
+                            }
+                            acked
                         }
                         Err(err) => Err(err.into()),
                     }
+                }
+                Happened::Checkpointed => {
+                    checkpoint_work = None;
+                    // cladefs: queue a relocation round for after this checkpoint (started at the
+                    // top of the loop once any earlier round has ended, doc-27, board 10918).
+                    relocate_wanted = true;
+                    Ok(())
                 }
                 Happened::Relocated(allowance, ended) => {
                     relocating = None;
@@ -1966,11 +2019,9 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         }
     }
 
-    /// cladefs: writes a checkpoint as of what `writer` acknowledged, as the run's work with the
-    /// cell's head: a checkpoint failing is said, and fails nothing.
-    fn checkpointing(
-        writer: Arc<Writer<B>>,
-    ) -> BoxFuture<'static, Result<HeadWork, bucket_cell::Error>> {
+    /// cladefs: writes a checkpoint as of what `writer` acknowledged, concurrently with segment
+    /// uploads and head acknowledgements: a checkpoint failing is logged, and fails nothing.
+    fn checkpointing(writer: Arc<Writer<B>>) -> BoxFuture<'static, ()> {
         async move {
             // A test's: the checkpoint landing late, after the commits it covers returned, as on
             // a loaded host, which a collector's pass then runs beside (TASK-339).
@@ -1978,7 +2029,6 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             if let Err(err) = writer.checkpoint().await {
                 log::warn!("cladefs: checkpointing cell {}: {err}", writer.cell());
             }
-            Ok(HeadWork::Checkpointed)
         }
         .boxed()
     }
@@ -2270,6 +2320,9 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         let opening = Opening { state, layer, taken, cache, keys: keys.clone(), held: parts };
         let open_cell = blocking(|| recovering.open(options, opening))?;
         assert!(self.cell.set(Arc::new(open_cell)).is_ok(), "an uploader opens its cell once");
+        if self.options.upload_closed {
+            self.cell().wake_on_segment_written(self.segment_ready.clone());
+        }
         self.hold_ring(&keys);
         self.token.set(placement).expect("an uploader's writers take one placement's token");
         self.took(&writer, placement, &head_now);
@@ -2388,7 +2441,11 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         // What a waiter wants is durable; then closed, if fewer segments wait than may upload, and
         // what the closing closed durable too.
         cell.flush().await?;
-        let mut closed = cell.closed(room).await?;
+        let mut closed = if close || !self.options.upload_closed {
+            cell.closed(room).await?
+        } else {
+            cell.closed_ready(room).await?
+        };
         let mut closing = close && closed.len() < room;
         if closing {
             let waited = {
@@ -2412,6 +2469,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         let freed = closed.iter().any(|closed| !closed.footer.contents.frees.is_empty());
         for closed in closed {
             let (number, tag) = (closed.number, closed.tag());
+            let continues = closed.footer.contents.continued.is_some();
             // cladefs: what reads its files, on a blocking thread, as `blocking` gives (board
             // 2944).
             let (own, size) = blocking(|| -> Result<_, Failure> {
@@ -2424,7 +2482,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             let closed = Arc::new(closed);
             let body = Body::new(size, move || blocking(|| closed.bytes()));
             let segment = writer.add_segment(Objects { footer, segment: body, own, data_len })?;
-            segments.push(Uploading { segment, number, tag });
+            segments.push(Uploading { segment, number, tag, continues });
         }
         let took = !segments.is_empty();
         in_flight.upload(writer, segments);
@@ -2460,18 +2518,18 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     /// uploader's (TASK-539.12). Before, the cell failed for it. A disk failing otherwise (EIO) is
     /// no full one: tried again for ever, it left every wait on an upload hanging (board 5359).
     async fn acknowledge_pending(&self, in_flight: &mut InFlight) -> Result<(), Failure> {
-        let mut epoch = None;
-        let stored = async {
-            while let Some(segment) = in_flight.acknowledging.front() {
-                self.cell().acknowledged(segment.number).await?;
-                epoch = Some(segment.epoch());
-                in_flight.acknowledging.pop_front();
-            }
-            Ok::<(), anyhow::Error>(())
+        if in_flight.acknowledging.is_empty() {
+            return Ok(());
         }
-        .await;
-        match stored {
-            Ok(()) => in_flight.acknowledging_failed = false,
+        let numbers: Vec<u64> =
+            in_flight.acknowledging.iter().map(|segment| segment.number).collect();
+        let epoch = match self.cell().acknowledged_batch(&numbers).await {
+            Ok(()) => {
+                in_flight.acknowledging_failed = false;
+                let epoch = in_flight.acknowledging.back().map(Uploading::epoch);
+                in_flight.acknowledging.clear();
+                epoch
+            }
             Err(err) if full(&err) => {
                 if !std::mem::replace(&mut in_flight.acknowledging_failed, true) {
                     log::warn!(
@@ -2480,9 +2538,10 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                         self.cell().description().cell
                     );
                 }
+                None
             }
             Err(err) => return Err(err.into()),
-        }
+        };
         let Some(epoch) = epoch else { return Ok(()) };
         failing!("upload::released");
         if let Some(sink) = self.fast_wal_sink.lock().unwrap().as_ref() {
@@ -2535,12 +2594,13 @@ struct Gathered {
     freed: bool,
 }
 
-/// A segment uploading: its number in the cell, and in the open cell; and the tag of the open
-/// cell's commit it ends with.
+/// A segment uploading: its number in the cell, and in the open cell; the tag of the open cell's
+/// commit it ends with; and whether a commit continues past it into the next segment.
 struct Uploading {
     segment: u64,
     number: u64,
     tag: u64,
+    continues: bool,
 }
 
 impl Uploading {
@@ -2550,38 +2610,38 @@ impl Uploading {
     }
 }
 
-/// The segments uploading, in order, and the futures of their uploads: an acknowledgement takes
-/// exactly the segments the writer acknowledged. Each is in the cell's write-ahead log, durably,
-/// before its upload goes (TASK-79.72's rule), so that nothing lands in the writer's name that the
-/// log doesn't hold.
-/// cladefs: the uploader's run's work with its cell's head, done.
-enum HeadWork {
-    /// An acknowledgement, to the segment it returns.
-    Acknowledged(Option<u64>),
-    Checkpointed,
-}
-
-/// cladefs: what the uploader's run waits on that happened first.
 /// cladefs: a relocation round under way, its task's, as it ends ([`Shared::relocating`]).
 type Round = futures::channel::oneshot::Receiver<anyhow::Result<crate::Relocated>>;
 
+/// cladefs: what the uploader's run waits on that happened first.
 enum Happened {
-    /// The next upload in order is done.
+    /// An in-flight upload finished (in any order, avoiding head-of-line blocking).
     Uploaded(Result<(), bucket_cell::Error>),
     /// cladefs: the relocation round under way, given what it was allowed, is done: how it ended.
     Relocated(u64, anyhow::Result<crate::Relocated>),
-    /// The work with the cell's head under way is done.
-    Headed(Result<HeadWork, bucket_cell::Error>),
+    /// The head acknowledgement under way finished, through the segment it returns.
+    Acknowledged(Result<Option<u64>, bucket_cell::Error>),
+    /// The background checkpoint upload finished.
+    Checkpointed,
     /// The head-swap coalescing window elapsed (hotbed question 535).
     AckDue,
-    /// It was woken, or its interval ran out: whether it was woken.
-    Woken(bool),
+    /// A closed segment finished framing and is ready to upload without closing the open segment.
+    SegmentReady,
+    /// The uploader was explicitly woken (`ask`, `stop`, `urge`, etc.).
+    Woken,
+    /// The open-segment close interval elapsed.
+    Interval,
 }
 
+/// The segments uploading, in order, and the unordered futures of their uploads: completions
+/// refill slots immediately without head-of-line blocking, while acknowledgements still advance
+/// strictly through the longest contiguous uploaded prefix ending on a complete commit.
 #[derive(Default)]
 struct InFlight {
     segments: VecDeque<Uploading>,
-    uploads: FuturesOrdered<BoxFuture<'static, Result<(), bucket_cell::Error>>>,
+    uploads: FuturesUnordered<BoxFuture<'static, Result<u64, bucket_cell::Error>>>,
+    /// Segment numbers (in `Writer`'s numbering) whose PUTs finished and await head swap.
+    uploaded: BTreeSet<u64>,
     /// cladefs: the segments the writer acknowledged that the cell hasn't yet, its last try at
     /// recording it failing on its disk, as a full one fails it: tried again at each pass
     /// ([`Shared::acknowledge_pending`], TASK-539.12).
@@ -2599,16 +2659,41 @@ impl InFlight {
     ) {
         for uploading in segments {
             let (writer, segment) = (writer.clone(), uploading.segment);
-            self.uploads.push_back(async move { writer.upload(segment).await }.boxed());
+            self.uploads
+                .push(async move { writer.upload(segment).await.map(|()| segment) }.boxed());
             self.segments.push_back(uploading);
         }
     }
 
-    /// The next upload done, in order.
-    fn next(
+    /// Polls for any finished upload, recording its segment number on completion.
+    fn poll_next(
         &mut self,
-    ) -> impl Future<Output = Option<Result<(), bucket_cell::Error>>> + Unpin + '_ {
-        self.uploads.next()
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Option<Result<(), bucket_cell::Error>>> {
+        match self.uploads.poll_next_unpin(cx) {
+            Poll::Ready(Some(Ok(segment))) => {
+                self.uploaded.insert(segment);
+                Poll::Ready(Some(Ok(())))
+            }
+            Poll::Ready(Some(Err(err))) => Poll::Ready(Some(Err(err))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    /// Awaits the next finished upload (used by tests that drive `InFlight` directly).
+    #[cfg(test)]
+    async fn next(&mut self) -> Option<Result<(), bucket_cell::Error>> {
+        futures::future::poll_fn(|cx| self.poll_next(cx)).await
+    }
+
+    /// Whether a contiguous prefix of `segments` has finished uploading and ends on at least one
+    /// complete (non-continued) commit, matching `Writer::naming`.
+    fn ready_to_ack(&self) -> bool {
+        self.segments
+            .iter()
+            .take_while(|segment| self.uploaded.contains(&segment.segment))
+            .any(|segment| !segment.continues)
     }
 
     /// The segments the writer acknowledged, `through` the last, which upload no more.
@@ -2616,7 +2701,11 @@ impl InFlight {
         let taken =
             |uploading: &&Uploading| through.is_some_and(|through| uploading.segment <= through);
         let count = self.segments.iter().take_while(taken).count();
-        self.segments.drain(..count).collect()
+        let acked: Vec<Uploading> = self.segments.drain(..count).collect();
+        for segment in &acked {
+            self.uploaded.remove(&segment.segment);
+        }
+        acked
     }
 
     /// How many uploads are in flight.

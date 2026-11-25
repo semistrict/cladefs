@@ -1284,7 +1284,11 @@ mod tests {
     /// uploading nothing until a commit waits for it, or the hour is up.
     pub(super) fn idle() -> local_cell::upload::Options {
         let keeping = crate::host_cell::keeping().unwrap();
-        local_cell::upload::Options { interval: Duration::from_secs(3600), ..keeping }
+        local_cell::upload::Options {
+            interval: Duration::from_secs(3600),
+            upload_closed: false,
+            ..keeping
+        }
     }
 
     pub(super) fn pattern(seed: u8, len: usize) -> Vec<u8> {

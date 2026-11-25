@@ -674,7 +674,8 @@ async fn gathers_take_what_may_upload_at_once() {
     LocalCell::make(&dir, description, Some("memory:///gathers"), None).unwrap();
     lifecycle::create(&*bucket, CELL, 1).await.unwrap();
     // Its uploader uploads nothing it is not asked to within the hour: the test gathers.
-    let options = Options { interval: Duration::from_secs(3600), ..Options::default() };
+    let options =
+        Options { interval: Duration::from_secs(3600), upload_closed: false, ..Options::default() };
     let recovering = LocalCell::recover_unmade(dir).unwrap();
     let (cell, uploader) =
         open(recovering, crate::Options::default(), bucket.clone(), (1, options), &host)
@@ -838,4 +839,303 @@ async fn clean_close_checkpoint_threshold_and_frees() {
         after_threshold, after_free,
         "clean close at checkpoint_min_on_close must advance checkpoint"
     );
+}
+
+/// Closed segments wake the uploader immediately even when `interval` is long (e.g. 15 s on base
+/// builds), without prematurely closing the open segment.
+#[tokio::test(flavor = "multi_thread")]
+async fn closed_segments_upload_immediately_with_long_interval_without_closing_open_segment() {
+    let options = Options {
+        interval: Duration::from_secs(3600),
+        upload_closed: true,
+        ack_coalesce: Duration::ZERO,
+        relocate: false,
+        ..Options::default()
+    };
+    let doc = Doc27::open(options).await;
+    for sequence in 1..=3u64 {
+        doc.cell.write(Doc27::extent(sequence), 0, &[sequence as u8; BLOCK]).await.unwrap();
+        doc.cell.close_segment().unwrap();
+        doc.cell.commit(None).await.unwrap();
+    }
+    let closed_epoch = doc.cell.last_commit().unwrap();
+    // Write a 4th commit into the open segment without closing it.
+    doc.cell.write(Doc27::extent(4), 0, &[4u8; BLOCK]).await.unwrap();
+    doc.cell.commit(None).await.unwrap();
+    let open_epoch = doc.cell.last_commit().unwrap();
+
+    // The 3 closed segments must upload and acknowledge promptly without waiting for `interval`.
+    doc.until("closed segments uploaded", |d| d.uploader.last_uploaded() >= closed_epoch).await;
+    assert_eq!(
+        doc.uploader.last_uploaded(),
+        closed_epoch,
+        "open segment must not be closed early while interval has not elapsed"
+    );
+    assert!(open_epoch > closed_epoch);
+    doc.uploader.close().await;
+}
+
+/// Out-of-order upload completions refill `IN_FLIGHT` slots immediately without head-of-line
+/// blocking behind a slow earliest segment, while acknowledgements still advance strictly in order.
+#[tokio::test(flavor = "multi_thread")]
+async fn out_of_order_upload_completions_refill_slots_without_hol_blocking() {
+    use object_store::ObjectStore;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Debug)]
+    struct HoldFirstSegment {
+        inner: Arc<object_store::memory::InMemory>,
+        first_seen: Arc<tokio::sync::Notify>,
+        release_first: Arc<tokio::sync::Notify>,
+        segments_started: Arc<AtomicUsize>,
+    }
+
+    impl std::fmt::Display for HoldFirstSegment {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "HoldFirstSegment")
+        }
+    }
+
+    impl ObjectStore for HoldFirstSegment {
+        fn put_opts<'life0, 'life1, 'async_trait>(
+            &'life0 self,
+            location: &'life1 object_store::path::Path,
+            payload: object_store::PutPayload,
+            opts: object_store::PutOptions,
+        ) -> futures::future::BoxFuture<'async_trait, object_store::Result<object_store::PutResult>>
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move {
+                let key = location.as_ref();
+                if key.contains("/segments/") {
+                    let n = self.segments_started.fetch_add(1, Ordering::SeqCst);
+                    if n == 0 {
+                        self.first_seen.notify_one();
+                        self.release_first.notified().await;
+                    }
+                }
+                self.inner.put_opts(location, payload, opts).await
+            })
+        }
+
+        fn put_multipart_opts<'life0, 'life1, 'async_trait>(
+            &'life0 self,
+            location: &'life1 object_store::path::Path,
+            opts: object_store::PutMultipartOptions,
+        ) -> futures::future::BoxFuture<
+            'async_trait,
+            object_store::Result<Box<dyn object_store::MultipartUpload>>,
+        >
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            Self: 'async_trait,
+        {
+            self.inner.put_multipart_opts(location, opts)
+        }
+
+        fn get_opts<'life0, 'life1, 'async_trait>(
+            &'life0 self,
+            location: &'life1 object_store::path::Path,
+            options: object_store::GetOptions,
+        ) -> futures::future::BoxFuture<'async_trait, object_store::Result<object_store::GetResult>>
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            Self: 'async_trait,
+        {
+            self.inner.get_opts(location, options)
+        }
+
+        fn delete_stream(
+            &self,
+            locations: futures::stream::BoxStream<
+                'static,
+                object_store::Result<object_store::path::Path>,
+            >,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::path::Path>>
+        {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&object_store::path::Path>,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+        {
+            self.inner.list(prefix)
+        }
+
+        fn list_with_delimiter<'life0, 'life1, 'async_trait>(
+            &'life0 self,
+            prefix: Option<&'life1 object_store::path::Path>,
+        ) -> futures::future::BoxFuture<'async_trait, object_store::Result<object_store::ListResult>>
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            Self: 'async_trait,
+        {
+            self.inner.list_with_delimiter(prefix)
+        }
+
+        fn copy_opts<'life0, 'life1, 'life2, 'async_trait>(
+            &'life0 self,
+            from: &'life1 object_store::path::Path,
+            to: &'life2 object_store::path::Path,
+            options: object_store::CopyOptions,
+        ) -> futures::future::BoxFuture<'async_trait, object_store::Result<()>>
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            'life2: 'async_trait,
+            Self: 'async_trait,
+        {
+            self.inner.copy_opts(from, to, options)
+        }
+    }
+
+    let first_seen = Arc::new(tokio::sync::Notify::new());
+    let release_first = Arc::new(tokio::sync::Notify::new());
+    let segments_started = Arc::new(AtomicUsize::new(0));
+    let store = Arc::new(HoldFirstSegment {
+        inner: Arc::new(object_store::memory::InMemory::new()),
+        first_seen: first_seen.clone(),
+        release_first: release_first.clone(),
+        segments_started: segments_started.clone(),
+    });
+    let bucket = Arc::new(ObjectBucket::new(store, "").unrouted());
+    let host = Runtime {
+        handle: tokio::runtime::Handle::current(),
+        uploads: Budget::new(Limits::UNBOUNDED),
+        keys: bucket_cell::keys::testing::host(),
+    };
+    let dir = MemDir::new();
+    let description = Description { block_size: BLOCK as u32, capacity: 1 << 30, cell: CELL };
+    LocalCell::make(&dir, description, Some("memory:///hol"), None).unwrap();
+    lifecycle::create(&*bucket, CELL, 1).await.unwrap();
+    let options = Options {
+        interval: Duration::from_secs(3600),
+        upload_closed: true,
+        ack_coalesce: Duration::ZERO,
+        relocate: false,
+        ..Options::default()
+    };
+    let recovering = LocalCell::recover_unmade(dir).unwrap();
+    let (cell, uploader) =
+        open(recovering, crate::Options::default(), bucket.clone(), (1, options), &host)
+            .await
+            .unwrap();
+    cell.made().unwrap();
+
+    // Close more than IN_FLIGHT segments: with FuturesOrdered, holding segment 0 would freeze
+    // segments_started at IN_FLIGHT forever; with FuturesUnordered, later completions immediately
+    // refill slots until all total segments have started uploading.
+    let total = IN_FLIGHT + 4;
+    for sequence in 1..=total as u64 {
+        cell.write(ExtentId::new(CELL.id, sequence), 0, &[sequence as u8; BLOCK]).await.unwrap();
+        cell.close_segment().unwrap();
+        cell.commit(None).await.unwrap();
+    }
+    first_seen.notified().await;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while segments_started.load(Ordering::SeqCst) < total && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        segments_started.load(Ordering::SeqCst),
+        total,
+        "all {total} segments (> IN_FLIGHT={IN_FLIGHT}) must start uploading while segment 0 is held"
+    );
+    // Nothing may be acknowledged before segment 0 lands.
+    assert_eq!(uploader.last_uploaded(), 0);
+
+    // Releasing segment 0 lets the entire contiguous prefix acknowledge cleanly.
+    release_first.notify_one();
+    let last = cell.last_commit().unwrap();
+    uploader.uploaded(last).await.unwrap();
+    uploader.close().await;
+    let state = bucket_cell::recover(&*bucket, CELL, None).await.unwrap().state;
+    let sequences: Vec<u64> = state.extents.keys().map(|e| e.sequence).collect();
+    assert_eq!(sequences, (1..=total as u64).collect::<Vec<_>>());
+}
+
+/// Batched WAL acknowledgement updates the start file once for a contiguous prefix, rejects a
+/// non-prefix batch, and recovers cleanly on reopen.
+#[tokio::test(flavor = "multi_thread")]
+async fn batched_acknowledge_updates_start_file_and_recovers_cleanly() {
+    let options = Options {
+        interval: Duration::from_secs(3600),
+        upload_closed: false,
+        ack_coalesce: Duration::ZERO,
+        relocate: false,
+        ..Options::default()
+    };
+    let doc = Doc27::open(options.clone()).await;
+    for sequence in 1..=5u64 {
+        doc.cell.write(Doc27::extent(sequence), 0, &[sequence as u8; BLOCK]).await.unwrap();
+        doc.cell.close_segment().unwrap();
+        doc.cell.commit(None).await.unwrap();
+    }
+    let closed = doc.cell.closed(usize::MAX).await.unwrap();
+    assert_eq!(closed.len(), 5);
+    // Non-prefix batch must fail without mutating the WAL.
+    assert!(doc.cell.acknowledged_batch(&[closed[1].number, closed[2].number]).await.is_err());
+    assert_eq!(doc.cell.wal_bytes().unwrap(), 5 * BLOCK as u64);
+
+    // Upload and acknowledge only the first 3 segments in the bucket, then acknowledge all 3 on
+    // the local cell in a single batched WAL start-file update.
+    let writer = doc.uploader.shared.writer.lock().unwrap().clone().unwrap();
+    for seg in &closed[..3] {
+        let size = seg.file.size().unwrap();
+        let seg_arc = Arc::new(seg.bytes().unwrap());
+        let body = Body::new(size, move || Ok(seg_arc.as_ref().clone()));
+        let id = writer
+            .add_segment(Objects {
+                footer: seg.footer.clone(),
+                segment: body,
+                own: Vec::new(),
+                data_len: seg.data_len,
+            })
+            .unwrap();
+        writer.upload(id).await.unwrap();
+    }
+    let through = writer.acknowledge().await.unwrap();
+    assert!(through.is_some());
+    doc.cell
+        .acknowledged_batch(&[closed[0].number, closed[1].number, closed[2].number])
+        .await
+        .unwrap();
+    assert_eq!(doc.cell.wal_bytes().unwrap(), 2 * BLOCK as u64);
+
+    // Cut short (leaving segments 3..5 local-only) and reopen: recovery must reconcile cleanly
+    // against the batched StartFile and keep only the 2 remaining segments in the local WAL.
+    let dir = doc.dir.clone();
+    let bucket = doc.bucket.clone();
+    let host = doc.host.clone();
+    doc.uploader.cut_short()();
+    doc.uploader.close().await;
+    doc.cell.close().await.unwrap();
+    drop(doc.cell);
+
+    let recovering = LocalCell::recover(dir).unwrap();
+    let (reopened, uploader) = open(
+        recovering,
+        crate::Options::default(),
+        bucket,
+        (2, Options { token: 6, ..options }),
+        &host,
+    )
+    .await
+    .unwrap();
+    assert_eq!(reopened.wal_bytes().unwrap(), 2 * BLOCK as u64);
+    let remaining = reopened.closed(usize::MAX).await.unwrap();
+    assert_eq!(remaining.len(), 2);
+    assert_eq!(remaining[0].number, closed[3].number);
+    assert_eq!(remaining[1].number, closed[4].number);
+    uploader.cut_short()();
+    uploader.close().await;
+    reopened.close().await.unwrap();
 }

@@ -19,7 +19,7 @@
 
 use super::Daemon;
 use super::server::Connection;
-use super::storage::{daemon_bucket_on, part_cache, upload_interval};
+use super::storage::{daemon_bucket_on, part_cache, upload_closed, upload_interval};
 use crate::cell_table::{self, CellTable, Writer as _};
 use crate::open_cell::{Opening, release};
 use crate::pages::Arena;
@@ -681,6 +681,7 @@ fn keeping(daemon: &Daemon) -> Result<local_cell::upload::Options, Errno> {
         fetching: Some(crate::bucket::fetching_on(&daemon.host)),
         token,
         interval,
+        upload_closed: upload_closed(),
         members,
         replace_after,
         fast_wal_config,

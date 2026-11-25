@@ -257,6 +257,9 @@ pub struct LocalCell<D: Dir> {
     /// [`LocalCell::close_now`] and the writes it holds up wait for; cladefs: and as each framing
     /// of a segment ends, which flushes, the uploader, forks and the cell's closing wait for.
     idle: Arc<Event>,
+    /// Optional uploader wakeup notified whenever a closed segment finishes writing its framed
+    /// file, so closed segments upload immediately without waiting for the open-segment interval.
+    segment_written: Arc<std::sync::OnceLock<Arc<tokio::sync::Notify>>>,
     /// cladefs: its keys, which its segments and extents stored on their own are encrypted and
     /// read under (TASK-411.3).
     keys: Arc<Ring>,
@@ -628,6 +631,7 @@ struct Framer<D: Dir> {
     cell: u64,
     state: Arc<SharedLock<Mutex<State<D::File>>>>,
     idle: Arc<Event>,
+    segment_written: Arc<std::sync::OnceLock<Arc<tokio::sync::Notify>>>,
     held: Arc<HeldParts>,
     cache_only: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -640,6 +644,7 @@ impl<D: Dir> Clone for Framer<D> {
             cell: self.cell,
             state,
             idle,
+            segment_written: self.segment_written.clone(),
             held: self.held.clone(),
             cache_only: self.cache_only.clone(),
         }
@@ -791,6 +796,9 @@ impl<D: Dir> Framer<D> {
         state.framing.wrote(number, framed);
         // cladefs: the uploader, which takes it now (TASK-384).
         self.idle.notify(usize::MAX);
+        if let Some(wake) = self.segment_written.get() {
+            wake.notify_one();
+        }
         if std::mem::replace(&mut state.framing.syncing, true) {
             return false;
         }
@@ -836,6 +844,9 @@ impl<D: Dir> Framer<D> {
                 Ok(framed) => {
                     state.segments.written(number, framed.clone());
                     state.framing.wrote(number, framed);
+                    if let Some(wake) = self.segment_written.get() {
+                        wake.notify_one();
+                    }
                 }
                 Err(error) => framing_ended(state, number, Err(&error)),
             }
@@ -1501,6 +1512,7 @@ impl<D: Dir> LocalCell<D> {
             cache,
             held: held.unwrap_or_default(),
             idle: Arc::new(Event::new()),
+            segment_written: Arc::new(std::sync::OnceLock::new()),
             keys,
             replicator: std::sync::Mutex::new(None),
             fast_wal: std::sync::Mutex::new(None),
@@ -2279,9 +2291,17 @@ impl<D: Dir> LocalCell<D> {
             cell: self.cell.id,
             state,
             idle,
+            segment_written: self.segment_written.clone(),
             held: self.held.clone(),
             cache_only: self.cache_only.clone(),
         }
+    }
+
+    /// Registers an uploader wakeup notified whenever a closed segment finishes writing its
+    /// framed file.
+    pub(crate) fn wake_on_segment_written(&self, wake: Arc<tokio::sync::Notify>) {
+        // Registered once when the cell's uploader opens it.
+        let _ = self.segment_written.set(wake);
     }
 
     /// cladefs: prepares the log of the segment after the open one, off the state lock, on a thread
@@ -3540,8 +3560,33 @@ impl<D: Dir> LocalCell<D> {
     /// cladefs: until it wrote their framed files, not until it made them durable, which their raw
     /// files and logs stand for meanwhile, until the commits their footers name are (TASK-384).
     pub async fn closed(&self, limit: usize) -> Result<Vec<Closed<D::File>>, Error> {
-        let framing = self.state()?.segments.framings().clone();
-        self.wait_for_writings(framing).await?;
+        let to_wait: Vec<SegmentId> = {
+            let state = self.state()?;
+            let durable = self.uploadable();
+            let segments = &state.segments;
+            state
+                .wal
+                .pending_writing(durable, limit, |number| {
+                    segments.is_writing(SegmentId { cell: self.cell.id, number })
+                })
+                .into_iter()
+                .map(|number| SegmentId { cell: self.cell.id, number })
+                .collect()
+        };
+        if !to_wait.is_empty() {
+            self.wait_for_writings(to_wait).await?;
+        }
+        self.take_closed(limit)
+    }
+
+    /// Takes up to `limit` untaken durable segments whose framed files are already written without
+    /// waiting on later segments still queued in the framer, so streaming uploads overlap with
+    /// framing instead of stalling behind queued framings.
+    pub(crate) async fn closed_ready(&self, limit: usize) -> Result<Vec<Closed<D::File>>, Error> {
+        self.take_closed(limit)
+    }
+
+    fn take_closed(&self, limit: usize) -> Result<Vec<Closed<D::File>>, Error> {
         crate::upload::blocking(|| {
             let mut state = self.state()?;
             let state = &mut *state;
@@ -3585,22 +3630,33 @@ impl<D: Dir> LocalCell<D> {
     /// acknowledged, its files leave as before, its framed file named its own, into the host's
     /// cache, where reads of its extents in the bucket find it, and its raw file and log go.
     pub async fn acknowledged(&self, number: u64) -> Result<(), Error> {
-        self.wait_framed_through(number).await?;
+        self.acknowledged_batch(&[number]).await
+    }
+
+    /// Acknowledges a contiguous prefix `numbers` of the write-ahead log with a single durable
+    /// WAL start-file update instead of one `fsync` per segment.
+    pub async fn acknowledged_batch(&self, numbers: &[u64]) -> Result<(), Error> {
+        let Some(&last) = numbers.last() else {
+            return Ok(());
+        };
+        self.wait_framed_through(last).await?;
         // cladefs: the members' logs of it, and before it, go: the bucket holds them (doc-21).
         if let Some(replicator) = self.replicator() {
-            replicator.acknowledged(number);
+            replicator.acknowledged(last);
         }
-        // cladefs: writes and syncs the WAL start, removes raw files and logs, and moves
-        // acknowledged segments to the part cache off the bucket runtime's workers (board 10824).
+        // cladefs: writes and syncs the WAL start once for the batch, removes raw files and logs,
+        // and moves acknowledged segments to the part cache off the bucket runtime's workers
+        // (board 10824).
         crate::upload::blocking(|| {
             let mut start = self.start.with(Mutex::lock);
             let after = {
                 let state = self.state()?;
-                match state.wal.first() {
-                    Some(queued) if queued.number == number => {
-                        queued.footer.contents.commits.last().copied().or(state.wal.start())
-                    }
-                    _ => bail!("segment {} is not the first of the write-ahead log", Short(number)),
+                match state.wal.start_after(numbers) {
+                    Some(after) => after,
+                    None => bail!(
+                        "segment {} is not the next of the write-ahead log",
+                        Short(numbers[0])
+                    ),
                 }
             };
             // cladefs: failing, it leaves the record before it whole, which the cell goes on with:
@@ -3613,22 +3669,25 @@ impl<D: Dir> LocalCell<D> {
             let (leaving, raw) = {
                 let mut state = self.state()?;
                 let state = &mut *state;
-                // cladefs: those whose acknowledgements are whole, of a commit spanning segments
-                // all once its last is acknowledged (`Queue::acknowledge`, TASK-338).
-                let whole = state.wal.acknowledge(number).expect("the first, as found");
-                for queued in &whole {
-                    state.release_kept(footer_last(&queued.footer));
+                let mut leaving = Vec::new();
+                for &number in numbers {
+                    // cladefs: those whose acknowledgements are whole, of a commit spanning
+                    // segments all once its last is acknowledged (`Queue::acknowledge`, TASK-338).
+                    let whole = state.wal.acknowledge(number).expect("the first, as found");
+                    for queued in &whole {
+                        state.release_kept(footer_last(&queued.footer));
+                    }
+                    for queued in whole {
+                        let footer = &queued.footer;
+                        let key =
+                            bucket_cell::layout::segment(self.cell, footer.segment, footer.epoch);
+                        let own: Vec<_> = footer.own().collect();
+                        let segment = SegmentId { cell: self.cell.id, number: queued.number };
+                        let at = (key.as_str(), !queued.restamped);
+                        leaving.extend(state.acknowledge(segment, at, &own, queued.data_len()));
+                    }
                 }
                 state.trim_kept(state.epoch);
-                let mut leaving = Vec::new();
-                for queued in whole {
-                    let footer = &queued.footer;
-                    let key = bucket_cell::layout::segment(self.cell, footer.segment, footer.epoch);
-                    let own: Vec<_> = footer.own().collect();
-                    let segment = SegmentId { cell: self.cell.id, number: queued.number };
-                    let at = (key.as_str(), !queued.restamped);
-                    leaving.extend(state.acknowledge(segment, at, &own, queued.data_len()));
-                }
                 // Those no extent's data is in here any more leave now.
                 let reaped = state.segments.reap().into_iter();
                 leaving.extend(reaped.map(|(number, key)| (segment_path(number), key)));
@@ -3641,7 +3700,7 @@ impl<D: Dir> LocalCell<D> {
             self.remove_raw(raw);
             let done_logs: Vec<SegmentId> = {
                 let mut kept = self.kept_logs.lock().unwrap();
-                let rest = kept.split_off(&SegmentId { cell: self.cell.id, number: number + 1 });
+                let rest = kept.split_off(&SegmentId { cell: self.cell.id, number: last + 1 });
                 std::mem::replace(&mut *kept, rest).into_iter().collect()
             };
             for segment in done_logs {

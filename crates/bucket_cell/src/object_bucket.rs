@@ -1290,7 +1290,35 @@ fn cloud<V: AsRef<str>>(
             (memory, None, Clock::Host, appends)
         }
         Scheme::AmazonS3 => {
-            let mut builder = configured!(object_store::aws::AmazonS3Builder);
+            let allow_http = options.iter().any(|(k, v)| {
+                (k.eq_ignore_ascii_case("aws_allow_http") || k.eq_ignore_ascii_case("allow_http"))
+                    && matches!(
+                        v.as_ref().to_ascii_lowercase().as_str(),
+                        "1" | "true" | "on" | "yes" | "y"
+                    )
+            });
+            // Over HTTPS, cladefs objects are already AEAD-authenticated and TLS-protected; avoid
+            // hashing multi-megabyte PUT bodies synchronously with SHA-256 on Tokio workers before
+            // sending bytes (explicit AWS_UNSIGNED_PAYLOAD=false still overrides this).
+            let mut builder = object_store::aws::AmazonS3Builder::new()
+                .with_url(url.as_str())
+                .with_client_options(client.options())
+                .with_http_connector(crate::client::Connector {
+                    client: *client,
+                    clock: served.clone(),
+                    bucket: bucket()?,
+                });
+            if !allow_http {
+                builder = builder.with_unsigned_payload(true);
+            }
+            let mut builder = options.iter().fold(builder, |builder, (key, value)| {
+                match key.to_ascii_lowercase().parse() {
+                    Ok(key) => builder.with_config(key, value.as_ref()),
+                    // Not one of this backend's: the environment holds every cloud's, each builder
+                    // taking its own.
+                    Err(_) => builder,
+                }
+            });
             let bucket_name = url.host_str().unwrap_or("");
             let explicit_express = options.iter().rev().find_map(|(k, v)| {
                 if k.eq_ignore_ascii_case("aws_s3_express") || k.eq_ignore_ascii_case("s3_express")

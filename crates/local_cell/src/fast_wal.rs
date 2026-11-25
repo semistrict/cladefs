@@ -2020,6 +2020,7 @@ mod tests {
         LocalCell::make(&dir1, desc, Some("memory:///cold"), Some(kind)).unwrap();
         let opts1 = upload::Options {
             interval: Duration::MAX,
+            upload_closed: false,
             token: 1,
             fast_wal: Some(Some(Fsync::FastWal)),
             fast_wal_config: Some(FastWalConfig::new(
@@ -2080,6 +2081,7 @@ mod tests {
         LocalCell::make(&dir2, desc, Some("memory:///cold"), Some(kind)).unwrap();
         let opts2 = upload::Options {
             interval: Duration::MAX,
+            upload_closed: false,
             token: 2,
             fast_wal: None, // inherits FastWal from head
             fast_wal_config: Some(FastWalConfig::new(
@@ -2186,6 +2188,7 @@ mod tests {
         LocalCell::make(&dir3, desc, Some("memory:///cold"), Some(kind)).unwrap();
         let opts3 = upload::Options {
             interval: Duration::MAX,
+            upload_closed: false,
             token: 3,
             fast_wal: Some(None),
             fast_wal_config: Some(FastWalConfig::new(
