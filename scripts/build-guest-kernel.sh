@@ -177,10 +177,11 @@ grep -q '^CONFIG_SERIAL_8250_CONSOLE=y' "$src/.config"
 # cladefs: fs/cladefs's tracepoints, in tracefs and for BPF (cladefs.config, TASK-44.16).
 grep -q '^CONFIG_FTRACE=y' "$src/.config"
 grep -q '^CONFIG_BPF_EVENTS=y' "$src/.config"
-# cladefs: eBPF JIT, kprobes, syscall tracepoints, BTF, and schedstats for in-guest profiling/bpftrace.
+# cladefs: eBPF JIT, kprobes, dynamic ftrace, syscall tracepoints, BTF, and schedstats for in-guest profiling/bpftrace.
 grep -q '^CONFIG_BPF_JIT=y' "$src/.config"
 grep -q '^CONFIG_KPROBES=y' "$src/.config"
 grep -q '^CONFIG_KPROBE_EVENTS=y' "$src/.config"
+grep -q '^CONFIG_DYNAMIC_FTRACE=y' "$src/.config"
 grep -q '^CONFIG_FTRACE_SYSCALLS=y' "$src/.config"
 grep -q '^CONFIG_DEBUG_INFO_BTF=y' "$src/.config"
 grep -q '^CONFIG_SCHEDSTATS=y' "$src/.config"

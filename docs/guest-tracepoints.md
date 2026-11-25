@@ -11,10 +11,10 @@ sit beside two other tools:
 - `/proc/fs/cladefs/<tag>`, the counters and latency histograms;
 - the `cladefs.dax_trace` ring of a page's maps and iomaps, which tests dump to the kernel log.
 
-A tracepoint that is off costs one static branch. The guest kernel has event tracing on
-(`guest/linux/configs/cladefs.config`: `CONFIG_FTRACE`, `CONFIG_ENABLE_DEFAULT_TRACERS`, `CONFIG_BPF_EVENTS`), but no
-function tracer. `scripts/build-guest-kernel.sh` checks `CONFIG_FTRACE` and
-`CONFIG_BPF_EVENTS`.
+A tracepoint that is off costs one static branch. The guest kernel has event tracing, dynamic
+ftrace, kprobes, syscall tracepoints, BTF, and BPF JIT on (`guest/linux/configs/cladefs.config`),
+so `perf`, `bpftrace` (tracepoints, `kprobe:`, and `fentry:`), and always-on eBPF profiling all work
+inside guests. `scripts/build-guest-kernel.sh` checks these options.
 
 ## The events
 
