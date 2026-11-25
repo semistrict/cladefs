@@ -10,8 +10,10 @@
 //! one, with nothing copied (`xFetch`); otherwise, or for pages changed since the last commit, it
 //! reads them as it would without.
 //!
-//! A transaction is committed as SQLite syncs the database's file at its end, or, if told not to
-//! sync (`synchronous=OFF`), as it unlocks it. WAL mode is refused: its log would be memory, which
+//! A transaction is committed as SQLite syncs the database's file at its end (`xSync` or
+//! `SQLITE_FCNTL_SYNC`), completes commit phase two (`SQLITE_FCNTL_COMMIT_PHASETWO`, which still
+//! fires under `locking_mode=EXCLUSIVE` with `synchronous=OFF`, board 8400), or lowers a write
+//! lock (`xUnlock`). WAL mode is refused: its log would be memory, which
 //! a crash loses, and SQLite then keeps to the rollback journal; nor does the VFS give SQLite the
 //! shared memory WAL mode needs otherwise. Randomness, sleeping and the time are the default VFS's.
 
@@ -497,11 +499,25 @@ unsafe extern "C" fn x_check_reserved_lock(file: *mut ffi::sqlite3_file, out: *m
 }
 
 unsafe extern "C" fn x_file_control(
-    _file: *mut ffi::sqlite3_file,
-    _op: c_int,
+    file: *mut ffi::sqlite3_file,
+    op: c_int,
     _arg: *mut c_void,
 ) -> c_int {
-    ffi::SQLITE_NOTFOUND
+    // Flush on SQLITE_FCNTL_SYNC and SQLITE_FCNTL_COMMIT_PHASETWO so transactions committed under
+    // locking_mode=EXCLUSIVE with synchronous=OFF (where SQLite omits both xSync and xUnlock) are
+    // still flushed to the extent device before COMMIT returns (board 8400).
+    match op {
+        ffi::SQLITE_FCNTL_SYNC | ffi::SQLITE_FCNTL_COMMIT_PHASETWO => {
+            // SAFETY: as SQLite calls it: a file x_open opened.
+            match unsafe { open(file) } {
+                Open::Database { database, .. } => {
+                    code_of(database.sync(), ffi::SQLITE_IOERR_FSYNC)
+                }
+                Open::Memory(_) => ffi::SQLITE_NOTFOUND,
+            }
+        }
+        _ => ffi::SQLITE_NOTFOUND,
+    }
 }
 
 unsafe extern "C" fn x_sector_size(file: *mut ffi::sqlite3_file) -> c_int {

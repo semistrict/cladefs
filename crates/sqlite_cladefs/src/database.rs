@@ -14,8 +14,9 @@
 //! **Memory files.** Journals and temporary files live in memory: the database's file changes
 //! only at its commits, whole, so that no crash needs a journal to roll it back.
 //!
-//! **Commits.** A transaction is committed as SQLite syncs the database's file, or, if told not
-//! to (`synchronous=OFF`), as a writer lowers its lock: the block device's flush.
+//! **Commits.** A transaction is committed as SQLite syncs the database's file, finishes commit
+//! phase two (`SQLITE_FCNTL_COMMIT_PHASETWO`, including under `locking_mode=EXCLUSIVE` with
+//! `synchronous=OFF`, board 8400), or lowers a write lock: the block device's flush.
 
 use crate::locks::{Level, Locks};
 use anyhow::{Error, bail};

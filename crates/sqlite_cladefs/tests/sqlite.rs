@@ -532,3 +532,67 @@ fn a_connection_outlives_its_registration() {
     let expected = 2_440_587.5 + since.as_secs_f64() / 86_400.0;
     assert!((now - expected).abs() < 10.0 / 86_400.0, "{now} is not {expected}, within 10 s");
 }
+
+/// board 8400: keeping the writer open under `locking_mode=EXCLUSIVE` with `synchronous=OFF`
+/// (across every supported rollback journal mode) still flushes each commit to the extent device
+/// before `COMMIT` returns so an immediate cell fork sees every committed row.
+#[test]
+fn forks_see_commits_under_exclusive_locking_and_synchronous_off() {
+    both(|mode| {
+        for (i, journal_mode) in
+            ["DELETE", "TRUNCATE", "PERSIST", "MEMORY", "OFF"].iter().enumerate()
+        {
+            let parent = Mounted::new(DeviceHolder::new(device()), mode);
+            let writer = parent.connect("main.db");
+            writer
+                .execute_batch(&format!(
+                    "PRAGMA locking_mode = EXCLUSIVE;
+                     PRAGMA synchronous = OFF;
+                     PRAGMA journal_mode = {journal_mode};
+                     CREATE TABLE t (k INTEGER PRIMARY KEY, v BLOB);"
+                ))
+                .unwrap();
+
+            writer.execute("INSERT INTO t VALUES (1, x'0102')", []).unwrap();
+            assert_eq!(rows(&writer), BTreeMap::from([(1, vec![1, 2])]));
+
+            // Writer stays connected holding its EXCLUSIVE lock; fork immediately after COMMIT.
+            let fork1 =
+                Mounted::new(parent.database.device().fork(100 + i as u64).expect("fork 1"), mode);
+            let reader1 = fork1.connect("main.db");
+            assert_eq!(integrity(&reader1), "ok", "{mode:?} {journal_mode} fork1");
+            assert_eq!(
+                rows(&reader1),
+                BTreeMap::from([(1, vec![1, 2])]),
+                "{mode:?} {journal_mode} fork1"
+            );
+
+            // Second explicit transaction and shrinking VACUUM while still in EXCLUSIVE + OFF.
+            writer
+                .execute_batch(
+                    "BEGIN;
+                     INSERT INTO t VALUES (2, zeroblob(65536));
+                     COMMIT;
+                     DELETE FROM t WHERE k = 2;
+                     INSERT INTO t VALUES (3, x'0304');
+                     VACUUM;",
+                )
+                .unwrap();
+
+            let fork2 =
+                Mounted::new(parent.database.device().fork(200 + i as u64).expect("fork 2"), mode);
+            let reader2 = fork2.connect("main.db");
+            assert_eq!(integrity(&reader2), "ok", "{mode:?} {journal_mode} fork2");
+            assert_eq!(
+                rows(&reader2),
+                BTreeMap::from([(1, vec![1, 2]), (3, vec![3, 4])]),
+                "{mode:?} {journal_mode} fork2"
+            );
+
+            drop((reader1, reader2, writer));
+            parent.check_extents();
+            fork1.check_extents();
+            fork2.check_extents();
+        }
+    });
+}
