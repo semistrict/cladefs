@@ -194,6 +194,10 @@ if [[ $arch == x86_64 ]]; then
     grep -q '^CONFIG_KVM_AMD=y' "$src/.config"
     grep -q '^CONFIG_KVM_INTEL=y' "$src/.config"
 fi
+# cladefs: compressed in-RAM swap (/dev/zram0) inside guests.
+grep -q '^CONFIG_ZRAM=y' "$src/.config"
+grep -q '^CONFIG_ZRAM_BACKEND_ZSTD=y' "$src/.config"
+grep -q '^CONFIG_ZRAM_BACKEND_LZ4=y' "$src/.config"
 
 # The filesystem's Rust, against a sysroot whose std is the kernel's (guest/rust/std). With
 # CLADEFS_GUEST_KERNEL_RUST_CHECKS=1, optimized, but with its debug assertions, and arithmetic that
