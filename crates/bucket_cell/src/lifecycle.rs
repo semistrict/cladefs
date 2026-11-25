@@ -524,7 +524,7 @@ pub async fn fork_version_keyed(
     child: CellId,
     version: u64,
     origin: Origin,
-    (owner, inheriting): (u64, Option<&mut crate::keys::Inheriting>),
+    (owner, inheriting): (u64, Option<&crate::keys::Inheriting>),
     keys: Parents<'_>,
 ) -> Result<(), Error> {
     failpoint!("version::record");
@@ -564,8 +564,6 @@ pub async fn fork_version_keyed(
         false => Made::Clone(origin),
     };
     let mut head = Head::of(made, owner);
-    // Spend the KEK right before attempting `Start::Create` so `Inheriting::drop` never returns a
-    // KEK that may have landed in the child's head (board 5396).
     if let Some(inheriting) = inheriting {
         let given = inheriting.spend();
         head.keks.extend(given.kek);
