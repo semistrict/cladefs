@@ -1532,7 +1532,7 @@ pub(crate) mod tests {
     #[test]
     fn versions_forked_into_another_bucket_are_mirrored_there() {
         use crate::collector::Collector;
-        use crate::mirror::{Mirrored, mirror};
+        use crate::mirror::{Here as _, Mirrored, mirror};
         use crate::testing::{VERSION, fork_version_given, ring_of};
         futures::executor::block_on(async {
             let dir = tempfile::tempdir().unwrap();
@@ -1585,7 +1585,7 @@ pub(crate) mod tests {
                 two.other.object_list(&layout::holds(parent, unnamed, 1)).await.unwrap().is_empty()
             );
             assert!(two.home.object_list(&layout::pins(parent, unnamed)).await.unwrap().is_empty());
-            assert!(two.home.object_get(&layout::mirror(parent, unnamed)).await.is_err());
+            assert!(!bucket.marked(parent, unnamed).await.unwrap(), "unnamed version marked");
 
             let listed = two.other.object_list(&parent.prefix()).await.unwrap();
             for meta in listed.into_iter().filter(|meta| crate::peer::served(&meta.key)) {
@@ -1623,8 +1623,8 @@ pub(crate) mod tests {
                 crate::collector::collect_cell(&*fresh, child, holder).await.unwrap();
             }
             let report = pass.collect_copy(&*fresh, &*fresh_own, 1, parent).await.unwrap();
-            // Its copy and its marker.
-            assert_eq!((report.deleted, report.retired), (3, 0), "nothing needing it");
+            // Its copy, its marker, and the Copying marker slot left by the unnamed mirror.
+            assert_eq!((report.deleted, report.retired), (4, 0), "nothing needing it");
             assert_eq!(two.home.object_list(&parent.prefix()).await.unwrap(), [], "left here");
             assert!(
                 two.other.object_list(&holds_prefix).await.unwrap().is_empty(),
@@ -2046,7 +2046,7 @@ pub(crate) mod tests {
     #[test]
     fn mirrors_hold_their_pins_alone() {
         use crate::collector::Collector;
-        use crate::mirror::{Mirrored, PIN_STALE, mirror};
+        use crate::mirror::{Here as _, Mirrored, PIN_STALE, mirror};
         futures::executor::block_on(async {
             let dir = tempfile::tempdir().unwrap();
             let two = Two::new(dir.path()).await;
@@ -2072,7 +2072,7 @@ pub(crate) mod tests {
             let taken = Watched::new(own.clone(), PIN_STALE + 1, Some(1));
             let gave_up = mirror(&*bucket, &taken, 1, parent, at).await.unwrap();
             assert_eq!(gave_up, Mirrored::GaveUp("its pin, stale, taken over".to_owned()));
-            assert!(two.home.object_get(&marker).await.is_err(), "marked, its pin taken over");
+            assert!(!bucket.marked(parent, at).await.unwrap(), "marked, its pin taken over");
             assert!(
                 two.other.object_list(&layout::holds(parent, at, 1)).await.unwrap().is_empty(),
                 "hold leaked after pin lost before mark"
@@ -2084,7 +2084,7 @@ pub(crate) mod tests {
             let later = Watched::new(own.clone(), PIN_STALE + 1, None);
             let report = Collector::new().collect_copy(&*bucket, &later, 1, parent).await;
             assert_eq!(report.unwrap().deleted, 0);
-            assert!(two.home.object_get(&marker).await.is_ok(), "not marked, begun again");
+            assert!(bucket.marked(parent, at).await.unwrap(), "not marked, begun again");
             assert!(
                 two.home.object_list(&layout::pins(parent, at)).await.unwrap().is_empty(),
                 "the stale pin stands"

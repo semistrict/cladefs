@@ -546,7 +546,10 @@ impl Collector {
                 }
                 crate::mirror::Mirrored::Unnamed => true,
                 crate::mirror::Mirrored::GaveUp(_) => {
-                    bucket::get(own, &layout::mirror(cell, at)).await?.is_none()
+                    match bucket::get(own, &layout::mirror(cell, at)).await? {
+                        Some(object) => !layout::Mirror::decode(&object.bytes)?.is_marked(),
+                        None => true,
+                    }
                 }
             };
             if reap_holds {

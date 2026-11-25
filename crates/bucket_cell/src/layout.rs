@@ -118,7 +118,11 @@ pub struct Child {
 /// without colliding with legacy files on `file://` buckets; legacy v31/v32 single-key pins
 /// (`refs/<at>/mirror`) and holds (`refs/<at>/mirror.<B>`) still decode as [`Kind::Pin`] and
 /// [`Kind::Hold`] and are cleaned up by the collector.
-pub const FORMAT: formats::Format = formats::Format::new("bucket layout", 31, 33);
+/// 34 (board 9498): [`Mirror`] carries [`MirrorState`] (`Copying { owner }` or `Marked`) so a
+/// mirror claims `mirrors/<at>` in `Copying` before copying and transitions it conditionally
+/// (`PutMode::Update`) to `Marked`, preventing a late marker write from marking a collected or
+/// taken-over copy; v31..=v33 markers decode as [`MirrorState::Marked`].
+pub const FORMAT: formats::Format = formats::Format::new("bucket layout", 31, 34);
 
 /// cladefs: the prefix of every tenant's cells' objects: all the bucket's cells (TASK-364).
 pub const TENANTS: &str = "tenants/";
@@ -1242,23 +1246,61 @@ impl Reference {
     }
 }
 
-/// cladefs: a mirror's marker's bytes ([`mirror`], TASK-633.8, board 6017): the format of the
-/// bucket's objects alone; the checkpoint epoch is carried directly in `Origin`.
+/// Frozen v31..=v33 mirror marker encoding (just the format version; always represents `Marked`).
+pub(crate) mod v33 {
+    use super::*;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
+    pub struct Mirror {
+        pub format: u32,
+    }
+}
+
+/// cladefs: a mirror's state at [`mirror`] (v34+, board 9498): `Copying { owner }` while a mirror
+/// run owns the marker slot and is copying objects (unmarked), transitioned conditionally
+/// (`PutMode::Update`) to `Marked` once every object is copied so a marker write landing past
+/// `PIN_STALE` cannot mark a copy another run took over or B's collector deleted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
+pub enum MirrorState {
+    Copying { owner: u64 },
+    Marked,
+}
+
+/// cladefs: a mirror's object's bytes ([`mirror`], TASK-633.8, board 6017, board 9498): its format
+/// version and [`MirrorState`]; the checkpoint epoch is carried directly in `Origin`. Versions
+/// 31..=33 stored only the format and decode as [`MirrorState::Marked`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
 pub struct Mirror {
     pub format: u32,
+    pub state: MirrorState,
 }
 
 impl Mirror {
-    pub const NOW: Self = Self { format: FORMAT.current };
+    pub const NOW: Self = Self { format: FORMAT.current, state: MirrorState::Marked };
 
-    /// Decodes a mirror marker object, checking its format version against [`FORMAT`] (doc-28,
-    /// board 10038).
+    pub const fn copying(owner: u64) -> Self {
+        Self { format: FORMAT.current, state: MirrorState::Copying { owner } }
+    }
+
+    pub const fn is_marked(&self) -> bool {
+        matches!(self.state, MirrorState::Marked)
+    }
+
+    pub const fn is_copying(&self) -> bool {
+        matches!(self.state, MirrorState::Copying { .. })
+    }
+
+    /// Decodes a mirror object, checking its format version against [`FORMAT`] (doc-28,
+    /// board 10038, board 9498).
     pub fn decode(bytes: &[u8]) -> Result<Self, crate::Error> {
         let format: u32 = decode(bytes.get(..4).unwrap_or(bytes))?;
         let format = FORMAT.check(format).map_err(|_| crate::Error::BucketFormat(format))?;
         match format {
-            31.. => decode(bytes),
+            31..=33 => {
+                let _: v33::Mirror = decode(bytes)?;
+                Ok(Self { format: FORMAT.current, state: MirrorState::Marked })
+            }
+            34.. => decode(bytes),
             _ => unreachable!("FORMAT.check enforces oldest..=current"),
         }
     }

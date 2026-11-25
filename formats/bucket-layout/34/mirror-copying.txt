@@ -1,0 +1,6 @@
+Mirror {
+    format: 34,
+    state: Copying {
+        owner: 66,
+    },
+}

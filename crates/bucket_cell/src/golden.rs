@@ -81,6 +81,18 @@ fn v31_heads_convert_to_current_and_map_local_to_ordered() {
     }
 }
 
+/// Checks v31..=v33 mirror markers (which stored only `format`) decode as v34 `MirrorState::Marked`
+/// (board 9498).
+#[test]
+fn v31_v32_v33_mirrors_decode_as_marked() {
+    for old_format in [31, 32, 33] {
+        let bytes = layout::encode(&layout::v33::Mirror { format: old_format });
+        let decoded = Mirror::decode(&bytes).unwrap();
+        assert_eq!(decoded, Mirror::NOW);
+        assert!(decoded.is_marked());
+    }
+}
+
 /// Checks every versioned bucket object kind refuses versions outside [`FORMAT`] and trailing bytes
 /// (doc-28, board 10038).
 #[test]
@@ -338,6 +350,7 @@ impl formats::golden::Family for BucketLayout {
             ("reference", layout::encode(&Reference::of(0x77))),
             ("retired", layout::encode(&Retired::NOW)),
             ("mirror", layout::encode(&Mirror::NOW)),
+            ("mirror-copying", layout::encode(&Mirror::copying(0x42))),
             ("objectid", layout::encode(&BlockTaker::of(0x88))),
             ("segment-footer", layout::encode_segment_footer(&segment_footer())),
             ("own-extent-footer", layout::own_extent_footer(ExtentId::new(CELL.id, 42))),
@@ -360,9 +373,31 @@ impl formats::golden::Family for BucketLayout {
                     }
                     Ok(format!("{head:#?}"))
                 }
+                "mirror" => {
+                    let mirror: layout::v33::Mirror =
+                        layout::decode(bytes).map_err(|err| err.to_string())?;
+                    if mirror.format != 31 {
+                        return Err(format!("expected format 31 mirror, got {}", mirror.format));
+                    }
+                    Ok(format!("{mirror:#?}"))
+                }
                 _ => Self::read_as(case, bytes),
             },
-            32 | 33 => Self::read_as(case, bytes),
+            32 | 33 => match case {
+                "mirror" => {
+                    let mirror: layout::v33::Mirror =
+                        layout::decode(bytes).map_err(|err| err.to_string())?;
+                    if mirror.format != version {
+                        return Err(format!(
+                            "expected format {version} mirror, got {}",
+                            mirror.format
+                        ));
+                    }
+                    Ok(format!("{mirror:#?}"))
+                }
+                _ => Self::read_as(case, bytes),
+            },
+            34 => Self::read_as(case, bytes),
             _ => Err(format!("no decoder of version {version}")),
         }
     }
@@ -374,7 +409,12 @@ impl formats::golden::Family for BucketLayout {
     fn fingerprint(version: u32) -> Option<String> {
         let head = match version {
             31 => layout::v31::Head::fingerprint(),
-            32 | 33 => Head::fingerprint(),
+            32..=34 => Head::fingerprint(),
+            _ => return None,
+        };
+        let mirror = match version {
+            31..=33 => layout::v33::Mirror::fingerprint(),
+            34 => Mirror::fingerprint(),
             _ => return None,
         };
         Some(
@@ -385,7 +425,7 @@ impl formats::golden::Family for BucketLayout {
                 format!("Registry = {}", Registry::fingerprint()),
                 format!("Reference = {}", Reference::fingerprint()),
                 format!("Retired = {}", Retired::fingerprint()),
-                format!("Mirror = {}", Mirror::fingerprint()),
+                format!("Mirror = {mirror}"),
                 format!("BlockTaker = {}", BlockTaker::fingerprint()),
                 format!("Footer = {}", Footer::fingerprint()),
                 format!("OwnExtent = {}", ExtentId::fingerprint()),
@@ -414,7 +454,7 @@ impl BucketLayout {
             "registry" => fmt(identity::parse_registry(bytes).map(|reg| format!("{reg:#?}"))),
             "reference" => fmt(Reference::decode(bytes).map(|r| format!("{r:#?}"))),
             "retired" => fmt(Retired::decode(bytes).map(|r| format!("{r:#?}"))),
-            "mirror" => fmt(Mirror::decode(bytes).map(|m| format!("{m:#?}"))),
+            "mirror" | "mirror-copying" => fmt(Mirror::decode(bytes).map(|m| format!("{m:#?}"))),
             "objectid" => fmt(BlockTaker::decode(bytes).map(|b| format!("{b:#?}"))),
             "segment-footer" => {
                 fmt(layout::decode_segment_footer(bytes).map(|f| format!("{f:#?}")))

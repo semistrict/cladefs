@@ -603,8 +603,7 @@ impl crate::mirror::Here for SimBucket {
             let Some(object) = crate::bucket::get(&*own, &layout::mirror(parent, at)).await? else {
                 return Ok(false);
             };
-            layout::Mirror::decode(&object.bytes)?;
-            Ok(true)
+            Ok(layout::Mirror::decode(&object.bytes)?.is_marked())
         })
     }
 
@@ -1057,6 +1056,7 @@ pub async fn uncollected_copies(
             copies.entry(cell).or_default().push(key);
         }
     }
+    let mut marked_mirrors = BTreeSet::new();
     for (&cell, keys) in &copies {
         let alive =
             matches!(crate::head::get(bucket, cell).await, Ok(Some(head)) if !head.deleted());
@@ -1067,6 +1067,17 @@ pub async fn uncollected_copies(
                 Kind::Pin { .. } => {
                     pinned = true;
                     left.push(format!("pin left: @{number}/{key}"));
+                }
+                Kind::Mirror { .. } => {
+                    if let Ok(Some(obj)) = crate::bucket::get(own, key).await {
+                        match layout::Mirror::decode(&obj.bytes) {
+                            Ok(m) if m.is_marked() => {
+                                marked_mirrors.insert(key.clone());
+                            }
+                            Ok(_) => {}
+                            Err(err) => left.push(format!("marker @{number}/{key}: {err}")),
+                        }
+                    }
                 }
                 Kind::Reference { parent, at, child } => {
                     let marked = here.contains(&layout::retired(parent, at, child));
@@ -1094,6 +1105,9 @@ pub async fn uncollected_copies(
         left.extend(stray.iter().map(|key| format!("garbage left: @{number}/{key}")));
         for &key in keys {
             let Kind::Mirror { at, .. } = layout::kind(key) else { continue };
+            if !marked_mirrors.contains(key) {
+                continue;
+            }
             if let Err(short) = copied_whole(bucket, own, number, cell, at, &here).await {
                 left.push(format!("marker @{number}/{key}: {short}"));
             }
@@ -1104,7 +1118,7 @@ pub async fn uncollected_copies(
     for meta in crate::bucket::list(bucket, "").await.unwrap() {
         match layout::kind(&meta.key) {
             Kind::Hold { parent, at, bucket: of }
-                if of == number && !here.contains(&layout::mirror(parent, at)) =>
+                if of == number && !marked_mirrors.contains(&layout::mirror(parent, at)) =>
             {
                 left.push(format!("hold left: {}", meta.key));
             }
@@ -1119,7 +1133,7 @@ pub async fn uncollected_copies(
         let Some(Origin { parent, at, .. }) = head.origin().filter(|_| !head.deleted()) else {
             continue;
         };
-        if here.contains(&layout::mirror(parent, at))
+        if marked_mirrors.contains(&layout::mirror(parent, at))
             && !here.contains(&layout::reference(parent, at, child))
         {
             left.push(format!(
@@ -1172,7 +1186,10 @@ async fn copied_whole(
     }
     let marker = crate::bucket::get(own, &layout::mirror(cell, at)).await.unwrap();
     let marker = marker.ok_or("gone")?;
-    layout::Mirror::decode(&marker.bytes).map_err(|err| err.to_string())?;
+    let decoded = layout::Mirror::decode(&marker.bytes).map_err(|err| err.to_string())?;
+    if !decoded.is_marked() {
+        return Err("unmarked".to_owned());
+    }
     // The version, as its cell's bucket keeps it whole, its hold there.
     let checkpoints = crate::recovery::Checkpoints::new(bucket, 0);
     let (state, read) = crate::recovery::recover_at(&checkpoints, cell, at)

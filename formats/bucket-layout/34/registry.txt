@@ -1,0 +1,48 @@
+Registry {
+    format: 34,
+    version: 2,
+    buckets: [
+        Entry {
+            number: 1,
+            id: 4369,
+            details: Details {
+                provider: Some(
+                    "s3",
+                ),
+                region: Some(
+                    "us-east-1",
+                ),
+                url: Some(
+                    "s3://cladefs-root/prefix",
+                ),
+                endpoint: None,
+                kms: Some(
+                    "aws-kms://us-east-1?key=alias/cladefs-{tenant}",
+                ),
+                master_key_id: None,
+            },
+        },
+        Entry {
+            number: 2,
+            id: 8738,
+            details: Details {
+                provider: Some(
+                    "gcs",
+                ),
+                region: Some(
+                    "us-central1",
+                ),
+                url: Some(
+                    "gs://cladefs-two",
+                ),
+                endpoint: Some(
+                    "https://storage.googleapis.com",
+                ),
+                kms: None,
+                master_key_id: Some(
+                    "0123456789abcdef",
+                ),
+            },
+        },
+    ],
+}

@@ -182,9 +182,24 @@ impl<B: Bucket> RoutedBucket<B> {
         }
         let listed = Instant::now();
         let markers = self.home.list(&layout::mirrors(cell)).await?;
-        let held = markers
-            .iter()
-            .any(|meta| matches!(layout::kind(&meta.key), layout::Kind::Mirror { .. }));
+        let mut held = false;
+        for meta in &markers {
+            if !matches!(layout::kind(&meta.key), layout::Kind::Mirror { .. }) {
+                continue;
+            }
+            match self.home.get(&meta.key).await {
+                Ok(object) => {
+                    // Unreadable or future-format markers are not treated as marked here; the
+                    // explicit `Here::marked` path surfaces `Error::BucketFormat`.
+                    if layout::Mirror::decode(&object.bytes).is_ok_and(|m| m.is_marked()) {
+                        held = true;
+                        break;
+                    }
+                }
+                Err(Error::NotFound) => continue,
+                Err(err) => return Err(err),
+            }
+        }
         self.mirrored.lock().unwrap().insert(cell, (held, listed));
         Ok(held)
     }
@@ -455,7 +470,9 @@ impl<B: Bucket> crate::mirror::Here for RoutedBucket<B> {
             let Some(object) = crate::bucket::get(&*self.home, &marker).await? else {
                 return Ok(false);
             };
-            layout::Mirror::decode(&object.bytes)?;
+            if !layout::Mirror::decode(&object.bytes)?.is_marked() {
+                return Ok(false);
+            }
             self.mirrored.lock().unwrap().insert(parent, (true, Instant::now()));
             self.mirrors.marked(parent, at);
             Ok(true)

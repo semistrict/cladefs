@@ -137,6 +137,13 @@
 (*   (single shared key under plain DELETE), a stopped mirror's late       *)
 (*   delete of its hold removes the next mirror's hold after it marked     *)
 (*   (TLC, MarkedHeld; board 8441, board 9229).                            *)
+(* - marksOwn (NoMarksOwn): a mirror claims <P>mirrors/<at> in Copying     *)
+(*   before copying and transitions it conditionally (PutMode::Update) to  *)
+(*   Marked once every part is copied (mirror.rs's claim_marker and mark,  *)
+(*   board 9498): a marker write landing late (LateLand) after another run *)
+(*   took over Copying or B's collector deleted the copy is rejected       *)
+(*   instead of marking a deleted copy (MarkersWhole) or an unheld copy    *)
+(*   (MarkedHeld).                                                         *)
 (* - copyChecksDead (NoCopyChecksDead): B's collector retires a child's    *)
 (*   reference in B when the child's head is deleted and holds no          *)
 (*   references of its own (collector.rs's collect_copy, board 10446): a   *)
@@ -180,7 +187,7 @@ CONSTANTS
 AllRules == {"forksReferFirst", "forksRecheck", "forksLeaveA", "forksRereadBeforeLeaving",
              "mirrorListsAfterMark", "mirrorRereadsBeforeRetiring", "mirrorPins", "mirrorChecks",
              "mirrorResumesMarked", "mirrorHolds", "mirrorHoldsUnmarked", "markerAfterCopy",
-             "copiesKeptWhileAlive", "markerGoesFirst", "copyRelists", "releasesOwn",
+             "copiesKeptWhileAlive", "markerGoesFirst", "copyRelists", "releasesOwn", "marksOwn",
              "copyChecksDead"}
 
 R(rule) == rule \in Rules
@@ -192,6 +199,9 @@ Pin(v, r) == <<v, "mirror", r>>
 
 \* A mirror run's hold of version v: a write-once reference of its own in A (<P>refs/<at>/mirror-holds/<B>/<run>).
 Hold(v, r) == <<v, "hold", r>>
+
+\* A mirror run's in-flight marker update for version v, in B (board 9498).
+Mark(v, r) == <<v, "mark", r>>
 
 IsPin(x, v) == x[1] = v /\ x[2] = "mirror"
 IsHold(x, v) == x[1] = v /\ x[2] = "hold"
@@ -242,7 +252,7 @@ ReferringInA(v) == {c \in Children : <<v, c>> \in refs["A"]}
 GcIdle == [pc |-> "idle", kind |-> None, c |-> None, alive |-> FALSE, vs |-> {}, rs |-> {},
            ms |-> {}, os |-> {}, mk |-> {}, missed |-> FALSE]
 
-MirIdle == [pc |-> "idle", kids |-> {}, copied |-> {}, run |-> 0]
+MirIdle == [pc |-> "idle", kids |-> {}, copied |-> {}, run |-> 0, slotBy |-> None]
 
 \* Whether the model lets a stopped mirror's requests land late ("late"): it tells the runs of v's
 \* mirror apart only then, its other models none the larger for them (BucketsLate checks it, and
@@ -420,7 +430,8 @@ MirPin(v) ==
                                        [] ~R("mirrorHoldsUnmarked") -> "hold"
                                        [] v \in marker /\ R("mirrorResumesMarked") -> Resume(v)
                                        [] OTHER -> "hold",
-                              !.kids = early]]
+                              !.kids = early,
+                              !.slotBy = IF Late /\ v \notin marker THEN mir[v].run ELSE @]]
        /\ UNCHANGED <<UNCH, objs, rec, marked, marker, fork, gc, down, passes, downs, restarts,
                       late>>
 
@@ -463,12 +474,16 @@ MirGiveUp(v) ==
     /\ UNCHANGED <<UNCH, objs, rec, refs, marked, marker, fork, gc, down, passes, downs, restarts,
                    late>>
 
-\* The marker, create-only: the switch, once every part is copied (markerAfterCopy).
+\* The marker: the switch, once every part is copied (markerAfterCopy). Under marksOwn, the
+\* Copying slot at <P>mirrors/<at> transitions conditionally to Marked (board 9498).
 MirMark(v) ==
     /\ mir[v].pc = "copy" /\ Up("B")
     /\ R("markerAfterCopy") => mir[v].copied = parts[v]
+    /\ (Late /\ R("marksOwn")) => mir[v].slotBy = mir[v].run
     /\ marker' = marker \cup {v}
-    /\ mir' = [mir EXCEPT ![v].pc = IF R("mirrorListsAfterMark") THEN "list" ELSE "retire"]
+    /\ mir' = [mir EXCEPT ![v] =
+                 [@ EXCEPT !.pc = IF R("mirrorListsAfterMark") THEN "list" ELSE "retire",
+                           !.slotBy = None]]
     /\ UNCHANGED <<UNCH, objs, rec, refs, marked, fork, gc, down, passes, downs, restarts, late>>
 
 \* The children referring in A listed, after the marker (mirrorListsAfterMark); under "dead",
@@ -532,20 +547,21 @@ MirFail(v) ==
     /\ UNCHANGED <<UNCH, objs, rec, refs, marked, marker, fork, gc, down, passes, downs, restarts,
                    late>>
 
-\* The requests a stopped mirror may have in flight: writes of references to B ("create"), and
-\* plain unconditional deletions of its own hold (in "unhold", before its pin's delete is sent) or
-\* its own pin (in "unpin").
+\* The requests a stopped mirror may have in flight: a marker write once every part is copied
+\* (board 9498), writes of references to B ("create"), and plain unconditional deletions of its own
+\* hold (in "unhold", before its pin's delete is sent) or its own pin (in "unpin").
 Releasing(v, pc) ==
     LET r == KeyRun(v) IN
-    CASE pc = "refer" -> {<<"B", <<v, c>>, "create">> : c \in mir[v].kids}
+    CASE pc = "copy" /\ mir[v].copied = parts[v] -> {<<"B", Mark(v, mir[v].run), "mark">>}
+      [] pc = "refer" -> {<<"B", <<v, c>>, "create">> : c \in mir[v].kids}
       [] pc = "unhold" -> {<<"A", Hold(v, r), "delete">>}
       [] pc = "unpin" -> {<<"B", Pin(v, r), "delete">>}
       [] OTHER -> {}
 
 \* Its host dies, or stops past its lease: it starts again from its pin, as a fresh run of its own,
-\* what it wrote kept. Stopped as it writes references or lets go, its requests in flight land
-\* later (LateLand), after the next mirror or a pass over the copy ran; in a model without "late",
-\* each landed before it stopped, or was never sent.
+\* what it wrote kept. Stopped as it marks, writes references, or lets go, its requests in flight
+\* land later (LateLand), after the next mirror or a pass over the copy ran; in a model without
+\* "late", each landed before it stopped, or was never sent.
 MirRestart(v) ==
     /\ "crash" \in Can /\ restarts < MaxRestarts
     /\ mir[v].pc \notin {"idle", "pin", "done"}
@@ -555,18 +571,29 @@ MirRestart(v) ==
     /\ UNCHANGED <<UNCH, objs, rec, refs, marked, marker, fork, gc, down, passes, downs>>
 
 \* A request a stopped mirror sent, landing: a late create creates the reference in its bucket; a
-\* late deletion is plain unconditional DELETE of the key that run sent (board 11699). Under
-\* releasesOwn, each run has disjoint pin and hold keys so an old run's unconditional delete never
-\* removes another run's key; without releasesOwn, runs share one key and the late delete removes
-\* the next run's hold (NoReleasesOwn, MarkedHeld).
+\* late marker update ("mark") transitions Copying -> Marked conditionally on this run still owning
+\* the slot (marksOwn, board 9498); a late deletion is plain unconditional DELETE of the key that
+\* run sent (board 11699). Under releasesOwn, each run has disjoint pin and hold keys so an old
+\* run's unconditional delete never removes another run's key; without releasesOwn, runs share one
+\* key and the late delete removes the next run's hold (NoReleasesOwn, MarkedHeld).
 LateLand(l) ==
     LET b == l[1] IN
     /\ l \in late /\ Up(b)
     /\ IF l[3] = "create"
-       THEN refs' = [refs EXCEPT ![b] = @ \cup {l[2]}]
-       ELSE refs' = [refs EXCEPT ![b] = @ \ {l[2]}]
+       THEN /\ refs' = [refs EXCEPT ![b] = @ \cup {l[2]}]
+            /\ UNCHANGED <<marker, mir>>
+       ELSE IF l[3] = "mark"
+            THEN LET v == l[2][1]
+                     r == l[2][3]
+                     own == ~R("marksOwn") \/ mir[v].slotBy = r
+                 IN /\ marker' = IF own THEN marker \cup {v} ELSE marker
+                    /\ mir' = IF own /\ R("marksOwn")
+                              THEN [mir EXCEPT ![v].slotBy = None] ELSE mir
+                    /\ UNCHANGED refs
+            ELSE /\ refs' = [refs EXCEPT ![b] = @ \ {l[2]}]
+                 /\ UNCHANGED <<marker, mir>>
     /\ late' = late \ {l}
-    /\ UNCHANGED <<UNCH, objs, rec, marked, marker, fork, mir, gc, down, passes, downs, restarts>>
+    /\ UNCHANGED <<UNCH, objs, rec, marked, fork, gc, down, passes, downs, restarts>>
 
 -----------------------------------------------------------------------------
 (* The collector. *)
@@ -702,6 +729,9 @@ GcReapUnmarkedHold(v, r) ==
     IN /\ Late /\ R("releasesOwn") /\ Collects("copy") /\ Up("A")
        /\ p \in refs["B"] /\ v \notin marker /\ h \in refs["A"]
        /\ (mir[v].pc \in {"idle", "done"} \/ KeyRun(v) # r)
+       \* collector.rs resumes a fresh mirror run (overwriting the Copying slot) before reaping
+       \* stale unmarked holds (board 9498).
+       /\ R("marksOwn") => mir[v].slotBy # r
        /\ refs' = [refs EXCEPT !["A"] = @ \ {h}]
        /\ UNCHANGED <<UNCH, objs, rec, marked, marker, fork, mir, gc, down, passes, downs, restarts,
                       late>>
@@ -712,37 +742,51 @@ GcReapUnmarkedPin(v, r) ==
     IN /\ Late /\ R("releasesOwn") /\ Collects("copy") /\ Up("B")
        /\ p \in refs["B"] /\ v \notin marker /\ h \notin refs["A"]
        /\ (mir[v].pc \in {"idle", "done"} \/ KeyRun(v) # r)
+       /\ R("marksOwn") => mir[v].slotBy # r
        /\ refs' = [refs EXCEPT !["B"] = @ \ {p}]
        /\ UNCHANGED <<UNCH, objs, rec, marked, marker, fork, mir, gc, down, passes, downs, restarts,
                       late>>
 
-\* Of P's copy in B: the markers going deleted first (markerGoesFirst); without the rule, the parts
-\* first.
+\* Clears the Copying marker slot of every version in S (collector.rs deletes all Kind::Mirror
+\* keys, Copying and Marked alike, before parts when tearing down an unneeded copy, board 9498).
+ClearSlots(S) ==
+    [v \in Versions |-> IF Late /\ v \in S THEN [mir[v] EXCEPT !.slotBy = None] ELSE mir[v]]
+
+\* Of P's copy in B: the markers (and any Copying slots) going deleted first (markerGoesFirst);
+\* without the rule, the parts first.
 GcUnmark(i) ==
-    LET g == gc[i] IN
-    /\ g.pc = "unmark" /\ Up("B")
-    /\ IF R("markerGoesFirst")
-       THEN marker' = marker \ GoingMarkers(g) /\ UNCHANGED objs
-       ELSE objs' = [objs EXCEPT !["B"] = @ \ GoingParts(g)] /\ UNCHANGED marker
-    /\ gc' = [gc EXCEPT ![i].pc = "delete"]
-    /\ UNCHANGED <<UNCH, rec, refs, marked, fork, mir, down, passes, downs, restarts, late>>
+    LET g == gc[i]
+        goingSlots == IF CopyKept(g) THEN {} ELSE Versions
+    IN /\ g.pc = "unmark" /\ Up("B")
+       /\ IF R("markerGoesFirst")
+          THEN /\ marker' = marker \ GoingMarkers(g)
+               /\ mir' = ClearSlots(goingSlots)
+               /\ UNCHANGED objs
+          ELSE /\ objs' = [objs EXCEPT !["B"] = @ \ GoingParts(g)]
+               /\ UNCHANGED <<marker, mir>>
+       /\ gc' = [gc EXCEPT ![i].pc = "delete"]
+       /\ UNCHANGED <<UNCH, rec, refs, marked, fork, down, passes, downs, restarts, late>>
 
 \* The parts going deleted: of P in A, those neither its head nor a reference named; of its copy in
 \* B, after the markers (or, without markerGoesFirst, the markers after the parts), and under
 \* "dead" the marks of references retired in B once the copy goes whole (collector.rs:494).
 GcDelete(i) ==
-    LET g == gc[i] IN
-    /\ g.pc = "delete" /\ Up(IF g.kind = "P" THEN "A" ELSE "B")
-    /\ IF g.kind = "P"
-       THEN /\ objs' = [objs EXCEPT !["A"] = @ \ (g.os \ PartsOf(Named(g.rs)))]
-            /\ UNCHANGED <<marker, marked>>
-       ELSE /\ IF R("markerGoesFirst")
-               THEN objs' = [objs EXCEPT !["B"] = @ \ GoingParts(g)] /\ UNCHANGED marker
-               ELSE marker' = marker \ GoingMarkers(g) /\ UNCHANGED objs
-            /\ marked' = IF Dead /\ ~CopyKept(g)
-                         THEN [marked EXCEPT !["B"] = @ \ g.mk] ELSE marked
-    /\ gc' = [gc EXCEPT ![i] = [GcIdle EXCEPT !.missed = g.missed]]
-    /\ UNCHANGED <<UNCH, rec, refs, fork, mir, down, passes, downs, restarts, late>>
+    LET g == gc[i]
+        goingSlots == IF CopyKept(g) THEN {} ELSE Versions
+    IN /\ g.pc = "delete" /\ Up(IF g.kind = "P" THEN "A" ELSE "B")
+       /\ IF g.kind = "P"
+          THEN /\ objs' = [objs EXCEPT !["A"] = @ \ (g.os \ PartsOf(Named(g.rs)))]
+               /\ UNCHANGED <<marker, marked, mir>>
+          ELSE /\ IF R("markerGoesFirst")
+                  THEN /\ objs' = [objs EXCEPT !["B"] = @ \ GoingParts(g)]
+                       /\ UNCHANGED <<marker, mir>>
+                  ELSE /\ marker' = marker \ GoingMarkers(g)
+                       /\ mir' = ClearSlots(goingSlots)
+                       /\ UNCHANGED objs
+               /\ marked' = IF Dead /\ ~CopyKept(g)
+                            THEN [marked EXCEPT !["B"] = @ \ g.mk] ELSE marked
+       /\ gc' = [gc EXCEPT ![i] = [GcIdle EXCEPT !.missed = g.missed]]
+       /\ UNCHANGED <<UNCH, rec, refs, fork, down, passes, downs, restarts, late>>
 
 \* Without "dead": a deleted child's references retired, marked, in bucket b, if it holds one.
 GcRetire(i, b) ==
