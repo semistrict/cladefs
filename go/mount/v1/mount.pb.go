@@ -65,9 +65,12 @@ type AttachRequest struct {
 	// The fencing token of the placement to take the cell at, if any: as CreateCell's.
 	Token *uint64 `protobuf:"varint,3,opt,name=token,proto3,oneof" json:"token,omitempty"`
 	// A new cell's: the most bytes it holds, as VMs' disks hold. Ignored for a cell named.
-	Capacity      uint64 `protobuf:"varint,4,opt,name=capacity,proto3" json:"capacity,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Capacity uint64 `protobuf:"varint,4,opt,name=capacity,proto3" json:"capacity,omitempty"`
+	// Optional per-cell uploader interval in milliseconds (hotbed question 534). Unset keeps the
+	// daemon default; 0 or values past 24 hours are refused (INVALID_ARGUMENT).
+	UploadIntervalMs *uint64 `protobuf:"varint,5,opt,name=upload_interval_ms,json=uploadIntervalMs,proto3,oneof" json:"upload_interval_ms,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *AttachRequest) Reset() {
@@ -124,6 +127,13 @@ func (x *AttachRequest) GetToken() uint64 {
 func (x *AttachRequest) GetCapacity() uint64 {
 	if x != nil {
 		return x.Capacity
+	}
+	return 0
+}
+
+func (x *AttachRequest) GetUploadIntervalMs() uint64 {
+	if x != nil && x.UploadIntervalMs != nil {
+		return *x.UploadIntervalMs
 	}
 	return 0
 }
@@ -445,13 +455,15 @@ var File_cladefs_mount_v1_mount_proto protoreflect.FileDescriptor
 
 const file_cladefs_mount_v1_mount_proto_rawDesc = "" +
 	"\n" +
-	"\x1ccladefs/mount/v1/mount.proto\x12\x10cladefs.mount.v1\"|\n" +
+	"\x1ccladefs/mount/v1/mount.proto\x12\x10cladefs.mount.v1\"\xc6\x01\n" +
 	"\rAttachRequest\x12\x16\n" +
 	"\x06tenant\x18\x01 \x01(\x04R\x06tenant\x12\x12\n" +
 	"\x04cell\x18\x02 \x01(\x04R\x04cell\x12\x19\n" +
 	"\x05token\x18\x03 \x01(\x04H\x00R\x05token\x88\x01\x01\x12\x1a\n" +
-	"\bcapacity\x18\x04 \x01(\x04R\bcapacityB\b\n" +
-	"\x06_token\"@\n" +
+	"\bcapacity\x18\x04 \x01(\x04R\bcapacity\x121\n" +
+	"\x12upload_interval_ms\x18\x05 \x01(\x04H\x01R\x10uploadIntervalMs\x88\x01\x01B\b\n" +
+	"\x06_tokenB\x15\n" +
+	"\x13_upload_interval_ms\"@\n" +
 	"\x0eAttachResponse\x12\x12\n" +
 	"\x04cell\x18\x01 \x01(\x04R\x04cell\x12\x14\n" +
 	"\x05shown\x18\x03 \x01(\bR\x05shownJ\x04\b\x02\x10\x03\"Q\n" +

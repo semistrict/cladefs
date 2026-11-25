@@ -781,9 +781,12 @@ type CreateCellRequest struct {
 	// answer, fewer than a take needs, as when f+1 of them are gone for good; commits told replicated
 	// that only the others held are lost, and StatCell's forced_after says past which commit. With
 	// `token`, the placement it is placed at is forced from then on.
-	Force         bool `protobuf:"varint,11,opt,name=force,proto3" json:"force,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Force bool `protobuf:"varint,11,opt,name=force,proto3" json:"force,omitempty"`
+	// Optional per-cell uploader interval in milliseconds (hotbed question 534). Unset keeps the
+	// daemon default; 0 or values past 24 hours are refused (INVALID_ARGUMENT).
+	UploadIntervalMs *uint64 `protobuf:"varint,12,opt,name=upload_interval_ms,json=uploadIntervalMs,proto3,oneof" json:"upload_interval_ms,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *CreateCellRequest) Reset() {
@@ -877,6 +880,13 @@ func (x *CreateCellRequest) GetForce() bool {
 		return x.Force
 	}
 	return false
+}
+
+func (x *CreateCellRequest) GetUploadIntervalMs() uint64 {
+	if x != nil && x.UploadIntervalMs != nil {
+		return *x.UploadIntervalMs
+	}
+	return 0
 }
 
 // The cell made.
@@ -5215,7 +5225,7 @@ const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\n" +
 	"references\x18\x02 \x01(\x04R\n" +
 	"references\x12&\n" +
-	"\x0edecommissioned\x18\x03 \x01(\bR\x0edecommissioned\"\xce\x02\n" +
+	"\x0edecommissioned\x18\x03 \x01(\bR\x0edecommissioned\"\x98\x03\n" +
 	"\x11CreateCellRequest\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x1a\n" +
 	"\bcapacity\x18\x02 \x01(\x04R\bcapacity\x12\x19\n" +
@@ -5226,9 +5236,11 @@ const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\breplicas\x18\t \x01(\rH\x01R\breplicas\x88\x01\x01\x125\n" +
 	"\x05fsync\x18\n" +
 	" \x01(\x0e2\x1f.cladefs.cladefsd.v1.FsyncLevelR\x05fsync\x12\x14\n" +
-	"\x05force\x18\v \x01(\bR\x05forceB\b\n" +
+	"\x05force\x18\v \x01(\bR\x05force\x121\n" +
+	"\x12upload_interval_ms\x18\f \x01(\x04H\x02R\x10uploadIntervalMs\x88\x01\x01B\b\n" +
 	"\x06_tokenB\v\n" +
-	"\t_replicasJ\x04\b\x03\x10\x04J\x04\b\b\x10\t\"F\n" +
+	"\t_replicasB\x15\n" +
+	"\x13_upload_interval_msJ\x04\b\x03\x10\x04J\x04\b\b\x10\t\"F\n" +
 	"\x12CreateCellResponse\x12\x16\n" +
 	"\x06tenant\x18\x02 \x01(\x04R\x06tenant\x12\x12\n" +
 	"\x04cell\x18\x03 \x01(\x04R\x04cellJ\x04\b\x01\x10\x02\"\x90\x01\n" +
