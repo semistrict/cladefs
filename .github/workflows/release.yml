@@ -1,0 +1,188 @@
+# Copyright 2026 The cladefs Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# Build and publish static musl Linux release binaries (cladefsd, firecracker with --features
+# cladefs + seccomp) and Firecracker guest kernels (x86_64 vmlinux, arm64 Image) for amd64 and
+# arm64, along with SHA256SUMS. Triggered by pushing a cladefs-* tag or manually via
+# workflow_dispatch.
+name: Release
+
+on:
+  push:
+    tags:
+      - 'cladefs-*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag name (defaults to cladefs-<short8>)
+        type: string
+        default: ''
+      mark-latest:
+        description: Mark the GitHub release as Latest
+        type: boolean
+        default: true
+
+# cladefs: the token reads the repository and nothing more by default (board 8603); only the
+# publish job grants contents: write to upload release assets.
+permissions:
+  contents: read
+
+jobs:
+  binaries:
+    name: release binaries (${{ matrix.goarch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goarch: amd64
+            musl: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+          - goarch: arm64
+            musl: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+      - name: Install build tools
+        uses: ./.github/actions/apt-install
+        with:
+          packages: clang libclang-dev musl-tools binutils libseccomp-dev
+      - name: Rust, as rust-toolchain.toml pins it
+        run: |
+          rustup toolchain install
+          rustup target add "${{ matrix.musl }}"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: release-bin-${{ matrix.musl }}-${{ hashFiles('Cargo.lock', 'vendor/firecracker.lock') }}
+          restore-keys: release-bin-${{ matrix.musl }}-
+      - name: Build static musl cladefsd and firecracker
+        run: |
+          set -euo pipefail
+          mkdir -p release-out
+          scripts/build-musl.sh --target "${{ matrix.musl }}" --out release-out/musl
+          cp release-out/musl/cladefsd "release-out/cladefsd-linux-${{ matrix.goarch }}"
+
+          musl="${{ matrix.musl }}"
+          musl_cflags="CFLAGS_${musl//-/_}=-idirafter /usr/include -idirafter /usr/include/$(uname -m)-linux-gnu"
+          env "$musl_cflags" scripts/firecracker-cargo.sh build --release -p firecracker \
+            --features cladefs --target "$musl"
+          fc_bin="target/firecracker/$musl/release/firecracker"
+          out="$(ldd "$fc_bin" 2>&1 || true)"
+          echo "firecracker: $out"
+          grep -qE 'not a dynamic executable|statically linked' <<< "$out"
+          cp "$fc_bin" "release-out/firecracker-linux-${{ matrix.goarch }}"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-binaries-${{ matrix.goarch }}
+          path: |
+            release-out/cladefsd-linux-${{ matrix.goarch }}
+            release-out/firecracker-linux-${{ matrix.goarch }}
+
+  guest-kernel:
+    name: guest kernel (${{ matrix.goarch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goarch: amd64
+            karch: x86_64
+            asset: vmlinux-linux-amd64
+            runner: ubuntu-24.04
+          - goarch: arm64
+            karch: arm64
+            asset: Image-linux-arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install guest kernel build tools
+        uses: ./.github/actions/apt-install
+        with:
+          packages: flex bison bc cpio libelf-dev libssl-dev dwarves binutils
+      - name: Rust, as rust-toolchain.toml pins it
+        run: rustup toolchain install
+      - name: Build guest kernel
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/cladefs-guest-kernel"
+          mkdir -p "$work" release-out
+          img="$(CLADEFS_GUEST_KERNEL_WORK="$work" scripts/build-guest-kernel.sh "${{ matrix.karch }}")"
+          ls -lh "$img"
+          vmlinux="$(find "$work" -maxdepth 2 -name vmlinux | head -n 1)"
+          readelf -S "$vmlinux" | grep -q '\.BTF'
+          cp "$img" "release-out/${{ matrix.asset }}"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-kernel-${{ matrix.goarch }}
+          path: release-out/${{ matrix.asset }}
+
+  publish:
+    name: publish GitHub release
+    needs: [binaries, guest-kernel]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # Needs contents: write solely to create/update the GitHub Release and upload its assets.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: release-assets
+          merge-multiple: true
+      - name: Create SHA256SUMS and publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }}
+          MARK_LATEST: ${{ inputs.mark-latest }}
+        run: |
+          set -euo pipefail
+          cd release-assets
+          sha256sum \
+            cladefsd-linux-amd64 \
+            cladefsd-linux-arm64 \
+            firecracker-linux-amd64 \
+            firecracker-linux-arm64 \
+            vmlinux-linux-amd64 \
+            Image-linux-arm64 > SHA256SUMS
+          cat SHA256SUMS
+
+          short_sha="${GITHUB_SHA:0:8}"
+          if [[ $GITHUB_REF_TYPE == tag ]]; then
+            tag="$GITHUB_REF_NAME"
+          elif [[ -n $INPUT_TAG ]]; then
+            tag="$INPUT_TAG"
+          else
+            tag="cladefs-$short_sha"
+          fi
+
+          latest_flag="--latest"
+          if [[ ${MARK_LATEST:-true} == "false" ]]; then
+            latest_flag="--latest=false"
+          fi
+
+          notes="Static musl release binaries (cladefsd, firecracker with cladefs feature + seccomp) and Firecracker guest kernels (x86_64 vmlinux and arm64 Image with BTF, dynamic ftrace, kprobes, syscall tracepoints, BPF JIT, schedstats, and nested KVM) built from ${GITHUB_REPOSITORY}@${GITHUB_SHA}."
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" --clobber \
+              cladefsd-linux-amd64 cladefsd-linux-arm64 \
+              firecracker-linux-amd64 firecracker-linux-arm64 \
+              vmlinux-linux-amd64 Image-linux-arm64 SHA256SUMS
+          else
+            gh release create "$tag" \
+              --target "$GITHUB_SHA" \
+              "$latest_flag" \
+              --title "cladefs $short_sha" \
+              --notes "$notes" \
+              cladefsd-linux-amd64 cladefsd-linux-arm64 \
+              firecracker-linux-amd64 firecracker-linux-arm64 \
+              vmlinux-linux-amd64 Image-linux-arm64 SHA256SUMS
+          fi
