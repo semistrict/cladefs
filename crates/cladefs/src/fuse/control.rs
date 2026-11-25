@@ -40,16 +40,23 @@ pub struct CellSource {
 
 impl CellSource {
     /// Resolves the local cell directory path for `shown` (`TENANT/CELL`): reuses an existing
-    /// directory if present on any JBOD root, otherwise picks the root whose `HostDisk` currently
-    /// has the most free space.
-    fn resolve_cell_path(&self, daemon: &crate::cladefsd::Daemon, shown: &str) -> PathBuf {
+    /// directory if present on any JBOD root, fails hard if probing a root hits an unexpected
+    /// storage error (e.g. `EIO`, never forking local cell state onto another root), and otherwise
+    /// picks the root whose `HostDisk` currently has the most free space.
+    fn resolve_cell_path(
+        &self,
+        daemon: &crate::cladefsd::Daemon,
+        shown: &str,
+    ) -> std::io::Result<PathBuf> {
         if self.dirs.len() == 1 {
-            return self.dirs[0].join(shown);
+            return Ok(self.dirs[0].join(shown));
         }
         for dir in &self.dirs {
             let candidate = dir.join(shown);
-            if host_fs::exists(&candidate) {
-                return candidate;
+            match host_fs::metadata(&candidate) {
+                Ok(_) => return Ok(candidate),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(err) => return Err(err),
             }
         }
         let best = self
@@ -63,7 +70,7 @@ impl CellSource {
                     .map_or(0, |sample| sample.free)
             })
             .unwrap_or(&self.dirs[0]);
-        best.join(shown)
+        Ok(best.join(shown))
     }
 }
 
@@ -235,7 +242,12 @@ impl Control {
             return Err(Errno::ENOTCONN.into());
         };
         let shown = cell_path(cell);
-        let path = self.source.resolve_cell_path(&self.daemon, &shown);
+        let path =
+            local_cell::upload::blocking(|| self.source.resolve_cell_path(&self.daemon, &shown))
+                .map_err(|err| {
+                    log::error!("cladefs: resolving mount store path for {shown}: {err}");
+                    err.raw_os_error().map(Errno::from_raw).unwrap_or(Errno::EIO)
+                })?;
         let of = match (new, kind) {
             (true, _) => (CellOf::Named(cell), capacity),
             (false, Some(Kind::Fxfs)) => (CellOf::Taken(cell), TAKEN_CAPACITY),

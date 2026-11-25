@@ -137,6 +137,28 @@ pub struct Usage {
     pub stuck: u64,
 }
 
+/// Key identifying a per-disk flusher in [`PageCache`]: physical filesystems share one stable
+/// flusher by `st_dev` (so recreating a [`HostDisk`] for the same mount never spawns extra
+/// threads), while virtual/in-memory disks get their own flusher that exits once the disk drops.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum DiskKey {
+    Default,
+    Device(u64),
+    Virtual(usize),
+}
+
+impl DiskKey {
+    fn of(disk: Option<&Arc<bucket_cell::host_disk::HostDisk>>) -> Self {
+        match disk {
+            None => Self::Default,
+            Some(d) => match d.dev() {
+                Some(dev) => Self::Device(dev),
+                None => Self::Virtual(Arc::as_ptr(d) as usize),
+            },
+        }
+    }
+}
+
 /// Per-`HostDisk` flusher wakeup state and write-behind queue, so each physical JBOD disk flushes
 /// concurrently without one slow or stalled disk blocking write-back on other disks.
 #[derive(Default)]
@@ -147,6 +169,10 @@ struct DiskFlusher {
     /// Wakes this disk's flusher.
     flush: Condvar,
     flushing: Mutex<bool>,
+    /// Weak handle to the virtual [`HostDisk`] when `DiskKey::Virtual`, so its flusher exits once
+    /// the disk is dropped rather than leaking threads.
+    #[cfg(not(madsim))]
+    disk: Option<Weak<bucket_cell::host_disk::HostDisk>>,
 }
 
 impl DiskFlusher {
@@ -185,9 +211,8 @@ pub struct PageCache {
     /// Each use's number, which says which files were used least recently.
     uses: AtomicU64,
     files: Mutex<Vec<Weak<dyn Paged>>>,
-    /// Per-disk flushers, keyed by `disk_key` (`0` for files without a `HostDisk`, or
-    /// `Arc::as_ptr(disk) as usize`).
-    flushers: Mutex<HashMap<usize, Arc<DiskFlusher>>>,
+    /// Per-disk flushers, keyed by [`DiskKey`].
+    flushers: Mutex<HashMap<DiskKey, Arc<DiskFlusher>>>,
     /// Wakes writers held back.
     drained: Condvar,
     /// What writers held back wait on `drained` with.
@@ -218,7 +243,7 @@ impl PageCache {
         #[cfg(not(madsim))]
         {
             let cache = Self::made(options, true);
-            cache.ensure_flusher(0);
+            cache.ensure_flusher(DiskKey::Default, None);
             cache
         }
         // cladefs: under madsim, which runs one thread, no flusher to wait for: writers past the
@@ -277,20 +302,34 @@ impl PageCache {
     /// Ensures a flusher thread exists for `disk_key` (outside `madsim`, when `self.flusher` is
     /// true).
     #[cfg(not(madsim))]
-    fn ensure_flusher(self: &Arc<Self>, disk_key: usize) {
+    fn ensure_flusher(
+        self: &Arc<Self>,
+        disk_key: DiskKey,
+        disk: Option<&Arc<bucket_cell::host_disk::HostDisk>>,
+    ) {
         let mut flushers = self.flushers.lock().unwrap();
-        if flushers.contains_key(&disk_key) {
-            return;
+        if let Some(existing) = flushers.get(&disk_key) {
+            let stale_virtual = matches!(disk_key, DiskKey::Virtual(_))
+                && existing.disk.as_ref().is_some_and(|w| w.strong_count() == 0);
+            if !stale_virtual {
+                return;
+            }
+            existing.wake();
         }
-        let flusher = Arc::new(DiskFlusher::default());
+        let flusher = Arc::new(DiskFlusher {
+            disk: matches!(disk_key, DiskKey::Virtual(_))
+                .then(|| disk.map(Arc::downgrade))
+                .flatten(),
+            ..DiskFlusher::default()
+        });
         flushers.insert(disk_key, flusher.clone());
         drop(flushers);
         if self.flusher {
             let weak = Arc::downgrade(self);
-            let name = if disk_key == 0 {
-                "store flusher".to_owned()
-            } else {
-                format!("store flusher {disk_key:x}")
+            let name = match disk_key {
+                DiskKey::Default => "store flusher".to_owned(),
+                DiskKey::Device(dev) => format!("store flusher dev-{dev:x}"),
+                DiskKey::Virtual(ptr) => format!("store flusher v-{ptr:x}"),
             };
             std::thread::Builder::new()
                 .name(name)
@@ -433,13 +472,13 @@ impl PageCache {
     /// Has the flusher for `disk_key` begin writing back `range` of `file`, before anything else
     /// it writes back, if it has one; with none, nothing: its writers write back past
     /// [`Options::background`].
-    fn begin(&self, disk_key: usize, file: Weak<dyn Paged>, range: Range<u64>) {
+    fn begin(&self, disk_key: DiskKey, file: Weak<dyn Paged>, range: Range<u64>) {
         if !self.flusher {
             return;
         }
         let target = {
             let flushers = self.flushers.lock().unwrap();
-            flushers.get(&disk_key).or_else(|| flushers.get(&0)).cloned()
+            flushers.get(&disk_key).or_else(|| flushers.get(&DiskKey::Default)).cloned()
         };
         if let Some(flusher) = target {
             flusher.begun.lock().unwrap().push_back((file, range));
@@ -574,7 +613,7 @@ impl PageCache {
     /// [`Options::expire`], and, while more than [`Options::background`] is dirty, the files on
     /// `disk_key` dirty the longest, 16 [`CHUNK`]s' worth of writes each in turn.
     #[cfg(not(madsim))]
-    fn flush_pass_for(&self, disk_key: usize, flusher: &DiskFlusher, now: Instant) {
+    fn flush_pass_for(&self, disk_key: DiskKey, flusher: &DiskFlusher, now: Instant) {
         loop {
             let Some((file, range)) = flusher.begun.lock().unwrap().pop_front() else { break };
             let Some(file) = file.upgrade() else { continue };
@@ -603,7 +642,7 @@ impl PageCache {
 /// each time it is woken, or a quarter of [`Options::expire`] after the last. The process's work
 /// for its life ([`FLUSHER`]); unwound by a panic, it says so ([`Dying`]).
 #[cfg(not(madsim))]
-fn flush_disk_while(cache: Weak<PageCache>, disk_key: usize, flusher: Arc<DiskFlusher>) {
+fn flush_disk_while(cache: Weak<PageCache>, disk_key: DiskKey, flusher: Arc<DiskFlusher>) {
     let _work = Holding::work(FLUSHER);
     let _dying = Dying { cache: cache.clone() };
     loop {
@@ -618,6 +657,25 @@ fn flush_disk_while(cache: Weak<PageCache>, disk_key: usize, flusher: Arc<DiskFl
         }
         let Some(strong) = cache.upgrade() else { return };
         strong.flush_pass_for(disk_key, &flusher, Instant::now());
+        if matches!(disk_key, DiskKey::Virtual(_))
+            && flusher.disk.as_ref().is_some_and(|w| w.strong_count() == 0)
+        {
+            let mut flushers = strong.flushers.lock().unwrap();
+            let empty_begun = flusher.begun.lock().unwrap().is_empty();
+            let any_file = strong
+                .files
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(Weak::upgrade)
+                .any(|f| f.disk_key() == disk_key);
+            if empty_begun && !any_file {
+                if flushers.get(&disk_key).is_some_and(|cur| Arc::ptr_eq(cur, &flusher)) {
+                    flushers.remove(&disk_key);
+                }
+                return;
+            }
+        }
     }
 }
 
@@ -645,8 +703,8 @@ impl Drop for Dying {
 /// A file a [`PageCache`] holds pages of, as its flusher and its eviction see it.
 trait Paged: Send + Sync {
     /// Which per-disk flusher owns this file (`0` when not bound to a [`HostDisk`]).
-    fn disk_key(&self) -> usize {
-        0
+    fn disk_key(&self) -> DiskKey {
+        DiskKey::Default
     }
     /// When it was used last ([`PageCache::used`]).
     fn used(&self) -> u64;
@@ -757,7 +815,9 @@ impl<F: File> Cached<F> {
     ) -> io::Result<Self> {
         let size = file.size()?;
         #[cfg(not(madsim))]
-        let disk_key = disk.as_ref().map_or(0, |d| Arc::as_ptr(d) as usize);
+        let disk_key = DiskKey::of(disk.as_ref());
+        #[cfg(not(madsim))]
+        let disk_for_flusher = disk.clone();
         let shared = Arc::new(Shared {
             file,
             cache: cache.clone(),
@@ -776,7 +836,7 @@ impl<F: File> Cached<F> {
         });
         #[cfg(not(madsim))]
         if cache.flusher {
-            cache.ensure_flusher(disk_key);
+            cache.ensure_flusher(disk_key, disk_for_flusher.as_ref());
         }
         let paged: Arc<dyn Paged> = shared.clone();
         cache.files.lock().unwrap().push(Arc::downgrade(&paged));
@@ -1138,8 +1198,8 @@ impl<F: File> Drop for Shared<F> {
 }
 
 impl<F: File> Paged for Shared<F> {
-    fn disk_key(&self) -> usize {
-        self.disk.as_ref().map_or(0, |d| Arc::as_ptr(d) as usize)
+    fn disk_key(&self) -> DiskKey {
+        DiskKey::of(self.disk.as_ref())
     }
 
     fn used(&self) -> u64 {
@@ -1998,11 +2058,10 @@ mod tests {
             }
         }
 
-        let dir = tempfile::tempdir().unwrap();
-        let host_a = bucket_cell::Host::new();
-        let host_b = bucket_cell::Host::new();
-        let disk_a = bucket_cell::host_disk::HostDisk::of_on(&host_a, dir.path()).unwrap();
-        let disk_b = bucket_cell::host_disk::HostDisk::of_on(&host_b, dir.path()).unwrap();
+        let disk_a =
+            bucket_cell::host_disk::HostDisk::in_memory(bucket_cell::host_disk::Sample::default);
+        let disk_b =
+            bucket_cell::host_disk::HostDisk::in_memory(bucket_cell::host_disk::Sample::default);
         assert!(!Arc::ptr_eq(&disk_a, &disk_b));
 
         let cache = cache(Options { expire: Duration::from_secs(3600), ..Options::default() });
@@ -2042,5 +2101,26 @@ mod tests {
         let _ = release_tx.send(());
         drop(file_a);
         drop(file_b);
+
+        // Repeated HostDisk creation/drop on the same filesystem reuses one Device flusher entry
+        // rather than leaking a new flusher thread each time.
+        let dir = tempfile::tempdir().unwrap();
+        let before = cache.flushers.lock().unwrap().len();
+        for _ in 0..8 {
+            let host = bucket_cell::Host::new();
+            let disk = bucket_cell::host_disk::HostDisk::of_on(&host, dir.path()).unwrap();
+            let f = Cached::on_disk(
+                CountingFile { wrote: Arc::new(AtomicU64::new(0)) },
+                &cache,
+                Some(disk),
+            )
+            .unwrap();
+            drop(f);
+        }
+        assert_eq!(
+            cache.flushers.lock().unwrap().len(),
+            before + 1,
+            "recreating HostDisk on the same st_dev must reuse one flusher"
+        );
     }
 }

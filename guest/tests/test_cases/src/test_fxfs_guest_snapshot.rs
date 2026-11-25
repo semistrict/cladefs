@@ -386,6 +386,7 @@ mod host {
                     .grant(GrantRequest {
                         tenant: tenant,
                         dir: control_path(dir),
+                        dirs: Vec::new(),
                         uid: uid,
                         gid: gid,
                     })

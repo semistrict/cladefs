@@ -2051,22 +2051,20 @@ pub(super) mod target {
             .into())
     }
 
-    /// Canonical paths of daemon-internal directories (ephemeral journal, all JBOD part cache
-    /// shards, all JBOD replica shards) that must never be used as destination parents for
-    /// migrated bucket-backed cells (board 11530).
-    fn daemon_internal_dirs() -> Vec<PathBuf> {
+    /// Canonical paths of daemon-internal directories (ephemeral journal, all live and configured
+    /// JBOD part cache shards, all JBOD replica shards) that must never be used as destination
+    /// parents for migrated bucket-backed cells (board 11530).
+    fn daemon_internal_dirs(daemon: &Daemon) -> Vec<PathBuf> {
         let mut raw_dirs = Vec::new();
         if let Some(dir) = node_local::env::var_os("CLADEFSD_EPHEMERAL").filter(|v| !v.is_empty()) {
             raw_dirs.push(PathBuf::from(dir));
         }
+        if let Some(cache) = super::super::storage::opened_cache(daemon) {
+            raw_dirs.extend(cache.shard_dirs());
+        }
         if let Some(raw) = node_local::env::var_os("CLADEFSD_PART_CACHE").filter(|v| !v.is_empty())
         {
-            match super::super::storage::parse_part_cache_dirs(&raw) {
-                Ok(dirs) => raw_dirs.extend(dirs),
-                // Fallback to split_paths so even an unexpanded or non-glob path is checked.
-                Err(_) => raw_dirs
-                    .extend(std::env::split_paths(&raw).filter(|p| !p.as_os_str().is_empty())),
-            }
+            raw_dirs.extend(super::super::storage::expand_part_cache_dirs_best_effort(&raw));
         }
         if let Some(raw) = node_local::env::var_os("CLADEFSD_REPLICAS").filter(|v| !v.is_empty()) {
             raw_dirs.extend(std::env::split_paths(&raw).filter(|p| !p.as_os_str().is_empty()));
@@ -2087,7 +2085,7 @@ pub(super) mod target {
     /// that root, no ancestor containing an existing cell (`store` / `store.deleted`), and not
     /// inside a daemon internal directory (`CLADEFSD_EPHEMERAL`, `CLADEFSD_PART_CACHE`,
     /// `CLADEFSD_REPLICAS`).
-    fn bucket_cell_path(roots: &[PathBuf], to: &str) -> Option<PathBuf> {
+    fn bucket_cell_path(daemon: &Daemon, roots: &[PathBuf], to: &str) -> Option<PathBuf> {
         if to.is_empty()
             || !to.starts_with('/')
             || to.ends_with('/')
@@ -2137,7 +2135,7 @@ pub(super) mod target {
         let candidate = canon_parent.join(name);
         // Reject daemon-internal directories (and paths equal to them) that may sit inside
         // CLADEFSD_ROOTS.
-        let internal = daemon_internal_dirs();
+        let internal = daemon_internal_dirs(daemon);
         if internal.iter().any(|dir| candidate.starts_with(dir)) {
             return None;
         }
@@ -2149,7 +2147,7 @@ pub(super) mod target {
     pub(crate) fn reap_orphaned_staging_on(daemon: &Daemon) -> usize {
         // No roots configured: nothing to scan.
         let Ok(roots) = bucket_cells_roots(daemon) else { return 0 };
-        let internal = daemon_internal_dirs();
+        let internal = daemon_internal_dirs(daemon);
         // Ephemeral host absent when CLADEFSD_EPHEMERAL is unset; skip only active ephemeral ones.
         let ephemeral_stagings: HashSet<PathBuf> = ephemeral_host::host_on(&daemon.host)
             .ok()
@@ -2249,7 +2247,7 @@ pub(super) mod target {
             }
             let path = if bucket_backed {
                 let roots = bucket_cells_roots(daemon).map_err(Status::failed_precondition)?;
-                bucket_cell_path(&roots, &to).ok_or_else(|| {
+                bucket_cell_path(daemon, &roots, &to).ok_or_else(|| {
                     Status::invalid_argument(format!(
                         "migration {migration:x}: {to:?} is no new cell path in this host's roots"
                     ))

@@ -906,6 +906,60 @@ fn jbod_spreads_cells_across_shards_and_rotates_incarnation_on_wipe() {
     );
 }
 
+/// Regression test for review 107 (finding 373): starting with `[A, B]` (cell logs on `B`),
+/// briefly running with only `[A]` (appending a pending configuration's log on `A`), and restoring
+/// `[A, B]` (restoring the original composite incarnation) must still return `B`'s acknowledged
+/// logs from `fence` and reject stale appends across both shards.
+#[test]
+fn jbod_reverted_shard_set_fences_and_reads_all_shards() {
+    let dir_a = MemDir::new();
+    let dir_b = MemDir::new();
+    let mut seq = [11u64, 22u64].into_iter();
+    let replicas =
+        Replicas::open_all_as(vec![dir_a.clone(), dir_b.clone()], MOST, || seq.next().unwrap())
+            .unwrap();
+    let inc_ab = replicas.incarnation();
+    let frame_active = own_frame(1, b"acknowledged-on-b");
+    let frame_pending = own_frame(2, b"pending-on-a");
+
+    // Pick a cell whose canonical rendezvous shard is B (index 1).
+    let cell = (1u64..1000)
+        .map(|id| CellId { tenant: 9, id })
+        .find(|&c| replicas.canonical_shard_index(c) == 1)
+        .expect("a cell mapping to shard B");
+
+    // Write acknowledged active config log onto shard B.
+    let active = key(1, 1);
+    replicas.append((cell, active, inc_ab), own_of(0), 0, &frame_active).unwrap();
+    assert!(dir_b.list("").unwrap().len() > 1);
+    assert_eq!(dir_a.list("").unwrap().len(), 1);
+    drop(replicas);
+
+    // Run briefly with only shard A; a pending config appends onto shard A.
+    let only_a = Replicas::open(dir_a.clone(), MOST).unwrap();
+    let inc_a = only_a.incarnation();
+    let pending = key(2, 1);
+    only_a.append((cell, pending, inc_a), own_of(0), 0, &frame_pending).unwrap();
+    drop(only_a);
+
+    // Restore [A, B]: composite incarnation matches `inc_ab`, and `cell` has files on BOTH A and B.
+    let restored = Replicas::open_all(vec![dir_a, dir_b], MOST).unwrap();
+    assert_eq!(restored.incarnation(), inc_ab);
+
+    // Fencing the active configuration at epoch 2 must return B's acknowledged log end and fence
+    // both shards so epoch-1 appends are rejected.
+    let fenced = restored.fence((cell, active, inc_ab), 2).unwrap();
+    assert_eq!(fenced, vec![(own_of(0), frame_active.len() as u64)]);
+    assert_eq!(
+        restored.read((cell, active, inc_ab), own_of(0), 0, frame_active.len() as u64).unwrap(),
+        frame_active
+    );
+    assert_eq!(
+        refused(restored.append((cell, active, inc_ab), own_of(1), 0, &frame_active)),
+        Refused::Fenced { promise: 2 }
+    );
+}
+
 /// The replica directory's own: its incarnation file, the names of its promises and logs, and an
 /// own log's frames. A segment's log it holds is the cell directory's (`formats/cell-directory`),
 /// an own frame's file an extent frame (`formats/extent-frame`).

@@ -124,17 +124,14 @@ impl Footprint {
         self.disk.as_ref()
     }
 
-    /// Has `change` count in its tally, its allotment's (and its multi-disk tenant group's, if
-    /// any) and every allotment's, if it is in one, and its disk's: under its allotment's lock, so
-    /// that a cell moved to another allotment moves what it counted whole.
+    /// Has `change` count in its tally, its allotment's and every allotment's, if it is in one,
+    /// and its disk's: under its allotment's lock, so that a cell moved to another allotment moves
+    /// what it counted whole.
     fn counting(&self, change: impl Fn(&Tally)) {
         let allotment = self.allotment.lock().unwrap();
         change(&self.tally);
         if let Some(allotment) = &*allotment {
             change(&allotment.tally);
-            if let Some(group) = &allotment.group {
-                change(&group.tally);
-            }
             change(&allotment.total.tally);
         }
         if let Some(disk) = &self.disk {
@@ -169,15 +166,9 @@ impl Footprint {
         let mut allotted = self.allotment.lock().unwrap();
         if let Some(was) = allotted.take() {
             moved(&self.tally, &was.tally, false);
-            if let Some(group) = &was.group {
-                moved(&self.tally, &group.tally, false);
-            }
             moved(&self.tally, &was.total.tally, false);
         }
         moved(&self.tally, &allotment.tally, true);
-        if let Some(group) = &allotment.group {
-            moved(&self.tally, &group.tally, true);
-        }
         moved(&self.tally, &allotment.total.tally, true);
         *allotted = Some(allotment.clone());
     }
@@ -197,9 +188,6 @@ impl Footprint {
         self.tally.opened(delta, more);
         if let Some(allotment) = &*allotment {
             allotment.tally.opened(delta, more);
-            if let Some(group) = &allotment.group {
-                group.tally.opened(delta, more);
-            }
             allotment.total.tally.opened(delta, more);
         }
         if let Some(disk) = &self.disk {
@@ -232,10 +220,9 @@ impl Footprint {
         let full = match &allotment {
             Some(allotment)
                 if over(&allotment.tally, &allotment.limit)
-                    || allotment
-                        .group
-                        .as_ref()
-                        .is_some_and(|group| over(&group.tally, &group.limit)) =>
+                    || allotment.group().is_some_and(|group| {
+                        group.committed() > group.limit.load(Ordering::Relaxed)
+                    }) =>
             {
                 Some(DiskFull::Allotment)
             }
@@ -492,42 +479,52 @@ const NONE: u64 = u64::MAX;
 pub const STORE_MADE: u64 = 64 << 10;
 
 /// Aggregate footprint and limit shared by a tenant granted multiple cell directories across JBOD
-/// host disks: each directory has its own per-disk [`Allotment`] for per-disk weighted shares,
-/// while the tenant's configured limit is enforced against the sum across all its directories.
+/// host disks: each directory keeps its own per-disk [`Allotment`] for per-disk weighted shares,
+/// while the tenant's configured limit is enforced against the sum across all member allotments.
+/// Because each member's `Tally` remains authoritative on the [`Allotment`] itself, re-granting a
+/// tenant with an expanded or contracted directory set rebinds existing allotments to a fresh
+/// [`Group`] with zero tally-migration drift.
 pub struct Group {
-    tally: Tally,
+    members: Mutex<Vec<Arc<Allotment>>>,
     limit: AtomicU64,
 }
 
 impl Group {
-    /// A new tenant group with no limit.
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self { tally: Tally::new(), limit: AtomicU64::new(NONE) })
+    /// A new tenant group binding `members` under one aggregate limit (clearing each member's
+    /// individual allotment limit so the group limit is the single source of truth).
+    pub fn for_allotments(members: Vec<Arc<Allotment>>) -> Arc<Self> {
+        let group =
+            Arc::new(Self { members: Mutex::new(members.clone()), limit: AtomicU64::new(NONE) });
+        for member in &members {
+            member.set_limit(None);
+            member.set_group(Some(group.clone()));
+        }
+        group
     }
 
     /// What all allotments in this group take together, counted.
     pub fn bytes(&self) -> u64 {
-        self.tally.bytes()
+        self.members.lock().unwrap().iter().map(|m| m.bytes()).sum()
     }
 
     /// Of those, unframed files'.
     pub fn unframed(&self) -> u64 {
-        self.tally.unframed()
+        self.members.lock().unwrap().iter().map(|m| m.unframed()).sum()
     }
 
     /// What writes admitted and not yet landed hold across the group.
     pub fn pledged(&self) -> u64 {
-        self.tally.pledged()
+        self.members.lock().unwrap().iter().map(|m| m.pledged()).sum()
     }
 
     /// What all cells in the group take, reserve and hold admitted.
     pub fn committed(&self) -> u64 {
-        self.tally.committed()
+        self.members.lock().unwrap().iter().map(|m| m.committed()).sum()
     }
 
     /// What all cells' own work may still add, and writes admitted hold.
     pub fn reserved(&self) -> u64 {
-        self.tally.reserved() + self.tally.pledged()
+        self.members.lock().unwrap().iter().map(|m| m.reserved()).sum()
     }
 
     /// Its aggregate limit, if set.
@@ -551,7 +548,7 @@ pub struct Allotment {
     /// Its limit, or [`NONE`].
     limit: AtomicU64,
     /// Optional multi-disk tenant group sharing an aggregate limit across several directories.
-    group: Option<Arc<Group>>,
+    group: Mutex<Option<Arc<Group>>>,
     /// Whether the last write refused was refused by it: logged as it begins to be.
     full: AtomicBool,
     /// The disk of its directory's filesystem, whose governor shares what it leaves by weight.
@@ -596,16 +593,6 @@ impl State {
 /// now, counting the cells in it as they were counted, and those not counted yet, closed, as one
 /// listing of each finds them.
 pub fn allotment_on(host: &Arc<crate::Host>, dir: &Path) -> io::Result<Arc<Allotment>> {
-    allotment_in_group_on(host, dir, None)
-}
-
-/// Like [`allotment_on`], attaching a newly made allotment to `group` so multiple JBOD directories
-/// of one tenant share a single aggregate byte limit.
-pub fn allotment_in_group_on(
-    host: &Arc<crate::Host>,
-    dir: &Path,
-    group: Option<Arc<Group>>,
-) -> io::Result<Arc<Allotment>> {
     let dir = host_fs::canonicalize(dir)?;
     let made = {
         let mut allotments = host.footprints.allotments.lock().unwrap();
@@ -617,7 +604,7 @@ pub fn allotment_in_group_on(
             dir,
             tally: Tally::new(),
             limit: AtomicU64::new(NONE),
-            group,
+            group: Mutex::new(None),
             full: AtomicBool::new(false),
             disk,
             weight: AtomicU64::new(DEFAULT_WEIGHT),
@@ -766,8 +753,13 @@ impl Allotment {
     }
 
     /// Its multi-disk tenant group, if it belongs to one.
-    pub fn group(&self) -> Option<&Arc<Group>> {
-        self.group.as_ref()
+    pub fn group(&self) -> Option<Arc<Group>> {
+        self.group.lock().unwrap().clone()
+    }
+
+    /// Rebinds this allotment to `group` (or detaches it from any group when `None`).
+    pub fn set_group(&self, group: Option<Arc<Group>>) {
+        *self.group.lock().unwrap() = group;
     }
 }
 
@@ -1308,16 +1300,20 @@ mod tests {
         let host = crate::Host::new();
         let root_a = tempfile::tempdir().unwrap();
         let root_b = tempfile::tempdir().unwrap();
-        let group = Group::new();
-        let allot_a = allotment_in_group_on(&host, root_a.path(), Some(group.clone())).unwrap();
-        let allot_b = allotment_in_group_on(&host, root_b.path(), Some(group.clone())).unwrap();
+        let root_c = tempfile::tempdir().unwrap();
+        let allot_a = allotment_on(&host, root_a.path()).unwrap();
+        let allot_b = allotment_on(&host, root_b.path()).unwrap();
+        let group = Group::for_allotments(vec![allot_a.clone(), allot_b.clone()]);
 
         let cell_a = root_a.path().join("cell-a");
         let cell_b = root_b.path().join("cell-b");
+        let cell_c = root_c.path().join("cell-c");
         host_fs::create_dir(&cell_a).unwrap();
         host_fs::create_dir(&cell_b).unwrap();
+        host_fs::create_dir(&cell_c).unwrap();
         let dir_a = HostDir::new_on(&host, &cell_a).unwrap();
         let dir_b = HostDir::new_on(&host, &cell_b).unwrap();
+        let dir_c = HostDir::new_on(&host, &cell_c).unwrap();
 
         dir_a.create("a", false).unwrap().write_at(&vec![1; 4 * GRANULE as usize], 0).unwrap();
         dir_b.create("b", false).unwrap().write_at(&vec![2; 4 * GRANULE as usize], 0).unwrap();
@@ -1339,7 +1335,26 @@ mod tests {
             Some(DiskFull::Allotment),
             "write on second directory must also observe group limit"
         );
-        group.set_limit(None);
+
+        // Rebind existing allotments plus a newly added third directory into a new group (simulating
+        // revoke + re-grant with [A, B, C]): all three must enforce the new group's limit.
+        let allot_c = allotment_on(&host, root_c.path()).unwrap();
+        let group2 = Group::for_allotments(vec![allot_a.clone(), allot_b.clone(), allot_c.clone()]);
+        let committed2 = group2.committed();
+        group2.set_limit(Some(committed2 + GRANULE));
+        assert_eq!(
+            dir_c.footprint().admit(2 * GRANULE, 0).err(),
+            Some(DiskFull::Allotment),
+            "newly added third root must enforce the shared group limit"
+        );
+        assert_eq!(
+            dir_a.footprint().admit(2 * GRANULE, 0).err(),
+            Some(DiskFull::Allotment),
+            "reused root A must enforce the rebound group limit"
+        );
+
+        group2.set_limit(None);
         assert!(dir_a.footprint().admit(2 * GRANULE, 0).is_ok());
+        assert!(dir_c.footprint().admit(2 * GRANULE, 0).is_ok());
     }
 }

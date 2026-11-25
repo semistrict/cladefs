@@ -578,11 +578,12 @@ fn render_rest(daemon: &Daemon, mut out: String, mut laps: Laps) -> String {
     );
     let _ = writeln!(out, "# TYPE {name} gauge");
     if let Some(cache) = &cache {
-        for (disk, state) in cache.shard_states() {
+        for (index, (disk, state)) in cache.shard_states().into_iter().enumerate() {
             let Some(dev) = disk.dev() else { continue };
             let device =
                 format!("{}:{}", libc::major(dev as libc::dev_t), libc::minor(dev as libc::dev_t));
-            let _ = writeln!(out, "{name}{{device=\"{device}\"}} {}", state.as_u64());
+            let _ =
+                writeln!(out, "{name}{{device=\"{device}\",shard=\"{index}\"}} {}", state.as_u64());
         }
     }
 
