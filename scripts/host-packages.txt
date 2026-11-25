@@ -14,7 +14,7 @@ libseccomp-dev
 # containers.
 podman busybox-static
 # The guest kernel (scripts/build-guest-kernel.sh).
-flex bison bc cpio libelf-dev libssl-dev
+flex bison bc cpio libelf-dev libssl-dev dwarves
 # eu-stack, which saves a hung test's stacks (the guest tests' runner, TASK-44.13).
 elfutils
 # spatch, which checks the guest's C (scripts/cocci-guest.py, TASK-44.17).

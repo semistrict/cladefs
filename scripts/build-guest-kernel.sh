@@ -43,8 +43,10 @@ case "$arch" in
     *) echo "Unsupported architecture: $arch" >&2; exit 2 ;;
 esac
 make_args=(ARCH="$arch")
+strip_bin=strip
 if [[ $guestarch != $(uname -m) ]]; then
     make_args+=(CROSS_COMPILE="$guestarch-linux-gnu-")
+    strip_bin="$guestarch-linux-gnu-strip"
 fi
 
 # The kernel's sources, once, and the release's commit, whether cloned now or before: a tag that
@@ -175,6 +177,13 @@ grep -q '^CONFIG_SERIAL_8250_CONSOLE=y' "$src/.config"
 # cladefs: fs/cladefs's tracepoints, in tracefs and for BPF (cladefs.config, TASK-44.16).
 grep -q '^CONFIG_FTRACE=y' "$src/.config"
 grep -q '^CONFIG_BPF_EVENTS=y' "$src/.config"
+# cladefs: eBPF JIT, kprobes, syscall tracepoints, BTF, and schedstats for in-guest profiling/bpftrace.
+grep -q '^CONFIG_BPF_JIT=y' "$src/.config"
+grep -q '^CONFIG_KPROBES=y' "$src/.config"
+grep -q '^CONFIG_KPROBE_EVENTS=y' "$src/.config"
+grep -q '^CONFIG_FTRACE_SYSCALLS=y' "$src/.config"
+grep -q '^CONFIG_DEBUG_INFO_BTF=y' "$src/.config"
+grep -q '^CONFIG_SCHEDSTATS=y' "$src/.config"
 # cladefs: an oops panics, and a panic resets the VM (cladefs.config, TASK-311).
 grep -q '^CONFIG_PANIC_ON_OOPS=y' "$src/.config"
 grep -q '^CONFIG_PANIC_TIMEOUT=-1' "$src/.config"
@@ -226,4 +235,9 @@ if grep -E " [TtWw] ($string_functions)\$" <<< "$rust_symbols" >&2; then
     exit 1
 fi
 cp "$src/$image" "$out/"
+# Strip non-allocatable DWARF .debug_* sections from x86_64 vmlinux while keeping .BTF (SHF_ALLOC
+# inside .rodata), kallsyms, and PT_LOAD/PT_NOTE segments so the cached kernel stays ~40 MB.
+if [[ $arch == x86_64 && -s "$out/vmlinux" ]]; then
+    "$strip_bin" --strip-debug "$out/vmlinux"
+fi
 echo "$out/$(basename "$image")"
