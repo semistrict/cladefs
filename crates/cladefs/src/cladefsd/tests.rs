@@ -2643,7 +2643,7 @@ async fn control_takes_cells_at_the_placements_given() {
         path("first"),
         1 << 24,
         new,
-        (Some(5), Kind::Fxfs, None, None, false, None),
+        (Some(5), Kind::Fxfs, None, None, false, None, false),
     );
     let cell = control(made).unwrap();
     let extent = ExtentId { cell: cell.id, sequence: 1 };
@@ -2664,7 +2664,7 @@ async fn control_takes_cells_at_the_placements_given() {
         path("third"),
         1 << 24,
         cell,
-        (Some(7), Kind::Fxfs, None, None, false, None),
+        (Some(7), Kind::Fxfs, None, None, false, None, false),
     );
     assert_eq!(control(taken), Ok(cell));
     let third = CellClient::connect(&socket, path("third"), 1 << 24).unwrap();
@@ -4880,8 +4880,9 @@ fn daemons_of_other_wire_versions_are_refused() {
                 OPEN => {
                     reply.set_body(&OpenedBody {
                         cell: 7,
+                        tenant: 0,
                         arena: 1,
-                        reserved: [0; 3],
+                        flags: 0,
                         max_map_count: 0,
                         version: 0,
                     });
@@ -4993,7 +4994,7 @@ fn openings_fail_on_refusals_of_what_they_ask() {
 /// its own, as of the default tenant, and its wire version this one.
 fn opened_body(cell: u64) -> super::wire::OpenedBody {
     let arena = crate::pages::ArenaId(1);
-    super::codec::Opened { cell, arena, max_map_count: None }.to_body()
+    super::codec::Opened { cell, tenant: 0, arena, max_map_count: None, ephemeral: false }.to_body()
 }
 
 /// TASK-216: a VM booted again on the cell its VM crashed out of opens it at once, while what

@@ -1,0 +1,41 @@
+StateV3 {
+    config: ConfigStateV2 {
+        id: "extents",
+        tag: "fxfs",
+        path_on_host: "/store",
+        capacity: 1073741824,
+        dax_window_size: Some(
+            67108864,
+        ),
+        dax_private_max_bytes: Some(
+            1048576,
+        ),
+        cladefsd_socket: "/cladefsd.sock",
+        cache_type: Unsafe,
+    },
+    window_addr: Some(
+        1099511627776,
+    ),
+    target: LocalEphemeral {
+        tenant: 2,
+        cell: 88,
+        committed: 42,
+    },
+    mappings: [
+        MappingStateV2 {
+            window_offset: 4096,
+            len: 8192,
+            contents: Extent {
+                cell: 3,
+                sequence: 9,
+                offset: 0,
+            },
+        },
+        MappingStateV2 {
+            window_offset: 2097152,
+            len: 4096,
+            contents: Zeros,
+        },
+    ],
+    frozen: true,
+}

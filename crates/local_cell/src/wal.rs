@@ -2136,9 +2136,13 @@ mod tests {
     /// dropped from there.
     #[test]
     fn files_of_versions_not_read_are_refused() {
-        let refusal = "cell directory version 19: this build reads version 18 alone";
+        let future = FORMAT.current + 1;
+        let refusal = format!(
+            "cell directory version {future}: this build reads versions {} to {}",
+            FORMAT.oldest, FORMAT.current
+        );
         let newer = |mut payload: Vec<u8>| {
-            payload[..4].copy_from_slice(&19u32.to_le_bytes());
+            payload[..4].copy_from_slice(&future.to_le_bytes());
             payload
         };
 
@@ -2148,7 +2152,7 @@ mod tests {
         let slot = newer(versioned(&Slot { serial: 2, start: Some(9) }));
         let file = dir.open(START, false).unwrap();
         file.write_at(&frame_salted(&slot, 0), 0).unwrap();
-        let err = StartFile::read(&dir).err().expect("a slot of 19 is refused");
+        let err = StartFile::read(&dir).err().expect("a future slot is refused");
         assert_eq!(format!("{err:#}"), format!("reading the WAL's start: {refusal}"));
 
         let (dir, seg, enc) = (MemDir::new(), segment(0), encryption());
@@ -2165,7 +2169,7 @@ mod tests {
         log.write_at(&frame_salted(&payload, 7), LOG_RECORDS).unwrap();
         log.sync().unwrap();
         let before = dir.files();
-        let err = recover(&dir, CELL, None).err().expect("a record of 19 is refused");
+        let err = recover(&dir, CELL, None).err().expect("a future record is refused");
         assert_eq!(
             format!("{err:#}"),
             format!(
@@ -2176,11 +2180,11 @@ mod tests {
         assert_eq!(dir.files(), before, "refused recovery keeps every file as it was");
 
         let mut header = log_header(7, seg, &enc);
-        header[4..8].copy_from_slice(&19u32.to_le_bytes());
+        header[4..8].copy_from_slice(&future.to_le_bytes());
         log.write_at(&header, 0).unwrap();
         log.sync().unwrap();
         let before = dir.files();
-        let err = recover(&dir, CELL, None).err().expect("a log headed 19 is refused");
+        let err = recover(&dir, CELL, None).err().expect("a future log header is refused");
         assert!(format!("{err:#}").contains("'s log has unsupported format"), "{err:#}");
         assert_eq!(dir.files(), before, "refused recovery keeps every file as it was");
     }

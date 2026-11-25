@@ -420,6 +420,12 @@ message CreateCellRequest {
   // ENOTSUP if CLADEFSD_FAST_WAL_BUCKET is unset, and EINVAL if combined with replicas >= 1);
   // false disables Fast WAL, flushing any active WAL on take.
   optional bool fast_wal = 13;
+  // Whether to create a standalone (parentless) host-local ephemeral cell (doc-25): kept on host
+  // SSD alone, encrypted under the tenant's KMS key, never uploaded to the bucket, with no
+  // versions and no bucket reference. Must be a new cell (`cell == 0`) with `token`, `replicas`,
+  // `force`, `upload_interval_ms`, and `fast_wal` unset and `fsync == FSYNC_LEVEL_ORDERED`
+  // (INVALID_ARGUMENT otherwise).
+  bool ephemeral = 14;
 }
 
 // What a guest's fsync, fdatasync, msync and O_SYNC wait for in a cell (doc-12, doc-21, doc-29).
@@ -494,6 +500,9 @@ message ImportMemoryRequest {
   uint64 tenant = 3;
   // Whether to make an initial version of the memory cell as part of the import.
   bool make_version = 4;
+  // Whether to import into a standalone host-local ephemeral memory cell (doc-25): kept on host
+  // SSD alone with zero bucket uploads. Cannot be combined with `make_version` (INVALID_ARGUMENT).
+  bool ephemeral = 5;
 }
 
 // The memory cell made.
@@ -771,6 +780,9 @@ message StatCellResponse {
   // Whether the cell's fast WAL bucket is degraded and commits are falling back to cold regional
   // bucket uploads.
   bool fast_wal_degraded = 31;
+  // Whether this cell is a host-local ephemeral cell (doc-25): kept on host SSD alone, never
+  // uploaded to the bucket.
+  bool ephemeral = 32;
 }
 
 // Asks for the cells the daemon serves.

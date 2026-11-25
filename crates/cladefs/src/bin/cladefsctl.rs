@@ -1060,6 +1060,7 @@ mod cli {
                         file: name(&file)?,
                         tenant: bucket_cell::layout::DEFAULT_TENANT,
                         make_version,
+                        ephemeral: false,
                     };
                     let imported = call!(
                         format!("importing memory {}", file.display()),
@@ -1921,6 +1922,7 @@ mod cli {
             fast_wal,
             fast_wal_bucket,
             fast_wal_degraded,
+            ephemeral,
         } = stat;
         serde_json::json!({
             "tenant": base32_id::Short(*tenant).to_string(),
@@ -1952,6 +1954,7 @@ mod cli {
             "fast_wal": fast_wal,
             "fast_wal_bucket": fast_wal_bucket,
             "fast_wal_degraded": fast_wal_degraded,
+            "ephemeral": ephemeral,
         })
     }
 

@@ -200,8 +200,8 @@ pub use node::{
     Attr, DirEntry, FileType, Inode, Owner, RenameFlags, SetAttr, SetTime, StatFs, XattrMode,
 };
 pub use open_cell::{
-    CellAccess, CellHolding, CellRole, CellVersion, Commit, ExtentInfo, MappingContents, OpenBase,
-    OpenCell, Opening, VersionInfo, Whose, WindowMapping, WriteBarriers,
+    CellAccess, CellHolding, CellRole, CellSnapshot, CellVersion, Commit, ExtentInfo,
+    MappingContents, OpenBase, OpenCell, Opening, VersionInfo, Whose, WindowMapping, WriteBarriers,
 };
 pub use storage::Storage;
 pub use storage_device::ExtentId;

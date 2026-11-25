@@ -118,6 +118,68 @@ in `PUT /snapshot/load` alongside `mem_backend.backend_type = "Cell"`: KVM track
 (including first-time COW into private pages and subsequent writes to private pages), while
 unmodified shared pages remain read-only and clean.
 
+### Host-local suspend/resume of ephemeral VMs (zero bucket uploads)
+
+VMs running on ephemeral Fxfs cells (`ForkCell(..., ephemeral: true)`, doc-25) can be parked to
+local SSD and resumed on the **same host** using standalone ephemeral memory cells without
+uploading anything to object storage:
+
+1. **Freeze, pause, and suspend (`PUT /snapshot/create`):**
+   - Freeze the guest's Fxfs filesystem and pause the VM (`PATCH /vm` with `{"state": "Paused"}`).
+   - **First suspend (cold-booted anonymous RAM):** pass `"ephemeral": true` in `memory_cell`:
+     ```json
+     {
+       "snapshot_type": "Full",
+       "snapshot_path": "<dir>/vm.state",
+       "memory_cell": {
+         "path_on_host": "<dir>/mem-cell",
+         "cladefsd_socket": "<tenant.sock>",
+         "ephemeral": true
+       }
+     }
+     ```
+     Firecracker creates a standalone host-local ephemeral memory cell (`CELL_KIND_MEMORY`, encrypted
+     under the tenant's KMS key, zero bucket uploads or references), writes resident non-zero pages,
+     commits, and checkpoints it locally. For each ephemeral rootfs extent device, `cladefsd`
+     quiesces and checkpoints the ephemeral cell in place instead of creating a bucket version,
+     recording `(tenant, cell, committed)` in the snapshot state (`snapshot-extent-state` v3).
+     `PUT /snapshot/create` returns `200 OK` with
+     `{"tenant": <u64>, "cell": <u64>, "version": 0, "ephemeral": true}`.
+   - **Subsequent re-suspends (VM already resumed from an ephemeral memory cell):** pass
+     `"memory_cell": {}` (or `{"ephemeral": true}`). Firecracker flushes only dirty private pages
+     into the existing ephemeral memory cell, reclaims them back to the cell's extents, and
+     checkpoints (punching freed runs in place).
+   - Stop the Firecracker process to release 100% of host RAM and swap. Do **not** call `SyncCell`
+     (ephemeral cells have no uploader and never upload to the bucket).
+2. **Resume on the same host (`PUT /snapshot/load`):**
+   - Pass `mem_backend.backend_type = "Cell"`, `mem_backend.backend_path = "<dir>/mem-cell"`, and
+     `memory_cell` with `"ephemeral": true` (`version` omitted or `0`; `tenant` and `cell` optional
+     to verify identity), plus `cladefs_overrides` pointing at the same ephemeral rootfs cell:
+     ```json
+     {
+       "snapshot_path": "<dir>/vm.state",
+       "mem_backend": { "backend_type": "Cell", "backend_path": "<dir>/mem-cell" },
+       "memory_cell": {
+         "tenant": <u64>,
+         "cell": <u64>,
+         "cladefsd_socket": "<tenant.sock>",
+         "ephemeral": true
+       },
+       "resume_vm": true,
+       "cladefs_overrides": [{ "id": "extents", "path_on_host": "<dir>/rootfs-cell" }]
+     }
+     ```
+   - `cladefsd` reopens the ephemeral rootfs cell in place only if its `(tenant, cell)` and latest
+     `committed` epoch still match the snapshot; restoring a stale snapshot after the VM resumed
+     and wrote more fails with `EEXIST`. Guest RAM pages fault back lazily via userfaultfd on
+     demand and copy-on-write on first guest store.
+3. **Discard / cleanup:** once the Firecracker process is stopped, call `DeleteCell` on both the
+   ephemeral rootfs cell (which retires its parent version reference) and the ephemeral memory cell
+   (standalone — holds no bucket reference and needs no `CLADEFSD_EPHEMERAL`), and remove the
+   Firecracker snapshot state file. Standalone ephemeral cells can also be created or imported via
+   `CreateCellRequest.ephemeral = true` or `ImportMemoryRequest.ephemeral = true` (with
+   `make_version = false`); `StatCellResponse.ephemeral` reports whether a cell is ephemeral.
+
 ## Live migration of bucket-backed cells (tail-only peer hand-over)
 
 Both ephemeral and bucket-backed cells migrate live between two hosts sharing a bucket over peer

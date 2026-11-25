@@ -43,6 +43,8 @@ use test_fxfs_guest_pgbench::{
     Database as PgbenchDatabase, Probe, Storage as PgbenchStorage, TestFxfsGuestPgbench,
 };
 mod test_fxfs_guest_bigmap;
+mod test_fxfs_guest_ephemeral_suspend;
+use test_fxfs_guest_ephemeral_suspend::TestFxfsGuestEphemeralSuspend;
 mod test_fxfs_guest_memory_cell;
 use test_fxfs_guest_memory_cell::TestFxfsGuestMemoryCell;
 // cladefs: what cladefsd asks of a disk it shares with many VMs and the bucket (TASK-310).
@@ -599,6 +601,11 @@ pub fn test_cases() -> Vec<TestCase> {
             "fxfs-guest-memory-cell-snapshot-and-dirty",
             &[Tag::Kernel, Tag::Nightly],
             Box::new(TestFxfsGuestMemoryCell),
+        ),
+        TestCase::new(
+            "fxfs-guest-ephemeral-local-suspend",
+            &[Tag::Kernel, Tag::Nightly],
+            Box::new(TestFxfsGuestEphemeralSuspend),
         ),
         TestCase::new(
             "fxfs-guest-suspend-dax",

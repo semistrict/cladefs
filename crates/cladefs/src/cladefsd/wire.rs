@@ -451,10 +451,10 @@ pub(crate) struct StageMapBody {
 )]
 pub(crate) struct OpenedBody {
     pub cell: u64,
+    pub tenant: u64,
     pub max_map_count: u64,
     pub arena: u32,
-    /// cladefs: where a follower's commit number was, up to `version`'s fixed offset (board 8237).
-    pub reserved: [u32; 3],
+    pub flags: u32,
     pub version: u64,
 }
 
@@ -479,6 +479,9 @@ pub(crate) struct InfoBody {
 pub(crate) struct ForkedBody {
     pub version: u64,
     pub tenant: u64,
+    pub committed: u64,
+    pub flags: u32,
+    pub reserved: u32,
 }
 
 /// Wire layout of one extent ID in a [`FREE_MANY`] payload (little-endian, unaligned).
@@ -575,7 +578,11 @@ const _: () = {
 /// nor `COMMITTED`, and an [`OPEN`]'s reply says no commit.
 /// Version 17: [`FORK`] takes no path (`ForkCell` covers it; board 10612): only [`FORK_QUIESCENT`]
 /// and [`FORK_DROP`], and its reply carries no cell ID.
-pub(crate) const VERSION: u64 = 17;
+/// Version 18: [`OPEN_EPHEMERAL`] for creating standalone ephemeral cells and reopening host-local
+/// ephemeral cells (rootfs at committed epoch, memory cells in place); [`OpenedBody`] carries
+/// `tenant` and `flags` ([`OPENED_EPHEMERAL`]); [`ForkedBody`] carries `committed` and `flags`
+/// ([`FORKED_EPHEMERAL`]) for local-only quiesced ephemeral snapshots.
+pub(crate) const VERSION: u64 = 18;
 
 /// cladefs: a flag of any request, which says the guest request it is a call for, the guest's
 /// number of it (`crate::request`, TASK-260): little-endian, not 0, in the first
@@ -744,8 +751,20 @@ pub(crate) const OPEN_FORK: u32 = 1 << 1;
 /// sqlite_cladefs VFS alone opens, not an Fxfs one (TASK-364).
 pub(crate) const OPEN_SQLITE: u32 = 1 << 3;
 /// cladefs: with [`OPEN_CREATE`], the cell made is a memory cell, a VM's memory
-/// (TASK-456.2), not an Fxfs one.
+/// (TASK-456.2), not an Fxfs one. With [`OPEN_EPHEMERAL`] alone, opens an existing ephemeral
+/// memory cell in place.
 pub(crate) const OPEN_MEMORY: u32 = 1 << 4;
+/// cladefs: host-local ephemeral cell open (doc-25): with [`OPEN_CREATE`] (and optionally
+/// [`OPEN_SQLITE`] or [`OPEN_MEMORY`]), creates a standalone ephemeral cell with zero bucket
+/// uploads; alone, reopens an existing ephemeral cell in place at `cell_version` (`committed`) for
+/// local VM restore (`EEXIST` on mismatch); with [`OPEN_MEMORY`], reopens an existing ephemeral
+/// memory cell in place.
+pub(crate) const OPEN_EPHEMERAL: u32 = 1 << 5;
+/// cladefs: [`OpenedBody::flags`] bit indicating the opened cell is host-local ephemeral.
+pub(crate) const OPENED_EPHEMERAL: u32 = 1 << 0;
+/// cladefs: [`ForkedBody::flags`] bit indicating a host-local quiesced ephemeral snapshot
+/// (`committed` holds the latest commit number and `version` is 0).
+pub(crate) const FORKED_EPHEMERAL: u32 = 1 << 0;
 /// cladefs: doc-4's `MAP_ZEROS`, at its bit. Bit 0 was writable DAX's; doc-4's bits 1 and 2,
 /// `MAP_MANY` and `MAP_PREFAULT`, are no flags here: [`MAP_MANY`] is a request of its own, and a VM
 /// process prefaults by itself.

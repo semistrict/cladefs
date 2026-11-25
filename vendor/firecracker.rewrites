@@ -49,3 +49,8 @@ a81a2449e85a9d2f1136a2d719e5f31423517687 ca06ec6088bb25ad02aae8887f4dc50a41b3586
 # cladefs-v1.18.0-r5 (branch cladefs-v1.18.0-r5): add PUT /snapshot/create `memory_cell` support
 # to write guest memory directly into a memory cell without a local memory file (TASK-456.4).
 ca06ec6088bb25ad02aae8887f4dc50a41b3586e de36a381b18679c6f8fc8fde9bee4a303d2f5fea
+# cladefs-v1.18.0-r6 (branch cladefs-v1.18.0-r6): add ephemeral memory cell support on
+# PUT /snapshot/create and PUT /snapshot/load (`ephemeral: true`) and update
+# devices::virtio::extent::persist for CellSnapshot (snapshot-extent-state v3) for host-local
+# suspend/resume of ephemeral VMs.
+de36a381b18679c6f8fc8fde9bee4a303d2f5fea cc076e3e0ac461021539505d35a1892d6e38e846

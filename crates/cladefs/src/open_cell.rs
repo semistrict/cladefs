@@ -290,6 +290,25 @@ pub struct CellVersion {
     pub version: u64,
 }
 
+/// cladefs: what a VM snapshot records for one extent device (`CellClient::snapshot_cell`):
+/// either a bucket-backed version (restored by forking on any host), or a host-local ephemeral
+/// cell quiesced at its latest commit (restored in place on the same host).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum CellSnapshot {
+    /// A bucket-backed version of a cell, forked on restore.
+    Version(CellVersion),
+    /// A host-local ephemeral cell quiesced at commit `committed`, reopened in place on restore
+    /// (`EEXIST` if the cell was modified or replaced since the snapshot).
+    LocalEphemeral {
+        /// The cell's tenant.
+        tenant: u64,
+        /// The cell's ID.
+        cell: u64,
+        /// The cell's latest commit number when the snapshot was taken.
+        committed: u64,
+    },
+}
+
 /// cladefs: a version of a cell ([`OpenCell::versions`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VersionInfo {
@@ -612,6 +631,33 @@ impl OpenCell {
     /// The number of the open cell's latest commit.
     pub fn committed(&self) -> Result<u64> {
         self.local.last_commit().map_err(errno)
+    }
+
+    /// cladefs: whether this open cell is a host-local ephemeral cell (doc-25).
+    pub fn is_ephemeral(&self) -> bool {
+        self.local.is_ephemeral()
+    }
+
+    /// cladefs: the kind of cell this open cell serves (`Fxfs`, `Sqlite`, or `Memory`).
+    pub fn kind(&self) -> Option<Kind> {
+        self.local.kind()
+    }
+
+    /// cladefs: quiesces an ephemeral cell for a host-local VM snapshot: verifies no extent is
+    /// open (`EBUSY` otherwise), flushes every ordered commit durably to the host's disk, folds
+    /// closed segments into its local checkpoint (punching freed runs), and returns the latest
+    /// commit number to guard stale restores (`EEXIST`). `EINVAL` for a bucket-backed cell.
+    pub async fn quiesce_ephemeral(&self) -> Result<u64, Error> {
+        let admitted = self.admit(Changing::Cell)?;
+        if !self.is_ephemeral() {
+            return Err(Errno::EINVAL.into());
+        }
+        self.at_rest(&admitted, async {
+            let committed = self.make_local().await?;
+            self.local.checkpoint(true).await.map_err(Error::new)?;
+            Ok(committed)
+        })
+        .await
     }
 
     /// cladefs: what reads the extents the open cell holds whose data is in the bucket, at their

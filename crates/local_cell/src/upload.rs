@@ -619,10 +619,45 @@ pub(crate) fn keys_fingerprint() -> String {
     <EphemeralKeys as TypeFingerprint>::fingerprint()
 }
 
+/// cladefs: creates the initial local checkpoint, encryption ring, and ring hold for a new
+/// standalone (parentless) host-local ephemeral cell of `capacity` bytes (cell-directory v19):
+/// wraps a fresh cell KEK under its tenant's KEK via `runtime.keys.kms`, wraps a fresh DEK under
+/// it, and registers the ring so `ForgetTenantKeys`/`ShredTenant` revokes it immediately. Writes
+/// nothing to `bucket`.
+pub async fn create_standalone_ephemeral(
+    bucket: &RoutedBucket,
+    runtime: &Runtime,
+    cell: CellId,
+    capacity: u64,
+    owner: u64,
+) -> Result<(crate::LocalCheckpoint, Arc<Ring>, RingHold), Failure> {
+    let (kek_secret, kek) = keys::new_cell_kek(&runtime.keys.kms, cell).await?;
+    let dek =
+        keys::wrap_dek((&kek_secret, kek.generation), cell, 1, &extent_frame::Secret::random());
+    let ephemeral_keys = EphemeralKeys {
+        owner,
+        kek: Some(kek.clone()),
+        deks: vec![dek.clone()],
+        inherited: Vec::new(),
+    };
+    let mut head = Head::of(bucket_cell::record::Made::Root, owner);
+    head.epoch = 1;
+    head.holder = rand::random();
+    head.keks.push(kek);
+    head.deks.push(dek);
+    let cell_keys = CellKeys::fresh(cell, &head, runtime.keys.kms.clone());
+    let ring = keys::ring(bucket, &cell_keys, cell, &head, true).await?;
+    let holding = runtime.keys.ring.hold(ring.clone());
+    let checkpoint =
+        crate::LocalCheckpoint::root(capacity, crate::layout::versioned(&ephemeral_keys));
+    Ok((checkpoint, ring, holding))
+}
+
 /// cladefs: opens the ephemeral cell `recovering` recovered (doc-25, TASK-698.3), with
 /// `cell_options`: its keys, as its local checkpoint keeps them, unwrapped through the host's KMS
-/// as its fork's head would give them; its parent's state at its version recovered from `bucket`,
-/// its parent's, under them, which its cell starts from. No uploader: nothing of it goes to a
+/// as its fork's head would give them; for a forked ephemeral cell, its parent's state at its
+/// version recovered from `bucket`, its parent's, under them; for a standalone (parentless)
+/// ephemeral cell, zero bucket I/O and an empty lower layer. No uploader: nothing of it goes to a
 /// bucket. Its parent's extents are read through `cache`, the host's, if it has one. Its keys are
 /// held among the host's while what it returns with the cell is, so that the host's fetchers read
 /// what it inherits, and forgetting its tenant or cell drops them (TASK-698.7).
@@ -632,14 +667,19 @@ pub async fn open_ephemeral<D: Dir>(
     bucket: Arc<RoutedBucket>,
     runtime: &Runtime,
     (cache, held): (Option<Arc<Cache>>, Option<Arc<HeldParts>>),
-) -> Result<(Arc<LocalCell<D>>, RingHold, Forked), Failure> {
+) -> Result<(Arc<LocalCell<D>>, RingHold, Option<Forked>), Failure> {
     let checkpoint = blocking(|| recovering.local_checkpoint())?;
     let (parent, cell) = (checkpoint.parent(), recovering.cell());
     let EphemeralKeys { owner, kek, deks, inherited } =
         crate::layout::read_versioned(checkpoint.keys())
             .map_err(|err| Failure::msg(format!("an ephemeral cell's keys: {err:#}")))?;
-    let origin = Origin { parent: parent.cell, at: parent.at, epoch: parent.epoch };
-    let mut head = Head::of(bucket_cell::record::Made::Clone(origin), owner);
+    let origin =
+        parent.map(|parent| Origin { parent: parent.cell, at: parent.at, epoch: parent.epoch });
+    let made = match origin {
+        Some(origin) => bucket_cell::record::Made::Clone(origin),
+        None => bucket_cell::record::Made::Root,
+    };
+    let mut head = Head::of(made, owner);
     // cladefs: use a fresh non-zero taking `(epoch, holder)` on every ephemeral reopen so
     // `CachingKms::kek` unwraps afresh instead of reusing a cached `(0, 0)` unwrap from an
     // earlier open (board 5410).
@@ -652,13 +692,18 @@ pub async fn open_ephemeral<D: Dir>(
     // board 2704).
     let cell_keys = CellKeys::fresh(cell, &head, runtime.keys.kms.clone());
     let ring = keys::ring(&*bucket, &cell_keys, cell, &head, true).await?;
-    let recovering_parent =
-        bucket_cell::recovery::recover_version(&*bucket, parent.cell, parent.at, &ring);
-    let recovered = recovering_parent.await?;
-    let state = recovered.layer.unwrap_or_else(|| Arc::new(recovered.state));
+    let (parent_state, forked) = match (parent, origin) {
+        (Some(parent), Some(origin)) => {
+            let recovering_parent =
+                bucket_cell::recovery::recover_version(&*bucket, parent.cell, parent.at, &ring);
+            let recovered = recovering_parent.await?;
+            let state = recovered.layer.unwrap_or_else(|| Arc::new(recovered.state));
+            (Some(state), Some(Forked { origin, ring: ring.clone() }))
+        }
+        _ => (None, None),
+    };
     let holding = runtime.keys.ring.hold(ring.clone());
-    let forked = Forked { origin, ring: ring.clone() };
-    let opening = crate::EphemeralOpening { parent: state, keys: ring, cache, held };
+    let opening = crate::EphemeralOpening { parent: parent_state, keys: ring, cache, held };
     let open_cell = blocking(|| recovering.open_ephemeral(cell_options, opening))?;
     Ok((Arc::new(open_cell), holding, forked))
 }

@@ -1,0 +1,78 @@
+salt 0x5a1d
+[
+    LogRecord {
+        contents: Contents {
+            commits: [
+                1048578,
+            ],
+            extents: [
+                (
+                    ExtentId {
+                        cell: 7,
+                        sequence: 1,
+                    },
+                    0,
+                    4096,
+                ),
+            ],
+            own: [],
+            frees: [],
+            root: None,
+            next_sequence: 2,
+            capacity: None,
+            continued: None,
+            versions: [],
+        },
+        runs: Checked(
+            [
+                12648430,
+            ],
+        ),
+    },
+    LogRecord {
+        contents: Contents {
+            commits: [
+                2097154,
+            ],
+            extents: [
+                (
+                    ExtentId {
+                        cell: 7,
+                        sequence: 2,
+                    },
+                    0,
+                    4096,
+                ),
+            ],
+            own: [],
+            frees: [],
+            root: None,
+            next_sequence: 3,
+            capacity: None,
+            continued: None,
+            versions: [],
+        },
+        runs: Held(
+            Bytes(
+                [
+                    171,
+                    171,
+                    171,
+                    171,
+                    171,
+                    171,
+                    171,
+                    171,
+                    171,
+                    171,
+                    171,
+                    171,
+                    171,
+                    171,
+                    171,
+                    171,
+                ],
+            ),
+        ),
+    },
+]

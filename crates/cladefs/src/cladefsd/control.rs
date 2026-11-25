@@ -587,6 +587,7 @@ fn stat_response(state: cells::CellState) -> StatCellResponse {
         fast_wal: fast_wal_active,
         fast_wal_bucket,
         fast_wal_degraded,
+        ephemeral: state.ephemeral,
     }
 }
 
@@ -643,8 +644,20 @@ impl Cladefsd for Control {
             force,
             upload_interval_ms,
             fast_wal,
+            ephemeral,
         } = request.into_inner();
         let cell_dir = path(cell_dir)?;
+        if ephemeral
+            && (cell != 0
+                || token.is_some()
+                || replicas.is_some()
+                || fast_wal.is_some()
+                || fsync != FsyncLevel::Ordered as i32
+                || force
+                || upload_interval_ms.is_some())
+        {
+            return Err(status(Errno::EINVAL));
+        }
         let upload_interval =
             cells::parse_upload_interval_ms(upload_interval_ms).map_err(status)?;
         room_for_a_cell(&self.daemon)?;
@@ -690,7 +703,7 @@ impl Cladefsd for Control {
             cell_dir,
             capacity,
             cell,
-            (token, kind, replication, fast_wal, force, upload_interval),
+            (token, kind, replication, fast_wal, force, upload_interval, ephemeral),
         )
         .await;
         reply(made.map(|made| CreateCellResponse { tenant: made.tenant, cell: made.id }))
@@ -713,12 +726,17 @@ impl Cladefsd for Control {
         &self,
         request: Request<ImportMemoryRequest>,
     ) -> Result<Response<ImportMemoryResponse>, Status> {
-        let ImportMemoryRequest { path: cell_dir, file, tenant, make_version } =
+        let ImportMemoryRequest { path: cell_dir, file, tenant, make_version, ephemeral } =
             request.into_inner();
         let (cell_dir, file) = (path(cell_dir)?, path(file)?);
+        if ephemeral && make_version {
+            return Err(status(Errno::EINVAL));
+        }
         room_for_a_cell(&self.daemon)?;
         let tenant = self.new_cell_at(&cell_dir, tenant)?;
-        let made = cells::import_memory(&self.daemon, cell_dir, file, tenant, make_version).await;
+        let made =
+            cells::import_memory(&self.daemon, cell_dir, file, tenant, make_version, ephemeral)
+                .await;
         reply(made.map(|(made, version)| ImportMemoryResponse {
             tenant: made.tenant,
             cell: made.id,

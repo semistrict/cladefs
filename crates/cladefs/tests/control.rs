@@ -78,6 +78,7 @@ fn cells_through_the_control_api() {
             fast_wal: false,
             fast_wal_bucket: String::new(),
             fast_wal_degraded: false,
+            ephemeral: false,
         }
     );
 
@@ -1083,6 +1084,7 @@ fn memory_cells_through_the_control_api() {
             file: name(&mem_file),
             tenant: 0,
             make_version: true,
+            ephemeral: false,
         }))
         .unwrap()
         .into_inner();
@@ -1125,6 +1127,7 @@ fn memory_cells_through_the_control_api() {
             file: name(&mem_file),
             tenant: 0,
             make_version: false,
+            ephemeral: false,
         }))
         .unwrap()
         .into_inner();
@@ -1146,6 +1149,7 @@ fn memory_cells_through_the_control_api() {
         file: name(&mem_file),
         tenant: 0,
         make_version: false,
+        ephemeral: false,
     }));
     assert_eq!(failure(exists), (Code::AlreadyExists, Errno::EEXIST));
 
@@ -1154,6 +1158,7 @@ fn memory_cells_through_the_control_api() {
         file: name(&dir.path().join("no-such-file.mem")),
         tenant: 0,
         make_version: false,
+        ephemeral: false,
     }));
     assert_eq!(failure(missing), (Code::NotFound, Errno::ENOENT));
 
@@ -1164,6 +1169,7 @@ fn memory_cells_through_the_control_api() {
         file: name(&bad_file),
         tenant: 0,
         make_version: false,
+        ephemeral: false,
     }));
     assert_eq!(failure(bad), (Code::InvalidArgument, Errno::EINVAL));
 
@@ -1184,6 +1190,7 @@ fn memory_cells_through_the_control_api() {
         file: name(&mem_file),
         tenant: 9,
         make_version: false,
+        ephemeral: false,
     }));
     assert_eq!(failure(wrong_tenant), (Code::PermissionDenied, Errno::EPERM));
     let right_tenant = daemon
@@ -1193,11 +1200,77 @@ fn memory_cells_through_the_control_api() {
             file: name(&mem_file),
             tenant: 0,
             make_version: true,
+            ephemeral: false,
         }))
         .unwrap()
         .into_inner();
     assert_eq!(right_tenant.tenant, 7);
     assert_ne!(right_tenant.version, 0);
+
+    // Ephemeral memory import: rejects make_version=true, otherwise stays local with ephemeral=true.
+    let bad_ephemeral = daemon.runtime.block_on(daemon.client.import_memory(ImportMemoryRequest {
+        path: name(&dir.path().join("ephemeral-mem-bad")),
+        file: name(&mem_file),
+        tenant: 0,
+        make_version: true,
+        ephemeral: true,
+    }));
+    assert_eq!(failure(bad_ephemeral), (Code::InvalidArgument, Errno::EINVAL));
+    let ephemeral_dir = dir.path().join("ephemeral-mem");
+    let imported_eph = daemon
+        .runtime
+        .block_on(daemon.client.import_memory(ImportMemoryRequest {
+            path: name(&ephemeral_dir),
+            file: name(&mem_file),
+            tenant: 0,
+            make_version: false,
+            ephemeral: true,
+        }))
+        .unwrap()
+        .into_inner();
+    assert_eq!(imported_eph.version, 0);
+    let eph_stat = daemon.stat(&ephemeral_dir).unwrap();
+    assert!(eph_stat.ephemeral);
+    assert!(!eph_stat.uploading);
+    let eph_open = cladefs::memory_cell::MemoryCell::open_ephemeral_existing(
+        &daemon.vms,
+        &ephemeral_dir,
+        Some(cladefs::CellId { tenant: imported_eph.tenant, id: imported_eph.cell }),
+        size,
+    )
+    .unwrap();
+    let mut got_eph = vec![0u8; size as usize];
+    eph_open.read(0, &mut got_eph).unwrap();
+    assert!(got_eph == expected);
+    eph_open.close().unwrap();
+    daemon.delete(&ephemeral_dir).unwrap();
+
+    // Standalone ephemeral CreateCell via control API.
+    let eph_cell_dir = dir.path().join("standalone-ephemeral");
+    let created_eph = daemon
+        .runtime
+        .block_on(daemon.client.create_cell(CreateCellRequest {
+            path: name(&eph_cell_dir),
+            capacity: CAPACITY,
+            kind: CellKind::Memory.into(),
+            ephemeral: true,
+            ..Default::default()
+        }))
+        .unwrap()
+        .into_inner();
+    assert_ne!(created_eph.cell, 0);
+    let stat_eph = daemon.stat(&eph_cell_dir).unwrap();
+    assert!(stat_eph.ephemeral);
+    assert!(!stat_eph.uploading);
+    daemon.delete(&eph_cell_dir).unwrap();
+    let bad_create_eph = daemon.runtime.block_on(daemon.client.create_cell(CreateCellRequest {
+        path: name(&dir.path().join("standalone-ephemeral-bad")),
+        capacity: CAPACITY,
+        token: Some(1),
+        ephemeral: true,
+        ..Default::default()
+    }));
+    assert_eq!(failure(bad_create_eph), (Code::InvalidArgument, Errno::EINVAL));
 }
 
 /// doc-29: Fast WAL cells are refused with ENOTSUP without CLADEFSD_FAST_WAL_BUCKET and with

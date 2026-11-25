@@ -91,6 +91,27 @@ impl MemoryCell {
         Self::over(daemon.open_forked(cell_dir, from, capacity(size))?, size)
     }
 
+    /// Creates (or reopens) a standalone host-local ephemeral memory cell at `cell_dir` of `size`
+    /// bytes of zeros, writing nothing to the bucket. `EINVAL` if the cell already exists with
+    /// another size, kind, or non-ephemeral mode.
+    pub fn open_ephemeral(socket: &Path, cell_dir: &Path, size: u64) -> Result<Self, Error> {
+        let daemon = DaemonConnection::connect(socket)?;
+        Self::over(daemon.open_memory_ephemeral(cell_dir, capacity(size))?, size)
+    }
+
+    /// Reopens an existing host-local ephemeral memory cell at `cell_dir` in place (`ENOENT` if
+    /// missing, `EINVAL` if not an ephemeral memory cell or wrong size, `EEXIST` if `expected` is
+    /// provided and the cell ID on disk differs).
+    pub fn open_ephemeral_existing(
+        socket: &Path,
+        cell_dir: &Path,
+        expected: Option<crate::CellId>,
+        size: u64,
+    ) -> Result<Self, Error> {
+        let daemon = DaemonConnection::connect(socket)?;
+        Self::over(daemon.open_ephemeral_memory_existing(cell_dir, expected, capacity(size))?, size)
+    }
+
     /// The memory cell `opened` is, of a memory of `size` bytes, made one of zeros if new.
     fn over(opened: CellClient, size: u64) -> Result<Self, Error> {
         let client = Arc::new(opened);
@@ -123,6 +144,16 @@ impl MemoryCell {
     /// Its cell.
     pub fn cell(&self) -> u64 {
         self.client.cell()
+    }
+
+    /// Its cell's tenant.
+    pub fn tenant(&self) -> u64 {
+        self.client.tenant()
+    }
+
+    /// Whether this memory cell is a host-local ephemeral cell (zero bucket uploads).
+    pub fn is_ephemeral(&self) -> bool {
+        self.client.is_ephemeral()
     }
 
     /// Writes `pages` at `offset`, whole pages, to be committed by [`MemoryCell::commit`].
@@ -194,16 +225,14 @@ impl MemoryCell {
         self.commit()
     }
 
-    /// Snapshots the memory cell's window (TASK-456.4): writes its window's private pages into the
-    /// cell (all-zero ones discarded as holes), commits them at once, reclaims them back to the
-    /// newly committed extents so no private pages remain, and makes a version of the cell.
+    /// Flushes all private pages in this memory cell's window into the cell (zero pages discarded
+    /// as holes), commits them durably, and reclaims them back to the newly committed extents so
+    /// no private pages remain.
     ///
     /// # Safety
     ///
-    /// `base` must be the base address previously passed to [`MemoryCell::window`], and no guest
-    /// vCPU or other thread may be concurrently mutating the window's memory (e.g., the VM is
-    /// paused).
-    pub unsafe fn snapshot_window(&self, base: NonNull<u8>) -> Result<CellVersion, Error> {
+    /// As [`MemoryCell::snapshot_window`].
+    unsafe fn flush_window_private(&self, base: NonNull<u8>) -> Result<(), Error> {
         if self.window.lock().unwrap().is_none() {
             return Err(Error::new(Errno::EINVAL)
                 .context("snapshotting memory of a memory cell with no window"));
@@ -222,7 +251,44 @@ impl MemoryCell {
         for run in &runs {
             self.reclaim(run.start, run.end - run.start)?;
         }
+        Ok(())
+    }
+
+    /// Snapshots the memory cell's window (TASK-456.4): writes its window's private pages into the
+    /// cell (all-zero ones discarded as holes), commits them at once, reclaims them back to the
+    /// newly committed extents so no private pages remain, and makes a version of the cell.
+    ///
+    /// # Safety
+    ///
+    /// `base` must be the base address previously passed to [`MemoryCell::window`], and no guest
+    /// vCPU or other thread may be concurrently mutating the window's memory (e.g., the VM is
+    /// paused).
+    pub unsafe fn snapshot_window(&self, base: NonNull<u8>) -> Result<CellVersion, Error> {
+        // SAFETY: Caller upholds the window base and quiescence invariant.
+        unsafe { self.flush_window_private(base) }?;
         self.make_version()
+    }
+
+    /// Snapshots a host-local ephemeral memory cell's window in place: writes its private pages
+    /// into the cell (zero pages discarded as holes), commits them, reclaims them so no private
+    /// pages remain, and checkpoints the ephemeral cell durably on host SSD (punching freed runs)
+    /// without making a bucket version or uploading anything to object storage.
+    ///
+    /// # Safety
+    ///
+    /// As [`MemoryCell::snapshot_window`].
+    pub unsafe fn snapshot_window_ephemeral(
+        &self,
+        base: NonNull<u8>,
+    ) -> Result<crate::CellId, Error> {
+        if !self.is_ephemeral() {
+            return Err(Error::new(Errno::EINVAL)
+                .context("snapshot_window_ephemeral called on a non-ephemeral memory cell"));
+        }
+        // SAFETY: Caller upholds the window base and quiescence invariant.
+        unsafe { self.flush_window_private(base) }?;
+        self.client.snapshot_cell().map_err(Error::new)?;
+        Ok(crate::CellId { tenant: self.tenant(), id: self.cell() })
     }
 
     /// Makes a version of the cell as of its last commit: a VM snapshot's memory, which any number
@@ -798,5 +864,166 @@ mod tests {
         memory_cell.close().unwrap();
         // SAFETY: Unmaps the test's memory after `memory_cell` dropped.
         assert_eq!(unsafe { libc::munmap(base.as_ptr().cast(), size as usize) }, 0);
+    }
+
+    #[test]
+    fn ephemeral_memory_cell_suspends_resumes_resuspends_and_deletes_without_bucket_uploads() {
+        // SAFETY: nextest runs each test in a process of its own, whose other threads don't read
+        // the environment yet.
+        unsafe {
+            std::env::set_var("CLADEFSD_BUCKET", "memory:///ephemeral-memory-cells");
+            std::env::set_var("CLADEFSD_TOKEN", "1");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("cladefsd.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        std::thread::spawn(move || crate::cladefsd::server::serve(listener));
+        let ps = page_size();
+        const PAGES: u64 = 32;
+        let size = PAGES * ps;
+        let cell_dir = dir.path().join("ephemeral-mem");
+
+        // Opening missing ephemeral memory cell fails with ENOENT.
+        assert_eq!(
+            MemoryCell::open_ephemeral_existing(&socket, &cell_dir, None, size)
+                .err()
+                .and_then(|err| err.errno()),
+            Some(Errno::ENOENT)
+        );
+
+        // Cold-boot suspend: create standalone ephemeral memory cell and populate guest RAM.
+        let mut expected: Vec<u8> =
+            (0..PAGES).flat_map(|page| pattern(page as u8, ps as usize)).collect();
+        let cold = MemoryCell::open_ephemeral(&socket, &cell_dir, size).unwrap();
+        assert!(cold.is_ephemeral());
+        assert_eq!(cold.make_version().unwrap_err().errno(), Some(Errno::ENOTSUP));
+        let cell_id = crate::CellId { tenant: cold.tenant(), id: cold.cell() };
+        let page = cold.page_size();
+        // Record baseline after any one-time BucketKms tenant KEK creation (`Upload::Other`);
+        // cell data (`Segments`/`Extents`/`Checkpoints`) must stay strictly zero, and zero
+        // further bytes of any kind may be uploaded during writes, commits, re-suspend, or delete.
+        let bucket = crate::cladefsd::cells::daemon_bucket().unwrap();
+        let cell_data_uploads = |b: &bucket_cell::object_bucket::RoutedBucket| -> u64 {
+            let stats = b.stats();
+            stats.uploaded(bucket_cell::object_bucket::Upload::Segments)
+                + stats.uploaded(bucket_cell::object_bucket::Upload::Extents)
+                + stats.uploaded(bucket_cell::object_bucket::Upload::Checkpoints)
+        };
+        let uploaded_bytes = |b: &bucket_cell::object_bucket::RoutedBucket| -> u64 {
+            let stats = b.stats();
+            bucket_cell::object_bucket::Upload::ALL
+                .into_iter()
+                .map(|kind| stats.uploaded(kind))
+                .sum()
+        };
+        let baseline_uploads = uploaded_bytes(&bucket);
+        assert_eq!(cell_data_uploads(&bucket), 0, "ephemeral create must upload no cell data");
+
+        cold.write_sparse(0, &expected).unwrap();
+        cold.commit().unwrap();
+        cold.close().unwrap();
+
+        assert_eq!(cell_data_uploads(&bucket), 0, "ephemeral memory cell must upload no cell data");
+        assert_eq!(
+            uploaded_bytes(&bucket),
+            baseline_uploads,
+            "ephemeral memory cell write/commit/close must upload nothing to bucket"
+        );
+
+        // Mismatched expected CellId is rejected with EEXIST.
+        let wrong_id = crate::CellId { tenant: cell_id.tenant, id: cell_id.id + 1 };
+        assert_eq!(
+            MemoryCell::open_ephemeral_existing(&socket, &cell_dir, Some(wrong_id), size)
+                .err()
+                .and_then(|err| err.errno()),
+            Some(Errno::EEXIST)
+        );
+
+        // Resume in place via open_ephemeral_existing + uffd window.
+        let resumed =
+            MemoryCell::open_ephemeral_existing(&socket, &cell_dir, Some(cell_id), size).unwrap();
+        assert!(resumed.is_ephemeral());
+        // SAFETY: Anonymous memory, reserving none, the test's: the window's.
+        let base = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                size as usize,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(base, libc::MAP_FAILED);
+        let base = NonNull::new(base.cast::<u8>()).unwrap();
+        // SAFETY: The memory is the test's and outlives `resumed`.
+        unsafe { resumed.window(base, size, None) }.unwrap();
+        crate::guest_thread_started();
+        let per_host_page = ps / page;
+        // Read page 0 lazily via userfaultfd and verify contents.
+        // SAFETY: Within the window's mapping of `size` bytes.
+        let page0: Vec<u8> =
+            (0..ps as usize).map(|i| unsafe { base.as_ptr().add(i).read_volatile() }).collect();
+        assert_eq!(page0, &expected[..ps as usize]);
+
+        // Modify page 3 with new data and zero page 7 completely (hole).
+        let page3 = pattern(0xab, ps as usize);
+        let zeros = vec![0u8; ps as usize];
+        // SAFETY: Within the window's mapping of `size` bytes.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                page3.as_ptr(),
+                base.as_ptr().add((3 * ps) as usize),
+                ps as usize,
+            );
+            std::ptr::copy_nonoverlapping(
+                zeros.as_ptr(),
+                base.as_ptr().add((7 * ps) as usize),
+                ps as usize,
+            );
+        }
+        expected[3 * ps as usize..4 * ps as usize].copy_from_slice(&page3);
+        expected[7 * ps as usize..8 * ps as usize].copy_from_slice(&zeros);
+        assert_eq!(resumed.private_pages().unwrap(), 2 * per_host_page);
+
+        // Re-suspend in place without creating any bucket version.
+        // SAFETY: `base` is the window's mapping and no other thread touches it.
+        let snapped = unsafe { resumed.snapshot_window_ephemeral(base) }.unwrap();
+        assert_eq!(snapped, cell_id);
+        assert_eq!(resumed.private_pages().unwrap(), 0);
+        assert_eq!(private_memory_held(size), 0);
+        resumed.close().unwrap();
+        // SAFETY: Unmaps the test's memory after `resumed` dropped.
+        assert_eq!(unsafe { libc::munmap(base.as_ptr().cast(), size as usize) }, 0);
+
+        // Reopen again and verify every single byte persisted across re-suspend.
+        let reopened =
+            MemoryCell::open_ephemeral_existing(&socket, &cell_dir, Some(cell_id), size).unwrap();
+        let mut got = vec![0u8; size as usize];
+        reopened.read(0, &mut got).unwrap();
+        assert!(got == expected, "re-suspended ephemeral memory cell bytes differ");
+        reopened.close().unwrap();
+
+        // Still zero bucket uploads across cold-boot suspend, resume, re-suspend, and reopen.
+        assert_eq!(cell_data_uploads(&bucket), 0, "ephemeral memory cell uploaded cell data");
+        assert_eq!(
+            uploaded_bytes(&bucket),
+            baseline_uploads,
+            "ephemeral memory cell uploaded bytes to bucket"
+        );
+
+        // Deleting a standalone ephemeral memory cell succeeds without CLADEFSD_EPHEMERAL.
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(crate::OpenCell::delete_on(crate::Host::process(), &cell_dir, Some(&bucket)))
+            .unwrap();
+        assert!(!cell_dir.exists());
+        assert_eq!(
+            uploaded_bytes(&bucket),
+            baseline_uploads,
+            "deleting standalone ephemeral memory cell must upload nothing to bucket"
+        );
     }
 }

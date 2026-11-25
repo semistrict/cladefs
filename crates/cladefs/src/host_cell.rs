@@ -952,13 +952,97 @@ fn make_dir(path: &Path) -> Result<(), Error> {
     })
 }
 
+/// cladefs: creates a standalone (parentless) host-local ephemeral cell of `kind` and `capacity`
+/// bytes for `tenant` at `path` on `host`, unmade until the caller marks it whole: encrypted under
+/// a tenant-wrapped cell KEK via the host's KMS, writing nothing to the bucket and holding no
+/// bucket reference or `CLADEFSD_EPHEMERAL` journal entry.
+pub(crate) async fn create_ephemeral_unmade_on(
+    host: &crate::Host,
+    path: &Path,
+    capacity: u64,
+    tenant: u64,
+    kind: cell::Kind,
+    keeping: &upload::Options,
+) -> Result<(Arc<LocalCell<HostDir>>, Arc<RoutedBucket>, bucket_cell::keys::RingHold), Failure> {
+    let url = bucket_for(path)?;
+    let bucket = bucket_on(host, &url).with_context(|| format!("opening the bucket {url}"))?;
+    let cell = new_cell(&bucket, tenant).await?;
+    let runtime = crate::bucket::runtime_on(host)?;
+    let (checkpoint, ring, ring_hold) =
+        upload::create_standalone_ephemeral(&*bucket, &runtime, cell, capacity, rand::random())
+            .await?;
+    upload::blocking(|| host_fs::create_dir(path))
+        .map_err(|err| Failure::local(err, format!("creating {}", path.display())))?;
+    let made = upload::blocking(|| -> anyhow::Result<LocalCell<HostDir>> {
+        let description = Description { block_size: BLOCK_SIZE, capacity, cell };
+        local_cell::create_host_ephemeral_on(
+            host.local(),
+            path,
+            description,
+            &url,
+            kind,
+            &checkpoint,
+            ring.try_encrypting()?,
+            |making| {
+                durable_in_parent(making, path);
+                Ok(())
+            },
+        )
+        .with_context(|| {
+            format!("creating standalone ephemeral cell {cell}: its cell directory")
+        })?;
+        let recovering = LocalCell::recover_unmade(host_dir_on(host, path)?)?;
+        let opening = local_cell::EphemeralOpening {
+            parent: None,
+            keys: ring,
+            cache: keeping.cache.clone(),
+            held: keeping.held.clone(),
+        };
+        recovering.open_ephemeral(options(), opening)
+    });
+    match made {
+        Ok(local) => Ok((Arc::new(local), bucket, ring_hold)),
+        Err(err) => {
+            upload::blocking(|| discard_on(host, path));
+            Err(Failure::from(err))
+        }
+    }
+}
+
+/// cladefs: creates a standalone (parentless) host-local ephemeral cell at `path` on `host`,
+/// marked whole (`made`).
+pub(crate) async fn create_ephemeral_on(
+    host: &crate::Host,
+    path: &Path,
+    capacity: u64,
+    tenant: u64,
+    kind: cell::Kind,
+    keeping: &upload::Options,
+) -> Result<(Arc<LocalCell<HostDir>>, Arc<RoutedBucket>, bucket_cell::keys::RingHold), Failure> {
+    let (local, bucket, ring_hold) =
+        create_ephemeral_unmade_on(host, path, capacity, tenant, kind, keeping).await?;
+    if let Err(err) = upload::blocking(|| local.made()) {
+        // Error path: best-effort close before discarding the unmade directory.
+        let _ = local.close().await;
+        drop((local, bucket, ring_hold));
+        upload::blocking(|| discard_on(host, path));
+        return Err(Failure::from(err));
+    }
+    Ok((local, bucket, ring_hold))
+}
+
 /// cladefs: opens the ephemeral cell at `path` on `host`.
 pub(crate) async fn open_ephemeral_on(
     host: &crate::Host,
     path: &Path,
     keeping: &upload::Options,
 ) -> Result<
-    (Arc<LocalCell<HostDir>>, Arc<RoutedBucket>, bucket_cell::keys::RingHold, upload::Forked),
+    (
+        Arc<LocalCell<HostDir>>,
+        Arc<RoutedBucket>,
+        bucket_cell::keys::RingHold,
+        Option<upload::Forked>,
+    ),
     Failure,
 > {
     closed_on(host, path).await?;
@@ -1025,14 +1109,17 @@ pub(crate) async fn delete_on(
     bucket: Option<&RoutedBucket>,
     token: impl Fn() -> Result<u64, Failure>,
 ) -> Result<(), Error> {
-    // cladefs: an ephemeral cell's reference retired, its note forgotten (doc-25, TASK-698.3).
+    // cladefs: an ephemeral cell's reference retired, its note forgotten (doc-25, TASK-698.3);
+    // standalone (parentless) ephemeral cells hold no bucket reference or journal entry.
     if upload::blocking(|| is_ephemeral(path)) {
         return delete_with_on(host_ctx, path, async |dir, cell| {
             let checkpoint =
                 upload::blocking(|| local_cell::host_local_checkpoint_on(host_ctx.local(), dir))?;
             let checkpoint = checkpoint
                 .ok_or_else(|| Failure::msg(format!("{} has no checkpoint", dir.display())))?;
-            let parent = checkpoint.parent();
+            let Some(parent) = checkpoint.parent() else {
+                return Ok(());
+            };
             let origin = bucket_cell::layout::Origin {
                 parent: parent.cell,
                 at: parent.at,

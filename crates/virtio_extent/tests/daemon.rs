@@ -615,8 +615,11 @@ fn devices_are_snapshotted_and_restored() {
     assert!(quiesced);
     let state = device.state();
     assert_eq!((state.frozen, state.window_addr), (true, None));
-    assert_eq!(state.version, device.snapshot().unwrap().version);
-    assert_eq!(state.version.cell, u64::from_le(original.cell));
+    assert_eq!(state.target, device.snapshot().unwrap().target);
+    assert!(matches!(
+        state.target,
+        cladefs::CellSnapshot::Version(v) if v.cell == u64::from_le(original.cell)
+    ));
 
     let mut restored_state = state.clone();
     restored_state.config.path_on_host = dir.0.join("restored").display().to_string();
@@ -662,11 +665,11 @@ fn snapshots_dropped_are_gone() {
     let freeze = bytes::<Info>(VIRTIO_EXTENT_T_FREEZE, VIRTIO_EXTENT_FREEZE_FROZEN, None, &[]);
     assert_eq!(serve_with(&device, &freeze, RESPONSE), (RESPONSE as u32, 0));
     device.take_snapshot(|| {}).unwrap();
-    let dropped = device.snapshot().unwrap().version;
+    let dropped = device.snapshot().unwrap().target;
     device.drop_snapshot();
     assert!(device.snapshot().is_none());
     device.take_snapshot(|| {}).unwrap();
-    assert_ne!(device.snapshot().unwrap().version, dropped);
+    assert_ne!(device.snapshot().unwrap().target, dropped);
 }
 
 /// cladefs doc-26 (TASK-203): a device whose window holds a private page, its VM process's own,
@@ -1152,4 +1155,123 @@ fn block_aligned_dax_maps_and_private_work_on_any_host_page_size() {
     device.take_snapshot(|| {}).unwrap();
     let state = device.state();
     assert_eq!(state.mappings.len(), 2);
+}
+
+/// Host-local suspend/resume of an ephemeral rootfs cell: takes a `LocalEphemeral` snapshot
+/// without creating a bucket version, restores in place, continues writing, re-snapshots at a
+/// higher commit, and rejects restoring the stale snapshot with `EEXIST`.
+#[test]
+fn ephemeral_device_snapshots_restores_resuspends_and_rejects_stale_restore() {
+    let dir = daemon();
+    let lost: virtio_extent::OnLost = Arc::new(|| panic!("the daemon went"));
+    let store = dir.0.join("ephemeral-root");
+    // Create a standalone ephemeral Fxfs cell via OpenCell so it starts ephemeral on disk.
+    let opening = cladefs::Opening::here().unwrap();
+    let created = futures::executor::block_on(cladefs::OpenCell::create_ephemeral_with(
+        &store,
+        4 << 20,
+        0,
+        opening,
+    ))
+    .unwrap();
+    let cell_id = created.cell();
+    futures::executor::block_on(created.close());
+
+    let vm1 = Arc::new(FakeVm::default());
+    let cfg = Config {
+        capacity: 4 << 20,
+        dax_window_size: Some(4 << 20),
+        ..config(&dir, "ephemeral-root")
+    };
+    let mut device = Device::new(cfg, 1, vm1.clone(), lost.clone()).unwrap();
+    device.activate(device.features(), Arc::new(Counted::default())).unwrap();
+
+    // Write extent 1 and commit, then map it into the DAX window.
+    let id = |seq: u64| ExtentIdLe { cell: cell_id.id.to_le(), sequence: seq.to_le() };
+    let w1 = bytes(
+        VIRTIO_EXTENT_T_WRITE,
+        VIRTIO_EXTENT_WRITE_COMMIT,
+        Some(IoArgs { id: id(1), offset: 0, len: (BLOCK as u32).to_le(), root_len: 0 }),
+        &[0x11u8; BLOCK],
+    );
+    assert_eq!(serve_with(&device, &w1, RESPONSE).1, 0);
+    let map1 = bytes(
+        VIRTIO_EXTENT_T_MAP,
+        0,
+        Some(MapArgs { id: id(1), offset: 0, len: (BLOCK as u64).to_le(), window_offset: 0 }),
+        &[],
+    );
+    assert_eq!(serve_with(&device, &map1, RESPONSE).1, 0);
+
+    // Freeze and take snapshot #1 (must record LocalEphemeral at commit 1).
+    let freeze = bytes::<Info>(VIRTIO_EXTENT_T_FREEZE, VIRTIO_EXTENT_FREEZE_FROZEN, None, &[]);
+    assert_eq!(serve_with(&device, &freeze, RESPONSE).1, 0);
+    device.take_snapshot(|| {}).unwrap();
+    let state1 = device.state();
+    assert_eq!(
+        state1.target,
+        cladefs::CellSnapshot::LocalEphemeral {
+            tenant: cell_id.tenant,
+            cell: cell_id.id,
+            committed: 1,
+        }
+    );
+    let encoded1 = state1.encode();
+    let decoded1 = virtio_extent::persist::State::decode(&encoded1).unwrap();
+    assert_eq!(decoded1, state1);
+
+    // Stop VMM #1.
+    drop(device);
+
+    // Restore VMM #2 in place from snapshot #1, verify DAX window mapping, thaw, write extent 2.
+    let vm2 = Arc::new(FakeVm::default());
+    let mut restored = Device::restore(&decoded1, 1, vm2.clone(), lost.clone()).unwrap();
+    restored.activate(restored.features(), Arc::new(Counted::default())).unwrap();
+    let base2 = vm2.host.load(Ordering::Relaxed) as *const u8;
+    // SAFETY: Within the mapped DAX window of 4 MiB, served by `restored`.
+    assert_eq!(unsafe { base2.read_volatile() }, 0x11);
+
+    let thaw = bytes::<Info>(VIRTIO_EXTENT_T_FREEZE, 0, None, &[]);
+    assert_eq!(serve_with(&restored, &thaw, RESPONSE).1, 0);
+    let w2 = bytes(
+        VIRTIO_EXTENT_T_WRITE,
+        VIRTIO_EXTENT_WRITE_COMMIT,
+        Some(IoArgs { id: id(2), offset: 0, len: (BLOCK as u32).to_le(), root_len: 0 }),
+        &[0x22u8; BLOCK],
+    );
+    assert_eq!(serve_with(&restored, &w2, RESPONSE).1, 0);
+    assert_eq!(serve_with(&restored, &freeze, RESPONSE).1, 0);
+    restored.take_snapshot(|| {}).unwrap();
+    let state2 = restored.state();
+    assert_eq!(
+        state2.target,
+        cladefs::CellSnapshot::LocalEphemeral {
+            tenant: cell_id.tenant,
+            cell: cell_id.id,
+            committed: 2,
+        }
+    );
+    drop(restored);
+
+    // Attempting to restore stale snapshot #1 must fail with EEXIST.
+    let stale_err =
+        Device::restore(&decoded1, 1, Arc::new(FakeVm::default()), lost.clone()).err().unwrap();
+    match stale_err {
+        virtio_extent::Error::Cell(_, err) => assert_eq!(err.errno(), Some(Errno::EEXIST)),
+        other => panic!("expected EEXIST for stale ephemeral snapshot, got {other}"),
+    }
+
+    // Restoring snapshot #2 succeeds and reads both extent 1 and extent 2.
+    let vm3 = Arc::new(FakeVm::default());
+    let mut restored2 = Device::restore(&state2, 1, vm3, lost).unwrap();
+    restored2.activate(restored2.features(), Arc::new(Counted::default())).unwrap();
+    let read2 = bytes(
+        VIRTIO_EXTENT_T_READ,
+        0,
+        Some(IoArgs { id: id(2), offset: 0, len: (BLOCK as u32).to_le(), root_len: 0 }),
+        &[],
+    );
+    let (used, status) = serve_with(&restored2, &read2, BLOCK + RESPONSE);
+    assert_eq!((used as usize, status), (BLOCK + RESPONSE, 0));
+    drop(restored2);
 }
