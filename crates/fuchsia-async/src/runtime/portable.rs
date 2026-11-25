@@ -2,8 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-pub mod scope;
-
 // cladefs: the runtime tasks and timers are on: tokio's; or, under the madsim simulation, madsim's,
 // so that what spawns them there, Fxfs, runs on the simulated host's one thread, its time the
 // simulation's (doc-24, board 5687). The executors below are tokio's either way: outside the
@@ -16,7 +14,6 @@ use tokio as rt;
 pub mod task {
     use super::rt;
     use core::task::{Context, Poll};
-    pub(crate) use rt::task::AbortHandle;
     pub use rt::task::yield_now;
     use std::future::Future;
     use std::mem::ManuallyDrop;
@@ -101,10 +98,6 @@ pub mod task {
                     }
                 }
             }
-        }
-
-        pub(crate) fn abort_handle(&self) -> AbortHandle {
-            self.task.abort_handle()
         }
     }
 

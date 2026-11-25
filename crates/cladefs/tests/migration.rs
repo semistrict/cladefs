@@ -1185,3 +1185,183 @@ fn migrating_cell_refuses_concurrent_migrate_and_delete_canonicalizes_path_and_p
     );
     forked.assert_handed_over(&there, 4);
 }
+
+/// Board 11657: verifies that (1) `reconcile_restarted_target` never misclassifies a 3rd-host
+/// takeover (`head.token > target_token` or `head.token > source_token` without a matching
+/// `target_token`) as target acceptance and never deletes the source's unuploaded tail while
+/// claiming `HandOverCell` succeeded, (2) an intermediate-token 3rd-host takeover
+/// (`source_token < head.token < target_token`) returns `EAGAIN` without deleting the source, and
+/// (3) `AbortMigration` passes available `placement_token` from `HandOverCell` so higher-token
+/// aborts reconcile cleanly after target restart (both pre-CAS `EAGAIN` and post-CAS `EEXIST`),
+/// while same-token dual restarts still fail closed with `ENOTCONN` (board 11530).
+#[test]
+fn bucket_backed_reconcile_rejects_third_host_takeover_and_higher_token_abort() {
+    let dir = tempfile::tempdir().unwrap();
+    let bucket = dir.path().join("bucket");
+    let hosts = [dir.path().join("source"), dir.path().join("target"), dir.path().join("third")];
+    for path in [&bucket, &hosts[0], &hosts[1], &hosts[2]] {
+        std::fs::create_dir(path).unwrap();
+    }
+    let [source_at, target_at] = addresses();
+    let [third_at, _] = addresses();
+    let source = daemon_bucket_only(
+        &hosts[0],
+        &bucket,
+        &[source_at.clone(), target_at.clone()],
+        &[("CLADEFSD_TOKEN", "1"), ("CLADEFSD_UPLOAD_INTERVAL", "3600")],
+    );
+    let target = daemon_bucket_only(
+        &hosts[1],
+        &bucket,
+        &[target_at.clone(), source_at.clone()],
+        &[("CLADEFSD_TOKEN", "1")],
+    );
+    let third = daemon_bucket_only(&hosts[2], &bucket, &[third_at], &[("CLADEFSD_TOKEN", "5")]);
+
+    // --- Part 1: 3rd-host takeover past target_token while target died pre-rename ---
+    let here = hosts[0].join("cell-takeover");
+    let there = hosts[1].join("cell-takeover");
+    let third_dir = hosts[2].join("cell-takeover");
+    let client = CellClient::connect(&source.vms, &here, CAPACITY).unwrap();
+    let cell = client.cell();
+    let own = |sequence| ExtentId { cell, sequence };
+    for sequence in 1..=3 {
+        write(&client, own(sequence));
+    }
+    source.migrate(&here, &target_at, &there).unwrap();
+    drop(client);
+    // Target dies before hand-over; source writes `migrating` and gets ENOTCONN.
+    drop(target);
+    let err = source.hand_over_with_token(&here, Some(2)).unwrap_err();
+    assert_eq!(err.errno(), Some(cladefs::Errno::ENOTCONN), "{err}");
+    assert!(here.join("migrating").exists());
+    assert!(!there.exists());
+
+    // A 3rd host takes the cell in the bucket at token 5 (> target_token 2) while target has
+    // nothing at `there`.
+    third
+        .control
+        .call(async |c| {
+            c.create_cell(cladefs::cladefsd::control::proto::CreateCellRequest {
+                path: control_path(&third_dir),
+                capacity: CAPACITY,
+                tenant: 0,
+                cell,
+                token: Some(5),
+                ..Default::default()
+            })
+            .await
+        })
+        .unwrap();
+    let third_client = CellClient::connect(&third.vms, &third_dir, CAPACITY).unwrap();
+    drop(third_client);
+
+    // Restart target cleanly (still has nothing at `there`).
+    let target = daemon_bucket_only(
+        &hosts[1],
+        &bucket,
+        &[target_at.clone(), source_at.clone()],
+        &[("CLADEFSD_TOKEN", "1")],
+    );
+
+    // Retrying HandOverCell(Some(2)) MUST NOT treat head.token=5 as target acceptance: must fail
+    // closed with ESTALE, leaving `here` (and its unuploaded tail) intact on disk.
+    let stale = source.hand_over_with_token(&here, Some(2)).unwrap_err();
+    assert_eq!(stale.errno(), Some(cladefs::Errno::ESTALE), "{stale}");
+    assert!(here.is_dir(), "source cell dir/tail must not be deleted on 3rd-host takeover");
+    assert!(here.join("migrating").exists());
+    assert!(!there.exists());
+
+    // Same-token retry (`None`) must also fail closed with ESTALE when head.token=5 > source=1.
+    let stale_none = source.hand_over_with_token(&here, None).unwrap_err();
+    assert_eq!(stale_none.errno(), Some(cladefs::Errno::ESTALE), "{stale_none}");
+    assert!(here.is_dir());
+
+    // Intermediate-token takeover (`source=1 < head=5 < target=6`): target's CAS at token 6
+    // definitely never landed, so reconcile returns EAGAIN, clears `migrating`, and keeps `here`.
+    let refused = source.hand_over_with_token(&here, Some(6)).unwrap_err();
+    assert_eq!(refused.errno(), Some(cladefs::Errno::EAGAIN), "{refused}");
+    assert!(here.is_dir(), "source cell dir/tail must be preserved");
+    assert!(!here.join("migrating").exists());
+    assert!(!there.exists());
+
+    // --- Part 2: Higher-token AbortMigration after target restart (pre-CAS and post-CAS) ---
+    let here2 = hosts[0].join("cell-abort-pre");
+    let there2 = hosts[1].join("cell-abort-pre");
+    let client2 = CellClient::connect(&source.vms, &here2, CAPACITY).unwrap();
+    let cell2 = client2.cell();
+    let own2 = |sequence| ExtentId { cell: cell2, sequence };
+    for sequence in 1..=3 {
+        write(&client2, own2(sequence));
+    }
+    source.migrate(&here2, &target_at, &there2).unwrap();
+    drop(client2);
+    drop(target);
+    let err = source.hand_over_with_token(&here2, Some(2)).unwrap_err();
+    assert_eq!(err.errno(), Some(cladefs::Errno::ENOTCONN), "{err}");
+    assert!(here2.join("migrating").exists());
+
+    // Restart target cleanly (head.token is still 1 < attempted_token 2).
+    let target = daemon_bucket_only(
+        &hosts[1],
+        &bucket,
+        &[target_at.clone(), source_at.clone()],
+        &[("CLADEFSD_TOKEN", "1"), ("FAILPOINTS", "migration::after_bucket_open=return")],
+    );
+    // AbortMigration uses the recorded placement_token (2), proves target never landed, clears
+    // `migrating`, returns EAGAIN (not ENOTCONN), and lets source resume serving.
+    let aborted = source.abort_migration(&here2).unwrap_err();
+    assert_eq!(aborted.errno(), Some(cladefs::Errno::EAGAIN), "{aborted}");
+    assert!(!here2.join("migrating").exists());
+    assert!(!there2.exists());
+    let resumed2 = CellClient::connect(&source.vms, &here2, CAPACITY).unwrap();
+    write(&resumed2, own2(4));
+
+    // Post-CAS target crash followed by target restart and AbortMigration: uses recorded
+    // placement_token (2), sees head.token == 2, cleans up `here2`, and answers EEXIST.
+    source.migrate(&here2, &target_at, &there2).unwrap();
+    drop(resumed2);
+    let crashed = source.hand_over_with_token(&here2, Some(2)).unwrap_err();
+    assert_eq!(crashed.errno(), Some(cladefs::Errno::ENOTCONN), "{crashed}");
+    assert!(there2.is_dir());
+    drop(target);
+    let target = daemon_bucket_only(
+        &hosts[1],
+        &bucket,
+        &[target_at.clone(), source_at.clone()],
+        &[("CLADEFSD_TOKEN", "1")],
+    );
+    let accepted = source.abort_migration(&here2).unwrap_err();
+    assert_eq!(accepted.errno(), Some(cladefs::Errno::EEXIST), "{accepted}");
+    assert!(!here2.exists());
+    let target_client2 = CellClient::connect(&target.vms, &there2, CAPACITY).unwrap();
+    for sequence in 1..=4 {
+        assert!(read(&target_client2, own2(sequence)) == data(sequence), "extent {sequence}");
+    }
+    drop(target_client2);
+
+    // --- Part 3: Same-token dual restart still fails closed with ENOTCONN (board 11530) ---
+    let here3 = hosts[0].join("cell-same-token-dual");
+    let there3 = hosts[1].join("cell-same-token-dual");
+    let client3 = CellClient::connect(&source.vms, &here3, CAPACITY).unwrap();
+    let cell3 = client3.cell();
+    write(&client3, ExtentId { cell: cell3, sequence: 1 });
+    source.migrate(&here3, &target_at, &there3).unwrap();
+    drop(client3);
+    drop(target);
+    let err = source.hand_over_with_token(&here3, None).unwrap_err();
+    assert_eq!(err.errno(), Some(cladefs::Errno::ENOTCONN), "{err}");
+    // Restart BOTH source and target on a same-token hand-over: must still fail closed ENOTCONN.
+    drop(source);
+    let source = daemon_bucket_only(
+        &hosts[0],
+        &bucket,
+        &[source_at.clone(), target_at.clone()],
+        &[("CLADEFSD_TOKEN", "1")],
+    );
+    let _target =
+        daemon_bucket_only(&hosts[1], &bucket, &[target_at, source_at], &[("CLADEFSD_TOKEN", "1")]);
+    let dual = source.abort_migration(&here3).unwrap_err();
+    assert_eq!(dual.errno(), Some(cladefs::Errno::ENOTCONN), "{dual}");
+    assert!(here3.join("migrating").exists(), "fail-closed must preserve marker on dual restart");
+}

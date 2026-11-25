@@ -362,6 +362,22 @@ pub trait Layer<K, V>: Send + Sync {
     /// Immediately clears any in-memory cached data for this layer.
     fn clear_cached_data(&self) {}
 
+    /// cladefs: bytes currently held in this layer's read chunk cache (TASK-596).
+    fn cached_bytes(&self) -> usize {
+        0
+    }
+
+    /// cladefs: number of chunks currently held in this layer's read chunk cache (TASK-596).
+    fn cached_chunks(&self) -> usize {
+        0
+    }
+
+    /// cladefs: evicts up to `max_chunks` cached read chunks from this layer, returning how many
+    /// were evicted (TASK-596).
+    fn evict_cached_chunks(&self, _max_chunks: usize) -> usize {
+        0
+    }
+
     /// Searches for a key. Bound::Excluded is not supported. Bound::Unbounded positions the
     /// iterator on the first item in the layer.
     async fn seek(&self, bound: std::ops::Bound<&K>)

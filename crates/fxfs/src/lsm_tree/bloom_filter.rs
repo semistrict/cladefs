@@ -40,27 +40,45 @@ use std::marker::PhantomData;
 // indexes modulo the size of the filter).
 // We target a false positive rate of 0.1%, from which we can derive the constants via relationships
 // described in https://en.wikipedia.org/wiki/Bloom_filter#Optimal_number_of_hash_functions.
+//
+// cladefs: integer fixed-point math (board 11687) so Fxfs needs zero floating-point operations in
+// the guest Linux kernel (where FPU is disabled and `guest/rust/std` provides no float methods).
+// Equivalent to the upstream f64 formula for TARGET_FP_RATE = 0.001:
+//   bits = ceil(n * (-ln(0.001) / ln(2)^2)).max(8).next_power_of_two()
+//   k    = smallest k >= 1 such that (1 - exp(-k / (bits / n)))^k <= 0.001
 fn estimate_params(num_items: usize) -> (usize, usize) {
     if num_items == 0 {
         return (0, 0);
     }
-    const TARGET_FP_RATE: f64 = 0.001;
-    use std::f64::consts::LN_2;
+    // Fixed-point scale 10^12: `-ln(0.001) / ln(2)^2 = 14.37758756605115984...`.
+    const SCALE: u128 = 1_000_000_000_000;
+    const BITS_PER_ITEM: u128 = 14_377_587_566_052;
+    // Exact minimal ratio `m / n` (scaled by 10^12, rounded up) for which `(1 - exp(-k / r))^k <=
+    // 0.001`. Since `bits` is rounded up to a power of two >= `ceil(n * BITS_PER_ITEM / SCALE)`,
+    // `bits / n` is always in `[14.377587..., 28.755175...)` (16.0 for `n == 1`), so `k` is in
+    // `3..=10`.
+    const THRESHOLDS: [(usize, u128); 7] = [
+        (3, 28_473_664_743_090),
+        (4, 20_428_426_146_544),
+        (5, 17_284_997_871_250),
+        (6, 15_784_056_925_422),
+        (7, 15_007_770_745_780),
+        (8, 14_607_697_478_480),
+        (9, 14_424_982_083_280),
+    ];
 
-    let n = num_items as f64;
-    let bits = ((n * TARGET_FP_RATE.ln()) / (-LN_2 * LN_2)).ceil() as u64;
+    let n = num_items as u128;
+    let bits = (n * BITS_PER_ITEM).div_ceil(SCALE);
     // Round up to a power-of-two number of bytes.
-    let bits = std::cmp::max(bits, 8).next_power_of_two();
-    let m = bits as f64;
+    let bits = (bits as u64).max(8).next_power_of_two();
+    let m_scaled = (bits as u128) * SCALE;
 
-    // Then, solve for a minimal `k` such that the probability of FP is <= TARGET_FP_RATE.
-    let mut k: f64 = 0.0;
-    let mut fp_rate = 1.0;
-    while fp_rate > TARGET_FP_RATE {
-        k += 1.0;
-        fp_rate = (1f64 - (-k / (m / n)).exp()).powf(k);
+    for (k, threshold) in THRESHOLDS {
+        if m_scaled >= n * threshold {
+            return (bits as usize, k);
+        }
     }
-    (bits as usize, k.round() as usize)
+    (bits as usize, 10)
 }
 
 /// A read-only handle to a bloom filter.  To create a bloom filter, use `BloomFilterWriter`.
@@ -244,6 +262,39 @@ mod tests {
         assert_eq!(estimate_params(5000), (131072, 4));
         assert_eq!(estimate_params(50000), (1048576, 4));
         assert_eq!(estimate_params(5_000_000), (134217728, 4));
+    }
+
+    /// cladefs: integer `estimate_params` matches the upstream f64 formula across all buckets
+    /// `0..=10_000_000` (board 11687).
+    #[test]
+    fn estimated_params_matches_float_formula() {
+        fn float_estimate(num_items: usize) -> (usize, usize) {
+            if num_items == 0 {
+                return (0, 0);
+            }
+            const TARGET_FP_RATE: f64 = 0.001;
+            use std::f64::consts::LN_2;
+            let n = num_items as f64;
+            let bits = ((n * TARGET_FP_RATE.ln()) / (-LN_2 * LN_2)).ceil() as u64;
+            let bits = std::cmp::max(bits, 8).next_power_of_two();
+            let m = bits as f64;
+            let mut k: f64 = 0.0;
+            let mut fp_rate = 1.0;
+            while fp_rate > TARGET_FP_RATE {
+                k += 1.0;
+                fp_rate = (1f64 - (-k / (m / n)).exp()).powf(k);
+            }
+            (bits as usize, k.round() as usize)
+        }
+        for n in 0..=20_000 {
+            assert_eq!(estimate_params(n), float_estimate(n), "mismatch at n={n}");
+        }
+        let mut n = 20_001usize;
+        while n <= 10_000_000 {
+            assert_eq!(estimate_params(n), float_estimate(n), "mismatch at n={n}");
+            // Step densely around every power-of-two transition.
+            n += (n / 1000).max(1);
+        }
     }
 
     const TEST_KEYS: [i32; 4] = [0, 65535, i32::MAX, i32::MIN];

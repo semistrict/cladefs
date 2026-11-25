@@ -301,15 +301,6 @@ mod tests {
             self.bucket.delete(key)
         }
 
-        fn delete_if(
-            &self,
-            key: &str,
-            version: &Version,
-        ) -> impl Future<Output = Result<(), crate::bucket::Error>> + Send {
-            self.requests.fetch_add(1, Ordering::Relaxed);
-            self.bucket.delete_if(key, version)
-        }
-
         fn now(&self) -> u64 {
             self.bucket.now()
         }

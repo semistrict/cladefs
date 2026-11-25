@@ -654,17 +654,20 @@ fn message() -> BoxedStrategy<Said> {
         (1u64..1024).prop_map(AckId::Is),
         any::<u64>().prop_map(AckId::Is),
     ];
+    let abusing_payload =
+        prop_oneof![Just(Vec::new()), proptest::collection::vec(any::<u8>(), 1..64)];
     let abusing = prop_oneof![
-        (ack_id, [word(), word(), word(), word(), word()]).prop_map(|(id, args)| Said {
-            id: Some(id),
-            ..said(ACK, 0, args, Payload::Bytes(Vec::new()))
+        (ack_id, [word(), word(), word(), word(), word()], abusing_payload.clone()).prop_map(
+            |(id, args, payload)| Said {
+                id: Some(id),
+                ..said(ACK, 0, args, Payload::Bytes(payload))
+            }
+        ),
+        ([word(), word(), word(), word(), word()], abusing_payload.clone())
+            .prop_map(|(args, payload)| said(STAGE_COUNTS, 0, args, Payload::Bytes(payload))),
+        ([word(), word(), word(), word(), word()], abusing_payload).prop_map(|(args, payload)| {
+            said(STAGE_PRIVATE_COUNTS, 0, args, Payload::Bytes(payload))
         }),
-        [word(), word(), word(), word(), word()].prop_map(|args| said(
-            STAGE_COUNTS,
-            0,
-            args,
-            Payload::Bytes(Vec::new())
-        )),
         prop_oneof![Just(b"0123abcd".to_vec()), proptest::collection::vec(any::<u8>(), 0..80)]
             .prop_map(|commit| said(BUILD, 0, [Is(0); 5], Payload::Bytes(commit))),
         (area(), word()).prop_map(|(area, len)| Said {
@@ -1648,7 +1651,7 @@ fn run_hostile(
     // is the stage operation's.
     let send =
         |header: Header, payload: &[u8], fd: Option<OwnedFd>| -> Result<u64, std::io::Error> {
-            if ![ACK, STAGE_COUNTS].contains(&header.kind) {
+            if ![ACK, STAGE_COUNTS, STAGE_PRIVATE_COUNTS].contains(&header.kind) {
                 shared.sent.lock().unwrap().insert(header.id, header);
             }
             // What an `OPEN` names, before a restore's NUL.
@@ -2356,6 +2359,16 @@ fn what_requests_hold_is_within_the_credit() {
     let rooted = Header::new(COMMIT, 6).with_flags(COMMIT_ROOT);
     let status = super::call(&sender, &mut receiver, rooted, &vec![5; MAX_ROOT]).header.status;
     assert_eq!(status, 0);
+    // Open a compact copying window (1 page) so 64 MiB MAP_MANY bursts test request/decode
+    // memory against `credit(0) + MAX_PAYLOAD` rather than a multi-GiB persistent window map
+    // (TASK-614, board 2624).
+    let ps = page_size();
+    let map_many_count = MAX_PAYLOAD / MAPPING_BYTES;
+    const WINDOW_PAGES: u64 = 1;
+    let window = Header::new(WINDOW, 7)
+        .with_body(&WindowBody { size: WINDOW_PAGES * ps, budget: 0 })
+        .with_flags(WINDOW_COPYING);
+    assert_eq!(super::call(&sender, &mut receiver, window, &[]).header.status, 0);
     // So many of each kind, `at_once` in flight, as many as the protocol allows: those of the
     // stream whose data the credit holds, and those of the area all of them. Their replies are read
     // as they come.
@@ -2367,8 +2380,16 @@ fn what_requests_hold_is_within_the_credit() {
                 sender.send(header, payload, &[]).unwrap();
             }
             for _ in 0..count {
-                let reply = receiver.receive(|| 0).unwrap().unwrap();
-                assert_eq!((reply.header.kind, reply.header.status), (REPLY, 0), "{kind}");
+                loop {
+                    let reply = receiver.receive(|| 0).unwrap().unwrap();
+                    if reply.header.kind == REPLY {
+                        assert_eq!(reply.header.status, 0, "{kind}");
+                        break;
+                    }
+                    if reply.header.flags & STAGE_ACK != 0 {
+                        sender.send(Header::new(ACK, reply.header.id), &[], &[]).unwrap();
+                    }
+                }
                 if let Some(header) = headers.next() {
                     sender.send(header, payload, &[]).unwrap();
                 }
@@ -2413,12 +2434,40 @@ fn what_requests_hold_is_within_the_credit() {
         })
     });
     let roots = (0..many).map(|id| Header::new(ROOT, 400 + id));
+    // TASK-614 (board 2624): 64 MiB FREE_MANY and MAP_MANY bursts stay within credit(0) + MAX_PAYLOAD.
+    let free_many_payload: Vec<u8> = (0..(len / 16))
+        .flat_map(|i| {
+            let mut bytes = [0u8; 16];
+            bytes[..8].copy_from_slice(&cell.to_le_bytes());
+            bytes[8..].copy_from_slice(&(10_000 + i).to_le_bytes());
+            bytes
+        })
+        .collect();
+    let free_many_in_flight = (MAX_STREAM_BYTES / (2 * len)) as usize;
+    let map_many_in_flight =
+        (MAX_STREAM_BYTES / (super::super::codec::MAP_MANY_HELD * len)).max(1) as usize;
+    let free_manys: Vec<_> = (0..free_many_in_flight as u64)
+        .map(|id| {
+            Header::new(FREE_MANY, 500 + id).with_body(&ExtentBody { cell, sequence: 9_999 + id })
+        })
+        .collect();
+    let map_many_mappings: Vec<_> = (0..map_many_count)
+        .map(|_| crate::WindowMapping {
+            window_offset: 0,
+            len: ps,
+            contents: crate::MappingContents::Zeros,
+        })
+        .collect();
+    let map_many_payload = super::super::codec::mappings_payload(&map_many_mappings);
+    let map_manys: Vec<_> = (0..2u64).map(|id| Header::new(MAP_MANY, 600 + id)).collect();
     let held = [
         burst("roots", roots.collect(), &[], many as usize),
         burst("reads", reads.collect(), &[], stream),
         burst("reads into the area", into_area.collect(), &[], many as usize),
         burst("writes from the area", from_area.collect(), &[], many as usize),
         burst("writes", writes.collect(), &vec![9; len as usize], stream),
+        burst("free_many", free_manys, &free_many_payload, free_many_in_flight),
+        burst("map_many", map_manys, &map_many_payload, map_many_in_flight),
     ];
     let within: Vec<_> = held.iter().map(|(kind, within, _)| (kind.as_str(), *within)).collect();
     assert_eq!(
@@ -2428,7 +2477,9 @@ fn what_requests_hold_is_within_the_credit() {
             ("reads", true),
             ("reads into the area", true),
             ("writes from the area", true),
-            ("writes", true)
+            ("writes", true),
+            ("free_many", true),
+            ("map_many", true),
         ],
         "MiB held past the credit's {} MiB and a reply's: {held:?}",
         credit(0) >> 20,
@@ -2689,6 +2740,51 @@ fn payloads_of_kinds_that_carry_none_end_their_connections() {
         super::assert_let_go(&sender, &stream, at_once);
         assert_eq!(mallory.in_flight().held(), 0, "a {kind}'s payload held");
     }
+}
+
+/// TASK-581 (board 2558): eight connections of one tenant each sending an `ACK` header with
+/// `len = MAX_PAYLOAD` and partial payload bytes (stalling before the last byte) end immediately
+/// without holding the uncounted payload: the daemon's heap peak stays within the tenant's
+/// in-flight budget plus slack.
+#[test]
+fn ack_payloads_on_eight_connections_stay_within_budget() {
+    const CONNECTIONS: usize = 8;
+    const IN_FLIGHT: u64 = MAX_PAYLOAD;
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let (cells, socket, mallory) = served_tenant(dir.path(), "mallory", MALLORY);
+    super::super::memory::set_in_flight(Some(MALLORY), Some(IN_FLIGHT)).unwrap();
+    let at_once = Duration::from_secs(2);
+    assert!(at_once < STALL);
+    let held = peak_while(|| {
+        let mut conns = Vec::with_capacity(CONNECTIONS);
+        for n in 0..CONNECTIONS {
+            let (sender, _receiver, stream, _) =
+                super::raw_connection(&socket, &cells.join(format!("ack-store-{n}")), 1 << 30);
+            let mut said = Header::new(ACK, 1);
+            said.len = MAX_PAYLOAD;
+            let mut sent = &stream;
+            std::io::Write::write_all(&mut sent, zerocopy::IntoBytes::as_bytes(&said)).unwrap();
+            // Send partial payload bytes (fewer than MAX_PAYLOAD) and stall; the daemon closes
+            // before allocating or reading the payload.
+            match std::io::Write::write_all(&mut sent, &[0x5a; 4096]) {
+                Ok(()) => {}
+                Err(err) if super::shut(&err) => {}
+                Err(err) => panic!("sending partial ACK payload: {err}"),
+            }
+            conns.push((sender, stream));
+        }
+        for (sender, stream) in &conns {
+            super::assert_let_go(sender, stream, at_once);
+        }
+    });
+    assert_eq!(mallory.in_flight().held(), 0);
+    assert!(
+        held <= IN_FLIGHT + SLACK,
+        "heap peak {} MiB exceeded tenant budget + slack ({} MiB)",
+        held >> 20,
+        (IN_FLIGHT + SLACK) >> 20,
+    );
 }
 
 /// TASK-546: a reply to `MAPPINGS` is counted as its request is admitted, as many mappings as its

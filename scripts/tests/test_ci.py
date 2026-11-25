@@ -309,7 +309,8 @@ class AptInstall(unittest.TestCase):
             if "actions/apt-install" in text:
                 users.append(path.relative_to(github).as_posix())
         self.assertEqual(users, ["actions/guest-host/action.yml", "workflows/ci.yml",
-                                 "workflows/hunt.yml", "workflows/nightly.yml"])
+                                 "workflows/hunt.yml", "workflows/nightly.yml",
+                                 "workflows/release.yml"])
 
     def install(self, resolves, sources=None, update_status=0):
         """Runs apt-install.sh for clang and lld on the image's mirror list, with the names in

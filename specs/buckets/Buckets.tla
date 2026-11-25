@@ -30,32 +30,37 @@
 (* for A, even once mirrored. Children are deleted.                        *)
 (*                                                                         *)
 (* A version's mirror into B starts at its first fork into B, in the       *)
-(* background (the user, 2026-11-18): its pin, a reference of its own in   *)
-(* B; its marker read in B, and if not there, its hold, a reference of its *)
-(* own in A (<P>refs/<at>/mirror.<B>), create-only; A's head read, the     *)
-(* mirror given up if its version is dropped or P deleted; the parts       *)
-(* copied, A to B, the same bytes at the same keys, a part already in B    *)
-(* (an earlier version's copy) taken as copied; the marker, create-only,   *)
-(* the switch; the children referring in A listed, and their references    *)
-(* written in B; A's head read again, and if it still names the version,   *)
-(* theirs in A retired, marked; its pin dropped, its hold left for B's     *)
-(* collector. A mirror's host may die at any step: it starts again from    *)
-(* its pin, what it wrote kept, past its copy if its marker is there. One  *)
+(* background (the user, 2026-11-18): each run draws its own disjoint run  *)
+(* ID (board 11699), creating its write-once pin in B                      *)
+(* (<P>refs/<at>/mirror-pins/<run>), create-only; its marker read in B,    *)
+(* if not there, its write-once hold in A (<P>refs/<at>/mirror.<B>.<run>), *)
+(* create-only; A's head read, the mirror given up if its version is       *)
+(* dropped or P deleted; the parts copied, A to B, the same bytes at the   *)
+(* same keys, a part already in B (an earlier version's copy) taken as     *)
+(* copied; the marker, create-only, the switch; the children referring in  *)
+(* A listed, and their references written in B; A's head read again, and   *)
+(* if it still names the version, theirs in A retired, marked; its own pin *)
+(* unconditionally deleted, its hold left for B's collector. A mirror's    *)
+(* host may die at any step: a new run starts with a fresh run ID, what    *)
+(* earlier runs wrote kept, past its copy if its marker is there. One      *)
 (* whose parts are gone from A and B before it copied them is given up:    *)
-(* its hold deleted, its pin dropped, no marker. A mirror done may be      *)
-(* begun again, as a new mirror, by a host that read no marker before the  *)
-(* first marked: it finds the marker, and goes on to the listing.          *)
+(* its own hold unconditionally deleted, then its own pin unconditionally  *)
+(* deleted, no marker. A mirror done may be begun again, as a new run, by  *)
+(* a host that read no marker before the first marked: it finds the        *)
+(* marker, and goes on to the listing.                                     *)
 (*                                                                         *)
 (* The collector runs passes, each over one cell in one bucket: P in A     *)
 (* (its head read, what it names and the writer's state with it, then the  *)
 (* references under P in A listed, then the parts that neither keeps       *)
 (* deleted, of those there at the head's read); P's copy in B (A's head    *)
-(* read, then B listed, its references, markers and parts; while P lives,  *)
-(* or a reference in B stands, the whole copy kept; else the listed        *)
-(* markers' versions' holds in A deleted, then the markers, then the       *)
-(* listed parts); a child (its record read; deleted, its references        *)
-(* retired, marked, in each bucket holding one, each once that bucket is   *)
-(* up).                                                                    *)
+(* read, then B listed, its references, markers and parts; stale pins in B *)
+(* reaped — deleting a stale run's matching hold in A first when unmarked, *)
+(* or leaving it for GcUnhold when marked; while P lives, or a reference   *)
+(* in B stands, the whole copy kept; else all holds in A matching prefix   *)
+(* <P>refs/<at>/mirror.<B> of the listed markers' versions deleted, then   *)
+(* the markers, then the listed parts); a child (its record read; deleted, *)
+(* its references retired, marked, in each bucket holding one, each once   *)
+(* that bucket is up).                                                     *)
 (*                                                                         *)
 (* Each rule is a member of Rules; specs/buckets/mutations removes one     *)
 (* each, and must find the violation it prevents:                          *)
@@ -123,19 +128,15 @@
 (*   marker before its parts.                                              *)
 (* - copyRelists (NoCopyRelists): B's collector lists B after it reads A's *)
 (*   head.                                                                 *)
-(* - releasesOwn (NoReleasesOwn): a mirror deletes its hold and its pin,  *)
-(*   letting go, only if each is still of its own write (mirror.rs's       *)
-(*   Bucket::delete_if, board 9229): the next mirror's write of either,    *)
-(*   its pin taken over, is of another version. Nothing bounds how long a  *)
-(*   deletion waits in flight: its host stopped as it lets go, the next    *)
-(*   mirror takes its pin over and writes the hold again, and a deletion   *)
-(*   it sent lands after (LateLand, in BucketsLate and NoReleasesOwn, whose *)
-(*   steps include "late"); unconditional, the next mirror marks           *)
-(*   with no hold in A (TLC, 2026-11-22, MarkedHeld; board 8441). A        *)
-(*   mirror gives up, deleting its hold, as it fails too (MirFail), its    *)
-(*   version still named: the next mirror does not. A lease alone, its     *)
-(*   deletions sent within it (board 8441), assumed each landed within the *)
-(*   lease's other half, which nothing bounds.                             *)
+(* - releasesOwn (NoReleasesOwn): each mirror run writes its own disjoint  *)
+(*   write-once pin (<P>refs/<at>/mirror-pins/<run>) and hold              *)
+(*   (<P>refs/<at>/mirror-holds/<B>/<run>) keys (board 11699), so plain    *)
+(*   unconditional DELETE letting go can never delete a newer run's pin or *)
+(*   hold however late it lands (LateLand, in BucketsLate and              *)
+(*   NoReleasesOwn, whose steps include "late"). Without per-run keys      *)
+(*   (single shared key under plain DELETE), a stopped mirror's late       *)
+(*   delete of its hold removes the next mirror's hold after it marked     *)
+(*   (TLC, MarkedHeld; board 8441, board 9229).                            *)
 (* - copyChecksDead (NoCopyChecksDead): B's collector retires a child's    *)
 (*   reference in B when the child's head is deleted and holds no          *)
 (*   references of its own (collector.rs's collect_copy, board 10446): a   *)
@@ -186,11 +187,14 @@ R(rule) == rule \in Rules
 
 Buckets == {"A", "B"}
 
-\* The mirror's pin of version v: a reference of its own, in B.
-Pin(v) == <<v, "mirror">>
+\* A mirror run's pin of version v: a write-once reference of its own in B (<P>refs/<at>/mirror-pins/<run>).
+Pin(v, r) == <<v, "mirror", r>>
 
-\* The mirror's hold of version v: a reference of its own, in A.
-Hold(v) == <<v, "hold">>
+\* A mirror run's hold of version v: a write-once reference of its own in A (<P>refs/<at>/mirror-holds/<B>/<run>).
+Hold(v, r) == <<v, "hold", r>>
+
+IsPin(x, v) == x[1] = v /\ x[2] = "mirror"
+IsHold(x, v) == x[1] = v /\ x[2] = "hold"
 
 VARIABLES
     vers,       \* the versions P's head, in A, names
@@ -203,12 +207,11 @@ VARIABLES
     marked,     \* marked[b]: the references retired in bucket b, marked
     marker,     \* the versions whose mirrors are marked in B
     fork,       \* fork[c]: the fork making c: None, or [pc, v, at]
-    mir,        \* mir[v]: v's mirror into B: [pc, kids, copied, run], and the runs whose writes its
-                \* pin and hold are (pinBy, holdBy)
+    mir,        \* mir[v]: v's mirror into B: [pc, kids, copied, run]
     gc,         \* gc[i]: pass i
     down,       \* the buckets down
     passes, downs, restarts,
-    late        \* deletions a stopped mirror sent, landing later: <<bucket, ref, its run>>
+    late        \* requests a stopped mirror sent, landing later: <<bucket, ref, "create"|"delete">>
 
 vars == <<vers, cut, parts, ended, objs, rec, refs, marked, marker, fork, mir, gc, down, passes,
           downs, restarts, late>>
@@ -239,12 +242,16 @@ ReferringInA(v) == {c \in Children : <<v, c>> \in refs["A"]}
 GcIdle == [pc |-> "idle", kind |-> None, c |-> None, alive |-> FALSE, vs |-> {}, rs |-> {},
            ms |-> {}, os |-> {}, mk |-> {}, missed |-> FALSE]
 
-MirIdle == [pc |-> "idle", kids |-> {}, copied |-> {}, run |-> 0, pinBy |-> 0, holdBy |-> 0]
+MirIdle == [pc |-> "idle", kids |-> {}, copied |-> {}, run |-> 0]
 
-\* Whether the model lets a stopped mirror's deletions land late ("late"): it tells the runs of v's
-\* mirror apart, and whose writes its pin and hold are, only then, its other models none the
-\* larger for them (BucketsLate checks it, and NoReleasesOwn).
+\* Whether the model lets a stopped mirror's requests land late ("late"): it tells the runs of v's
+\* mirror apart only then, its other models none the larger for them (BucketsLate checks it, and
+\* NoReleasesOwn).
 Late == "late" \in Can
+
+\* The run ID carried in mir[v]'s pin and hold keys: disjoint per run under releasesOwn
+\* (board 11699), else a single shared key (0) across all runs (NoReleasesOwn).
+KeyRun(v) == IF R("releasesOwn") /\ Late THEN mir[v].run ELSE 0
 
 \* Whether the model tracks a dead child's one-shot pass (passed), splits a mirror's list and
 \* write in B (MirList/MirRefer), lets a forking child be deleted, and deletes B's retired marks
@@ -252,7 +259,7 @@ Late == "late" \in Can
 \* and NoCopyChecksDead; board 10446).
 Dead == "dead" \in Can
 
-\* v's mirror begun again, as its run `run`: what its pin and hold are of kept.
+\* v's mirror begun again, as its run `run`.
 MirAnew(v, run) ==
     [mir[v] EXCEPT !.pc = "pin", !.kids = {}, !.copied = {}, !.run = IF Late THEN run ELSE 0]
 
@@ -405,7 +412,7 @@ Resume(v) ==
 \* mirrorListsAfterMark, the children referring in A listed now, in A, and referred in B with it.
 MirPin(v) ==
     LET early == IF R("mirrorListsAfterMark") THEN {} ELSE ReferringInA(v)
-        pin == IF R("mirrorPins") THEN {Pin(v)} ELSE {}
+        pin == IF R("mirrorPins") THEN {Pin(v, KeyRun(v))} ELSE {}
     IN /\ mir[v].pc = "pin" /\ Up("B") /\ (~R("mirrorListsAfterMark") => Up("A"))
        /\ refs' = [refs EXCEPT !["B"] = @ \cup pin \cup {<<v, c>> : c \in early}]
        /\ mir' = [mir EXCEPT ![v] =
@@ -413,19 +420,15 @@ MirPin(v) ==
                                        [] ~R("mirrorHoldsUnmarked") -> "hold"
                                        [] v \in marker /\ R("mirrorResumesMarked") -> Resume(v)
                                        [] OTHER -> "hold",
-                              !.kids = early,
-                              !.pinBy = IF R("mirrorPins") /\ Late THEN mir[v].run ELSE @]]
+                              !.kids = early]]
        /\ UNCHANGED <<UNCH, objs, rec, marked, marker, fork, gc, down, passes, downs, restarts,
                       late>>
 
-\* Its hold written in A, before it reads the head (mirrorHolds): of its own bytes, over any there,
-\* a write of its own run's.
+\* Its write-once hold created in A, before it reads the head (mirrorHolds).
 MirHold(v) ==
     /\ mir[v].pc = "hold" /\ Up("A")
-    /\ refs' = [refs EXCEPT !["A"] = @ \cup {Hold(v)}]
-    /\ mir' = [mir EXCEPT ![v] =
-                [@ EXCEPT !.pc = IF R("mirrorHoldsUnmarked") THEN Resume(v) ELSE "read",
-                          !.holdBy = IF Late THEN mir[v].run ELSE @]]
+    /\ refs' = [refs EXCEPT !["A"] = @ \cup {Hold(v, KeyRun(v))}]
+    /\ mir' = [mir EXCEPT ![v].pc = IF R("mirrorHoldsUnmarked") THEN Resume(v) ELSE "read"]
     /\ UNCHANGED <<UNCH, objs, rec, marked, marker, fork, gc, down, passes, downs, restarts, late>>
 
 \* Without mirrorHoldsUnmarked, its marker read in B after its hold.
@@ -498,17 +501,17 @@ MirRetire(v) ==
        /\ mir' = [mir EXCEPT ![v].pc = "unpin"]
        /\ UNCHANGED <<UNCH, objs, rec, marker, fork, gc, down, passes, downs, restarts, late>>
 
-\* Given up, its hold deleted in A (mirrorHolds).
+\* Given up, its own hold unconditionally deleted in A (mirrorHolds).
 MirUnhold(v) ==
     /\ mir[v].pc = "unhold" /\ Up("A")
-    /\ refs' = [refs EXCEPT !["A"] = @ \ {Hold(v)}]
+    /\ refs' = [refs EXCEPT !["A"] = @ \ {Hold(v, KeyRun(v))}]
     /\ mir' = [mir EXCEPT ![v].pc = "unpin"]
     /\ UNCHANGED <<UNCH, objs, rec, marked, marker, fork, gc, down, passes, downs, restarts, late>>
 
-\* Its pin dropped: done.
+\* Its own pin unconditionally deleted in B: done.
 MirUnpin(v) ==
     /\ mir[v].pc = "unpin" /\ Up("B")
-    /\ refs' = [refs EXCEPT !["B"] = @ \ {Pin(v)}]
+    /\ refs' = [refs EXCEPT !["B"] = @ \ {Pin(v, KeyRun(v))}]
     /\ mir' = [mir EXCEPT ![v].pc = "done"]
     /\ UNCHANGED <<UNCH, objs, rec, marked, marker, fork, gc, down, passes, downs, restarts, late>>
 
@@ -529,19 +532,20 @@ MirFail(v) ==
     /\ UNCHANGED <<UNCH, objs, rec, refs, marked, marker, fork, gc, down, passes, downs, restarts,
                    late>>
 
-\* The requests a stopped mirror may have in flight: writes of references to B (run = None), and
-\* deletions of its hold and its pin, each with the run that sent it.
+\* The requests a stopped mirror may have in flight: writes of references to B ("create"), and
+\* plain unconditional deletions of its own hold (in "unhold", before its pin's delete is sent) or
+\* its own pin (in "unpin").
 Releasing(v, pc) ==
-    LET run == mir[v].run IN
-    CASE pc = "refer" -> {<<"B", <<v, c>>, None>> : c \in mir[v].kids}
-      [] pc = "unhold" -> {<<"A", Hold(v), run>>, <<"B", Pin(v), run>>}
-      [] pc = "unpin" -> {<<"B", Pin(v), run>>}
+    LET r == KeyRun(v) IN
+    CASE pc = "refer" -> {<<"B", <<v, c>>, "create">> : c \in mir[v].kids}
+      [] pc = "unhold" -> {<<"A", Hold(v, r), "delete">>}
+      [] pc = "unpin" -> {<<"B", Pin(v, r), "delete">>}
       [] OTHER -> {}
 
-\* Its host dies, or stops past its lease: it starts again from its pin, as a run of its own, what
-\* it wrote kept, the next mirror taking its pin over once stale. Stopped as it writes references
-\* or lets go, its requests in flight land later (LateLand), after the next mirror or a pass over
-\* the copy ran; in a model without "late", each landed before it stopped, or was never sent.
+\* Its host dies, or stops past its lease: it starts again from its pin, as a fresh run of its own,
+\* what it wrote kept. Stopped as it writes references or lets go, its requests in flight land
+\* later (LateLand), after the next mirror or a pass over the copy ran; in a model without "late",
+\* each landed before it stopped, or was never sent.
 MirRestart(v) ==
     /\ "crash" \in Can /\ restarts < MaxRestarts
     /\ mir[v].pc \notin {"idle", "pin", "done"}
@@ -550,19 +554,17 @@ MirRestart(v) ==
     /\ late' = IF Late THEN late \cup Releasing(v, mir[v].pc) ELSE late
     /\ UNCHANGED <<UNCH, objs, rec, refs, marked, marker, fork, gc, down, passes, downs>>
 
-\* The run whose write the reference r, a pin or a hold, is.
-WrittenBy(r) == IF r[2] = "mirror" THEN mir[r[1]].pinBy ELSE mir[r[1]].holdBy
-
-\* A request a stopped mirror sent, landing: a late create (l[3] = None) creates the reference in
-\* its bucket; a late deletion, conditional on its run's write (releasesOwn), deletes another run's
-\* write of the reference not.
+\* A request a stopped mirror sent, landing: a late create creates the reference in its bucket; a
+\* late deletion is plain unconditional DELETE of the key that run sent (board 11699). Under
+\* releasesOwn, each run has disjoint pin and hold keys so an old run's unconditional delete never
+\* removes another run's key; without releasesOwn, runs share one key and the late delete removes
+\* the next run's hold (NoReleasesOwn, MarkedHeld).
 LateLand(l) ==
     LET b == l[1] IN
     /\ l \in late /\ Up(b)
-    /\ IF l[3] = None
+    /\ IF l[3] = "create"
        THEN refs' = [refs EXCEPT ![b] = @ \cup {l[2]}]
-       ELSE LET own == ~R("releasesOwn") \/ WrittenBy(l[2]) = l[3] IN
-            refs' = IF own THEN [refs EXCEPT ![b] = @ \ {l[2]}] ELSE refs
+       ELSE refs' = [refs EXCEPT ![b] = @ \ {l[2]}]
     /\ late' = late \ {l}
     /\ UNCHANGED <<UNCH, objs, rec, marked, marker, fork, mir, gc, down, passes, downs, restarts>>
 
@@ -671,13 +673,48 @@ GcList(i) ==
           ELSE UNCHANGED <<refs, marked>>
        /\ UNCHANGED <<UNCH, objs, rec, marker, fork, mir, down, passes, downs, restarts, late>>
 
-\* Of P's copy in B, the holds in A of the versions whose markers go deleted (mirrorHolds).
+\* Of P's copy in B, all holds in A of the versions whose markers go deleted, found by prefix LIST
+\* on <P>refs/<at>/mirror.<B> (mirrorHolds, board 11699): both per-run holds and legacy holds.
 GcUnhold(i) ==
-    LET g == gc[i] IN
-    /\ g.pc = "unhold" /\ Up("A")
-    /\ refs' = [refs EXCEPT !["A"] = @ \ {Hold(v) : v \in GoingMarkers(g)}]
-    /\ gc' = [gc EXCEPT ![i].pc = "unmark"]
-    /\ UNCHANGED <<UNCH, objs, rec, marked, marker, fork, mir, down, passes, downs, restarts, late>>
+    LET g == gc[i]
+        Hs == {r \in refs["A"] : \E v \in GoingMarkers(g) : IsHold(r, v)}
+    IN /\ g.pc = "unhold" /\ Up("A")
+       /\ refs' = [refs EXCEPT !["A"] = @ \ Hs]
+       /\ gc' = [gc EXCEPT ![i].pc = "unmark"]
+       /\ UNCHANGED <<UNCH, objs, rec, marked, marker, fork, mir, down, passes, downs, restarts,
+                      late>>
+
+\* Reaping a stale per-run pin in B (collector.rs's collect_copy, board 11699): when the version
+\* is marked in B, only the stale pin is deleted in B (leaving its hold in A for GcUnhold); when
+\* unmarked, the stale run's matching hold in A is deleted first, then the stale pin in B.
+GcReapMarkedPin(v, r) ==
+    LET p == Pin(v, r) IN
+    /\ Late /\ R("releasesOwn") /\ Collects("copy") /\ Up("B")
+    /\ p \in refs["B"] /\ v \in marker
+    /\ (mir[v].pc \in {"idle", "done"} \/ KeyRun(v) # r)
+    /\ refs' = [refs EXCEPT !["B"] = @ \ {p}]
+    /\ UNCHANGED <<UNCH, objs, rec, marked, marker, fork, mir, gc, down, passes, downs, restarts,
+                   late>>
+
+GcReapUnmarkedHold(v, r) ==
+    LET p == Pin(v, r)
+        h == Hold(v, r)
+    IN /\ Late /\ R("releasesOwn") /\ Collects("copy") /\ Up("A")
+       /\ p \in refs["B"] /\ v \notin marker /\ h \in refs["A"]
+       /\ (mir[v].pc \in {"idle", "done"} \/ KeyRun(v) # r)
+       /\ refs' = [refs EXCEPT !["A"] = @ \ {h}]
+       /\ UNCHANGED <<UNCH, objs, rec, marked, marker, fork, mir, gc, down, passes, downs, restarts,
+                      late>>
+
+GcReapUnmarkedPin(v, r) ==
+    LET p == Pin(v, r)
+        h == Hold(v, r)
+    IN /\ Late /\ R("releasesOwn") /\ Collects("copy") /\ Up("B")
+       /\ p \in refs["B"] /\ v \notin marker /\ h \notin refs["A"]
+       /\ (mir[v].pc \in {"idle", "done"} \/ KeyRun(v) # r)
+       /\ refs' = [refs EXCEPT !["B"] = @ \ {p}]
+       /\ UNCHANGED <<UNCH, objs, rec, marked, marker, fork, mir, gc, down, passes, downs, restarts,
+                      late>>
 
 \* Of P's copy in B: the markers going deleted first (markerGoesFirst); without the rule, the parts
 \* first.
@@ -799,6 +836,9 @@ Next ==
     \/ EndP
     \/ \E v \in Versions : DropVersion(v) \/ MirStep(v) \/ MirRestart(v)
                            \/ MirAgain(v) \/ MirFail(v)
+                           \/ \E r \in 0..MaxRestarts :
+                                GcReapMarkedPin(v, r) \/ GcReapUnmarkedHold(v, r)
+                                \/ GcReapUnmarkedPin(v, r)
     \/ \E l \in late : LateLand(l)
     \/ \E c \in Children : ForkStep(c) \/ DeleteChild(c) \/ GcStart("child", c)
                            \/ \E v \in Versions : StartFork(c, v)
@@ -861,18 +901,23 @@ MirroredChildrenOnB ==
             /\ <<rec[c].v, c>> \in refs["B"]
             /\ rec[c].v \in vers => <<rec[c].v, c>> \notin refs["A"]
 
-\* A mirror's hold stands only while its marker does, or its mirror is under way: B's collector,
-\* which deletes the holds of the markers it deletes, leaves none behind it, which would keep P's
-\* cell in A for good (mirrorHolds, mirrorHoldsUnmarked).
+\* A mirror's hold stands only while its marker does, its run is under way, or its run's pin still
+\* stands in B for B's collector to reap (deleting the hold first when unmarked): B's collector,
+\* which deletes all holds of the markers it deletes by prefix LIST, leaves none behind it, which
+\* would keep P's cell in A for good (mirrorHolds, mirrorHoldsUnmarked, board 11699).
 HoldsMarked ==
-    \A v \in Versions : Hold(v) \in refs["A"] => v \in marker \/ mir[v].pc \notin {"idle", "done"}
+    \A r \in refs["A"] :
+        r[2] = "hold" =>
+            \/ r[1] \in marker
+            \/ (mir[r[1]].pc \notin {"idle", "done"} /\ KeyRun(r[1]) = r[3])
+            \/ Pin(r[1], r[3]) \in refs["B"]
 
-\* A marked copy's hold stands in A (mirrorHolds): from before its marker until B's collector
-\* deletes both, the hold first, the pass deleting it then about to delete the marker. It keeps P's cell,
-\* and what the version inherits from P's origin, in A while readers in B read the copy.
+\* A marked copy has at least one hold standing in A (mirrorHolds): from before its marker until
+\* B's collector deletes all holds of the version before its marker. It keeps P's cell, and what
+\* the version inherits from P's origin, in A while readers in B read the copy.
 MarkedHeld ==
     \A v \in marker :
-        \/ Hold(v) \in refs["A"]
+        \/ \E r \in refs["A"] : IsHold(r, v)
         \/ \E i \in 1..MaxPasses : gc[i].pc = "unmark" /\ v \in GoingMarkers(gc[i])
 
 \* A pass over P's copy in B never keeps as standing a reference of a dead child whose own pass

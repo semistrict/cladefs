@@ -1134,6 +1134,18 @@ impl<K: Key, V: LayerValue> Layer<K, V> for PersistentLayer<K, V> {
         self.object_handle.clear();
     }
 
+    fn cached_bytes(&self) -> usize {
+        self.object_handle.cached_bytes()
+    }
+
+    fn cached_chunks(&self) -> usize {
+        self.object_handle.cached_chunks()
+    }
+
+    fn evict_cached_chunks(&self, max_chunks: usize) -> usize {
+        self.object_handle.evict_chunks(max_chunks)
+    }
+
     async fn seek<'a>(&'a self, bound: Bound<&K>) -> Result<BoxedLayerIterator<'a, K, V>, Error> {
         Ok(Box::new(PersistentLayer::seek(self, bound).await?))
     }

@@ -12,8 +12,9 @@ whole-request timeout, only a 20-30 s no-progress cut; a file bucket's delete wa
 and removes the next mirror's hold. `mirror::tests::late_deletes_of_mirrors_letting_go_leave_the_next_ones_hold_and_pin`
 reproduces it on the simulation's bucket (red with the lease alone).
 **Why it's dead:** a lease bounds when a request is *sent*, never when it *lands*: nothing bounds a
-request's flight, so a lease can't fence a delete. Deletes are now conditional on the version the
-mirror itself wrote (`Bucket::delete_if`: S3 `If-Match`, GCS `x-goog-if-generation-match`, a file
-bucket's lock), the hold's bytes its own nonce so that the next mirror's rewrite is another version
-(`releasesOwn`). The lease still gates the marker's create, which no condition can fence (board 9498).
+request's flight, so a lease can't fence a delete. Board 9229 replaced lease-fenced deletes with
+conditional deletes (`Bucket::delete_if`), and board 11699 replaced those with per-run write-once
+pin and hold keys (`<P>refs/<at>/mirror-pins/<run>`, `<P>refs/<at>/mirror-holds/<B>/<run>`) so `releasesOwn`
+holds by key disjointness under plain unconditional `DELETE` on every backend. The lease still gates
+the marker's create, which no condition can fence (board 9498).
 **Reopen if:** never for deletes; for the marker, only if a bucket bounds a request's flight.

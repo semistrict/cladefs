@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Synchronization: `alloc`'s `Arc`, `core`'s atomics, and std's locks, cells, condition
-//! variable and channels. Panics abort, so locks are never poisoned.
+//! Synchronization: `alloc`'s `Arc`, `core`'s atomics, and std's locks, cells, and condition
+//! variable. Panics abort, so locks are never poisoned.
 //!
 //! The locks are std's own over futexes (sys/sync), whose waits sleep on the kernel's wait queues.
 
@@ -17,8 +17,6 @@ use core::sync::atomic::Ordering;
 
 pub use alloc_crate::sync::{Arc, Weak};
 pub use core::sync::atomic;
-
-pub mod mpsc;
 
 /// An error that a lock was poisoned, which never happens.
 pub struct PoisonError<T>(T);

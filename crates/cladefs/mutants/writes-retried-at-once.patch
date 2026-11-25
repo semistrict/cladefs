@@ -6,7 +6,7 @@
 # Killer: cladefsd::tests::soak::a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound
 --- a/crates/bucket_cell/src/object_bucket.rs
 +++ b/crates/bucket_cell/src/object_bucket.rs
-@@ -1483,11 +1483,6 @@ impl ObjectBucket {
+@@ -1267,11 +1267,6 @@ impl ObjectBucket {
          async move {
              // cladefs: as long after its last write of the key as the backend needs (TASK-690).
              self.rewrites.wait(&path).await;
@@ -15,6 +15,6 @@
 -                true => self.counts.turns[request as usize].turn().await,
 -                false => None,
 -            };
-             let _shared = self.shared().await;
              let timed = self.counts.request(request, Some(&path));
              let len = bytes.len() as u64;
+             let options = PutOptions { mode, ..PutOptions::default() };

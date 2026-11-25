@@ -51,8 +51,6 @@ storage_device = { path = "../storage_device", default-features = false }
 thiserror.workspace = true
 tokio = { workspace = true, optional = true }
 url = { workspace = true, optional = true }
-# cladefs: the paths of a conditional delete's requests, decoded (`client::conditioned`, board 9229).
-percent-encoding = { version = "2.3.2", optional = true }
 
 [target.'cfg(target_env = "musl")'.dependencies]
 mimalloc.workspace = true
@@ -85,7 +83,7 @@ default = ["full"]
 full = [
     "extent_frame/crypto",
     "extent_keys/crypto",
-    "storage_device/full",
+    "storage_device/fake-device",
     "dep:host_fs",
     "dep:async-trait",
     "dep:backtrace",
@@ -100,7 +98,6 @@ full = [
     "dep:serde_json",
     "dep:tokio",
     "dep:url",
-    "dep:percent-encoding",
 ]
 keyless-gc = ["extent_frame/pure-zstd"]
 # cladefs: what tests of the protocol outside this crate need, as its own have it: a bucket whose

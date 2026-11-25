@@ -86,11 +86,6 @@
 //! [mounted](Filesystem::mount) straight from storage is the `default` volume of an image of its
 //! own, which closing it closes.
 //!
-//! [`Image::snapshot_volume`] snapshots a whole volume, mounted or not, into a new one, in time and
-//! space independent of its size: the snapshot shares the source's metadata and data until
-//! either changes them, as Fxfs writes changes to new blocks, and what they share is freed once
-//! neither references it.
-//!
 //! # Storage
 //!
 //! An image lives on [`Storage`]: an image, which is a cell directory, a file
@@ -132,7 +127,6 @@ mod dax;
 mod ephemeral_host;
 mod error;
 mod evidence;
-mod executor;
 pub mod faults;
 mod filesystem;
 pub mod fuse;
@@ -172,9 +166,6 @@ pub mod stacks;
 // The extent daemon's (Linux), and its tests' everywhere.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod caller;
-// The extent daemon's (Linux), and its tests' everywhere.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-mod cell_requests;
 // The extent daemon's (Linux), and its tests' everywhere.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod cell_table;

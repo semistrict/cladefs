@@ -125,18 +125,20 @@ impl Disk {
                 "a tenant disk needs at least one directory",
             ));
         }
-        let group = (dirs.len() > 1).then(footprint::Group::new);
         let mut allotments = Vec::with_capacity(dirs.len());
         for dir in dirs {
-            let allotment =
-                footprint::allotment_in_group_on(daemon.host.local(), dir, group.clone())?;
-            allotments.push(allotment);
+            allotments.push(footprint::allotment_on(daemon.host.local(), dir)?);
         }
-        let effective_group = allotments.iter().find_map(|a| a.group().cloned()).or(group);
+        let group = if allotments.len() > 1 {
+            Some(footprint::Group::for_allotments(allotments.clone()))
+        } else {
+            allotments[0].set_group(None);
+            None
+        };
         let mut registry = daemon.disk.registry.lock().unwrap();
         let limit = registry.limit(tenant);
         let weight = registry.weight(tenant);
-        if let Some(group) = &effective_group {
+        if let Some(group) = &group {
             group.set_limit(limit);
         } else {
             for allotment in &allotments {
@@ -146,7 +148,7 @@ impl Disk {
         for allotment in &allotments {
             allotment.set_weight(weight);
         }
-        let disk = Arc::new(Self { tenant, allotments, group: effective_group });
+        let disk = Arc::new(Self { tenant, allotments, group });
         registry.disks.retain(|alive| alive.strong_count() > 0);
         registry.disks.push(Arc::downgrade(&disk));
         Ok(disk)

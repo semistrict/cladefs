@@ -7,13 +7,10 @@
 of the toolchain guest/rust/rust-toolchain.toml pins (Rust's library is MIT OR Apache-2.0).
 
 Crates written for std need std's own types and methods, which a lookalike can't serve: they call
-hash maps' methods by path (`HashMap::get(map, key)`) and name their entry types, and call the
-float methods std adds to the primitives (`f64::floor`, which `core` leaves out). So the guest's
+hash maps' methods by path (`HashMap::get(map, key)`) and name their entry types. So the guest's
 std has std's own sources for them:
 
 - collections/hash/{map,set}.rs: HashMap and HashSet, over hashbrown;
-- num/{f32,f64}.rs: the float methods, over `core`'s math and libm's functions (sys/cmath.rs),
-  which the kernel's link needs only if something calls them;
 - sys/sync/{mutex,rwlock,condvar}/futex.rs: std's locks over futexes, which the guest's std backs
   with the kernel's wait queues (sys/sync/futex.rs).
 
@@ -41,9 +38,6 @@ HEADER = """// SPDX-License-Identifier: MIT OR Apache-2.0
 FILES = (
     ("collections/hash/map.rs", "collections/hash/map.rs"),
     ("collections/hash/set.rs", "collections/hash/set.rs"),
-    ("num/f32.rs", "f32.rs"),
-    ("num/f64.rs", "f64.rs"),
-    ("sys/cmath.rs", "sys/cmath.rs"),
     ("sys/sync/mutex/futex.rs", "sys/sync/mutex.rs"),
     ("sys/sync/rwlock/futex.rs", "sys/sync/rwlock.rs"),
     ("sys/sync/condvar/futex.rs", "sys/sync/condvar.rs"),

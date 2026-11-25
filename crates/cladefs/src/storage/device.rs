@@ -425,7 +425,11 @@ mod tests {
         let local = storage.open_cell().local().clone();
         let device = Arc::new(storage.into_device());
         let cell = device.cell();
-        let executor = crate::executor::Executor::new(1);
+        let executor = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
         // A write of the executor's in progress, which ends once told to.
         let (go, went) = futures::channel::oneshot::channel::<()>();
         let (began, beginning) = std::sync::mpsc::channel();
@@ -454,6 +458,7 @@ mod tests {
         let waited = written.recv_timeout(std::time::Duration::from_secs(30));
         assert_eq!(waited, Ok(()), "the held write never went on");
         committing.await.unwrap();
+        executor.shutdown_background();
     }
 
     /// TASK-98: as above, with the write in progress a future of the held write's own task, as
@@ -467,7 +472,11 @@ mod tests {
         let local = storage.open_cell().local().clone();
         let device = Arc::new(storage.into_device());
         let cell = device.cell();
-        let executor = crate::executor::Executor::new(1);
+        let executor = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
         let (go, went) = futures::channel::oneshot::channel::<()>();
         let (held, holding) = futures::channel::oneshot::channel::<()>();
         let (began, beginning) = std::sync::mpsc::channel();
@@ -507,6 +516,7 @@ mod tests {
         let waited = written.recv_timeout(std::time::Duration::from_secs(30));
         assert_eq!(waited, Ok(()), "the task's writes never ended");
         committing.await.unwrap();
+        executor.shutdown_background();
     }
 
     /// cladefs: an image of an encrypted cell (TASK-411.5): what its device writes, in its open

@@ -2,11 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Fuchsia's `src/storage/fxfs/src/object_store.rs`. cladefs snapshots (volume snapshots that share
-// their source's layers and extents) deviate from upstream here: `ObjectStore::snapshot_store_info`
-// gives a snapshot's store information. Volumes are not installed from images within files (no
-// `install`, `extent_mapping_iterator`): such an image is a block device's, which cladefs's extent
-// store has none of (backlog doc-4). `dirty_reservation` reserves room for the data a page cache
+// Fuchsia's `src/storage/fxfs/src/object_store.rs`. Volumes are not installed from images within
+// files (no `install`, `extent_mapping_iterator`): such an image is a block device's, which
+// cladefs's extent store has none of (backlog doc-4). `dirty_reservation` reserves room for the data a page cache
 // holds dirty as it dirties it, as Fuchsia's pager-backed files do in its platform crate, for the
 // guest kernel's page cache (TASK-80). A store may have layers of a base, a volume another
 // filesystem wrote, below its own (`StoreInfo::base_layers`, `ObjectStore::manifest`, backlog doc-10). What stops
@@ -39,9 +37,7 @@ mod tree;
 pub(crate) mod tree_cache;
 pub mod volume;
 
-pub use data_object_handle::{
-    DataObjectHandle, DirectWriter, ExtentAccess, FileExtent, FrozenPage,
-};
+pub use data_object_handle::{DataObjectHandle, DirectWriter, ExtentAccess, FileExtent};
 pub use directory::Directory;
 pub use object_record::{ChildValue, ObjectDescriptor, PosixAttributes, SpecialFile, Timestamp};
 pub use store_object_handle::{
@@ -448,34 +444,6 @@ impl ObjectStore {
 
     pub fn parent_store(&self) -> Option<&Arc<ObjectStore>> {
         self.parent_store.as_ref()
-    }
-
-    /// Returns the id of the internal directory. Returns a NotFound error if this has not been
-    /// initialized.
-    pub fn get_internal_directory_id(self: &Arc<Self>) -> Result<u64, Error> {
-        let id = self.store_info.lock().internal_directory_object_id;
-        if id == INVALID_OBJECT_ID { Err(FxfsError::NotFound.into()) } else { Ok(id) }
-    }
-
-    pub async fn get_or_create_internal_directory_id(self: &Arc<Self>) -> Result<u64, Error> {
-        // Create the transaction first to use the object store lock.
-        let mut transaction = self
-            .new_transaction(
-                lock_keys![LockKey::InternalDirectory { store_object_id: self.store_object_id }],
-                Options::default(),
-            )
-            .await?;
-        let obj_id = self.store_info.lock().internal_directory_object_id;
-        if obj_id != INVALID_OBJECT_ID {
-            return Ok(obj_id);
-        }
-
-        // Need to create an internal directory.
-        let directory = Directory::create(&mut transaction, self).await?;
-
-        transaction.add(self.store_object_id, Mutation::CreateInternalDir(directory.object_id()));
-        transaction.commit().await?;
-        Ok(directory.object_id())
     }
 
     /// Returns the file size for the object without opening the object.
@@ -1207,13 +1175,8 @@ impl ObjectStore {
         // cladefs: below them, what the store has of a base, which is no part of the size above:
         // no compaction rewrites it, so no reservation pays for that.
         fs.allocator().add_base_cells(&base_cells);
-        let block_size = store.block_size();
-        let handles = base_layers
-            .into_iter()
-            .map(|layer| BaseLayerObject::new(fs.device(), block_size, layer))
-            .collect::<Result<Vec<_>, _>>()?;
         let base_layers =
-            layers_from_handles(handles).await.context("Failed to read base layers")?;
+            Self::open_base_layers(fs.device(), store.block_size(), &base_layers).await?;
         store.tree.append_open_layers(base_layers);
 
         fs.object_manager().update_reservation(
@@ -1222,6 +1185,51 @@ impl ObjectStore {
         );
 
         Ok(store)
+    }
+
+    /// cladefs: validates and opens `base_layers` (alignment, bounds, device reads, layer version)
+    /// without mutating filesystem state, so `new_volume_over_base` fails before committing a
+    /// broken volume (TASK-597, board 2590).
+    pub(crate) async fn open_base_layers(
+        device: Arc<dyn storage_device::Device>,
+        block_size: storage_units::BlockSize,
+        base_layers: &[crate::object_store::base_layer::BaseLayer],
+    ) -> Result<Vec<Arc<dyn crate::lsm_tree::types::Layer<ObjectKey, ObjectValue>>>, Error> {
+        let handles = base_layers
+            .iter()
+            .cloned()
+            .map(|layer| BaseLayerObject::new(device.clone(), block_size, layer))
+            .collect::<Result<Vec<_>, _>>()?;
+        layers_from_handles(handles).await.context("Failed to read base layers")
+    }
+
+    /// cladefs: constructs and attaches a newly committed volume over already-opened `base_layers`
+    /// (`new_volume_over_base`, TASK-597). Infallible once the volume's commit succeeds.
+    pub(crate) fn open_new_over_base(
+        parent_store: &Arc<ObjectStore>,
+        handle: DataObjectHandle<ObjectStore>,
+        info: StoreInfo,
+        base_layers: Vec<Arc<dyn crate::lsm_tree::types::Layer<ObjectKey, ObjectValue>>>,
+        object_cache: Option<Box<dyn ObjectCache<ObjectKey, ObjectValue>>>,
+    ) -> Arc<ObjectStore> {
+        debug_assert!(info.layers.is_empty());
+        let store_object_id = handle.object_id();
+        let last_object_id = info.last_object_id;
+        let base_cells = info.base_cells.clone();
+        let fs = parent_store.filesystem();
+        let store = ObjectStore::new(
+            Some(parent_store.clone()),
+            store_object_id,
+            fs.clone(),
+            info,
+            object_cache,
+            last_object_id,
+        );
+        assert!(store.store_info_handle.set(handle).is_ok(), "Failed to set store_info_handle!");
+        fs.allocator().add_base_cells(&base_cells);
+        store.tree.append_open_layers(base_layers);
+        fs.object_manager().update_reservation(store_object_id, 0);
+        store
     }
 
     #[cfg(test)]
@@ -1240,11 +1248,11 @@ impl ObjectStore {
             !filesystem.object_manager().needs_flush(self.store_object_id),
             FxfsError::Unavailable
         );
-        let mut info = self.snapshot_store_info();
+        let mut info = self.store_info.lock().clone();
+        info.last_object_id = *self.last_object_id.lock();
+        info.guid = *Uuid::new_v4().as_bytes();
         let allocator = self.allocator();
-        let mut owners = allocator.shared_owners(self.store_object_id);
-        owners.push(allocator.data_owner(self.store_object_id));
-        let mut cells = allocator.cells_of(&owners);
+        let mut cells = allocator.cells_of(&[self.store_object_id]);
         cells.append(&mut info.base_cells);
 
         let parent_store = self.parent_store.as_ref().ok_or(FxfsError::NotSupported)?;
@@ -1275,16 +1283,6 @@ impl ObjectStore {
         info.serialize_with_version(&mut manifest)?;
         ensure!(manifest.len() <= MAX_MANIFEST_SIZE, FxfsError::TooBig);
         Ok(manifest)
-    }
-
-    /// cladefs: the information of a new store that is a snapshot of this one: this store's
-    /// persistent layers and root and graveyard directories as they are, the object ids it has
-    /// used so far, and a new guid.
-    pub(super) fn snapshot_store_info(&self) -> StoreInfo {
-        let mut info = self.store_info.lock().clone();
-        info.last_object_id = *self.last_object_id.lock();
-        info.guid = *Uuid::new_v4().as_bytes();
-        info
     }
 
     /// Returns a new object ID that can be used.
@@ -1781,12 +1779,11 @@ mod tests {
     use crate::lsm_tree::types::{ItemRef, LayerIterator};
     use crate::object_handle::{INVALID_OBJECT_ID, ObjectHandle, WriteObjectHandle};
     use crate::object_store::directory::Directory;
-    use crate::object_store::object_record::{ObjectKey, ObjectKind, ObjectValue};
+    use crate::object_store::object_record::{ObjectKey, ObjectValue};
     use crate::object_store::store_object_handle::MAX_INLINE_XATTR_SIZE;
     use crate::object_store::transaction::{LockKeys, Options, lock_keys};
     use crate::object_store::volume::root_volume;
     use crate::serialized_types::{DEFAULT_MAX_SERIALIZED_RECORD_SIZE, Versioned, VersionedLatest};
-    use assert_matches::assert_matches;
     use fuchsia_async as fasync;
     use fuchsia_sync::Mutex;
     use futures::join;
@@ -1809,44 +1806,6 @@ mod tests {
 
     async fn test_filesystem() -> OpenFxFilesystem {
         test_filesystem_with_hooks(Default::default()).await
-    }
-
-    #[fuchsia_async::run_singlethreaded(test)]
-    async fn test_create_and_open_internal_dir() {
-        let fs = test_filesystem().await;
-        let dir_id;
-        let store_id;
-        {
-            let root_volume = root_volume(fs.clone()).await.expect("root_volume failed");
-            let store = root_volume
-                .new_volume("test", NewChildStoreOptions::default())
-                .await
-                .expect("new_volume failed");
-            dir_id =
-                store.get_or_create_internal_directory_id().await.expect("Create internal dir");
-            store_id = store.store_object_id();
-        }
-
-        fs.close().await.expect("close failed");
-        let device = fs.take_device().await;
-        device.reopen(false);
-        let fs = FxFilesystem::open(device).await.expect("open failed");
-
-        {
-            let store = fs.object_manager().store(store_id).expect("store not found");
-            assert_eq!(
-                dir_id,
-                store.get_or_create_internal_directory_id().await.expect("Retrieving dir")
-            );
-            let obj = store
-                .tree()
-                .find_value(&ObjectKey::object(dir_id))
-                .await
-                .expect("Searching tree for dir")
-                .unwrap();
-            assert_matches!(obj, ObjectValue::Object { kind: ObjectKind::Directory { .. }, .. });
-        }
-        fs.close().await.expect("Close failed");
     }
 
     #[fuchsia_async::run(10, test)]

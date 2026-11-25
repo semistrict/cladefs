@@ -31,14 +31,19 @@ rustc-hash.workspace = true
 scopeguard.workspace = true
 serde.workspace = true
 static_assertions.workspace = true
-storage_device.workspace = true
+# cladefs: keep `fake_device` and `rand` out of the guest kernel build (board 11687).
+storage_device = { path = "../storage_device", default-features = false }
 storage_units.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 zerocopy.workspace = true
 
+[target.'cfg(fuzz)'.dependencies]
+storage_device = { path = "../storage_device", features = ["fake-device"] }
+
 [dev-dependencies]
 rand.workspace = true
+storage_device = { path = "../storage_device", features = ["fake-device"] }
 test-case.workspace = true
 
 [lints]

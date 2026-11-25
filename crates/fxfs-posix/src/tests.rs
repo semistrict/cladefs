@@ -894,11 +894,11 @@ async fn a_removed_fill_gives_back_all_its_data() {
         let reserved = objects.metadata_reservation().amount() as i64;
         [held(data) + usage.pending as i64, held(metadata), reserved]
     };
-    // Metadata, until the reservation for the journal is 13 MiB: ~3 MiB of the journal's 8 plus
+    // Metadata, until the reservation for the journal is 15 MiB: ~3.5 MiB of the journal's 8 plus
     // RESERVED_SPACE, so the fill crosses reclaim_size / 2 (4 MiB) even without journal-extent
-    // allocation records.
+    // allocation records or per-block ExtentMode::Cow checksums (board 10535).
     let mut n = 0;
-    while objects.metadata_reservation().amount() < 13 << 20 {
+    while objects.metadata_reservation().amount() < 15 << 20 {
         let ino = fs.new_file(root, format!("before-{n}").as_bytes()).await;
         fs.set_xattr(ino, b"user.x", &[1; 200], SetExtendedAttributeMode::Set).await.unwrap();
         n += 1;
@@ -906,6 +906,7 @@ async fn a_removed_fill_gives_back_all_its_data() {
     fs.sync().await.unwrap();
     let free = || (fs.usage().free_blocks * 4096) as i64;
     let (before, usage_before) = (free(), usage());
+    let layers_before = fs.volume.store_info().layers.len();
     let filler = fs.new_file(root, b"filler").await;
     let mut at = 0;
     for len in [1 << 20, 4096] {
@@ -922,16 +923,135 @@ async fn a_removed_fill_gives_back_all_its_data() {
     fs.evict(filler, true);
     fs.sync().await.unwrap();
     let (after, usage_after) = (free(), usage());
+    let layers_after = fs.volume.store_info().layers.len();
     let short = before - after;
     let [data, metadata, reserved] = [0, 1, 2].map(|i| usage_after[i] - usage_before[i]);
     let said = format!(
         "{at} filled, {before} free before, {after} after, {short} short; data, metadata held and \
-         reserved {usage_before:?}, then {usage_after:?}"
+         reserved {usage_before:?}, then {usage_after:?}; layers {layers_before} -> {layers_after}"
     );
-    assert!(reserved < 0 && metadata > 0, "no flush during the fill: {said}");
-    assert!(short - reserved > 1 << 20, "the reservation alone accounts for it: {said}");
+    // Without per-block `ExtentMode::Cow` checksums (board 10535), the flushed volume layer is
+    // ~500 KiB smaller so freeing old journal spans can net slightly negative `metadata` while a
+    // compaction flush still shrinks `reserved` by > 1 MiB and writes a persistent volume layer.
+    assert!(
+        reserved < -(1 << 20) && layers_after > layers_before,
+        "no flush during the fill: {said}"
+    );
     assert!(data <= STAGING_SIZE as i64, "{said}");
     // To the block statfs rounds the used bytes up to.
     assert!((short - data - metadata - reserved).abs() < 4096, "{said}");
     fs.stop_delayed().await.unwrap();
+}
+
+/// TASK-596 (board 2588): `Fxfs::cached` and `Fxfs::free_cached` count and purge persistent layer
+/// read chunks across store layers, base layers, and the allocator's layers, leaving zero cached
+/// chunks (`Present` or `Expired`) after the shrinker runs.
+#[fuchsia_async::run_singlethreaded(test)]
+async fn shrinker_purges_persistent_base_and_allocator_layer_chunks() {
+    use fxfs::filesystem::{FxFilesystem, SyncOptions};
+    use fxfs::lsm_tree::types::LayerIterator as _;
+    use fxfs::object_store::directory::Directory;
+    use fxfs::object_store::transaction::{LockKey, Options};
+
+    // 1. Build a published base volume with enough files that its persistent layer has cached
+    // chunks when scanned.
+    let base_dev = DeviceHolder::new(FakeDevice::new(32768, 512).with_cell(10));
+    let base_fs = FxFilesystem::new_empty(base_dev).await.unwrap();
+    let base_root = root_volume((*base_fs).clone()).await.unwrap();
+    let base_vol = base_root.new_volume("base", NewChildStoreOptions::default()).await.unwrap();
+    let base_dir = Directory::open(&base_vol, base_vol.root_directory_object_id()).await.unwrap();
+    for i in 0..300u32 {
+        let mut txn = base_vol
+            .new_transaction(
+                lock_keys![LockKey::object(base_vol.store_object_id(), base_dir.object_id())],
+                Options::default(),
+            )
+            .await
+            .unwrap();
+        base_dir.create_child_file(&mut txn, &format!("base-file-{i:04}")).await.unwrap();
+        txn.commit().await.unwrap();
+    }
+    let manifest = base_root.publish_volume("base").await.unwrap();
+    base_fs.sync(SyncOptions { flush_device: true, ..Default::default() }).await.unwrap();
+
+    // 2. Mount a child filesystem over the base volume, add its own files, and flush both the
+    // volume store and the allocator so store layers, base layers, and allocator layers are all
+    // persistent.
+    let mut child_dev = FakeDevice::new(32768, 512).with_cell(20);
+    let _reads = child_dev.attach(base_fs.device().fork(11).unwrap());
+    let child_fs = FxFilesystem::new_empty(DeviceHolder::new(child_dev)).await.unwrap();
+    let child_root = root_volume((*child_fs).clone()).await.unwrap();
+    let over = child_root.new_volume_over_base("over", &manifest).await.unwrap();
+    let root_ino = over.root_directory_object_id();
+    let posix = Fxfs::new((*child_fs).clone(), over.clone(), false, Tested);
+    for i in 0..200u32 {
+        let ino = posix.new_file(root_ino, format!("own-file-{i:04}").as_bytes()).await;
+        posix.write(ino, 0, &[i as u8; 4096]).await.unwrap();
+    }
+    posix.sync().await.unwrap();
+    over.flush().await.unwrap();
+    child_fs.allocator().flush().await.unwrap();
+    child_fs.root_store().flush().await.unwrap();
+
+    // Evict everything first, then perform a full tree scan + allocator layer scan so persistent
+    // layer chunks are loaded on demand across store, base, and allocator layers.
+    let _ = posix.free_cached(u64::MAX);
+    assert_eq!(child_fs.object_manager().cached_layer_bytes(), 0);
+
+    let mut names = Vec::new();
+    posix
+        .readdir(root_ino, ReaddirStart::Index(0), |name, _, _| {
+            names.push(name.to_owned());
+            true
+        })
+        .await
+        .unwrap();
+    assert_eq!(names.len(), 500);
+    for name in &names {
+        let attr = posix.lookup(root_ino, name.as_bytes()).await.unwrap();
+        let _ = posix.attr(attr.ino).await.unwrap();
+    }
+    // Also read through the allocator's persistent layer.
+    {
+        let layer_set = child_fs.allocator().tree().layer_set();
+        let mut merger = layer_set.merger();
+        let mut iter = merger.query(fxfs::lsm_tree::Query::FullScan).await.unwrap();
+        while iter.get().is_some() {
+            iter.advance().await.unwrap();
+        }
+    }
+
+    assert!(
+        over.tree().cached_layer_bytes() > 0,
+        "store + base persistent layers should have cached chunks after scan"
+    );
+    assert!(
+        child_fs.allocator().tree().cached_layer_bytes() > 0,
+        "allocator persistent layer should have cached chunks after scan"
+    );
+    assert!(posix.cached() > 0);
+
+    // 3. Drive the shrinker in 128-item batches (matching Linux's drop_caches loop).
+    let mut iterations = 0;
+    while posix.cached() > 0 {
+        let freed = posix.free_cached(128);
+        assert!(freed > 0, "shrinker made no progress while cached() == {}", posix.cached());
+        iterations += 1;
+        assert!(iterations < 10_000, "shrinker loop did not converge");
+    }
+    assert_eq!(over.tree().cached_layer_bytes(), 0);
+    assert_eq!(child_fs.allocator().tree().cached_layer_bytes(), 0);
+    assert_eq!(child_fs.object_manager().cached_layer_bytes(), 0);
+    assert_eq!(child_fs.object_manager().cached_layer_chunks(), 0);
+    assert_eq!(posix.cached(), 0);
+
+    // 4. Subsequent reads still work transparently after eviction.
+    let attr = posix.lookup(root_ino, b"base-file-0000").await.unwrap();
+    let _ = posix.attr(attr.ino).await.unwrap();
+
+    posix.stop_delayed().await.unwrap();
+    drop((posix, over, child_root));
+    child_fs.close().await.unwrap();
+    drop((base_dir, base_vol, base_root));
+    base_fs.close().await.unwrap();
 }

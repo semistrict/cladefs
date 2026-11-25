@@ -120,8 +120,6 @@ struct ScannedStore<'a> {
     objects: BTreeMap<u64, ScannedObject>,
     root_objects: Vec<u64>,
     store_id: u64,
-    /// cladefs: the owner the store allocates under, which a snapshot may have changed.
-    data_owner: u64,
     // cladefs: the cells of the extents of the store's base, if it has one (backlog doc-10).
     base_cells: HashSet<u64>,
     is_root_store: bool,
@@ -139,7 +137,6 @@ impl<'a> ScannedStore<'a> {
             objects: BTreeMap::new(),
             root_objects: root_objects.as_ref().into(),
             store_id,
-            data_owner: store_id,
             base_cells: HashSet::default(),
             is_root_store,
         }
@@ -544,11 +541,9 @@ impl<'a> ScannedStore<'a> {
                 device_offset,
             ))?;
         }
-        // cladefs: the extent is the store's current data owner's, unless it is shared with other
-        // stores (snapshots), which fsck checks no store for, or is its base's, which the allocator
-        // doesn't hold.
-        if !self.fsck.is_shared(&store_extent) && !self.base_cells.contains(&store_extent.cell) {
-            self.fsck.reference(store_extent, device_offset..device_offset + len, self.data_owner);
+        // cladefs: a base's extents are not held by this allocator.
+        if !self.base_cells.contains(&store_extent.cell) {
+            self.fsck.reference(store_extent, device_offset..device_offset + len, self.store_id);
         }
         Ok(())
     }
@@ -772,7 +767,6 @@ pub(super) async fn scan_store(
     let next_object_id = store.query_next_object_id();
 
     let mut scanned = ScannedStore::new(fsck, root_objects, store_id, store.is_root());
-    scanned.data_owner = store.filesystem().allocator().data_owner(store_id);
     scanned.base_cells = store.store_info().base_cells.iter().copied().collect();
 
     // Scan the store for objects, attributes, and parent/child relationships.

@@ -156,6 +156,8 @@ struct Outgoing {
     /// can still reconcile against the bucket head after a target restart (board 11530).
     attempted_token: Mutex<Option<u64>>,
     client: super::peers::Client,
+    /// Pins the shared HTTP/2 channel in `daemon.peer_channels` while this migration is live.
+    _channel: super::peers::PeerChannel,
     sent: Mutex<HashMap<String, (u64, u64)>>,
     rounds: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
@@ -163,7 +165,7 @@ struct Outgoing {
 impl Outgoing {
     fn new(
         Marker { migration, peer, incarnation, token }: Marker,
-        client: super::peers::Client,
+        (client, _channel): (super::peers::Client, super::peers::PeerChannel),
         bucket_backed: bool,
     ) -> Self {
         let (sent, rounds) = (Mutex::default(), Mutex::default());
@@ -176,6 +178,7 @@ impl Outgoing {
             source_epoch: Mutex::new(None),
             attempted_token: Mutex::new(None),
             client,
+            _channel,
             sent,
             rounds,
         }
@@ -460,10 +463,12 @@ async fn within<T>(
     }
 }
 
-/// A client of the peer at `address`.
-fn client(daemon: &Daemon, address: &str) -> Result<super::peers::Client, Errno> {
-    let runtime = crate::bucket::bucket_runtime_on(&daemon.host).map_err(|_| Errno::EIO)?;
-    super::peers::member_on(daemon, &runtime, address).map_err(|err| {
+/// A pooled client and channel handle for the peer at `address` (board 11713, board 11659).
+fn client(
+    daemon: &Daemon,
+    address: &str,
+) -> Result<(super::peers::Client, super::peers::PeerChannel), Errno> {
+    super::peers::client_on(daemon, address).map_err(|err| {
         log::warn!("cladefsd: migrating to {address}: {err}");
         Errno::EINVAL
     })
@@ -531,7 +536,7 @@ pub(super) async fn migrate_on(
     })
     .await?;
     let migration = rand::random::<u64>() | 1;
-    let mut client = client(daemon, &peer)?;
+    let (mut client, channel) = client(daemon, &peer)?;
     let (bucket_backed, prepare) = match kind {
         SourceKind::Ephemeral { cell, parent } => {
             let host = ephemeral_host::host_on(&daemon.host)?;
@@ -609,7 +614,7 @@ pub(super) async fn migrate_on(
         };
     count(&COUNTS.prepared, 1);
     let marker = Marker { migration, peer, incarnation, token };
-    let outgoing = Arc::new(Outgoing::new(marker, client, bucket_backed));
+    let outgoing = Arc::new(Outgoing::new(marker, (client, channel), bucket_backed));
     // Its rounds' task noted before the migration is the cell's, with nothing awaited between: a
     // hand-over or an abort finding it stops them.
     start_rounds(daemon, &outgoing, path.clone())?;
@@ -1404,19 +1409,27 @@ async fn ask(
 }
 
 /// Reconciles an uncertain bucket-backed hand-over after the target daemon restarted or evicted its
-/// in-memory acceptance set (returning `FAILED_PRECONDITION`, board 11530).
+/// in-memory acceptance set (returning `FAILED_PRECONDITION`, board 11530, board 11657).
 ///
 /// Because the target durably renames `staged -> into` before taking the bucket head:
-/// - `head.token > source_token` (or `>= target_token`) proves the target took ownership and holds
-///   `into` on disk (`Ok(true)`).
-/// - A strictly higher `target_token > source_token` with `head.token <= source_token` proves the
-///   target's CAS never landed (`Ok(false)`).
-/// - For same-token hand-overs, `source_epoch` (captured after `hold_cell_alone_hurry`) separates
-///   pre-CAS (`head.epoch == epoch` -> `Ok(false)`) from post-CAS (`head.epoch > epoch` ->
-///   `Ok(true)`).
-/// - If both source and target restarted on a same-token hand-over (`source_epoch` is `None` and no
-///   strictly higher `target_token` was supplied), ownership cannot be proved either way, so this
-///   fails closed (`Err(ENOTCONN)`) rather than risking split-brain or data loss.
+/// - Deleted cells (`head.deleted()`, whose `token` is `u64::MAX`) fail closed (`Err(ESTALE)`).
+/// - When a strictly higher `target_token > source_token` is known:
+///   - `head.token == target_token` proves this target took ownership and holds `into` on disk
+///     (`Ok(true)`).
+///   - `head.token < target_token` proves this target's CAS never landed (`Ok(false)`), even if a
+///     3rd host took over at an intermediate token (`source_token < head.token < target_token`).
+///   - `head.token > target_token` means a 3rd host took over past `target_token`; whether the
+///     target accepted first or died pre-rename cannot be proved, so fail closed (`Err(ESTALE)`)
+///     without deleting the source's tail or reporting `HandOverCell` succeeded.
+/// - Without a strictly higher `target_token`:
+///   - `head.token > source_token` indicates a 3rd-host takeover (not a same-token target CAS);
+///     fail closed (`Err(ESTALE)`) without deleting the source's tail.
+///   - For same-token hand-overs (`head.token <= source_token`), `source_epoch` (captured after
+///     `hold_cell_alone_hurry`) separates pre-CAS (`head.epoch == epoch` -> `Ok(false)`) from
+///     post-CAS (`head.epoch > epoch` -> `Ok(true)`).
+///   - If both source and target restarted on a same-token hand-over (`source_epoch` is `None` and
+///     no strictly higher `target_token` was supplied), ownership cannot be proved either way, so
+///     this fails closed (`Err(ENOTCONN)`) rather than risking split-brain or data loss.
 async fn reconcile_restarted_target(
     daemon: &Daemon,
     path: &Path,
@@ -1455,18 +1468,45 @@ async fn reconcile_restarted_target(
     let Some(head) = head else {
         return Ok(false);
     };
+    if head.deleted() {
+        log::warn!(
+            "cladefsd: reconciling {} after target restart: cell {cell} is deleted in bucket; \
+             refusing to treat as target acceptance",
+            path.display(),
+        );
+        return Err(Errno::ESTALE);
+    }
     let target_token = placement_token.or_else(|| *outgoing.attempted_token.lock().unwrap());
     let source_epoch = *outgoing.source_epoch.lock().unwrap();
-    if target_token.is_some_and(|t| t > source_token && head.token >= t)
-        || head.token > source_token
-    {
-        return Ok(true);
+    if let Some(target) = target_token.filter(|&t| t > source_token) {
+        if head.token == target {
+            return Ok(true);
+        }
+        if head.token < target {
+            return Ok(false);
+        }
+        log::warn!(
+            "cladefsd: reconciling {} after target restart: head token {} > target token {} \
+             (third-host takeover); refusing to treat as target acceptance",
+            path.display(),
+            head.token,
+            target
+        );
+        return Err(Errno::ESTALE);
+    }
+    if head.token > source_token {
+        log::warn!(
+            "cladefsd: reconciling {} after target restart: head token {} > source token {} \
+             without a matching placement_token (third-host takeover); refusing to treat as \
+             target acceptance",
+            path.display(),
+            head.token,
+            source_token
+        );
+        return Err(Errno::ESTALE);
     }
     if let Some(epoch) = source_epoch {
         return Ok(head.epoch > epoch);
-    }
-    if target_token.is_some_and(|t| t > source_token) {
-        return Ok(false);
     }
     log::warn!(
         "cladefsd: reconciling {} after target restart: head token {} <= source token {} without \
@@ -1593,7 +1633,12 @@ pub(super) async fn abort_on(daemon: &Arc<Daemon>, path: PathBuf) -> Result<(), 
         log::warn!("cladefsd: aborting migration {:x}: {err}", outgoing.migration);
         return Err(Errno::ENOTCONN);
     }
-    match ask(daemon, ephemeral_host.as_ref(), &path, &outgoing, None).await {
+    // Pass any recorded placement_token from the prior HandOverCell attempt so bucket-backed
+    // aborts reconcile higher-token migrations cleanly without touching frozen `cell-records` v1
+    // (board 11657).
+    let placement_token =
+        if outgoing.bucket_backed { *outgoing.attempted_token.lock().unwrap() } else { None };
+    match ask(daemon, ephemeral_host.as_ref(), &path, &outgoing, placement_token).await {
         // Accepted before the abort: handed over, the cell the target's, which an abort answering
         // Ok would hide (hotbed question 519).
         Ok(()) => Err(Errno::EEXIST),
@@ -1703,7 +1748,7 @@ async fn let_go(
 /// Tells the target at `peer` it may forget it accepted `migration`, its cell let go of here
 /// (board 5734). Unheard, the target keeps remembering it: one empty file.
 async fn release(daemon: &Daemon, peer: &str, migration: u64) {
-    let Ok(mut client) = client(daemon, peer) else { return };
+    let Ok((mut client, _channel)) = client(daemon, peer) else { return };
     let released = MigrateReleaseRequest { migration };
     // Unanswered: said; the target forgets the migration when it is idle as long.
     if let Err(err) = within(BUCKET_BOUND, client.migrate_release(released)).await {
@@ -2051,22 +2096,20 @@ pub(super) mod target {
             .into())
     }
 
-    /// Canonical paths of daemon-internal directories (ephemeral journal, all JBOD part cache
-    /// shards, all JBOD replica shards) that must never be used as destination parents for
-    /// migrated bucket-backed cells (board 11530).
-    fn daemon_internal_dirs() -> Vec<PathBuf> {
+    /// Canonical paths of daemon-internal directories (ephemeral journal, all live and configured
+    /// JBOD part cache shards, all JBOD replica shards) that must never be used as destination
+    /// parents for migrated bucket-backed cells (board 11530).
+    fn daemon_internal_dirs(daemon: &Daemon) -> Vec<PathBuf> {
         let mut raw_dirs = Vec::new();
         if let Some(dir) = node_local::env::var_os("CLADEFSD_EPHEMERAL").filter(|v| !v.is_empty()) {
             raw_dirs.push(PathBuf::from(dir));
         }
+        if let Some(cache) = super::super::storage::opened_cache(daemon) {
+            raw_dirs.extend(cache.shard_dirs());
+        }
         if let Some(raw) = node_local::env::var_os("CLADEFSD_PART_CACHE").filter(|v| !v.is_empty())
         {
-            match super::super::storage::parse_part_cache_dirs(&raw) {
-                Ok(dirs) => raw_dirs.extend(dirs),
-                // Fallback to split_paths so even an unexpanded or non-glob path is checked.
-                Err(_) => raw_dirs
-                    .extend(std::env::split_paths(&raw).filter(|p| !p.as_os_str().is_empty())),
-            }
+            raw_dirs.extend(super::super::storage::expand_part_cache_dirs_best_effort(&raw));
         }
         if let Some(raw) = node_local::env::var_os("CLADEFSD_REPLICAS").filter(|v| !v.is_empty()) {
             raw_dirs.extend(std::env::split_paths(&raw).filter(|p| !p.as_os_str().is_empty()));
@@ -2087,7 +2130,7 @@ pub(super) mod target {
     /// that root, no ancestor containing an existing cell (`store` / `store.deleted`), and not
     /// inside a daemon internal directory (`CLADEFSD_EPHEMERAL`, `CLADEFSD_PART_CACHE`,
     /// `CLADEFSD_REPLICAS`).
-    fn bucket_cell_path(roots: &[PathBuf], to: &str) -> Option<PathBuf> {
+    fn bucket_cell_path(daemon: &Daemon, roots: &[PathBuf], to: &str) -> Option<PathBuf> {
         if to.is_empty()
             || !to.starts_with('/')
             || to.ends_with('/')
@@ -2137,7 +2180,7 @@ pub(super) mod target {
         let candidate = canon_parent.join(name);
         // Reject daemon-internal directories (and paths equal to them) that may sit inside
         // CLADEFSD_ROOTS.
-        let internal = daemon_internal_dirs();
+        let internal = daemon_internal_dirs(daemon);
         if internal.iter().any(|dir| candidate.starts_with(dir)) {
             return None;
         }
@@ -2149,7 +2192,7 @@ pub(super) mod target {
     pub(crate) fn reap_orphaned_staging_on(daemon: &Daemon) -> usize {
         // No roots configured: nothing to scan.
         let Ok(roots) = bucket_cells_roots(daemon) else { return 0 };
-        let internal = daemon_internal_dirs();
+        let internal = daemon_internal_dirs(daemon);
         // Ephemeral host absent when CLADEFSD_EPHEMERAL is unset; skip only active ephemeral ones.
         let ephemeral_stagings: HashSet<PathBuf> = ephemeral_host::host_on(&daemon.host)
             .ok()
@@ -2249,7 +2292,7 @@ pub(super) mod target {
             }
             let path = if bucket_backed {
                 let roots = bucket_cells_roots(daemon).map_err(Status::failed_precondition)?;
-                bucket_cell_path(&roots, &to).ok_or_else(|| {
+                bucket_cell_path(daemon, &roots, &to).ok_or_else(|| {
                     Status::invalid_argument(format!(
                         "migration {migration:x}: {to:?} is no new cell path in this host's roots"
                     ))

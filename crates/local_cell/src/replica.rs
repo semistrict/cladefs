@@ -53,6 +53,26 @@ use std::sync::{Arc, Mutex};
 /// The directory's incarnation file.
 const INCARNATION: &str = "incarnation";
 
+/// Unfrozen rebuildable cache of the newest bucket head (`Seen`) observed for held cells
+/// (doc-28, board 11671). Stored outside the frozen `replica-directory` v4 format: missing,
+/// corrupt, or incompatible-version files are ignored and rebuilt without failing open.
+const SEEN_CACHE: &str = "seen.cache";
+
+/// 4-byte magic prefix of [`SEEN_CACHE`].
+const SEEN_CACHE_MAGIC: [u8; 4] = *b"FXSC";
+
+/// Exact version of the unfrozen [`SEEN_CACHE`] format (doc-28: refused and rebuilt on mismatch).
+const SEEN_CACHE_VERSION: u32 = 1;
+
+/// Maximum entries retained in [`SEEN_CACHE`], bounding memory and disk footprint.
+const SEEN_CACHE_MAX: usize = 65_536;
+
+/// Encoded byte length of a single `(CellId, Seen)` record in [`SEEN_CACHE`].
+const SEEN_ENTRY_BYTES: usize = 8 + 8 + 8 + 8 + 1 + 8 + 8;
+
+/// Maximum encoded size accepted when reading [`SEEN_CACHE`] (4 MiB).
+const MAX_SEEN_CACHE_BYTES: u64 = 4 << 20;
+
 /// The replica directory's family: 2, logs held as their writers send them, no outer framing
 /// (board 6902); 3, the formats of the logs it holds named, `cladefs replicas 3, logs ..., own frames
 /// ...` (board 8457), refused but by a build of those alone; 4, frozen (doc-28, board 10046): its
@@ -283,6 +303,10 @@ impl From<io::Error> for Error {
 /// Bounded LRU of open replica log file handles across all cells (board 6902).
 type FileCache<F> = bucket_cell::lru::LruMap<(CellId, Key, u64), Arc<F>>;
 
+/// Bounded LRU of the newest bucket heads observed for cells held in this replica directory,
+/// mirrored to the unfrozen rebuildable [`SEEN_CACHE`] file (board 11671).
+type SeenCache = bucket_cell::lru::LruMap<CellId, Seen>;
+
 /// One replica directory shard on one host disk (doc-21, frozen format v4).
 struct Shard<D: Dir> {
     dir: D,
@@ -293,6 +317,13 @@ struct Shard<D: Dir> {
     cells: Mutex<HashMap<CellId, Arc<Mutex<Held>>>>,
     /// Bounded LRU of open log file handles across all cells on this shard (board 6902).
     files: Mutex<FileCache<D::File>>,
+    /// Newest bucket heads noted for held cells on this shard, loaded from and persisted to
+    /// [`SEEN_CACHE`] so a restarted member continues admitting calls during a bucket outage
+    /// (board 11671).
+    seen_cache: Mutex<SeenCache>,
+    /// Serializes atomic writes/removals of [`SEEN_CACHE`] so concurrent `saw`/`sweep` calls never
+    /// race `seen.cache.new` or overwrite newer entries with older snapshots.
+    seen_io: Mutex<()>,
 }
 
 /// A host's replica store across one or more JBOD replica directories.
@@ -305,6 +336,10 @@ struct Shard<D: Dir> {
 /// configuration.
 pub struct Replicas<D: Dir> {
     shards: Vec<Shard<D>>,
+    /// Serializes cross-shard cell lookup/acquisition with `Holding::drop` eviction so concurrent
+    /// calls cannot split a cell across two shards (TOCTOU between `has_cell` and `holding`).
+    /// Never held across disk I/O; lock order is always `routing -> shard.cells -> held`.
+    routing: Mutex<()>,
     incarnation: u64,
     /// The most bytes a configuration's logs hold here: the writer's lag bound in bytes, which
     /// bounds what is not in the bucket yet (doc-21, Commit). Per configuration, as a take installs
@@ -355,9 +390,6 @@ struct Held {
     promises: BTreeSet<u64>,
     /// Its logs, by configuration and log.
     logs: BTreeMap<(Key, u64), Log>,
-    /// cladefs: the newest of its head the peer service read for its calls, which admits them
-    /// while the bucket is out of reach ([`Replicas::saw`], board 8445). Kept while it holds files.
-    seen: Option<Seen>,
 }
 
 impl Held {
@@ -447,6 +479,7 @@ impl<D: Dir> Shard<D> {
             write_text(&dir, INCARNATION, &incarnation_text(incarnation))?;
             incarnation
         };
+        let has_seen_cache = names.iter().any(|name| name == SEEN_CACHE);
         // cladefs: each cell's files, as this one listing found them, read as the cell is first
         // asked of (board 8451).
         let mut found: HashMap<CellId, Vec<String>> = HashMap::new();
@@ -461,11 +494,15 @@ impl<D: Dir> Shard<D> {
                 (cell, Arc::new(Mutex::new(held)))
             })
             .collect();
+        let seen_cache =
+            if has_seen_cache { load_seen_cache(&dir) } else { bucket_cell::lru::LruMap::new() };
         Ok(Self {
             dir,
             incarnation,
             cells: Mutex::new(cells),
             files: Mutex::new(bucket_cell::lru::LruMap::new()),
+            seen_cache: Mutex::new(seen_cache),
+            seen_io: Mutex::new(()),
         })
     }
 
@@ -497,9 +534,9 @@ impl<D: Dir> Shard<D> {
 
     /// What this shard holds of `cell`, held for a call of it ([`Holding`]): its entry, or one
     /// made, empty, so that calls of a cell new here are served one at a time too.
-    fn holding(&self, cell: CellId) -> Holding<'_, D> {
+    fn holding<'a>(&'a self, cell: CellId, routing: &'a Mutex<()>) -> Holding<'a, D> {
         let held = self.cells.lock().unwrap().entry(cell).or_default().clone();
-        Holding { shard: self, cell, held }
+        Holding { shard: self, routing, cell, held }
     }
 
     /// Reads the files `held` names unread ([`Held::unread`]), `cell`'s, from the disk: kept unread
@@ -536,6 +573,31 @@ impl<D: Dir> Shard<D> {
                 held.unread = Some(names);
                 Err(err)
             }
+        }
+    }
+
+    /// Writes this shard's [`SEEN_CACHE`] snapshot atomically to disk, or removes the cache file
+    /// when empty. Failures are logged without failing the caller because [`SEEN_CACHE`] is an
+    /// unfrozen rebuildable cache (doc-28, board 11671).
+    fn flush_seen_cache(&self) {
+        let _io = self.seen_io.lock().unwrap();
+        let bytes = {
+            let cache = self.seen_cache.lock().unwrap();
+            if cache.is_empty() { None } else { Some(encode_seen_cache(&cache)) }
+        };
+        let result = match bytes {
+            Some(bytes) => {
+                self.dir.replace(SEEN_CACHE, &bytes).and_then(|()| self.dir.sync_dir(""))
+            }
+            None => match self.dir.remove(SEEN_CACHE) {
+                Ok(()) => self.dir.sync_dir(""),
+                Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+                Err(err) => Err(err),
+            },
+        };
+        if let Err(err) = result {
+            // Rebuildable cache (doc-28): keep in-memory state and let a later write retry.
+            log::warn!("replicas: updating {SEEN_CACHE}: {err}");
         }
     }
 
@@ -632,26 +694,54 @@ impl<D: Dir> Replicas<D> {
             shards.push(Shard::open_as(dir, &mut new)?);
         }
         let incarnation = composite_incarnation(&shards);
-        Ok(Self { shards, incarnation, most, logs_most: LOGS_MOST })
+        Ok(Self { shards, routing: Mutex::new(()), incarnation, most, logs_most: LOGS_MOST })
     }
 
-    /// The shard owning `cell`: whichever shard already holds files for `cell`, or the shard
-    /// maximizing the rendezvous hash score over `(shard.incarnation, cell)`.
-    fn shard_for(&self, cell: CellId) -> &Shard<D> {
-        if self.shards.len() == 1 {
-            return &self.shards[0];
-        }
-        if let Some(shard) = self.shards.iter().find(|shard| shard.has_cell(cell)) {
-            return shard;
-        }
+    /// The rendezvous-hashed canonical shard index for `cell`.
+    fn canonical_shard_index(&self, cell: CellId) -> usize {
         self.shards
             .iter()
-            .max_by(|a, b| {
+            .enumerate()
+            .max_by(|(_, a), (_, b)| {
                 shard_score(a.incarnation, cell)
                     .cmp(&shard_score(b.incarnation, cell))
                     .then_with(|| a.incarnation.cmp(&b.incarnation))
             })
+            .map(|(i, _)| i)
             .expect("at least one shard")
+    }
+
+    /// Acquires [`Holding`] guards (in ascending shard index order) for every shard that currently
+    /// holds `cell`, or for the single canonical rendezvous shard if none holds it yet. Held under
+    /// `self.routing` so `Holding::drop` cannot race and split a cell across two shards, and if a
+    /// reverted shard set left files on multiple shards, callers see and fence all of them.
+    fn hold_cell(&self, cell: CellId) -> Vec<Holding<'_, D>> {
+        if self.shards.len() == 1 {
+            return vec![self.shards[0].holding(cell, &self.routing)];
+        }
+        let _routing = self.routing.lock().unwrap();
+        let mut holdings = Vec::new();
+        for shard in &self.shards {
+            if shard.has_cell(cell) {
+                holdings.push(shard.holding(cell, &self.routing));
+            }
+        }
+        if holdings.is_empty() {
+            let idx = self.canonical_shard_index(cell);
+            holdings.push(self.shards[idx].holding(cell, &self.routing));
+        }
+        holdings
+    }
+
+    /// Like [`Replicas::hold_cell`], returning only shards that already hold `cell` without
+    /// creating a new entry when none does (used by `sweep` and `seen`).
+    fn hold_existing_cell(&self, cell: CellId) -> Vec<Holding<'_, D>> {
+        let _routing = self.routing.lock().unwrap();
+        self.shards
+            .iter()
+            .filter(|shard| shard.has_cell(cell))
+            .map(|shard| shard.holding(cell, &self.routing))
+            .collect()
     }
 
     /// This, holding at most `logs` logs of a configuration, fewer than [`LOGS_MOST`], as a test
@@ -686,21 +776,32 @@ impl<D: Dir> Replicas<D> {
         bytes: &[u8],
     ) -> Result<u64, Error> {
         self.check(incarnation)?;
-        let shard = self.shard_for(cell);
-        let holding = shard.holding(cell);
-        let mut held = holding.lock()?;
-        if key.epoch < held.promise {
-            return Err(Refused::Fenced { promise: held.promise }.into());
+        let holdings = self.hold_cell(cell);
+        let mut helds: Vec<std::sync::MutexGuard<'_, Held>> =
+            holdings.iter().map(Holding::lock).collect::<Result<_, _>>()?;
+        let max_promise = helds.iter().map(|h| h.promise).max().unwrap_or(0);
+        if key.epoch < max_promise {
+            return Err(Refused::Fenced { promise: max_promise }.into());
         }
         // Nothing to append makes nothing: no file a writer's empty appends would make by the
         // thousand, past the bound, which counts bytes (Codex's review of TASK-537.3.2).
         if bytes.is_empty() {
-            return Ok(held.logs.get(&(key, log)).map_or(0, |state| state.end));
+            return Ok(helds
+                .iter()
+                .filter_map(|h| h.logs.get(&(key, log)).map(|state| state.end))
+                .max()
+                .unwrap_or(0));
         }
+        let target_idx = helds
+            .iter()
+            .position(|h| h.logs.contains_key(&(key, log)))
+            .or_else(|| helds.iter().position(|h| h.logs_of(key) > 0))
+            .unwrap_or(0);
+        let shard = holdings[target_idx].shard;
         let path = log_path(cell, key, log);
         // What it would append, checked before any file is made: an append past the end, all of
         // it held already, or past the bound, leaves nothing behind.
-        let end = held.logs.get(&(key, log)).map_or(0, |state| state.end);
+        let end = helds[target_idx].logs.get(&(key, log)).map_or(0, |state| state.end);
         if offset > end || offset + bytes.len() as u64 <= end {
             return Ok(end);
         }
@@ -714,22 +815,25 @@ impl<D: Dir> Replicas<D> {
             let at = format!("log {log} of {cell} at {offset}");
             return Err(Refused::format(at, given).into());
         }
-        let would = held.bytes(key) + (offset + bytes.len() as u64 - end);
+        let total_held_bytes: u64 = helds.iter().map(|h| h.bytes(key)).sum();
+        let would = total_held_bytes + (offset + bytes.len() as u64 - end);
         if would > self.most {
             return Err(Refused::Full { would, most: self.most }.into());
         }
-        if !held.logs.contains_key(&(key, log)) && held.logs_of(key) >= self.logs_most {
+        let total_logs_of: usize = helds.iter().map(|h| h.logs_of(key)).sum();
+        if !helds[target_idx].logs.contains_key(&(key, log)) && total_logs_of >= self.logs_most {
             return Err(Refused::Logs { most: self.logs_most }.into());
         }
         // cladefs: a configuration new here, past those a cell's logs are of (board 8451).
-        if held.logs_of(key) == 0 && held.configurations().len() >= CONFIGURATIONS_MOST {
+        let total_configs: BTreeSet<Key> = helds.iter().flat_map(|h| h.configurations()).collect();
+        if total_logs_of == 0 && total_configs.len() >= CONFIGURATIONS_MOST {
             return Err(Refused::Configurations { cell, most: CONFIGURATIONS_MOST }.into());
         }
         // cladefs: what it adds, admitted by the disk governor before any file is made, held
         // until written (board 8451).
         let _pledge = shard.admit(offset + bytes.len() as u64 - end)?;
         let mut created_file = None;
-        if !held.logs.contains_key(&(key, log)) {
+        if !helds[target_idx].logs.contains_key(&(key, log)) {
             // Its file made, it is held at once, empty, however its first append ends: a failure
             // after leaves a file the next append opens, and drops and sweeps remove. Its
             // `dir_synced` flag stays false until `sync_dir("")` succeeds (board 5418).
@@ -738,7 +842,7 @@ impl<D: Dir> Replicas<D> {
                     let file = Arc::new(file);
                     shard.cache_file((cell, key, log), file.clone());
                     created_file = Some(file);
-                    held.logs.insert((key, log), Log { end: 0, dir_synced: false });
+                    helds[target_idx].logs.insert((key, log), Log { end: 0, dir_synced: false });
                 }
                 Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
                     // Made by an append that failed before it was held (or before its dir sync):
@@ -749,13 +853,13 @@ impl<D: Dir> Replicas<D> {
                     let mut found = Log::read(cell, log, &file, &path)?;
                     found.dir_synced = false;
                     let found_end = found.end;
-                    held.logs.insert((key, log), found);
+                    helds[target_idx].logs.insert((key, log), found);
                     if found_end != 0 {
                         shard.dir.sync_dir("").context("syncing the replica directory")?;
-                        held.logs.get_mut(&(key, log)).unwrap().dir_synced = true;
+                        helds[target_idx].logs.get_mut(&(key, log)).unwrap().dir_synced = true;
                         drop(file);
-                        drop(held);
-                        drop(holding);
+                        drop(helds);
+                        drop(holdings);
                         return self.append((cell, key, incarnation), log, offset, bytes);
                     }
                     let file = Arc::new(file);
@@ -767,6 +871,7 @@ impl<D: Dir> Replicas<D> {
                 }
             }
         }
+        let held = &mut helds[target_idx];
         // Ensure the new log's directory entry is durable before writing or acknowledging any
         // append, including retries after an earlier `sync_dir` failure (board 5418).
         if !held.logs.get(&(key, log)).unwrap().dir_synced {
@@ -794,38 +899,44 @@ impl<D: Dir> Replicas<D> {
         epoch: u64,
     ) -> Result<Vec<(u64, u64)>, Error> {
         self.check(incarnation)?;
-        let shard = self.shard_for(cell);
-        let holding = shard.holding(cell);
-        let mut held = holding.lock()?;
-        if epoch < held.promise {
-            return Err(Refused::Fenced { promise: held.promise }.into());
+        let holdings = self.hold_cell(cell);
+        let mut helds: Vec<std::sync::MutexGuard<'_, Held>> =
+            holdings.iter().map(Holding::lock).collect::<Result<_, _>>()?;
+        let max_promise = helds.iter().map(|h| h.promise).max().unwrap_or(0);
+        if epoch < max_promise {
+            return Err(Refused::Fenced { promise: max_promise }.into());
         }
-        if epoch > held.promise {
-            // A file of each promise, made and synced before the ones before go: a crash
-            // between leaves both, the greatest read. Nothing renamed over another (TASK-537.3.4's
-            // review: `Dir::rename` renames to no file there). A fence at this epoch that failed
-            // partway left its file, made again here (board 5420).
-            let path = promise_path(cell, epoch);
-            let made = match shard.dir.create(&path, false) {
-                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                    shard.dir.open(&path, false)
+        let mut logs: BTreeMap<u64, u64> = BTreeMap::new();
+        for (holding, held) in holdings.iter().zip(helds.iter_mut()) {
+            let shard = holding.shard;
+            if epoch > held.promise {
+                // A file of each promise, made and synced before the ones before go: a crash
+                // between leaves both, the greatest read. Nothing renamed over another (TASK-537.3.4's
+                // review: `Dir::rename` renames to no file there). A fence at this epoch that failed
+                // partway left its file, made again here (board 5420).
+                let path = promise_path(cell, epoch);
+                let made = match shard.dir.create(&path, false) {
+                    Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                        shard.dir.open(&path, false)
+                    }
+                    made => made,
+                };
+                let file = made.with_context(|| format!("making {path}"))?;
+                held.promises.insert(epoch);
+                file.sync().with_context(|| format!("syncing {path}"))?;
+                shard.dir.sync_dir("").context("syncing the replica directory")?;
+                // Made: the promise, from here on, whatever of the rest fails. The files before it
+                // going fail no fence: they are left as a crash leaves them, the next fence's to remove.
+                held.promise = epoch;
+                if let Err(err) = shard.remove_promises(cell, held, ..epoch) {
+                    log::warn!("replicas: {cell}'s promises before {epoch}: {err:#}");
                 }
-                made => made,
-            };
-            let file = made.with_context(|| format!("making {path}"))?;
-            held.promises.insert(epoch);
-            file.sync().with_context(|| format!("syncing {path}"))?;
-            shard.dir.sync_dir("").context("syncing the replica directory")?;
-            // Made: the promise, from here on, whatever of the rest fails. The files before it
-            // going fail no fence: they are left as a crash leaves them, the next fence's to remove.
-            held.promise = epoch;
-            if let Err(err) = shard.remove_promises(cell, &mut held, ..epoch) {
-                log::warn!("replicas: {cell}'s promises before {epoch}: {err:#}");
+            }
+            for (&(_, log), state) in held.logs.range((key, 0)..=(key, u64::MAX)) {
+                logs.entry(log).and_modify(|end| *end = (*end).max(state.end)).or_insert(state.end);
             }
         }
-        Ok((held.logs.range((key, 0)..=(key, u64::MAX)))
-            .map(|(&(_, log), state)| (log, state.end))
-            .collect())
+        Ok(logs.into_iter().collect())
     }
 
     /// `len` bytes at `offset` of the log `log` of `cell`'s configuration `key`, as far as it holds
@@ -838,11 +949,18 @@ impl<D: Dir> Replicas<D> {
         len: u64,
     ) -> Result<Vec<u8>, Error> {
         self.check(incarnation)?;
-        let shard = self.shard_for(cell);
-        let holding = shard.holding(cell);
-        let held = holding.lock()?;
-        let Some(state) = held.logs.get(&(key, log)) else { return Ok(Vec::new()) };
-        let available = state.end.saturating_sub(offset).min(len) as usize;
+        let holdings = self.hold_cell(cell);
+        let helds: Vec<std::sync::MutexGuard<'_, Held>> =
+            holdings.iter().map(Holding::lock).collect::<Result<_, _>>()?;
+        let found = holdings
+            .iter()
+            .zip(helds.iter())
+            .filter_map(|(holding, held)| {
+                held.logs.get(&(key, log)).map(|state| (holding.shard, state.end))
+            })
+            .max_by_key(|&(_, end)| end);
+        let Some((shard, end)) = found else { return Ok(Vec::new()) };
+        let available = end.saturating_sub(offset).min(len) as usize;
         if available == 0 {
             return Ok(Vec::new());
         }
@@ -865,17 +983,19 @@ impl<D: Dir> Replicas<D> {
         through: Option<u64>,
     ) -> Result<(), Error> {
         self.check(incarnation)?;
-        let shard = self.shard_for(cell);
-        let holding = shard.holding(cell);
-        let mut held = holding.lock()?;
-        let gone: Vec<(Key, u64)> = (held.logs.keys())
-            .filter(|&&(of, log)| match through {
-                Some(last) => of == key && log <= last,
-                None => of < key,
-            })
-            .copied()
-            .collect();
-        shard.remove(cell, &mut held, &gone)
+        let holdings = self.hold_existing_cell(cell);
+        for holding in &holdings {
+            let mut held = holding.lock()?;
+            let gone: Vec<(Key, u64)> = (held.logs.keys())
+                .filter(|&&(of, log)| match through {
+                    Some(last) => of == key && log <= last,
+                    None => of < key,
+                })
+                .copied()
+                .collect();
+            holding.shard.remove(cell, &mut held, &gone)?;
+        }
+        Ok(())
     }
 
     /// The cells the directory holds logs or a promise of, and the configurations it holds logs
@@ -925,11 +1045,7 @@ impl<D: Dir> Replicas<D> {
             // what the head names a configuration later than; TASK-537.3.2's review).
             return Ok(());
         }
-        for shard in &self.shards {
-            if self.shards.len() > 1 && !shard.has_cell(cell) {
-                continue;
-            }
-            let holding = shard.holding(cell);
+        for holding in self.hold_existing_cell(cell) {
             let mut held = holding.lock()?;
             let gone: Vec<(Key, u64)> = match swept {
                 Swept::Unconfigured => unreachable!(),
@@ -938,13 +1054,20 @@ impl<D: Dir> Replicas<D> {
                 }
                 Swept::Gone => held.logs.keys().copied().collect(),
             };
-            shard.remove(cell, &mut held, &gone)?;
+            holding.shard.remove(cell, &mut held, &gone)?;
             if swept == Swept::Gone {
                 // Every promise, of `u64::MAX` too (board 8449: removing those before `u64::MAX`
                 // kept its file, while the promise held went to 0, accepting appends it promised
                 // to refuse): the promise held 0 only once all are gone, durably.
-                shard.remove_promises(cell, &mut held, ..)?;
+                holding.shard.remove_promises(cell, &mut held, ..)?;
                 held.promise = 0;
+            }
+        }
+        if swept == Swept::Gone {
+            for shard in &self.shards {
+                if shard.seen_cache.lock().unwrap().remove(&cell).is_some() {
+                    shard.flush_seen_cache();
+                }
             }
         }
         Ok(())
@@ -971,45 +1094,74 @@ impl<D: Dir> Replicas<D> {
         active: Option<Key>,
     ) -> Result<(), Error> {
         self.check(incarnation)?;
-        let shard = self.shard_for(cell);
-        let holding = shard.holding(cell);
-        let mut held = holding.lock()?;
         let left = |of: &Key| of.epoch <= key.epoch && *of < key && Some(*of) != active;
-        let gone: Vec<(Key, u64)> =
-            held.logs.range(..(key, 0)).map(|(&at, _)| at).filter(|(of, _)| left(of)).collect();
-        if !gone.is_empty() {
-            log::info!(
-                "replicas: {cell}'s configurations before {key:?} left behind: {:?}",
-                gone.iter().map(|&(of, _)| of).collect::<BTreeSet<_>>()
-            );
+        for holding in self.hold_existing_cell(cell) {
+            let mut held = holding.lock()?;
+            let gone: Vec<(Key, u64)> =
+                held.logs.range(..(key, 0)).map(|(&at, _)| at).filter(|(of, _)| left(of)).collect();
+            if !gone.is_empty() {
+                log::info!(
+                    "replicas: {cell}'s configurations before {key:?} left behind: {:?}",
+                    gone.iter().map(|&(of, _)| of).collect::<BTreeSet<_>>()
+                );
+            }
+            holding.shard.remove(cell, &mut held, &gone)?;
         }
-        shard.remove(cell, &mut held, &gone)
+        Ok(())
     }
 
-    /// cladefs: notes that `cell`'s head, read from the bucket, said `seen` (board 8445): kept while
-    /// the cell holds files here, the newest of what was read, to admit its calls by while the bucket
-    /// is out of reach ([`Replicas::seen`]). Each of a head's fields only grows.
+    /// cladefs: notes that `cell`'s head, read from the bucket, said `seen` (board 8445, board
+    /// 11671): kept for cells holding files here (or already tracked in the rebuildable cache)
+    /// and persisted to [`SEEN_CACHE`], the newest of what was read, to admit its calls by while
+    /// the bucket is out of reach ([`Replicas::seen`]), including across restarts. Each of a
+    /// head's fields only grows.
     pub fn saw(&self, cell: CellId, seen: Seen) -> Result<(), Error> {
-        let shard = self.shard_for(cell);
-        let holding = shard.holding(cell);
-        let mut held = holding.lock()?;
         let newest =
             |was: Seen| (was.epoch, was.end, was.active) < (seen.epoch, seen.end, seen.active);
-        if held.seen.is_none_or(newest) {
-            held.seen = Some(seen);
+        for holding in self.hold_cell(cell) {
+            let held = holding.lock()?;
+            let has_files = !held.is_empty();
+            drop(held);
+            let changed = {
+                let mut cache = holding.shard.seen_cache.lock().unwrap();
+                let existing = cache.peek(&cell).copied();
+                if !has_files && existing.is_none() {
+                    false
+                } else if existing.is_none_or(newest) {
+                    cache.insert(cell, seen);
+                    while cache.len() > SEEN_CACHE_MAX {
+                        cache.pop_oldest();
+                    }
+                    true
+                } else {
+                    false
+                }
+            };
+            if changed {
+                holding.shard.flush_seen_cache();
+            }
         }
         Ok(())
     }
 
     /// cladefs: the newest of `cell`'s head the directory noted ([`Replicas::saw`]), if it holds
-    /// files of the cell: a head the bucket held once, by which what is admitted harms no writer or
-    /// take of the head since (board 8445): a promise no later than its epoch, no later than any
-    /// head's since; appends and drops of a configuration superseded since, which no take reads.
+    /// files of the cell (or previously noted it before logs were dropped, persisted in
+    /// [`SEEN_CACHE`]): a head the bucket held once, by which what is admitted harms no writer or
+    /// take of the head since (board 8445, board 11671): a promise no later than its epoch, no
+    /// later than any head's since; appends and drops of a configuration superseded since, which
+    /// no take reads.
     pub fn seen(&self, cell: CellId) -> Result<Option<Seen>, Error> {
-        let shard = self.shard_for(cell);
-        let holding = shard.holding(cell);
-        let held = holding.lock()?;
-        Ok(held.seen)
+        let mut best: Option<Seen> = None;
+        for shard in &self.shards {
+            if let Some(seen) = shard.seen_cache.lock().unwrap().get(&cell).copied()
+                && best.is_none_or(|was| {
+                    (was.epoch, was.end, was.active) < (seen.epoch, seen.end, seen.active)
+                })
+            {
+                best = Some(seen);
+            }
+        }
+        Ok(best)
     }
 
     /// cladefs: how many cells it keeps in memory across all shards, read or not.
@@ -1024,6 +1176,7 @@ impl<D: Dir> Replicas<D> {
 /// a peer's by the hundred thousand, leave nothing in memory.
 struct Holding<'a, D: Dir> {
     shard: &'a Shard<D>,
+    routing: &'a Mutex<()>,
     cell: CellId,
     held: Arc<Mutex<Held>>,
 }
@@ -1039,6 +1192,7 @@ impl<D: Dir> Holding<'_, D> {
 
 impl<D: Dir> Drop for Holding<'_, D> {
     fn drop(&mut self) {
+        let _routing = self.routing.lock().unwrap();
         let mut cells = self.shard.cells.lock().unwrap();
         // Held by the map and this alone: no other call holds it, or waits for it; none takes it
         // from the map while the map is locked.
@@ -1135,6 +1289,134 @@ fn write_text<D: Dir>(dir: &D, path: &str, text: &str) -> Result<(), Error> {
     dir.rename(&new, path).with_context(|| format!("renaming {new} to {path}"))?;
     dir.sync_dir("").context("syncing the replica directory")?;
     Ok(())
+}
+
+/// Encodes `cache` into the unfrozen rebuildable [`SEEN_CACHE`] binary format:
+/// `SEEN_CACHE_MAGIC || version (u32 LE) || count (u32 LE) || entries || crc32c (u32 LE)`.
+fn encode_seen_cache(cache: &SeenCache) -> Vec<u8> {
+    let count = cache.len().min(SEEN_CACHE_MAX);
+    let mut out = Vec::with_capacity(12 + count * SEEN_ENTRY_BYTES + 4);
+    out.extend_from_slice(&SEEN_CACHE_MAGIC);
+    out.extend_from_slice(&SEEN_CACHE_VERSION.to_le_bytes());
+    out.extend_from_slice(&(count as u32).to_le_bytes());
+    for (&cell, &seen) in cache.iter_lru().take(count) {
+        out.extend_from_slice(&cell.tenant.to_le_bytes());
+        out.extend_from_slice(&cell.id.to_le_bytes());
+        out.extend_from_slice(&seen.epoch.to_le_bytes());
+        out.extend_from_slice(&seen.end.to_le_bytes());
+        match seen.active {
+            Some(active) => {
+                out.push(1);
+                out.extend_from_slice(&active.number.to_le_bytes());
+                out.extend_from_slice(&active.epoch.to_le_bytes());
+            }
+            None => {
+                out.push(0);
+                out.extend_from_slice(&0u64.to_le_bytes());
+                out.extend_from_slice(&0u64.to_le_bytes());
+            }
+        }
+    }
+    let crc = extent_frame::crc(&out);
+    out.extend_from_slice(&crc.to_le_bytes());
+    out
+}
+
+/// Decodes untrusted bytes from [`SEEN_CACHE`] into `(CellId, Seen)` entries in LRU order.
+/// Refuses wrong magic, mismatched exact version (unfrozen cache per doc-28), truncated or
+/// trailing bytes, oversized counts, invalid flags, and bad CRC32C.
+#[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
+fn decode_seen_cache(bytes: &[u8]) -> anyhow::Result<Vec<(CellId, Seen)>> {
+    let Some((payload, crc_bytes)) =
+        bytes.len().checked_sub(4).and_then(|at| bytes.split_at_checked(at))
+    else {
+        return Err(anyhow!("{SEEN_CACHE}: truncated trailer"));
+    };
+    let expected_crc = u32::from_le_bytes(
+        crc_bytes.try_into().map_err(|_| anyhow!("{SEEN_CACHE}: truncated crc"))?,
+    );
+    let actual_crc = extent_frame::crc(payload);
+    if actual_crc != expected_crc {
+        return Err(anyhow!("{SEEN_CACHE}: bad crc ({actual_crc:#x} != {expected_crc:#x})"));
+    }
+    let mut cursor = crate::untrusted::Cursor::new(payload);
+    let magic = cursor.array::<4>().ok_or_else(|| anyhow!("{SEEN_CACHE}: truncated magic"))?;
+    if magic != SEEN_CACHE_MAGIC {
+        return Err(anyhow!("{SEEN_CACHE}: bad magic"));
+    }
+    let version = cursor.u32().ok_or_else(|| anyhow!("{SEEN_CACHE}: truncated version"))?;
+    if version != SEEN_CACHE_VERSION {
+        return Err(anyhow!("{SEEN_CACHE}: version {version} != current {SEEN_CACHE_VERSION}"));
+    }
+    let count = usize::try_from(
+        cursor.u32().ok_or_else(|| anyhow!("{SEEN_CACHE}: truncated entry count"))?,
+    )
+    .map_err(|_| anyhow!("{SEEN_CACHE}: entry count overflows usize"))?;
+    if count > SEEN_CACHE_MAX {
+        return Err(anyhow!("{SEEN_CACHE}: {count} entries exceeds limit {SEEN_CACHE_MAX}"));
+    }
+    let expected_len = count
+        .checked_mul(SEEN_ENTRY_BYTES)
+        .and_then(|entries| entries.checked_add(12))
+        .ok_or_else(|| anyhow!("{SEEN_CACHE}: length overflow"))?;
+    if payload.len() != expected_len {
+        return Err(anyhow!(
+            "{SEEN_CACHE}: payload length {} != expected {expected_len}",
+            payload.len()
+        ));
+    }
+    let mut entries = Vec::with_capacity(count);
+    for _ in 0..count {
+        let tenant = cursor.u64().ok_or_else(|| anyhow!("{SEEN_CACHE}: truncated tenant"))?;
+        let id = cursor.u64().ok_or_else(|| anyhow!("{SEEN_CACHE}: truncated cell"))?;
+        let epoch = cursor.u64().ok_or_else(|| anyhow!("{SEEN_CACHE}: truncated epoch"))?;
+        let end = cursor.u64().ok_or_else(|| anyhow!("{SEEN_CACHE}: truncated end"))?;
+        let [has_active] =
+            cursor.array::<1>().ok_or_else(|| anyhow!("{SEEN_CACHE}: truncated active flag"))?;
+        let active_number =
+            cursor.u64().ok_or_else(|| anyhow!("{SEEN_CACHE}: truncated active number"))?;
+        let active_epoch =
+            cursor.u64().ok_or_else(|| anyhow!("{SEEN_CACHE}: truncated active epoch"))?;
+        let active = match has_active {
+            0 if active_number == 0 && active_epoch == 0 => None,
+            1 => Some(Key { number: active_number, epoch: active_epoch }),
+            _ => return Err(anyhow!("{SEEN_CACHE}: invalid active flag {has_active}")),
+        };
+        entries.push((CellId { tenant, id }, Seen { epoch, end, active }));
+    }
+    if cursor.take(1).is_some() {
+        return Err(anyhow!("{SEEN_CACHE}: trailing bytes"));
+    }
+    Ok(entries)
+}
+
+/// Reads and decodes [`SEEN_CACHE`] from `dir`, returning an empty cache (with a warning) if the
+/// rebuildable cache file is missing, unreadable, corrupt, or from another build (doc-28).
+fn load_seen_cache<D: Dir>(dir: &D) -> SeenCache {
+    let loaded = (|| -> anyhow::Result<Vec<(CellId, Seen)>> {
+        let file = dir.open(SEEN_CACHE, false)?;
+        let bytes = crate::dir::read_file(&file, MAX_SEEN_CACHE_BYTES)?;
+        decode_seen_cache(&bytes)
+    })();
+    let mut cache = bucket_cell::lru::LruMap::new();
+    match loaded {
+        Ok(entries) => {
+            for (cell, seen) in entries {
+                cache.insert(cell, seen);
+            }
+        }
+        Err(err)
+            if err
+                .downcast_ref::<io::Error>()
+                .is_some_and(|io_err| io_err.kind() == io::ErrorKind::NotFound) => {}
+        Err(err) => {
+            // Rebuildable cache (doc-28): ignore corrupt or incompatible file and rebuild on use.
+            log::warn!(
+                "replicas: ignoring unreadable/incompatible {SEEN_CACHE} (rebuilding): {err:#}"
+            );
+        }
+    }
+    cache
 }
 
 #[cfg(test)]

@@ -113,6 +113,29 @@ pub(super) fn parse_part_cache_dirs(raw: &std::ffi::OsStr) -> Result<Vec<PathBuf
     Ok(dirs)
 }
 
+/// Best-effort per-entry expansion of `CLADEFSD_PART_CACHE` for internal-directory exclusion:
+/// unlike [`parse_part_cache_dirs`], a single glob that stopped matching after startup does not
+/// discard the surviving globs' or literal paths' matches.
+pub(super) fn expand_part_cache_dirs_best_effort(raw: &std::ffi::OsStr) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    for entry in std::env::split_paths(raw) {
+        if entry.as_os_str().is_empty() {
+            continue;
+        }
+        let has_glob = entry.to_str().is_some_and(|s| s.contains(['*', '?', '[']));
+        if has_glob {
+            // An unmatching or unreadable glob contributes nothing rather than discarding other
+            // surviving entries; opened shards are also excluded directly from the live `Cache`.
+            if let Ok(matched) = expand_glob(&entry) {
+                dirs.extend(matched);
+            }
+        } else {
+            dirs.push(entry);
+        }
+    }
+    dirs
+}
+
 /// Expands a path containing glob wildcards (`*`, `?`, `[...]`) across directory components.
 fn expand_glob(pattern: &std::path::Path) -> Result<Vec<PathBuf>, String> {
     let mut current = vec![PathBuf::new()];
@@ -307,7 +330,8 @@ pub(super) fn open_part_cache(daemon: &Daemon) -> Result<Option<Arc<Cache>>, Str
     if let Some(cache) = &*opened {
         return Ok(cache.clone());
     }
-    let cache = match cache_config()? {
+    let config = local_cell::upload::blocking(cache_config)?;
+    let cache = match config {
         Some((dirs, capacity)) => match local_cell::upload::blocking(|| {
             Cache::open_all_on(daemon.host.bucket_host(), &dirs, capacity)
         }) {
@@ -422,9 +446,15 @@ mod tests {
         assert_eq!(parse_part_cache_dirs(&joined).unwrap(), vec![d0.clone(), d1.clone()]);
 
         let glob = dir.path().join("nvme*").join("part-cache");
-        assert_eq!(parse_part_cache_dirs(glob.as_os_str()).unwrap(), vec![d0, d1]);
+        assert_eq!(parse_part_cache_dirs(glob.as_os_str()).unwrap(), vec![d0.clone(), d1.clone()]);
 
         let missing = dir.path().join("missing*").join("part-cache");
         assert!(parse_part_cache_dirs(missing.as_os_str()).is_err());
+
+        // Best-effort expansion preserves surviving globs even when one glob stops matching.
+        let mixed = std::env::join_paths([&missing, &glob]).unwrap();
+        let mut expanded = expand_part_cache_dirs_best_effort(&mixed);
+        expanded.sort();
+        assert_eq!(expanded, vec![d0, d1]);
     }
 }

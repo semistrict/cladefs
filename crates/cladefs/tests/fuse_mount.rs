@@ -1156,7 +1156,9 @@ fn ephemeral_cells_attach_to_fuse_without_uploading_to_the_bucket() {
     control
         .call(async |client| {
             client
-                .delete_cell(DeleteCellRequest { path: control_path(&ws_dir.join("custom-interval")) })
+                .delete_cell(DeleteCellRequest {
+                    path: control_path(&ws_dir.join("custom-interval")),
+                })
                 .await
         })
         .unwrap();

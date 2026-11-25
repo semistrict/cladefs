@@ -10,7 +10,6 @@
 //! unmounts the volumes still open, and gives the storage back.
 
 use crate::error::{Errno, Error};
-use crate::executor::{Executor, assert_not_on_executor};
 use crate::filesystem::{Filesystem, Options};
 use crate::storage::{Kind, Storage};
 use crate::volume::{HostFxfs, Unmount, Volume};
@@ -39,7 +38,7 @@ pub struct Image {
 
 /// What an image's volumes share with it.
 pub(crate) struct ImageShared {
-    pub executor: Executor,
+    runtime: tokio::runtime::Handle,
     pub block_size: u32,
     storage_kind: Kind,
     state: Mutex<State>,
@@ -132,17 +131,15 @@ impl VolumeMetadata {
     }
 }
 
-/// The records in `allocator`'s tree of the extents of the store `store_id`, shared ones too.
+/// The records in `allocator`'s tree of the extents of the store `store_id`.
 async fn allocator_records(allocator: &Allocator, store_id: u64) -> Result<u64, anyhow::Error> {
-    let mut owners = allocator.shared_owners(store_id);
-    owners.push(allocator.data_owner(store_id));
     let layer_set = allocator.tree().layer_set();
     let mut merger = layer_set.merger();
     let mut records = filter_tombstones(merger.query(Query::FullScan).await?).await?;
     let mut count = 0;
     while let Some(ItemRef { value, .. }) = records.get() {
         if matches!(value, AllocatorValue::Abs { owner_object_id, .. }
-            if owners.contains(owner_object_id))
+            if *owner_object_id == store_id)
         {
             count += 1;
         }
@@ -170,9 +167,9 @@ impl Image {
     ) -> Result<Self, Error> {
         let (device, storage_kind) = storage.into_parts();
         let barriers = matches!(storage_kind, Kind::Image { .. });
-        let executor = Executor::new(options.threads());
-        let open = executor
-            .run(async move {
+        let runtime = options.fxfs_runtime();
+        let open = runtime
+            .spawn(async move {
                 let filesystem = FxFilesystemBuilder::new()
                     .format(format)
                     .barriers_enabled(barriers)
@@ -182,12 +179,13 @@ impl Image {
                 anyhow::Ok(Open { filesystem, root_volume })
             })
             .await
+            .expect("Fxfs open task panicked")
             .map_err(Error::new)?;
         let block_size = open.filesystem.block_size().get() as u32;
         let state =
             Mutex::new(State { open: Some(open), volumes: Vec::new(), mounted: HashSet::new() });
         let volumes_lock = futures::lock::Mutex::new(());
-        let shared = ImageShared { executor, block_size, storage_kind, state, volumes_lock };
+        let shared = ImageShared { runtime, block_size, storage_kind, state, volumes_lock };
         Ok(Self { shared: Arc::new(shared) })
     }
 
@@ -206,7 +204,6 @@ impl Image {
     pub async fn compact(&self) -> Result<(), Error> {
         let filesystem = self.shared.with_open(|open| open.filesystem.clone())?;
         self.shared
-            .executor
             .run(async move { filesystem.journal().force_compact().await })
             .await
             .map_err(Error::new)
@@ -216,7 +213,6 @@ impl Image {
     pub async fn volumes(&self) -> Result<Vec<String>, Error> {
         let root_volume = self.shared.with_open(|open| open.root_volume.clone())?;
         self.shared
-            .executor
             .run(async move {
                 let directory = root_volume.volume_directory();
                 let layer_set = directory.store().tree().layer_set();
@@ -244,16 +240,17 @@ impl Image {
 impl Drop for Image {
     /// Closes the image, unmounting its volumes, blocking the dropping thread until it is done.
     /// Await [`close`](Image::close) rather than dropping an image.
-    ///
-    /// # Panics
-    ///
-    /// If an open image is dropped on Fxfs's executor.
     fn drop(&mut self) {
         let Some(closing) = self.shared.begin_close() else {
             return;
         };
-        assert_not_on_executor();
-        if let Err(error) = self.shared.executor.run_blocking(closing) {
+        if self.shared.on_own_current_thread() && std::thread::panicking() {
+            log::error!(
+                "cladefs: skipping blocking image close during unwind on current_thread runtime"
+            );
+            return;
+        }
+        if let Err(error) = self.shared.run_blocking(closing) {
             log::error!("cladefs: failed to close the image: {error:#}");
         }
     }
@@ -267,6 +264,75 @@ impl std::fmt::Debug for Image {
 }
 
 impl ImageShared {
+    /// Spawns `future` on this image's Tokio runtime.
+    pub(crate) fn spawn(&self, future: impl Future<Output = ()> + Send + 'static) {
+        self.runtime.spawn(future);
+    }
+
+    /// Runs `future` on this image's Tokio runtime; dropping the returned future detaches the task
+    /// so operations run to completion.
+    pub(crate) async fn run<T: Send + 'static>(
+        &self,
+        future: impl Future<Output = T> + Send + 'static,
+    ) -> T {
+        self.runtime.spawn(future).await.expect("Fxfs task panicked or cancelled")
+    }
+
+    /// Whether the current thread is executing this image's own `current_thread` Tokio runtime
+    /// (where blocking on a task spawned onto `self.runtime` would deadlock).
+    pub(crate) fn on_own_current_thread(&self) -> bool {
+        #[cfg(madsim)]
+        return false;
+        #[cfg(not(madsim))]
+        matches!(
+            tokio::runtime::Handle::try_current(),
+            Ok(current)
+                if current.runtime_flavor() != tokio::runtime::RuntimeFlavor::MultiThread
+                    && current.id() == self.runtime.id()
+        )
+    }
+
+    /// Runs `future` on this image's Tokio runtime, blocking the caller thread (for `Drop`).
+    ///
+    /// On a multi-thread Tokio worker, `block_in_place` runs before spawning so the task lands on
+    /// the global queue rather than this worker's unstealable LIFO slot and cannot starve the
+    /// shared runtime even under concurrent drops (hotbed reviews 111 and 112).
+    pub(crate) fn run_blocking<T: Send + 'static>(
+        &self,
+        future: impl Future<Output = T> + Send + 'static,
+    ) -> T {
+        local_cell::blocks!("waiting for an Fxfs task, an outermost entry's");
+        let run = || {
+            let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+            self.runtime.spawn(async move {
+                // Its waiter gone: nothing to tell.
+                let _ = sender.send(future.await);
+            });
+            receiver.recv().expect("Fxfs task dropped unfinished")
+        };
+        #[cfg(madsim)]
+        return run();
+        #[cfg(not(madsim))]
+        match tokio::runtime::Handle::try_current() {
+            Ok(current)
+                if current.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread =>
+            {
+                #[allow(
+                    clippy::disallowed_methods,
+                    reason = "synchronous Drop cannot await; block_in_place yields the worker core before spawning so teardown runs on another worker without starving the shared runtime"
+                )]
+                tokio::task::block_in_place(run)
+            }
+            Ok(current) if current.id() == self.runtime.id() => {
+                panic!(
+                    "cladefs: dropped a mounted Filesystem or open Image on its own \
+                     current_thread runtime; await unmount() or close() first"
+                );
+            }
+            _ => run(),
+        }
+    }
+
     /// Runs `f` on the open filesystem, or fails with `ENOTCONN` once the image is closed.
     fn with_open<T>(&self, f: impl FnOnce(&Open) -> T) -> Result<T, Errno> {
         self.state.lock().unwrap().open.as_ref().map(f).ok_or(Errno::ENOTCONN)
@@ -298,7 +364,6 @@ impl ImageShared {
         let _volumes = self.volumes_lock.lock().await;
         let root_volume = self.with_open(|open| open.root_volume.clone())?;
         let store = self
-            .executor
             .run({
                 let name = name.to_owned();
                 async move {
@@ -340,7 +405,7 @@ impl ImageShared {
     /// Unmounts the volumes still mounted, closes the filesystem, and gives the storage back.
     pub async fn close(&self) -> Result<Storage, Error> {
         let closing = self.begin_close().ok_or(Errno::ENOTCONN)?;
-        let device = self.executor.run(closing).await.map_err(Error::new)?;
+        let device = self.run(closing).await.map_err(Error::new)?;
         Ok(Storage::closed(device, self.storage_kind.clone()))
     }
 

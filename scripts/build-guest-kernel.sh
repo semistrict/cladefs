@@ -94,7 +94,6 @@ commit 0004-cladefs.patch fs/cladefs
 commit 0007-dax-say-why-a-fault-fails.patch
 commit 0010-dax-read-replaces-no-entry-naming-its-page.patch
 commit 0011-dax-a-folio-put-for-good-keeps-no-share-count.patch
-commit 0012-dax-invalidate-unmaps-under-entry-lock.patch
 commit 0013-mprotect-writable-batches-alike-in-dirtiness.patch
 rm -f "$index"
 kgit reset -q --hard "$series"
@@ -195,6 +194,10 @@ if [[ $arch == x86_64 ]]; then
     grep -q '^CONFIG_KVM_AMD=y' "$src/.config"
     grep -q '^CONFIG_KVM_INTEL=y' "$src/.config"
 fi
+# cladefs: compressed in-RAM swap (/dev/zram0) inside guests.
+grep -q '^CONFIG_ZRAM=y' "$src/.config"
+grep -q '^CONFIG_ZRAM_BACKEND_ZSTD=y' "$src/.config"
+grep -q '^CONFIG_ZRAM_BACKEND_LZ4=y' "$src/.config"
 
 # The filesystem's Rust, against a sysroot whose std is the kernel's (guest/rust/std). With
 # CLADEFS_GUEST_KERNEL_RUST_CHECKS=1, optimized, but with its debug assertions, and arithmetic that

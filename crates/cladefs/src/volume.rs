@@ -220,8 +220,8 @@ impl Volume {
         self.state.lock().unwrap().unmounting.is_none()
     }
 
-    /// Runs the future `f` makes of the volume's Fxfs on Fxfs's executor
-    /// ([`Executor::run`](crate::executor::Executor::run)), which runs it to completion whether or
+    /// Runs the future `f` makes of the volume's Fxfs on the image's Tokio runtime
+    /// ([`ImageShared::run`]), which runs it to completion whether or
     /// not the caller waits for it, and the unmount waits for. It fails with `ENOTCONN` once the
     /// unmount has begun.
     pub async fn run<T, F>(&self, f: impl FnOnce(Arc<HostFxfs>) -> F) -> Result<T>
@@ -237,7 +237,6 @@ impl Volume {
         };
         let future = f(fxfs);
         self.image
-            .executor
             .run(async move {
                 // The future, and the volume's Fxfs it holds, go before the operation ends.
                 let output = future.await;
@@ -375,7 +374,7 @@ impl Volume {
         drop(state);
         let (result, began) = oneshot::channel();
         let volume = self.clone();
-        self.image.executor.spawn(async move {
+        self.image.spawn(async move {
             let unmounted = async {
                 volume.operations.idle().await;
                 let Mounted { fxfs, nodes } =

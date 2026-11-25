@@ -400,10 +400,8 @@ pub(super) async fn start_on(
     let linked = url.clone();
     let runtime =
         crate::bucket::bucket_runtime_on(&daemon.host).map_err(|err| failed(&err.to_string()))?;
-    let linking = runtime.clone();
     let linking_daemon = Arc::clone(daemon);
-    let asking =
-        Peers::new(address, move |peer| link(&linking_daemon, &linking, peer, (&linked, region)));
+    let asking = Peers::new(address, move |peer| link(&linking_daemon, peer, (&linked, region)));
     asking.set(peers);
     crate::bucket::ask_peers_on(&daemon.host, bucket.clone(), asking)?;
     let replicas = match node_local::env::var_os("CLADEFSD_REPLICAS").filter(|v| !v.is_empty()) {
@@ -427,7 +425,7 @@ pub(super) async fn start_on(
             bucket: url.clone(),
             me: address.to_owned(),
             incarnation: replicas.incarnation(),
-            channels: Channels::new(Arc::clone(daemon), runtime.clone()),
+            daemon: Arc::clone(daemon),
         };
         crate::bucket::replicate_with_on(&daemon.host, Arc::new(members))?;
     }
@@ -491,7 +489,10 @@ pub(super) fn set_on(daemon: &Daemon, addresses: Vec<String>) -> Result<(), crat
         })?;
     }
     log::info!("cladefsd: peers: {}", addresses.join(","));
-    peers.set(addresses);
+    peers.set(addresses.clone());
+    if let Some(channels) = daemon.peer_channels.get() {
+        channels.prune(&addresses);
+    }
     Ok(())
 }
 
@@ -1533,42 +1534,58 @@ impl proto::peer_server::Peer for Server {
 }
 
 /// The link to the peer at `address`, a daemon serving the hosts of its region, asked as the host
-/// whose bucket is at `bucket`, of `region`, connected when first asked, on `runtime`, the bucket
-/// runtime.
-fn link(
-    daemon: &Daemon,
-    runtime: &tokio::runtime::Handle,
-    address: &str,
-    (bucket, region): (&str, Option<Region>),
-) -> Arc<dyn Link> {
-    let _entered = runtime.enter();
+/// whose bucket is at `bucket`, of `region`, sharing `daemon`'s pooled HTTP/2 channel (board
+/// 11713). Called while `Peers` holds its lock, so it must not re-enter `Peers::addresses`.
+fn link(daemon: &Daemon, address: &str, (bucket, region): (&str, Option<Region>)) -> Arc<dyn Link> {
     // Its address checked, and the credentials as the daemon started.
-    let endpoint =
-        endpoint_on(daemon, address).expect("a peer's address checked, the credentials read");
-    let endpoint = endpoint.connect_timeout(CONNECT).timeout(DEADLINE).tcp_nodelay(true);
-    let client = made(endpoint.connect_lazy());
-    Arc::new(Grpc { client, bucket: bucket.to_owned(), region })
+    let channel = channel_on_with_prune(daemon, address, false)
+        .expect("a peer's address checked, the credentials read");
+    Arc::new(Grpc { channel, bucket: bucket.to_owned(), region })
 }
 
-/// cladefs: a client of the member at `address` (doc-21), on `runtime`, the bucket runtime, on a
-/// channel of its own ([`channel`]).
-pub(crate) fn member_on(
-    daemon: &Daemon,
-    runtime: &tokio::runtime::Handle,
-    address: &str,
-) -> Result<Client, String> {
-    Ok(client(&channel(daemon, runtime, address)?))
+/// Shared handle to a pooled peer HTTP/2 channel.
+pub(super) type PeerChannel = Arc<Channel>;
+
+/// cladefs: a pooled client and channel handle for the peer at `address` on `daemon` (board 11713,
+/// board 11659): callers keeping the handle keep the shared HTTP/2 connection pinned in `daemon`'s
+/// pool while active.
+pub(super) fn client_on(daemon: &Daemon, address: &str) -> Result<(Client, PeerChannel), String> {
+    let channel = channel_on(daemon, address)?;
+    Ok((client(&channel), channel))
 }
 
 #[cfg(all(test, not(madsim)))]
-pub(crate) fn member(runtime: &tokio::runtime::Handle, address: &str) -> Result<Client, String> {
-    member_on(Daemon::process(), runtime, address)
+pub(crate) fn member(_runtime: &tokio::runtime::Handle, address: &str) -> Result<Client, String> {
+    Ok(client(&*channel_on(Daemon::process(), address)?))
 }
 
-/// cladefs: a channel to the member at `address` (doc-21), on `runtime`, the bucket runtime,
-/// connected when first used: with no deadline on a request, as a writer's stream of appends lasts
-/// as long as its configuration, but pinging it, so that a member down ends its stream within
-/// [`KEEPALIVE`] and [`CONNECT`].
+/// cladefs: returns the pooled HTTP/2 channel to `address` from `daemon.peer_channels`, creating
+/// the pool lazily on `daemon`'s bucket runtime.
+pub(super) fn channel_on(daemon: &Daemon, address: &str) -> Result<PeerChannel, String> {
+    channel_on_with_prune(daemon, address, true)
+}
+
+fn channel_on_with_prune(
+    daemon: &Daemon,
+    address: &str,
+    prune: bool,
+) -> Result<PeerChannel, String> {
+    let channels = match daemon.peer_channels.get() {
+        Some(channels) => channels,
+        None => {
+            let runtime =
+                crate::bucket::bucket_runtime_on(&daemon.host).map_err(|err| err.to_string())?;
+            daemon.peer_channels.get_or_init(|| Channels::new(runtime))
+        }
+    };
+    channels.of(daemon, address, prune)
+}
+
+/// cladefs: a channel to the peer at `address` (doc-21, board 11713), on `runtime`, the bucket
+/// runtime, connected when first used: with no endpoint-level deadline on a request, as a writer's
+/// stream of appends lasts as long as its configuration (unary calls apply per-call
+/// `tokio::time::timeout`), pinging it so a down peer ends its stream within [`KEEPALIVE`] and
+/// [`CONNECT`].
 fn channel(
     daemon: &Daemon,
     runtime: &tokio::runtime::Handle,
@@ -1585,7 +1602,7 @@ fn channel(
     Ok(endpoint.connect_lazy())
 }
 
-/// cladefs: a client of a member on `channel`, its messages [`MESSAGE_MOST`] at most.
+/// cladefs: a client of a peer on `channel`, its messages [`MESSAGE_MOST`] at most.
 fn client(channel: &Channel) -> Client {
     let client = made(channel.clone());
     client.max_decoding_message_size(MESSAGE_MOST).max_encoding_message_size(MESSAGE_MOST)
@@ -1607,50 +1624,65 @@ fn made(channel: Channel) -> Client {
     PeerClient::new(channel)
 }
 
-/// cladefs: the channels to the members, one per address (board 8575): every replicated cell's
-/// link to a member and every call to it (fences, log reads, drops, incarnations) share its one
-/// HTTP/2 connection and its pings, where each had a connection of its own, a host of N replicated
-/// cells holding 2N connections to its peers and pinging each every [`KEEPALIVE`]. A channel goes,
-/// its connection with it, once its address is no peer's and nothing holds it (a link of a
-/// configuration's, [`GrpcMember`], or a call): the next asks make another.
-struct Channels {
-    daemon: Arc<Daemon>,
+/// cladefs: the daemon's pooled peer HTTP/2 channels, one per peer address (board 8575, board
+/// 11713, board 11659): GetPart, replication (append streams, fences, log reads, drops,
+/// incarnations), and live migration all multiplex over the same HTTP/2 connection and keepalive
+/// pings per peer. A channel is dropped once its address is neither in the current peer set nor
+/// held by any active link, migration, or RPC.
+pub(super) struct Channels {
     runtime: tokio::runtime::Handle,
     open: Mutex<HashMap<String, Arc<Channel>>>,
 }
 
 impl Channels {
-    fn new(daemon: Arc<Daemon>, runtime: tokio::runtime::Handle) -> Self {
-        Self { daemon, runtime, open: Mutex::default() }
+    fn new(runtime: tokio::runtime::Handle) -> Self {
+        Self { runtime, open: Mutex::default() }
     }
 
-    /// The channel to the member at `address`, made if there is none.
-    fn of(&self, address: &str) -> Result<Arc<Channel>, String> {
-        // No peers asked yet: none kept but those held.
-        let peers = crate::bucket::peers_on(&self.daemon.host)
-            .map(|peers| peers.addresses())
-            .unwrap_or_default();
+    /// Drops unheld channels whose addresses are no longer in `peers`.
+    fn prune(&self, peers: &[String]) {
         let mut open = self.open.lock().unwrap();
         open.retain(|at, channel| Arc::strong_count(channel) > 1 || peers.contains(at));
+    }
+
+    /// The pooled channel to the peer at `address`, made if there is none.
+    fn of(&self, daemon: &Daemon, address: &str, prune: bool) -> Result<Arc<Channel>, String> {
+        // When invoked outside `Peers`'s lock (`prune == true`), evict stale unheld channels;
+        // `link()` runs under `Peers`'s lock and must not re-enter `peers_on`.
+        let peers = if prune {
+            Some(
+                crate::bucket::peers_on(&daemon.host)
+                    .map(|peers| peers.addresses())
+                    .unwrap_or_default(),
+            )
+        } else {
+            None
+        };
+        let mut open = self.open.lock().unwrap();
+        if let Some(peers) = &peers {
+            open.retain(|at, channel| {
+                at == address || Arc::strong_count(channel) > 1 || peers.contains(at)
+            });
+        }
         if let Some(channel) = open.get(address) {
             return Ok(channel.clone());
         }
-        let channel = Arc::new(channel(&self.daemon, &self.runtime, address)?);
+        let channel = Arc::new(channel(daemon, &self.runtime, address)?);
         open.insert(address.to_owned(), channel.clone());
         Ok(channel)
     }
 }
 
 /// cladefs: the hosts sharing the bucket, as a replicated cell's members (doc-21, TASK-537.3.3):
-/// this host, at `me`, of its replica directory's incarnation, and its peers, reached on
-/// `runtime`, the bucket runtime. Members are picked by rendezvous hashing of the cell and the
-/// configuration's number over the peers (`crate::bucket::peers::ranked`), each that answers its
-/// incarnation, distinct hosts.
+/// this host, at `me`, of its replica directory's incarnation, and its peers, reached through
+/// `daemon`'s shared peer channel pool. Members are picked by rendezvous hashing of the cell and
+/// the configuration's number over the peers (`crate::bucket::peers::ranked`), each that answers
+/// its incarnation, distinct hosts.
 pub(crate) struct ReplicaMembers {
     bucket: String,
     me: String,
     incarnation: u64,
-    channels: Channels,
+    daemon: Arc<Daemon>,
 }
 
 impl local_cell::upload::Members for ReplicaMembers {
@@ -1660,7 +1692,7 @@ impl local_cell::upload::Members for ReplicaMembers {
 
     /// cladefs: this host, or one of its peers now (board 8579): one `SetPeers` removed is no more.
     fn is_peer(&self, address: &str) -> bool {
-        let peers = crate::bucket::peers_on(&self.channels.daemon.host);
+        let peers = crate::bucket::peers_on(&self.daemon.host);
         address == self.me
             || peers.is_some_and(|peers| peers.addresses().iter().any(|at| at == address))
     }
@@ -1682,7 +1714,7 @@ impl local_cell::upload::Members for ReplicaMembers {
         member: &bucket_cell::layout::Member,
     ) -> Arc<dyn local_cell::replicate::MemberLink> {
         let of = self.of(cell, configuration, member);
-        let channel = self.channels.of(&member.address).expect("a peer's address checked");
+        let channel = channel_on(&self.daemon, &member.address).expect("a peer's address checked");
         Arc::new(GrpcMember { channel, of, stream: tokio::sync::Mutex::default() })
     }
 
@@ -1695,7 +1727,7 @@ impl local_cell::upload::Members for ReplicaMembers {
     ) -> BoxFuture<'a, Result<Vec<(u64, u64)>, String>> {
         Box::pin(async move {
             let request = FenceRequest { of: Some(self.of(cell, configuration, whom)), epoch };
-            let channel = self.channels.of(&whom.address)?;
+            let channel = channel_on(&self.daemon, &whom.address)?;
             let mut client = client(&channel).max_decoding_message_size(FENCE_ANSWER_MOST);
             match tokio::time::timeout(DEADLINE, client.fence(request)).await {
                 Ok(Ok(answer)) => fence_answer(answer.into_inner(), members_most()),
@@ -1716,7 +1748,7 @@ impl local_cell::upload::Members for ReplicaMembers {
         Box::pin(async move {
             let request =
                 ReadLogRequest { of: Some(self.of(cell, configuration, whom)), log, offset: 0 };
-            let channel = self.channels.of(&whom.address)?;
+            let channel = channel_on(&self.daemon, &whom.address)?;
             let mut client = client(&channel).max_decoding_message_size(READ_PIECE_MOST);
             let answered = tokio::time::timeout(DEADLINE, client.read_log(request)).await;
             let answered = answered.map_err(|_| format!("no answer within {DEADLINE:?}"))?;
@@ -1735,7 +1767,7 @@ impl local_cell::upload::Members for ReplicaMembers {
             let mut of = self.of(cell, configuration, whom);
             of.incarnation = whom.incarnation;
             let request = DropLogsRequest { of: Some(of), through: None };
-            let mut client = client(&*self.channels.of(&whom.address)?);
+            let mut client = client(&*channel_on(&self.daemon, &whom.address)?);
             match tokio::time::timeout(DEADLINE, client.drop_logs(request)).await {
                 Ok(Ok(_)) => Ok(()),
                 Ok(Err(status)) => Err(said(&status)),
@@ -1817,8 +1849,7 @@ impl ReplicaMembers {
         f: u8,
         avoid: &[String],
     ) -> Result<Vec<bucket_cell::layout::Member>, String> {
-        let peers =
-            crate::bucket::peers_on(&self.channels.daemon.host).ok_or("the daemon has no peers")?;
+        let peers = crate::bucket::peers_on(&self.daemon.host).ok_or("the daemon has no peers")?;
         let addresses = peers.addresses();
         let others = (addresses.iter().map(String::as_str))
             .filter(|address| *address != self.me && !avoid.iter().any(|avoid| avoid == address));
@@ -1874,7 +1905,7 @@ impl ReplicaMembers {
     /// The incarnation of the replica directory of the host at `address`, as it answers within
     /// [`DEADLINE`].
     async fn incarnation_of(&self, address: &str) -> Result<u64, String> {
-        let mut client = client(&*self.channels.of(address)?);
+        let mut client = client(&*channel_on(&self.daemon, address)?);
         let asked = IncarnationRequest {
             bucket: self.bucket.clone(),
             #[allow(deprecated)]
@@ -1990,9 +2021,9 @@ impl GrpcMember {
     }
 }
 
-/// A peer reached over gRPC.
+/// A peer reached over gRPC, sharing the daemon's pooled HTTP/2 channel (board 11713).
 struct Grpc {
-    client: Client,
+    channel: PeerChannel,
     bucket: String,
     region: Option<Region>,
 }
@@ -2003,16 +2034,17 @@ impl Link for Grpc {
         let (home, root) =
             self.region.map_or((0, 0), |region| (u32::from(region.home), region.root));
         let request = GetPartRequest { bucket: self.bucket.clone(), key, part, home, root };
-        let mut client = self.client.clone();
+        let mut client = client(&self.channel);
         async move {
-            match client.get_part(request).await {
-                Ok(response) => Ok(Some(response.into_inner().bytes)),
-                Err(status) if status.code() == Code::NotFound => Ok(None),
+            match tokio::time::timeout(DEADLINE, client.get_part(request)).await {
+                Ok(Ok(response)) => Ok(Some(response.into_inner().bytes)),
+                Ok(Err(status)) if status.code() == Code::NotFound => Ok(None),
                 // Of another region, or another bucket: asked nothing again (TASK-633.4).
-                Err(status) if status.code() == Code::FailedPrecondition => {
+                Ok(Err(status)) if status.code() == Code::FailedPrecondition => {
                     Err(Refusal::Foreign(status.message().to_owned()))
                 }
-                Err(status) => Err(Refusal::Failed(said(&status))),
+                Ok(Err(status)) => Err(Refusal::Failed(said(&status))),
+                Err(_) => Err(Refusal::Failed(format!("no answer within {DEADLINE:?}"))),
             }
         }
         .boxed()

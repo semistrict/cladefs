@@ -311,8 +311,10 @@ fn grammar_keys() -> Vec<String> {
         format!("{}head/0000000000003", CELL.prefix()),
         layout::reference(PARENT, 7, CHILD),
         layout::retired(PARENT, 7, CHILD),
-        layout::pin(PARENT, 7),
-        layout::hold(PARENT, 7, 0x1234),
+        layout::legacy_pin(PARENT, 7),
+        layout::pin(PARENT, 7, 0x2a),
+        layout::legacy_hold(PARENT, 7, 0x1234),
+        layout::hold(PARENT, 7, 0x1234, 0x2a),
         layout::mirror(PARENT, 7),
         layout::ephemeral_reference(PARENT, 7, 0x2a, CHILD),
         layout::ephemeral_index(0x2a, CELL, 7, CHILD),
@@ -360,7 +362,7 @@ impl formats::golden::Family for BucketLayout {
                 }
                 _ => Self::read_as(case, bytes),
             },
-            32 => Self::read_as(case, bytes),
+            32 | 33 => Self::read_as(case, bytes),
             _ => Err(format!("no decoder of version {version}")),
         }
     }
@@ -372,7 +374,7 @@ impl formats::golden::Family for BucketLayout {
     fn fingerprint(version: u32) -> Option<String> {
         let head = match version {
             31 => layout::v31::Head::fingerprint(),
-            32 => Head::fingerprint(),
+            32 | 33 => Head::fingerprint(),
             _ => return None,
         };
         Some(

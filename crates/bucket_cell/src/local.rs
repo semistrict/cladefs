@@ -188,31 +188,6 @@ impl Local {
         let opts = PutOptions { mode: PutMode::Overwrite, ..opts };
         self.files.put_opts(location, payload, opts).await
     }
-
-    /// cladefs: deletes the object at `location` only if it is of `version` (board 9229), the
-    /// lock held ([`Local::locked_write`]), as an update compares its version: a precondition
-    /// failed if another, or none, is there. What `object_store` has no request for, which
-    /// [`crate::object_bucket`] asks of a file bucket directly.
-    pub async fn delete_if(&self, location: &Path, version: &UpdateVersion) -> Result<()> {
-        let (location, version) = (location.clone(), version.clone());
-        let lock = lock_of(location.as_ref());
-        self.locked_write(vec![lock], move |this| async move {
-            let found = match this.files.head(&location).await {
-                Ok(meta) => meta.e_tag,
-                Err(object_store::Error::NotFound { .. }) => None,
-                Err(other) => return Err(other),
-            };
-            if found.is_none() || found != version.e_tag {
-                return Err(object_store::Error::Precondition {
-                    path: location.to_string(),
-                    source: format!("{found:?} is not {:?}", version.e_tag).into(),
-                });
-            }
-            // Under the lock every replacement and removal of it takes: there still, of `version`.
-            this.files.delete(&location).await
-        })
-        .await
-    }
 }
 
 /// The lock file `path`, locked, by blocking the calling thread: held until it is dropped.

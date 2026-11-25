@@ -673,6 +673,26 @@ pub(crate) async fn fork_on(
     child: Child,
     prepare: impl FnOnce(&mut Making<'_, HostDir>) -> anyhow::Result<()> + Send,
 ) -> Result<(), Error> {
+    fork_with_on(host, local, uploader, path, child, prepare, |child, inheriting| {
+        uploader.forked(child, inheriting)
+    })
+    .await
+}
+
+/// Shared bucket-fork and local child directory creation used by both at-version forks
+/// ([`fork_on`]) and direct version forks of writable cells ([`fork_through_on`]).
+async fn fork_with_on<F>(
+    host: &crate::Host,
+    local: &LocalCell<HostDir>,
+    uploader: &Uploader<HostDir>,
+    path: &Path,
+    child: Child,
+    prepare: impl FnOnce(&mut Making<'_, HostDir>) -> anyhow::Result<()> + Send,
+    record: impl FnOnce(Child, bucket_cell::keys::Inheriting) -> F,
+) -> Result<(), Error>
+where
+    F: std::future::Future<Output = Result<(), Failure>>,
+{
     may_fork_into(local.description().cell, uploader, child.cell.tenant)?;
     let inheriting = uploader.inheriting(child).await?;
     upload::blocking(|| host_fs::create_dir(path)).map_err(|err| match err.kind() {
@@ -683,7 +703,7 @@ pub(crate) async fn fork_on(
     })?;
     let cell = child.cell;
     let failed = |err| fork_failure(cell, err);
-    let made = match uploader.forked(child, inheriting).await {
+    let made = match record(child, inheriting).await {
         Err(err) => Err(failed(err)),
         Ok(()) => upload::blocking(|| -> anyhow::Result<()> {
             failpoint!("fork::recorded");
@@ -753,7 +773,8 @@ pub(crate) fn version_dir(cell: CellId, version: u64, cache: Option<&Cache>) -> 
     root.join(format!("{:x}.{:x}.{:x}", cell.tenant, cell.id, version))
 }
 
-/// Forks `local`, its cell's version `version` made and uploaded, to `child` on `host`.
+/// Forks `local`, its cell's version `version` made and uploaded, directly in the bucket to
+/// `child` on `host`, without materializing a temporary version directory on disk (board 11701).
 pub(crate) async fn fork_through_on(
     host: &crate::Host,
     local: &LocalCell<HostDir>,
@@ -763,38 +784,10 @@ pub(crate) async fn fork_through_on(
     child: Child,
     prepare: impl FnOnce(&mut Making<'_, HostDir>) -> anyhow::Result<()> + Send,
 ) -> Result<(), Error> {
-    let at = version_dir(local.description().cell, version, uploader.options().cache.as_deref());
-    let (kind, url) = (local.kind().ok_or(Errno::EINVAL)?, local.bucket().ok_or(Errno::EINVAL)?);
-    let made = upload::blocking(|| -> Result<(), Error> {
-        let made = at.parent().map_or(Ok(()), host_fs::create_dir_all);
-        made.and_then(|()| host_fs::create_dir(&at)).map_err(|err| {
-            Error::new(anyhow::Error::new(err).context(format!("making {}", at.display())))
-        })?;
-        local_cell::create_host_at_version_on(
-            host.local(),
-            &at,
-            local.description(),
-            url,
-            kind,
-            version,
-        )
-        .and_then(|()| local_cell::made_host_on(host.local(), &at))
-        .map_err(Error::new)
-    });
-    // The cell at the version closed before it goes, as it held its directory.
-    let forked = match made {
-        Err(err) => Err(err),
-        Ok(()) => match open_on(host, &at, uploader.options().clone()).await {
-            Err(failure) => Err(Error::from(failure)),
-            Ok(opened) => {
-                let forked =
-                    fork_on(host, &opened.local, &opened.uploader, path, child, prepare).await;
-                opened.close().await;
-                forked
-            }
-        },
-    };
-    upload::blocking(|| discard_on(host, &at));
+    let forked = fork_with_on(host, local, uploader, path, child, prepare, |child, inheriting| {
+        uploader.fork_version(version, child, inheriting)
+    })
+    .await;
     // The version, the fork's alone, dropped whether or not it forked. The child made is the
     // fork's last step that can fail it: past it, a drop failing leaves the version named, which
     // the cell's versions list for dropping again, and a fork reported failed would leave a live

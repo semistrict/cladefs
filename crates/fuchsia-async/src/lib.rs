@@ -39,7 +39,6 @@ pub use self::runtime::*;
 /// Asynchronous networking abstractions.
 pub use fuchsia_async_macro::{run, run_singlethreaded};
 
-pub mod condition;
 /// Testing support for repeated runs
 // cladefs: its threads aren't the guest kernel's (TASK-26.6).
 #[cfg(not(target_os = "none"))]

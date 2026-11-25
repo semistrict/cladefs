@@ -906,6 +906,60 @@ fn jbod_spreads_cells_across_shards_and_rotates_incarnation_on_wipe() {
     );
 }
 
+/// Regression test for review 107 (finding 373): starting with `[A, B]` (cell logs on `B`),
+/// briefly running with only `[A]` (appending a pending configuration's log on `A`), and restoring
+/// `[A, B]` (restoring the original composite incarnation) must still return `B`'s acknowledged
+/// logs from `fence` and reject stale appends across both shards.
+#[test]
+fn jbod_reverted_shard_set_fences_and_reads_all_shards() {
+    let dir_a = MemDir::new();
+    let dir_b = MemDir::new();
+    let mut seq = [11u64, 22u64].into_iter();
+    let replicas =
+        Replicas::open_all_as(vec![dir_a.clone(), dir_b.clone()], MOST, || seq.next().unwrap())
+            .unwrap();
+    let inc_ab = replicas.incarnation();
+    let frame_active = own_frame(1, b"acknowledged-on-b");
+    let frame_pending = own_frame(2, b"pending-on-a");
+
+    // Pick a cell whose canonical rendezvous shard is B (index 1).
+    let cell = (1u64..1000)
+        .map(|id| CellId { tenant: 9, id })
+        .find(|&c| replicas.canonical_shard_index(c) == 1)
+        .expect("a cell mapping to shard B");
+
+    // Write acknowledged active config log onto shard B.
+    let active = key(1, 1);
+    replicas.append((cell, active, inc_ab), own_of(0), 0, &frame_active).unwrap();
+    assert!(dir_b.list("").unwrap().len() > 1);
+    assert_eq!(dir_a.list("").unwrap().len(), 1);
+    drop(replicas);
+
+    // Run briefly with only shard A; a pending config appends onto shard A.
+    let only_a = Replicas::open(dir_a.clone(), MOST).unwrap();
+    let inc_a = only_a.incarnation();
+    let pending = key(2, 1);
+    only_a.append((cell, pending, inc_a), own_of(0), 0, &frame_pending).unwrap();
+    drop(only_a);
+
+    // Restore [A, B]: composite incarnation matches `inc_ab`, and `cell` has files on BOTH A and B.
+    let restored = Replicas::open_all(vec![dir_a, dir_b], MOST).unwrap();
+    assert_eq!(restored.incarnation(), inc_ab);
+
+    // Fencing the active configuration at epoch 2 must return B's acknowledged log end and fence
+    // both shards so epoch-1 appends are rejected.
+    let fenced = restored.fence((cell, active, inc_ab), 2).unwrap();
+    assert_eq!(fenced, vec![(own_of(0), frame_active.len() as u64)]);
+    assert_eq!(
+        restored.read((cell, active, inc_ab), own_of(0), 0, frame_active.len() as u64).unwrap(),
+        frame_active
+    );
+    assert_eq!(
+        refused(restored.append((cell, active, inc_ab), own_of(1), 0, &frame_active)),
+        Refused::Fenced { promise: 2 }
+    );
+}
+
 /// The replica directory's own: its incarnation file, the names of its promises and logs, and an
 /// own log's frames. A segment's log it holds is the cell directory's (`formats/cell-directory`),
 /// an own frame's file an extent frame (`formats/extent-frame`).
@@ -960,4 +1014,73 @@ impl Files {
             _ => Err(format!("no file {case}")),
         }
     }
+}
+
+/// Board 11671: `Seen` persists across restarts and crashes in the unfrozen rebuildable
+/// `seen.cache` file without altering frozen `replica-directory` v4 files, never writes entries
+/// for cells holding nothing, cleans up on `Swept::Gone`, and safely ignores corrupt or
+/// wrong-version cache files.
+#[test]
+fn seen_cache_persists_across_restart_and_ignores_corrupt_or_incompatible_files() {
+    let dir = MemDir::new();
+    let replicas = Replicas::open(dir.clone(), MOST).unwrap();
+    let ours = replicas.incarnation();
+    let other = CellId { tenant: 3, id: 10 };
+    let head1 = Seen { epoch: 4, end: 12, active: Some(key(1, 4)) };
+    let head2 = Seen { epoch: 5, end: 19, active: Some(key(2, 5)) };
+
+    // Calling `saw` for a cell holding no files writes nothing to memory or disk (board 8451).
+    replicas.saw(CELL, head1).unwrap();
+    assert_eq!(replicas.seen(CELL).unwrap(), None);
+    assert!(!dir.list("").unwrap().iter().any(|name| name == SEEN_CACHE));
+
+    // Once the cell holds a file, `saw` persists `Seen` and survives clean reopen and crashes.
+    let frame = own_frame(1, b"replicated");
+    replicas.append((CELL, key(1, 4), ours), own_of(0), 0, &frame).unwrap();
+    replicas.saw(CELL, head1).unwrap();
+    assert_eq!(replicas.seen(CELL).unwrap(), Some(head1));
+    assert!(dir.list("").unwrap().iter().any(|name| name == SEEN_CACHE));
+
+    // Older heads never overwrite newer ones; newer heads advance and persist.
+    replicas.saw(CELL, Seen { epoch: 3, end: 0, active: None }).unwrap();
+    assert_eq!(replicas.seen(CELL).unwrap(), Some(head1));
+    replicas.saw(CELL, head2).unwrap();
+    assert_eq!(replicas.seen(CELL).unwrap(), Some(head2));
+
+    // Even if all logs are dropped before a restart, `seen` remains available for outage admission
+    // until the cell is swept gone.
+    replicas.drop_logs((CELL, key(1, 4), ours), Some(own_of(0))).unwrap();
+    for seed in 0..8 {
+        let reopened = Replicas::open(dir.crash(seed), MOST).unwrap();
+        assert_eq!(reopened.seen(CELL).unwrap(), Some(head2), "seed {seed}");
+        assert_eq!(reopened.seen(other).unwrap(), None, "seed {seed}");
+    }
+
+    // Corrupt, truncated, trailing-byte, and wrong-version cache files are ignored (rebuilt),
+    // never failing `Replicas::open`.
+    let valid = dir.files().into_iter().find(|(name, _)| name == SEEN_CACHE).unwrap().1;
+    let mut bad_crc = valid.clone();
+    bad_crc[0] ^= 0xff;
+    let mut wrong_version = valid.clone();
+    wrong_version[4..8].copy_from_slice(&(SEEN_CACHE_VERSION + 1).to_le_bytes());
+    let crc = extent_frame::crc(&wrong_version[..wrong_version.len() - 4]);
+    let len = wrong_version.len();
+    wrong_version[len - 4..].copy_from_slice(&crc.to_le_bytes());
+    let mut trailing = valid.clone();
+    trailing.push(0);
+    for bad in [Vec::new(), b"FXSC".to_vec(), bad_crc, wrong_version, trailing] {
+        dir.replace(SEEN_CACHE, &bad).unwrap();
+        let reopened = Replicas::open(dir.clone(), MOST).unwrap();
+        assert_eq!(reopened.seen(CELL).unwrap(), None);
+        assert_eq!(reopened.incarnation(), ours);
+    }
+
+    // Rebuilding after corrupt file works, and `Swept::Gone` removes the entry and empty file.
+    let rebuilt = Replicas::open(dir.clone(), MOST).unwrap();
+    rebuilt.append((CELL, key(2, 5), ours), own_of(1), 0, &frame).unwrap();
+    rebuilt.saw(CELL, head2).unwrap();
+    assert_eq!(rebuilt.seen(CELL).unwrap(), Some(head2));
+    rebuilt.sweep(CELL, Swept::Gone).unwrap();
+    assert_eq!(rebuilt.seen(CELL).unwrap(), None);
+    assert!(!dir.list("").unwrap().iter().any(|name| name == SEEN_CACHE));
 }

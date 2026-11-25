@@ -17,7 +17,6 @@
 //! changes meanwhile ([`VolatileSlice`]).
 
 use crate::error::{Errno, Error, Result};
-use crate::executor::assert_not_on_executor;
 use crate::image::{Compactions, Image, ImageShared, VolumeMetadata};
 use crate::memory::{VolatileSlice, VolatileSliceMut};
 use crate::node::*;
@@ -29,6 +28,20 @@ use fxfs_posix::ReaddirStart;
 use std::future::Future;
 use std::num::NonZeroU8;
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// cladefs: counts entries emitted by `fxfs.readdir` across `Node::entries` and
+/// `Node::entries_page` for tests verifying bounded streaming `READDIR` (TASK-619, board 2634).
+#[cfg(test)]
+pub(crate) static READDIR_EMITS: AtomicU64 = AtomicU64::new(0);
+
+/// Where a bounded directory listing (`Node::entries_page`) begins (TASK-619, board 2634).
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum EntriesStart<'a> {
+    Index(u64),
+    After(&'a [u8]),
+}
 
 /// The errno of `error`, an Fxfs operation's, as Fxfs's VFSs give it (`fxfs_posix::errno`).
 fn errno(error: anyhow::Error) -> Errno {
@@ -115,37 +128,64 @@ fn now() -> Result<u64> {
 /// The name of the volume a filesystem mounted from storage serves.
 pub(crate) const VOLUME_NAME: &str = "default";
 
-/// The number of threads of a filesystem's executor, unless [`Options`] say otherwise.
-pub(crate) const DEFAULT_EXECUTOR_THREADS: u8 = 1;
+/// Returns a Tokio runtime handle for Fxfs tasks: the caller-supplied handle if any; under
+/// `madsim`, the current simulated host runtime; otherwise one shared single-threaded runtime
+/// lazily created for standalone callers (`cladefs-mount`, `cladefsctl`, `Storage::check`, and
+/// tests driving futures with `futures::executor::block_on`) (board 11689, board 11679).
+pub(crate) fn fxfs_runtime(handle: Option<&tokio::runtime::Handle>) -> tokio::runtime::Handle {
+    if let Some(handle) = handle {
+        return handle.clone();
+    }
+    #[cfg(madsim)]
+    {
+        tokio::runtime::Handle::current()
+    }
+    #[cfg(not(madsim))]
+    {
+        // Outside the simulation: one shared single-threaded runtime for standalone Fxfs images
+        // when no caller runtime is supplied (avoids spawning a runtime + OS thread per image).
+        static SHARED: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+        SHARED
+            .get_or_init(|| {
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(1)
+                    .thread_name("cladefs fxfs")
+                    .enable_all()
+                    .build()
+                    .expect("failed to start cladefs fxfs runtime")
+            })
+            .handle()
+            .clone()
+    }
+}
 
 /// How a filesystem or image is mounted.
 #[derive(Clone, Debug)]
 pub struct Options {
-    executor_threads: NonZeroU8,
+    runtime: Option<tokio::runtime::Handle>,
 }
 
 impl Options {
     /// The default options.
     pub fn new() -> Self {
-        Self { executor_threads: NonZeroU8::new(DEFAULT_EXECUTOR_THREADS).unwrap() }
+        Self { runtime: None }
     }
 
-    /// The number of threads Fxfs's work runs on: its journal, pager and background writeback.
-    /// They are separate from the tasks and threads calling the filesystem. The default is 1:
-    /// operations mostly wait for one another and the device, and on one thread they wake one
-    /// another without waking other threads, which costs a request most of its time otherwise.
-    /// An image's import goes no faster on two (TASK-92.47: on the test host, small files and
-    /// replacing them 3% faster on two, about 15,000 and 9,700 a second on one, the large file 10%
-    /// slower; docs/measurements/ubu1-import-bench-threads-2026-11-10b, built with none of the
-    /// tests' features: GCE's of 2026-11-08 had the extent store's audit, TASK-303, and those and
-    /// ubu1-import-bench-threads-2026-11-10 cladefs's failpoints, TASK-320).
-    pub fn executor_threads(&mut self, threads: NonZeroU8) -> &mut Self {
-        self.executor_threads = threads;
+    /// Runs Fxfs's tasks on `runtime` instead of the shared fallback runtime (board 11689).
+    #[cfg_attr(madsim, allow(dead_code))]
+    pub(crate) fn runtime(&mut self, runtime: tokio::runtime::Handle) -> &mut Self {
+        self.runtime = Some(runtime);
         self
     }
 
-    pub(crate) fn threads(&self) -> u8 {
-        self.executor_threads.get()
+    /// Kept for compatibility with callers that previously sized a per-image executor; Fxfs images
+    /// now share the caller's runtime or the shared fallback runtime (board 11689).
+    pub fn executor_threads(&mut self, _threads: NonZeroU8) -> &mut Self {
+        self
+    }
+
+    pub(crate) fn fxfs_runtime(&self) -> tokio::runtime::Handle {
+        fxfs_runtime(self.runtime.as_ref())
     }
 
     /// Mounts the filesystem on `storage`, which [`format`](Self::format) formatted: the volume
@@ -343,13 +383,18 @@ impl Drop for Filesystem {
     ///
     /// # Panics
     ///
-    /// If a filesystem is dropped on Fxfs's executor while it is mounted, or while the image of
-    /// its own it was mounted from storage with is open.
+    /// If a filesystem is dropped on its own `current_thread` Tokio runtime while it is mounted,
+    /// or while the image of its own it was mounted from storage with is open.
     fn drop(&mut self) {
+        if self.volume.image.on_own_current_thread() && std::thread::panicking() {
+            log::error!(
+                "cladefs: skipping blocking unmount during unwind on current_thread runtime"
+            );
+            return;
+        }
         let unmount = self.volume.image.unmount_volume(&self.volume);
         if unmount.began() {
-            assert_not_on_executor();
-            if let Err(error) = self.volume.image.executor.run_blocking(unmount.wait()) {
+            if let Err(error) = self.volume.image.run_blocking(unmount.wait()) {
                 log::error!("cladefs: failed to unmount: {error:#}");
             }
         }
@@ -782,6 +827,8 @@ impl Node {
             .run(move |fxfs| async move {
                 let mut entries = Vec::new();
                 let listed = fxfs.readdir(dir, ReaddirStart::Index(0), |name, ino, kind| {
+                    #[cfg(test)]
+                    READDIR_EMITS.fetch_add(1, Ordering::Relaxed);
                     // Fxfs's types are those a mode may have.
                     let file_type = FileType::from_mode(kind).unwrap_or(FileType::File);
                     entries.push(DirEntry { inode: Inode(ino), file_type, name: name.into() });
@@ -789,6 +836,46 @@ impl Node {
                 });
                 listed.await.map_err(errno)?;
                 Ok(entries)
+            })
+            .await
+    }
+
+    /// cladefs: reads at most `limit` entries of this directory starting at `start` (plus at most
+    /// one extra Fxfs emit to detect whether more entries follow), returning `(entries, has_more)`
+    /// (TASK-619, board 2634).
+    pub(crate) async fn entries_page(
+        &self,
+        start: EntriesStart<'_>,
+        limit: usize,
+    ) -> Result<(Vec<DirEntry>, bool)> {
+        let volume = self.directory()?;
+        let dir = self.ino();
+        let owned = match start {
+            EntriesStart::Index(index) => (Some(index), None),
+            EntriesStart::After(name) => (None, Some(name.to_vec())),
+        };
+        volume
+            .run(move |fxfs| async move {
+                let mut entries = Vec::with_capacity(limit.min(256));
+                let mut has_more = false;
+                let start = match &owned {
+                    (Some(index), _) => ReaddirStart::Index(*index),
+                    (None, Some(name)) => ReaddirStart::After(name.as_slice()),
+                    (None, None) => unreachable!(),
+                };
+                let listed = fxfs.readdir(dir, start, |name, ino, kind| {
+                    #[cfg(test)]
+                    READDIR_EMITS.fetch_add(1, Ordering::Relaxed);
+                    if entries.len() >= limit {
+                        has_more = true;
+                        return false;
+                    }
+                    let file_type = FileType::from_mode(kind).unwrap_or(FileType::File);
+                    entries.push(DirEntry { inode: Inode(ino), file_type, name: name.into() });
+                    true
+                });
+                listed.await.map_err(errno)?;
+                Ok((entries, has_more))
             })
             .await
     }
@@ -1036,11 +1123,61 @@ mod tests {
         let fs = block_on(Filesystem::format(Storage::memory(8 << 20))).unwrap();
         block_on(fs.unmount()).unwrap();
         let image = fs.volume().image.clone();
-        let dropped = image.executor.run_blocking(async move {
+        let dropped = image.run_blocking(async move {
             drop(fs);
             true
         });
         assert!(dropped);
+    }
+
+    /// Dropping mounted filesystems from worker threads of a shared multi-thread Tokio runtime
+    /// (including all workers simultaneously or a 1-worker multi-thread runtime) hands off the
+    /// worker core via `block_in_place` so teardown completes without deadlocking (hotbed reviews
+    /// 111 and 112).
+    #[test]
+    fn dropping_mounted_filesystems_on_shared_multithread_runtime_completes() {
+        for workers in [4usize, 1] {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(workers)
+                .enable_all()
+                .build()
+                .unwrap();
+            let barrier = Arc::new(tokio::sync::Barrier::new(workers));
+            let (tx, rx) = std::sync::mpsc::channel();
+            for _ in 0..workers {
+                let handle = rt.handle().clone();
+                let barrier = Arc::clone(&barrier);
+                let tx = tx.clone();
+                rt.spawn(async move {
+                    let mut options = Options::new();
+                    options.runtime(handle);
+                    let fs = options.format(Storage::memory(8 << 20)).await.unwrap();
+                    // Synchronize all workers right before dropping simultaneously.
+                    barrier.wait().await;
+                    drop(fs);
+                    tx.send(()).unwrap();
+                });
+            }
+            for _ in 0..workers {
+                rx.recv_timeout(std::time::Duration::from_secs(30))
+                    .expect("mounted filesystem drop deadlocked shared multi-thread runtime");
+            }
+        }
+    }
+
+    /// Dropping a mounted filesystem on its own `current_thread` runtime panics immediately rather
+    /// than deadlocking forever.
+    #[test]
+    #[should_panic(expected = "current_thread runtime")]
+    fn dropping_mounted_filesystem_on_own_current_thread_runtime_panics() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let handle = rt.handle().clone();
+        rt.block_on(async move {
+            let mut options = Options::new();
+            options.runtime(handle);
+            let fs = options.format(Storage::memory(8 << 20)).await.unwrap();
+            drop(fs);
+        });
     }
 
     /// A filesystem of an image of its own, dropped while an unmount given up on is under way,
@@ -1083,7 +1220,7 @@ mod tests {
         drop(fxfs);
         let (locked, held) = oneshot::channel();
         let (release, released) = oneshot::channel::<()>();
-        volume.image.executor.spawn(async move {
+        volume.image.spawn(async move {
             let keys = lock_keys![LockKey::object(store.store_object_id(), object_id)];
             let transaction = store.new_transaction(keys, Default::default()).await.unwrap();
             let _ = locked.send(());

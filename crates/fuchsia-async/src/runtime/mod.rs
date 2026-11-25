@@ -22,13 +22,6 @@ pub use implementation::executor::{
 pub use implementation::task::{JoinHandle, Task, unblock, yield_now};
 pub use implementation::timer::Timer;
 
-/// Structured concurrency API for fuchsia-async.
-///
-/// See the [`Scope`] documentation for details.
-pub mod scope;
-
-pub use scope::{Scope, ScopeHandle};
-
 use futures::prelude::*;
 use pin_project_lite::pin_project;
 use std::pin::Pin;

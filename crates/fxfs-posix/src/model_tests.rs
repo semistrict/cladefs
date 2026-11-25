@@ -129,8 +129,6 @@ const BLOCKS_A_FILL_MAY_LEAVE: u64 = 1024;
 const WHOLLY_READ: u64 = 64 << 20;
 /// The volume the sequences' files are in.
 const VOLUME: &str = "test";
-/// The snapshots a sequence takes of it, at most.
-const SNAPSHOTS: usize = 2;
 /// A power cut is recorded at one barrier in this many.
 const CUTS_ONE_IN: u32 = 3;
 /// A power cut of a replay is recorded at one barrier in this many.
@@ -597,8 +595,6 @@ enum Op {
     },
     /// statfs, which counts at least what the model takes.
     Statfs,
-    /// A snapshot of the volume, a volume of its own, unless the sequence has taken `SNAPSHOTS`.
-    Snapshot,
     Sync,
     Fsync,
     Compact,
@@ -944,7 +940,6 @@ fn short_op() -> impl Strategy<Value = Op> {
         2 => Just(Op::Fsync),
         3 => Just(Op::Compact),
         2 => Just(Op::Remount),
-        1 => Just(Op::Snapshot),
     ]
 }
 
@@ -1002,7 +997,6 @@ fn op() -> impl Strategy<Value = Op> {
         2 => (0usize..CURSORS, 0usize..8).prop_map(|(cursor, count)| Op::ReadOn { cursor, count }),
         1 => (0usize..DIRS, 0..BAD_NAMES.len()).prop_map(|(dir, name)| Op::BadName { dir, name }),
         1 => Just(Op::Statfs),
-        1 => Just(Op::Snapshot),
         1 => Just(Op::Sync),
         1 => Just(Op::Fsync),
         1 => Just(Op::Compact),
@@ -1037,17 +1031,6 @@ struct Model {
     queued: Vec<Queued>,
     /// The files those leave nothing of, as a cut before them would find them.
     gone: BTreeMap<u64, Data>,
-    /// The snapshots of the volume, in the order they were taken.
-    snapshots: Vec<Arc<Snapshot>>,
-}
-
-/// A snapshot of the volume (`Op::Snapshot`), a volume of its own: what it holds is what the
-/// volume did as it was taken, as a volume opened anew has it, with any of the unlinks queued
-/// then done or not, and what was open with no name gone (`Model::cuts`).
-#[derive(Debug)]
-struct Snapshot {
-    name: String,
-    held: Vec<Model>,
 }
 
 impl Model {
@@ -1063,14 +1046,7 @@ impl Model {
             linkable: BTreeSet::new(),
             queued: Vec::new(),
             gone: BTreeMap::new(),
-            snapshots: Vec::new(),
         }
-    }
-
-    /// What a snapshot taken now, named `name`, holds.
-    fn snapshot(&self, name: String) -> Snapshot {
-        let model = Self { snapshots: Vec::new(), ..self.clone() };
-        Snapshot { name, held: model.cuts() }
     }
 
     /// The ino of the `index`th file there is, if there is any: one open may have no names.
@@ -1826,51 +1802,9 @@ impl<const KEEPS: bool> World<KEEPS> {
         View(&self.fs)
     }
 
-    /// Checks that its volume, and each of its snapshots, hold what `model` says.
+    /// Checks that its volume holds what `model` says.
     async fn holds(&self, model: &Model) -> Result<(), String> {
-        self.view().holds(model).await?;
-        self.holds_snapshots(model).await
-    }
-
-    /// Checks that the filesystem's volumes are its volume and `model`'s snapshots, each of
-    /// which, opened as a volume, holds what it did as it was taken.
-    async fn holds_snapshots(&self, model: &Model) -> Result<(), String> {
-        let volumes = root_volume((*self.filesystem).clone()).await;
-        let volumes = volumes.map_err(|e| format!("the root volume: {e:#}"))?;
-        let mut found = Vec::new();
-        let layer_set = volumes.volume_directory().store().tree().layer_set();
-        let mut merger = layer_set.merger();
-        let listed = volumes.volume_directory().iter(&mut merger).await;
-        let mut listed = listed.map_err(|e| format!("listing volumes: {e:#}"))?;
-        while let Some((name, _, _)) = listed.get() {
-            found.push(name.to_string());
-            listed.advance().await.map_err(|e| format!("listing volumes: {e:#}"))?;
-        }
-        found.sort();
-        let mut expected: Vec<String> =
-            model.snapshots.iter().map(|snapshot| snapshot.name.clone()).collect();
-        expected.push(VOLUME.to_string());
-        expected.sort();
-        if found != expected {
-            return Err(format!("the volumes are {found:?}, not {expected:?}"));
-        }
-        for snapshot in &model.snapshots {
-            let volume = volumes.volume(&snapshot.name).await;
-            let volume = volume.map_err(|e| format!("{}: {e:#}", snapshot.name))?;
-            let platform = Seeded::<KEEPS> { workers: false };
-            let fs = Fxfs::new((*self.filesystem).clone(), volume, true, platform);
-            let mut differs = Vec::new();
-            for held in &snapshot.held {
-                match View(&fs).holds(held).await {
-                    Ok(()) => break,
-                    Err(error) => differs.push(error),
-                }
-            }
-            if differs.len() == snapshot.held.len() {
-                return Err(format!("{} holds none of what it did: {differs:?}", snapshot.name));
-            }
-        }
-        Ok(())
+        self.view().holds(model).await
     }
 
     async fn new(
@@ -2723,18 +2657,6 @@ impl<const KEEPS: bool> World<KEEPS> {
             Op::BadName { dir, name } => {
                 let dir = self.model.dirs[dir % self.model.dirs.len()];
                 self.refuses_bad_name(dir, BAD_NAMES[name % BAD_NAMES.len()]).await?;
-            }
-            Op::Snapshot if self.model.snapshots.len() < SNAPSHOTS => {
-                let name = format!("snapshot-{}", self.model.snapshots.len());
-                let volumes = root_volume((*self.filesystem).clone()).await;
-                let volumes = volumes.map_err(|e| format!("the root volume: {e:#}"))?;
-                let made = volumes.snapshot_volume(VOLUME, &name).await.map(drop);
-                if self.unless_full(made, "snapshot")?.is_none() {
-                    return Ok(());
-                }
-                let snapshot = self.model.snapshot(name);
-                self.model.snapshots.push(Arc::new(snapshot));
-                self.holds_snapshots(&self.model).await?;
             }
             Op::Statfs => self.holds_statfs(&self.model).await?,
             Op::Sync => self.fs.sync().await.map_err(|e| format!("sync: {e:#}"))?,
@@ -4290,75 +4212,6 @@ fn writeback_on_a_full_filesystem_is_paid_for_by_the_room_it_reserved() {
     ops.extend((0..11).map(|half| dirty(1024 + 2048 * half, 1024 >> half, false)));
     ops.push(Op::Remount);
     Setting::awkward(0, TIGHT).holds(ops);
-}
-
-/// A snapshot of a volume whose graveyard holds a file closed, not yet tombstoned, as a guest's
-/// batches its tombstones: remounted, the volume still syncs, and its snapshot holds nothing of
-/// the file. The graveyard tombstoned it during the snapshot's flush, freeing its extent, which the
-/// snapshot shared; remounted, the snapshot's graveyard freed it again, an inconsistency the
-/// journal failed with (TASK-149.40's snapshots found it, TASK-241).
-#[test]
-fn a_snapshot_of_a_file_closed_but_not_yet_tombstoned() {
-    let ops = vec![
-        Op::Tmpfile(0),
-        Op::Write { file: 0, at: 0, len: 1, byte: 0 },
-        Op::Close(0),
-        Op::Snapshot,
-    ];
-    Setting::awkward(0, ROOMY).with_graveyard_of_seed().holds(ops);
-}
-
-/// Snapshots hold what the volume did as they were taken, as the volume goes on: its files
-/// written over, truncated, unlinked and renamed, a directory made, across cuts and remounts. A
-/// snapshot shares the volume's extents, which neither frees while both do (TASK-149.40).
-#[test]
-fn snapshots_hold_what_the_volume_did_as_it_goes_on() {
-    let write = |file, byte| Op::Fill { file, page: 0, pages: 4, stride: 1, byte };
-    let ops = vec![
-        Op::Create(0),
-        Op::Create(1),
-        write(0, 1),
-        write(1, 2),
-        Op::Snapshot,
-        write(0, 3),
-        Op::Truncate { file: 1, size: PAGE / 2 },
-        Op::Sync,
-        Op::Snapshot,
-        Op::Unlink(0),
-        Op::Rename(1, 2),
-        Op::Mkdir(3),
-        Op::Remount,
-    ];
-    Setting::awkward(0, ROOMY).cutting_everywhere().holds(ops);
-}
-
-/// A snapshot, an unlink queued and a write, every cut of them: land-all11's macOS run of
-/// every_cut_of_a_short_sequence hung on it, a commit waiting for its lock and another for room in
-/// the journal, before the fixes of TASK-241 and TASK-245.
-#[test]
-fn every_cut_of_a_snapshot_an_unlink_queued_and_a_write() {
-    let ops = vec![
-        Op::Snapshot,
-        Op::UnlinkLater(5),
-        Op::Write { file: 13, at: 36085, len: 2686, byte: 15 },
-    ];
-    let setting = Setting::awkward(17604531016692502004, ROOMY).with_graveyard_of_seed();
-    setting.cutting_everywhere().holds(ops);
-}
-
-/// A snapshot, a directory made, a large xattr set on it and a rename into it, every cut of them:
-/// every_cut_of_a_short_sequence waited for room in the journal on it until it panicked
-/// (TASK-272).
-#[test]
-fn every_cut_of_a_snapshot_a_directory_its_xattr_and_a_rename() {
-    let ops = vec![
-        Op::Snapshot,
-        Op::Mkdir(0),
-        Op::SetDirXattr { dir: 2, name: 0, len: 4682, byte: 112 },
-        Op::Rename(12, 2),
-    ];
-    let setting = Setting::awkward(9159821385706884731, ROOMY).with_graveyard_of_seed();
-    setting.cutting_everywhere().holds(ops);
 }
 
 /// A change of mode, owner, group and times, as `Op::SetAttr` asks.

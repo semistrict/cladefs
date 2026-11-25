@@ -55,7 +55,7 @@ fn ask_as(
     asked: Asked,
 ) -> Result<Option<Vec<u8>>, Refusal> {
     let runtime = crate::bucket::bucket_runtime().unwrap();
-    runtime.block_on(link(Daemon::process(), &runtime, address, (url, region)).get(asked))
+    runtime.block_on(link(Daemon::process(), address, (url, region)).get(asked))
 }
 
 /// Part `part` of the object at `location`'s key in `bucket`, asked for by its key and number, and
@@ -735,7 +735,7 @@ fn writers_append_to_members_through_their_links() {
         bucket: URL.to_owned(),
         me: "127.0.0.1:1".to_owned(),
         incarnation: 1,
-        channels: Channels::new(Daemon::process().clone(), runtime.clone()),
+        daemon: Daemon::process().clone(),
     };
     let cell = crate::CellId { tenant: 3, id: 9 };
     let configuration =
@@ -862,7 +862,7 @@ fn takes_refuse_members_answering_more_logs_than_a_member_holds() {
         bucket: URL.to_owned(),
         me: "127.0.0.1:1".to_owned(),
         incarnation: 1,
-        channels: Channels::new(Daemon::process().clone(), runtime.clone()),
+        daemon: Daemon::process().clone(),
     };
     let cell = crate::CellId { tenant: 3, id: 9 };
     runtime.block_on(heading(&*served.bucket, cell, 5, 0, Some(Key { number: 1, epoch: 4 })));
@@ -1057,7 +1057,7 @@ fn members_are_reached_on_one_connection_whatever_the_cells() {
         bucket: URL.to_owned(),
         me: "127.0.0.1:1".to_owned(),
         incarnation: 1,
-        channels: Channels::new(Daemon::process().clone(), runtime.clone()),
+        daemon: Daemon::process().clone(),
     };
     let configuration =
         bucket_cell::layout::Configuration { number: 1, epoch: 4, f: 1, members: Vec::new() };
@@ -1477,7 +1477,7 @@ fn a_parts_bucket_requests_for_a_peer_are_on_its_trace() {
     let asking = bucket_cell::trace::Span::start("a fetcher's read");
     let trace = asking.context().unwrap().span().span_context().trace_id();
     let runtime = crate::bucket::bucket_runtime().unwrap();
-    let link = link(Daemon::process(), &runtime, &address, (URL, None));
+    let link = link(Daemon::process(), &address, (URL, None));
     assert_eq!(runtime.block_on(asking.around(link.get(asked))), Ok(Some(bytes)));
     drop(asking);
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -1499,4 +1499,45 @@ fn a_parts_bucket_requests_for_a_peer_are_on_its_trace() {
     for span in fetched {
         assert_eq!(span.span_context.trace_id(), trace, "{} on a trace of its own", span.name);
     }
+}
+
+/// board 11659, board 11713: more than `PEER_CONNECTIONS_MOST` (16) concurrent migration/peer
+/// clients, plus `GetPart` and replication links, all multiplex over one pooled HTTP/2 connection
+/// per peer on `Daemon::peer_channels` instead of exhausting the peer connection limit.
+#[test]
+fn concurrent_peer_and_migration_clients_exceeding_connection_limit_share_one_connection() {
+    let dir = tempfile::tempdir().unwrap();
+    let (bucket, location) = holding(&noise(3 * layout::PART));
+    let served = counted_member_of(dir.path(), bucket.clone());
+    let (part_asked, expected_bytes) = asked(&bucket, &location, 1);
+    let incarnation = served.replicas.unwrap().incarnation();
+    let runtime = crate::bucket::bucket_runtime().unwrap();
+    let daemon = Daemon::new();
+    let count = PEER_CONNECTIONS_MOST + 8;
+    let clients: Vec<_> =
+        (0..count).map(|_| super::client_on(&daemon, &served.address).unwrap()).collect();
+    let part_link = link(&daemon, &served.address, (URL, None));
+    runtime.block_on(within(async {
+        let mut handles = Vec::with_capacity(count);
+        for (mut client, _channel) in clients {
+            handles.push(tokio::spawn(async move {
+                let asked = IncarnationRequest {
+                    bucket: URL.to_owned(),
+                    #[allow(deprecated)]
+                    formats: String::new(),
+                    versions: Some(super::current_formats()),
+                };
+                client.incarnation(asked).await.unwrap().into_inner().incarnation
+            }));
+        }
+        assert_eq!(part_link.get(part_asked).await, Ok(Some(expected_bytes)));
+        for handle in handles {
+            assert_eq!(handle.await.unwrap(), incarnation);
+        }
+    }));
+    assert_eq!(
+        served.accepted.load(Ordering::Relaxed),
+        1,
+        "GetPart and {count} concurrent migration/peer clients should share one HTTP/2 connection"
+    );
 }

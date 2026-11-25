@@ -1012,6 +1012,81 @@ async fn members_removed_from_the_peers_are_replaced_at_once() {
     assert_eq!(lost, Vec::<u64>::new(), "blocks told replicated lost");
 }
 
+/// Board 11671: a replica member restarted while the bucket is completely unreachable still admits
+/// `Append` for already-held cells using its persisted rebuildable `seen.cache`, allowing f=1
+/// replicated commits to keep succeeding when the third member is also down (so only writer +
+/// restarted member form the f+1 quorum). After the writer is lost and the bucket recovers,
+/// taking the cell from the restarted member recovers every block committed during the outage.
+#[madsim::test]
+async fn restarted_replica_member_admits_commits_during_bucket_outage() {
+    const WRITES: u64 = 4;
+    let (bucket, faults) = world();
+    faults.set(bucket_cell::faults::Odds::NONE);
+    let (nodes, roots) = hosts_keeping(3, &bucket, Kept::replicas(3));
+    let handle = madsim::runtime::Handle::current();
+    let manager = manager();
+    let path = roots[0].join("store");
+    let at = path.clone();
+    let cell = manager.spawn(async move { create_replicated(1, &at, 10).await }).await.unwrap();
+
+    let (ready, mut readied) = tokio::sync::mpsc::channel::<()>(1);
+    let (go, mut going) = tokio::sync::mpsc::channel::<()>(1);
+    let at = path.clone();
+    let writer = nodes[0].spawn(async move {
+        let guest = guest().await;
+        let cell = guest.open(&at, 64 << 20).await.unwrap();
+        let mut told = Blocks::new();
+        for round in 0..2 {
+            let first = guest.next_sequence().await.unwrap();
+            for sequence in first..first + WRITES {
+                let block = block_of(round, sequence);
+                guest.write(cladefs::ExtentId { cell, sequence }, 0, &block).await.unwrap();
+                guest.commit(cladefs::Commit::Uploaded).await.unwrap();
+                told.insert(sequence, block);
+            }
+            if round == 0 {
+                ready.send(()).await.unwrap();
+                going.recv().await.unwrap();
+            }
+        }
+        told
+    });
+    // Round 0 commits replicated to both peers (hosts 2 and 3), populating their `seen.cache`.
+    readied.recv().await.unwrap();
+
+    // Restart host 2 while the writer is paused (so host 2 loses all in-memory `Held::seen` state
+    // and receives no writes while the bucket is still up, reloading `seen.cache` from disk on
+    // boot). Then cut the bucket completely and kill host 3 so host 1 MUST form its f+1 quorum
+    // with restarted host 2 alone without any bucket head read.
+    node_local::kill(nodes[1].id()).await;
+    node_local::restart(nodes[1].id()).await;
+    let _ = manager.spawn(async move { connect(2).await }).await.unwrap();
+    faults.set(bucket_cell::faults::Odds { fail_before: 1.0, ..bucket_cell::faults::Odds::NONE });
+    node_local::kill(nodes[2].id()).await;
+
+    // Round 1 commits MUST succeed via replicated quorum (host 1 + restarted host 2) even while
+    // the bucket is 100% unreachable.
+    go.send(()).await.unwrap();
+    let told = tokio::time::timeout(Duration::from_secs(30), writer)
+        .await
+        .expect("replicated commits stalled after replica member restart during bucket outage")
+        .unwrap();
+
+    // Kill the writer host 1 permanently before healing the bucket; restart host 3 (which missed
+    // all Round 1 commits) so host 2 + host 3 form an unforced f+1 fencing quorum, and verify
+    // host 2's take recovers every block committed both before and during the outage.
+    node_local::kill(nodes[0].id()).await;
+    faults.set(bucket_cell::faults::Odds::NONE);
+    node_local::restart(nodes[2].id()).await;
+    let _ = manager.spawn(async move { connect(3).await }).await.unwrap();
+    let taken = roots[1].join("taken");
+    let at = taken.clone();
+    manager.spawn(async move { take(2, &at, cell, 20, false).await }).await.unwrap();
+    let node = handle.get_node(nodes[1].id()).unwrap();
+    let lost = node.spawn(lost_in(taken, cell, told, Blocks::new())).await.unwrap();
+    assert_eq!(lost, Vec::<u64>::new(), "blocks told replicated during outage lost");
+}
+
 /// How a profile cuts its hosts off the network a while, at each round, as the seed says (doc-24,
 /// FoundationDB's partitions and swizzle).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

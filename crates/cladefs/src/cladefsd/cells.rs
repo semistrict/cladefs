@@ -20,7 +20,6 @@
 use super::Daemon;
 use super::server::Connection;
 use super::storage::{daemon_bucket_on, part_cache, upload_interval};
-use crate::cell_requests::{self, Capacity, Close};
 use crate::cell_table::{self, CellTable, Writer as _};
 use crate::open_cell::{Opening, release};
 use crate::pages::Arena;
@@ -60,21 +59,6 @@ pub(super) async fn hold_to_write(
 fn in_arena(open_cell: &OpenCell, arena: Option<&Arc<Arena>>) -> Result<(), Errno> {
     let own = arena.map_or(crate::pages::ArenaId::DEFAULT, |arena| arena.id());
     if open_cell.arena() == own { Ok(()) } else { Err(Errno::EBUSY) }
-}
-
-/// cladefs: what tells those waiting for the cell at its key, a writer's that went, closing, that it
-/// is closed: kept with the open cell by its writer's connection as it goes, and dropped as the cell
-/// closes, whoever lets it go last (`OpenCell::keep_until_closed`,
-/// `crate::cell_table::CellTable::closed`, board 8237).
-pub(super) struct Closed {
-    pub(super) table: Table,
-    pub(super) key: PathBuf,
-}
-
-impl Drop for Closed {
-    fn drop(&mut self) {
-        self.table.closed(&self.key);
-    }
 }
 
 /// How long holding a cell waits for a connection whose VM process is gone to let it go: as a VM
@@ -318,23 +302,14 @@ impl Drop for Here {
     }
 }
 
-impl Close for Here {
+impl Here {
+    /// Closes this handle's cell on `daemon`'s runtime and awaits completion before returning.
     async fn close(mut self) {
         if let Some(open_cell) = self.held.take()
             && let Err(err) = release_held_behind(&self.daemon, open_cell).await
         {
             log::error!("cladefsd: closing a cell: {err}");
         }
-    }
-}
-
-impl Capacity for Here {
-    fn capacity(&self) -> Result<(u64, u64), Errno> {
-        capacity(&self.held().open_cell)
-    }
-
-    async fn set_capacity(&self, capacity: u64) -> Result<(), Errno> {
-        set_capacity(self.held(), capacity).await
     }
 }
 
@@ -447,28 +422,8 @@ async fn let_go_failed(daemon: &Daemon, key: &Path, kept: Weak<HeldCell>) {
     }
 }
 
-/// A cell open for connections, as a request works on it, which it leaves open.
-pub(super) struct Live(pub(super) Arc<OpenCell>);
-
-impl Close for Live {
-    /// Lets the cell go, which its connection, gone meanwhile, may have left it last to close.
-    async fn close(self) {
-        release(self.0).await;
-    }
-}
-
-impl Capacity for Live {
-    fn capacity(&self) -> Result<(u64, u64), Errno> {
-        capacity(&self.0)
-    }
-
-    async fn set_capacity(&self, capacity: u64) -> Result<(), Errno> {
-        set_capacity(&self.0, capacity).await
-    }
-}
-
 /// `open_cell`'s capacity, and the bytes it holds.
-fn capacity(open_cell: &OpenCell) -> Result<(u64, u64), Errno> {
+pub(super) fn capacity(open_cell: &OpenCell) -> Result<(u64, u64), Errno> {
     let info = open_cell.info()?;
     Ok((info.capacity, info.capacity - info.available))
 }
@@ -488,7 +443,7 @@ struct Forked {
     live: bool,
 }
 
-impl Close for Forked {
+impl Forked {
     async fn close(self) {
         self.here.close().await;
     }
@@ -1210,28 +1165,37 @@ async fn fork_held(
     tenant: u64,
     key: &Path,
 ) -> Result<CellId, Errno> {
-    let live = |connection: &Connection| {
-        Some(Forked { here: Here::of(daemon, connection.cell()?.clone(), None), live: true })
-    };
-    let open = |hold: Option<Hold>| async {
-        if let Some(open_cell) = daemon.table.instance(key) {
-            return Ok(Forked { here: Here::of(daemon, open_cell, hold), live: true });
-        }
-        // Opened by a restore that held it before.
-        if let Some(kept) = kept(daemon, key) {
-            return Ok(Forked { here: Here::kept(daemon, kept), live: false });
-        }
-        let open_cell = open_here(daemon, from).await?;
-        let here = match hold {
-            // Let go of once kept.
-            Some(hold) => Here::kept(daemon, keep(daemon, &hold, open_cell)),
-            None => Here::of(daemon, Arc::new(open_cell), None),
-        };
-        Ok(Forked { here, live: false })
-    };
     let forking = match kept(daemon, key) {
         Some(kept) => Forked { here: Here::kept(daemon, kept), live: false },
-        None => cell_requests::forking(&daemon.table, key, live, CLOSING_WAIT, open).await?,
+        None => {
+            daemon
+                .table
+                .fork_cell(
+                    key,
+                    CLOSING_WAIT,
+                    |connection| async move {
+                        let open_cell = connection.cell().ok_or(Errno::EBUSY)?.clone();
+                        Ok(Forked { here: Here::of(daemon, open_cell, None), live: true })
+                    },
+                    |hold| async move {
+                        if let Some(open_cell) = daemon.table.instance(key) {
+                            Ok(Forked { here: Here::of(daemon, open_cell, hold), live: true })
+                        } else if let Some(kept) = kept(daemon, key) {
+                            // Opened by a restore that held it before.
+                            Ok(Forked { here: Here::kept(daemon, kept), live: false })
+                        } else {
+                            let open_cell = open_here(daemon, from).await?;
+                            // Hold let go of once kept.
+                            let here = match hold {
+                                Some(hold) => Here::kept(daemon, keep(daemon, &hold, open_cell)),
+                                None => Here::of(daemon, Arc::new(open_cell), None),
+                            };
+                            Ok(Forked { here, live: false })
+                        }
+                    },
+                )
+                .await?
+        }
     };
     let (held, live) = (forking.here.held().clone(), forking.live);
     let weak = Arc::downgrade(&held);
@@ -1417,26 +1381,40 @@ async fn delete_alone(
 pub(super) async fn resize(
     daemon: &Arc<Daemon>,
     path: PathBuf,
-    capacity: u64,
+    new_capacity: u64,
 ) -> Result<(), Errno> {
     let key = cell_dir_key(&path);
-    let open = |hold: Option<Hold>| {
-        let key = key.clone();
-        async move {
-            let open_cell = match daemon.table.instance(&key) {
-                Some(open_cell) => open_cell,
-                None => {
-                    close_kept(daemon, hold.as_ref().and_then(Hold::take_kept)).await;
-                    if !local_cell::upload::blocking(|| host_fs::exists(&key)) {
-                        return Err(Errno::ENOENT);
-                    }
-                    Arc::new(open_here(daemon, &key).await?)
+    daemon
+        .table
+        .resize_cell(
+            &key,
+            new_capacity,
+            |writer, cap| async move { writer.resize(cap).await },
+            |hold| {
+                let key = key.clone();
+                async move {
+                    let open_cell = match daemon.table.instance(&key) {
+                        Some(open_cell) => open_cell,
+                        None => {
+                            if let Some(hold) = &hold {
+                                close_kept(daemon, hold.take_kept()).await;
+                            }
+                            if !local_cell::upload::blocking(|| host_fs::exists(&key)) {
+                                return Err(Errno::ENOENT);
+                            }
+                            Arc::new(open_here(daemon, &key).await?)
+                        }
+                    };
+                    Ok(Here::of(daemon, open_cell, hold))
                 }
-            };
-            Ok(Here::of(daemon, open_cell, hold))
-        }
-    };
-    cell_requests::resize(&daemon.table, &key, capacity, open).await
+            },
+            |here| capacity(&here.held().open_cell),
+            async |here, cap| set_capacity(here.held(), cap).await,
+            // Closed before those waiting to open it may (it once let them wait out CLOSING_WAIT:
+            // found by the cell table's Shuttle tests, TASK-44.6).
+            |here| here.close(),
+        )
+        .await
 }
 
 /// Places the cell at `path` on `daemon` at the placement whose fencing token is `token`.

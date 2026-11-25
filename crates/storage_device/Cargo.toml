@@ -6,36 +6,25 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 
+[features]
+# cladefs: `fake_device` (and its `rand` dependency) are host/test-only; the guest kernel builds
+# with `default-features = false` (board 11687).
+default = ["fake-device"]
+fake-device = ["dep:rand"]
+
 [dependencies]
-anyhow = { workspace = true, optional = true }
-async-trait = { workspace = true, optional = true }
-bitflags = { workspace = true, optional = true }
-event-listener = { workspace = true, optional = true }
+anyhow.workspace = true
+async-trait.workspace = true
+bitflags.workspace = true
+event-listener.workspace = true
 fprint.workspace = true
-fuchsia-sync = { workspace = true, optional = true }
-futures = { workspace = true, optional = true }
-log = { workspace = true, optional = true }
-num = { workspace = true, optional = true }
+fuchsia-sync.workspace = true
+futures.workspace = true
+log.workspace = true
 rand = { workspace = true, optional = true }
 serde.workspace = true
 # cladefs: the errors of extent.rs.
 thiserror.workspace = true
-
-[features]
-# cladefs: `default-features = false` exposes only `ExtentId`, `ExtentRange`, and their errors
-# for pure-Rust `wasm32` builds (`gc_wasm`) without pulling in OS locking or random deps.
-default = ["full"]
-full = [
-    "dep:anyhow",
-    "dep:async-trait",
-    "dep:bitflags",
-    "dep:event-listener",
-    "dep:fuchsia-sync",
-    "dep:futures",
-    "dep:log",
-    "dep:num",
-    "dep:rand",
-]
 
 # cladefs: what the fuzz targets (crates/fxfs/fuzz) make extents of.
 [target.'cfg(fuzz)'.dependencies]
@@ -43,6 +32,7 @@ arbitrary.workspace = true
 
 [dev-dependencies]
 fuchsia-async.workspace = true
+rand.workspace = true
 
 # The workspace's lints.
 [lints.rust]

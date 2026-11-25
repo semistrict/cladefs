@@ -753,3 +753,24 @@ async fn faults_a_seed_picks() {
     };
     all(seeds.map(seeded)).await;
 }
+
+/// Board 5546 AC #2 / TASK-639 (board 2708): when `OpenCell::fork` fails at `fork::uploaded`
+/// (after committing a scratch version and before `fork_through_on`), the undo path drops that
+/// scratch version so the parent cell's head does not leak it.
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_fork_at_upload_drops_its_scratch_version() {
+    host();
+    let mut world = World::new().await;
+    let parent_cell = world.parent.as_ref().unwrap().cell();
+    let forked = world.fork(&[Fault::Fails("fork::uploaded")]).await;
+    assert!(forked.is_err(), "expected fork::uploaded fault to fail fork");
+    let head = bucket_cell::head::get(&*world.bucket, parent_cell).await.unwrap().unwrap();
+    assert!(
+        head.versions.is_empty(),
+        "failed fork at fork::uploaded leaked scratch version(s): {:?}",
+        head.versions
+    );
+    world
+        .settle(forked, Leftover::Deleted, "failed_fork_at_upload_drops_its_scratch_version")
+        .await;
+}

@@ -8,9 +8,6 @@
 
 //! Fuchsia-native synchronization primitives.
 
-mod condvar;
-pub use condvar::*;
-
 #[cfg(target_os = "none")]
 mod kernel;
 #[cfg(target_os = "none")]

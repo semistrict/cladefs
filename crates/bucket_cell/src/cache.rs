@@ -31,7 +31,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -81,6 +81,9 @@ const OFFLINE_AFTER: Duration = Duration::from_secs(30 * 60);
 /// Consecutive probe successes that promote `Offline` -> `Returning` -> `Online`.
 const RETURNING_SUCCESSES: u32 = 3;
 const HEALTH_WINDOW: Duration = Duration::from_secs(60);
+/// Minimum interval between health probes on the same unhealthy shard so probes neither false-recover
+/// in milliseconds nor burn through `OFFLINE_ERRORS` before `OFFLINE_AFTER`.
+const PROBE_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 struct HealthInner {
@@ -89,11 +92,13 @@ struct HealthInner {
     suspect_since: Option<Instant>,
     consecutive_errors: u32,
     probe_successes: u32,
+    last_probe: Option<Instant>,
 }
 
 #[derive(Debug)]
 struct ShardHealthState {
     state: AtomicU8,
+    probe_in_flight: AtomicBool,
     inner: Mutex<HealthInner>,
 }
 
@@ -101,12 +106,14 @@ impl ShardHealthState {
     fn new() -> Self {
         Self {
             state: AtomicU8::new(ShardHealth::Online as u8),
+            probe_in_flight: AtomicBool::new(false),
             inner: Mutex::new(HealthInner {
                 window_start: Instant::now(),
                 window_errors: 0,
                 suspect_since: None,
                 consecutive_errors: 0,
                 probe_successes: 0,
+                last_probe: None,
             }),
         }
     }
@@ -121,6 +128,28 @@ impl ShardHealthState {
 
     fn is_offline(&self) -> bool {
         self.get() == ShardHealth::Offline
+    }
+
+    /// Reserves a rate-limited health probe slot for this shard if it is unhealthy and not already
+    /// being probed.
+    fn try_begin_probe(&self, now: Instant) -> bool {
+        if self.is_online() {
+            return false;
+        }
+        if self.probe_in_flight.swap(true, Ordering::AcqRel) {
+            return false;
+        }
+        let mut inner = self.inner.lock().unwrap();
+        if inner.last_probe.is_some_and(|last| now.duration_since(last) < PROBE_INTERVAL) {
+            self.probe_in_flight.store(false, Ordering::Release);
+            return false;
+        }
+        inner.last_probe = Some(now);
+        true
+    }
+
+    fn finish_probe(&self) {
+        self.probe_in_flight.store(false, Ordering::Release);
     }
 
     fn on_io_success(&self) {
@@ -161,6 +190,15 @@ impl ShardHealthState {
         if !is_disk_io_error(err) {
             return;
         }
+        self.record_error(dir, err);
+    }
+
+    /// Records any failure of an explicit health probe (including `InvalidData` read-back mismatch).
+    fn on_probe_error(&self, dir: &Path, err: &io::Error) {
+        self.record_error(dir, err);
+    }
+
+    fn record_error(&self, dir: &Path, err: &io::Error) {
         let mut inner = self.inner.lock().unwrap();
         let now = Instant::now();
         if now.duration_since(inner.window_start) >= HEALTH_WINDOW {
@@ -243,6 +281,9 @@ struct Shard {
     versions: PathBuf,
     /// Runtime disk health state for JBOD failover.
     health: ShardHealthState,
+    /// Keys dropped from the in-memory index while this shard was `Offline` (so healthy-disk
+    /// adoptions never block on an offline disk's unlink); drained once the shard recovers.
+    pending_forgets: Mutex<Vec<String>>,
     /// The directory, locked, so that no other cache opens it while this one has it.
     _lock: host_fs::Flock,
 }
@@ -594,6 +635,7 @@ impl Shard {
             kept: Mutex::new(kept),
             versions,
             health: ShardHealthState::new(),
+            pending_forgets: Mutex::new(Vec::new()),
             _lock: lock,
         };
         shard.set_limit(u64::MAX)?;
@@ -638,24 +680,75 @@ impl Shard {
         let Some(root) = self.files.dir.parent() else { return };
         let path = root.join(PROBE_FILE);
         let res = (|| -> io::Result<()> {
-            host_fs::write(&path, b"ok")?;
-            let read = host_fs::read(&path)?;
+            let block = crate::direct::DIRECT_BLOCK as usize;
+            let mut wbuf = crate::direct::Buffer::new(block);
+            wbuf.bytes_mut().fill(0x5a);
+            {
+                let file = host_fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .open(&path)?;
+                crate::direct::bypass(&file, &path)?;
+                file.write_all_at(wbuf.bytes(), 0)?;
+                file.sync_all()?;
+            }
+            let mut rbuf = crate::direct::Buffer::new(block);
+            {
+                let file = host_fs::File::open(&path)?;
+                crate::direct::bypass(&file, &path)?;
+                file.read_exact_at(rbuf.bytes_mut(), 0)?;
+            }
             // Best-effort cleanup of the temporary probe file; probe outcome is decided by the
-            // read-back check and logged on error below.
+            // direct-I/O read-back check and logged on error below.
             if let Err(err) = host_fs::remove_file(&path) {
                 log::warn!("cladefs: removing probe file {}: {err}", path.display());
             }
-            if read != b"ok" {
+            if rbuf.bytes() != wbuf.bytes() {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "probe mismatch"));
             }
             Ok(())
         })();
-        match self.record_io(res) {
-            Ok(()) => {}
-            Err(err) => log::warn!(
-                "cladefs: part cache shard {} health probe failed: {err}",
-                root.display()
-            ),
+        match res {
+            Ok(()) => {
+                self.health.on_io_success();
+                if !self.health.is_offline() {
+                    self.drain_pending_forgets();
+                }
+            }
+            Err(err) => {
+                self.health.on_probe_error(&self.files.dir, &err);
+                log::warn!(
+                    "cladefs: part cache shard {} health probe failed: {err}",
+                    root.display()
+                );
+            }
+        }
+    }
+
+    fn forget_in_memory(&self, key: &str) {
+        let gone = {
+            let mut kept = self.kept.lock().unwrap();
+            let gone = kept.forget(key);
+            if let Some(Evicted::Remove(k)) = &gone {
+                kept.removing.remove(k);
+            }
+            gone
+        };
+        if let Some(Evicted::Remove(k)) = gone {
+            self.pending_forgets.lock().unwrap().push(k);
+        }
+    }
+
+    fn drain_pending_forgets(&self) {
+        let pending = std::mem::take(&mut *self.pending_forgets.lock().unwrap());
+        for key in pending {
+            if let Err(err) = self.files.remove(&key)
+                && err.kind() != io::ErrorKind::NotFound
+            {
+                log::warn!("cladefs: removing deferred stale copy of {key}: {err}");
+            }
         }
     }
 
@@ -1080,11 +1173,53 @@ impl Cache {
     }
 
     /// Re-probes any `Suspect`, `Offline`, or `Returning` shards so recovered disks rejoin
-    /// automatically.
-    pub fn probe_unhealthy(&self) {
-        for shard in &self.shards {
-            shard.probe();
+    /// automatically. Probes are rate-limited per shard and dispatched off the governor thread so
+    /// a wedged drive never stalls governance of healthy disks.
+    pub fn probe_unhealthy(self: &Arc<Self>) {
+        struct ProbeGuard<'a>(&'a ShardHealthState);
+        impl Drop for ProbeGuard<'_> {
+            fn drop(&mut self) {
+                self.0.finish_probe();
+            }
         }
+
+        let now = Instant::now();
+        for idx in 0..self.shards.len() {
+            if !self.shards[idx].health.try_begin_probe(now) {
+                continue;
+            }
+            #[cfg(not(madsim))]
+            {
+                let cache = Arc::clone(self);
+                let spawned = std::thread::Builder::new()
+                    .name(format!("cache shard probe {idx}"))
+                    .spawn(move || {
+                        let _guard = ProbeGuard(&cache.shards[idx].health);
+                        cache.shards[idx].probe();
+                    });
+                if let Err(err) = spawned {
+                    self.shards[idx].health.finish_probe();
+                    log::warn!("cladefs: spawning part cache shard {idx} probe thread: {err}");
+                }
+            }
+            #[cfg(madsim)]
+            {
+                let _guard = ProbeGuard(&self.shards[idx].health);
+                host_fs::may_block(|| self.shards[idx].probe());
+            }
+        }
+    }
+
+    /// All shard root directories (and object directories) currently held open by this cache.
+    pub fn shard_dirs(&self) -> Vec<PathBuf> {
+        let mut out = Vec::with_capacity(self.shards.len() * 2);
+        for shard in &self.shards {
+            if let Some(root) = shard.files.dir.parent() {
+                out.push(root.to_path_buf());
+            }
+            out.push(shard.files.dir.clone());
+        }
+        out
     }
 
     /// Runtime health state of each shard paired with its [`HostDisk`], for metrics.
@@ -1275,7 +1410,12 @@ impl Cache {
         if adopted {
             for (i, shard) in self.shards.iter().enumerate() {
                 if i != target && shard.has_key(key) {
-                    if let Err(err) = shard.forget(key) {
+                    if shard.health.is_offline() {
+                        // Never block a healthy disk's WAL adoption on an offline disk's unlink:
+                        // drop the superseded entry from memory immediately and defer unlinking
+                        // until the shard passes health probes.
+                        shard.forget_in_memory(key);
+                    } else if let Err(err) = shard.forget(key) {
                         log::warn!("cladefs: forgetting superseded copy of {key}: {err}");
                     }
                 }
@@ -2714,16 +2854,59 @@ mod tests {
         let wal = tempfile::tempdir().unwrap();
         let dirs = [dir1.path().to_path_buf(), dir2.path().to_path_buf()];
         let cache = Cache::open_all(&dirs, 8 * PART).unwrap();
+        let eio = io::Error::from_raw_os_error(libc::EIO);
+
+        // Determine which shard weighted rendezvous prefers for KEY, mark it offline so `first`
+        // lands on the OTHER shard, then bring it back online so `adopt` picks the primary shard
+        // and genuinely exercises cross-shard forgetting of the superseded copy.
+        let primary = cache.ranked_shards(KEY, false)[0];
+        let secondary = 1 - primary;
+        for _ in 0..OFFLINE_ERRORS {
+            cache.shards[primary].health.on_io_error(dirs[primary].as_path(), &eio);
+        }
+        assert!(cache.shards[primary].health.is_offline());
+
         let first = Object::noise(KEY, PART, 1);
         first.keep(&cache);
-        assert_eq!(cache.keys(), vec![KEY.to_owned()]);
+        assert!(cache.shards[secondary].has_key(KEY));
+        assert!(!cache.shards[primary].has_key(KEY));
+
+        for _ in 0..RETURNING_SUCCESSES {
+            cache.shards[primary].health.on_io_success();
+        }
+        assert!(cache.shards[primary].health.is_online());
 
         let second = Object::noise(KEY, PART, 2);
         let from = second.write_to(wal.path());
         assert!(cache.adopt(KEY, &from).unwrap());
         cache.check();
+        assert!(cache.shards[primary].has_key(KEY));
+        assert!(!cache.shards[secondary].has_key(KEY));
+        assert_eq!(cache.shards[secondary].bytes(), 0);
         assert_eq!(cache.keys(), vec![KEY.to_owned()]);
         assert_eq!(second.read(&cache, 0).as_deref(), Some(second.part(0)));
+
+        // Adopting onto primary while secondary is Offline must forget in memory without touching
+        // disk, queuing the unlink until secondary recovers.
+        for _ in 0..OFFLINE_ERRORS {
+            cache.shards[primary].health.on_io_error(dirs[primary].as_path(), &eio);
+        }
+        let third = Object::noise(OTHER, PART, 3);
+        third.keep(&cache);
+        assert!(cache.shards[secondary].has_key(OTHER));
+        for _ in 0..RETURNING_SUCCESSES {
+            cache.shards[primary].health.on_io_success();
+        }
+        for _ in 0..OFFLINE_ERRORS {
+            cache.shards[secondary].health.on_io_error(dirs[secondary].as_path(), &eio);
+        }
+        let fourth = Object::noise(OTHER, PART, 4);
+        let from2 = fourth.write_to(wal.path());
+        assert!(cache.adopt(OTHER, &from2).unwrap());
+        assert!(cache.shards[primary].has_key(OTHER));
+        assert!(!cache.shards[secondary].has_key(OTHER));
+        assert_eq!(cache.shards[secondary].pending_forgets.lock().unwrap().len(), 1);
+        assert_eq!(fourth.read(&cache, 0).as_deref(), Some(fourth.part(0)));
     }
 
     #[test]
@@ -2740,6 +2923,13 @@ mod tests {
         for _ in 0..7 {
             state.on_io_error(dummy, &eio);
         }
+        assert_eq!(state.get(), ShardHealth::Offline);
+        state.on_io_success();
+        assert_eq!(state.get(), ShardHealth::Returning);
+        // InvalidData probe mismatch during Returning must demote back to Offline and reset
+        // probe_successes.
+        let mismatch = io::Error::new(io::ErrorKind::InvalidData, "probe mismatch");
+        state.on_probe_error(dummy, &mismatch);
         assert_eq!(state.get(), ShardHealth::Offline);
         state.on_io_success();
         assert_eq!(state.get(), ShardHealth::Returning);

@@ -5,10 +5,7 @@
 // cladefs's own: the runtime in the guest kernel (target_os = "none", TASK-26.6), in place of the
 // portable runtime's tokio: tasks run on the kernel's workers, timers are the kernel's, and
 // executors poll their main future on the calling thread, which sleeps between polls
-// (guest/rust/linux-rt). Scopes are the portable runtime's.
-
-#[path = "portable/scope.rs"]
-pub mod scope;
+// (guest/rust/linux-rt).
 
 pub mod task {
     use futures::future::{AbortHandle as FuturesAbortHandle, Abortable, Aborted};
@@ -73,10 +70,6 @@ pub mod task {
         pub fn abort(mut self) -> impl Future<Output = Option<T>> {
             let task = self.task.take().unwrap();
             async move { task.cancel().await.and_then(Result::ok) }
-        }
-
-        pub(crate) fn abort_handle(&self) -> AbortHandle {
-            self.abort.clone()
         }
     }
 

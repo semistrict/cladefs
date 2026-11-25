@@ -2,11 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! What the kernel gives std (guest/linux/fs/cladefs/rt.h), and libm's functions (cmath).
+//! What the kernel gives std (guest/linux/fs/cladefs/rt.h).
 
-// libm's, which the kernel's link needs only for what is called.
-#[allow(dead_code)]
-pub mod cmath;
 pub mod sync;
 
 use core::ffi::{c_char, c_int};

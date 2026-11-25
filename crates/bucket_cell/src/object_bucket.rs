@@ -66,130 +66,6 @@ pub struct ObjectBucket {
     rewrites: Rewrites,
     /// cladefs: its backend's clock, as it dates objects ([`Bucket::now`], board 8467).
     clock: Clock,
-    /// cladefs: how it deletes an object only if it is of a version ([`Bucket::delete_if`], board
-    /// 9229), and, over HTTP, whether its backend was found to honour the condition, once asked.
-    deletes: Deletes,
-    honours_deletes: tokio::sync::OnceCell<bool>,
-}
-
-/// cladefs: how a bucket deletes an object only if it is of a version ([`Bucket::delete_if`], board
-/// 9229), which `object_store` sends no request for.
-#[derive(Clone, Debug)]
-pub(crate) enum Deletes {
-    /// A DELETE of the object alone, through cladefs's client, carrying the condition `by` names
-    /// ([`crate::client::conditioned`]): `objects`, the backend as it deletes a request an object
-    /// (S3's with DeleteObjects off). Checked to honour it before the first is relied on
-    /// ([`ObjectBucket::honours_deletes`]): one of S3's kin that ignored it would delete
-    /// unconditionally.
-    Http { objects: Arc<dyn ObjectStore>, by: Condition },
-    /// A file bucket's, under the lock of the object's directory ([`crate::local::Local::delete_if`]).
-    Local(crate::local::Local),
-    /// A store of this process's alone, memory's: its version compared and the object deleted
-    /// under `lock`, held alone, which every write of the store through a bucket shares
-    /// ([`in_process`]).
-    InProcess(Arc<tokio::sync::RwLock<()>>),
-    /// None it can make: Azure's, whose deletes `object_store` sends in batches (Blob Batch), and
-    /// signs with the condition left out.
-    Refused,
-}
-
-/// cladefs: what makes a DELETE conditional on a version over HTTP ([`Deletes::Http`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Condition {
-    /// S3's `If-Match`, on the object's e-tag.
-    ETag,
-    /// GCS's `x-goog-if-generation-match`, on its generation.
-    Generation,
-}
-
-impl Condition {
-    /// The header saying a delete is of `version` alone: none if `version` has none of what it
-    /// names.
-    fn header(
-        self,
-        version: &Version,
-    ) -> Option<(reqwest::header::HeaderName, reqwest::header::HeaderValue)> {
-        let (name, value) = match self {
-            Self::ETag => (reqwest::header::IF_MATCH, version.e_tag.as_deref()?),
-            Self::Generation => (
-                reqwest::header::HeaderName::from_static("x-goog-if-generation-match"),
-                version.version.as_deref()?,
-            ),
-        };
-        // Not one a header carries: none, the delete refused as unsupported.
-        Some((name, reqwest::header::HeaderValue::from_str(value).ok()?))
-    }
-}
-
-/// cladefs: whether `objects` honours the condition `by` on a delete of `path`, its probe's object
-/// of `version` (board 9229, [`ObjectBucket::honours_deletes`]): a delete of another version must
-/// be refused, the object kept, and one of its version delete it. A failure, which answers nothing
-/// of the condition, fails it (hotbed review 53).
-async fn probe_deletes(
-    objects: &Arc<dyn ObjectStore>,
-    by: Condition,
-    path: &Path,
-    version: &Version,
-) -> object_store::Result<bool> {
-    // No backend makes this e-tag; no object's generation is 0.
-    let other =
-        Version { e_tag: Some("\"cladefs-probe\"".to_owned()), version: Some("0".to_owned()) };
-    let (Some(header), Some(own)) = (by.header(&other), by.header(version)) else {
-        // cladefs: none it names: the object deleted, the condition not to be sent.
-        delete_one(&**objects, path).await?;
-        return Ok(false);
-    };
-    let deleting = delete_one(&**objects, path);
-    let refused = match crate::client::conditioned(header, path.to_string(), deleting).await.0 {
-        Err(object_store::Error::Precondition { .. }) => true,
-        Ok(()) | Err(object_store::Error::NotFound { .. }) => false,
-        Err(failed) => return Err(failed),
-    };
-    let options = GetOptions { head: true, ..GetOptions::default() };
-    match objects.get_opts(path, options).await {
-        Ok(_) => {}
-        // Deleted: the condition ignored.
-        Err(object_store::Error::NotFound { .. }) => return Ok(false),
-        Err(other) => return Err(other),
-    }
-    let (deleted, _) =
-        crate::client::conditioned(own, path.to_string(), delete_one(&**objects, path)).await;
-    deleted?;
-    Ok(refused)
-}
-
-/// cladefs: deletes the object at `path` of `store`, through its `delete_stream`, as a delete of
-/// one object alone: of S3's with DeleteObjects off, a DeleteObject (board 9229).
-async fn delete_one(store: &dyn ObjectStore, path: &Path) -> object_store::Result<()> {
-    let deleting = path.clone();
-    let mut deleted = store.delete_stream(stream::once(async move { Ok(deleting) }).boxed());
-    match deleted.next().await {
-        Some(deleted) => deleted.map(drop),
-        None => Err(object_store::Error::Generic {
-            store: "cladefs",
-            source: format!("{path}: a delete answered nothing").into(),
-        }),
-    }
-}
-
-/// cladefs: the lock of the store `store`, of this process's alone, which every bucket of it shares
-/// ([`Deletes::InProcess`]): its writes hold it shared, its conditional deletes alone, so that none
-/// lands between such a delete's comparison and its deletion. By the store's address, while it
-/// lives.
-fn in_process(store: &Arc<dyn ObjectStore>) -> Arc<tokio::sync::RwLock<()>> {
-    type Locks = Vec<(std::sync::Weak<dyn ObjectStore>, Arc<tokio::sync::RwLock<()>>)>;
-    // cladefs: the process's, not a simulated host's: a store in memory is the process's, and the
-    // hosts holding it share it, and so its lock.
-    static LOCKS: std::sync::Mutex<Locks> = std::sync::Mutex::new(Vec::new());
-    let mut locks = LOCKS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    locks.retain(|(held, _)| held.strong_count() > 0);
-    let found = locks.iter().find(|(held, _)| std::ptr::addr_eq(held.as_ptr(), Arc::as_ptr(store)));
-    if let Some((_, lock)) = found {
-        return lock.clone();
-    }
-    let lock = Arc::new(tokio::sync::RwLock::new(()));
-    locks.push((Arc::downgrade(store), lock.clone()));
-    lock
 }
 
 /// cladefs: how long after GCS takes a write of an object it takes another: about one a second,
@@ -725,9 +601,7 @@ impl ObjectBucket {
 
     /// cladefs: the objects of `backend` under `prefix`, a level of which `pages`, the same
     /// backend, lists a page a request, if given (TASK-395.5): S3's, GCS's and Azure's. Dated by
-    /// the host's clock, as [`ObjectBucket::new`]'s. Its conditional deletes, as of a store of this
-    /// process's alone ([`Deletes::InProcess`]): one reached by its URL makes them as its backend
-    /// does ([`ObjectBucket::from_url`]).
+    /// the host's clock, as [`ObjectBucket::new`]'s.
     pub fn paged(
         backend: Arc<dyn ObjectStore>,
         pages: Option<Arc<dyn PaginatedListStore>>,
@@ -737,7 +611,6 @@ impl ObjectBucket {
         let (counts, honoured, decoded) = Default::default();
         let objectids = crate::objectid::Allocator::new();
         let rewrites = Default::default();
-        let deletes = Deletes::InProcess(in_process(&backend));
         Self {
             backend,
             pages,
@@ -748,17 +621,15 @@ impl ObjectBucket {
             objectids,
             rewrites,
             clock: Clock::Host,
-            deletes,
-            honours_deletes: tokio::sync::OnceCell::new(),
         }
     }
 
     /// cladefs: the bucket `reached` reaches ([`reach`]), spacing its writes of a key as its
     /// backend needs.
     fn reached(reached: Reached) -> Self {
-        let Reached { objects, pages, prefix, rewrite_every, clock, deletes } = reached;
+        let Reached { objects, pages, prefix, rewrite_every, clock } = reached;
         let bucket = Self::paged(objects, pages, &prefix).rewriting_every(rewrite_every);
-        Self { clock, deletes, ..bucket }
+        Self { clock, ..bucket }
     }
 
     /// cladefs: the same bucket, each write of a key at least `every` after the last of it was
@@ -905,8 +776,6 @@ pub(crate) struct Reached {
     /// cladefs: its clock, as it dates objects (board 8467): the host's, of files and memory; of a
     /// cloud's, as its responses date them.
     pub clock: Clock,
-    /// cladefs: how it deletes an object only if it is of a version (board 9229).
-    pub deletes: Deletes,
 }
 
 /// cladefs: opens other buckets by the registry of buckets (TASK-633.3, TASK-633.4): the bucket
@@ -1013,53 +882,42 @@ pub(crate) fn reach(
     client: &Client,
 ) -> Result<Reached, String> {
     let url = url::Url::parse(url).map_err(|error| format!("{url}: {error}"))?;
-    let (backend, pages, path, clock, deletes): (Arc<dyn ObjectStore>, _, Path, _, _) =
-        match url.scheme() {
-            // cladefs: `object_store`'s own refuses conditional updates (TASK-165.1).
-            "file" => {
-                let dir = url.to_file_path().map_err(|()| format!("{url}: no directory"))?;
-                let local =
-                    crate::local::Local::new(&dir).map_err(|error| format!("{url}: {error}"))?;
-                let deletes = Deletes::Local(local.clone());
-                (Arc::new(local), None, Path::default(), Clock::Host, deletes)
-            }
-            _ => cloud(&url, options, client).map_err(|error| format!("{url}: {error}"))?,
-        };
+    let (backend, pages, path, clock): (Arc<dyn ObjectStore>, _, Path, _) = match url.scheme() {
+        // cladefs: `object_store`'s own refuses conditional updates (TASK-165.1).
+        "file" => {
+            let dir = url.to_file_path().map_err(|()| format!("{url}: no directory"))?;
+            let local =
+                crate::local::Local::new(&dir).map_err(|error| format!("{url}: {error}"))?;
+            (Arc::new(local), None, Path::default(), Clock::Host)
+        }
+        _ => cloud(&url, options, client).map_err(|error| format!("{url}: {error}"))?,
+    };
     let mut rewrite_every = match provider_of(url.as_str())? {
         "gcs" => GCS_REWRITE_EVERY,
         _ => std::time::Duration::ZERO,
     };
-    // cladefs: degraded as the environment says, its pages too (board 5740), and its conditional
-    // deletes over HTTP; a file bucket's, under its lock, not.
-    let (objects, pages, deletes): (Arc<dyn ObjectStore>, _, _) =
-        match crate::faults::Faults::from_env()? {
-            Some(faults) => {
-                rewrite_every = rewrite_every.max(faults.now().rewrite_every);
-                let pages = pages.map(|pages| -> Arc<dyn PaginatedListStore> {
-                    Arc::new(crate::faults::FaultyPages::new(pages, faults.clone()))
-                });
-                let deletes = match deletes {
-                    Deletes::Http { objects, by } => {
-                        let objects = Arc::new(crate::faults::Faulty::new(objects, faults.clone()));
-                        Deletes::Http { objects, by }
-                    }
-                    deletes => deletes,
-                };
-                (Arc::new(crate::faults::Faulty::new(backend, faults)), pages, deletes)
-            }
-            None => (backend, pages, deletes),
-        };
+    // cladefs: degraded as the environment says, its pages too (board 5740).
+    let (objects, pages): (Arc<dyn ObjectStore>, _) = match crate::faults::Faults::from_env()? {
+        Some(faults) => {
+            rewrite_every = rewrite_every.max(faults.now().rewrite_every);
+            let pages = pages.map(|pages| -> Arc<dyn PaginatedListStore> {
+                Arc::new(crate::faults::FaultyPages::new(pages, faults.clone()))
+            });
+            (Arc::new(crate::faults::Faulty::new(backend, faults)), pages)
+        }
+        None => (backend, pages),
+    };
     let prefix = path.as_ref().to_owned();
-    Ok(Reached { objects, pages, prefix, rewrite_every, clock, deletes })
+    Ok(Reached { objects, pages, prefix, rewrite_every, clock })
 }
 
 /// cladefs: what [`cloud`] reaches.
-type Cloud = (Arc<dyn ObjectStore>, Pages, Path, Clock, Deletes);
+type Cloud = (Arc<dyn ObjectStore>, Pages, Path, Clock);
 
 /// The backend of a URL of a cloud's, or of memory, the same backend as it lists a level of keys a
 /// page a request, if it does, the path it names in it, as `object_store::parse_url_opts` makes
-/// them, but with `client`; its clock: a cloud's, as its responses date them, memory's the
-/// host's; and how it deletes an object only if it is of a version (board 9229).
+/// them, but with `client`; and its clock: a cloud's, as its responses date them, memory's the
+/// host's.
 fn cloud(
     url: &url::Url,
     options: impl IntoIterator<Item = (String, String)>,
@@ -1110,39 +968,32 @@ fn cloud(
         let built = Arc::new(built);
         (built.clone() as Arc<dyn ObjectStore>, Some(built as Arc<dyn PaginatedListStore>))
     }
-    let (backend, pages, clock, deletes) = match scheme {
+    let (backend, pages, clock) = match scheme {
         Scheme::Memory => {
             let memory: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
-            let deletes = Deletes::InProcess(in_process(&memory));
-            (memory, None, Clock::Host, deletes)
+            (memory, None, Clock::Host)
         }
-        // cladefs: its conditional deletes a DeleteObject each, not DeleteObjects', whose body
-        // the client can't condition (board 9229).
         Scheme::AmazonS3 => {
             let builder = configured!(object_store::aws::AmazonS3Builder);
-            let objects = Arc::new(builder.clone().with_disable_bulk_delete(true).build()?);
-            let deletes = Deletes::Http { objects, by: Condition::ETag };
             let (backend, pages) = paged(builder.build()?);
-            (backend, pages, Clock::Served(served), deletes)
+            (backend, pages, Clock::Served(served))
         }
-        // A DELETE an object already.
         Scheme::GoogleCloudStorage => {
             let builder = configured!(object_store::gcp::GoogleCloudStorageBuilder);
             let (backend, pages) = paged(builder.build()?);
-            let deletes = Deletes::Http { objects: backend.clone(), by: Condition::Generation };
-            (backend, pages, Clock::Served(served), deletes)
+            (backend, pages, Clock::Served(served))
         }
         Scheme::MicrosoftAzure => {
             let builder = configured!(object_store::azure::MicrosoftAzureBuilder);
             let (backend, pages) = paged(builder.build()?);
-            (backend, pages, Clock::Served(served), Deletes::Refused)
+            (backend, pages, Clock::Served(served))
         }
         other => {
             let source = format!("no buckets of {other:?}").into();
             return Err(object_store::Error::Generic { store: "cladefs", source });
         }
     };
-    Ok((backend, pages, path, clock, deletes))
+    Ok((backend, pages, path, clock))
 }
 
 /// What a request's failure means to cells. Failures other than the ones the protocol answers
@@ -1421,7 +1272,6 @@ impl ObjectBucket {
                 true => self.counts.turns[request as usize].turn().await,
                 false => None,
             };
-            let _shared = self.shared().await;
             let timed = self.counts.request(request, Some(&path));
             let len = bytes.len() as u64;
             let options = PutOptions { mode, ..PutOptions::default() };
@@ -1436,7 +1286,6 @@ impl ObjectBucket {
     fn object_delete(&self, key: &str) -> impl Future<Output = Result<(), Error>> + Send {
         let (backend, path) = (self.backend.clone(), self.path(key));
         async move {
-            let _shared = self.shared().await;
             let timed = self.counts.request(Request::Delete, Some(&path));
             let deleting = path.clone();
             let mut deleted =
@@ -1458,7 +1307,6 @@ impl ObjectBucket {
         let paths: Vec<object_store::Result<Path>> =
             keys.iter().map(|key| Ok(self.path(key))).collect();
         async move {
-            let _shared = self.shared().await;
             let timed = self.counts.request(Request::DeleteBatch, None);
             let objects = paths.len();
             // Every answer awaited, the first failure kept: the rest took effect, or failed too.
@@ -1473,112 +1321,6 @@ impl ObjectBucket {
                 .await;
             timed.span.set_count(crate::trace::OBJECTS, objects as u64);
             timed.answered(deleted, |_| 0)
-        }
-    }
-
-    /// cladefs: the object at `key` deleted only if it is of `version` ([`Bucket::delete_if`],
-    /// board 9229), as its backend makes such a delete ([`Deletes`]): a request of its own, counted
-    /// as a delete.
-    fn object_delete_if(
-        &self,
-        key: &str,
-        version: &Version,
-    ) -> impl Future<Output = Result<(), Error>> + Send {
-        let (path, version) = (self.path(key), version.clone());
-        async move {
-            let timed = self.counts.request(Request::Delete, Some(&path));
-            let deleted = self.deleted_if(&path, &version).await;
-            timed.answered(deleted, |_| 0)
-        }
-    }
-
-    async fn deleted_if(&self, path: &Path, version: &Version) -> object_store::Result<()> {
-        let precondition = |found: &dyn std::fmt::Debug| object_store::Error::Precondition {
-            path: path.to_string(),
-            source: format!("{found:?} is not {version:?}").into(),
-        };
-        let unsupported = |why: &str| object_store::Error::NotSupported {
-            source: format!("a delete of {path} conditional on its version: {why}").into(),
-        };
-        match &self.deletes {
-            Deletes::Local(local) => {
-                let Version { e_tag, version } = version.clone();
-                local.delete_if(path, &UpdateVersion { e_tag, version }).await
-            }
-            Deletes::InProcess(lock) => {
-                let _alone = lock.write().await;
-                let options = GetOptions { head: true, ..GetOptions::default() };
-                let found = match self.backend.get_opts(path, options).await {
-                    Ok(found) => Some(found.meta.e_tag),
-                    Err(object_store::Error::NotFound { .. }) => None,
-                    Err(other) => return Err(other),
-                };
-                if found.as_ref().is_none_or(|e_tag| *e_tag != version.e_tag) {
-                    return Err(precondition(&found));
-                }
-                delete_one(&*self.backend, path).await
-            }
-            Deletes::Http { objects, by } => {
-                let header =
-                    by.header(version).ok_or_else(|| unsupported("no version it names"))?;
-                if !self.honours_deletes(objects, *by).await? {
-                    return Err(unsupported("its backend ignores the condition"));
-                }
-                let (deleted, sent) = crate::client::conditioned(
-                    header,
-                    path.to_string(),
-                    delete_one(&**objects, path),
-                )
-                .await;
-                // cladefs: an invariant of this build's, not of what a backend sends: deleted with
-                // no request carrying the condition, it went unconditioned.
-                assert!(sent || deleted.is_err(), "{path}: deleted with no condition sent");
-                match deleted {
-                    // None there, as S3 may say it.
-                    Err(object_store::Error::NotFound { .. }) => Err(precondition(&"none")),
-                    deleted => deleted,
-                }
-            }
-            Deletes::Refused => Err(unsupported("its backend's deletes go unconditioned")),
-        }
-    }
-
-    /// cladefs: whether its backend over HTTP, `objects`, honours the condition `by` on a delete
-    /// (board 9229), found once, with an object of its own at `probe/deletes-<random>`, which it
-    /// removes: a delete of another version must fail, the object kept, and one of its version
-    /// succeed. One that ignores it, as a store of S3's kin may, would delete unconditionally: its
-    /// conditional deletes are refused. Its requests failing fail it, to be asked again.
-    async fn honours_deletes(
-        &self,
-        objects: &Arc<dyn ObjectStore>,
-        by: Condition,
-    ) -> object_store::Result<bool> {
-        let probe = || async {
-            let path = self.path(&format!("probe/deletes-{}", base32_id::Padded(rand::random())));
-            let create = PutOptions { mode: object_store::PutMode::Create, ..Default::default() };
-            let made = objects.put_opts(&path, PutPayload::from_static(b"probe"), create).await?;
-            let version = Version { e_tag: made.e_tag, version: made.version };
-            let checked = probe_deletes(objects, by, &path, &version).await;
-            if checked.is_err() {
-                // cladefs: best effort (hotbed review 54): what is left of a probe is its own
-                // object, which no cell names; the failure is what the check gives.
-                let _ = delete_one(&**objects, &path).await;
-            }
-            checked
-        };
-        let honoured = *self.honours_deletes.get_or_try_init(probe).await?;
-        if !honoured {
-            log::error!("bucket: its backend ignores the condition of a delete ({by:?}): refused");
-        }
-        Ok(honoured)
-    }
-
-    /// cladefs: the lock of its store of this process's alone, held shared by each write
-    /// ([`Deletes::InProcess`]); none for any other.
-    async fn shared(&self) -> Option<tokio::sync::RwLockReadGuard<'_, ()>> {
-        match &self.deletes {
-            Deletes::InProcess(lock) => Some(lock.read().await),
-            _ => None,
         }
     }
 }
@@ -1643,21 +1385,6 @@ impl Bucket for ObjectBucket {
 
     fn delete_batch(&self, keys: &[&str]) -> impl Future<Output = Result<(), Error>> + Send {
         self.object_delete_batch(keys)
-    }
-
-    fn delete_if(
-        &self,
-        key: &str,
-        version: &Version,
-    ) -> impl Future<Output = Result<(), Error>> + Send {
-        self.object_delete_if(key, version)
-    }
-
-    fn supports_conditional_delete(
-        &self,
-        _key: &str,
-    ) -> impl Future<Output = Result<bool, Error>> + Send {
-        std::future::ready(Ok(!matches!(self.deletes, Deletes::Refused)))
     }
 
     fn now(&self) -> u64 {
@@ -1795,52 +1522,6 @@ pub(crate) mod tests {
     use super::*;
     use crate::layout::test_cell;
 
-    #[test]
-    fn mirrors_leave_no_pin_or_hold_when_either_bucket_refuses_conditional_deletes() {
-        struct Source(Arc<ObjectBucket>);
-
-        impl Resolve for Source {
-            fn open<'a>(
-                &'a self,
-                _home: &'a ObjectBucket,
-                number: u16,
-            ) -> futures::future::BoxFuture<'a, Result<Arc<ObjectBucket>, crate::Error>>
-            {
-                assert_eq!(number, 2);
-                Box::pin(std::future::ready(Ok(self.0.clone())))
-            }
-        }
-
-        futures::executor::block_on(async {
-            for (source_refuses, destination_refuses) in
-                [(true, false), (false, true), (true, true)]
-            {
-                let dir = tempfile::tempdir().unwrap();
-                let Two { mut home, mut other, .. } = Two::new(dir.path()).await;
-                if source_refuses {
-                    other.deletes = Deletes::Refused;
-                }
-                if destination_refuses {
-                    home.deletes = Deletes::Refused;
-                }
-                let other = Arc::new(other);
-                let bucket = home.routed(Arc::new(Source(other.clone())));
-                let own = bucket.own();
-                let parent = test_cell(2 << 48 | 1);
-                let error = crate::mirror::mirror(&bucket, &*own, 1, parent, 3).await.unwrap_err();
-                assert!(matches!(
-                    error,
-                    crate::Error::Refused(crate::bucket::Refused {
-                        refusal: crate::bucket::Refusal::Request,
-                        ..
-                    })
-                ));
-                assert!(own.object_list(&parent.prefix()).await.unwrap().is_empty());
-                assert!(other.object_list(&parent.prefix()).await.unwrap().is_empty());
-            }
-        });
-    }
-
     /// TASK-633.8: a version of a cell of another bucket forked into this one, mirrored here: its
     /// hold made in the parent's bucket, its objects copied, its marker made, its child's reference
     /// moved here (retired, marked, in the parent's bucket), its pin dropped; begun again, the
@@ -1868,10 +1549,15 @@ pub(crate) mod tests {
             let mirrored = mirror(&*bucket, &*own, 1, parent, at).await.unwrap();
             // The checkpoint at the version, and the segment holding its extent.
             assert_eq!(mirrored, Mirrored::Done { copied: 2, referred: 1, retired: 1 });
-            let (hold, marker) = (layout::hold(parent, at, 1), layout::mirror(parent, at));
-            assert!(two.other.object_get(&hold).await.is_ok(), "no hold");
+            let (holds_prefix, marker) = (layout::holds(parent, at, 1), layout::mirror(parent, at));
+            let held = two.other.object_list(&holds_prefix).await.unwrap();
+            assert_eq!(held.len(), 1, "expected one per-run hold");
+            let hold = held[0].key.clone();
             assert!(two.home.object_get(&marker).await.is_ok(), "no marker");
-            assert!(two.home.object_get(&layout::pin(parent, at)).await.is_err(), "the pin stands");
+            assert!(
+                two.home.object_list(&layout::pins(parent, at)).await.unwrap().is_empty(),
+                "the pin stands"
+            );
             assert_eq!(two.refers(origin, child).await, (false, true, true));
             let again = mirror(&*bucket, &*own, 1, parent, at).await.unwrap();
             assert_eq!(again, Mirrored::Done { copied: 0, referred: 0, retired: 0 });
@@ -1880,7 +1566,10 @@ pub(crate) mod tests {
             two.other.object_delete(&hold).await.unwrap();
             let again = mirror(&*bucket, &*own, 1, parent, at).await.unwrap();
             assert_eq!(again, Mirrored::Done { copied: 0, referred: 0, retired: 0 });
-            assert!(two.other.object_get(&hold).await.is_err(), "a hold written again");
+            assert!(
+                two.other.object_list(&holds_prefix).await.unwrap().is_empty(),
+                "a hold written again"
+            );
             two.other
                 .object_put(
                     &hold,
@@ -1892,8 +1581,10 @@ pub(crate) mod tests {
             let unnamed = at + 7;
             let dropped = mirror(&*bucket, &*own, 1, parent, unnamed).await.unwrap();
             assert_eq!(dropped, Mirrored::Unnamed);
-            assert!(two.other.object_get(&layout::hold(parent, unnamed, 1)).await.is_err());
-            assert!(two.home.object_get(&layout::pin(parent, unnamed)).await.is_err());
+            assert!(
+                two.other.object_list(&layout::holds(parent, unnamed, 1)).await.unwrap().is_empty()
+            );
+            assert!(two.home.object_list(&layout::pins(parent, unnamed)).await.unwrap().is_empty());
             assert!(two.home.object_get(&layout::mirror(parent, unnamed)).await.is_err());
 
             let listed = two.other.object_list(&parent.prefix()).await.unwrap();
@@ -1935,7 +1626,10 @@ pub(crate) mod tests {
             // Its copy and its marker.
             assert_eq!((report.deleted, report.retired), (3, 0), "nothing needing it");
             assert_eq!(two.home.object_list(&parent.prefix()).await.unwrap(), [], "left here");
-            assert!(two.other.object_get(&hold).await.is_err(), "the hold stands");
+            assert!(
+                two.other.object_list(&holds_prefix).await.unwrap().is_empty(),
+                "the hold stands"
+            );
         });
     }
 
@@ -2027,16 +1721,15 @@ pub(crate) mod tests {
             Self { own, ahead, taken_at, updates, deleted }
         }
 
-        /// Counts a conditional write of `key`, if it is a pin's, and takes the pin over for
-        /// another mirror first if it is the `taken_at`th.
+        /// Counts a conditional write of `key`, if it is a pin's, and reaps the pin first if it
+        /// is the `taken_at`th.
         async fn taken(&self, key: &str) -> Result<(), Error> {
             if !matches!(layout::kind(key), layout::Kind::Pin { .. }) {
                 return Ok(());
             }
             let updates = self.updates.fetch_add(1, Ordering::Relaxed) + 1;
             if self.taken_at == Some(updates) {
-                let another = layout::encode(&layout::Reference::of(u64::MAX));
-                self.own.put(key, another.into(), PutMode::Overwrite).await?;
+                self.own.delete(key).await?;
             }
             Ok(())
         }
@@ -2078,16 +1771,6 @@ pub(crate) mod tests {
         async fn delete(&self, key: &str) -> Result<(), Error> {
             self.deleted.lock().unwrap().push(key.to_owned());
             self.own.delete(key).await
-        }
-
-        async fn delete_if(&self, key: &str, version: &Version) -> Result<(), Error> {
-            self.deleted.lock().unwrap().push(key.to_owned());
-            self.taken(key).await?;
-            self.own.delete_if(key, version).await
-        }
-
-        async fn supports_conditional_delete(&self, key: &str) -> Result<bool, Error> {
-            self.own.supports_conditional_delete(key).await
         }
 
         fn now(&self) -> u64 {
@@ -2269,9 +1952,14 @@ pub(crate) mod tests {
                 let failed = mirror(&*bucket, &*own, 1, parent, at).await;
                 fail::remove(step);
                 assert!(failed.is_err(), "{step}: {failed:?}");
-                let held = two.other.object_get(&layout::hold(parent, at, 1)).await;
-                assert!(held.is_err(), "{step}");
-                assert!(two.home.object_get(&layout::pin(parent, at)).await.is_err(), "{step}");
+                assert!(
+                    two.other.object_list(&layout::holds(parent, at, 1)).await.unwrap().is_empty(),
+                    "{step}"
+                );
+                assert!(
+                    two.home.object_list(&layout::pins(parent, at)).await.unwrap().is_empty(),
+                    "{step}"
+                );
             }
             let mirrored = mirror(&*bucket, &*own, 1, parent, at).await.unwrap();
             assert!(matches!(mirrored, Mirrored::Done { referred: 1, .. }), "{mirrored:?}");
@@ -2351,10 +2039,10 @@ pub(crate) mod tests {
         });
     }
 
-    /// TASK-633.8: one mirror of a version holds its pin at a time: another's standing, a mirror
-    /// does nothing; one whose pin another takes over, stale, gives up unmarked, that pin left; and
-    /// a pin stale, its mirror's host dead, this bucket's collector begins the mirror again, which
-    /// takes it over and is done.
+    /// TASK-633.8, board 11699: a best-effort prefix LIST skips copying when another mirror holds
+    /// a non-stale pin (per-run or legacy); a mirror whose pin is reaped before its marker gives
+    /// up unmarked, releasing its own hold; a stale pin in B is resumed and reaped by B's
+    /// collector; and a mirror finishing deletes only its own per-run pin, leaving any other pin.
     #[test]
     fn mirrors_hold_their_pins_alone() {
         use crate::collector::Collector;
@@ -2371,7 +2059,7 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
             let (own, pin, marker) =
-                (bucket.own(), layout::pin(parent, at), layout::mirror(parent, at));
+                (bucket.own(), layout::pin(parent, at, 0x99), layout::mirror(parent, at));
             let another = layout::encode(&layout::Reference::of(u64::MAX));
             let put = PutMode::Overwrite;
             two.home.object_put(&pin, another.clone().into(), put).await.unwrap();
@@ -2379,25 +2067,34 @@ pub(crate) mod tests {
             assert_eq!(mirror(&*bucket, &*own, 1, parent, at).await.unwrap(), Mirrored::UnderWay);
             assert!(two.home.object_get(&marker).await.is_err(), "marked under another's pin");
 
-            // Its pin taken over as it refreshes it before its marker.
-            let taken = Watched::new(own.clone(), PIN_STALE + 1, Some(2));
+            // Its own pin reaped as it refreshes it before its marker: gives up unmarked, releases
+            // its own hold, and leaves the stale pin of the earlier run untouched.
+            let taken = Watched::new(own.clone(), PIN_STALE + 1, Some(1));
             let gave_up = mirror(&*bucket, &taken, 1, parent, at).await.unwrap();
             assert_eq!(gave_up, Mirrored::GaveUp("its pin, stale, taken over".to_owned()));
             assert!(two.home.object_get(&marker).await.is_err(), "marked, its pin taken over");
-            assert_eq!(two.home.object_get(&pin).await.unwrap().bytes, another, "the pin taken");
+            assert!(
+                two.other.object_list(&layout::holds(parent, at, 1)).await.unwrap().is_empty(),
+                "hold leaked after pin lost before mark"
+            );
+            assert_eq!(two.home.object_get(&pin).await.unwrap().bytes, another, "the other's pin");
 
+            // B's collector sees the stale pin, resumes the mirror (marking & moving refs), and
+            // reaps the stale pin.
             let later = Watched::new(own.clone(), PIN_STALE + 1, None);
             let report = Collector::new().collect_copy(&*bucket, &later, 1, parent).await;
             assert_eq!(report.unwrap().deleted, 0);
             assert!(two.home.object_get(&marker).await.is_ok(), "not marked, begun again");
-            assert!(two.home.object_get(&pin).await.is_err(), "the pin stands");
+            assert!(
+                two.home.object_list(&layout::pins(parent, at)).await.unwrap().is_empty(),
+                "the stale pin stands"
+            );
             assert_eq!(two.refers(origin, child).await, (false, true, true));
 
-            // Its pin taken over as it lets it go: the other's left, its delete conditional on its
-            // own write (board 9229).
+            // Finishing when another (stale) pin stands: this run deletes only its own per-run pin
+            // with plain unconditional DELETE, leaving the other's pin intact (board 11699).
             two.home.object_put(&pin, another.clone().into(), PutMode::Overwrite).await.unwrap();
-            let taken = Watched::new(own.clone(), PIN_STALE + 1, Some(2));
-            let done = mirror(&*bucket, &taken, 1, parent, at).await.unwrap();
+            let done = mirror(&*bucket, &later, 1, parent, at).await.unwrap();
             assert_eq!(done, Mirrored::Done { copied: 0, referred: 0, retired: 0 });
             assert_eq!(two.home.object_get(&pin).await.unwrap().bytes, another, "the other's pin");
         });
@@ -2540,11 +2237,15 @@ pub(crate) mod tests {
                 let there = two.other.object_get(&checkpoint).await.is_ok();
                 let here = two.home.object_get(&checkpoint).await.is_ok();
                 assert_eq!((there, here), (true, marked), "{step}: where the version is");
-                let held = two.other.object_get(&layout::hold(parent, at, 1)).await.is_ok();
+                let held =
+                    !two.other.object_list(&layout::holds(parent, at, 1)).await.unwrap().is_empty();
                 assert_eq!(held, marked, "{step}: the hold");
                 let reference = two.refers(origin, child).await;
                 assert_eq!((reference.0, reference.1), (!retired, marked), "{step}: references");
-                assert!(two.home.object_get(&layout::pin(parent, at)).await.is_err(), "{step}");
+                assert!(
+                    two.home.object_list(&layout::pins(parent, at)).await.unwrap().is_empty(),
+                    "{step}"
+                );
             });
             let again = block_on(mirror(&*bucket, &*own, 1, parent, at)).unwrap();
             // The reference left there written here again, and left there still.
@@ -2617,20 +2318,27 @@ pub(crate) mod tests {
             let version = Version { id: 9, at: 3, epoch: 1, shared: false };
             let named = Head { versions: vec![version], ..Head::of(Made::Root, 4) };
             put_head(other, parent, named).await;
-            // And a version a mirror copied and never marked, its hold left.
+            // And a version a mirror copied and never marked, its per-run hold left.
             let copied = [
                 layout::checkpoint(parent, 3, 1),
                 layout::checkpoint(parent, 5, 1),
                 layout::segment(parent, 1, 2),
             ];
-            let unmarked = layout::hold(parent, 5, 1);
+            let unmarked = layout::hold(parent, 5, 1, 0x11);
             put(other, &unmarked, layout::encode(&layout::Reference::of(0))).await;
             for key in &copied {
                 put(home, key, b"copied".to_vec()).await;
             }
-            let (marker, hold) = (layout::mirror(parent, 3), layout::hold(parent, 3, 1));
+            // Both a legacy v31/v32 single-key hold and a v33 per-run hold stand in A for version
+            // 3: prefix LIST in GcUnhold deletes both before the marker (board 11699).
+            let (marker, legacy_hold, run_hold) = (
+                layout::mirror(parent, 3),
+                layout::legacy_hold(parent, 3, 1),
+                layout::hold(parent, 3, 1, 0x22),
+            );
             put(home, &marker, layout::encode(&Mirror::NOW)).await;
-            put(other, &hold, layout::encode(&layout::Reference::of(0))).await;
+            put(other, &legacy_hold, layout::encode(&layout::Reference::of(0))).await;
+            put(other, &run_hold, layout::encode(&layout::Reference::of(0x22))).await;
             let pass = || Collector::new();
             let all = listed(home, parent).await;
 
@@ -2664,12 +2372,13 @@ pub(crate) mod tests {
             let after = (listed(home, parent).await, listed(other, parent).await);
             assert_eq!((report, after), (crate::collector::Report::default(), before), "capped");
             assert_eq!(budget.unwrap().refused(), 1);
-            put(home, &layout::pin(parent, 3), b"pin".to_vec()).await;
+            let pin = layout::pin(parent, 3, 0x33);
+            put(home, &pin, b"pin".to_vec()).await;
             let report = pass().collect_copy(&*routed, &*own, 1, parent).await.unwrap();
             assert_eq!((report.deleted, report.retired), (0, 1), "pinned");
             assert!(home.object_get(&reference).await.is_err(), "a gone child's reference stands");
 
-            home.object_delete(&layout::pin(parent, 3)).await.unwrap();
+            home.object_delete(&pin).await.unwrap();
             let log = Arc::new(std::sync::Mutex::new(Vec::new()));
             let watched = Watched { deleted: log.clone(), ..Watched::new(routed.clone(), 0, None) };
             let watched_own =
@@ -2680,10 +2389,56 @@ pub(crate) mod tests {
             assert_eq!(listed(home, parent).await, Vec::<String>::new(), "left here");
             assert_eq!(listed(other, parent).await, vec![layout::head(parent)], "touched there");
             let mark = layout::retired(parent, 3, child);
-            let mut order = vec![hold, unmarked, marker];
+            let mut order = vec![legacy_hold, run_hold, unmarked, marker];
             order.extend(copied);
             order.push(mark);
             assert_eq!(*log.lock().unwrap(), order, "deleted in that order");
+        });
+    }
+
+    /// board 11699: `collect_copy` reaps stale pins of both v33 per-run and legacy v31/v32
+    /// single-key formats: when unmarked and unnamed, deleting each stale pin's matching hold in
+    /// A before deleting the stale pin in B; when marked, deleting the stale pin in B while
+    /// keeping the hold in A for `GcUnhold`.
+    #[test]
+    fn collect_copy_reaps_stale_legacy_and_per_run_pins_with_matching_holds() {
+        use crate::collector::Collector;
+        use crate::layout::Head;
+        use crate::mirror::PIN_STALE;
+        use crate::record::Made;
+        futures::executor::block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let two = Two::new(dir.path()).await;
+            let (routed, (home, other)) = (two.routed(), (&two.home, &two.other));
+            let own = routed.own();
+            let parent = test_cell(2 << 48 | 1);
+            // Parent stays alive, with version 3 dropped (unnamed) so whole == false and stale pin
+            // reaping alone must clean up the stale pins and their unmarked holds.
+            put_head(other, parent, Head::of(Made::Root, 4)).await;
+
+            let legacy_pin = layout::legacy_pin(parent, 3);
+            let legacy_hold = layout::legacy_hold(parent, 3, 1);
+            let run_pin = layout::pin(parent, 3, 0x55);
+            let run_hold = layout::hold(parent, 3, 1, 0x55);
+            let bytes = layout::encode(&layout::Reference::of(0));
+            for (bucket, key) in
+                [(home, &legacy_pin), (other, &legacy_hold), (home, &run_pin), (other, &run_hold)]
+            {
+                bucket.object_put(key, bytes.clone().into(), PutMode::Create).await.unwrap();
+            }
+
+            let later = Watched::new(own.clone(), PIN_STALE + 1, None);
+            Collector::new().collect_copy(&*routed, &later, 1, parent).await.unwrap();
+            assert!(
+                home.object_list(&layout::pins(parent, 3)).await.unwrap().is_empty()
+                    && matches!(home.object_head(&legacy_pin).await, Err(Error::NotFound)),
+                "stale pins left in B"
+            );
+            assert!(
+                other.object_list(&layout::holds(parent, 3, 1)).await.unwrap().is_empty()
+                    && matches!(other.object_head(&legacy_hold).await, Err(Error::NotFound)),
+                "unmarked holds left in A"
+            );
         });
     }
 
@@ -3022,7 +2777,7 @@ pub(crate) mod tests {
             );
 
             // TASK-633.8: its own bucket, unrouted, takes a key of another bucket's cell here.
-            let pin = layout::pin(theirs, 3);
+            let pin = layout::pin(theirs, 3, 1);
             let resolve = Arc::new(Registered::new(Vec::<(String, String)>::new()));
             let own = ObjectBucket::from_url(&home_url).unwrap().routed(resolve).own().clone();
             own.put(&pin, b"pin".to_vec().into(), PutMode::Create).await.unwrap();
@@ -3509,14 +3264,6 @@ pub(crate) mod tests {
             self.0.delete(key)
         }
 
-        fn delete_if(
-            &self,
-            key: &str,
-            version: &Version,
-        ) -> impl Future<Output = Result<(), Error>> + Send {
-            self.0.delete_if(key, version)
-        }
-
         fn now(&self) -> u64 {
             self.0.now()
         }
@@ -3802,12 +3549,6 @@ pub(crate) mod tests {
     #[test]
     fn memory_buckets_conform() {
         futures::executor::block_on(crate::bucket::conformance(&*memory(), "conformance"));
-        let bucket = memory();
-        futures::executor::block_on(crate::bucket::conditional_deletes(
-            &*bucket,
-            "conformance",
-            true,
-        ));
     }
 
     /// cladefs: a bucket on the host's filesystem does what every bucket must (TASK-165.1).
@@ -3815,20 +3556,12 @@ pub(crate) mod tests {
     fn file_buckets_conform() {
         let dir = tempfile::tempdir().unwrap();
         futures::executor::block_on(crate::bucket::conformance(&*file(dir.path()), "conformance"));
-        let bucket = file(dir.path());
-        futures::executor::block_on(crate::bucket::conditional_deletes(
-            &*bucket,
-            "conformance",
-            true,
-        ));
     }
 
     #[test]
     fn simulated_buckets_conform() {
         let bucket = crate::testing::Direct(crate::testing::SimBucket::new());
         futures::executor::block_on(crate::bucket::conformance(&bucket, "conformance"));
-        let deletes = crate::bucket::conditional_deletes(&bucket, "conformance", true);
-        futures::executor::block_on(deletes);
     }
 
     /// cladefs: `object_store`'s own bucket of a directory refuses conditional updates, which the
@@ -4106,44 +3839,7 @@ pub(crate) mod tests {
             let server = S3Server::start(None);
             let bucket = s3(&server, "conformance", &Client::DEFAULT);
             crate::bucket::conformance(&*bucket, "conformance").await;
-            crate::bucket::conditional_deletes(&*bucket, "conformance", true).await;
             cell_lifecycle(s3(&server, "cells", &Client::DEFAULT), 1).await;
-        });
-    }
-
-    /// board 9229, hotbed review 53: a bucket's check that its backend honours a conditional
-    /// delete, its delete of another version failing (the server refusing it once), answers
-    /// nothing of the condition: the delete fails, and the next asks again, finds it honoured,
-    /// and deletes, never taking the failure for "ignored" for good. Over S3, a conditional delete
-    /// is a DeleteObject, not DeleteObjects. The check failing at any step deletes its object.
-    #[test]
-    fn conditional_deletes_check_their_backend_again_after_a_failure() {
-        runtime().block_on(async {
-            let server = S3Server::start(None);
-            let bucket = s3(&server, "deletes", &Client::DEFAULT);
-            let version = bucket.put("key", vec![1].into(), PutMode::Create).await.unwrap();
-            server.answering_next(crate::s3_server::Next::ConditionalDelete, 403);
-            let refused = bucket.delete_if("key", &version).await;
-            assert_eq!(refused, Err(Error::Refused(Refusal::Denied)));
-            assert_eq!(bucket.get("key").await.unwrap().bytes, [1]);
-            let before = server.requests();
-            assert_eq!(bucket.delete_if("key", &version).await, Ok(()));
-            assert_eq!(bucket.head("key").await.map(drop), Err(Error::NotFound));
-            let deletes =
-                |requests: &std::collections::BTreeMap<&str, u64>| requests.get("delete").copied();
-            // The check's two, then its own.
-            assert_eq!(deletes(&server.requests()), deletes(&before).map(|n| n + 3));
-            assert_eq!(server.requests().get("delete-objects"), before.get("delete-objects"));
-
-            // hotbed review 54: the check failing at any step leaves nothing of its probe.
-            let bucket = s3(&server, "leaks", &Client::DEFAULT);
-            let version = bucket.put("key", vec![1].into(), PutMode::Create).await.unwrap();
-            server.answering_next(crate::s3_server::Next::Head, 403);
-            let refused = bucket.delete_if("key", &version).await;
-            assert_eq!(refused, Err(Error::Refused(Refusal::Denied)));
-            let left: Vec<String> =
-                bucket.list("").await.unwrap().into_iter().map(|meta| meta.key).collect();
-            assert_eq!(left, ["key"]);
         });
     }
 
@@ -4386,10 +4082,6 @@ pub(crate) mod tests {
             // reach (TASK-645). Even, so that the child's, the next, is one too.
             let root = (crate::objectid::named() & !1).max(2);
             crate::bucket::conformance(&*bucket, &format!("conformance-{root:x}")).await;
-            // cladefs: made by all but Azure's, through `object_store` (board 9229).
-            let made = provider_of(url) != Ok("azure");
-            crate::bucket::conditional_deletes(&*bucket, &format!("conformance-{root:x}"), made)
-                .await;
             cell_lifecycle(bucket, root).await;
         });
     }

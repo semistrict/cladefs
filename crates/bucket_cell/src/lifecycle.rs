@@ -19,6 +19,7 @@ use crate::keys::Parents;
 #[cfg(feature = "full")]
 use crate::layout::Origin;
 use crate::layout::{self, CellId, Head};
+#[cfg(feature = "full")]
 use crate::record::Made;
 #[cfg(feature = "full")]
 use crate::recovery;
@@ -125,6 +126,7 @@ async fn change_leaving<R>(
 /// Creates `cell`, of no parent, of `owner`, which its maker chose at random, never taken: its
 /// first taking gives it its keys and kind ([`head::take`]). Returns whether it made it: a head
 /// there already, whoever's, being made or not, is left as it is.
+#[cfg(feature = "full")]
 pub async fn create(bucket: &impl Bucket, cell: CellId, owner: u64) -> Result<bool, Error> {
     let head = Head::of(Made::Root, owner);
     change(bucket, cell, Start::Create, |found| match found {
@@ -245,38 +247,37 @@ async fn retire_one(bucket: &impl Bucket, key: &str) -> Result<(), bucket::Refus
     bucket::delete(bucket, key).await
 }
 
-/// cladefs: retires the reference of the fork of `origin` to `child`, whose head, `found`, names
-/// another origin than the fork's, or none (TASK-395.10): the fork made no cell, and no head will
-/// name it, so that no pass would retire it ([`crate::collector`] retires a reference by the origin
-/// its child's deleted head names). Marked ([`retire`]).
 #[cfg(feature = "full")]
-async fn take_back(
-    bucket: &impl Bucket,
-    origin: Origin,
-    child: CellId,
-    found: &Head,
-) -> Result<(), bucket::Refused> {
-    if rules().references && found.origin() != Some(origin) {
-        retire_one(bucket, &layout::reference(origin.parent, origin.at, child)).await?;
-    }
-    Ok(())
-}
-
-/// cladefs: a fork of the version `version` of the cell `origin` names, at the segment it names, to
-/// `child`, an ephemeral cell kept on the host of incarnation `incarnation` alone (doc-25,
-/// TASK-698.3; specs/ephemeral): its reference's index entry, then its reference, written before
-/// the cell's head is read (`forksReferFirst`), which must name the version there
-/// ([`Error::Deleted`] otherwise), shared if `child` is another tenant's ([`Error::NotShared`]);
-/// refused, or the head not to be read, its reference goes again. Then the cell's checkpoint at the
-/// version's segment, made if none is there, sealed under `keys`, as a fork into another cell's is
-/// (`recovery::checkpoint_at`): the child's openings recover its parent's state from there, one
-/// decoded state for all of them (TASK-698.8), not from an earlier one, replaying the segments
-/// between each time. No head of the child's: its host keeps its state. A host crashing part way
-/// leaves the reference, which it retires starting again, or its decommissioning does.
-#[cfg(feature = "full")]
-mod full_lifecycle {
+mod full_ops {
     use super::*;
 
+    /// cladefs: retires the reference of the fork of `origin` to `child`, whose head, `found`, names
+    /// another origin than the fork's, or none (TASK-395.10): the fork made no cell, and no head will
+    /// name it, so that no pass would retire it ([`crate::collector`] retires a reference by the origin
+    /// its child's deleted head names). Marked ([`retire`]).
+    async fn take_back(
+        bucket: &impl Bucket,
+        origin: Origin,
+        child: CellId,
+        found: &Head,
+    ) -> Result<(), bucket::Refused> {
+        if rules().references && found.origin() != Some(origin) {
+            retire_one(bucket, &layout::reference(origin.parent, origin.at, child)).await?;
+        }
+        Ok(())
+    }
+
+    /// cladefs: a fork of the version `version` of the cell `origin` names, at the segment it names, to
+    /// `child`, an ephemeral cell kept on the host of incarnation `incarnation` alone (doc-25,
+    /// TASK-698.3; specs/ephemeral): its reference's index entry, then its reference, written before
+    /// the cell's head is read (`forksReferFirst`), which must name the version there
+    /// ([`Error::Deleted`] otherwise), shared if `child` is another tenant's ([`Error::NotShared`]);
+    /// refused, or the head not to be read, its reference goes again. Then the cell's checkpoint at the
+    /// version's segment, made if none is there, sealed under `keys`, as a fork into another cell's is
+    /// (`recovery::checkpoint_at`): the child's openings recover its parent's state from there, one
+    /// decoded state for all of them (TASK-698.8), not from an earlier one, replaying the segments
+    /// between each time. No head of the child's: its host keeps its state. A host crashing part way
+    /// leaves the reference, which it retires starting again, or its decommissioning does.
     pub async fn fork_ephemeral(
         bucket: &impl Bucket,
         child: CellId,
@@ -542,7 +543,7 @@ mod full_lifecycle {
         child: CellId,
         version: u64,
         origin: Origin,
-        (owner, inheriting): (u64, Option<&mut crate::keys::Inheriting>),
+        (owner, inheriting): (u64, Option<&crate::keys::Inheriting>),
         keys: Parents<'_>,
     ) -> Result<(), Error> {
         failpoint!("version::record");
@@ -582,8 +583,6 @@ mod full_lifecycle {
             false => Made::Clone(origin),
         };
         let mut head = Head::of(made, owner);
-        // Spend the KEK right before attempting `Start::Create` so `Inheriting::drop` never returns a
-        // KEK that may have landed in the child's head (board 5396).
         if let Some(inheriting) = inheriting {
             let given = inheriting.spend();
             head.keks.extend(given.kek);
@@ -704,7 +703,7 @@ mod full_lifecycle {
 }
 
 #[cfg(feature = "full")]
-pub use full_lifecycle::{
+pub use full_ops::{
     Decommissioned, EphemeralHost, decommission, decommissioned, ephemeral_buckets,
     ephemeral_hosts, ephemeral_references, fork_ephemeral, fork_version, fork_version_keyed,
     refer_ephemeral, referenced_at, unrefer_ephemeral,
@@ -756,6 +755,7 @@ fn ended(head: Head, holder: u64) -> Head {
 /// which no other's is. Fails for a cell a later placement took, whose token is higher
 /// ([`Error::Stale`]), leaving it as it was: a placement cut off deletes no cell from under the one
 /// after it (TASK-45.1).
+#[cfg(feature = "full")]
 pub async fn delete(
     bucket: &impl Bucket,
     cell: CellId,
@@ -790,6 +790,7 @@ pub async fn delete_existing(
 /// Deletes `cell` as [`delete`] does, if `ours` says its head is one to delete, one with none
 /// getting a head of `owner`'s: returns whether it is deleted, now or before, whoever's; `false`
 /// for a head left as it is.
+#[cfg(feature = "full")]
 async fn delete_if(
     bucket: &impl Bucket,
     cell: CellId,
@@ -816,6 +817,7 @@ async fn delete_if(
 /// finds it so. A cell of another's, whose ID the child was given, is left as it is (TASK-79.82);
 /// so is a cell deleted already, whoever's. Returns whether the fork's cell is gone, deleted now
 /// or before: `false` for another's.
+#[cfg(feature = "full")]
 pub async fn delete_fork(
     bucket: &impl Bucket,
     child: CellId,

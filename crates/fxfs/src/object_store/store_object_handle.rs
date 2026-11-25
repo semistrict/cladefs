@@ -6,14 +6,17 @@
 // here: data lives in extents of an extent store (backlog doc-4), which are written once;
 // overwrite/preallocation mode (`multi_overwrite`) is deleted (board 10600). Reads of extents that
 // may never have been written (raw extents) read zeros if the store doesn't hold them.
-// `multi_write_packed` packs small writes into the staging extent, which other small writes share
-// (`Allocator::allocate_shared`): a guest's writeback. Extended attributes are set in a transaction
-// of the caller's (`set_extended_attribute_impl`, public), and removed with the room it chooses
-// (`remove_extended_attribute_with_options`).
+// `ExtentMode::Cow` writes emit empty checksums (`Checksums::fletcher(Vec::new())`, board 10535)
+// while preserving missing-extent error semantics (`NoExtent`, not `Raw` zeros), and Fletcher64
+// per-block hashing runs only for `JournalRecord::DataChecksums` when `barriers_enabled` is false
+// (split into `MAX_DATA_CHECKSUMS_PER_RECORD`-block records so extents > 448 blocks fit in a
+// journal block). `multi_write_packed` packs small writes into the staging extent, which other
+// small writes share (`Allocator::allocate_shared`): a guest's writeback. Extended attributes are
+// set in a transaction of the caller's (`set_extended_attribute_impl`, public), and removed with
+// the room it chooses (`remove_extended_attribute_with_options`).
 
 use crate::checksum::{Checksum, Checksums};
 use crate::errors::FxfsError;
-use crate::log::*;
 use crate::lsm_tree::Query;
 use crate::lsm_tree::merge::{Merger, MergerIterator};
 use crate::lsm_tree::types::{ItemRef, LayerIterator};
@@ -44,8 +47,6 @@ use storage_device::buffer::{Buffer, BufferFuture, BufferRef, MutableBufferRef};
 use storage_device::{ExtentId, ExtentRange, NoExtent, WriteOptions};
 use storage_units::BlockSize;
 
-use fuchsia_async as fasync;
-
 /// Maximum size for an extended attribute name.
 pub const MAX_XATTR_NAME_SIZE: usize = 255;
 /// Maximum size an extended attribute can be before it's stored in an object attribute instead of
@@ -58,6 +59,12 @@ pub const MAX_XATTR_VALUE_SIZE: usize = 64000;
 
 /// cladefs: the most `read_attr` reads: merkle trees and extended attributes are far shorter.
 const MAX_ATTRIBUTE_READ: u64 = 32 << 20;
+
+/// cladefs: the most per-block checksums emitted in one `JournalRecord::DataChecksums` record
+/// when `barriers_enabled` is false (board 10535). 448 × 8 = 3,584 bytes plus framing stays well
+/// under both `DEFAULT_MAX_SERIALIZED_RECORD_SIZE` and `Journal::BLOCK_SIZE` (4,096 bytes), so
+/// extents larger than 448 blocks still commit cleanly without barriers.
+pub(crate) const MAX_DATA_CHECKSUMS_PER_RECORD: usize = 448;
 
 /// When writing, often the logic should be generic over whether or not checksums are generated.
 /// This provides that and a handy way to convert to the more general ExtentMode that eventually
@@ -138,33 +145,6 @@ impl<S: HandleOwner> ObjectHandle for StoreObjectHandle<S> {
 
     fn block_size(&self) -> BlockSize {
         self.store().block_size()
-    }
-}
-
-struct Watchdog {
-    _task: fasync::Task<()>,
-}
-
-impl Watchdog {
-    fn new(increment_seconds: u64, cb: impl Fn(u64) + Send + 'static) -> Self {
-        Self {
-            _task: fasync::Task::spawn(async move {
-                let increment = increment_seconds.try_into().unwrap();
-                let mut fired_counter = 0;
-                let mut next_wake = fasync::MonotonicInstant::now();
-                loop {
-                    next_wake += std::time::Duration::from_secs(increment).into();
-                    // If this isn't being scheduled this will purposely result in fast looping
-                    // when it does. This will be insightful about the state of the thread and
-                    // task scheduling.
-                    if fasync::MonotonicInstant::now() < next_wake {
-                        fasync::Timer::new(next_wake).await;
-                    }
-                    fired_counter += 1;
-                    cb(fired_counter);
-                }
-            }),
-        }
     }
 }
 
@@ -295,11 +275,10 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
         options: WriteOptions<'_>,
     ) -> Result<MaybeChecksums, Error> {
         let store = self.store();
-        let _watchdog = Watchdog::new(10, |count| {
-            warn!("Write I/O request blocked for {} seconds", count * 10);
-        });
 
-        if !self.options.skip_checksums {
+        // cladefs: `ExtentMode::Cow` stores empty checksums (board 10535), so per-block Fletcher64
+        // hashing is only needed for `JournalRecord::DataChecksums` when barriers are disabled.
+        if !self.options.skip_checksums && !store.filesystem().options().barriers_enabled {
             let mut checksums = Vec::new();
             try_join!(store.device.write_with_opts(extent, extent_offset, buf, options), async {
                 let block_size = self.block_size().get() as usize;
@@ -495,13 +474,7 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
         extent_offset: u64,
         buffer: MutableBufferRef<'_>,
     ) -> Result<(), Error> {
-        let store = self.store();
-
-        let _watchdog = Watchdog::new(10, |count| {
-            warn!("Read I/O request blocked for {} seconds", count * 10);
-        });
-
-        store.device.read(extent, extent_offset, buffer).await
+        self.store().device.read(extent, extent_offset, buffer).await
     }
 
     /// Returns a stream of extents for the given attribute ID, mapping logical offsets to device
@@ -914,6 +887,10 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
 
         let mut allocated = 0;
         let allocator = store.allocator();
+        // cladefs: records the staging extent if `write_aligned` is refused with `SealedExtent` so
+        // dropping this transaction does not charge the unwritten range against the reservation
+        // (TASK-592, board 2580). Declared before `writes` so it outlives the futures borrowing it.
+        let sealed_extent = fuchsia_sync::Mutex::new(None);
         let mut writes = FuturesOrdered::new();
 
         while !buf.is_empty() {
@@ -935,25 +912,43 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
 
             // cladefs: box each `write_aligned` future so `FuturesOrdered` and
             // `multi_write_internal` stay small on 16 KiB guest kernel stacks (TASK-26.9).
+            let sealed_ref = &sealed_extent;
             writes.push_back(crate::boxed(|| async move {
-                Result::<_, Error>::Ok((
-                    extent,
-                    device_range.start,
-                    len,
-                    self.write_aligned(
+                let checksums = match self
+                    .write_aligned(
                         head.as_ref(),
                         extent,
                         device_range.start,
                         WriteOptions::default(),
                     )
-                    .await?,
-                ))
+                    .await
+                {
+                    Ok(checksums) => checksums,
+                    Err(error) => {
+                        if shared
+                            && error.chain().any(|cause| cause.is::<storage_device::SealedExtent>())
+                        {
+                            *sealed_ref.lock() = Some(extent);
+                        }
+                        return Err(error);
+                    }
+                };
+                Result::<_, Error>::Ok((extent, device_range.start, len, checksums))
             }));
         }
 
+        let extent_mode = if self.options.skip_checksums {
+            ExtentMode::Raw
+        } else {
+            // cladefs: zero-format-change on frozen Fxfs v66 (board 10535): keep `ExtentMode::Cow`
+            // so missing extents still fail with `NoExtent` rather than zero-filling like `Raw`,
+            // while emitting empty checksums (`Checksums::fletcher(Vec::new())`).
+            ExtentMode::Cow(Checksums::fletcher(Vec::new()))
+        };
+
         // cladefs: box the `try_join!` branches so `multi_write` does not keep `writes` and
         // `deallocate_old_extents` side-by-side on 16 KiB guest kernel stacks (TASK-26.9).
-        let ((mutations, checksums), deallocated) = try_join!(
+        let joined = try_join!(
             crate::boxed(|| async {
                 let mut current_range = 0..0;
                 let mut mutations = Vec::new();
@@ -983,7 +978,7 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
                             ObjectValue::Extent(ExtentValue::new(
                                 extent,
                                 device_offset,
-                                checksums.to_mode(),
+                                extent_mode.clone(),
                             )),
                         ));
                         checksums = tail;
@@ -1002,16 +997,37 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
                 }
                 Result::<_, Error>::Ok(deallocated)
             })
-        )?;
+        );
+        let ((mutations, checksums), deallocated) = match joined {
+            Ok(ok) => ok,
+            Err(error) => {
+                if let Some(extent) = *sealed_extent.lock() {
+                    transaction.sealed_extent = Some(extent);
+                }
+                return Err(error);
+            }
+        };
 
         for m in mutations {
             transaction.add(store_id, m);
         }
 
         // Only store checksums in the journal if barriers are not enabled.
+        // cladefs: split into `MAX_DATA_CHECKSUMS_PER_RECORD`-block records so extents larger than
+        // 448 blocks still fit within `Journal::BLOCK_SIZE` / `DEFAULT_MAX_SERIALIZED_RECORD_SIZE`
+        // (board 10535).
         if !store.filesystem().options().barriers_enabled {
             for (r, c) in checksums {
-                transaction.add_checksum(r, c, true);
+                for (i, chunk) in c.chunks(MAX_DATA_CHECKSUMS_PER_RECORD).enumerate() {
+                    let start =
+                        r.range.start + (i * MAX_DATA_CHECKSUMS_PER_RECORD) as u64 * block_size;
+                    let end = start + chunk.len() as u64 * block_size;
+                    transaction.add_checksum(
+                        ExtentRange::new(r.extent, start..end),
+                        chunk.to_vec(),
+                        true,
+                    );
+                }
             }
         }
         Ok((allocated, deallocated))
@@ -2321,5 +2337,222 @@ mod tests {
         let mut read_buf = object.allocate_buffer(size).await;
         assert_eq!(object.read_aligned(0, read_buf.as_mut()).await.expect("read failed"), size);
         assert_eq!(read_buf.as_slice(), buf.as_slice());
+    }
+
+    /// cladefs: `ExtentMode::Cow` writes emit empty checksums (`Checksums::fletcher(Vec::new())`)
+    /// while preserving missing-extent error semantics (`NoExtent`), unlike `ExtentMode::Raw`
+    /// which zero-fills missing extents (board 10535).
+    #[fuchsia_async::run_singlethreaded(test)]
+    async fn test_cow_writes_emit_empty_checksums_and_fail_on_missing_extent() {
+        use crate::checksum::Checksums;
+        use crate::filesystem::FxFilesystemBuilder;
+        use crate::lsm_tree::Query;
+        use crate::lsm_tree::types::LayerIterator as _;
+        use crate::object_store::{Extent, ExtentMode, ExtentValue};
+        use storage_device::NoExtent;
+
+        for barriers_enabled in [false, true] {
+            let device = DeviceHolder::new(FakeDevice::new(4096, 4096));
+            let fs = FxFilesystemBuilder::new()
+                .format(true)
+                .barriers_enabled(barriers_enabled)
+                .open(device)
+                .await
+                .expect("open failed");
+            let store = fs.root_store();
+            let bs = fs.block_size().get();
+
+            let mut transaction = store
+                .new_transaction(
+                    lock_keys![LockKey::object(
+                        store.store_object_id(),
+                        store.root_directory_object_id(),
+                    )],
+                    Options::default(),
+                )
+                .await
+                .expect("new_transaction failed");
+            let cow_obj =
+                ObjectStore::create_object(&store, &mut transaction, HandleOptions::default())
+                    .await
+                    .expect("create_object cow failed");
+            let raw_obj = ObjectStore::create_object(
+                &store,
+                &mut transaction,
+                HandleOptions { skip_checksums: true, ..Default::default() },
+            )
+            .await
+            .expect("create_object raw failed");
+            let root =
+                Directory::open(&store, store.root_directory_object_id()).await.expect("open");
+            root.add_child_file(&mut transaction, "cow", &cow_obj).await.expect("add cow");
+            root.add_child_file(&mut transaction, "raw", &raw_obj).await.expect("add raw");
+            transaction.commit().await.expect("commit failed");
+
+            let mut write_buf = cow_obj.allocate_buffer(3 * bs as usize).await;
+            write_buf.as_mut_slice().fill(0x5a);
+            cow_obj.write_or_append(Some(0), write_buf.as_ref()).await.expect("cow write");
+            raw_obj.write_or_append(Some(0), write_buf.as_ref()).await.expect("raw write");
+
+            // Partial middle overwrite exercises `ExtentValue::shrunk` and `offset_by` on empty
+            // Cow checksums during LSM merge.
+            let mut patch = cow_obj.allocate_buffer(bs as usize).await;
+            patch.as_mut_slice().fill(0x3c);
+            cow_obj.write_or_append(Some(bs), patch.as_ref()).await.expect("cow patch");
+            store.flush().await.expect("flush failed");
+            crate::fsck::fsck(fs.clone()).await.expect("fsck failed");
+
+            // Verify every Cow extent record has `ExtentMode::Cow(Checksums::fletcher(vec![]))`.
+            let layer_set = store.tree().layer_set();
+            let mut merger = layer_set.merger();
+            let mut iter = merger
+                .query(Query::FullRange(&ObjectKey::attribute(
+                    cow_obj.object_id(),
+                    AttributeId::DATA,
+                    AttributeKey::Extent(Extent::search_key_from_offset(0)),
+                )))
+                .await
+                .expect("query failed");
+            let mut cow_extents = Vec::new();
+            while let Some(item) = iter.get() {
+                if item.key.object_id != cow_obj.object_id() {
+                    break;
+                }
+                if let ObjectValue::Extent(ExtentValue::Some { extent, mode, .. }) = item.value {
+                    assert_eq!(
+                        mode,
+                        &ExtentMode::Cow(Checksums::fletcher(Vec::new())),
+                        "barriers_enabled={barriers_enabled}: Cow extent must carry empty checksums"
+                    );
+                    cow_extents.push(*extent);
+                }
+                iter.advance().await.expect("advance failed");
+            }
+            assert_eq!(cow_extents.len(), 3, "expected split [0..bs, bs..2bs, 2bs..3bs]");
+
+            // Remove the underlying extents from the device: Cow must fail with `NoExtent`,
+            // while Raw silently zero-fills.
+            let raw_extent =
+                raw_obj.device_extents().await.expect("raw extents")[0].device_range().extent;
+            fs.device().free(cow_extents[0]).await.expect("free cow extent");
+            fs.device().free(raw_extent).await.expect("free raw extent");
+
+            let mut read_buf = cow_obj.allocate_buffer(bs as usize).await;
+            read_buf.as_mut_slice().fill(0xff);
+            let err = cow_obj
+                .read_aligned(0, read_buf.as_mut())
+                .await
+                .expect_err("missing Cow extent must return error, not zeros");
+            assert_eq!(
+                err.downcast_ref::<NoExtent>(),
+                Some(&NoExtent(cow_extents[0])),
+                "barriers_enabled={barriers_enabled}: expected NoExtent, got {err:?}"
+            );
+
+            read_buf.as_mut_slice().fill(0xff);
+            raw_obj
+                .read_aligned(0, read_buf.as_mut())
+                .await
+                .expect("missing Raw extent should zero-fill");
+            assert!(read_buf.as_slice().iter().all(|&b| b == 0));
+
+            drop(read_buf);
+            drop(patch);
+            drop(write_buf);
+            drop(iter);
+            drop(merger);
+            drop(layer_set);
+            drop((cow_obj, raw_obj, root, store));
+            fs.close().await.expect("close failed");
+        }
+    }
+
+    /// cladefs: writes larger than the old 448-block (1.75 MiB) cap allocate in a single extent,
+    /// survive remount and journal replay, and pass fsck both with and without barriers (board
+    /// 10535).
+    #[fuchsia_async::run_singlethreaded(test)]
+    async fn test_large_write_allocates_single_extent_past_448_blocks() {
+        use crate::filesystem::{FxFilesystemBuilder, SyncOptions};
+
+        const OLD_CAP_BYTES: u64 = 448 * 4096;
+        const WRITE_SIZE: usize = 4 * 1024 * 1024;
+        assert!(WRITE_SIZE as u64 > OLD_CAP_BYTES);
+
+        for barriers_enabled in [false, true] {
+            let device = DeviceHolder::new(FakeDevice::new(8192, 4096));
+            let fs = FxFilesystemBuilder::new()
+                .format(true)
+                .barriers_enabled(barriers_enabled)
+                .open(device)
+                .await
+                .expect("open failed");
+            let store = fs.root_store();
+            let mut transaction = store
+                .new_transaction(
+                    lock_keys![LockKey::object(
+                        store.store_object_id(),
+                        store.root_directory_object_id(),
+                    )],
+                    Options::default(),
+                )
+                .await
+                .expect("new_transaction failed");
+            let object =
+                ObjectStore::create_object(&store, &mut transaction, HandleOptions::default())
+                    .await
+                    .expect("create_object failed");
+            let object_id = object.object_id();
+            let root =
+                Directory::open(&store, store.root_directory_object_id()).await.expect("open");
+            root.add_child_file(&mut transaction, "large", &object).await.expect("add child");
+            transaction.commit().await.expect("commit failed");
+
+            let mut buf = object.allocate_buffer(WRITE_SIZE).await;
+            for (i, byte) in buf.as_mut_slice().iter_mut().enumerate() {
+                *byte = (i % 251) as u8;
+            }
+            let expected = buf.as_slice().to_vec();
+            object.write_or_append(Some(0), buf.as_ref()).await.expect("large write failed");
+
+            let extents = object.device_extents().await.expect("device_extents failed");
+            assert_eq!(
+                extents.len(),
+                1,
+                "barriers_enabled={barriers_enabled}: 4 MiB write should allocate a single extent, got {extents:?}"
+            );
+            assert_eq!(extents[0].length(), WRITE_SIZE as u64);
+
+            // Sync journal and remount to verify journal replay (including split `DataChecksums`
+            // when `!barriers_enabled`), fsck, and full readback.
+            fs.sync(SyncOptions { flush_device: true, ..Default::default() })
+                .await
+                .expect("sync failed");
+            drop(buf);
+            drop((object, root, store));
+            fs.close().await.expect("close failed");
+
+            let device = fs.take_device().await;
+            device.reopen(false);
+            let fs = FxFilesystemBuilder::new()
+                .barriers_enabled(barriers_enabled)
+                .open(device)
+                .await
+                .expect("remount failed");
+            crate::fsck::fsck(fs.clone()).await.expect("fsck failed");
+            let store = fs.root_store();
+            let reopened = ObjectStore::open_object(&store, object_id, HandleOptions::default())
+                .await
+                .expect("reopen failed");
+            let mut read_buf = reopened.allocate_buffer(WRITE_SIZE).await;
+            assert_eq!(
+                reopened.read_aligned(0, read_buf.as_mut()).await.expect("read failed"),
+                WRITE_SIZE
+            );
+            assert_eq!(read_buf.as_slice(), expected.as_slice());
+
+            drop(read_buf);
+            drop((reopened, store));
+            fs.close().await.expect("close failed");
+        }
     }
 }

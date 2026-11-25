@@ -19,8 +19,7 @@ mod model_tests;
 mod tests;
 
 use crate::error::{Error, Result};
-use crate::executor::Executor;
-use crate::filesystem::DEFAULT_EXECUTOR_THREADS;
+use crate::filesystem::fxfs_runtime;
 use crate::host_cell::{self, Opened};
 use crate::open_cell::{OpenCell, Opening, release};
 use anyhow::Context as _;
@@ -404,6 +403,11 @@ impl Storage {
         Self { device: DeviceHolder::new(device), kind: Kind::Memory }
     }
 
+    #[cfg(test)]
+    pub(crate) fn from_device(device: DeviceHolder) -> Self {
+        Self { device, kind: Kind::Memory }
+    }
+
     /// Whether the storage's I/O bypasses the host's page cache: an image's does, or it opens not
     /// at all (TASK-433.6); memory has none to bypass.
     pub fn bypasses_page_cache(&self) -> bool {
@@ -484,8 +488,8 @@ impl Storage {
     /// anything it warns about, and gives the storage back.
     pub async fn check(self) -> Result<Self, Error> {
         let Self { device, kind } = self;
-        let executor = Executor::new(DEFAULT_EXECUTOR_THREADS);
-        let device = executor.run(async move {
+        let runtime = fxfs_runtime(None);
+        let device = runtime.spawn(async move {
             let filesystem = FxFilesystem::open(device).await?;
             // cladefs: what fsck found, which its error says, as well as how many (TASK-82).
             let issues = Mutex::new(Vec::new());
@@ -510,7 +514,8 @@ impl Storage {
             filesystem.close().await?;
             anyhow::Ok(filesystem.take_device().await)
         });
-        Ok(Self::closed(device.await.map_err(Error::new)?, kind))
+        let device = device.await.expect("fsck task panicked").map_err(Error::new)?;
+        Ok(Self::closed(device, kind))
     }
 
     /// cladefs: the storage's device, for what keeps itself on a device in place of Fxfs, as a

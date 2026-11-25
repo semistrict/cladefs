@@ -691,25 +691,6 @@ impl<B: Bucket> Bucket for Counted<B> {
         }
     }
 
-    fn delete_if(
-        &self,
-        key: &str,
-        version: &Version,
-    ) -> impl Future<Output = Result<(), BucketError>> + Send {
-        self.count(Request::Delete);
-        async move {
-            self.turn().await;
-            self.bucket.delete_if(key, version).await
-        }
-    }
-
-    fn supports_conditional_delete(
-        &self,
-        key: &str,
-    ) -> impl Future<Output = Result<bool, BucketError>> + Send {
-        self.bucket.supports_conditional_delete(key)
-    }
-
     /// One request, as a backend with batch deletes makes it, whatever the bucket under it does.
     fn delete_batch(&self, keys: &[&str]) -> impl Future<Output = Result<(), BucketError>> + Send {
         self.count(Request::DeleteBatch);
@@ -957,15 +938,6 @@ mod tests {
             std::future::pending()
         }
 
-        fn delete_if(
-            &self,
-            key: &str,
-            version: &Version,
-        ) -> impl Future<Output = Result<(), BucketError>> + Send {
-            let _ = (key, version);
-            std::future::pending()
-        }
-
         fn delete_batch(&self, _: &[&str]) -> impl Future<Output = Result<(), BucketError>> + Send {
             std::future::pending()
         }
@@ -1031,15 +1003,6 @@ mod tests {
         fn delete(&self, key: &str) -> impl Future<Output = Result<(), BucketError>> + Send {
             (self.note)(key);
             self.bucket.delete(key)
-        }
-
-        fn delete_if(
-            &self,
-            key: &str,
-            version: &Version,
-        ) -> impl Future<Output = Result<(), BucketError>> + Send {
-            (self.note)(key);
-            self.bucket.delete_if(key, version)
         }
 
         /// One request, as [`Counted`] counts it.
@@ -1406,14 +1369,6 @@ mod tests {
         }
 
         fn delete(&self, _: &str) -> impl Future<Output = Result<(), BucketError>> + Send {
-            Self::refused()
-        }
-
-        fn delete_if(
-            &self,
-            _: &str,
-            _: &Version,
-        ) -> impl Future<Output = Result<(), BucketError>> + Send {
             Self::refused()
         }
 

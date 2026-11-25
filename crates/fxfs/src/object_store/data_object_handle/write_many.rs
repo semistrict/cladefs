@@ -15,6 +15,7 @@ use crate::object_store::allocator::Reservation;
 use crate::object_store::extent_record::ExtentValue;
 use crate::object_store::journal::{checksums_record_bytes, mutation_record_bytes};
 use crate::object_store::object_record::{ObjectKey, ObjectValue};
+use crate::object_store::store_object_handle::MAX_DATA_CHECKSUMS_PER_RECORD;
 use crate::object_store::transaction::{self, Mutation, Options, Transaction};
 use anyhow::{Error, anyhow, ensure};
 use std::ops::Range;
@@ -120,10 +121,11 @@ impl<S: HandleOwner> DataObjectHandle<S> {
 
     /// cladefs: how many of `writes`, one at least, `transaction` has room for, as written by one
     /// `multi_write`, which has yet to find what they replace, or what it allocates. The most it
-    /// can take: for each run of them its extent's record, and a record of the checksums unless
-    /// barriers stand for them, and for each block its checksums and the record freeing an extent
-    /// of its own. What it can't say is what `TRANSACTION_ROOM` spares: the rest of an allocation
-    /// split into many.
+    /// can take: for each run of them its extent's record (empty `ExtentMode::Cow` checksums,
+    /// board 10535), and `JournalRecord::DataChecksums` records (chunked by
+    /// `MAX_DATA_CHECKSUMS_PER_RECORD`) unless barriers stand for them, plus for each block the
+    /// record freeing an extent of its own and (when journaled) its checksum. What it can't say is
+    /// what `TRANSACTION_ROOM` spares: the rest of an allocation split into many.
     fn writes_in_room(&self, transaction: &Transaction<'_>, writes: &[BlocksWrite<'_>]) -> usize {
         let store = self.store();
         let journaled = !store.filesystem().options().barriers_enabled;
@@ -131,8 +133,9 @@ impl<S: HandleOwner> DataObjectHandle<S> {
         // reach 32 bits.
         let extent = ExtentId::new(u64::MAX, u64::MAX);
         let blocks = ExtentRange::new(extent, u32::MAX as u64..u32::MAX as u64);
-        let sum_size = (1 + journaled as u64) * size_of::<Checksum>() as u64;
+        let sum_size = (journaled as u64) * size_of::<Checksum>() as u64;
         let per_block = self.cost_of_freeing(blocks.clone()) + sum_size;
+        let journal_header = if journaled { checksums_record_bytes(&blocks, &[], true) } else { 0 };
         let run = |write: &BlocksWrite<'_>| {
             let extent =
                 ObjectKey::extent(self.object_id(), self.attribute_id(), write.blocks.clone());
@@ -140,21 +143,29 @@ impl<S: HandleOwner> DataObjectHandle<S> {
             let value = ExtentValue::with_checksum(blocks.extent, blocks.range.start, no_sums);
             let extent = Mutation::merge_object(extent, ObjectValue::Extent(value));
             mutation_record_bytes(store.store_object_id(), &extent)
-                + if journaled { checksums_record_bytes(&blocks, &[], true) } else { 0 }
         };
         let block_size = self.block_size();
+        let chunk_blocks = MAX_DATA_CHECKSUMS_PER_RECORD as u64;
         let mut room = transaction.room();
         let mut end = None;
+        let mut run_blocks = 0u64;
         let mut held = 0;
         for write in writes {
             let covered = (write.blocks.end - write.blocks.start) / block_size;
-            let run = if end == Some(write.blocks.start) { 0 } else { run(write) };
-            let cost = covered * per_block + run;
+            let (run_cost, next_run_blocks, header_chunks) = if end == Some(write.blocks.start) {
+                let next = run_blocks + covered;
+                let added = next.div_ceil(chunk_blocks) - run_blocks.div_ceil(chunk_blocks);
+                (0, next, added)
+            } else {
+                (run(write), covered, covered.div_ceil(chunk_blocks))
+            };
+            let cost = covered * per_block + run_cost + header_chunks * journal_header;
             if held > 0 && cost > room {
                 break;
             }
             room = room.saturating_sub(cost);
             end = Some(write.blocks.end);
+            run_blocks = next_run_blocks;
             held += 1;
         }
         held
@@ -804,9 +815,10 @@ mod tests {
         }
         let before = trips.writes.count();
         file.write_many(&writes).await.expect("write_many failed");
-        // Transactions of 179 writes, the rest of the 300, the two large ones, the one that costs
-        // more alone, in the three of the most an allocation may be, and the last two.
-        assert_eq!(trips.writes.count() - before, 7);
+        // Transactions of the first batch of the 300 writes, the rest of the 300, the two large
+        // ones, the one that costs more alone (now a single 4 MiB extent with the 448-block cap
+        // lifted, board 10535), and the last two.
+        assert_eq!(trips.writes.count() - before, 5);
         assert_eq!(file.contents(usize::MAX).await.expect("contents")[..], expected[..]);
         fsck(fs.clone()).await.expect("fsck failed");
         fs.close().await.expect("close failed");

@@ -293,6 +293,32 @@ impl<'tree, K: MergeableKey, V: Value> LSMTree<K, V> {
         self.cache.as_ref().map_or(0, |c| c.shrink(count))
     }
 
+    /// cladefs: total bytes currently cached in persistent (and base) layer read chunks (TASK-596).
+    pub fn cached_layer_bytes(&self) -> usize {
+        self.immutable_layer_set().layers.iter().map(|layer| layer.cached_bytes()).sum()
+    }
+
+    /// cladefs: number of chunks currently cached in persistent (and base) layer read caches
+    /// (TASK-596).
+    pub fn cached_layer_chunks(&self) -> usize {
+        self.immutable_layer_set().layers.iter().map(|layer| layer.cached_chunks()).sum()
+    }
+
+    /// cladefs: evicts up to `max_chunks` cached read chunks across this tree's immutable layers,
+    /// returning how many were evicted (TASK-596).
+    pub fn evict_layer_chunks(&self, mut max_chunks: usize) -> usize {
+        let mut evicted = 0;
+        for layer in self.immutable_layer_set().layers {
+            if max_chunks == 0 {
+                break;
+            }
+            let n = layer.evict_cached_chunks(max_chunks);
+            evicted += n;
+            max_chunks -= n;
+        }
+        evicted
+    }
+
     pub fn report_compaction_metrics(&self, bytes_written: u64, duration: std::time::Duration) {
         let mut counters = self.counters.compaction.lock().unwrap();
         counters.compactions += 1;

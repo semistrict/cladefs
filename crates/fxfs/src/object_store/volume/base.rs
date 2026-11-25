@@ -70,8 +70,26 @@ impl RootVolume {
             .context("Failed to deserialize manifest")
             .context(FxfsError::InvalidArgs)?;
         info.check_manifest()?;
+        ensure!(
+            info.graveyard_directory_object_id != crate::object_store::INVALID_OBJECT_ID,
+            anyhow!(FxfsError::Inconsistent).context("A store with no graveyard")
+        );
         info.set_new_guid();
         filesystem.allocator().check_base_cells(&info.base_cells)?;
+
+        // cladefs: check the name and validate/open every base layer before committing anything, so
+        // a misaligned extent, unreadable layer or unsupported layer version leaves no broken
+        // volume in the volume directory (TASK-597, board 2590).
+        ensure!(
+            matches!(self.volume_directory().lookup(name).await?, None),
+            FxfsError::AlreadyExists
+        );
+        let opened_base_layers = ObjectStore::open_base_layers(
+            filesystem.device(),
+            filesystem.block_size(),
+            &info.base_layers,
+        )
+        .await?;
 
         let root_store = filesystem.root_store();
         let directory_key =
@@ -93,12 +111,17 @@ impl RootVolume {
         let mut buf = handle.allocate_buffer(serialized_info.len()).await;
         buf.copy_from_slice(&serialized_info);
         handle.txn_write(&mut transaction, 0u64, buf.as_ref()).await?;
+        drop(buf);
         self.volume_directory().add_child_volume(&mut transaction, name, object_id).await?;
         transaction.commit().await?;
 
-        let store =
-            ObjectStore::open(&root_store, object_id, Some(Box::new(filesystem.new_tree_cache())))
-                .await?;
+        let store = ObjectStore::open_new_over_base(
+            &root_store,
+            handle,
+            info,
+            opened_base_layers,
+            Some(Box::new(filesystem.new_tree_cache())),
+        );
         filesystem.object_manager().add_store(store.clone());
         Ok(store)
     }
@@ -243,10 +266,6 @@ mod tests {
         }
         assert!(!exists(&store, "later").await);
         // The allocator holds none of it.
-        assert_eq!(
-            filesystem.allocator().data_owner(store.store_object_id()),
-            store.store_object_id()
-        );
         assert!(filesystem.allocator().cells_of(&[store.store_object_id()]).is_empty());
         std::mem::drop((store, root, base_store, base_root));
         do_fsck(&filesystem, Some("repo")).await;
@@ -335,10 +354,10 @@ mod tests {
         base.close().await.expect("Close failed");
     }
 
-    /// Reflinks of a base's extents, and snapshots of a volume over a base, share them as
-    /// reflinks and snapshots do, and whatever deletes them leaves the base be.
+    /// Reflinks of a base's extents share them as reflinks do, and deleting the volume or its
+    /// files leaves the base untouched.
     #[fuchsia_async::run_singlethreaded(test)]
-    async fn test_base_reflinks_and_snapshots() {
+    async fn test_base_reflinks() {
         let (base, manifest) = published(0).await;
         let (filesystem, _reads) = over(&base).await;
         let root = root_volume(filesystem.clone()).await.expect("root_volume failed");
@@ -364,14 +383,10 @@ mod tests {
         remove_file(&store, "a").await;
         assert_eq!(read_file(&store, "copy").await, [0xaa; 8192]);
 
-        let snapshot = root.snapshot_volume("repo", "snapshot").await.expect("snapshot failed");
         remove_file(&store, "copy").await;
-        assert_eq!(read_file(&snapshot, "copy").await, [0xaa; 8192]);
-        assert_eq!(read_file(&snapshot, "b").await, [0xbb; 8192]);
         filesystem.graveyard().flush().await;
-        std::mem::drop((store, snapshot));
+        std::mem::drop(store);
         do_fsck(&filesystem, Some("repo")).await;
-        do_fsck(&filesystem, Some("snapshot")).await;
 
         // A volume over a base deletes as any does.
         let (_, transaction) = root
@@ -380,7 +395,7 @@ mod tests {
             .expect("acquire_transaction_for_remove_volume failed");
         root.delete_volume("repo", transaction, || {}).await.expect("delete_volume failed");
         std::mem::drop(root);
-        do_fsck(&filesystem, Some("snapshot")).await;
+        do_fsck(&filesystem, None).await;
         filesystem.close().await.expect("Close failed");
         base.close().await.expect("Close failed");
     }
@@ -508,8 +523,72 @@ mod tests {
         assert!(FxfsError::InvalidVersion.matches(&error), "{error:?}");
         let named = format!("Layer of unsupported version {OLDER}");
         assert!(format!("{error:#}").contains(&named), "{error:#}");
+        // TASK-597: failed import leaves no durable volume entry and eager remount + fsck succeed.
+        assert_eq!(root.volume_directory().lookup("repo").await.expect("lookup failed"), None);
         std::mem::drop(root);
         filesystem.close().await.expect("Close failed");
+        let device = filesystem.take_device().await;
+        device.reopen(false);
+        let reopened = FxFilesystem::open(device).await.expect("eager remount failed");
+        do_fsck(&reopened, None).await;
+        reopened.close().await.expect("Close failed");
+        base.close().await.expect("Close failed");
+    }
+
+    /// TASK-597 (board 2590): a manifest whose base layers fail `BaseLayer::check` (unaligned
+    /// `extent_offset`) or cannot be read from the device (missing `attach()`) leaves no volume
+    /// directory entry, lets eager `FxFilesystem::open` and `fsck` succeed, and allows the same
+    /// name to be imported again.
+    #[fuchsia_async::run_singlethreaded(test)]
+    async fn test_base_import_failure_leaves_no_volume() {
+        let (base, manifest) = published(0).await;
+
+        // (a) Misaligned extent_offset in the manifest's first base layer.
+        let mut reader = &manifest[..];
+        let version = Version::deserialize_from(&mut reader).expect("version");
+        let mut bad_info =
+            StoreInfo::deserialize_from_version(&mut reader, version).expect("store info");
+        bad_info.base_layers[0].extents[0].extent_offset += 1;
+        let mut misaligned = Vec::new();
+        bad_info.serialize_with_version(&mut misaligned).expect("serialize");
+
+        let (filesystem, _reads) = over(&base).await;
+        let root = root_volume(filesystem.clone()).await.expect("root_volume failed");
+        let err = root
+            .new_volume_over_base("repo", &misaligned)
+            .await
+            .err()
+            .expect("misaligned base layer accepted");
+        assert!(FxfsError::Inconsistent.matches(&err), "{err:?}");
+        assert_eq!(root.volume_directory().lookup("repo").await.expect("lookup failed"), None);
+        std::mem::drop(root);
+        filesystem.close().await.expect("Close failed");
+        let device = filesystem.take_device().await;
+        device.reopen(false);
+        let reopened = FxFilesystem::open(device).await.expect("eager remount failed");
+        do_fsck(&reopened, None).await;
+        // Importing the same name with the valid manifest now succeeds.
+        let root = root_volume(reopened.clone()).await.expect("root_volume failed");
+        let store = root.new_volume_over_base("repo", &manifest).await.expect("re-import failed");
+        check_originals(&store).await;
+        std::mem::drop((store, root));
+        do_fsck(&reopened, Some("repo")).await;
+        reopened.close().await.expect("Close failed");
+
+        // (b) Valid manifest on a device with no attach().
+        let unattached_dev = DeviceHolder::new(FakeDevice::new(16384, 512).with_cell(SANDBOX));
+        let unattached = FxFilesystem::new_empty(unattached_dev).await.expect("new_empty failed");
+        let root = root_volume(unattached.clone()).await.expect("root_volume failed");
+        root.new_volume_over_base("repo", &manifest).await.err().expect("unattached base accepted");
+        assert_eq!(root.volume_directory().lookup("repo").await.expect("lookup failed"), None);
+        std::mem::drop(root);
+        unattached.close().await.expect("Close failed");
+        let device = unattached.take_device().await;
+        device.reopen(false);
+        let reopened = FxFilesystem::open(device).await.expect("eager remount failed");
+        do_fsck(&reopened, None).await;
+        reopened.close().await.expect("Close failed");
+
         base.close().await.expect("Close failed");
     }
 

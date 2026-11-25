@@ -3,13 +3,12 @@
 // found in the LICENSE file.
 
 // Fuchsia's `src/storage/fxfs/src/object_store/volume.rs`. cladefs's additions are in child modules,
-// impl blocks of their own, so that this file keeps upstream's shape (TASK-160.24): `snapshot`
-// (`RootVolume::snapshot_volume`, volume snapshots that share their source's layers and
-// extents) and `base` (`RootVolume::publish_volume` and `new_volume_over_base`, a volume of one
-// another filesystem wrote, backlog doc-10). Deleting a volume releases its layers by reference
-// count, and locks them. There is no `install_volume` (nor `replace_volume`, which it used): an
-// image within a file is a block device's, which cladefs's extent store has none of (backlog
-// doc-4). `RootVolume::volume` opens a volume left closed (`Options::lazy_volumes`).
+// impl blocks of their own, so that this file keeps upstream's shape (TASK-160.24): `base`
+// (`RootVolume::publish_volume` and `new_volume_over_base`, a volume of one another filesystem
+// wrote, backlog doc-10). Deleting a volume releases its layers by reference count, and locks them.
+// There is no `install_volume` (nor `replace_volume`, which it used): an image within a file is a
+// block device's, which cladefs's extent store has none of (backlog doc-4). `RootVolume::volume`
+// opens a volume left closed (`Options::lazy_volumes`).
 
 use crate::errors::FxfsError;
 use crate::filesystem::FxFilesystem;
@@ -33,7 +32,6 @@ use std::sync::Arc;
 mod base;
 #[cfg(test)]
 mod lazy;
-mod snapshot;
 #[cfg(test)]
 mod testing;
 
@@ -166,8 +164,7 @@ impl RootVolume {
         let root_store = self.filesystem.root_store();
 
         // Delete all the layers stored in root_store for this volume.
-        // This includes the StoreInfo itself. cladefs: layers are deleted only once no other volume
-        // shares them (see `snapshot_volume`).
+        // This includes the StoreInfo itself.
         let mut parent_objects = load_store_info(&root_store, object_id).await?.parent_objects();
         parent_objects.push(object_id);
 

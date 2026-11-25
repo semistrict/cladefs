@@ -259,9 +259,22 @@ pub struct OpenCell {
     /// cladefs: what reads its extents whose data is in the bucket: of the bucket its uploader
     /// keeps the cell in, keeping what it fetches in the host's cache, if it has one.
     fetcher: Arc<crate::bucket::HostFetcher>,
-    /// cladefs: what goes once it is closed, after all of it, and not before
-    /// ([`OpenCell::keep_until_closed`]): last, so that its drop drops it last.
-    kept_until_closed: std::sync::Mutex<Vec<Box<dyn std::any::Any + Send>>>,
+    /// cladefs: invoked once after all other fields of this open cell have dropped (board 8237,
+    /// board 11701): last field so its `Drop` runs after `local` and `uploader` are closed.
+    on_close: OnClose,
+}
+
+/// Typed close hook stored as the final field of [`OpenCell`] so it fires after the cell's
+/// underlying storage and uploader have fully dropped (board 8237, board 11701).
+#[derive(Default)]
+struct OnClose(std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>);
+
+impl Drop for OnClose {
+    fn drop(&mut self) {
+        if let Some(callback) = self.0.get_mut().unwrap_or_else(PoisonError::into_inner).take() {
+            callback();
+        }
+    }
 }
 
 /// cladefs: a version of a cell, as a VM snapshot holds it and its restores fork it
@@ -530,14 +543,19 @@ impl OpenCell {
         Opening::here()?.create(path, capacity, CellOf::New(host_cell::DEFAULT_TENANT)).await
     }
 
-    /// cladefs: keeps `kept` until the open cell is closed, dropping it then, after all of the
-    /// open cell, whoever lets it go last: what says to the next writer of a writer's connection
-    /// gone that its cell is closed, should the daemon's work have had it still (cladefsd's
-    /// `cells::Closed`, board 8237).
+    /// cladefs: runs `callback` once the open cell finishes dropping, after `local` and `uploader`
+    /// have closed: notifies the daemon's cell table that a departing writer's cell is closed
+    /// (`crate::cell_table::CellTable::closed`, board 8237, board 11701).
     // The extent daemon's (Linux).
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    pub(crate) fn keep_until_closed(&self, kept: Box<dyn std::any::Any + Send>) {
-        self.kept_until_closed.lock().unwrap_or_else(PoisonError::into_inner).push(kept);
+    pub(crate) fn on_close(&self, callback: impl FnOnce() + Send + 'static) {
+        let prev = self
+            .on_close
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .replace(Box::new(callback));
+        debug_assert!(prev.is_none(), "OpenCell::on_close registered twice");
     }
 
     /// cladefs: what it is, which says what may be done to it ([`CellAccess`]).
@@ -733,8 +751,25 @@ impl OpenCell {
             }
             (false, false) => self.commit_version(admitted, None, false).await?,
         };
-        self.make_uploaded().await?;
-        failpoint!("fork::uploaded");
+        let uploaded = async {
+            self.make_uploaded().await?;
+            failpoint!("fork::uploaded");
+            Ok::<(), Error>(())
+        }
+        .await;
+        if let Err(err) = uploaded {
+            // cladefs: undo the scratch version committed for this fork when uploading or the
+            // handoff fails before `fork_through_on` takes ownership of it (board 5546, TASK-639).
+            if let Err(drop_err) =
+                uploader.drop_versions(&std::collections::BTreeSet::from([id])).await
+            {
+                log::error!(
+                    "cladefs: fork of {:?} failed before fork_through, its version {id:x} not dropped: {drop_err}",
+                    self.cell(),
+                );
+            }
+            return Err(err);
+        }
         host_cell::fork_through_on(
             &self.host,
             admitted.local(),
@@ -1451,8 +1486,9 @@ impl OpenCell {
     /// each took a change of their own (TASK-92.14).
     pub async fn map_many(&self, mappings: &[WindowMapping]) -> Result<()> {
         let start = std::time::Instant::now();
-        // What each maps, as far as the first that fails.
-        let mut pieces = Vec::new();
+        // What each maps, as far as the first that fails. Pre-size to `mappings.len()` so a large
+        // `MAP_MANY` avoids 2x Vec growth overhead above `MAP_MANY_HELD` (TASK-614, board 2624).
+        let mut pieces = Vec::with_capacity(mappings.len());
         let mut failed = None;
         for (at, mapping) in mappings.iter().enumerate() {
             let WindowMapping { window_offset, len, contents } = *mapping;
@@ -1480,18 +1516,32 @@ impl OpenCell {
             }
         }
         self.dax.lock(&self.halt)?.as_mut().ok_or(Errno::ENOSYS)?.map_many(&pieces);
-        // Each recorded as its own MAP would have it, the one that failed too, but zeros'.
+        // Each recorded as its own MAP would have it, the one that failed too, but zeros'. When no
+        // refused accesses wait to be matched, only the tail of `WindowChanges::MOST` entries can
+        // remain in the ring buffer (avoiding millions of wasted `Instant::now()` calls on a large
+        // `MAP_MANY`).
         let tried = failed.map_or(mappings.len(), |(at, _)| at + 1);
         let mut changes = self.changes.lock(&self.halt)?;
+        let record_from = if changes.has_refused() {
+            0
+        } else {
+            tried.saturating_sub(crate::dax::WindowChanges::MOST)
+        };
         let mut maps = 0;
         for (at, mapping) in mappings[..tried].iter().enumerate() {
             let result = match failed {
                 Some((failed, errno)) if failed == at => Err(errno),
                 _ => Ok(()),
             };
+            let is_extent = matches!(mapping.contents, MappingContents::Extent { .. });
+            if is_extent {
+                maps += 1;
+            }
+            if at < record_from {
+                continue;
+            }
             let change = match mapping.contents {
                 MappingContents::Extent { extent, offset } => {
-                    maps += 1;
                     WindowChangeKind::Map { extent, offset, result }
                 }
                 MappingContents::Zeros if result.is_ok() => WindowChangeKind::Zeros,
@@ -1737,18 +1787,6 @@ impl OpenCell {
         Ok(())
     }
 
-    /// cladefs: makes a cell directory at `path` on `host`, of the version `id` of `description`.
-    #[cfg(not(madsim))]
-    pub(crate) fn create_at_version_on(
-        host: &crate::Host,
-        path: &Path,
-        (url, kind): (&str, Kind),
-        description: local_cell::Description,
-        id: u64,
-    ) -> Result<(), Error> {
-        Self::create_at_version_with_on(host, path, (url, kind), description, id, || Ok(()))
-    }
-
     /// cladefs: makes a cell directory at `path`, which must not exist, of the version `id` of the
     /// cell `description` names, of `kind`, kept in the bucket at `url`: what the daemon opens a
     /// version in for forks of it on a host, nothing writing it.
@@ -1759,7 +1797,14 @@ impl OpenCell {
         description: local_cell::Description,
         id: u64,
     ) -> Result<(), Error> {
-        Self::create_at_version_on(crate::Host::process(), path, (url, kind), description, id)
+        Self::create_at_version_with_on(
+            crate::Host::process(),
+            path,
+            (url, kind),
+            description,
+            id,
+            || Ok(()),
+        )
     }
 
     /// cladefs: makes a version, uploaded, and opens it at `path` as [`OpenCell::open_version_at`]
