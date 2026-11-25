@@ -3148,7 +3148,7 @@ fn tenants_together_are_bounded_and_leave_another_room() {
     const MOST: usize = 12;
     const KEPT: usize = 2;
     const EACH: usize = 8;
-    let limits = super::super::server::CONNECTION_LIMITS_GIVEN.set((MOST, KEPT));
+    let limits = super::super::server::CONNECTION_LIMITS_GIVEN.set((Some(MOST), KEPT));
     assert!(limits.is_ok(), "the limits given");
     host();
     let dir = tempfile::tempdir().unwrap();
@@ -3200,6 +3200,71 @@ fn tenants_together_are_bounded_and_leave_another_room() {
         assert!(peak <= MAX_PAYLOAD, "tenant {n} held {} MiB at once", peak >> 20);
     }
     drop(floods);
+}
+
+/// board 9975: a tenant's cells' files leave another tenant room, under a low limit of open files:
+/// mallory's VM processes open as many cells as the daemon lets them, each writing and committing
+/// extents, so that its cell opens files of its own; then alice's VM process, within its tenant's
+/// share, connects, opens its cell and commits. Before, the daemon counted 4 files a connection,
+/// its cell's as the rest's: mallory's cells took every file the process may open far below the
+/// most connections it served, and alice's failed (`EMFILE`). The limit is what this process has
+/// open, four times over, and room for a few connections at their most besides: the test's own
+/// VM processes' files are this process's too.
+#[test]
+fn a_tenants_cells_files_leave_another_tenant_room() {
+    const KEPT: usize = 2;
+    /// The cells mallory tries to open at most, far more than a limit this low holds.
+    const TRIES: usize = 512;
+    /// Each one's extents, a block each, committed in fours.
+    const EXTENTS: u64 = 16;
+    let limits = super::super::server::CONNECTION_LIMITS_GIVEN.set((None, KEPT));
+    assert!(limits.is_ok(), "the limits given");
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let (mallorys, mallory_socket, mallory) = served_tenant(dir.path(), "mallory", 10);
+    let (alices, alice_socket, _) = served_tenant(dir.path(), "alice", 11);
+    let open = || std::fs::read_dir("/proc/self/fd").unwrap().count() as u64;
+    let per_connection = super::super::cell_open_files();
+    let files = (4 * (open() + 64)).max(4 * (2 * KEPT as u64 + 2) * per_connection / 3 + 4);
+    let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    // SAFETY: Reads the process's limit into `limit`.
+    assert_eq!(unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) }, 0);
+    let lowered = libc::rlimit { rlim_cur: files, ..limit };
+    // SAFETY: Lowers the process's own limit, a test's process's alone.
+    assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &lowered) }, 0);
+    let write_extents = |client: &CellClient| -> Result<(), Errno> {
+        for sequence in 1..=EXTENTS {
+            let extent = ExtentId { cell: client.cell(), sequence };
+            write(client, extent, 0, &[sequence as u8; BLOCK])?;
+            if sequence % 4 == 0 {
+                client.commit(None)?;
+            }
+        }
+        Ok(())
+    };
+    // Mallory's, until one is refused, or fails for want of files.
+    let mut mallorys_clients = Vec::new();
+    for n in 0..TRIES {
+        let opened =
+            CellClient::connect(&mallory_socket, mallorys.join(format!("{n}")), CELL_BYTES);
+        let Ok(client) = opened else { break };
+        let written = write_extents(&client);
+        mallorys_clients.push(client);
+        if written.is_err() {
+            break;
+        }
+    }
+    assert!(mallory.connections() > KEPT, "{} of mallory's served", mallory.connections());
+    assert!(mallorys_clients.len() < TRIES, "every one of mallory's {TRIES} served");
+    let alice = CellClient::connect(&alice_socket, alices.join("store"), CELL_BYTES);
+    let alice = alice.unwrap_or_else(|err| {
+        panic!("alice's cell, beside mallory's {}: {err:#}", mallory.connections())
+    });
+    assert_eq!(write_extents(&alice), Ok(()));
+    assert!(open() < files, "{} files open of {files}", open());
+    drop((alice, mallorys_clients));
+    // SAFETY: As above, its limit as it was.
+    assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
 }
 
 /// `len` bytes of `seed`'s that don't compress, as a closed segment's framing would otherwise

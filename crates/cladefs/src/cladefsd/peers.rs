@@ -465,8 +465,10 @@ pub(super) async fn start_on(
     serving.map_err(|err| failed(&err.to_string()))?;
     // cladefs: the migrations to it their sources abandoned, given up (board 5734, board 11369):
     // always spawned whenever peers are served, for both ephemeral and bucket-backed migrations.
+    // Supervised: its panic aborts the daemon, which would keep them for ever (board 9414).
     let idle = super::migration::idle().map_err(|err| failed(&err))?;
-    runtime.spawn(super::migration::target::reap(Arc::clone(daemon), idle));
+    let reaping = super::migration::target::reap(Arc::clone(daemon), idle);
+    drop(runtime.spawn(super::run::supervising(REAPING, reaping)));
     Ok(())
 }
 
@@ -538,8 +540,9 @@ pub(super) fn line_on(daemon: &Daemon) -> Option<String> {
 }
 
 /// Serves `server` to the peers that connect to `listening`, until accepting fails for good
-/// ([`accepting`]): each connection with no delay, TCP's keepalives on, and pinged as a member's
-/// client pings it (board 8575); so many of each peer's address and of all ([`admitting`]).
+/// (`super::run::accepting`): each connection with no delay, TCP's keepalives on, and pinged as a
+/// member's client pings it (board 8575); so many of each peer's address and of all
+/// ([`admitting`]).
 async fn serve(listening: Listening, server: Server) -> std::io::Result<()> {
     #[cfg(not(madsim))]
     {
@@ -891,8 +894,8 @@ fn admitting(
     })
 }
 
-/// cladefs: serves `server` to the connections `incoming` accepts ([`accepting`]): until it fails
-/// for good, whose error it returns.
+/// cladefs: serves `server` to the connections `incoming` accepts (`super::run::accepting`): until
+/// it fails for good, whose error it returns.
 #[cfg(not(madsim))]
 async fn serve_on<IO>(
     incoming: impl futures::Stream<Item = std::io::Result<IO>> + Unpin + Send + 'static,
@@ -907,62 +910,9 @@ where
         + 'static,
 {
     let failed = Arc::new(std::sync::OnceLock::new());
-    let served = router(server)?.serve_with_incoming(accepting(incoming, failed.clone())).await;
-    served.map_err(std::io::Error::other)?;
-    // Its connections ended, their stream dropped with its note of why.
-    let failed = Arc::into_inner(failed).and_then(std::sync::OnceLock::into_inner);
-    Err(failed.unwrap_or_else(|| std::io::Error::other("the peer listener ended")))
-}
-
-/// cladefs: the connections `incoming` accepts, a failure the host may get over (no descriptor
-/// free, EMFILE or ENFILE, no buffers, a connection gone before it was accepted) logged and tried
-/// again after a pause, [`super::server::ACCEPT_AGAIN`], as the VM sockets are (board 8573):
-/// served by tonic as they come, such a failure was passed over at once, again and again, a busy
-/// loop holding a thread while the descriptors stayed short. One of the listener's own (it is
-/// closed, or no listener: EBADF, EINVAL, ENOTSOCK, EOPNOTSUPP) ends them, noted in `failed`.
-#[cfg(not(madsim))]
-fn accepting<IO>(
-    incoming: impl futures::Stream<Item = std::io::Result<IO>> + Unpin,
-    failed: Arc<std::sync::OnceLock<std::io::Error>>,
-) -> impl futures::Stream<Item = std::io::Result<IO>> {
-    use futures::StreamExt as _;
-    futures::stream::unfold((incoming, false), move |(mut incoming, mut failing)| {
-        let failed = failed.clone();
-        async move {
-            loop {
-                match incoming.next().await? {
-                    Ok(accepted) => return Some((Ok(accepted), (incoming, false))),
-                    // That connection's, gone before it was accepted.
-                    Err(err) if err.kind() == std::io::ErrorKind::ConnectionAborted => {}
-                    Err(err) if for_good(&err) => {
-                        // The first error for good; there is no other, the stream ending here.
-                        let _ = failed.set(err);
-                        return None;
-                    }
-                    Err(err) => {
-                        if !failing {
-                            log::error!(
-                                "cladefsd: accepting a peer's connection: {err}: trying again \
-                                 every {:?}",
-                                super::server::ACCEPT_AGAIN
-                            );
-                            failing = true;
-                        }
-                        tokio::time::sleep(super::server::ACCEPT_AGAIN).await;
-                    }
-                }
-            }
-        }
-    })
-}
-
-/// cladefs: whether `err`, an accept's, is of the listener itself, which no retry gets over.
-#[cfg(not(madsim))]
-fn for_good(err: &std::io::Error) -> bool {
-    matches!(
-        err.raw_os_error(),
-        Some(libc::EBADF | libc::EINVAL | libc::ENOTSOCK | libc::EOPNOTSUPP | libc::EFAULT)
-    )
+    let accepted = super::run::accepting("a peer's", incoming, failed.clone());
+    let served = router(server)?.serve_with_incoming(accepted).await;
+    super::run::accepted_until("the peer listener", served, failed)
 }
 
 /// cladefs: the daemon's replica directories (`CLADEFSD_REPLICAS`, colon-separated for JBOD,
@@ -1004,21 +954,30 @@ fn replicas(
 }
 
 /// cladefs: sweeps `replicas` against the heads of `bucket`'s cells now and every
-/// [`SWEEP_EVERY`] after, a task on `runtime`, the bucket runtime (doc-24 step 12).
+/// [`SWEEP_EVERY`] after, a task on `runtime`, the bucket runtime (doc-24 step 12): supervised,
+/// its panic aborting the daemon (`super::run::supervising`, board 9414), as its replicas would
+/// be swept never again, the daemon serving on.
 fn sweeping(
     replicas: Arc<Replicas<HostDir>>,
     bucket: Arc<bucket_cell::object_bucket::RoutedBucket>,
     runtime: &tokio::runtime::Handle,
 ) {
-    drop(runtime.spawn(async move {
+    drop(runtime.spawn(super::run::supervising(SWEEPING, async move {
         loop {
             if let Err(err) = sweep(&replicas, &*bucket).await {
                 log::warn!("cladefsd: sweeping the replica directory: {err}");
             }
             tokio::time::sleep(SWEEP_EVERY).await;
         }
-    }));
+    })));
 }
+
+/// cladefs: what the replica directory's sweep is called, as a panic in it names it (board 9414).
+const SWEEPING: &str = "cladefsd sweep";
+
+/// cladefs: what the reaping of the migrations to it their sources abandoned is called, as a panic
+/// in it names it (board 9414).
+const REAPING: &str = "cladefsd reap";
 
 /// cladefs: drops from `replicas` what the heads of `bucket`'s cells name no more: every
 /// configuration's logs before the active one, and all of a cell gone or deleted; nothing of a

@@ -137,9 +137,12 @@ impl State {
 
     /// Takes the collector back from `running`, waiting for it to end, and what it did.
     fn ended(&mut self, running: JoinHandle<(Collector, Report)>) {
-        // A pass that panicked, its panic said: a new collector in its place, as reap says.
-        let (collector, report) =
-            running.join().unwrap_or_else(|_| (Collector::new(), Report::default()));
+        // A pass that panicked, its panic said: a new collector in its place, as reap says, said
+        // here too (board 9414): a pass is work of an image's, which the next pass does again.
+        let (collector, report) = running.join().unwrap_or_else(|_| {
+            log::error!("cladefs: a pass of an image's collector panicked: a new one in its place");
+            (Collector::new(), Report::default())
+        });
         self.idle = Some(collector);
         self.collected += report;
     }

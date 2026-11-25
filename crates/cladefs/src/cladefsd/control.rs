@@ -79,15 +79,36 @@ pub(super) fn serve_control_on(
 }
 
 /// Serves the control API for `daemon` to the callers that connect to `listener`, until accepting
-/// fails; the sockets of the tenants it grants go in the directory `tenants`. Runs on `daemon`'s
-/// consolidated runtime (no separate Tokio runtime; Wave 4C.5, board 10774).
-/// cladefs: and the Mount service of the daemon's FUSE mount of cells, if it has one
-/// ([`super::mount`], TASK-475.2): its calls, counted and refused as the daemon drains as the
-/// API's are; without a mount, they fail `UNIMPLEMENTED`.
+/// fails for good, whose error it returns; the sockets of the tenants it grants go in the
+/// directory `tenants`. Runs on `daemon`'s consolidated runtime (no separate Tokio runtime; Wave
+/// 4C.5, board 10774).
 #[cfg(not(madsim))]
 pub(super) async fn serve_control_async(
     daemon: Arc<Daemon>,
     listener: std::os::unix::net::UnixListener,
+    tenants: PathBuf,
+) -> std::io::Result<()> {
+    let incoming = tokio_stream::wrappers::UnixListenerStream::new(
+        tokio::net::UnixListener::from_std(listener)?,
+    );
+    serve_control_with(daemon, incoming, tenants).await
+}
+
+/// cladefs: serves the control API for `daemon`, as [`serve_control_async`] does, to the
+/// connections `incoming` accepts: through `super::run::accepting`, an accept failing as the host
+/// may get over tried again after a pause, logged once (board 9760), where tonic passed each
+/// over at once, a busy loop holding one of the runtime's threads while the descriptors stayed
+/// short; one of the listener's own ends it, returned.
+/// cladefs: and the Mount service of the daemon's FUSE mount of cells, if it has one
+/// ([`super::mount`], TASK-475.2): its calls, counted and refused as the daemon drains as the
+/// API's are; without a mount, they fail `UNIMPLEMENTED`.
+#[cfg(not(madsim))]
+pub(super) async fn serve_control_with(
+    daemon: Arc<Daemon>,
+    incoming: impl futures::Stream<Item = std::io::Result<tokio::net::UnixStream>>
+    + Unpin
+    + Send
+    + 'static,
     tenants: PathBuf,
 ) -> std::io::Result<()> {
     let control = Control {
@@ -95,9 +116,8 @@ pub(super) async fn serve_control_async(
         grants: Arc::new(Grants::new(Arc::clone(&daemon), tenants)),
     };
     let (reporter, health) = tonic_health::server::health_reporter();
-    let incoming = tokio_stream::wrappers::UnixListenerStream::new(
-        tokio::net::UnixListener::from_std(listener)?,
-    );
+    let failed = Arc::new(std::sync::OnceLock::new());
+    let incoming = super::run::accepting("a control API caller's", incoming, failed.clone());
     // Its first status reported before it serves: the reporter starts with the server's, "",
     // SERVING, which a check served before a task of its own reported otherwise saw.
     let mut serving = daemon.serving.subscribe();
@@ -125,7 +145,7 @@ pub(super) async fn serve_control_async(
     daemon.control_serving.store(true, std::sync::atomic::Ordering::Release);
     let mount =
         super::mount::service_on(&daemon).map(|mount| Served::new(Drained::new(&daemon, mount)));
-    tonic::transport::Server::builder()
+    let served = tonic::transport::Server::builder()
         .add_service(health)
         // cladefs: no answer encoded past MAX_MESSAGE_BYTES (board 8581): what grows refuses
         // first, saying what to leave out (`bounded`); any other, OUT_OF_RANGE, tonic's. Its
@@ -138,8 +158,8 @@ pub(super) async fn serve_control_async(
         // cladefs: its FUSE mount's, if it mounts cells (TASK-475.2).
         .add_optional_service(mount)
         .serve_with_incoming(incoming)
-        .await
-        .map_err(std::io::Error::other)
+        .await;
+    super::run::accepted_until("the control API's listener", served, failed)
 }
 
 /// cladefs: serves `daemon`'s control API, as [`serve_control`] does, on the simulated network at

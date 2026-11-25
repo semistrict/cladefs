@@ -258,11 +258,17 @@ fn drain_on_signals(
         // cladefs: its panic, as its drain's, aborts the daemon, which could drain no more
         // (board 8501).
         let _supervised = cladefs::cladefsd::supervised("cladefsd signal");
+        // cladefs: unable to wait for them, it stops now, saying why (board 9414): its thread
+        // returned, the daemon served on with nothing to drain it, which only SIGKILL then ended,
+        // a crash for every cell, its log saying nothing of why at the time.
         let signal = match signals.wait() {
             Ok(signal) => signal,
             Err(error) => {
-                log::error!("cladefsd: waiting for SIGTERM, SIGINT or SIGHUP: {error}");
-                return;
+                log::error!(
+                    "cladefsd: waiting for SIGTERM, SIGINT or SIGHUP: {error}: aborting, as \
+                     nothing could drain it"
+                );
+                std::process::abort();
             }
         };
         let name = match signal {

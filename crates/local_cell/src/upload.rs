@@ -74,7 +74,7 @@ use futures::StreamExt as _;
 use futures::future::{BoxFuture, FutureExt as _};
 use futures::stream::FuturesUnordered;
 use std::collections::{BTreeSet, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::Poll;
 use std::time::{Duration, SystemTime};
 
@@ -814,8 +814,9 @@ pub(crate) struct Shared<D: Dir, B: bucket_cell::Bucket = RoutedBucket> {
     /// history of the commits of (TASK-680).
     #[cfg(test)]
     recovered_from: Mutex<Option<bucket_cell::layout::Configuration>>,
-    /// cladefs: active Fast WAL sink for a fast-WAL cell (doc-29).
-    fast_wal_sink: Mutex<Option<Arc<crate::fast_wal::FastWalSink>>>,
+    /// cladefs: active Fast WAL sink for a fast-WAL cell (doc-29), set once, as its writer takes the
+    /// cell: no lock a panic could poison for its other users (board 9412).
+    fast_wal_sink: std::sync::OnceLock<Arc<crate::fast_wal::FastWalSink>>,
     /// cladefs: completion signal for the background Fast WAL writer task, awaited in `wind_up`.
     fast_wal_done: Mutex<Option<futures::channel::oneshot::Receiver<()>>>,
 }
@@ -1051,8 +1052,8 @@ impl<D: Dir> Uploader<D> {
         shared.observe()?;
         let pending_bytes = self.cell().wal_bytes()?;
         let replication = self.replication_status();
-        let fast_wal = shared.fast_wal_sink.lock().unwrap().as_ref().map(|sink| sink.status());
-        let progress = shared.progress.lock().unwrap();
+        let fast_wal = shared.fast_wal_sink.get().map(|sink| sink.status());
+        let progress = shared.progress();
         Ok(UploadStatus {
             taking: progress.taking,
             uploaded: progress.uploaded,
@@ -1067,7 +1068,7 @@ impl<D: Dir> Uploader<D> {
     /// cladefs: the Fast WAL fsync level of the cell, as its writer's taking found its head
     /// (doc-29): none unless the cell uses Fast WAL.
     pub fn fast_wal_fsync(&self) -> Option<bucket_cell::layout::Fsync> {
-        self.shared.progress.lock().unwrap().taking.and_then(|taking| taking.fast_wal)
+        self.shared.progress().taking.and_then(|taking| taking.fast_wal)
     }
 
     /// cladefs: waits until local cache lag for `epoch` is within bounds, OR returns immediately
@@ -1078,7 +1079,7 @@ impl<D: Dir> Uploader<D> {
         epoch: u64,
     ) -> impl std::future::Future<Output = Result<(), Failure>> + Send + use<D> {
         let waiting = (|| -> Result<Option<Waiting>, Failure> {
-            let sink = self.shared.fast_wal_sink.lock().unwrap().clone();
+            let sink = self.shared.fast_wal_sink.get().cloned();
             let Some(sink) = sink else {
                 return self.waiting_lag(epoch);
             };
@@ -1102,11 +1103,11 @@ impl<D: Dir> Uploader<D> {
     ) -> impl std::future::Future<Output = Result<(), Failure>> + Send + use<D> {
         let waiting = (|| -> Result<Option<Waiting>, Failure> {
             self.shared.observe()?;
-            let sink = self.shared.fast_wal_sink.lock().unwrap().clone();
+            let sink = self.shared.fast_wal_sink.get().cloned();
             let Some(sink) = sink else {
                 return self.waiting_uploaded(epoch);
             };
-            let progress = self.shared.progress.lock().unwrap();
+            let progress = self.shared.progress();
             if sink.durable().max(sink.head_acked()).max(progress.uploaded) >= epoch {
                 return Ok(None);
             }
@@ -1115,7 +1116,7 @@ impl<D: Dir> Uploader<D> {
             }
             drop(progress);
             if sink.degraded() {
-                self.shared.progress.lock().unwrap().wanted = true;
+                self.shared.progress().wanted = true;
                 self.shared.wake.notify_one();
             }
             Ok(Some(Waiting::FastWal(sink, epoch)))
@@ -1353,7 +1354,7 @@ impl<D: Dir> Uploader<D> {
 
     /// How many commits waited for the lag to shrink.
     pub fn stalls(&self) -> u64 {
-        self.shared.progress.lock().unwrap().stalls
+        self.shared.progress().stalls
     }
 
     /// Why uploading stopped, if it did: the open cell's commits are the cell's no more.
@@ -1371,7 +1372,7 @@ impl<D: Dir> Uploader<D> {
         let shared = Arc::downgrade(&self.shared);
         move || {
             let Some(shared) = shared.upgrade() else { return };
-            shared.progress.lock().unwrap().cut = true;
+            shared.progress().cut = true;
             shared.wake.notify_one();
         }
     }
@@ -1380,7 +1381,7 @@ impl<D: Dir> Uploader<D> {
     /// cut short ([`Uploader::cut_short`]): for a cell another writer took over, as it was, its
     /// uploader going on, whose going later no writer waits for.
     pub fn drain_on_stop(&self) {
-        self.shared.progress.lock().unwrap().cut = false;
+        self.shared.progress().cut = false;
     }
 }
 
@@ -1434,7 +1435,7 @@ impl<D: Dir> Drop for Uploader<D> {
 /// gather, whatever its guest is doing, and uploads it, so that what it held leaves the disk.
 impl<D: Dir, B: bucket_cell::Bucket> bucket_cell::host_disk::Urge for Shared<D, B> {
     fn urge(&self) {
-        self.progress.lock().unwrap().wanted = true;
+        self.progress().wanted = true;
         self.wake.notify_one();
     }
 }
@@ -1472,7 +1473,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             relocation: Mutex::default(),
             #[cfg(test)]
             recovered_from: Mutex::default(),
-            fast_wal_sink: Mutex::default(),
+            fast_wal_sink: std::sync::OnceLock::new(),
             fast_wal_done: Mutex::default(),
         })
     }
@@ -1488,24 +1489,46 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         self.holders.lock().unwrap().next()
     }
 
+    /// cladefs: its progress, locked, as every user of it locks it: a panic holding it, which
+    /// left it as the panic found it, half changed perhaps, fails the uploader, unless it failed
+    /// already, naming that, as [`Shared::panicked`] does; and its poison is cleared, so that what
+    /// takes it next, a commit's wait, a close, a drop, finds the failure, rather than panic in
+    /// turn (board 9412): `Uploader::drop`, unwinding already, aborted the process so.
+    fn progress(&self) -> MutexGuard<'_, Progress> {
+        self.progress_or(|| {
+            let failure = Failure::msg("a panic left its progress as it held it");
+            log::error!("cladefs: uploading a cell: {failure}");
+            failure
+        })
+    }
+
+    /// cladefs: its progress, locked, as [`Shared::progress`] says, `failure` its failure if a
+    /// panic holding it left it poisoned: the waiters, and the uploader, woken to find it.
+    fn progress_or(&self, failure: impl FnOnce() -> Failure) -> MutexGuard<'_, Progress> {
+        self.progress.lock().unwrap_or_else(|poisoned| {
+            self.progress.clear_poison();
+            let mut progress = poisoned.into_inner();
+            progress.failed.get_or_insert_with(failure);
+            self.changed.notify(usize::MAX);
+            self.wake.notify_one();
+            progress
+        })
+    }
+
     /// The epoch of the cell's latest commit uploaded and acknowledged.
     pub(crate) fn last_uploaded(&self) -> u64 {
-        self.progress.lock().unwrap().uploaded
+        self.progress().uploaded
     }
 
     /// The lowest sequence number the cell's guest may mint extents' IDs from.
     pub(crate) fn next_sequence(&self) -> u64 {
-        self.progress.lock().unwrap().next_sequence
+        self.progress().next_sequence
     }
 
     /// Why uploading stopped, if it did.
     pub(crate) fn failed(&self) -> Option<Failure> {
-        self.progress
-            .lock()
-            .unwrap()
-            .failed
-            .clone()
-            .or_else(|| self.fast_wal_sink.lock().unwrap().as_ref().and_then(|sink| sink.failed()))
+        let failed = self.progress().failed.clone();
+        failed.or_else(|| self.fast_wal_sink.get().and_then(|sink| sink.failed()))
     }
 
     /// The cell's writer, once one took it.
@@ -1516,10 +1539,8 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     /// Has the uploader stop: once it uploaded what its cell made durable, its open segment's
     /// commits too, unless cut short ([`Uploader::cut_short`]).
     pub(crate) fn stop(&self) {
-        self.progress.lock().unwrap().stop = true;
-        if let Some(sink) =
-            self.fast_wal_sink.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref()
-        {
+        self.progress().stop = true;
+        if let Some(sink) = self.fast_wal_sink.get() {
             sink.stop();
         }
         self.changed.notify(usize::MAX);
@@ -1543,7 +1564,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     /// Notes the cell's latest commit, if it isn't uploaded, as seen now.
     fn observe(&self) -> Result<(), Failure> {
         let epoch = self.cell().last_commit()?;
-        let mut progress = self.progress.lock().unwrap();
+        let mut progress = self.progress();
         let newer = progress.seen.back().is_none_or(|(seen, _)| *seen < epoch);
         if epoch > progress.uploaded && newer {
             progress.seen.push_back((epoch, SystemTime::now()));
@@ -1555,7 +1576,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     /// asks the uploader for it, counting a stall if it is the lag.
     pub(crate) fn ask(&self, epoch: u64, awaited: Awaited) -> Result<bool, Failure> {
         self.observe()?;
-        let mut progress = self.progress.lock().unwrap();
+        let mut progress = self.progress();
         if self.reached(&progress, epoch, awaited).transpose()?.is_some() {
             return Ok(true);
         }
@@ -1601,12 +1622,8 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     /// is durable.
     fn within_lag(&self, uploaded: u64, epoch: u64) -> Result<bool, Failure> {
         let max_bytes = self.options.max_lag_bytes;
-        let effective_uploaded = self
-            .fast_wal_sink
-            .lock()
-            .unwrap()
-            .as_ref()
-            .map_or(uploaded, |sink| uploaded.max(sink.head_acked()));
+        let effective_uploaded =
+            self.fast_wal_sink.get().map_or(uploaded, |sink| uploaded.max(sink.head_acked()));
         Ok(effective_uploaded >= epoch && self.cell().wal_bytes()? <= max_bytes)
     }
 
@@ -1641,7 +1658,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         loop {
             let changed = self.changed.listen();
             {
-                let progress = self.progress.lock().unwrap();
+                let progress = self.progress();
                 if let Some(found) = self.found(&progress, waiting) {
                     return found;
                 }
@@ -1671,9 +1688,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     /// its keeper (TASK-701). Its locks taken as a panic holding one left them, poisoned or not:
     /// what it takes of them is all it changes.
     async fn wind_up(&self) {
-        if let Some(sink) =
-            self.fast_wal_sink.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref()
-        {
+        if let Some(sink) = self.fast_wal_sink.get() {
             sink.stop();
         }
         let fast_wal_done =
@@ -1699,8 +1714,8 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     /// cladefs: stops uploading, `what` having panicked, its task or its keeper's, with `panic`
     /// (board 8507): commits waiting for uploads, and forks, fail, naming it, as at
     /// [`Shared::fail`], unless it failed already; and the uploader stops, woken (its keeper's
-    /// panic) or not (its own). Its progress taken as a panic holding it left it, poisoned or not:
-    /// its failure is all it changes of it.
+    /// panic) or not (its own). Its progress taken as a panic holding it left it, poisoned or not
+    /// ([`Shared::progress_or`]): its failure is all it changes of it.
     fn panicked(&self, what: &str, panic: &(dyn std::any::Any + Send)) {
         let message = (panic.downcast_ref::<&str>().copied())
             .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
@@ -1711,8 +1726,9 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             Some(writer) => log::error!("cladefs: uploading cell {}: {failure}", writer.cell()),
             None => log::error!("cladefs: opening a cell to upload it: {failure}"),
         }
-        let mut progress = self.progress.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        progress.failed.get_or_insert(Failure::msg(failure));
+        let failure = Failure::msg(failure);
+        let mut progress = self.progress_or(|| failure.clone());
+        progress.failed.get_or_insert(failure);
         drop(progress);
         self.changed.notify(usize::MAX);
         self.wake.notify_one();
@@ -1749,7 +1765,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         };
         // A version's cell has nothing to upload.
         let Some(writer) = writer else {
-            while !self.progress.lock().unwrap().stop {
+            while !self.progress().stop {
                 self.wake.notified().await;
             }
             return;
@@ -1799,7 +1815,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                 return self.fail(&writer, err);
             }
             let (stop, cut, failed) = {
-                let mut progress = self.progress.lock().unwrap();
+                let mut progress = self.progress();
                 let wanted = std::mem::take(&mut progress.wanted);
                 urgent |= wanted;
                 ack_urgent |= wanted;
@@ -2079,12 +2095,10 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
 
     /// Stops uploading, for `err`: commits waiting for uploads, and forks, fail with it.
     fn fail(&self, writer: &Writer<B>, err: Failure) {
-        if let Some(sink) =
-            self.fast_wal_sink.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref()
-        {
+        if let Some(sink) = self.fast_wal_sink.get() {
             sink.stop();
         }
-        let mut progress = self.progress.lock().unwrap();
+        let mut progress = self.progress();
         if !progress.stop {
             log::error!("cladefs: uploading cell {}: {err}", writer.cell());
         }
@@ -2125,7 +2139,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             let open_cell = blocking(|| recovering.open(options, opening))?;
             assert!(self.cell.set(Arc::new(open_cell)).is_ok(), "an uploader opens its cell once");
             self.hold_ring(&keys);
-            let mut progress = self.progress.lock().unwrap();
+            let mut progress = self.progress();
             progress.uploaded_through(u64::MAX);
             return Ok(None);
         }
@@ -2334,7 +2348,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             let shared_weak = Arc::downgrade(self);
             let urge_cold: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
                 if let Some(shared) = shared_weak.upgrade() {
-                    shared.progress.lock().unwrap().wanted = true;
+                    shared.progress().wanted = true;
                     shared.wake.notify_one();
                 }
             });
@@ -2347,7 +2361,10 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                 hot_budget,
             );
             self.cell().fast_wal_to(sink.clone());
-            *self.fast_wal_sink.lock().unwrap() = Some(sink.clone());
+            assert!(
+                self.fast_wal_sink.set(sink.clone()).is_ok(),
+                "an uploader opens its cell once"
+            );
             let fw_writer = crate::fast_wal::FastWalWriter::new(
                 writer.clone(),
                 cfg.bucket.clone(),
@@ -2382,7 +2399,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             replication,
             fast_wal,
         };
-        let mut progress = self.progress.lock().unwrap();
+        let mut progress = self.progress();
         (progress.next_sequence, progress.taking) = (writer.chain().next_sequence(), Some(taking));
         if let Some(last) = writer.state().last_commit {
             progress.uploaded_through(epoch_of(last));
@@ -2449,7 +2466,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         let mut closing = close && closed.len() < room;
         if closing {
             let waited = {
-                let progress = self.progress.lock().unwrap();
+                let progress = self.progress();
                 // A clock gone back: nothing waited yet.
                 let oldest = progress.seen.front().and_then(|(_, seen)| seen.elapsed().ok());
                 oldest.is_some_and(|waited| waited >= self.options.filling_wait)
@@ -2503,7 +2520,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         // Notify Fast WAL immediately once the cold head CAS succeeds, without blocking degraded
         // fallback or oversized-batch spill waiters on local WAL start-file sync.
         if let Some(last_epoch) = acked.last().map(|segment| segment.epoch())
-            && let Some(sink) = self.fast_wal_sink.lock().unwrap().as_ref()
+            && let Some(sink) = self.fast_wal_sink.get()
         {
             sink.head_acknowledged(last_epoch);
         }
@@ -2544,10 +2561,10 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         };
         let Some(epoch) = epoch else { return Ok(()) };
         failing!("upload::released");
-        if let Some(sink) = self.fast_wal_sink.lock().unwrap().as_ref() {
+        if let Some(sink) = self.fast_wal_sink.get() {
             sink.head_acknowledged(epoch);
         }
-        self.progress.lock().unwrap().uploaded_through(epoch);
+        self.progress().uploaded_through(epoch);
         self.changed.notify(usize::MAX);
         Ok(())
     }

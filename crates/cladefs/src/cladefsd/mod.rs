@@ -281,16 +281,25 @@ const OWN_OPEN_FILES: u64 = 1024;
 
 /// cladefs: the open files a cell keeps at most beside its segments' and its extents' (each
 /// `local_cell::Options::open_files`): its open segment's, its commit log, its lock, and its VM
-/// process's connection, two sockets.
+/// process's connection, two sockets, and that VM process's pidfd.
 const CELL_OPEN_FILES_BESIDE: u64 = 8;
+
+/// cladefs: the open files a cell keeps at most, as the daemon opens cells
+/// (`crate::host_cell::options`), its VM process's connection's among them: its segments' and its
+/// extents', and those beside ([`CELL_OPEN_FILES_BESIDE`]). What the daemon's limit of open files
+/// is shared out by: its floor ([`open_files_floor`]), and each connection's
+/// (`server::most_connections`, board 9975), which opens one cell at most.
+pub(super) fn cell_open_files() -> u64 {
+    let segments_and_extents = 2 * crate::host_cell::options().open_files as u64;
+    segments_and_extents + CELL_OPEN_FILES_BESIDE
+}
 
 /// cladefs: the limit of open files (`RLIMIT_NOFILE`) under which a daemon refuses to start (board
 /// 8595): its own, and [`FLOOR_CELLS`] cells' at their most. A lower limit started a daemon that
 /// answered `EMFILE` once its host was busy, its VMs failing to open their cells or to connect
 /// (TASK-79.35).
 pub fn open_files_floor() -> u64 {
-    let segments_and_extents = 2 * local_cell::Options::default().open_files as u64;
-    OWN_OPEN_FILES + FLOOR_CELLS * (segments_and_extents + CELL_OPEN_FILES_BESIDE)
+    OWN_OPEN_FILES + FLOOR_CELLS * cell_open_files()
 }
 
 /// cladefs: refuses a limit of open files under [`open_files_floor`], naming it (board 8595): the

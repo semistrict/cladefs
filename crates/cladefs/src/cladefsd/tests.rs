@@ -3516,6 +3516,35 @@ fn a_cells_metrics_name_it_alike_in_every_family() {
     assert_eq!(unsafe { libc::munmap(writers.as_ptr().cast(), 2 * ps) }, 0);
 }
 
+/// board 9760: an accept of the control API's that fails as the host may get over (EMFILE, as
+/// with every descriptor open) is tried again after `ACCEPT_AGAIN`, and the call after it served.
+/// Before, tonic passed it over at once, and again at once as long as it failed: a busy loop
+/// holding one of the runtime's threads (92% of a CPU with the descriptors out), nothing saying
+/// why.
+#[tokio::test(flavor = "multi_thread")]
+async fn control_accepts_failing_are_tried_again_after_a_pause() {
+    use futures::StreamExt as _;
+    use tonic_health::pb::{HealthCheckRequest, health_client::HealthClient};
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("control.sock");
+    let tenants = dir.path().join("tenants");
+    std::fs::create_dir(&tenants).unwrap();
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let emfile = || Err(std::io::Error::from_raw_os_error(libc::EMFILE));
+    let incoming = futures::stream::iter([emfile(), emfile()])
+        .chain(tokio_stream::wrappers::UnixListenerStream::new(listener));
+    let began = tokio::time::Instant::now();
+    let daemon = super::Daemon::process().clone();
+    let serving = tokio::spawn(super::control::serve_control_with(daemon, incoming, tenants));
+    let channel = super::control::channel(&socket).await.unwrap();
+    let request = HealthCheckRequest { service: String::new() };
+    HealthClient::new(channel).check(request).await.unwrap();
+    let waited = began.elapsed();
+    assert!(waited >= 2 * super::server::ACCEPT_AGAIN, "served after {waited:?}");
+    serving.abort();
+}
+
 /// TASK-79.35: the daemon goes on accepting VM processes' connections through a failure to accept
 /// one, as with as many files open as it may (EMFILE): it accepts them once files close.
 #[test]

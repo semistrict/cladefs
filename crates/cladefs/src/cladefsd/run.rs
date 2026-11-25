@@ -28,19 +28,98 @@ where
     F: Future<Output = ()> + Send + 'static,
 {
     #[cfg(not(madsim))]
-    {
-        drop(daemon.spawn(async move {
-            let _supervised = local_cell::shared::Awaited::new(name);
-            fail::fail_point!(&format!("cladefsd::service::{name}"));
-            service().await;
-        }));
-    }
+    drop(daemon.spawn(supervising(name, async move { service().await })));
     #[cfg(madsim)]
     {
         let _ = (daemon, name);
         drop(tokio::spawn(service()));
     }
     Ok(())
+}
+
+/// cladefs: `service`, a task of the daemon's that runs as long as it does, named `name`, wherever
+/// it is spawned: a panic in it aborts the daemon naming `name` (`local_cell::shared::Awaited`,
+/// board 8501), as [`service`]'s does; for a task spawned on a runtime of its own, as the bucket
+/// runtime's replica sweep (board 9414). A test has it panic as it starts with the failpoint
+/// `cladefsd::service::NAME`. Under madsim, `service` as it is: a panic there the simulation's.
+pub(super) async fn supervising(name: &'static str, service: impl Future<Output = ()>) {
+    #[cfg(not(madsim))]
+    let _supervised = local_cell::shared::Awaited::new(name);
+    #[cfg(not(madsim))]
+    fail::fail_point!(&format!("cladefsd::service::{name}"));
+    #[cfg(madsim)]
+    let _ = name;
+    service.await;
+}
+
+/// cladefs: the connections `incoming` accepts for the daemon's server `what` names (`a peer's`,
+/// `a control API caller's`), a failure the host may get over (no descriptor free, EMFILE or
+/// ENFILE, no buffers, a connection gone before it was accepted) logged once and tried again after
+/// a pause, [`super::server::ACCEPT_AGAIN`], as the VM sockets are (board 8573, board 9760):
+/// served by tonic as they come, such a failure was passed over at once, again and again, a busy
+/// loop holding a thread while the descriptors stayed short. One of the listener's own (it is
+/// closed, or no listener: EBADF, EINVAL, ENOTSOCK, EOPNOTSUPP) ends them, noted in `failed`,
+/// which [`accepted_until`] returns.
+#[cfg(not(madsim))]
+pub(super) fn accepting<IO>(
+    what: &'static str,
+    incoming: impl futures::Stream<Item = std::io::Result<IO>> + Unpin,
+    failed: std::sync::Arc<std::sync::OnceLock<std::io::Error>>,
+) -> impl futures::Stream<Item = std::io::Result<IO>> {
+    use futures::StreamExt as _;
+    futures::stream::unfold((incoming, false), move |(mut incoming, mut failing)| {
+        let failed = failed.clone();
+        async move {
+            loop {
+                match incoming.next().await? {
+                    Ok(accepted) => return Some((Ok(accepted), (incoming, false))),
+                    // That connection's, gone before it was accepted.
+                    Err(err) if err.kind() == std::io::ErrorKind::ConnectionAborted => {}
+                    Err(err) if for_good(&err) => {
+                        // The first error for good; there is no other, the stream ending here.
+                        let _ = failed.set(err);
+                        return None;
+                    }
+                    Err(err) => {
+                        if !failing {
+                            log::error!(
+                                "cladefsd: accepting {what} connection: {err}: trying again \
+                                 every {:?}",
+                                super::server::ACCEPT_AGAIN
+                            );
+                            failing = true;
+                        }
+                        tokio::time::sleep(super::server::ACCEPT_AGAIN).await;
+                    }
+                }
+            }
+        }
+    })
+}
+
+/// cladefs: what a server serving the connections of [`accepting`] ended with, `served`: its own
+/// failure, or, its connections ended, the listener's failure for good that ended them, noted in
+/// `failed`; or, if none was, that `what` ended. Never `Ok`: a server of the daemon's serves as
+/// long as it does.
+#[cfg(not(madsim))]
+pub(super) fn accepted_until(
+    what: &str,
+    served: Result<(), tonic::transport::Error>,
+    failed: std::sync::Arc<std::sync::OnceLock<std::io::Error>>,
+) -> std::io::Result<()> {
+    served.map_err(std::io::Error::other)?;
+    // Its connections ended, their stream dropped with its note of why.
+    let failed = std::sync::Arc::into_inner(failed).and_then(std::sync::OnceLock::into_inner);
+    Err(failed.unwrap_or_else(|| std::io::Error::other(format!("{what} ended"))))
+}
+
+/// cladefs: whether `err`, an accept's, is of the listener itself, which no retry gets over.
+#[cfg(not(madsim))]
+fn for_good(err: &std::io::Error) -> bool {
+    matches!(
+        err.raw_os_error(),
+        Some(libc::EBADF | libc::EINVAL | libc::ENOTSOCK | libc::EOPNOTSUPP | libc::EFAULT)
+    )
 }
 
 /// Runs `turn` now and every `period` after, until it says to stop (false), named `name`: on a

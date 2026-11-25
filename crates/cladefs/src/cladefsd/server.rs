@@ -263,11 +263,6 @@ impl Memory {
 /// 16 GiB holding 497 with 3.9 GiB to spare (board 7084).
 pub(super) const MAX_CONNECTIONS: usize = 4096;
 
-/// cladefs: how many of the daemon's open files a connection takes, as [`most_connections`]
-/// counts them (board 8465): its socket, the socket again for its sender, its VM process's pidfd,
-/// and one for what its cell opens beside the cells of others.
-const FILES_PER_CONNECTION: usize = 4;
-
 /// cladefs: how many connections each tenant alive keeps, whatever the others have (board 8465): a
 /// tenant with fewer is refused none while the daemon has room for any, however many the others
 /// have taken; those past it take what all of them leave. A VM restored from a zygote has two
@@ -275,10 +270,15 @@ const FILES_PER_CONNECTION: usize = 4;
 const RESERVED_CONNECTIONS: usize = 64;
 
 /// cladefs: the most connections the daemon serves at once, every tenant's together (board 8465):
-/// what its open files leave, [`FILES_PER_CONNECTION`] each, a quarter of its limit kept for the
-/// rest (its cells' files, its part cache, its control API). Past it, an accept that failed for
-/// files held every tenant's new VM processes, retried every [`ACCEPT_AGAIN`], whichever tenant had
-/// taken them.
+/// what its open files leave, each connection's at their most, a quarter of its limit kept for the
+/// rest (its own, its part cache's, its control API's and the cells it opens for it, its peers').
+/// A connection's files are its cell's, which it opens one of at most, at their most
+/// (`super::cell_open_files`, board 9975): its segments' and extents', its sockets and its VM
+/// process's pidfd. Before, 4 a connection, as if its cell's were the rest's: one tenant's cells
+/// took every file the daemon had far below the cap, 18 connections of 56 at a limit of 300, and
+/// another tenant's VM processes, within their reserved share, failed to connect (`EMFILE`), as
+/// their cells would have to open. Past it, an accept that failed for files held every tenant's
+/// new VM processes, retried every [`ACCEPT_AGAIN`], whichever tenant had taken them.
 fn most_connections() -> usize {
     let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
     // SAFETY: Reads the process's limit into `limit`.
@@ -290,23 +290,27 @@ fn most_connections() -> usize {
     }
     // Unlimited, RLIM_INFINITY, as many as a usize counts.
     let files = usize::try_from(limit.rlim_cur).unwrap_or(usize::MAX);
-    (files - files / 4) / FILES_PER_CONNECTION
+    // A few hundred files: as many as a usize counts.
+    let per_connection = usize::try_from(super::cell_open_files()).unwrap_or(usize::MAX);
+    (files - files / 4) / per_connection
 }
 
 /// cladefs: the connections the daemon serves at once, of the most ([`most_connections`]), and how
 /// many each tenant keeps ([`RESERVED_CONNECTIONS`]): as a test gives them, if it does.
 fn connection_limits() -> (usize, usize) {
     #[cfg(test)]
-    if let Some(&given) = CONNECTION_LIMITS_GIVEN.get() {
-        return given;
+    if let Some(&(most, reserved)) = CONNECTION_LIMITS_GIVEN.get() {
+        return (most.unwrap_or_else(most_connections), reserved);
     }
     (most_connections(), RESERVED_CONNECTIONS)
 }
 
 /// cladefs: the limits of connections in a test, in place of the daemon's ([`connection_limits`]):
-/// the process's, a test's, which runs in a process of its own.
+/// the most the daemon serves, or, if none, what the process's limit of open files leaves
+/// ([`most_connections`]); and how many each tenant keeps. The process's, a test's, which runs in
+/// a process of its own.
 #[cfg(test)]
-pub(super) static CONNECTION_LIMITS_GIVEN: OnceLock<(usize, usize)> = OnceLock::new();
+pub(super) static CONNECTION_LIMITS_GIVEN: OnceLock<(Option<usize>, usize)> = OnceLock::new();
 
 /// cladefs: a tenant's connection counted among its connections, and every tenant's on its daemon,
 /// until dropped.
@@ -3085,7 +3089,9 @@ impl Peer {
             // Process-wide registration for slabs::quarantine_with.
             static QUARANTINED: std::sync::Once = std::sync::Once::new();
             QUARANTINED.call_once(|| crate::slabs::quarantine_with(quarantine));
-            daemon.spawn(watch(Arc::downgrade(daemon)));
+            // cladefs: supervised, its panic aborting the daemon (board 9414): VM processes that
+            // stopped answering would be let go never again, holding the pages freed for good.
+            daemon.spawn(super::run::supervising(WATCHDOG, watch(Arc::downgrade(daemon))));
         });
         let process = peer_process(stream)?;
         if let Some(process) = &process {
@@ -3601,6 +3607,10 @@ pub(super) fn most_queued() -> u64 {
 /// cladefs: lets the VM processes on `daemon` that stopped answering go ([`Peer::unresponsive`]),
 /// or reading what the daemon sends them ([`AsyncSender::stalled`], board 8459), looking every
 /// [`WATCH_EVERY`], for as long as `daemon` lives.
+/// cladefs: what the VM processes' watchdog ([`watch`]) is called, as a panic in it names it
+/// (board 9414).
+const WATCHDOG: &str = "cladefsd watchdog";
+
 async fn watch(daemon: Weak<Daemon>) {
     let mut every = tokio::time::interval(WATCH_EVERY);
     loop {
