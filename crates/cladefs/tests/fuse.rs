@@ -548,11 +548,11 @@ fn truncating_and_killing_privileges() {
 
         // Non-root FALLOCATE clears suid/sgid and security.capability; root keeps suid/sgid.
         client.setattr(file, 1, SetattrFields { mode: 0o6755, ..Default::default() }).await;
-        assert_eq!(client.call(SETXATTR, file, set_cap).await.ok(), b"");
+        assert_eq!(client.call(SETXATTR, file, set_cap.clone()).await.ok(), b"");
         let falloc = Body::default().u64(0).u64(0).u64(4096).u32(0).u32(0);
         assert_eq!(client.call(FALLOCATE, file, falloc).await.ok(), b"");
         assert_eq!(attr_out(&client.getattr(file).await.ok()).mode, 0o100755);
-        assert_eq!(client.call(GETXATTR, file, get_cap).await.error, ENODATA);
+        assert_eq!(client.call(GETXATTR, file, get_cap.clone()).await.error, ENODATA);
 
         // Chown with FATTR_KILL_SUIDGID clears suid/sgid; explicit mode wins; directory keeps sgid.
         client.setattr(file, 1, SetattrFields { mode: 0o4755, ..Default::default() }).await;
@@ -562,9 +562,22 @@ fn truncating_and_killing_privileges() {
         let chown = SetattrFields { uid: 9, mode: 0o755, ..Default::default() };
         let attr = client.setattr(file, 1 | 2, chown).await;
         assert_eq!((attr.uid, attr.gid, attr.mode), (9, 8, 0o100755));
+        // No-op chown(-1, -1) with HANDLE_KILLPRIV_V2 sends valid=0 (non-reg) or FATTR_CTIME only.
+        client.setattr(file, 1, SetattrFields { mode: 0o6755, ..Default::default() }).await;
+        assert_eq!(client.call(SETXATTR, file, set_cap.clone()).await.ok(), b"");
+        let attr = client.setattr(file, 1 << 10, SetattrFields::default()).await;
+        assert_eq!(attr.mode, 0o100755);
+        assert_eq!(client.call(GETXATTR, file, get_cap.clone()).await.error, ENODATA);
+        let fifo_in = Body::default().u32(0o013750).u32(0).u32(0).u32(0).name(b"fifo");
+        let (fifo, fifo_attr) = entry(&client.call(MKNOD, ROOT, fifo_in).await.ok());
+        assert_eq!(fifo_attr.mode, 0o013750);
+        let attr = client.setattr(fifo, 0, SetattrFields::default()).await;
+        assert_eq!(attr.mode, 0o011750);
         let (dir, _) = client.mkdir(ROOT, b"dir", 0o2775).await;
         let attr = client.setattr(dir, 4, SetattrFields { gid: 8, ..Default::default() }).await;
         assert_eq!((attr.gid, attr.mode), (8, 0o042755));
+        let attr = client.setattr(dir, 0, SetattrFields::default()).await;
+        assert_eq!(attr.mode, 0o042755);
     })
 }
 

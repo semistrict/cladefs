@@ -1263,7 +1263,13 @@ impl Server {
         let explicit_ctime =
             if valid(FATTR_CTIME) { Some(time(set.ctime, set.ctimensec)?) } else { None };
         let killpriv_v2 = self.handle_killpriv_v2();
-        let kill_suid_sgid = killpriv_v2 && valid(FATTR_KILL_SUIDGID);
+        // Linux's `chown_common` sets `ATTR_KILL_SUID | ATTR_KILL_SGID | ATTR_KILL_PRIV` even for
+        // a no-op `chown(-1, -1)` on any non-directory. With `FUSE_HANDLE_KILLPRIV_V2`,
+        // `fuse_setattr` strips `ATTR_MODE`, and `fuse_do_setattr` only sets `FATTR_KILL_SUIDGID`
+        // when `ATTR_UID | ATTR_GID` is present — leaving at most `FATTR_CTIME` and `FATTR_FH`.
+        // No other VFS operation sends a `SETATTR` without mode/uid/gid/size/atime/mtime.
+        let noop_chown = (set.valid & !(FATTR_CTIME | FATTR_FH)) == 0;
+        let kill_suid_sgid = killpriv_v2 && (valid(FATTR_KILL_SUIDGID) || noop_chown);
         let kill_security_cap =
             killpriv_v2 && (kill_suid_sgid || valid(FATTR_UID) || valid(FATTR_GID));
         let set = SetAttr {
