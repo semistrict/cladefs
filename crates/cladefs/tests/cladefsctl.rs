@@ -910,7 +910,9 @@ fn peers_and_migrations_through_the_daemon() {
     let refused = run(&["abort-migration", path.to_str().unwrap()]).unwrap_err();
     let aborting = format!("aborting the migration of the cell at {}", path.display());
     assert!(refused.contains(&aborting), "{refused}");
-    assert!(refused.contains("ENOTSUP"), "{refused}");
+    // Bucket-backed migrations are supported even without CLADEFSD_EPHEMERAL (board 11369), so
+    // aborting when no migration is under way returns ENOENT rather than ENOTSUP (board 11587).
+    assert!(refused.contains("ENOENT"), "{refused}");
 }
 
 /// board 8585: `--timeout`, or CLADEFSCTL_TIMEOUT, bounds a call the daemon holds, here a GetStats
