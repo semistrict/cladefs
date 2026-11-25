@@ -86,11 +86,6 @@
 //! [mounted](Filesystem::mount) straight from storage is the `default` volume of an image of its
 //! own, which closing it closes.
 //!
-//! [`Image::snapshot_volume`] snapshots a whole volume, mounted or not, into a new one, in time and
-//! space independent of its size: the snapshot shares the source's metadata and data until
-//! either changes them, as Fxfs writes changes to new blocks, and what they share is freed once
-//! neither references it.
-//!
 //! # Storage
 //!
 //! An image lives on [`Storage`]: an image, which is a cell directory, a file

@@ -266,10 +266,6 @@ mod tests {
         }
         assert!(!exists(&store, "later").await);
         // The allocator holds none of it.
-        assert_eq!(
-            filesystem.allocator().data_owner(store.store_object_id()),
-            store.store_object_id()
-        );
         assert!(filesystem.allocator().cells_of(&[store.store_object_id()]).is_empty());
         std::mem::drop((store, root, base_store, base_root));
         do_fsck(&filesystem, Some("repo")).await;
@@ -358,10 +354,10 @@ mod tests {
         base.close().await.expect("Close failed");
     }
 
-    /// Reflinks of a base's extents, and snapshots of a volume over a base, share them as
-    /// reflinks and snapshots do, and whatever deletes them leaves the base be.
+    /// Reflinks of a base's extents share them as reflinks do, and deleting the volume or its
+    /// files leaves the base untouched.
     #[fuchsia_async::run_singlethreaded(test)]
-    async fn test_base_reflinks_and_snapshots() {
+    async fn test_base_reflinks() {
         let (base, manifest) = published(0).await;
         let (filesystem, _reads) = over(&base).await;
         let root = root_volume(filesystem.clone()).await.expect("root_volume failed");
@@ -387,14 +383,10 @@ mod tests {
         remove_file(&store, "a").await;
         assert_eq!(read_file(&store, "copy").await, [0xaa; 8192]);
 
-        let snapshot = root.snapshot_volume("repo", "snapshot").await.expect("snapshot failed");
         remove_file(&store, "copy").await;
-        assert_eq!(read_file(&snapshot, "copy").await, [0xaa; 8192]);
-        assert_eq!(read_file(&snapshot, "b").await, [0xbb; 8192]);
         filesystem.graveyard().flush().await;
-        std::mem::drop((store, snapshot));
+        std::mem::drop(store);
         do_fsck(&filesystem, Some("repo")).await;
-        do_fsck(&filesystem, Some("snapshot")).await;
 
         // A volume over a base deletes as any does.
         let (_, transaction) = root
@@ -403,7 +395,7 @@ mod tests {
             .expect("acquire_transaction_for_remove_volume failed");
         root.delete_volume("repo", transaction, || {}).await.expect("delete_volume failed");
         std::mem::drop(root);
-        do_fsck(&filesystem, Some("snapshot")).await;
+        do_fsck(&filesystem, None).await;
         filesystem.close().await.expect("Close failed");
         base.close().await.expect("Close failed");
     }

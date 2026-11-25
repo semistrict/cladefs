@@ -17,7 +17,6 @@
 
 use crate::checksum::{Checksum, Checksums};
 use crate::errors::FxfsError;
-use crate::log::*;
 use crate::lsm_tree::Query;
 use crate::lsm_tree::merge::{Merger, MergerIterator};
 use crate::lsm_tree::types::{ItemRef, LayerIterator};
@@ -47,8 +46,6 @@ use std::sync::Arc;
 use storage_device::buffer::{Buffer, BufferFuture, BufferRef, MutableBufferRef};
 use storage_device::{ExtentId, ExtentRange, NoExtent, WriteOptions};
 use storage_units::BlockSize;
-
-use fuchsia_async as fasync;
 
 /// Maximum size for an extended attribute name.
 pub const MAX_XATTR_NAME_SIZE: usize = 255;
@@ -148,33 +145,6 @@ impl<S: HandleOwner> ObjectHandle for StoreObjectHandle<S> {
 
     fn block_size(&self) -> BlockSize {
         self.store().block_size()
-    }
-}
-
-struct Watchdog {
-    _task: fasync::Task<()>,
-}
-
-impl Watchdog {
-    fn new(increment_seconds: u64, cb: impl Fn(u64) + Send + 'static) -> Self {
-        Self {
-            _task: fasync::Task::spawn(async move {
-                let increment = increment_seconds.try_into().unwrap();
-                let mut fired_counter = 0;
-                let mut next_wake = fasync::MonotonicInstant::now();
-                loop {
-                    next_wake += std::time::Duration::from_secs(increment).into();
-                    // If this isn't being scheduled this will purposely result in fast looping
-                    // when it does. This will be insightful about the state of the thread and
-                    // task scheduling.
-                    if fasync::MonotonicInstant::now() < next_wake {
-                        fasync::Timer::new(next_wake).await;
-                    }
-                    fired_counter += 1;
-                    cb(fired_counter);
-                }
-            }),
-        }
     }
 }
 
@@ -305,9 +275,6 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
         options: WriteOptions<'_>,
     ) -> Result<MaybeChecksums, Error> {
         let store = self.store();
-        let _watchdog = Watchdog::new(10, |count| {
-            warn!("Write I/O request blocked for {} seconds", count * 10);
-        });
 
         // cladefs: `ExtentMode::Cow` stores empty checksums (board 10535), so per-block Fletcher64
         // hashing is only needed for `JournalRecord::DataChecksums` when barriers are disabled.
@@ -507,13 +474,7 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
         extent_offset: u64,
         buffer: MutableBufferRef<'_>,
     ) -> Result<(), Error> {
-        let store = self.store();
-
-        let _watchdog = Watchdog::new(10, |count| {
-            warn!("Read I/O request blocked for {} seconds", count * 10);
-        });
-
-        store.device.read(extent, extent_offset, buffer).await
+        self.store().device.read(extent, extent_offset, buffer).await
     }
 
     /// Returns a stream of extents for the given attribute ID, mapping logical offsets to device

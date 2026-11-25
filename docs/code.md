@@ -40,13 +40,10 @@ their leading comment:
   image-builder mode, or per-volume byte limits.
 - `storage_device` has no `FileBackedDevice`: cladefs has its own image device
   (see `crates/cladefs`).
-- Fxfs can snapshot a volume (`RootVolume::snapshot_volume`), which upstream
-  can't. The snapshot shares the source's layer files, by reference count,
-  and its data extents. The allocator records a store's allocations under a
-  data owner that a snapshot changes; the source's owner at the snapshot is
-  frozen, its extents never deallocated one by one while any store shares
-  them, and freed once none does. fsck checks shared extents, and the on-disk
-  format is version 66, the only one a mount reads: no format is migrated.
+- Fxfs volume snapshots (`RootVolume::snapshot_volume`) were removed (board 11695,
+  board 2578) — cell forks replace per-volume snapshots (`doc-10`). Frozen
+  version-66 serialized fields stay in place for read compatibility, and non-empty
+  snapshot metadata is refused at open.
 
 ## `crates/cladefs/src/slabs.rs`: physical memory
 

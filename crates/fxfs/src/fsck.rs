@@ -226,7 +226,12 @@ pub async fn fsck_with_options(
     let mut store_ids = HashSet::default();
     store_ids.insert(root_store.store_object_id());
     store_ids.insert(object_manager.root_parent_store().store_object_id());
-    fsck.verify_allocations(filesystem.as_ref(), &store_ids).await?;
+    // With `lazy_volumes(true)`, cleanly compacted child volumes exist in `volume_directory`
+    // (`journal_checkpoint_ids`) without being opened in `object_manager` yet; recognize them as
+    // valid allocation owners when scanning only the root stores (board 11695).
+    let mut known_stores = journal_checkpoint_ids.clone();
+    known_stores.extend(store_ids.iter().copied());
+    fsck.verify_allocations(filesystem.as_ref(), &store_ids, &known_stores).await?;
     fsck.verbose("Verifying allocations done");
 
     // Every key in journal_file_offsets should map to an lsm tree (ObjectStore or Allocator).
@@ -277,11 +282,22 @@ pub async fn fsck_volume_with_options(
     let _guard = if options.no_lock { None } else { Some(filesystem.lock_commits().await) };
 
     let mut fsck = Fsck::new(options);
-    fsck.find_shared_extents(filesystem);
     fsck.check_child_store(store.as_ref(), &mut result).await?;
     let mut store_ids = HashSet::default();
     store_ids.insert(store_id);
-    fsck.verify_allocations(filesystem, &store_ids).await?;
+    let mut known_stores = store_ids.clone();
+    known_stores.insert(filesystem.root_store().store_object_id());
+    known_stores.insert(filesystem.object_manager().root_parent_store().store_object_id());
+    let root_vol = root_volume(store.filesystem()).await?;
+    let vol_dir = root_vol.volume_directory();
+    let vol_layer_set = vol_dir.store().tree().layer_set();
+    let mut vol_merger = vol_layer_set.merger();
+    let mut vol_iter = vol_dir.iter(&mut vol_merger).await?;
+    while let Some((_, id, _)) = vol_iter.get() {
+        known_stores.insert(id);
+        vol_iter.advance().await?;
+    }
+    fsck.verify_allocations(filesystem, &store_ids, &known_stores).await?;
 
     let errors = fsck.errors();
     let warnings = fsck.warnings();
@@ -303,9 +319,6 @@ struct Fsck<'a> {
     options: &'a FsckOptions<'a>,
     // A list of allocations generated based on all extents found across all scanned object stores.
     allocations: Arc<SkipListLayer<AllocatorKey, AllocatorValue>>,
-    // cladefs: the extents frozen owners hold, which any number of stores (snapshots) may share, or
-    // none; they are left out of `allocations`.
-    shared_extents: HashSet<ExtentId>,
     // cladefs: how many of the extents scanned reference each range of each extent, by its owner:
     // the counts `allocations` gets, which reflinks make more than one (the allocator's
     // "References").
@@ -320,28 +333,10 @@ impl<'a> Fsck<'a> {
             options,
             // TODO(https://fxbug.dev/42178047): fix magic number
             allocations: SkipListLayer::new(2048),
-            shared_extents: HashSet::default(),
             references: Mutex::default(),
             errors: AtomicU64::new(0),
             warnings: AtomicU64::new(0),
         }
-    }
-
-    /// cladefs: finds the extents frozen owners hold.
-    fn find_shared_extents(&mut self, filesystem: &FxFilesystem) {
-        let allocator = filesystem.allocator();
-        let frozen_owners = allocator.frozen_owners();
-        self.shared_extents = allocator
-            .extents()
-            .into_iter()
-            .filter(|(_, (owner, _))| frozen_owners.contains_key(owner))
-            .map(|(extent, _)| extent)
-            .collect();
-    }
-
-    /// cladefs: whether a frozen owner holds `extent`.
-    fn is_shared(&self, extent: &ExtentId) -> bool {
-        self.shared_extents.contains(extent)
     }
 
     /// cladefs: counts a reference to `range` of `extent`, which `owner_object_id` allocated, by an
@@ -537,6 +532,7 @@ impl<'a> Fsck<'a> {
         &self,
         filesystem: &FxFilesystem,
         store_object_ids: &HashSet<u64>,
+        known_stores: &HashSet<u64>,
     ) -> Result<(), Error> {
         self.add_references();
         let allocator = filesystem.allocator();
@@ -556,12 +552,6 @@ impl<'a> Fsck<'a> {
             CoalescingIterator::new(self.allocations.seek(Bound::Unbounded)).await?;
         let mut observed_owner_allocated_bytes = BTreeMap::new();
         let mut extra_allocations: Vec<errors::Allocation> = vec![];
-        // cladefs: stores allocate under their current data owners, and share the extents of frozen
-        // owners, which any number of stores may reference, or none.
-        let frozen_owners = allocator.frozen_owners();
-        let data_owners = allocator.data_owners();
-        let scanned_owners: HashSet<u64> =
-            store_object_ids.iter().map(|id| *data_owners.get(id).unwrap_or(id)).collect();
         let bs = filesystem.block_size();
         while let Some(allocation) = stored_allocations.get() {
             let r = &allocation.key.range;
@@ -576,11 +566,10 @@ impl<'a> Fsck<'a> {
             };
 
             *observed_owner_allocated_bytes.entry(owner_object_id).or_insert(0) += r.end - r.start;
-            if !scanned_owners.contains(&owner_object_id) {
-                let owner_exists = filesystem.object_manager().store(owner_object_id).is_some()
-                    || frozen_owners.contains_key(&owner_object_id)
-                    || data_owners.values().any(|owner| *owner == owner_object_id);
-                if !owner_exists {
+            if !store_object_ids.contains(&owner_object_id) {
+                if !known_stores.contains(&owner_object_id)
+                    && filesystem.object_manager().store(owner_object_id).is_none()
+                {
                     self.error(FsckError::AllocationForNonexistentOwner(allocation.into()))?;
                 }
                 stored_allocations.advance().await?;

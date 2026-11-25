@@ -31,17 +31,14 @@ a-create-leaves-its-directorys-times: a flag negated
 a-create-times-its-directory-on-the-guest: a flag forced true
 a-directory-moved-stays-counted: a count left at 0
 a-directory-replaced-may-have-names: a check taken out whole (NotEmpty)
-a-held-back-free-frees-what-is-frozen: a check taken out whole (frozen ranges)
 a-long-symlinks-chunks-are-listed: a prefix replaced by another
 a-queued-evict-leaves-the-object: a tombstone's queueing taken out whole
 a-queued-unlink-times-its-directory: one call for another: which removal keeps the directory's times is the batch's
-a-snapshot-holds-no-commits-back: a lock taken out whole: Fxfs's locks are a lock manager's keys, no field a rule can follow
 a-special-files-entry-says-file: a value (the descriptor)
 a-sync-holding-commits-records-reaches: a condition narrowed
 a-tombstone-leaves-a-trims-entry: a graveyard's removal taken out whole
 a-transaction-never-fills: a bound replaced by a huge value
 a-trim-goes-past-the-room: a bound replaced by a count
-a-volume-frees-what-its-snapshot-shares: a condition narrowed and a check taken out whole (frozen owners)
 allocate-ignores-the-room: a condition widened
 allocate-shrinks-to-its-end: a comparison changed
 an-xattr-made-replaces-one-there: a condition forced false

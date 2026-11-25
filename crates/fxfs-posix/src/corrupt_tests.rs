@@ -521,10 +521,8 @@ async fn map(device: &FakeDevice, barriers: bool) -> (Vec<Region>, Vec<Chain>, L
     let allocator = filesystem.allocator();
     let volumes = root_volume((*filesystem).clone()).await.expect("the root volume");
     let test = volumes.volume("test").await.expect("the volume");
-    let snapshot = volumes.volume("snapshot").await.expect("the snapshot");
-    let (test_id, snapshot_id) = (test.store_object_id(), snapshot.store_object_id());
-    let mut volume_layers = test.parent_objects();
-    volume_layers.extend(snapshot.parent_objects());
+    let test_id = test.store_object_id();
+    let volume_layers = test.parent_objects();
 
     let mut regions = Vec::new();
     let mut in_journal = Vec::new();
@@ -575,7 +573,7 @@ async fn map(device: &FakeDevice, barriers: bool) -> (Vec<Region>, Vec<Chain>, L
             Part::AllocatorLayer
         } else if volume_layers.contains(&object) {
             Part::VolumeLayer
-        } else if object == test_id || object == snapshot_id {
+        } else if object == test_id {
             Part::StoreInfo
         } else if root_layers.contains(&object) {
             Part::RootLayer
@@ -598,7 +596,7 @@ async fn map(device: &FakeDevice, barriers: bool) -> (Vec<Region>, Vec<Chain>, L
     for chain in &chains {
         assert!(!chain.blocks.is_empty(), "{chain:?} holds nothing checksummed");
     }
-    drop((test, snapshot, volumes, root_parent, root_store, allocator));
+    drop((test, volumes, root_parent, root_store, allocator));
     unmount(None, filesystem).await;
     (regions, chains, layers)
 }
@@ -638,11 +636,10 @@ impl Image {
         let root = volume.root_directory_object_id();
         let fs = Fxfs::new((*filesystem).clone(), volume, false, Tested);
 
-        // Layers of a few ages, a snapshot sharing the oldest, and a journal holding the youngest.
+        // Layers of a few ages and a journal holding the youngest.
         let journal = filesystem.journal();
         populate(&fs, root, 0).await;
         journal.force_compact().await.expect("compacting");
-        volumes.snapshot_volume("test", "snapshot").await.expect("the snapshot");
         populate(&fs, root, 1).await;
         journal.force_compact().await.expect("compacting");
         populate(&fs, root, 2).await;

@@ -4,8 +4,6 @@
 
 use crate::object_store::allocator::TEST_EXTENT;
 
-use storage_device::ExtentRange;
-
 use crate::errors::FxfsError;
 use crate::filesystem::{FxFilesystem, FxFilesystemBuilder, OpenFxFilesystem, SyncOptions};
 use crate::fsck::errors::{self, FsckError, FsckFatal, FsckIssue, FsckWarning};
@@ -267,12 +265,9 @@ async fn test_extra_allocation() {
             .expect("new_transaction failed");
         // cladefs: an allocation in an extent of its own.
         fs.allocator()
-            .mark_allocated(
-                &mut transaction,
-                4,
-                ExtentRange::new(TEST_EXTENT, 0..fs.block_size().get()),
-            )
-            .expect("mark_allocated failed");
+            .allocate(&mut transaction, 4, fs.block_size().get())
+            .await
+            .expect("allocate failed");
         transaction.commit().await.expect("commit failed");
     }
 

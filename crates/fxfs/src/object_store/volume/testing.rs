@@ -4,7 +4,7 @@
 
 //! cladefs's own, a child of volume.rs: the files and volumes tests of cladefs's volumes make.
 
-use super::{RootVolume, root_volume};
+use super::RootVolume;
 use crate::filesystem::{FxFilesystem, FxFilesystemBuilder, OpenFxFilesystem};
 use crate::object_handle::{ObjectHandle, ReadObjectHandle, WriteObjectHandle};
 use crate::object_store::directory::Directory;
@@ -85,14 +85,4 @@ pub(super) fn lazily(device: DeviceHolder) -> impl Future<Output = OpenFxFilesys
 pub(super) async fn open_store(filesystem: &FxFilesystem, root: &RootVolume, name: &str) -> bool {
     let (object_id, _) = root.volume_directory().lookup(name).await.unwrap().unwrap();
     filesystem.object_manager().store(object_id).is_some()
-}
-
-/// Deletes the volume `name`.
-pub(super) async fn delete_volume(fs: &Arc<FxFilesystem>, name: &str) {
-    let root = root_volume(fs.clone()).await.expect("root_volume failed");
-    let (_, transaction) = root
-        .acquire_transaction_for_remove_volume(name, [], false)
-        .await
-        .expect("acquire transaction failed");
-    root.delete_volume(name, transaction, || {}).await.expect("delete_volume failed");
 }

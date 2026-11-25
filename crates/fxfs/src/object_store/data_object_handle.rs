@@ -5,16 +5,15 @@
 // Fuchsia's `src/storage/fxfs/src/object_store/data_object_handle.rs`. cladefs's additions are
 // in child modules, impl blocks of their own, so that this file keeps upstream's shape
 // (TASK-160.24): `dax` (the extents a DAX window maps, backlog doc-13), `write_many` (the guest's
-// writeback), `reflink` and `in_commits` (clones and punches of however many extents), `tail`
-// (zeroing past a file's end), and `snapshot`. Data lives in extents of an extent store (backlog
-// doc-4), written copy-on-write; overwrite and preallocation modes are deleted (board 10600).
+// writeback), `reflink` and `in_commits` (clones and punches of however many extents), and `tail`
+// (zeroing past a file's end). Data lives in extents of an extent store (backlog doc-4), written
+// copy-on-write; overwrite and preallocation modes are deleted (board 10600).
 
 use crate::errors::FxfsError;
 use crate::log::*;
 use crate::object_handle::{
     LayerObject, ObjectHandle, ObjectProperties, ReadObjectHandle, WriteBytes, WriteObjectHandle,
 };
-use crate::object_store::extent_record::ExtentValue;
 use crate::object_store::object_manager::ObjectManager;
 use crate::object_store::object_record::{
     AttributeKey, ObjectAttributes, ObjectItem, ObjectKey, ObjectKind, ObjectValue, Timestamp,
@@ -45,13 +44,11 @@ use storage_units::BlockSize;
 mod dax;
 mod in_commits;
 mod reflink;
-mod snapshot;
 mod tail;
 #[cfg(test)]
 mod testing;
 mod write_many;
 pub use dax::ExtentAccess;
-pub use snapshot::FrozenPage;
 pub use write_many::FAIL_COMMITS;
 
 /// How much data each transaction will cover when writing an attribute across batches. Pulled from
@@ -137,35 +134,6 @@ impl<S: HandleOwner> DataObjectHandle<S> {
     /// Consumes the `DataObjectHandle` and returns the `StoreObjectHandle` that it contained.
     pub fn into_store_object_handle(self) -> StoreObjectHandle<S> {
         self.handle
-    }
-
-    /// Extend the file with the given extent.  The only use case for this right now is for files
-    /// that must exist at certain offsets on the device, such as super-blocks.
-    pub async fn extend<'a>(
-        &'a self,
-        transaction: &mut Transaction<'a>,
-        device_range: ExtentRange,
-    ) -> Result<(), Error> {
-        let old_end =
-            self.block_size().align_up(self.txn_get_size(transaction)).ok_or(FxfsError::TooBig)?;
-        let new_size = old_end + device_range.len();
-        self.store().allocator().mark_allocated(
-            transaction,
-            self.store().store_object_id(),
-            device_range.clone(),
-        )?;
-        self.txn_update_size(transaction, new_size).await?;
-        transaction.add(
-            self.store().store_object_id,
-            Mutation::merge_object(
-                ObjectKey::extent(self.object_id(), self.attribute_id(), old_end..new_size),
-                ObjectValue::Extent(ExtentValue::new_raw(
-                    device_range.extent,
-                    device_range.range.start,
-                )),
-            ),
-        );
-        self.update_allocated_size(transaction, device_range.len(), 0).await
     }
 
     // Returns a new aligned buffer (reading the head and tail blocks if necessary) with a copy of
@@ -769,7 +737,6 @@ mod tests {
     use crate::object_handle::{
         ObjectHandle, ObjectProperties, ReadObjectHandle, WriteObjectHandle,
     };
-    use crate::object_store::allocator::TEST_EXTENT;
     use crate::object_store::directory::replace_child;
     use crate::object_store::object_record::{ObjectKey, ObjectValue, Timestamp};
     use crate::object_store::transaction::{Mutation, Options, TRANSACTION_ROOM, lock_keys};
@@ -788,7 +755,6 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
     use storage_device::DeviceHolder;
-    use storage_device::ExtentRange;
     use storage_device::fake_device::FakeDevice;
 
     pub(super) const TEST_DEVICE_BLOCK_SIZE: u32 = 512;
@@ -1252,36 +1218,6 @@ mod tests {
         let empty = object.read_bytes(100..100).await.expect("read_bytes failed");
         assert!(empty.is_empty());
 
-        fs.close().await.expect("Close failed");
-    }
-
-    #[fuchsia_async::run_singlethreaded(test)]
-    async fn test_extend() {
-        let fs = test_filesystem().await;
-        let handle;
-        let mut transaction = fs
-            .root_store()
-            .new_transaction(lock_keys![], Options::default())
-            .await
-            .expect("new_transaction failed");
-        let store = fs.root_store();
-        handle = ObjectStore::create_object(&store, &mut transaction, HandleOptions::default())
-            .await
-            .expect("create_object failed");
-
-        // cladefs: an extent no allocator mints, which upstream's 'magic' starting point on the
-        // device was the equivalent of.
-        handle
-            .extend(&mut transaction, ExtentRange::new(TEST_EXTENT, 0..5 * fs.block_size()))
-            .await
-            .expect("extend failed");
-        transaction.commit().await.expect("commit failed");
-        let mut buf = handle.allocate_buffer(5 * fs.block_size().get() as usize).await;
-        buf.fill(123);
-        handle.write_or_append(Some(0), buf.as_ref()).await.expect("write failed");
-        buf.fill(67);
-        handle.read_aligned(0, buf.as_mut()).await.expect("read failed");
-        assert_eq!(buf.to_vec(), vec![123; 5 * fs.block_size().get() as usize]);
         fs.close().await.expect("Close failed");
     }
 
@@ -1786,14 +1722,14 @@ mod tests {
             after
         );
 
-        // extend...
-        let mut transaction = object.new_transaction().await.expect("new_transaction failed");
+        // write a new block past the initial test extent at TEST_DATA_OFFSET (block 1)...
         let before = after;
+        let mut block = object.allocate_buffer(fs.block_size().get() as usize).await;
+        block.fill(0xab);
         object
-            .extend(&mut transaction, ExtentRange::new(TEST_EXTENT, 0..fs.block_size().get()))
+            .write_or_append(Some(fs.block_size().get() * 2), block.as_ref())
             .await
-            .expect("extend failed");
-        transaction.commit().await.expect("commit failed");
+            .expect("write failed");
         let after = object.get_properties().await.expect("get_properties failed").allocated_size;
         assert_eq!(after, before + fs.block_size());
 

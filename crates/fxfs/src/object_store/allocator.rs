@@ -792,9 +792,6 @@ struct Inner {
     /// cladefs: the ranges of shared extents that allocations which dropped took, with their owners,
     /// which the journal doesn't yet record (`record_reaches`, TASK-213).
     unrecorded_reaches: Vec<(ExtentRange, u64)>,
-
-    /// Tracks the number of allocations of size 1,2,...63,>=64.
-    allocation_size_histogram: [u64; 64],
 }
 
 impl Inner {
@@ -815,20 +812,6 @@ impl Inner {
             + self.unattributed_reserved_bytes
     }
 
-    /// cladefs: whether `range`'s extent is a frozen owner's, shared with stores a snapshot made.
-    fn is_frozen(&self, range: &ExtentRange) -> bool {
-        self.extents
-            .owner(range.extent)
-            .is_some_and(|owner| self.info.frozen_owners.contains_key(&owner))
-    }
-
-    /// cladefs: the owner that allocations for `owner_object_id`, a store or another owner, are
-    /// recorded and counted under: a store's current data owner, which a snapshot changes, and
-    /// otherwise the owner itself.
-    fn data_owner(&self, owner_object_id: u64) -> u64 {
-        *self.info.data_owners.get(&owner_object_id).unwrap_or(&owner_object_id)
-    }
-
     // Returns the amount that is not available to be allocated: the extents alive, whole, those
     // allocated for transactions that haven't committed yet, and those that died but which the
     // device hasn't been flushed for, so can't be freed yet.
@@ -844,10 +827,7 @@ impl Inner {
 
     fn add_reservation(&mut self, owner_object_id: Option<u64>, amount: u64) {
         match owner_object_id {
-            Some(owner) => {
-                let owner = self.data_owner(owner);
-                self.owner_bytes.entry(owner).or_default().reserved_bytes += amount
-            }
+            Some(owner) => self.owner_bytes.entry(owner).or_default().reserved_bytes += amount,
             None => self.unattributed_reserved_bytes += amount,
         };
     }
@@ -855,7 +835,6 @@ impl Inner {
     fn remove_reservation(&mut self, owner_object_id: Option<u64>, amount: u64) {
         match owner_object_id {
             Some(owner) => {
-                let owner = self.data_owner(owner);
                 let owner_entry = self.owner_bytes.entry(owner).or_default();
                 assert!(
                     owner_entry.reserved_bytes >= amount,
@@ -877,8 +856,8 @@ impl Inner {
         };
     }
 
-    /// cladefs: commits the allocation of `range` for `owner_object_id`, a data owner, as a
-    /// transaction applied in `context` does, and returns its record (`ExtentTable::commit`).
+    /// cladefs: commits the allocation of `range` for `owner_object_id` as a transaction applied
+    /// in `context` does, and returns its record (`ExtentTable::commit`).
     fn commit(
         &mut self,
         range: &ExtentRange,
@@ -890,7 +869,7 @@ impl Inner {
         let bytes = self.owner_bytes.entry(owner_object_id).or_default();
         bytes.allocated_bytes += len;
         // Live, the bytes were counted as uncommitted, and held by the transaction's reservation if
-        // it has one, since it allocated them (`allocate_in`, `mark_allocated`).
+        // it has one, since it allocated them (`allocate_in`).
         if let ApplyMode::Live(transaction) = context.mode {
             bytes.uncommitted_allocated_bytes -= len;
             if let Some(reservation) = transaction.allocator_reservation {
@@ -960,7 +939,6 @@ impl Allocator {
                 extents: ExtentTable::default(),
                 base_cells: HashSet::new(),
                 unrecorded_reaches: Vec::new(),
-                allocation_size_histogram: [0; 64],
             }),
             freeing: futures::lock::Mutex::new(None),
         }
@@ -981,13 +959,6 @@ impl Allocator {
         let iter =
             filter_marked_for_deletion(filter_tombstones(iter).await?, marked_for_deletion).await?;
         Ok(iter)
-    }
-
-    /// A histogram of allocation request sizes.
-    /// The index into the array is 'number of blocks'.
-    /// The last bucket is a catch-all for larger allocation requests.
-    pub fn allocation_size_histogram(&self) -> [u64; 64] {
-        self.inner.lock().allocation_size_histogram
     }
 
     /// Creates a new (empty) allocator.
@@ -1038,6 +1009,15 @@ impl Allocator {
                 (EARLIEST_SUPPORTED_VERSION..=LATEST_VERSION).contains(&version),
                 anyhow!(FxfsError::InvalidVersion)
                     .context(format!("Unsupported AllocatorInfo version: {version:?}"))
+            );
+            // cladefs: per-volume snapshots are retired (board 11695); v66 fields stay on-disk for
+            // passive compatibility, but non-empty snapshot maps are refused cleanly.
+            ensure!(
+                info.frozen_owners.is_empty()
+                    && info.shared_owners.is_empty()
+                    && info.data_owners.is_empty(),
+                anyhow!(FxfsError::NotSupported)
+                    .context("volume snapshot allocator metadata is not supported")
             );
 
             let (layers, total_size) = open_layers(&root_store, info.layers.iter().cloned())
@@ -1401,8 +1381,7 @@ impl Allocator {
             // We must take care not to use up space that might be reserved.
             let limit = self.device_size().saturating_sub(device_used);
             len = self.block_size.align_down(std::cmp::min(len, limit));
-            let data_owner = inner.data_owner(owner_object_id);
-            let owner_entry = inner.owner_bytes.entry(data_owner).or_default();
+            let owner_entry = inner.owner_bytes.entry(owner_object_id).or_default();
             owner_entry.reserved_bytes += len;
             Right(ReservationImpl::<_, Self>::new(&**self, Some(owner_object_id), len))
         };
@@ -1473,16 +1452,15 @@ impl Allocator {
         let device = self.filesystem.upgrade().unwrap().device();
         let result = {
             let mut inner = self.inner.lock();
-            inner.allocation_size_histogram[std::cmp::min(63, len / self.block_size) as usize] += 1;
-            let data_owner = inner.data_owner(owner_object_id);
             let result = if shared {
-                let (range, records) = inner.extents.stage(self.cell(), data_owner, len, &*device);
+                let (range, records) =
+                    inner.extents.stage(self.cell(), owner_object_id, len, &*device);
                 self.record(records);
                 range
             } else {
                 ExtentRange::new(inner.extents.mint(self.cell(), &*device), 0..len)
             };
-            let owner_entry = inner.owner_bytes.entry(data_owner).or_default();
+            let owner_entry = inner.owner_bytes.entry(owner_object_id).or_default();
             owner_entry.uncommitted_allocated_bytes += len;
             // If the reservation has an owner, ensure they are the same.
             assert_eq!(owner_object_id, reservation_owner.unwrap_or(owner_object_id));
@@ -1496,61 +1474,6 @@ impl Allocator {
         assert!(transaction.add(self.object_id(), Mutation::Allocator(mutation)).is_none());
 
         Ok(result)
-    }
-
-    /// Marks the given range as allocated, in an extent no allocator mints.  The main use case
-    /// for this at this time is for the super-block which needs to be at a fixed location.
-    pub fn mark_allocated(
-        &self,
-        transaction: &mut Transaction<'_>,
-        owner_object_id: u64,
-        device_range: ExtentRange,
-    ) -> Result<(), Error> {
-        debug_assert_ne!(owner_object_id, INVALID_OBJECT_ID);
-        {
-            let len = device_range.range.length().map_err(|_| FxfsError::InvalidArgs)?;
-            // cladefs: an empty range allocates nothing. The extent table refuses to commit one, as
-            // inconsistent, which is fatal once the transaction applies: it is refused here, as a
-            // malformed range is, before anything is journaled.
-            ensure!(len > 0, FxfsError::InvalidArgs);
-
-            let system_bytes = self.system_bytes();
-            let mut inner = self.inner.lock();
-            let device_used = inner.used_bytes() + system_bytes;
-            let data_owner = inner.data_owner(owner_object_id);
-            ensure!(
-                device_range.extent.cell == 0
-                    && !inner.extents.is_alive(device_range.extent)
-                    && self.device_size().saturating_sub(device_used) >= len,
-                anyhow!(FxfsError::NoSpace).context(format!(
-                    "Failed to allocate {} bytes at {:?} for owner {} (device_used: {}, \
-                    device_size: {})",
-                    len,
-                    device_range,
-                    owner_object_id,
-                    device_used,
-                    self.device_size()
-                ))
-            );
-            if let Some(reservation) = &mut transaction.allocator_reservation {
-                // The transaction takes ownership of this hold.
-                reservation
-                    .reserve(len)
-                    .ok_or_else(|| {
-                        anyhow!(FxfsError::NoSpace).context(format!(
-                            "Failed to reserve {} bytes at {:?} from {}",
-                            len,
-                            device_range,
-                            self.reservation_description(reservation),
-                        ))
-                    })?
-                    .forget();
-            }
-            inner.owner_bytes.entry(data_owner).or_default().uncommitted_allocated_bytes += len;
-        }
-        let mutation = AllocatorMutation::Allocate { device_range, owner_object_id };
-        transaction.add(self.object_id(), Mutation::Allocator(mutation));
-        Ok(())
     }
 
     /// cladefs: whether dropped shared-extent allocations have unrecorded reaches that must be
@@ -1610,9 +1533,8 @@ impl Allocator {
     ) -> Result<u64, Error> {
         debug!(device_range:? = dealloc_range; "deallocate");
         ensure!(dealloc_range.range.is_valid(), FxfsError::InvalidArgs);
-        // cladefs: the extents frozen owners hold are shared by stores a snapshot made (see
-        // `snapshot`), and stay allocated, and a base's are not held here at all; only the rest are
-        // the store's to deallocate. Of those, the parts referenced more than once lose a reference
+        // cladefs: a base's extents are not held here at all; only the store's own are
+        // deallocated. Of those, the parts referenced more than once lose a reference
         // (see "References").
         let deallocated = dealloc_range.len();
         if !self.is_held_beyond_the_store(&dealloc_range) {
@@ -1630,11 +1552,9 @@ impl Allocator {
         Ok(deallocated)
     }
 
-    /// cladefs: whether `range`'s extent is more than its store's to deallocate: a frozen owner's, or
-    /// a base's (backlog doc-10).
+    /// cladefs: whether `range`'s extent is a base's, not held by this allocator (backlog doc-10).
     fn is_held_beyond_the_store(&self, range: &ExtentRange) -> bool {
         self.inner.lock().base_cells.contains(&range.extent.cell)
-            || self.frozen_owner(range).is_some()
     }
 
     /// cladefs: notes that a store opened has a base whose extents are in `cells`.
@@ -1666,25 +1586,8 @@ impl Allocator {
         cells.into_iter().collect()
     }
 
-    /// cladefs: the frozen owner holding `range`'s extent, if one does.
-    fn frozen_owner(&self, range: &ExtentRange) -> Option<u64> {
-        let inner = self.inner.lock();
-        let owner = inner.extents.owner(range.extent)?;
-        inner.info.frozen_owners.contains_key(&owner).then_some(owner)
-    }
-
-    /// cladefs: the parts of `range` that frozen owners hold, in order, with their owners. Their
-    /// data does not change while their owners are frozen.
-    pub async fn frozen_ranges(
-        &self,
-        range: ExtentRange,
-    ) -> Result<Vec<(ExtentRange, u64)>, Error> {
-        Ok(self.frozen_owner(&range).map(|owner| (range, owner)).into_iter().collect())
-    }
-
     /// cladefs: whether `range` is shared, and must not be overwritten in place: its extent is a
-    /// frozen owner's, shared with other stores, or a base's, or some of it is referenced more than
-    /// once (see "References").
+    /// base's, or some of it is referenced more than once (see "References").
     pub async fn is_shared(&self, range: ExtentRange) -> Result<bool, Error> {
         if self.is_held_beyond_the_store(&range) {
             return Ok(true);
@@ -1694,7 +1597,6 @@ impl Allocator {
 
     /// cladefs: references `range`, which `owner_object_id`'s store has allocated, once more: for
     /// another extent of a file to share it (a reflink, `DataObjectHandle::txn_clone_range`). A
-    /// frozen owner's range is shared already, and stays allocated while the store does, and a
     /// base's is never freed.
     pub fn reference(
         &self,
@@ -1705,53 +1607,6 @@ impl Allocator {
         if !self.is_held_beyond_the_store(&range) {
             transaction.add_reference(self.object_id(), range, owner_object_id, 1);
         }
-    }
-
-    /// cladefs: snapshots the store `source_store_object_id` into the new store
-    /// `new_store_object_id`, which shares all of the source's extents. The source's current data
-    /// owner is frozen: both stores share its extents, which neither deallocates, until no store
-    /// shares them. From then on, the source allocates under `new_owner_object_id`, which must be
-    /// an object id never used as an owner.
-    pub fn snapshot(
-        &self,
-        transaction: &mut Transaction<'_>,
-        source_store_object_id: u64,
-        new_store_object_id: u64,
-        new_owner_object_id: u64,
-    ) {
-        transaction.add(
-            self.object_id(),
-            Mutation::Allocator(AllocatorMutation::Snapshot {
-                source_store_object_id,
-                new_store_object_id,
-                new_owner_object_id,
-            }),
-        );
-    }
-
-    /// cladefs: the owner the store `store_object_id` allocates under.
-    pub fn data_owner(&self, store_object_id: u64) -> u64 {
-        self.inner.lock().data_owner(store_object_id)
-    }
-
-    /// cladefs: the frozen owners whose extents the store `store_object_id` shares.
-    pub fn shared_owners(&self, store_object_id: u64) -> Vec<u64> {
-        self.inner.lock().info.shared_owners.get(&store_object_id).cloned().unwrap_or_default()
-    }
-
-    /// cladefs: whether any owner is frozen.
-    pub fn has_frozen_owners(&self) -> bool {
-        !self.inner.lock().info.frozen_owners.is_empty()
-    }
-
-    /// cladefs: the frozen owners, with the number of stores sharing their extents.
-    pub fn frozen_owners(&self) -> BTreeMap<u64, u64> {
-        self.inner.lock().info.frozen_owners.clone()
-    }
-
-    /// cladefs: the current data owners of the stores snapshots gave new ones, by store object id.
-    pub fn data_owners(&self) -> BTreeMap<u64, u64> {
-        self.inner.lock().info.data_owners.clone()
     }
 
     /// cladefs: the sequence numbers of this allocator's cell the mount sought orphans among, for
@@ -2066,83 +1921,25 @@ impl JournalingObject for Allocator {
         match mutation {
             Mutation::Allocator(AllocatorMutation::MarkForDeletion(owner_object_id)) => {
                 let mut inner = self.inner.lock();
-                // cladefs: a store's extents are its current data owner's, and those of the frozen
-                // owners it shares, which are deleted once no store shares them.
-                let mut owners = vec![inner.data_owner(owner_object_id)];
-                inner.info.data_owners.remove(&owner_object_id);
-                let shared = inner.info.shared_owners.remove(&owner_object_id).unwrap_or_default();
-                for frozen_owner in shared {
-                    if let Some(sharers) = inner.info.frozen_owners.get_mut(&frozen_owner) {
-                        *sharers = sharers.saturating_sub(1);
-                        if *sharers == 0 {
-                            inner.info.frozen_owners.remove(&frozen_owner);
-                            owners.push(frozen_owner);
-                        }
-                    }
-                }
-
-                for owner in &owners {
-                    inner.owner_bytes.remove(owner);
-                    // The owner's allocations are ignored from now on, and filtered out of the
-                    // tree by a compaction once its extents are freed.
-                    inner.info.marked_for_deletion.insert(*owner);
-                }
-                inner.extents.kill_owners(&owners, Applied::of(context));
+                inner.owner_bytes.remove(&owner_object_id);
+                // The owner's allocations are ignored from now on, and filtered out of the
+                // tree by a compaction once its extents are freed.
+                inner.info.marked_for_deletion.insert(owner_object_id);
+                inner.extents.kill_owners(&[owner_object_id], Applied::of(context));
             }
-            Mutation::Allocator(AllocatorMutation::Snapshot {
-                source_store_object_id,
-                new_store_object_id,
-                new_owner_object_id,
-            }) => {
-                // The new owner is an object id of the root store's: none may use it again.
-                if context.mode.is_replay()
-                    && let Some(filesystem) = self.filesystem.upgrade()
-                {
-                    filesystem.root_store().update_last_object_id(new_owner_object_id);
-                }
-                let mut inner = self.inner.lock();
-                // The source's extents so far are frozen, and shared by both stores, with those the
-                // source already shared.
-                let frozen_owner = inner.data_owner(source_store_object_id);
-                let mut shared = inner
-                    .info
-                    .shared_owners
-                    .get(&source_store_object_id)
-                    .cloned()
-                    .unwrap_or_default();
-                for owner in &shared {
-                    *inner.info.frozen_owners.entry(*owner).or_default() += 1;
-                }
-                *inner.info.frozen_owners.entry(frozen_owner).or_default() += 2;
-                shared.push(frozen_owner);
-                inner.info.shared_owners.insert(source_store_object_id, shared.clone());
-                inner.info.shared_owners.insert(new_store_object_id, shared);
-                inner.info.data_owners.insert(source_store_object_id, new_owner_object_id);
-                // What the source has reserved, or allocated in transactions not yet committed, is
-                // counted under its new owner from now on.
-                if let Some(frozen) = inner.owner_bytes.get_mut(&frozen_owner) {
-                    let reserved = std::mem::take(&mut frozen.reserved_bytes);
-                    let uncommitted = std::mem::take(&mut frozen.uncommitted_allocated_bytes);
-                    let owner = inner.owner_bytes.entry(new_owner_object_id).or_default();
-                    owner.reserved_bytes += reserved;
-                    owner.uncommitted_allocated_bytes += uncommitted;
-                }
+            Mutation::Allocator(AllocatorMutation::Snapshot { .. }) => {
+                bail!(
+                    anyhow!(FxfsError::NotSupported)
+                        .context("AllocatorMutation::Snapshot is not supported")
+                );
             }
             Mutation::Allocator(AllocatorMutation::Allocate { device_range, owner_object_id }) => {
-                // The allocation is the store's current data owner's.
                 let mut inner = self.inner.lock();
-                let data_owner = inner.data_owner(owner_object_id);
-                let records = inner.commit(&device_range, data_owner, context)?;
+                let records = inner.commit(&device_range, owner_object_id, context)?;
                 self.record(records);
             }
             Mutation::Allocator(AllocatorMutation::Reference { device_range, delta, .. }) => {
                 let mut inner = self.inner.lock();
-                // cladefs: of a transaction built before a snapshot froze the extent's owner and
-                // committed after it, which `reference` and `deallocate` would have left out: a
-                // frozen owner's extents are shared whole (TASK-241).
-                if inner.is_frozen(&device_range) {
-                    return Ok(());
-                }
                 let records = inner.recount(&device_range, delta, context)?;
                 self.record(records);
             }
@@ -2152,15 +1949,6 @@ impl JournalingObject for Allocator {
             }
             Mutation::Allocator(AllocatorMutation::Deallocate { device_range, .. }) => {
                 let mut inner = self.inner.lock();
-                // `deallocate` leaves out the extents frozen owners hold, so the extent is the
-                // store's current data owner's. cladefs: but for a transaction built before a
-                // snapshot froze its owner and committed after it, held back from the snapshot's
-                // flush: left out here, the extent shared with the snapshot (TASK-241). The parts
-                // referenced more than once lose a reference; the rest are deallocated (see
-                // "References").
-                if inner.is_frozen(&device_range) {
-                    return Ok(());
-                }
                 let records = inner.recount(&device_range, -1, context)?;
                 self.record(records);
             }
@@ -2185,8 +1973,8 @@ impl JournalingObject for Allocator {
         {
             let len = device_range.len();
             let mut inner = self.inner.lock();
-            let data_owner = inner.data_owner(owner_object_id);
-            inner.owner_bytes.entry(data_owner).or_default().uncommitted_allocated_bytes -= len;
+            inner.owner_bytes.entry(owner_object_id).or_default().uncommitted_allocated_bytes -=
+                len;
             // cladefs: the extent's data may have been written: it dies, unless a shared extent's
             // other allocations keep it, which then takes the range, as one allocated
             // (`ExtentTable::drop_allocation`). What it takes is the reservation's, as a commit
@@ -2195,9 +1983,9 @@ impl JournalingObject for Allocator {
             // filesystem had held (TASK-211).
             let Dropped { records, kept } =
                 if transaction.sealed_extent == Some(device_range.extent) {
-                    inner.extents.drop_sealed_allocation(&device_range, data_owner)
+                    inner.extents.drop_sealed_allocation(&device_range, owner_object_id)
                 } else {
-                    inner.extents.drop_allocation(&device_range, data_owner)
+                    inner.extents.drop_allocation(&device_range, owner_object_id)
                 };
             if let Some(reservation) = transaction.allocator_reservation {
                 let res_owner = reservation.owner_object_id();
@@ -3169,7 +2957,7 @@ mod tests {
     /// cladefs: a transaction that is dropped kills the extents it allocated, which are never minted
     /// again.
     #[fuchsia_async::run_singlethreaded(test)]
-    async fn test_mark_allocated() {
+    async fn test_dropped_transaction_kills_extents() {
         const STORE_OBJECT_ID: u64 = 99;
         let (fs, allocator) = test_fs().await;
         let mut device_ranges = collect_allocations(&allocator).await;
@@ -3202,35 +2990,7 @@ mod tests {
                 .expect("allocate failed"),
         );
         assert!(device_ranges.last().unwrap().extent > range.extent);
-
-        // Mark an extent no allocator mints as allocated.
-        let marked = ExtentRange::new(TEST_EXTENT, 0..fs.block_size().get());
-        allocator
-            .mark_allocated(&mut transaction, STORE_OBJECT_ID, marked.clone())
-            .expect("mark_allocated failed");
-        device_ranges.push(marked.clone());
-        // An extent allocators mint can't be.
-        let minted = ExtentRange::new(range.extent, 0..fs.block_size().get());
-        allocator
-            .mark_allocated(&mut transaction, STORE_OBJECT_ID, minted)
-            .expect_err("marked a minted extent allocated");
-        // Nor can an empty range.
-        let empty = ExtentRange::new(ExtentId::new(0, TEST_EXTENT.sequence + 1), 0..0);
-        let refused = allocator
-            .mark_allocated(&mut transaction, STORE_OBJECT_ID, empty)
-            .expect_err("marked an empty range allocated");
-        assert!(crate::errors::FxfsError::InvalidArgs.matches(&refused), "{refused:?}");
         transaction.commit().await.expect("commit failed");
-
-        // Nor can an extent that is allocated.
-        let mut transaction = fs
-            .root_store()
-            .new_transaction(lock_keys![], Options::default())
-            .await
-            .expect("new failed");
-        allocator
-            .mark_allocated(&mut transaction, STORE_OBJECT_ID, marked)
-            .expect_err("marked an allocated extent allocated");
 
         check_allocations(&allocator, &device_ranges).await;
     }
