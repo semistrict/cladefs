@@ -172,9 +172,10 @@ async fn mount_ephemeral_cell(
 ) -> Result<Filesystem, Error> {
     let keeping = crate::cladefsd::cells::mount_keeping(daemon).map_err(Error::from)?;
     let storage = Storage::open_on_keeping(&daemon.host, path, keeping).await?;
-    Filesystem::mount(storage)
-        .await
-        .map_err(|err| err.context(format!("mounting {}", path.display())))
+    let mut options = crate::Options::new();
+    #[cfg(not(madsim))]
+    options.runtime(daemon.runtime().handle().clone());
+    options.mount(storage).await.map_err(|err| err.context(format!("mounting {}", path.display())))
 }
 
 /// Takes a cell's filesystem, the cell `of` says, into a cell directory at `path` in the bucket at
@@ -204,14 +205,21 @@ async fn mount_cell(
     let storage =
         Storage::take_on_keeping(&daemon.host, path, (of, capacity), url, token, keeping).await?;
     let mounting = async {
+        let mut options = crate::Options::new();
+        #[cfg(not(madsim))]
+        options.runtime(daemon.runtime().handle().clone());
         if !new {
-            return Filesystem::mount(storage).await;
+            return options.mount(storage).await;
         }
-        let fs = Filesystem::format(storage).await?;
+        let fs = options.format(storage).await?;
         // SAFETY: Plain calls returning the process's IDs.
         let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
         let owner = SetAttr { uid: Some(uid), gid: Some(gid), ..SetAttr::default() };
-        fs.root().setattr(&owner).await?;
+        if let Err(err) = fs.root().setattr(&owner).await {
+            // Return the original setattr error; unmount asynchronously rather than hitting Drop.
+            let _ = fs.unmount().await;
+            return Err(err.into());
+        }
         Ok(fs)
     };
     mounting.await.map_err(|err| err.context(format!("mounting {}", path.display())))

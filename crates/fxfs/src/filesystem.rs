@@ -387,7 +387,6 @@ impl FxFilesystemBuilder {
             commit_mutex: futures::lock::Mutex::new(()),
             lock_manager: LockManager::new(),
             flush_task: Mutex::new(None),
-            background_tasks: fasync::Scope::new(),
             closed: AtomicBool::new(true),
             tree_cache_budget: TreeCacheBudget::new(filesystem_options.object_cache_items),
             graveyard: Graveyard::new(objects.clone(), filesystem_options.graveyard_batch_delay),
@@ -495,7 +494,6 @@ pub struct FxFilesystem {
     commit_mutex: futures::lock::Mutex<()>,
     lock_manager: LockManager,
     flush_task: Mutex<Option<fasync::Task<()>>>,
-    background_tasks: fasync::Scope,
     closed: AtomicBool,
     graveyard: Arc<Graveyard>,
     /// cladefs: what the caches of its stores' records share (`Options::object_cache_items`).
@@ -530,7 +528,6 @@ impl FxFilesystem {
     pub async fn close(&self) -> Result<(), Error> {
         assert_eq!(self.closed.swap(true, Ordering::SeqCst), false);
         debug_assert_not_too_long!(self.graveyard.wait_for_reap());
-        debug_assert_not_too_long!(self.background_tasks.clone().cancel());
         // cladefs: what dropped allocations left in shared extents, which the next mount counts.
         // Do not return early on failure: close must still flush the journal, terminate the flush
         // task, and close the device (TASK-623, board 2644).
@@ -646,10 +643,6 @@ impl FxFilesystem {
     /// cladefs: a new cache of a store's records.
     pub fn new_tree_cache(&self) -> TreeCache {
         TreeCache::sharing(&self.tree_cache_budget)
-    }
-
-    pub fn scope(&self) -> &fasync::Scope {
-        &self.background_tasks
     }
 
     /// Returns a guard that must be taken before any transaction can commence.  This guard takes a

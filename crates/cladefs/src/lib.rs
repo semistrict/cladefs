@@ -127,7 +127,6 @@ mod dax;
 mod ephemeral_host;
 mod error;
 mod evidence;
-mod executor;
 pub mod faults;
 mod filesystem;
 pub mod fuse;
