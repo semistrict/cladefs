@@ -29,7 +29,7 @@
 //! - **Writers are throttled**, not refused, past [`Options::hard`] dirty: they wait for
 //!   write-back, as `balance_dirty_pages` has them. cladefs: a file whose write-back is failing,
 //!   as a full or broken disk fails it, holds its dirty pages, which no wait writes back: they
-//!   are left out of what other files' writers wait on ([`PageCache::throttle`]), and the writers
+//!   are left out of what other files' writers wait on ([`PageCache::throttle_for`]), and the writers
 //!   held at the bound of it, or of any file of its disk, get its failure, never another disk's
 //!   (board 8553): so that what is stuck grows past the bound by a bound's worth a disk at most.
 //! - **A sync** ([`Cached::sync`]) writes back what was dirty as it began, waits for every write of
@@ -128,7 +128,7 @@ pub struct Usage {
     /// The most bytes dirty at once so far.
     pub peak_dirty: u64,
     /// cladefs: the writers held back so far, past [`Options::hard`] dirty, waiting for write-back
-    /// ([`PageCache::throttle`]): flush stalls (board 8565).
+    /// ([`PageCache::throttle_for`]): flush stalls (board 8565).
     pub stalls: u64,
     /// cladefs: how long those writers were held, their nanoseconds together.
     pub stalled_ns: u64,
@@ -159,8 +159,9 @@ impl DiskKey {
     }
 }
 
-/// Per-`HostDisk` flusher wakeup state and write-behind queue, so each physical JBOD disk flushes
-/// concurrently without one slow or stalled disk blocking write-back on other disks.
+/// Per-`HostDisk` flusher wakeup state, write-behind queue, and per-disk dirty/stuck page counts,
+/// so each physical JBOD disk flushes and throttles independently without one slow or stalled disk
+/// blocking write-back or exhausting the dirty-page budget for healthy disks (board 11939).
 #[derive(Default)]
 struct DiskFlusher {
     /// The ranges of files on this disk writers asked to be written back, waiting for none of it,
@@ -169,6 +170,16 @@ struct DiskFlusher {
     /// Wakes this disk's flusher.
     flush: Condvar,
     flushing: Mutex<bool>,
+    /// Bytes currently dirty on this disk.
+    dirty: AtomicU64,
+    /// Of `dirty`, bytes held by files whose write-back is failing.
+    stuck: AtomicU64,
+    /// Live [`Shared`] files currently bound to this disk; `0 -> 1` and `1 -> 0` transitions
+    /// maintain [`PageCache::active_disks`] so only disks with open files share the dirty budget.
+    open_files: AtomicU64,
+    /// Writers currently waiting in [`PageCache::throttle_for`] on this disk.
+    #[cfg(test)]
+    waiters: AtomicU64,
     /// Weak handle to the virtual [`HostDisk`] when `DiskKey::Virtual`, so its flusher exits once
     /// the disk is dropped rather than leaking threads.
     #[cfg(not(madsim))]
@@ -213,6 +224,9 @@ pub struct PageCache {
     files: Mutex<Vec<Weak<dyn Paged>>>,
     /// Per-disk flushers, keyed by [`DiskKey`].
     flushers: Mutex<HashMap<DiskKey, Arc<DiskFlusher>>>,
+    /// Number of disks (including [`DiskKey::Default`]) with at least one open file, used lock-free
+    /// to divide `background` and `hard` into per-disk dirty budgets (board 11939).
+    active_disks: AtomicU64,
     /// Wakes writers held back.
     drained: Condvar,
     /// What writers held back wait on `drained` with.
@@ -243,7 +257,7 @@ impl PageCache {
         #[cfg(not(madsim))]
         {
             let cache = Self::made(options, true);
-            cache.ensure_flusher(DiskKey::Default, None);
+            cache.ensure_flusher(DiskKey::Default, None, false);
             cache
         }
         // cladefs: under madsim, which runs one thread, no flusher to wait for: writers past the
@@ -291,6 +305,7 @@ impl PageCache {
             uses: AtomicU64::new(0),
             files: Mutex::default(),
             flushers: Mutex::default(),
+            active_disks: AtomicU64::new(0),
             drained: Condvar::new(),
             holding: Mutex::new(()),
             stuck: AtomicU64::new(0),
@@ -299,31 +314,47 @@ impl PageCache {
         })
     }
 
-    /// Ensures a flusher thread exists for `disk_key` (outside `madsim`, when `self.flusher` is
-    /// true).
-    #[cfg(not(madsim))]
+    /// Ensures a [`DiskFlusher`] exists for `disk_key` (spawning its flusher thread outside
+    /// `madsim` when `self.flusher` is true) and returns it. When `bind_file` is true, increments
+    /// `open_files` under the `flushers` lock and updates [`PageCache::active_disks`] on `0 -> 1`.
     fn ensure_flusher(
         self: &Arc<Self>,
         disk_key: DiskKey,
         disk: Option<&Arc<bucket_cell::host_disk::HostDisk>>,
-    ) {
+        bind_file: bool,
+    ) -> Arc<DiskFlusher> {
         let mut flushers = self.flushers.lock().unwrap();
         if let Some(existing) = flushers.get(&disk_key) {
+            #[cfg(not(madsim))]
             let stale_virtual = matches!(disk_key, DiskKey::Virtual(_))
                 && existing.disk.as_ref().is_some_and(|w| w.strong_count() == 0);
+            #[cfg(madsim)]
+            let stale_virtual = false;
             if !stale_virtual {
-                return;
+                let flusher = existing.clone();
+                if bind_file && flusher.open_files.fetch_add(1, Ordering::AcqRel) == 0 {
+                    self.active_disks.fetch_add(1, Ordering::AcqRel);
+                }
+                return flusher;
             }
             existing.wake();
         }
         let flusher = Arc::new(DiskFlusher {
+            open_files: AtomicU64::new(u64::from(bind_file)),
+            #[cfg(not(madsim))]
             disk: matches!(disk_key, DiskKey::Virtual(_))
                 .then(|| disk.map(Arc::downgrade))
                 .flatten(),
             ..DiskFlusher::default()
         });
+        #[cfg(madsim)]
+        let _ = disk;
         flushers.insert(disk_key, flusher.clone());
+        if bind_file {
+            self.active_disks.fetch_add(1, Ordering::AcqRel);
+        }
         drop(flushers);
+        #[cfg(not(madsim))]
         if self.flusher {
             let weak = Arc::downgrade(self);
             let name = match disk_key {
@@ -331,11 +362,13 @@ impl PageCache {
                 DiskKey::Device(dev) => format!("store flusher dev-{dev:x}"),
                 DiskKey::Virtual(ptr) => format!("store flusher v-{ptr:x}"),
             };
+            let thread_flusher = flusher.clone();
             std::thread::Builder::new()
                 .name(name)
-                .spawn(move || flush_disk_while(weak, disk_key, flusher))
+                .spawn(move || flush_disk_while(weak, disk_key, thread_flusher))
                 .expect("starting the page cache's flusher");
         }
+        flusher
     }
 
     /// What it holds.
@@ -386,6 +419,20 @@ impl PageCache {
 
     fn hard(&self) -> u64 {
         self.hard.load(Ordering::Relaxed)
+    }
+
+    /// Per-disk background flush threshold: divides [`PageCache::background`] across active disks
+    /// (board 11939).
+    fn disk_background(&self) -> u64 {
+        let disks = self.active_disks.load(Ordering::Acquire).max(1);
+        self.background() / disks
+    }
+
+    /// Per-disk dirty hard ceiling: divides [`PageCache::hard`] across active disks so one slow or
+    /// stalled disk cannot exhaust the dirty-page budget for writers on healthy disks (board 11939).
+    fn disk_hard(&self) -> u64 {
+        let disks = self.active_disks.load(Ordering::Acquire).max(1);
+        self.hard() / disks
     }
 
     fn most(&self) -> u64 {
@@ -469,23 +516,6 @@ impl PageCache {
         }
     }
 
-    /// Has the flusher for `disk_key` begin writing back `range` of `file`, before anything else
-    /// it writes back, if it has one; with none, nothing: its writers write back past
-    /// [`Options::background`].
-    fn begin(&self, disk_key: DiskKey, file: Weak<dyn Paged>, range: Range<u64>) {
-        if !self.flusher {
-            return;
-        }
-        let target = {
-            let flushers = self.flushers.lock().unwrap();
-            flushers.get(&disk_key).or_else(|| flushers.get(&DiskKey::Default)).cloned()
-        };
-        if let Some(flusher) = target {
-            flusher.begun.lock().unwrap().push_back((file, range));
-            flusher.wake();
-        }
-    }
-
     /// Writes back, on the caller's thread, the files dirty the longest, a few chunks of each in
     /// turn, until no more than `dirty` bytes are dirty: a file whose write-back fails, which its
     /// next sync reports, is passed over, as the flusher passes it over (board 8553).
@@ -503,18 +533,37 @@ impl PageCache {
         }
     }
 
-    /// Holds a writer about to dirty pages back while more than [`Options::hard`] is dirty, until
-    /// write-back brings it under, the flusher woken. With no flusher, its writers keep it under
-    /// [`Options::background`] as they go ([`PageCache::dirtied`]). Its flusher dead, it panics,
-    /// as none would let it go.
+    /// Holds a writer about to dirty pages back while more than its disk's share of
+    /// [`Options::hard`] is dirty (or global [`Options::hard`] when called without a disk flusher),
+    /// until write-back brings it under, its flusher woken. With no flusher, its writers keep it
+    /// under [`Options::background`] as they go ([`PageCache::dirtied_on`]). Its flusher dead, it
+    /// panics, as none would let it go.
     ///
     /// cladefs: what files whose write-back is failing hold dirty ([`PageCache::stuck`]) no wait
     /// writes back: a writer waits for the rest alone, and one of a failing file, or of a disk
-    /// with one, which `failing` gives the failure of, held at the bound, fails with it. So a disk
-    /// that fails its writes fails its own files' writers, never another disk's, which before were
-    /// given its error, or any file's that failed last in the flusher's pass (board 8553).
-    fn throttle(&self, failing: impl Fn() -> Option<io::Error>) -> io::Result<()> {
-        if !self.flusher || self.dirty.load(Ordering::Relaxed) <= self.hard() {
+    /// with one, which `failing` gives the failure of, held at the bound, fails with it. Per-disk
+    /// dirty budgets (board 11939) further isolate a slow or blocked disk whose write-back has not
+    /// yet returned an error so writers on healthy disks continue unthrottled.
+    fn throttle_for(
+        &self,
+        flusher: Option<&DiskFlusher>,
+        failing: impl Fn() -> Option<io::Error>,
+    ) -> io::Result<()> {
+        let current = || match flusher {
+            Some(f) => {
+                (f.dirty.load(Ordering::Relaxed), f.stuck.load(Ordering::Relaxed), self.disk_hard())
+            }
+            None => (
+                self.dirty.load(Ordering::Relaxed),
+                self.stuck.load(Ordering::Relaxed),
+                self.hard(),
+            ),
+        };
+        if !self.flusher {
+            return Ok(());
+        }
+        let (dirty, _, limit) = current();
+        if dirty <= limit {
             return Ok(());
         }
         // cladefs: when it began to wait, if it waited: a stall, counted with its time as it ends
@@ -530,16 +579,28 @@ impl PageCache {
                 break Err(error);
             }
             let holding = self.holding.lock().unwrap();
-            let dirty = self.dirty.load(Ordering::Relaxed);
-            let unstuck = dirty.saturating_sub(self.stuck.load(Ordering::Relaxed));
-            if dirty <= self.hard() || unstuck <= self.hard() {
+            let (dirty, stuck, limit) = current();
+            let unstuck = dirty.saturating_sub(stuck);
+            if dirty <= limit || unstuck <= limit {
                 break Ok(());
             }
-            self.wake();
+            match flusher {
+                Some(f) => f.wake(),
+                None => self.wake(),
+            }
             waited.get_or_insert_with(std::time::Instant::now);
+            #[cfg(test)]
+            if let Some(f) = flusher {
+                f.waiters.fetch_add(1, Ordering::Release);
+            }
             // Woken as pages go clean, or go, and after each of the flusher's passes, whose
             // failures change what is stuck.
-            drop(self.drained.wait(holding).unwrap());
+            let waited_guard = self.drained.wait(holding);
+            #[cfg(test)]
+            if let Some(f) = flusher {
+                f.waiters.fetch_sub(1, Ordering::Release);
+            }
+            drop(waited_guard.unwrap());
         };
         if let Some(began) = waited {
             self.stalls.fetch_add(1, Ordering::Relaxed);
@@ -548,22 +609,27 @@ impl PageCache {
         held
     }
 
+    #[cfg(test)]
+    fn throttle(&self, failing: impl Fn() -> Option<io::Error>) -> io::Result<()> {
+        self.throttle_for(None, failing)
+    }
+
     /// Pages became clean, or went: writers held back may go on.
     fn drained(&self) {
         let _holding = self.holding.lock().unwrap();
         self.drained.notify_all();
     }
 
-    /// Pages were dirtied: the flusher writes back once more than [`Options::background`] is
-    /// dirty, or the writer, with none; and clean ones are evicted once more than
-    /// [`Options::most`] is held.
-    fn dirtied(&self) {
-        if self.dirty.load(Ordering::Relaxed) > self.background() {
-            if self.flusher {
-                self.wake();
-            } else {
-                self.write_back_to(self.background());
+    /// Pages were dirtied on `flusher`: wakes `flusher` once its disk exceeds its background
+    /// threshold (or writes back inline when there is no flusher), and evicts clean pages past
+    /// [`Options::most`].
+    fn dirtied_on(&self, flusher: Option<&DiskFlusher>) {
+        if let Some(flusher) = flusher {
+            if flusher.dirty.load(Ordering::Relaxed) > self.disk_background() {
+                flusher.wake();
             }
+        } else if self.dirty.load(Ordering::Relaxed) > self.background() {
+            self.write_back_to(self.background());
         }
         if self.bytes() > self.most() {
             self.evict_to(self.most());
@@ -609,9 +675,10 @@ impl PageCache {
     }
 
     /// A pass of `disk_key`'s flusher, as of `now`: it writes back the ranges writers asked it to
-    /// begin ([`PageCache::begin`]), in the order asked; then what has been dirty longer than
-    /// [`Options::expire`], and, while more than [`Options::background`] is dirty, the files on
-    /// `disk_key` dirty the longest, 16 [`CHUNK`]s' worth of writes each in turn.
+    /// begin ([`Cached::write_behind`]), in the order asked; then what has been dirty longer than
+    /// [`Options::expire`], and, while more than this disk's share of [`Options::background`] is
+    /// dirty, the files on `disk_key` dirty the longest, 16 [`CHUNK`]s' worth of writes each in
+    /// turn.
     #[cfg(not(madsim))]
     fn flush_pass_for(&self, disk_key: DiskKey, flusher: &DiskFlusher, now: Instant) {
         loop {
@@ -626,7 +693,7 @@ impl PageCache {
                 continue;
             }
             let Some(dirtied) = file.dirtied() else { continue };
-            let over = self.dirty.load(Ordering::Relaxed) > self.background();
+            let over = flusher.dirty.load(Ordering::Relaxed) > self.disk_background();
             if !over && now.duration_since(dirtied) < self.options.expire {
                 break;
             }
@@ -659,17 +726,13 @@ fn flush_disk_while(cache: Weak<PageCache>, disk_key: DiskKey, flusher: Arc<Disk
         strong.flush_pass_for(disk_key, &flusher, Instant::now());
         if matches!(disk_key, DiskKey::Virtual(_))
             && flusher.disk.as_ref().is_some_and(|w| w.strong_count() == 0)
+            && flusher.open_files.load(Ordering::Acquire) == 0
+            && flusher.dirty.load(Ordering::Relaxed) == 0
         {
             let mut flushers = strong.flushers.lock().unwrap();
-            let empty_begun = flusher.begun.lock().unwrap().is_empty();
-            let any_file = strong
-                .files
-                .lock()
-                .unwrap()
-                .iter()
-                .filter_map(Weak::upgrade)
-                .any(|f| f.disk_key() == disk_key);
-            if empty_begun && !any_file {
+            if flusher.open_files.load(Ordering::Acquire) == 0
+                && flusher.begun.lock().unwrap().is_empty()
+            {
                 if flushers.get(&disk_key).is_some_and(|cur| Arc::ptr_eq(cur, &flusher)) {
                     flushers.remove(&disk_key);
                 }
@@ -681,7 +744,7 @@ fn flush_disk_while(cache: Weak<PageCache>, disk_key: DiskKey, flusher: Arc<Disk
 
 /// A flusher's death, said as a panic unwinds it, where the panic did not abort the process: the
 /// cache knows it ([`PageCache::flusher_died`]), the log says it, and writers held back, woken,
-/// find it out ([`PageCache::throttle`]).
+/// find it out ([`PageCache::throttle_for`]).
 #[cfg(not(madsim))]
 struct Dying {
     cache: Weak<PageCache>,
@@ -702,7 +765,9 @@ impl Drop for Dying {
 
 /// A file a [`PageCache`] holds pages of, as its flusher and its eviction see it.
 trait Paged: Send + Sync {
-    /// Which per-disk flusher owns this file (`0` when not bound to a [`HostDisk`]).
+    /// Which per-disk flusher owns this file ([`DiskKey::Default`] when not bound to a
+    /// [`HostDisk`]).
+    #[cfg(not(madsim))]
     fn disk_key(&self) -> DiskKey {
         DiskKey::Default
     }
@@ -765,6 +830,9 @@ pub(crate) struct Shared<F: File> {
     /// cladefs: the host disk this file lives on, whose dirty count tracks its dirty pages
     /// (board 5995).
     disk: Option<Arc<bucket_cell::host_disk::HostDisk>>,
+    /// Per-disk flusher and dirty/stuck counters for this file's [`DiskKey`] when the cache runs
+    /// background flusher threads (`None` on inline caches without flushers; board 11939).
+    flusher: Option<Arc<DiskFlusher>>,
     pages: Mutex<Pages>,
     /// Keeps the file's bytes stable while readers miss the cache. Write-back, punching and
     /// dropping dirty pages take it exclusively. Taken before the pages' lock: a cache hit, or a
@@ -814,14 +882,17 @@ impl<F: File> Cached<F> {
         disk: Option<Arc<bucket_cell::host_disk::HostDisk>>,
     ) -> io::Result<Self> {
         let size = file.size()?;
-        #[cfg(not(madsim))]
-        let disk_key = DiskKey::of(disk.as_ref());
-        #[cfg(not(madsim))]
-        let disk_for_flusher = disk.clone();
+        let flusher = if cache.flusher {
+            let disk_key = DiskKey::of(disk.as_ref());
+            Some(cache.ensure_flusher(disk_key, disk.as_ref(), true))
+        } else {
+            None
+        };
         let shared = Arc::new(Shared {
             file,
             cache: cache.clone(),
             disk,
+            flusher,
             pages: Mutex::new(Pages {
                 dirty_pages: 0,
                 pages: BTreeMap::new(),
@@ -834,10 +905,6 @@ impl<F: File> Cached<F> {
             used: AtomicU64::new(cache.used()),
             unlinked: AtomicBool::new(false),
         });
-        #[cfg(not(madsim))]
-        if cache.flusher {
-            cache.ensure_flusher(disk_key, disk_for_flusher.as_ref());
-        }
         let paged: Arc<dyn Paged> = shared.clone();
         cache.files.lock().unwrap().push(Arc::downgrade(&paged));
         Ok(Self { shared })
@@ -886,8 +953,14 @@ impl<F: File> Shared<F> {
         }
         let dirty = self.cache.dirty.fetch_add(bytes, Ordering::Relaxed) + bytes;
         self.cache.peak_dirty.fetch_max(dirty, Ordering::Relaxed);
+        if let Some(flusher) = &self.flusher {
+            flusher.dirty.fetch_add(bytes, Ordering::Relaxed);
+        }
         if failing {
             self.cache.stuck.fetch_add(bytes, Ordering::Relaxed);
+            if let Some(flusher) = &self.flusher {
+                flusher.stuck.fetch_add(bytes, Ordering::Relaxed);
+            }
         }
         if let Some(disk) = &self.disk {
             disk.dirty.add(bytes);
@@ -901,8 +974,14 @@ impl<F: File> Shared<F> {
         }
         if failing {
             self.cache.stuck.fetch_sub(bytes, Ordering::Relaxed);
+            if let Some(flusher) = &self.flusher {
+                flusher.stuck.fetch_sub(bytes, Ordering::Relaxed);
+            }
         }
         self.cache.dirty.fetch_sub(bytes, Ordering::Relaxed);
+        if let Some(flusher) = &self.flusher {
+            flusher.dirty.fetch_sub(bytes, Ordering::Relaxed);
+        }
         if let Some(disk) = &self.disk {
             disk.dirty.sub(bytes);
         }
@@ -916,11 +995,17 @@ impl<F: File> Shared<F> {
         match (failed, pages.failing.is_some()) {
             (Some(err), false) => {
                 self.cache.stuck.fetch_add(bytes, Ordering::Relaxed);
+                if let Some(flusher) = &self.flusher {
+                    flusher.stuck.fetch_add(bytes, Ordering::Relaxed);
+                }
                 self.disk_failing(Some(err));
             }
             (Some(err), true) => self.disk_failing_again(err),
             (None, true) => {
                 self.cache.stuck.fetch_sub(bytes, Ordering::Relaxed);
+                if let Some(flusher) = &self.flusher {
+                    flusher.stuck.fetch_sub(bytes, Ordering::Relaxed);
+                }
                 self.disk_failing(None);
             }
             (None, false) => {}
@@ -958,7 +1043,7 @@ impl<F: File> Shared<F> {
     }
 
     /// Its write-back's failure, if it is failing, or its disk's, if a file of it is: what its
-    /// writers held at the cache's bound fail with ([`PageCache::throttle`]).
+    /// writers held at the cache's bound fail with ([`PageCache::throttle_for`]).
     fn failing(&self) -> Option<io::Error> {
         if let Some(err) = self.pages().failing.as_ref() {
             return Some(copied(err));
@@ -1193,11 +1278,17 @@ impl<F: File> Drop for Shared<F> {
         if failing {
             self.disk_failing(None);
         }
+        if let Some(flusher) = &self.flusher
+            && flusher.open_files.fetch_sub(1, Ordering::AcqRel) == 1
+        {
+            self.cache.active_disks.fetch_sub(1, Ordering::AcqRel);
+        }
         self.cache.drained();
     }
 }
 
 impl<F: File> Paged for Shared<F> {
+    #[cfg(not(madsim))]
     fn disk_key(&self) -> DiskKey {
         DiskKey::of(self.disk.as_ref())
     }
@@ -1296,7 +1387,7 @@ impl<F: File> File for Cached<F> {
 
     fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<()> {
         let shared = &*self.shared;
-        shared.cache.throttle(|| shared.failing())?;
+        shared.cache.throttle_for(shared.flusher.as_deref(), || shared.failing())?;
         let mut backing = None;
         let mut pages = shared.lock();
         let mut end = offset + buf.len() as u64;
@@ -1385,7 +1476,7 @@ impl<F: File> File for Cached<F> {
         shared.dirty_add(dirtied * PAGE, pages.failing.is_some());
         drop(pages);
         drop(backing);
-        shared.cache.dirtied();
+        shared.cache.dirtied_on(shared.flusher.as_deref());
         failed.map_or(Ok(()), Err)
     }
 
@@ -1405,12 +1496,11 @@ impl<F: File> File for Cached<F> {
     /// 2.3x slower and its commit 5x on the test host against the host's page cache. A failure is
     /// the file's next sync's. With no flusher, nothing: its writers write back as they go.
     fn write_behind(&self, offset: u64, len: u64) -> io::Result<()> {
-        let paged: Arc<dyn Paged> = self.shared.clone();
-        self.shared.cache.begin(
-            self.shared.disk_key(),
-            Arc::downgrade(&paged),
-            offset..offset + len,
-        );
+        if let Some(flusher) = &self.shared.flusher {
+            let paged: Arc<dyn Paged> = self.shared.clone();
+            flusher.begun.lock().unwrap().push_back((Arc::downgrade(&paged), offset..offset + len));
+            flusher.wake();
+        }
         Ok(())
     }
 
@@ -2064,7 +2154,26 @@ mod tests {
             bucket_cell::host_disk::HostDisk::in_memory(bucket_cell::host_disk::Sample::default);
         assert!(!Arc::ptr_eq(&disk_a, &disk_b));
 
-        let cache = cache(Options { expire: Duration::from_secs(3600), ..Options::default() });
+        let cache = cache(Options {
+            background: PAGE,
+            hard: 2 * PAGE,
+            expire: Duration::from_secs(3600),
+            ..Options::default()
+        });
+        struct ReleaseGuard(Option<mpsc::SyncSender<()>>);
+        impl ReleaseGuard {
+            fn release(&mut self) {
+                if let Some(tx) = self.0.take() {
+                    let _ = tx.send(());
+                }
+            }
+        }
+        impl Drop for ReleaseGuard {
+            fn drop(&mut self) {
+                self.release();
+            }
+        }
+
         let (entered_tx, entered_rx) = mpsc::sync_channel(1);
         let (release_tx, release_rx) = mpsc::sync_channel(1);
         let file_a = Cached::on_disk(
@@ -2074,33 +2183,121 @@ mod tests {
                 wrote: AtomicU64::new(0),
             },
             &cache,
+            Some(disk_a.clone()),
+        )
+        .unwrap();
+        // Declared after `file_a` so any early panic releases disk A's gate before `file_a` drops.
+        let mut release_guard = ReleaseGuard(Some(release_tx));
+        let file_a2 = Cached::on_disk(
+            CountingFile { wrote: Arc::new(AtomicU64::new(0)) },
+            &cache,
             Some(disk_a),
         )
         .unwrap();
+        let flusher_a = file_a2.shared.flusher.clone().unwrap();
         let wrote_b = Arc::new(AtomicU64::new(0));
         let file_b =
             Cached::on_disk(CountingFile { wrote: wrote_b.clone() }, &cache, Some(disk_b)).unwrap();
+        assert_eq!(cache.active_disks.load(Ordering::Acquire), 2);
 
-        file_a.write_at(&vec![1u8; PAGE as usize], 0).unwrap();
-        file_a.write_behind(0, PAGE).unwrap();
+        // Dirty 3 * PAGE on disk A (> global `hard = 2 * PAGE` and > per-disk `disk_hard = PAGE`)
+        // in one write and block disk A's flusher inside `write_at`.
+        file_a.write_at(&vec![1u8; (3 * PAGE) as usize], 0).unwrap();
+        file_a.write_behind(0, 3 * PAGE).unwrap();
         // Wait until disk A's flusher is blocked inside write_at.
         entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(
+            cache.usage().dirty > cache.hard(),
+            "disk A must exceed global hard while blocked in flight"
+        );
 
-        // Now dirty and write_behind on disk B: its own flusher must complete while A is blocked.
-        file_b.write_at(&vec![2u8; PAGE as usize], 0).unwrap();
-        file_b.write_behind(0, PAGE).unwrap();
+        // Foreground writes on healthy disk B must still complete and flush via disk B's flusher
+        // without hanging on disk A's stalled write-back (board 11939). Run them on a worker so a
+        // regression fails the timeout instead of deadlocking the test thread.
+        let (b_done_tx, b_done_rx) = mpsc::sync_channel(1);
+        let b_thread = std::thread::spawn(move || {
+            for i in 0..4u64 {
+                file_b.write_at(&vec![2u8; PAGE as usize], i * PAGE).unwrap();
+                file_b.write_behind(i * PAGE, PAGE).unwrap();
+            }
+            let _ = b_done_tx.send(());
+            file_b
+        });
+        b_done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("disk B foreground writes must not hang while disk A is blocked past hard");
+        let file_b = b_thread.join().unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
-        while wrote_b.load(Ordering::Relaxed) < PAGE && Instant::now() < deadline {
+        while wrote_b.load(Ordering::Relaxed) < 4 * PAGE && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert_eq!(
             wrote_b.load(Ordering::Relaxed),
-            PAGE,
-            "disk B flusher must finish while disk A flusher is blocked"
+            4 * PAGE,
+            "disk B flusher must finish while disk A is blocked past hard"
         );
-        let _ = release_tx.send(());
-        drop(file_a);
+
+        // Meanwhile, a second writer on stalled disk A must enter throttle_for's wait on disk A and
+        // record its own stall once disk A drains.
+        let stalls_before_a2 = cache.usage().stalls;
+        let a2_done = Arc::new(AtomicBool::new(false));
+        let a2_done_bg = a2_done.clone();
+        let a2_thread = std::thread::spawn(move || {
+            file_a2.write_at(&vec![3u8; PAGE as usize], 0).unwrap();
+            a2_done_bg.store(true, Ordering::Release);
+            file_a2
+        });
+        let wait_deadline = Instant::now() + Duration::from_secs(5);
+        while flusher_a.waiters.load(Ordering::Acquire) == 0
+            && !a2_done.load(Ordering::Acquire)
+            && Instant::now() < wait_deadline
+        {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            flusher_a.waiters.load(Ordering::Acquire) >= 1 && !a2_done.load(Ordering::Acquire),
+            "writer on stalled disk A must be waiting inside throttle_for before disk A drains"
+        );
+        release_guard.release();
+        let file_a2 = a2_thread.join().unwrap();
+        assert!(
+            cache.usage().stalls > stalls_before_a2,
+            "stalled disk A writer must record a stall of its own"
+        );
+
+        // Dropping all files on disk B returns its budget share immediately, and opening a Default
+        // file alongside disk A counts both toward active_disks.
         drop(file_b);
+        assert_eq!(cache.active_disks.load(Ordering::Acquire), 1);
+        let file_default =
+            Cached::new(CountingFile { wrote: Arc::new(AtomicU64::new(0)) }, &cache).unwrap();
+        assert_eq!(cache.active_disks.load(Ordering::Acquire), 2);
+        assert_eq!(cache.disk_hard(), PAGE);
+        drop(file_default);
+        assert_eq!(cache.active_disks.load(Ordering::Acquire), 1);
+        assert_eq!(cache.disk_hard(), 2 * PAGE);
+        drop(file_a2);
+        drop(file_a);
+        assert_eq!(cache.active_disks.load(Ordering::Acquire), 0);
+
+        // Inline caches without flushers must not register virtual disks in `flushers`.
+        let inline = PageCache::without_flusher(Options::default());
+        for _ in 0..4 {
+            let d = bucket_cell::host_disk::HostDisk::in_memory(
+                bucket_cell::host_disk::Sample::default,
+            );
+            let f = Cached::on_disk(
+                CountingFile { wrote: Arc::new(AtomicU64::new(0)) },
+                &inline,
+                Some(d),
+            )
+            .unwrap();
+            drop(f);
+        }
+        assert!(
+            inline.flushers.lock().unwrap().is_empty(),
+            "inline caches must not retain virtual disk registrations"
+        );
 
         // Repeated HostDisk creation/drop on the same filesystem reuses one Device flusher entry
         // rather than leaking a new flusher thread each time.
