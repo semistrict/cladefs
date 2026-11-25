@@ -299,16 +299,28 @@ impl<'tree, K: MergeableKey, V: Value> LSMTree<K, V> {
     }
 
     /// cladefs: number of chunks currently cached in persistent (and base) layer read caches
-    /// (TASK-596).
+    /// (TASK-596). Non-blocking and allocation-free so direct reclaim (`super_cache_count` ->
+    /// `Fxfs::cached`) during an allocation under `self.data` (e.g., `seal()`) cannot
+    /// self-deadlock (TASK-292, hotbed review 109).
     pub fn cached_layer_chunks(&self) -> usize {
-        self.immutable_layer_set().layers.iter().map(|layer| layer.cached_chunks()).sum()
+        let Some(data) = self.data.try_read() else {
+            return 0;
+        };
+        data.layers.iter().map(|layer| layer.cached_chunks()).sum()
     }
 
-    /// cladefs: evicts up to `max_chunks` cached read chunks across this tree's immutable layers,
-    /// returning how many were evicted (TASK-596).
+    /// cladefs: non-blocking, allocation-free eviction of up to `max_chunks` cached read chunks
+    /// across this tree's immutable layers, returning how many were evicted (TASK-292, TASK-596,
+    /// hotbed review 109).
     pub fn evict_layer_chunks(&self, mut max_chunks: usize) -> usize {
+        if max_chunks == 0 {
+            return 0;
+        }
+        let Some(data) = self.data.try_read() else {
+            return 0;
+        };
         let mut evicted = 0;
-        for layer in self.immutable_layer_set().layers {
+        for layer in &data.layers {
             if max_chunks == 0 {
                 break;
             }
@@ -1614,6 +1626,62 @@ mod tests {
         // Lookup should fail and drop the placeholder.
         assert!(a.find(&TestKey(1..1)).await.is_err());
         assert_eq!(inner.lock().stats(), (1, 0, 0, 1));
+    }
+
+    /// cladefs: `cached_layer_chunks` and `evict_layer_chunks` must not block while `self.data`
+    /// is write-locked (as `seal()` holds it while allocating a new mutable layer; TASK-292,
+    /// TASK-596, hotbed review 109).
+    #[fuchsia_async::run_singlethreaded(test)]
+    async fn test_layer_chunk_shrinker_under_data_write_lock() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountingLayer(AtomicUsize);
+
+        #[async_trait]
+        impl Layer<TestKey, u64> for CountingLayer {
+            async fn seek(
+                &self,
+                _bound: std::ops::Bound<&TestKey>,
+            ) -> Result<BoxedLayerIterator<'_, TestKey, u64>, Error> {
+                unreachable!()
+            }
+            fn len(&self) -> usize {
+                0
+            }
+            fn cached_chunks(&self) -> usize {
+                self.0.load(Ordering::Relaxed)
+            }
+            fn evict_cached_chunks(&self, max_chunks: usize) -> usize {
+                let cur = self.0.load(Ordering::Relaxed);
+                let take = cur.min(max_chunks);
+                self.0.fetch_sub(take, Ordering::Relaxed);
+                take
+            }
+            async fn key_exists(&self, _key: &TestKey) -> Result<Existence, Error> {
+                Ok(Existence::Missing)
+            }
+            fn lock(&self) -> Option<Arc<DropEvent>> {
+                None
+            }
+            async fn close(&self) {}
+            fn get_version(&self) -> crate::serialized_types::Version {
+                crate::serialized_types::LATEST_VERSION
+            }
+        }
+
+        let tree = LSMTree::new(emit_left_merge_fn, None);
+        tree.set_layers(vec![Arc::new(CountingLayer(AtomicUsize::new(5)))]);
+        assert_eq!(tree.cached_layer_chunks(), 5);
+
+        {
+            let _write_guard = tree.data.write();
+            assert_eq!(tree.cached_layer_chunks(), 0);
+            assert_eq!(tree.evict_layer_chunks(5), 0);
+        }
+
+        assert_eq!(tree.cached_layer_chunks(), 5);
+        assert_eq!(tree.evict_layer_chunks(3), 3);
+        assert_eq!(tree.cached_layer_chunks(), 2);
     }
 }
 

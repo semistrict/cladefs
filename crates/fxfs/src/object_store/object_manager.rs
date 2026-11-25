@@ -237,9 +237,14 @@ impl ObjectManager {
     }
 
     /// cladefs: total number of persistent (and base) layer read chunks currently cached across
-    /// the allocator and every open object store (TASK-596).
+    /// the allocator and every open object store (TASK-596). Non-blocking and allocation-free so
+    /// direct reclaim (`super_cache_count` -> `Fxfs::cached`) during an allocation under
+    /// `self.inner`, an `LSMTree::data`, or a layer's chunk lock cannot self-deadlock (TASK-292,
+    /// hotbed review 109).
     pub fn cached_layer_chunks(&self) -> usize {
-        let inner = self.inner.read();
+        let Some(inner) = self.inner.try_read() else {
+            return 0;
+        };
         let mut total = 0;
         if let Some(allocator) = &inner.allocator {
             total += allocator.tree().cached_layer_chunks();
@@ -250,15 +255,18 @@ impl ObjectManager {
         total
     }
 
-    /// cladefs: evicts up to `max_chunks` persistent (and base) layer read chunks across every
-    /// open object store and the allocator, returning how many were evicted (TASK-596).
+    /// cladefs: non-blocking, allocation-free eviction of up to `max_chunks` persistent (and base)
+    /// layer read chunks across every open object store and the allocator, returning how many were
+    /// evicted (TASK-292, TASK-596, hotbed review 109).
     pub fn evict_layer_chunks(&self, mut max_chunks: usize) -> usize {
-        let (allocator, stores): (Option<Arc<Allocator>>, Vec<Arc<ObjectStore>>) = {
-            let inner = self.inner.read();
-            (inner.allocator.clone(), inner.stores.values().cloned().collect())
+        if max_chunks == 0 {
+            return 0;
+        }
+        let Some(inner) = self.inner.try_read() else {
+            return 0;
         };
         let mut evicted = 0;
-        for store in stores {
+        for store in inner.stores.values() {
             if max_chunks == 0 {
                 return evicted;
             }
@@ -267,7 +275,7 @@ impl ObjectManager {
             max_chunks -= n;
         }
         if max_chunks > 0
-            && let Some(allocator) = allocator
+            && let Some(allocator) = &inner.allocator
         {
             evicted += allocator.tree().evict_layer_chunks(max_chunks);
         }
@@ -943,5 +951,21 @@ impl ReservationUpdate {
 impl AssociatedObject for ReservationUpdate {
     fn will_apply_mutation(&self, _mutation: &Mutation, object_id: u64, manager: &ObjectManager) {
         manager.update_reservation(object_id, self.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ObjectManager;
+
+    /// cladefs: `cached_layer_chunks` and `evict_layer_chunks` must not block while
+    /// `ObjectManager::inner` is write-locked (as `add_store` holds it while inserting into
+    /// `stores`; TASK-292, TASK-596, hotbed review 109).
+    #[test]
+    fn test_layer_chunk_shrinker_under_inner_write_lock() {
+        let manager = ObjectManager::new(None);
+        let _write_guard = manager.inner.write();
+        assert_eq!(manager.cached_layer_chunks(), 0);
+        assert_eq!(manager.evict_layer_chunks(16), 0);
     }
 }

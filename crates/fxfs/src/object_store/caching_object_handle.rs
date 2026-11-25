@@ -9,6 +9,7 @@ use event_listener::{Event, EventListener};
 use fuchsia_sync::Mutex;
 use std::ops::Deref;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use storage_device::buffer::BufferFuture;
 use storage_units::BlockSize;
 
@@ -81,6 +82,11 @@ pub struct CachingObjectHandle<S> {
     // evicted.  The size of this array never changes.
     chunks: Mutex<Vec<Chunk>>,
 
+    // cladefs: number of slots in `chunks` currently in `Present` or `Expired` state, updated
+    // under `chunks` so `cached_chunks()` is lock-free for the kernel superblock shrinker
+    // (TASK-292, TASK-596, hotbed review 109).
+    cached_count: AtomicUsize,
+
     // Reads that are waiting on another read to load a chunk will wait on this event. There's only
     // 1 event for all chunks so a read may receive a notification for a different chunk than the
     // one it's waiting for and need to re-wait. It's rare for multiple chunks to be loading at once
@@ -101,7 +107,12 @@ impl<S: ReadObjectHandle> CachingObjectHandle<S> {
 
         let mut chunks = Vec::<Chunk>::new();
         chunks.resize_with(chunk_count, Default::default);
-        Self { source, chunks: Mutex::new(chunks), event: Event::new() }
+        Self {
+            source,
+            chunks: Mutex::new(chunks),
+            cached_count: AtomicUsize::new(0),
+            event: Event::new(),
+        }
     }
 
     /// cladefs: as `new`, with `contents`, all of `source`'s, cached already: as a layer just written
@@ -111,9 +122,12 @@ impl<S: ReadObjectHandle> CachingObjectHandle<S> {
         assert_eq!(contents.len() as u64, this.source.get_size());
         {
             let mut chunks = this.chunks.lock();
+            let mut count = 0usize;
             for (chunk, data) in chunks.iter_mut().zip(contents.chunks(CHUNK_SIZE.get() as usize)) {
                 *chunk = Chunk::Present(CachedChunk(Arc::new(data.to_vec().into_boxed_slice())));
+                count += 1;
             }
+            this.cached_count.store(count, Ordering::Relaxed);
         }
         this
     }
@@ -218,6 +232,7 @@ impl<S: ReadObjectHandle> CachingObjectHandle<S> {
             let mut chunks = self.chunks.lock();
             debug_assert!(matches!(chunks[chunk_num], Chunk::Pending));
             chunks[chunk_num] = Chunk::Present(cached_chunk.clone());
+            self.cached_count.fetch_add(1, Ordering::Relaxed);
         }
         self.event.notify(usize::MAX);
 
@@ -232,10 +247,15 @@ impl<S: ReadObjectHandle> CachingObjectHandle<S> {
     pub fn purge(&self) {
         // Deallocate out of the lock scope, so we don't hold up readers.
         let mut to_deallocate = vec![];
-        let mut chunks = self.chunks.lock();
-        for chunk in chunks.iter_mut() {
-            if let Some(data) = chunk.maybe_purge() {
-                to_deallocate.push(data);
+        {
+            let mut chunks = self.chunks.lock();
+            for chunk in chunks.iter_mut() {
+                if let Some(data) = chunk.maybe_purge() {
+                    to_deallocate.push(data);
+                }
+            }
+            if !to_deallocate.is_empty() {
+                self.cached_count.fetch_sub(to_deallocate.len(), Ordering::Relaxed);
             }
         }
         log::debug!(
@@ -255,6 +275,9 @@ impl<S: ReadObjectHandle> CachingObjectHandle<S> {
                 if matches!(chunk, Chunk::Present(_) | Chunk::Expired(_)) {
                     to_deallocate.push(std::mem::take(chunk));
                 }
+            }
+            if !to_deallocate.is_empty() {
+                self.cached_count.fetch_sub(to_deallocate.len(), Ordering::Relaxed);
             }
         }
         log::debug!(
@@ -278,34 +301,53 @@ impl<S: ReadObjectHandle> CachingObjectHandle<S> {
             .sum()
     }
 
-    /// cladefs: number of chunks currently held in `Present` or `Expired` state (TASK-596).
+    /// cladefs: number of chunks currently held in `Present` or `Expired` state, read lock-free
+    /// so the guest kernel's superblock shrinker (`super_cache_count`) cannot self-deadlock when
+    /// direct reclaim runs during an allocation under `self.chunks` (TASK-292, TASK-596, hotbed
+    /// review 109).
     pub fn cached_chunks(&self) -> usize {
-        self.chunks
-            .lock()
-            .iter()
-            .filter(|chunk| matches!(chunk, Chunk::Present(_) | Chunk::Expired(_)))
-            .count()
+        // Relaxed: advisory count snapshot for the shrinker with no dependency on chunk contents.
+        self.cached_count.load(Ordering::Relaxed)
     }
 
-    /// cladefs: immediately evicts up to `max_chunks` `Present` or `Expired` chunks, returning how
-    /// many were evicted (TASK-596). Deallocation happens outside the lock.
+    /// cladefs: non-blocking, allocation-free eviction of up to `max_chunks` `Present` or
+    /// `Expired` chunks, returning how many were evicted (TASK-292, TASK-596, hotbed review 109).
+    /// Skips the handle if `self.chunks` is currently locked, and deallocates freed chunks in
+    /// fixed-size stack batches outside the lock so direct reclaim neither blocks nor allocates.
     pub fn evict_chunks(&self, max_chunks: usize) -> usize {
         if max_chunks == 0 {
             return 0;
         }
-        let mut to_deallocate = Vec::new();
-        {
-            let mut chunks = self.chunks.lock();
-            for chunk in chunks.iter_mut() {
-                if to_deallocate.len() >= max_chunks {
+        const BATCH: usize = 16;
+        let mut evicted = 0;
+        let mut cursor = 0;
+        while evicted < max_chunks {
+            let mut to_deallocate: [Chunk; BATCH] = std::array::from_fn(|_| Chunk::Missing);
+            let mut batch_len = 0;
+            let done = {
+                let Some(mut chunks) = self.chunks.try_lock() else {
                     break;
+                };
+                while cursor < chunks.len() && batch_len < BATCH && evicted + batch_len < max_chunks
+                {
+                    if matches!(chunks[cursor], Chunk::Present(_) | Chunk::Expired(_)) {
+                        to_deallocate[batch_len] = std::mem::take(&mut chunks[cursor]);
+                        batch_len += 1;
+                    }
+                    cursor += 1;
                 }
-                if matches!(chunk, Chunk::Present(_) | Chunk::Expired(_)) {
-                    to_deallocate.push(std::mem::take(chunk));
+                if batch_len > 0 {
+                    self.cached_count.fetch_sub(batch_len, Ordering::Relaxed);
                 }
+                cursor >= chunks.len()
+            };
+            drop(to_deallocate);
+            evicted += batch_len;
+            if done || batch_len == 0 {
+                break;
             }
         }
-        to_deallocate.len()
+        evicted
     }
 }
 
@@ -650,5 +692,42 @@ mod tests {
         caching_object_handle.clear();
         source.start();
         assert_eq!(&*pending_fut.await.unwrap(), make_buf(3, CHUNK_SIZE.get() as usize));
+    }
+
+    /// cladefs: `cached_chunks` is lock-free and `evict_chunks` is non-blocking when `self.chunks`
+    /// is held, matching `TreeCache` so direct reclaim cannot self-deadlock (TASK-292, TASK-596,
+    /// hotbed review 109).
+    #[fuchsia_async::run_singlethreaded(test)]
+    async fn test_cached_chunks_and_evict_under_chunks_lock() {
+        let device = Arc::new(FakeDevice::new(1024, 512));
+        let size = (CHUNK_SIZE.get() as usize) * 2 + 4096;
+        let source = FakeSource::new(device, size);
+        source.start();
+        let contents = make_buf(9, size);
+        let handle = CachingObjectHandle::new_with_contents(source, &contents);
+        assert_eq!(handle.cached_chunks(), 3);
+
+        // Hold the chunks lock directly (as `read()` does while boxing `event.listen()`):
+        // `cached_chunks` must still report the count and `evict_chunks` must return 0 without
+        // blocking.
+        {
+            let _guard = handle.chunks.lock();
+            assert_eq!(handle.cached_chunks(), 3);
+            assert_eq!(handle.evict_chunks(3), 0);
+        }
+
+        // Once unlocked, partial eviction, purge, and clear all keep `cached_count` exact.
+        assert_eq!(handle.evict_chunks(1), 1);
+        assert_eq!(handle.cached_chunks(), 2);
+        // Second-chance purge marks remaining 2 Expired (still cached), second purge drops them.
+        handle.purge();
+        assert_eq!(handle.cached_chunks(), 2);
+        handle.purge();
+        assert_eq!(handle.cached_chunks(), 0);
+        // Reload one chunk and clear it.
+        handle.read(0).await.unwrap();
+        assert_eq!(handle.cached_chunks(), 1);
+        handle.clear();
+        assert_eq!(handle.cached_chunks(), 0);
     }
 }

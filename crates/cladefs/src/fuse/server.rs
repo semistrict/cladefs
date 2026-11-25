@@ -437,6 +437,11 @@ struct OpenDirs {
 const READDIR_READAHEAD: usize = 32;
 /// Hard upper bound on entries fetched in a single Fxfs `readdir` page (TASK-619, board 2634).
 const READDIR_MAX_BATCH: usize = 1024;
+/// Bounded count of recent `(emitted_offset, name_before_offset)` bookmarks kept per open
+/// directory handle so mid-reply resumes (e.g., musl's 2048-byte `getdents` buffer consuming part
+/// of a 4096-byte FUSE `READDIR` reply) and retries resume by name (`EntriesStart::After`) rather
+/// than index-seeking the live directory (hotbed review 109).
+const READDIR_BOOKMARKS_CAP: usize = READDIR_MAX_BATCH;
 /// Minimum wire size of one FUSE `Dirent` (24-byte header + 1-byte name, 8-byte aligned).
 const MIN_DIRENT_LEN: usize = (size_of::<Dirent>() + 1).next_multiple_of(8);
 
@@ -446,20 +451,41 @@ const MIN_DIRENT_LEN: usize = (size_of::<Dirent>() + 1).next_multiple_of(8);
 struct DirCursor {
     /// Next sequential FUSE offset (starts at 2, after `.` = 0 and `..` = 1).
     next_offset: u64,
-    /// Last entry name emitted at `next_offset - 1`.
+    /// Last entry name emitted (or skipped on `ENOENT`) at `next_offset`.
     last_name: Option<Vec<u8>>,
     /// Bounded read-ahead buffer of entries starting at `next_offset`.
     buffered: VecDeque<DirEntry>,
     /// True once Fxfs reached end-of-directory when filling `buffered`.
     eof: bool,
-    /// Bookmark `(start_offset, last_name_before_start)` of the previous reply so a retry at that
-    /// offset resumes by name rather than index.
-    prev: Option<(u64, Option<Vec<u8>>)>,
+    /// Bounded recent `(offset, last_name_at_offset)` bookmarks (monotone in `offset`, capped at
+    /// [`READDIR_BOOKMARKS_CAP`]) covering the start and every emitted dirent offset of recent
+    /// replies so mid-reply resumes and retries resume by name in O(log N) rather than falling
+    /// back to `EntriesStart::Index` (hotbed review 109).
+    recent: VecDeque<(u64, Option<Vec<u8>>)>,
 }
 
 impl DirCursor {
     fn new() -> Self {
-        Self { next_offset: 2, last_name: None, buffered: VecDeque::new(), eof: false, prev: None }
+        Self {
+            next_offset: 2,
+            last_name: None,
+            buffered: VecDeque::new(),
+            eof: false,
+            recent: VecDeque::new(),
+        }
+    }
+
+    fn record_bookmark(&mut self, offset: u64, last_name: Option<Vec<u8>>) {
+        if let Some((back_off, back_name)) = self.recent.back_mut()
+            && *back_off == offset
+        {
+            *back_name = last_name;
+            return;
+        }
+        if self.recent.len() >= READDIR_BOOKMARKS_CAP {
+            self.recent.pop_front();
+        }
+        self.recent.push_back((offset, last_name));
     }
 }
 
@@ -1676,25 +1702,31 @@ impl Server {
         }
 
         // Align the streaming cursor to `cur_offset`: sequential reads reuse the bounded
-        // read-ahead buffer and resume by name (`EntriesStart::After`), retries at the previous
-        // reply's start offset reuse its saved name, and arbitrary `seekdir` falls back to an
-        // index start.
+        // read-ahead buffer and resume by name (`EntriesStart::After`); retries and mid-reply
+        // resumes (e.g., a smaller user `getdents` buffer consuming only part of a `PAGE_SIZE`
+        // FUSE reply) match a bounded recent `(offset -> last_name)` bookmark and resume by name
+        // rather than index-seeking the live directory (hotbed review 109); arbitrary unseen
+        // `seekdir` offsets fall back to an index start.
         let mut index_seek = false;
         if cur_offset == cursor.next_offset {
-            cursor.prev = Some((cur_offset, cursor.last_name.clone()));
-        } else if let Some((prev_off, prev_name)) = cursor.prev.clone()
-            && prev_off == cur_offset
+            let last_name = cursor.last_name.clone();
+            cursor.record_bookmark(cur_offset, last_name);
+        } else if let Some((_, saved_name)) =
+            cursor.recent.iter().rev().find(|(off, _)| *off == cur_offset).cloned()
         {
             cursor.next_offset = cur_offset;
-            cursor.last_name = prev_name;
+            cursor.last_name = saved_name;
             cursor.buffered.clear();
             cursor.eof = false;
+            while cursor.recent.back().is_some_and(|(off, _)| *off > cur_offset) {
+                cursor.recent.pop_back();
+            }
         } else {
             cursor.next_offset = cur_offset;
             cursor.last_name = None;
             cursor.buffered.clear();
             cursor.eof = false;
-            cursor.prev = None;
+            cursor.recent.clear();
             index_seek = true;
         }
 
@@ -1714,9 +1746,33 @@ impl Server {
                 } else {
                     EntriesStart::Index(0)
                 };
-                let (mut page, has_more) = dir.entries_page(start, batch_limit).await?;
+                let (mut page, has_more) = match dir.entries_page(start, batch_limit).await {
+                    Ok(page) => page,
+                    // Entries already placed in `reply` (especially for `READDIRPLUS`, which took
+                    // lookups the kernel only forgets if it receives them) must be delivered; the
+                    // next read at the reply's end offset will hit the error with an empty reply
+                    // (hotbed review 109).
+                    Err(_) if !reply.is_empty() => break,
+                    Err(errno) => return Err(errno),
+                };
+                let mut map_err = None;
                 for entry in &mut page {
-                    entry.inode = Inode(self.inode(slot, entry.inode.0)?);
+                    match self.inode(slot, entry.inode.0) {
+                        Ok(ino) => entry.inode = Inode(ino),
+                        Err(errno) => {
+                            map_err = Some(errno);
+                            break;
+                        }
+                    }
+                }
+                if let Some(errno) = map_err {
+                    // Deliver entries already encoded in `reply` so taken `READDIRPLUS` lookups
+                    // are not leaked; the next read surfaces `errno` on an empty reply (hotbed
+                    // review 109).
+                    if !reply.is_empty() {
+                        break;
+                    }
+                    return Err(errno);
                 }
                 cursor.buffered.extend(page);
                 cursor.eof = !has_more;
@@ -1753,11 +1809,13 @@ impl Server {
                             }
                         }
                     }
-                    // Removed since the page was read: advance past it so we never revisit it.
+                    // Removed since the page was read: advance `last_name` without advancing
+                    // `cur_offset` / `next_offset` so the next read at the last emitted dirent's
+                    // `d.off` still hits the sequential fast path and skips past this vanished
+                    // entry (hotbed review 109).
                     Err(Errno::ENOENT) => {
-                        cur_offset += 1;
+                        cursor.record_bookmark(cur_offset, Some(entry.name.clone()));
                         cursor.last_name = Some(entry.name);
-                        cursor.next_offset = cur_offset;
                         continue;
                     }
                     // The entries so far took lookups, which the kernel forgets only if it gets
@@ -1775,6 +1833,7 @@ impl Server {
             }
             cur_offset += 1;
             push_dirent(&mut reply, &entry, cur_offset, dirent_len);
+            cursor.record_bookmark(cur_offset, Some(entry.name.clone()));
             cursor.last_name = Some(entry.name);
             cursor.next_offset = cur_offset;
         }
@@ -2248,5 +2307,345 @@ mod tests {
             ReleaseIn { fh: open2.fh, ..Default::default() }.as_bytes(),
         );
         block_on(server2.into_filesystem().close()).unwrap();
+    }
+
+    /// hotbed review 109 (finding 404): resuming `READDIR` at a mid-reply offset after earlier
+    /// entries were unlinked (e.g., musl's 2048-byte `getdents` buffer consuming part of a
+    /// 4096-byte FUSE reply during `rm -r`) must resume by name rather than index-seeking the
+    /// live directory, and a vanished (`ENOENT`) entry at the end of a `READDIRPLUS` reply must
+    /// not advance `next_offset` past the last emitted dirent.
+    #[test]
+    fn readdir_mid_reply_resume_and_readdirplus_enoent_do_not_skip_entries() {
+        use zerocopy::{FromBytes, IntoBytes};
+
+        let parse_dirents = |payload: &[u8], plus: bool| -> Vec<(String, u64)> {
+            let mut out = Vec::new();
+            let mut rest = payload;
+            while !rest.is_empty() {
+                if plus {
+                    rest = &rest[size_of::<EntryOut>()..];
+                }
+                let (d, after) = Dirent::read_from_prefix(rest).unwrap();
+                let name = String::from_utf8(after[..d.namelen as usize].to_vec()).unwrap();
+                let padded = (size_of::<Dirent>() + d.namelen as usize).next_multiple_of(8)
+                    - size_of::<Dirent>();
+                rest = &after[padded..];
+                out.push((name, d.off));
+            }
+            out
+        };
+
+        let fs = block_on(Filesystem::format(crate::Storage::memory(16 << 20))).unwrap();
+        let root = fs.root().clone();
+        for i in 0..80u32 {
+            block_on(root.create(
+                format!("entry-{i:03}").as_bytes(),
+                0o644,
+                Owner { uid: 0, gid: 0 },
+            ))
+            .unwrap();
+        }
+        let server = Server::new(fs, Box::new(|_| Ok(())));
+        let send = |unique: u64, opcode: u32, nodeid: u64, body: &[u8]| -> Vec<u8> {
+            let header = InHeader {
+                len: (size_of::<InHeader>() + body.len()) as u32,
+                opcode,
+                unique,
+                nodeid,
+                uid: 0,
+                gid: 0,
+                pid: 1,
+                padding: 0,
+            };
+            let mut req = header.as_bytes().to_vec();
+            req.extend_from_slice(body);
+            let raw = block_on(server.handle(&req)).unwrap().unwrap();
+            let (out, payload) = OutHeader::read_from_prefix(&raw).unwrap();
+            assert_eq!(out.error, 0, "opcode {opcode} failed with errno {}", -out.error);
+            payload.to_vec()
+        };
+
+        // 1. Mid-reply READDIR resume after unlinking earlier entries.
+        let open = OpenOut::read_from_prefix(&send(1, opcode::OPENDIR, ROOT_ID, &[])).unwrap().0;
+        let reply1 = send(
+            2,
+            opcode::READDIR,
+            ROOT_ID,
+            ReadIn { fh: open.fh, offset: 0, size: 4096, ..Default::default() }.as_bytes(),
+        );
+        let entries1 = parse_dirents(&reply1, false);
+        let entry009_off = entries1
+            .iter()
+            .find(|(name, _)| name == "entry-009")
+            .expect("entry-009 in first 4096-byte reply")
+            .1;
+        assert!(
+            entries1.len() > 20,
+            "first reply must extend past entry-009 so entry-009 is mid-reply"
+        );
+        for i in 0..5u32 {
+            block_on(root.unlink(format!("entry-{i:03}").as_bytes())).unwrap();
+        }
+        let reply2 = send(
+            3,
+            opcode::READDIR,
+            ROOT_ID,
+            ReadIn { fh: open.fh, offset: entry009_off, size: 4096, ..Default::default() }
+                .as_bytes(),
+        );
+        let entries2 = parse_dirents(&reply2, false);
+        assert_eq!(
+            entries2.first().map(|(n, _)| n.as_str()),
+            Some("entry-010"),
+            "mid-reply resume must return entry-010 first, not index-seek past unlinks"
+        );
+        send(
+            4,
+            opcode::RELEASEDIR,
+            ROOT_ID,
+            ReleaseIn { fh: open.fh, ..Default::default() }.as_bytes(),
+        );
+
+        // 2. READDIRPLUS where the last entry examined on a page vanishes (ENOENT).
+        let open_plus =
+            OpenOut::read_from_prefix(&send(5, opcode::OPENDIR, ROOT_ID, &[])).unwrap().0;
+        // `.` (160) + `..` (160) + 3 entries (`entry-005..007`, 168 each) = 824 bytes.
+        let p1 = send(
+            6,
+            opcode::READDIRPLUS,
+            ROOT_ID,
+            ReadIn { fh: open_plus.fh, offset: 0, size: 840, ..Default::default() }.as_bytes(),
+        );
+        let pe1 = parse_dirents(&p1, true);
+        assert_eq!(pe1.last().map(|(n, _)| n.as_str()), Some("entry-007"));
+        let off_after_007 = pe1.last().unwrap().1;
+
+        // Unlink an earlier entry (entry-005) and the entry right after the next reply's capacity
+        // (entry-010): reply 2 fits entry-008 and entry-009 (2 * 168 = 336 <= 400), hits ENOENT
+        // on entry-010, and cannot fit entry-011 (3 * 168 = 504 > 400).
+        block_on(root.unlink(b"entry-005")).unwrap();
+        block_on(root.unlink(b"entry-010")).unwrap();
+        let p2 = send(
+            7,
+            opcode::READDIRPLUS,
+            ROOT_ID,
+            ReadIn { fh: open_plus.fh, offset: off_after_007, size: 400, ..Default::default() }
+                .as_bytes(),
+        );
+        let pe2 = parse_dirents(&p2, true);
+        assert_eq!(
+            pe2.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+            vec!["entry-008", "entry-009"]
+        );
+        let off_after_009 = pe2.last().unwrap().1;
+
+        let p3 = send(
+            8,
+            opcode::READDIRPLUS,
+            ROOT_ID,
+            ReadIn { fh: open_plus.fh, offset: off_after_009, size: 400, ..Default::default() }
+                .as_bytes(),
+        );
+        let pe3 = parse_dirents(&p3, true);
+        assert_eq!(
+            pe3.first().map(|(n, _)| n.as_str()),
+            Some("entry-011"),
+            "READDIRPLUS after ENOENT at page boundary must resume at entry-011 without index-seek"
+        );
+        send(
+            9,
+            opcode::RELEASEDIR,
+            ROOT_ID,
+            ReleaseIn { fh: open_plus.fh, ..Default::default() }.as_bytes(),
+        );
+        block_on(server.into_filesystem().close()).unwrap();
+    }
+
+    /// hotbed review 109 (finding 405): when `READDIRPLUS` exhausts `cursor.buffered` mid-reply
+    /// and the refill page fails (here `EOVERFLOW` from a hostile cell's object ID >= 2^48),
+    /// `readdir_node` must return `Ok(reply)` for the entries that already took lookups and defer
+    /// the error to the next call rather than dropping `reply` and leaking `Nodes::looked`.
+    #[test]
+    fn readdirplus_refill_error_returns_taken_lookups_without_leaking() {
+        use fxfs::object_handle::ObjectHandle as _;
+        use fxfs::object_store::ObjectDescriptor;
+        use fxfs::object_store::directory::Directory;
+        use fxfs::object_store::transaction::{LockKey, Options, lock_keys};
+        use zerocopy::{FromBytes, IntoBytes};
+
+        const NORMAL: usize = 60;
+        let device = storage_device::DeviceHolder::new(
+            storage_device::fake_device::FakeDevice::new(16_384, 512),
+        );
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let device = rt.block_on(async move {
+            let fxfs = fxfs::filesystem::FxFilesystem::new_empty(device).await.unwrap();
+            let root_vol = fxfs::object_store::volume::root_volume((*fxfs).clone()).await.unwrap();
+            let store = root_vol
+                .new_volume(
+                    crate::filesystem::VOLUME_NAME,
+                    fxfs::object_store::NewChildStoreOptions::default(),
+                )
+                .await
+                .unwrap();
+            let root_dir = Directory::open(&store, store.root_directory_object_id()).await.unwrap();
+            let dir_lock =
+                lock_keys![LockKey::object(store.store_object_id(), root_dir.object_id())];
+            let target_id = {
+                let mut txn =
+                    store.new_transaction(dir_lock.clone(), Options::default()).await.unwrap();
+                let handle = root_dir.create_child_file(&mut txn, "seed").await.unwrap();
+                txn.commit().await.unwrap();
+                handle.object_id()
+            };
+            let mut txn =
+                store.new_transaction(dir_lock.clone(), Options::default()).await.unwrap();
+            for i in 0..NORMAL {
+                root_dir
+                    .insert_child(
+                        &mut txn,
+                        &format!("entry-{i:03}"),
+                        target_id,
+                        ObjectDescriptor::File,
+                    )
+                    .await
+                    .unwrap();
+            }
+            // Hostile entry past the first page + read-ahead whose object ID overflows the
+            // 48-bit per-slot node ID space on a multi-cell server (`EOVERFLOW`).
+            root_dir
+                .insert_child(&mut txn, "zzz-overflow", (1u64 << 48) + 1, ObjectDescriptor::File)
+                .await
+                .unwrap();
+            txn.commit().await.unwrap();
+            drop((root_dir, store, root_vol));
+            fxfs.close().await.unwrap();
+            let device = fxfs.take_device().await;
+            device.reopen(false);
+            device
+        });
+        drop(rt);
+
+        let server = Server::cells(Owner { uid: 0, gid: 0 }, Box::new(|_| Ok(())));
+        block_on(server.attach("c", Filesystem::mount(crate::Storage::from_device(device))))
+            .unwrap();
+
+        let send_raw = |unique: u64, opcode: u32, nodeid: u64, body: &[u8]| -> (i32, Vec<u8>) {
+            let header = InHeader {
+                len: (size_of::<InHeader>() + body.len()) as u32,
+                opcode,
+                unique,
+                nodeid,
+                uid: 0,
+                gid: 0,
+                pid: 1,
+                padding: 0,
+            };
+            let mut req = header.as_bytes().to_vec();
+            req.extend_from_slice(body);
+            let raw = block_on(server.handle(&req)).unwrap().unwrap();
+            let (out, payload) = OutHeader::read_from_prefix(&raw).unwrap();
+            (out.error, payload.to_vec())
+        };
+
+        let (err, lookup_body) = send_raw(1, opcode::LOOKUP, ROOT_ID, b"c\0");
+        assert_eq!(err, 0);
+        let cell_root = EntryOut::read_from_prefix(&lookup_body).unwrap().0.nodeid;
+
+        let (err, open_body) = send_raw(2, opcode::OPENDIR, cell_root, &[]);
+        assert_eq!(err, 0);
+        let fh = OpenOut::read_from_prefix(&open_body).unwrap().0.fh;
+
+        let parse_plus = |payload: &[u8]| -> Vec<(u64, String, u64)> {
+            let mut out = Vec::new();
+            let mut rest = payload;
+            while !rest.is_empty() {
+                let (eo, after_eo) = EntryOut::read_from_prefix(rest).unwrap();
+                let (d, after_d) = Dirent::read_from_prefix(after_eo).unwrap();
+                let name = String::from_utf8(after_d[..d.namelen as usize].to_vec()).unwrap();
+                let padded = (size_of::<Dirent>() + d.namelen as usize).next_multiple_of(8)
+                    - size_of::<Dirent>();
+                rest = &after_d[padded..];
+                out.push((eo.nodeid, name, d.off));
+            }
+            out
+        };
+
+        // Reply 1 (4096 bytes) fetches ~55 entries into `cursor.buffered` and emits ~22, leaving
+        // ~33 buffered before `zzz-overflow`.
+        let (err1, p1) = send_raw(
+            3,
+            opcode::READDIRPLUS,
+            cell_root,
+            ReadIn { fh, offset: 0, size: 4096, ..Default::default() }.as_bytes(),
+        );
+        assert_eq!(err1, 0);
+        let entries1 = parse_plus(&p1);
+        let off1 = entries1.last().unwrap().2;
+
+        // Reply 2 (8192 bytes) drains the buffered entries (taking lookups for each) and then
+        // refills mid-reply, hitting `EOVERFLOW` on `zzz-overflow`. It must return Ok with the
+        // already-encoded entries so lookups stay balanced.
+        let (err2, p2) = send_raw(
+            4,
+            opcode::READDIRPLUS,
+            cell_root,
+            ReadIn { fh, offset: off1, size: 8192, ..Default::default() }.as_bytes(),
+        );
+        assert_eq!(err2, 0, "mid-reply refill error must return already-taken READDIRPLUS entries");
+        let entries2 = parse_plus(&p2);
+        assert!(!entries2.is_empty());
+        let off2 = entries2.last().unwrap().2;
+
+        // Total lookups held on child nodes of `cell_root` must equal the exact number of
+        // non-dot `EntryOut`s delivered to the kernel across replies 1 and 2.
+        let delivered_lookups: u64 = entries1
+            .iter()
+            .chain(&entries2)
+            .filter(|(_, name, _)| name != "." && name != "..")
+            .count() as u64;
+        let recorded_lookups: u64 = {
+            let nodes = server.nodes.lock().unwrap();
+            nodes
+                .looked
+                .iter()
+                .filter(|&(&nid, _)| nid != cell_root)
+                .map(|(_, looked)| looked.lookups)
+                .sum()
+        };
+        assert_eq!(
+            recorded_lookups, delivered_lookups,
+            "READDIRPLUS lookups in Nodes::looked must match delivered EntryOuts"
+        );
+
+        // Reply 3 starts with an empty reply, hits the refill EOVERFLOW, and surfaces it without
+        // taking any new lookups.
+        let (err3, p3) = send_raw(
+            5,
+            opcode::READDIRPLUS,
+            cell_root,
+            ReadIn { fh, offset: off2, size: 4096, ..Default::default() }.as_bytes(),
+        );
+        assert_eq!(err3, -Errno::EOVERFLOW.raw());
+        assert!(p3.is_empty());
+        let recorded_after: u64 = {
+            let nodes = server.nodes.lock().unwrap();
+            nodes
+                .looked
+                .iter()
+                .filter(|&(&nid, _)| nid != cell_root)
+                .map(|(_, looked)| looked.lookups)
+                .sum()
+        };
+        assert_eq!(recorded_after, delivered_lookups);
+
+        let (err_rel, _) = send_raw(
+            6,
+            opcode::RELEASEDIR,
+            cell_root,
+            ReleaseIn { fh, ..Default::default() }.as_bytes(),
+        );
+        assert_eq!(err_rel, 0);
+        block_on(server.unmount()).unwrap();
     }
 }
