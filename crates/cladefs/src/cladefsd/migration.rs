@@ -156,6 +156,8 @@ struct Outgoing {
     /// can still reconcile against the bucket head after a target restart (board 11530).
     attempted_token: Mutex<Option<u64>>,
     client: super::peers::Client,
+    /// Pins the shared HTTP/2 channel in `daemon.peer_channels` while this migration is live.
+    _channel: super::peers::PeerChannel,
     sent: Mutex<HashMap<String, (u64, u64)>>,
     rounds: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
@@ -163,7 +165,7 @@ struct Outgoing {
 impl Outgoing {
     fn new(
         Marker { migration, peer, incarnation, token }: Marker,
-        client: super::peers::Client,
+        (client, _channel): (super::peers::Client, super::peers::PeerChannel),
         bucket_backed: bool,
     ) -> Self {
         let (sent, rounds) = (Mutex::default(), Mutex::default());
@@ -176,6 +178,7 @@ impl Outgoing {
             source_epoch: Mutex::new(None),
             attempted_token: Mutex::new(None),
             client,
+            _channel,
             sent,
             rounds,
         }
@@ -460,10 +463,12 @@ async fn within<T>(
     }
 }
 
-/// A client of the peer at `address`.
-fn client(daemon: &Daemon, address: &str) -> Result<super::peers::Client, Errno> {
-    let runtime = crate::bucket::bucket_runtime_on(&daemon.host).map_err(|_| Errno::EIO)?;
-    super::peers::member_on(daemon, &runtime, address).map_err(|err| {
+/// A pooled client and channel handle for the peer at `address` (board 11713, board 11659).
+fn client(
+    daemon: &Daemon,
+    address: &str,
+) -> Result<(super::peers::Client, super::peers::PeerChannel), Errno> {
+    super::peers::client_on(daemon, address).map_err(|err| {
         log::warn!("cladefsd: migrating to {address}: {err}");
         Errno::EINVAL
     })
@@ -531,7 +536,7 @@ pub(super) async fn migrate_on(
     })
     .await?;
     let migration = rand::random::<u64>() | 1;
-    let mut client = client(daemon, &peer)?;
+    let (mut client, channel) = client(daemon, &peer)?;
     let (bucket_backed, prepare) = match kind {
         SourceKind::Ephemeral { cell, parent } => {
             let host = ephemeral_host::host_on(&daemon.host)?;
@@ -609,7 +614,7 @@ pub(super) async fn migrate_on(
         };
     count(&COUNTS.prepared, 1);
     let marker = Marker { migration, peer, incarnation, token };
-    let outgoing = Arc::new(Outgoing::new(marker, client, bucket_backed));
+    let outgoing = Arc::new(Outgoing::new(marker, (client, channel), bucket_backed));
     // Its rounds' task noted before the migration is the cell's, with nothing awaited between: a
     // hand-over or an abort finding it stops them.
     start_rounds(daemon, &outgoing, path.clone())?;
@@ -1703,7 +1708,7 @@ async fn let_go(
 /// Tells the target at `peer` it may forget it accepted `migration`, its cell let go of here
 /// (board 5734). Unheard, the target keeps remembering it: one empty file.
 async fn release(daemon: &Daemon, peer: &str, migration: u64) {
-    let Ok(mut client) = client(daemon, peer) else { return };
+    let Ok((mut client, _channel)) = client(daemon, peer) else { return };
     let released = MigrateReleaseRequest { migration };
     // Unanswered: said; the target forgets the migration when it is idle as long.
     if let Err(err) = within(BUCKET_BOUND, client.migrate_release(released)).await {

@@ -91,6 +91,9 @@ pub struct Daemon {
     pub(super) disk: disk::State,
     /// Mutual TLS credentials for peer gRPC (`CLADEFSD_PEER_TLS`).
     pub(super) peer_credentials: Mutex<Option<peers::Credentials>>,
+    /// Shared HTTP/2 peer gRPC channel pool across GetPart, replication, and migration (board
+    /// 11713, board 11659).
+    pub(super) peer_channels: OnceLock<peers::Channels>,
     /// Outgoing and incoming ephemeral cell migration state.
     pub(super) migrations: migration::State,
     /// Active VM connection reports for `GetStats` and `/metrics`.
@@ -144,6 +147,7 @@ impl Daemon {
             governor: governor::State::default(),
             disk: disk::State::new(),
             peer_credentials: Mutex::new(None),
+            peer_channels: OnceLock::new(),
             migrations: migration::State::new(),
             stats_reports: Mutex::new(Vec::new()),
             process: process::State::new(),
@@ -174,9 +178,9 @@ impl Daemon {
     }
 
     /// The daemon's consolidated Tokio runtime (outside `madsim`), shared by VM socket I/O,
-    /// control gRPC, peer gRPC, and the memory governor.
+    /// control gRPC, peer gRPC, the memory governor, and FUSE-mounted Fxfs cells.
     #[cfg(not(madsim))]
-    pub(super) fn runtime(&self) -> &tokio::runtime::Runtime {
+    pub(crate) fn runtime(&self) -> &tokio::runtime::Runtime {
         self.runtime.get_or_init(|| {
             // cladefs: the daemon's seam: one consolidated runtime outside the simulation.
             tokio::runtime::Builder::new_multi_thread()
