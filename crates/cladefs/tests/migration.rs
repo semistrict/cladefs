@@ -525,6 +525,9 @@ fn hand_overs_naming_files_the_target_lacks_are_refused() {
                 }
             }
         }
+        // Sort so `kept(&staged)[0]` is the earliest segment, already finished and recorded in
+        // `outgoing.sent` by the time later segments arrive (board 11541).
+        found.sort();
         found
     };
     let deadline = Instant::now() + Duration::from_secs(60);
