@@ -53,16 +53,39 @@ what the part cache keeps. Nothing walks a directory to count it but once, as a
 tenant is granted, and as a cell is opened by this process after another had it
 (TASK-539.5). `GetTenantDisk` and `/metrics` read those counts.
 
-The cells come first. The part cache (`CLADEFSD_PART_CACHE`), copies of the
-bucket's objects that any tenant's cells read, which is no tenant's, keeps what
-the cells leave of the allowance, `CLADEFSD_PART_CACHE_BYTES` at most if set,
-and gives it back at once as they need it, least recently read first. Their
+The cells come first. The part cache (`CLADEFSD_PART_CACHE`, one or more colon-separated
+directories or glob patterns such as `/mnt/nvme*/cladefsd/part-cache` across JBOD disks), copies
+of the bucket's objects that any tenant's cells read, which is no tenant's, keeps what the cells
+leave of each disk's allowance, `CLADEFSD_PART_CACHE_BYTES` at most across all shards if set, and
+gives it back at once as they need it, least recently read first. Put one part-cache shard on
+every JBOD disk that holds cell directories so acknowledged WAL segments adopt in place via
+zero-copy `rename(2)` without `EXDEV`; objects fetched from the bucket distribute across healthy
+shards by weighted rendezvous hashing proportional to each disk's size, and per-shard health
+(`cladefsd_part_cache_shard_state`) isolates failing drives without stalling healthy ones. Their
 cells near the allowance, within the headroom of it, the disk is under
 pressure: their uploaders are urged, closing and uploading their open segments
 at once, and each tenant's writes are refused past its share, by its weight
 (`SetDiskWeight`, 1 each by default), of what the allowance leaves the tenants.
 Past the allowance, writes are refused with `ENOSPC`, which the guest sees as a
 full disk; the daemon and every cell go on.
+
+### Multi-disk JBOD hosts
+
+Every local-SSD path in `cladefsd` accepts colon-separated directories across independent
+filesystems (one per NVMe drive, no RAID0 required):
+
+- `CLADEFSD_PART_CACHE=/mnt/nvme0/cladefsd/part-cache:/mnt/nvme1/cladefsd/part-cache` (or glob)
+- `CLADEFSD_REPLICAS=/mnt/nvme0/cladefsd/replicas:/mnt/nvme1/cladefsd/replicas` (composite
+  incarnation over all shards; wiping any one disk rotates it cleanly)
+- `CLADEFSD_ROOTS=/mnt/nvme0/cladefsd/cells:/mnt/nvme1/cladefsd/cells`
+- `CLADEFSD_EPHEMERAL_CELLS=/mnt/nvme0/cladefsd/ephemeral-cells:/mnt/nvme1/cladefsd/ephemeral-cells`
+- `CLADEFSD_MOUNT_STORES=/mnt/nvme0/cladefsd/mount-stores:/mnt/nvme1/cladefsd/mount-stores`
+- `GrantRequest.dirs` (and `cladefsctl grant TENANT /d0:/d1`) grants a tenant multiple JBOD
+  directories under one aggregate `SetDiskLimit` and per-disk `SetDiskWeight` shares.
+- `CLADEFSD_EPHEMERAL` stays a single small metadata journal directory (tens of KiB).
+
+Each host disk gets its own cell page-cache flusher thread, independent disk governor allowance,
+and independent `cladefsd_host_disk_*` and `cladefsd_part_cache_shard_state` metrics.
 
 Each write is admitted by its cell before it takes any of the disk: what it
 writes, and what the cell's own work may still add for it, its commit copying

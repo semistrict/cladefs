@@ -3673,13 +3673,16 @@ type GrantRequest struct {
 	// (Crockford's digits, lower case, no leading zeros): `<tenant>.sock`.
 	Tenant uint64 `protobuf:"varint,1,opt,name=tenant,proto3" json:"tenant,omitempty"`
 	// The directory its cells are in, which must exist: its VM processes name cells in it
-	// alone.
+	// alone (or in `dir` and `dirs` together when multiple JBOD directories are granted).
 	Dir string `protobuf:"bytes,2,opt,name=dir,proto3" json:"dir,omitempty"`
 	// The user to give its socket to, its jails': the socket is theirs and its group's alone. The
 	// daemon's own user, if not given.
 	Uid *uint32 `protobuf:"varint,3,opt,name=uid,proto3,oneof" json:"uid,omitempty"`
 	// The group to give its socket to; the daemon's own, if not given.
-	Gid           *uint32 `protobuf:"varint,4,opt,name=gid,proto3,oneof" json:"gid,omitempty"`
+	Gid *uint32 `protobuf:"varint,4,opt,name=gid,proto3,oneof" json:"gid,omitempty"`
+	// Additional directories its cells may live in across JBOD disks, each of which must exist.
+	// Combined with `dir` when both are non-empty; `dir` may be empty when `dirs` is non-empty.
+	Dirs          []string `protobuf:"bytes,5,rep,name=dirs,proto3" json:"dirs,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3740,6 +3743,13 @@ func (x *GrantRequest) GetGid() uint32 {
 		return *x.Gid
 	}
 	return 0
+}
+
+func (x *GrantRequest) GetDirs() []string {
+	if x != nil {
+		return x.Dirs
+	}
+	return nil
 }
 
 // The tenant's VM socket.
@@ -5459,12 +5469,13 @@ const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01\x1a;\n" +
 	"\rFailuresEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01\"v\n" +
+	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01\"\x8a\x01\n" +
 	"\fGrantRequest\x12\x16\n" +
 	"\x06tenant\x18\x01 \x01(\x04R\x06tenant\x12\x10\n" +
 	"\x03dir\x18\x02 \x01(\tR\x03dir\x12\x15\n" +
 	"\x03uid\x18\x03 \x01(\rH\x00R\x03uid\x88\x01\x01\x12\x15\n" +
-	"\x03gid\x18\x04 \x01(\rH\x01R\x03gid\x88\x01\x01B\x06\n" +
+	"\x03gid\x18\x04 \x01(\rH\x01R\x03gid\x88\x01\x01\x12\x12\n" +
+	"\x04dirs\x18\x05 \x03(\tR\x04dirsB\x06\n" +
 	"\x04_uidB\x06\n" +
 	"\x04_gid\"'\n" +
 	"\rGrantResponse\x12\x16\n" +

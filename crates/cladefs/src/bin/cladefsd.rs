@@ -58,8 +58,9 @@
 //! seconds (60 by default), exiting 0; past them, it logs what is left and exits 1. A host is
 //! upgraded so, its VMs moved off or stopped first (`docs/upgrading-a-host.md`).
 //!
-//! With `CLADEFSD_MOUNT` naming a mount point, a directory, and `CLADEFSD_MOUNT_STORES` a directory
-//! for their cells, the daemon mounts a directory of tenants' cells there with FUSE, none at first
+//! With `CLADEFSD_MOUNT` naming a mount point, a directory, and `CLADEFSD_MOUNT_STORES` one or
+//! more colon-separated JBOD directories for their cells, the daemon mounts a directory of
+//! tenants' cells there with FUSE, none at first
 //! (TASK-302, TASK-364, TASK-475.2), and serves its Mount service on the control socket
 //! (`proto/cladefs/mount/v1/mount.proto`; `cladefsctl mount`), which `CLADEFSD_GRPC` must name.
 //! Attaching a cell (`Attach`; a cell of 0, a new Fxfs one, its filesystem made empty) takes it
@@ -85,11 +86,13 @@
 //! `CLADEFSD_BUCKET` names the bucket (`s3://bucket/prefix`, `gs://bucket/prefix`,
 //! `az://container/prefix`) each cell it opens keeps its cell in (backlog doc-7), with credentials
 //! from the environment's `AWS_*`, `GOOGLE_*` or `AZURE_*` variables: durable commits are uploaded
-//! behind them, within a second. With `CLADEFSD_PART_CACHE` naming a directory too, what cells read
-//! from the bucket is kept there, sparse, as much as its cells leave of its filesystem, and kept
-//! across the daemon's restarts: one daemon at a time has the directory.
-//! `CLADEFSD_PART_CACHE_BYTES` caps what it keeps there, in bytes (TASK-406.1): those read least
-//! recently go first.
+//! behind them, within a second. With `CLADEFSD_PART_CACHE` naming one or more colon-separated
+//! directories (or glob patterns such as `/mnt/nvme*/cladefsd/part-cache`) across JBOD disks,
+//! what cells read from the bucket is kept there, sparse, weighted by disk capacity with
+//! zero-copy rename adoption onto the cell's own disk, as much as its cells leave of each
+//! filesystem, and kept across the daemon's restarts: one daemon at a time locks each directory.
+//! `CLADEFSD_PART_CACHE_BYTES` caps what it keeps across all shards combined, in bytes
+//! (TASK-406.1): those read least recently go first.
 //!
 //! The host's disks are governed as its memory is (backlog doc-22): every filesystem the daemon
 //! keeps cells or its part cache on is its but for a headroom (`CLADEFSD_DISK_HEADROOM`, bytes or
@@ -117,11 +120,13 @@
 //! asks it nothing again, nor counts it among a part's owners, whatever its list says; within the
 //! region, parts of any bucket are served, those of another region's buckets fetched from there
 //! once by their owner here.
-//! With `CLADEFSD_REPLICAS` naming a directory too, made if it is not there, the daemon is a
+//! With `CLADEFSD_REPLICAS` naming one or more colon-separated JBOD directories, each made if it
+//! is not there, the daemon is a
 //! member of other hosts' replicated cells' configurations (backlog doc-21, TASK-537): it keeps
-//! their writers' logs there until the bucket does, each cell's to the lag bound in bytes, and
-//! sweeps what their heads name no more every ten minutes. The directory's incarnation, made with
-//! it, names this host in their configurations: one made anew, its disk lost, is another member.
+//! their writers' logs spread across them until the bucket does, each cell's to the lag bound in
+//! bytes, and sweeps what their heads name no more every ten minutes. With one directory, its
+//! incarnation names this host; with multiple JBOD directories, a composite incarnation derived
+//! from all shards' incarnations names it, so losing or wiping any single disk rotates it.
 //! A writer of a replicated cell replaces a member down for `CLADEFSD_REPLACE_AFTER` seconds
 //! (default 30), and, its configuration holding no quorum that long, none to be had, drops it to
 //! f = 0 once the bucket holds what it told.

@@ -1170,6 +1170,7 @@ fn memory_cells_through_the_control_api() {
         .block_on(daemon.client.grant(GrantRequest {
             tenant: 7,
             dir: name(&tenant_dir),
+            dirs: Vec::new(),
             uid: None,
             gid: None,
         }))

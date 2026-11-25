@@ -929,13 +929,16 @@ message GrantRequest {
   // (Crockford's digits, lower case, no leading zeros): `<tenant>.sock`.
   uint64 tenant = 1;
   // The directory its cells are in, which must exist: its VM processes name cells in it
-  // alone.
+  // alone (or in `dir` and `dirs` together when multiple JBOD directories are granted).
   string dir = 2;
   // The user to give its socket to, its jails': the socket is theirs and its group's alone. The
   // daemon's own user, if not given.
   optional uint32 uid = 3;
   // The group to give its socket to; the daemon's own, if not given.
   optional uint32 gid = 4;
+  // Additional directories its cells may live in across JBOD disks, each of which must exist.
+  // Combined with `dir` when both are non-empty; `dir` may be empty when `dirs` is non-empty.
+  repeated string dirs = 5;
 }
 
 // The tenant's VM socket.

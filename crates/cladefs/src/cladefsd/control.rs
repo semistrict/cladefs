@@ -1059,11 +1059,20 @@ impl Cladefsd for Control {
         &self,
         request: Request<GrantRequest>,
     ) -> Result<Response<GrantResponse>, Status> {
-        let GrantRequest { tenant, dir, uid, gid } = request.into_inner();
-        let dir = path(dir)?;
+        let GrantRequest { tenant, dir, dirs, uid, gid } = request.into_inner();
+        let mut all_dirs = Vec::with_capacity(dirs.len() + usize::from(!dir.is_empty()));
+        if !dir.is_empty() {
+            all_dirs.push(path(dir)?);
+        }
+        for extra in dirs {
+            all_dirs.push(path(extra)?);
+        }
+        if all_dirs.is_empty() {
+            return reply(Err(Errno::EINVAL));
+        }
         let grants = self.grants.clone();
         let granted = cells::blocking(move || {
-            let socket = grants.grant(tenant, &dir, (uid, gid))?;
+            let socket = grants.grant_many(tenant, &all_dirs, (uid, gid))?;
             let socket = socket.into_os_string().into_string().map_err(|_| Errno::EINVAL)?;
             Ok(GrantResponse { socket })
         });

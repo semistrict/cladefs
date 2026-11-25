@@ -107,11 +107,16 @@ impl Registry {
     }
 }
 
-/// The tenant of the ID `id` on `daemon`, whose cells are in `dir`, alive, if one is: one revoked
-/// whose VM processes live on, which a grant of it again goes on with (TASK-79.36).
-pub(super) fn alive_on(daemon: &Daemon, id: u64, dir: &std::path::Path) -> Option<Arc<Tenant>> {
+/// The tenant of the ID `id` on `daemon`, whose cells are in `dirs` (canonical, sorted), alive,
+/// if one is: one revoked whose VM processes live on, which a grant of it again goes on with
+/// (TASK-79.36).
+pub(super) fn alive_on(
+    daemon: &Daemon,
+    id: u64,
+    dirs: &[std::path::PathBuf],
+) -> Option<Arc<Tenant>> {
     let registry = daemon.memory.registry.lock().unwrap();
-    registry.alive().find(|tenant| tenant.id() == id && tenant.dir() == Some(dir))
+    registry.alive().find(|tenant| tenant.id() == id && tenant.dirs() == Some(dirs))
 }
 
 /// Counts `tenant`, new, among those alive on `daemon`, limited as its ID is.

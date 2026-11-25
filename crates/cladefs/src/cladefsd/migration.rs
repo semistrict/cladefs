@@ -1983,28 +1983,41 @@ pub(super) mod target {
         done.unwrap_or_else(|err| Err(status("serving it", err)))
     }
 
-    /// The directory ephemeral cells migrated to this host go in (`CLADEFSD_EPHEMERAL_CELLS`),
-    /// as its path resolves, each a new name in it (board 8447): the only place a peer's prepare
-    /// makes anything. `Err` saying why if it names none, or no directory: a host of no such
-    /// directory takes no migrations, and its daemon refuses to start naming one not there.
-    pub(crate) fn cells_root() -> Result<PathBuf, String> {
+    /// The directories ephemeral cells migrated to this host may go in
+    /// (`CLADEFSD_EPHEMERAL_CELLS`, colon-separated for JBOD), as their paths resolve, each a new
+    /// name in one of them (board 8447): the only places a peer's prepare makes anything. `Err`
+    /// saying why if it names none, or any is no directory: a host of no such directory takes no
+    /// migrations, and its daemon refuses to start naming one not there.
+    pub(crate) fn cells_roots() -> Result<Vec<PathBuf>, String> {
         let set = node_local::env::var_os("CLADEFSD_EPHEMERAL_CELLS");
         let Some(set) = set.filter(|set| !set.is_empty()) else {
             return Err("CLADEFSD_EPHEMERAL_CELLS names no directory for migrated cells".into());
         };
-        let root = host_fs::canonicalize(&set);
-        let root = root.map_err(|err| format!("CLADEFSD_EPHEMERAL_CELLS {set:?}: {err}"))?;
-        if !host_fs::is_dir(&root) {
-            return Err(format!("CLADEFSD_EPHEMERAL_CELLS {set:?} is no directory"));
+        let mut roots = Vec::new();
+        for entry in std::env::split_paths(&set) {
+            if entry.as_os_str().is_empty() {
+                continue;
+            }
+            let root = host_fs::canonicalize(&entry)
+                .map_err(|err| format!("CLADEFSD_EPHEMERAL_CELLS {entry:?}: {err}"))?;
+            if !host_fs::is_dir(&root) {
+                return Err(format!("CLADEFSD_EPHEMERAL_CELLS {entry:?} is no directory"));
+            }
+            if !roots.contains(&root) {
+                roots.push(root);
+            }
         }
-        Ok(root)
+        if roots.is_empty() {
+            return Err("CLADEFSD_EPHEMERAL_CELLS names no directory for migrated cells".into());
+        }
+        Ok(roots)
     }
 
     /// The longest name of a migrated cell's directory, `NAME_MAX` less what its staging adds:
     /// `.`, `.migrating-` and a migration's ID in hexadecimal.
     const NAME_MOST: usize = 255 - 1 - ".migrating-".len() - 16;
 
-    /// The path in `root`, the directory of migrated cells, a peer's `to` names, if it names one:
+    /// The path in `root`, a directory of migrated cells, a peer's `to` names, if it names one:
     /// a name directly in `root`, `root` as it resolves, then `/` and a name neither empty, nor
     /// beginning with `.` (as `.`, `..` and every staging do), nor holding a `/` or a NUL, nor
     /// longer than [`NAME_MOST`] (board 8447). A peer's paths are untrusted (AGENTS.md, Trust
@@ -2019,6 +2032,11 @@ pub(super) mod target {
         normal.then(|| root.join(name))
     }
 
+    /// Checks `to` against any of the configured `CLADEFSD_EPHEMERAL_CELLS` JBOD roots.
+    fn cell_path_in_roots(roots: &[PathBuf], to: &str) -> Option<PathBuf> {
+        roots.iter().find_map(|root| cell_path(root, to))
+    }
+
     /// The directories bucket-backed cells migrated to this host may go in (board 11369):
     /// `CLADEFSD_ROOTS` if configured, falling back to `CLADEFSD_EPHEMERAL_CELLS`.
     fn bucket_cells_roots(daemon: &Daemon) -> Result<Vec<PathBuf>, String> {
@@ -2026,20 +2044,35 @@ pub(super) mod target {
             return Ok(roots.to_vec());
         }
         if node_local::env::var_os("CLADEFSD_EPHEMERAL_CELLS").is_some_and(|set| !set.is_empty()) {
-            return Ok(vec![cells_root()?]);
+            return cells_roots();
         }
         Err("neither CLADEFSD_ROOTS nor CLADEFSD_EPHEMERAL_CELLS names a directory for migrated \
              cells"
             .into())
     }
 
-    /// Canonical paths of daemon-internal directories (ephemeral journal, part cache, replicas)
-    /// that must never be used as destination parents for migrated bucket-backed cells (board
-    /// 11530).
+    /// Canonical paths of daemon-internal directories (ephemeral journal, all JBOD part cache
+    /// shards, all JBOD replica shards) that must never be used as destination parents for
+    /// migrated bucket-backed cells (board 11530).
     fn daemon_internal_dirs() -> Vec<PathBuf> {
-        ["CLADEFSD_EPHEMERAL", "CLADEFSD_PART_CACHE", "CLADEFSD_REPLICAS"]
+        let mut raw_dirs = Vec::new();
+        if let Some(dir) = node_local::env::var_os("CLADEFSD_EPHEMERAL").filter(|v| !v.is_empty()) {
+            raw_dirs.push(PathBuf::from(dir));
+        }
+        if let Some(raw) = node_local::env::var_os("CLADEFSD_PART_CACHE").filter(|v| !v.is_empty())
+        {
+            match super::super::storage::parse_part_cache_dirs(&raw) {
+                Ok(dirs) => raw_dirs.extend(dirs),
+                // Fallback to split_paths so even an unexpanded or non-glob path is checked.
+                Err(_) => raw_dirs
+                    .extend(std::env::split_paths(&raw).filter(|p| !p.as_os_str().is_empty())),
+            }
+        }
+        if let Some(raw) = node_local::env::var_os("CLADEFSD_REPLICAS").filter(|v| !v.is_empty()) {
+            raw_dirs.extend(std::env::split_paths(&raw).filter(|p| !p.as_os_str().is_empty()));
+        }
+        raw_dirs
             .into_iter()
-            .filter_map(|var| node_local::env::var_os(var).filter(|value| !value.is_empty()))
             .filter_map(|dir| {
                 // Nonexistent optional internal dir has nothing to exclude yet.
                 host_fs::canonicalize(&dir).ok()
@@ -2227,11 +2260,12 @@ pub(super) mod target {
                         "migration {migration:x}: ephemeral prepare names no parent cell"
                     )));
                 }
-                let root = cells_root().map_err(Status::failed_precondition)?;
-                cell_path(&root, &to).ok_or_else(|| {
+                let roots = cells_roots().map_err(Status::failed_precondition)?;
+                cell_path_in_roots(&roots, &to).ok_or_else(|| {
+                    let shown =
+                        roots.iter().map(|r| r.display().to_string()).collect::<Vec<_>>().join(":");
                     Status::invalid_argument(format!(
-                        "migration {migration:x}: {to:?} is no new name in {}",
-                        root.display()
+                        "migration {migration:x}: {to:?} is no new name in {shown}"
                     ))
                 })?
             };

@@ -557,7 +557,8 @@ fn render_rest(daemon: &Daemon, mut out: String, mut laps: Laps) -> String {
     // cladefs: what the part cache keeps, and its budget (TASK-406.1): 0 until a cell opens it, or
     // if there is none, so that its series are there from the start (board 8561).
     let cache = super::storage::opened_cache(daemon);
-    let (bytes, capacity) = cache.map_or((0, 0), |cache| (cache.bytes(), cache.capacity()));
+    let (bytes, capacity) =
+        cache.as_ref().map_or((0, 0), |cache| (cache.bytes(), cache.capacity()));
     for (name, help, value) in [
         ("cladefsd_part_cache_bytes", "Bytes of objects the host's part cache keeps.", bytes),
         (
@@ -569,6 +570,20 @@ fn render_rest(daemon: &Daemon, mut out: String, mut laps: Laps) -> String {
         let _ = writeln!(out, "# HELP {name} {help}");
         let _ = writeln!(out, "# TYPE {name} gauge");
         let _ = writeln!(out, "{name} {value}");
+    }
+    let name = "cladefsd_part_cache_shard_state";
+    let _ = writeln!(
+        out,
+        "# HELP {name} Health state of each JBOD part cache shard (0=online, 1=suspect, 2=offline, 3=returning)."
+    );
+    let _ = writeln!(out, "# TYPE {name} gauge");
+    if let Some(cache) = &cache {
+        for (disk, state) in cache.shard_states() {
+            let Some(dev) = disk.dev() else { continue };
+            let device =
+                format!("{}:{}", libc::major(dev as libc::dev_t), libc::minor(dev as libc::dev_t));
+            let _ = writeln!(out, "{name}{{device=\"{device}\"}} {}", state.as_u64());
+        }
     }
 
     // cladefs: the parts asked of peers, and served them (TASK-406.2).

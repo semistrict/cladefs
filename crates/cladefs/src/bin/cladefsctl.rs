@@ -1321,7 +1321,20 @@ mod cli {
                     print_value(&disk, json)?;
                 }
                 Self::Grant { tenant, dir, uid, gid } => {
-                    let request = GrantRequest { tenant, dir: name(&dir)?, uid, gid };
+                    let parts: Vec<PathBuf> =
+                        std::env::split_paths(&dir).filter(|p| !p.as_os_str().is_empty()).collect();
+                    let (first, rest) = match parts.as_slice() {
+                        [only] => (name(only)?, Vec::new()),
+                        [first, rest @ ..] => {
+                            let mut extra = Vec::with_capacity(rest.len());
+                            for p in rest {
+                                extra.push(name(p)?);
+                            }
+                            (name(first)?, extra)
+                        }
+                        [] => (name(&dir)?, Vec::new()),
+                    };
+                    let request = GrantRequest { tenant, dir: first, dirs: rest, uid, gid };
                     let grant =
                         call!(format!("granting {}", whom(Some(tenant), "")), grant, request);
                     println!("{}", grant.socket);

@@ -871,6 +871,41 @@ fn every_frozen_version_is_read() {
     formats::golden::check::<Files>(env!("CARGO_MANIFEST_DIR"));
 }
 
+#[test]
+fn jbod_spreads_cells_across_shards_and_rotates_incarnation_on_wipe() {
+    let dir1 = MemDir::new();
+    let dir2 = MemDir::new();
+    let replicas = Replicas::open_all(vec![dir1.clone(), dir2.clone()], MOST).unwrap();
+    let ours = replicas.incarnation();
+    let frame = own_frame(1, b"replicated");
+
+    let cells: Vec<CellId> = (1..=16).map(|id| CellId { tenant: 7, id }).collect();
+    for &cell in &cells {
+        replicas.append((cell, key(1, 1), ours), own_of(0), 0, &frame).unwrap();
+    }
+    assert!(dir1.list("").unwrap().len() > 1, "shard 1 must hold some cells");
+    assert!(dir2.list("").unwrap().len() > 1, "shard 2 must hold some cells");
+    assert_eq!(replicas.cells().unwrap().len(), cells.len());
+    drop(replicas);
+
+    // Reopening with the same shards preserves the composite incarnation and all logs.
+    let reopened = Replicas::open_all(vec![dir1.clone(), dir2.clone()], MOST).unwrap();
+    assert_eq!(reopened.incarnation(), ours);
+    for &cell in &cells {
+        let got = reopened.read((cell, key(1, 1), ours), own_of(0), 0, frame.len() as u64).unwrap();
+        assert_eq!(got, frame);
+    }
+    drop(reopened);
+
+    // Wiping one disk changes the composite incarnation so old configurations are refused.
+    let wiped = Replicas::open_all(vec![dir1, MemDir::new()], MOST).unwrap();
+    assert_ne!(wiped.incarnation(), ours);
+    assert_eq!(
+        refused(wiped.append((cells[0], key(1, 1), ours), own_of(0), 0, &frame)),
+        Refused::Incarnation { asked: ours, ours: wiped.incarnation() }
+    );
+}
+
 /// The replica directory's own: its incarnation file, the names of its promises and logs, and an
 /// own log's frames. A segment's log it holds is the cell directory's (`formats/cell-directory`),
 /// an own frame's file an extent frame (`formats/extent-frame`).

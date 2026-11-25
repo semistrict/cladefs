@@ -154,6 +154,7 @@ fn a_panic_on_any_service_aborts_the_daemon_naming_it() {
                             .grant(GrantRequest {
                                 tenant: 1,
                                 dir: control_path(&tenant),
+                                dirs: Vec::new(),
                                 uid: None,
                                 gid: None,
                             })

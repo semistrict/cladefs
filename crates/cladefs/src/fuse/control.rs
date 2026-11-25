@@ -32,10 +32,39 @@ pub mod proto {
 /// Where a mount of many cells takes the cells it attaches from, and keeps their cells.
 #[derive(Clone, Debug)]
 pub struct CellSource {
-    /// The directory the cells are in, each at the path it is attached at.
-    pub dir: PathBuf,
+    /// One or more JBOD root directories the cells live in, each at the path it is attached at.
+    pub dirs: Vec<PathBuf>,
     /// The URL of the bucket the cells are in.
     pub bucket: String,
+}
+
+impl CellSource {
+    /// Resolves the local cell directory path for `shown` (`TENANT/CELL`): reuses an existing
+    /// directory if present on any JBOD root, otherwise picks the root whose `HostDisk` currently
+    /// has the most free space.
+    fn resolve_cell_path(&self, daemon: &crate::cladefsd::Daemon, shown: &str) -> PathBuf {
+        if self.dirs.len() == 1 {
+            return self.dirs[0].join(shown);
+        }
+        for dir in &self.dirs {
+            let candidate = dir.join(shown);
+            if host_fs::exists(&candidate) {
+                return candidate;
+            }
+        }
+        let best = self
+            .dirs
+            .iter()
+            .max_by_key(|dir| {
+                // Unsampled roots fall back to 0 so any healthy sampled root is preferred.
+                bucket_cell::host_disk::HostDisk::of_on(daemon.host.bucket_host(), dir)
+                    .ok()
+                    .and_then(|disk| disk.sample().ok())
+                    .map_or(0, |sample| sample.free)
+            })
+            .unwrap_or(&self.dirs[0]);
+        best.join(shown)
+    }
 }
 
 /// The Mount service of `server`, a server of many cells, which attaches cells as `cells` says:
@@ -206,7 +235,7 @@ impl Control {
             return Err(Errno::ENOTCONN.into());
         };
         let shown = cell_path(cell);
-        let path = self.source.dir.join(&shown);
+        let path = self.source.resolve_cell_path(&self.daemon, &shown);
         let of = match (new, kind) {
             (true, _) => (CellOf::Named(cell), capacity),
             (false, Some(Kind::Fxfs)) => (CellOf::Taken(cell), TAKEN_CAPACITY),

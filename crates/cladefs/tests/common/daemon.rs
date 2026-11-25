@@ -210,7 +210,7 @@ impl Daemon {
         dir: &Path,
         (uid, gid): (Option<u32>, Option<u32>),
     ) -> Result<PathBuf, tonic::Status> {
-        let request = GrantRequest { tenant, dir: name(dir), uid, gid };
+        let request = GrantRequest { tenant, dir: name(dir), dirs: Vec::new(), uid, gid };
         Ok(self.runtime.block_on(self.client.grant(request))?.into_inner().socket.into())
     }
 

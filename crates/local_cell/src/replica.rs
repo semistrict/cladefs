@@ -283,9 +283,28 @@ impl From<io::Error> for Error {
 /// Bounded LRU of open replica log file handles across all cells (board 6902).
 type FileCache<F> = bucket_cell::lru::LruMap<(CellId, Key, u64), Arc<F>>;
 
-/// A host's replica directory.
-pub struct Replicas<D: Dir> {
+/// One replica directory shard on one host disk (doc-21, frozen format v4).
+struct Shard<D: Dir> {
     dir: D,
+    incarnation: u64,
+    /// cladefs: the cells it holds files of, each as the directory's one listing, as it opened,
+    /// found them, read as it is first asked of (board 8451); and, while a call of it is served, a
+    /// cell holding nothing, which goes from here as its last call ends ([`Holding`]).
+    cells: Mutex<HashMap<CellId, Arc<Mutex<Held>>>>,
+    /// Bounded LRU of open log file handles across all cells on this shard (board 6902).
+    files: Mutex<FileCache<D::File>>,
+}
+
+/// A host's replica store across one or more JBOD replica directories.
+///
+/// With a single directory, `incarnation` is that directory's `incarnation` file verbatim. With
+/// multiple JBOD directories, each directory keeps its own frozen-v4 `incarnation` file and the
+/// host's advertised `incarnation` is derived deterministically from the sorted shard incarnations
+/// (`rapidhash | 1`): wiping or replacing any single disk changes the composite incarnation,
+/// preventing a host that lost promises on one disk from participating in any existing
+/// configuration.
+pub struct Replicas<D: Dir> {
+    shards: Vec<Shard<D>>,
     incarnation: u64,
     /// The most bytes a configuration's logs hold here: the writer's lag bound in bytes, which
     /// bounds what is not in the bucket yet (doc-21, Commit). Per configuration, as a take installs
@@ -293,12 +312,32 @@ pub struct Replicas<D: Dir> {
     most: u64,
     /// The most logs a configuration has here: [`LOGS_MOST`], or fewer in a test.
     logs_most: usize,
-    /// cladefs: the cells it holds files of, each as the directory's one listing, as it opened,
-    /// found them, read as it is first asked of (board 8451); and, while a call of it is served, a
-    /// cell holding nothing, which goes from here as its last call ends ([`Holding`]).
-    cells: Mutex<HashMap<CellId, Arc<Mutex<Held>>>>,
-    /// Bounded LRU of open log file handles across all cells (board 6902).
-    files: Mutex<FileCache<D::File>>,
+}
+
+/// Composite host incarnation for multi-disk JBOD replica stores: deterministic over the set of
+/// shard incarnations, non-zero, and sensitive to wiping or adding any single shard.
+fn composite_incarnation<D: Dir>(shards: &[Shard<D>]) -> u64 {
+    if shards.len() == 1 {
+        return shards[0].incarnation;
+    }
+    let mut ids: Vec<u64> = shards.iter().map(|s| s.incarnation).collect();
+    ids.sort_unstable();
+    let mut bytes = Vec::with_capacity(16 + ids.len() * 8);
+    bytes.extend_from_slice(b"cladefs-jbod-v1\0");
+    for id in ids {
+        bytes.extend_from_slice(&id.to_le_bytes());
+    }
+    rapidhash::rapidhash(&bytes) | 1
+}
+
+/// Rendezvous hash score placing `cell` on a shard by the shard's own incarnation (independent of
+/// directory order).
+fn shard_score(shard_incarnation: u64, cell: CellId) -> u64 {
+    let mut bytes = [0u8; 24];
+    bytes[..8].copy_from_slice(&shard_incarnation.to_le_bytes());
+    bytes[8..16].copy_from_slice(&cell.tenant.to_le_bytes());
+    bytes[16..24].copy_from_slice(&cell.id.to_le_bytes());
+    rapidhash::rapidhash(&bytes)
 }
 
 /// What the directory holds of a cell, under its lock: an append and a fence of it never at once,
@@ -386,27 +425,8 @@ impl Log {
     }
 }
 
-impl<D: Dir> Replicas<D> {
-    /// The replica directory `dir`: of the incarnation its file names, or a new one, made, if it
-    /// holds nothing of a member's yet (a file system's own `lost+found`, or an incarnation's file
-    /// a crash left half made, aside). A directory holding a member's files and no incarnation is
-    /// refused: what its logs were promised can't be known. Each configuration's logs hold at most
-    /// `most` bytes.
-    pub fn open(dir: D, most: u64) -> Result<Self, Error> {
-        Self::open_as(dir, most, || {
-            loop {
-                let number: u64 = rand::random();
-                if number != 0 {
-                    break number;
-                }
-            }
-        })
-    }
-
-    /// Opens the replica directory `dir` as [`Replicas::open`] does, a new incarnation, if one is
-    /// made, `new`'s: as the simulation draws it from its seed, so that a run replays (TASK-680).
-    /// It must not be 0.
-    pub fn open_as(dir: D, most: u64, new: impl FnOnce() -> u64) -> Result<Self, Error> {
+impl<D: Dir> Shard<D> {
+    fn open_as(dir: D, new: &mut impl FnMut() -> u64) -> Result<Self, Error> {
         let names = dir.list("").context("listing the replica directory")?;
         let incarnation = if names.iter().any(|name| name == INCARNATION) {
             parse_incarnation(&read_text(&dir, INCARNATION)?)?
@@ -444,11 +464,13 @@ impl<D: Dir> Replicas<D> {
         Ok(Self {
             dir,
             incarnation,
-            most,
-            logs_most: LOGS_MOST,
             cells: Mutex::new(cells),
             files: Mutex::new(bucket_cell::lru::LruMap::new()),
         })
+    }
+
+    fn has_cell(&self, cell: CellId) -> bool {
+        self.cells.lock().unwrap().contains_key(&cell)
     }
 
     fn cache_file(&self, id: (CellId, Key, u64), file: Arc<D::File>) {
@@ -473,273 +495,48 @@ impl<D: Dir> Replicas<D> {
         self.files.lock().unwrap().remove(id);
     }
 
-    /// This, holding at most `logs` logs of a configuration, fewer than [`LOGS_MOST`], as a test
-    /// reaches the bound without making as many.
-    #[cfg(test)]
-    fn holding_at_most(self, logs: usize) -> Self {
-        Self { logs_most: logs, ..self }
+    /// What this shard holds of `cell`, held for a call of it ([`Holding`]): its entry, or one
+    /// made, empty, so that calls of a cell new here are served one at a time too.
+    fn holding(&self, cell: CellId) -> Holding<'_, D> {
+        let held = self.cells.lock().unwrap().entry(cell).or_default().clone();
+        Holding { shard: self, cell, held }
     }
 
-    #[cfg(test)]
-    fn open_files(&self) -> usize {
-        self.files.lock().unwrap().len()
-    }
-
-    /// The directory's incarnation: what a configuration naming this host as a member names.
-    pub fn incarnation(&self) -> u64 {
-        self.incarnation
-    }
-
-    /// Appends `bytes` at `offset` of the log `log` of `cell`'s configuration `key`, whose writer's
-    /// epoch is `key.epoch`, to this member named in `incarnation`, and syncs it: the log's end,
-    /// synced. Bytes before the end again are not written again, as a writer catching a member up
-    /// sends what it may have had: the same, as a configuration's log is written once. An append
-    /// past the end writes nothing, and answers the end, from which the writer sends again. A
-    /// segment's log not begun with this build's `wal::LOG_MAGIC` is refused, written not, so that
-    /// a writer of another format gets no ack of this member's (board 8457).
-    pub fn append(
-        &self,
-        (cell, key, incarnation): (CellId, Key, u64),
-        log: u64,
-        offset: u64,
-        bytes: &[u8],
-    ) -> Result<u64, Error> {
-        self.check(incarnation)?;
-        let holding = self.holding(cell);
-        let mut held = holding.lock()?;
-        if key.epoch < held.promise {
-            return Err(Refused::Fenced { promise: held.promise }.into());
-        }
-        // Nothing to append makes nothing: no file a writer's empty appends would make by the
-        // thousand, past the bound, which counts bytes (Codex's review of TASK-537.3.2).
-        if bytes.is_empty() {
-            return Ok(held.logs.get(&(key, log)).map_or(0, |state| state.end));
-        }
-        let path = log_path(cell, key, log);
-        // What it would append, checked before any file is made: an append past the end, all of
-        // it held already, or past the bound, leaves nothing behind.
-        let end = held.logs.get(&(key, log)).map_or(0, |state| state.end);
-        if offset > end || offset + bytes.len() as u64 <= end {
-            return Ok(end);
-        }
-        // A segment's log's first bytes, this append's of them: of a format this build reads, or
-        // refused (board 8457, doc-28). Its own extents' frames say this directory's version, and
-        // the writer's formats (which name `replica::FORMAT`) are checked where its stream of
-        // appends enters (`cladefsd::peers`).
-        if log & 1 == 0
-            && let Some(given) = log_start_refused(offset, bytes)
-        {
-            let at = format!("log {log} of {cell} at {offset}");
-            return Err(Refused::format(at, given).into());
-        }
-        let would = held.bytes(key) + (offset + bytes.len() as u64 - end);
-        if would > self.most {
-            return Err(Refused::Full { would, most: self.most }.into());
-        }
-        if !held.logs.contains_key(&(key, log)) && held.logs_of(key) >= self.logs_most {
-            return Err(Refused::Logs { most: self.logs_most }.into());
-        }
-        // cladefs: a configuration new here, past those a cell's logs are of (board 8451).
-        if held.logs_of(key) == 0 && held.configurations().len() >= CONFIGURATIONS_MOST {
-            return Err(Refused::Configurations { cell, most: CONFIGURATIONS_MOST }.into());
-        }
-        // cladefs: what it adds, admitted by the disk governor before any file is made, held
-        // until written (board 8451).
-        let _pledge = self.admit(offset + bytes.len() as u64 - end)?;
-        let mut created_file = None;
-        if !held.logs.contains_key(&(key, log)) {
-            // Its file made, it is held at once, empty, however its first append ends: a failure
-            // after leaves a file the next append opens, and drops and sweeps remove. Its
-            // `dir_synced` flag stays false until `sync_dir("")` succeeds (board 5418).
-            match self.dir.create(&path, false) {
-                Ok(file) => {
-                    let file = Arc::new(file);
-                    self.cache_file((cell, key, log), file.clone());
-                    created_file = Some(file);
-                    held.logs.insert((key, log), Log { end: 0, dir_synced: false });
-                }
-                Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
-                    // Made by an append that failed before it was held (or before its dir sync):
-                    // what it holds, if any of it was written, read as a reopening would, and the
-                    // directory synced before acknowledging anything (board 5418).
-                    let file =
-                        self.dir.open(&path, false).with_context(|| format!("opening {path}"))?;
-                    let mut found = Log::read(cell, log, &file, &path)?;
-                    found.dir_synced = false;
-                    let found_end = found.end;
-                    held.logs.insert((key, log), found);
-                    if found_end != 0 {
-                        self.dir.sync_dir("").context("syncing the replica directory")?;
-                        held.logs.get_mut(&(key, log)).unwrap().dir_synced = true;
-                        drop(file);
-                        drop(held);
-                        drop(holding);
-                        return self.append((cell, key, incarnation), log, offset, bytes);
+    /// Reads the files `held` names unread ([`Held::unread`]), `cell`'s, from the disk: kept unread
+    /// if any fails to be, to be read again by the next call.
+    fn read_held(&self, cell: CellId, held: &mut Held) -> Result<(), Error> {
+        let Some(names) = held.unread.take() else { return Ok(()) };
+        let mut read = Held::default();
+        let reading = (|| {
+            for name in &names {
+                match parse_name(name) {
+                    Some((_, None)) => {
+                        let epoch = last_number(name).expect("a promise's name, read");
+                        // A crash between a promise and the removal of the one before leaves both.
+                        read.promise = read.promise.max(epoch);
+                        read.promises.insert(epoch);
                     }
-                    let file = Arc::new(file);
-                    self.cache_file((cell, key, log), file.clone());
-                    created_file = Some(file);
-                }
-                Err(err) => {
-                    return Err(anyhow::Error::from(err).context(format!("making {path}")).into());
+                    Some((_, Some(key))) => {
+                        let log = last_number(name).expect("a log's name, read");
+                        let file = (self.dir.open(name, false))
+                            .with_context(|| format!("opening {name}"))?;
+                        read.logs.insert((key, log), Log::read(cell, log, &file, name)?);
+                    }
+                    None => {}
                 }
             }
-        }
-        // Ensure the new log's directory entry is durable before writing or acknowledging any
-        // append, including retries after an earlier `sync_dir` failure (board 5418).
-        if !held.logs.get(&(key, log)).unwrap().dir_synced {
-            self.dir.sync_dir("").context("syncing the replica directory")?;
-            held.logs.get_mut(&(key, log)).unwrap().dir_synced = true;
-        }
-        let state = held.logs.get_mut(&(key, log)).unwrap();
-        let new = &bytes[(end - offset) as usize..];
-        let file = match created_file {
-            Some(file) => file,
-            None => self.open_cached((cell, key, log), &path)?,
-        };
-        file.write_at(new, state.end).with_context(|| format!("writing {path}"))?;
-        file.sync().with_context(|| format!("syncing {path}"))?;
-        state.end += new.len() as u64;
-        Ok(state.end)
-    }
-
-    /// Fences `cell` at `epoch`, for this member named in `incarnation`: its promise raised to it,
-    /// on the disk, before this returns; then the ends of the logs it holds of the configuration
-    /// `key`. Refused if a later epoch fenced it already.
-    pub fn fence(
-        &self,
-        (cell, key, incarnation): (CellId, Key, u64),
-        epoch: u64,
-    ) -> Result<Vec<(u64, u64)>, Error> {
-        self.check(incarnation)?;
-        let holding = self.holding(cell);
-        let mut held = holding.lock()?;
-        if epoch < held.promise {
-            return Err(Refused::Fenced { promise: held.promise }.into());
-        }
-        if epoch > held.promise {
-            // A file of each promise, made and synced before the ones before go: a crash
-            // between leaves both, the greatest read. Nothing renamed over another (TASK-537.3.4's
-            // review: `Dir::rename` renames to no file there). A fence at this epoch that failed
-            // partway left its file, made again here (board 5420).
-            let path = promise_path(cell, epoch);
-            let made = match self.dir.create(&path, false) {
-                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                    self.dir.open(&path, false)
-                }
-                made => made,
-            };
-            let file = made.with_context(|| format!("making {path}"))?;
-            held.promises.insert(epoch);
-            file.sync().with_context(|| format!("syncing {path}"))?;
-            self.dir.sync_dir("").context("syncing the replica directory")?;
-            // Made: the promise, from here on, whatever of the rest fails. The files before it
-            // going fail no fence: they are left as a crash leaves them, the next fence's to remove.
-            held.promise = epoch;
-            if let Err(err) = self.remove_promises(cell, &mut held, ..epoch) {
-                log::warn!("replicas: {cell}'s promises before {epoch}: {err:#}");
+            Ok::<_, Error>(())
+        })();
+        match reading {
+            Ok(()) => {
+                *held = read;
+                Ok(())
+            }
+            Err(err) => {
+                held.unread = Some(names);
+                Err(err)
             }
         }
-        Ok((held.logs.range((key, 0)..=(key, u64::MAX)))
-            .map(|(&(_, log), state)| (log, state.end))
-            .collect())
-    }
-
-    /// `len` bytes at `offset` of the log `log` of `cell`'s configuration `key`, as far as it holds
-    /// them: fewer past its end, none of a log it does not hold.
-    pub fn read(
-        &self,
-        (cell, key, incarnation): (CellId, Key, u64),
-        log: u64,
-        offset: u64,
-        len: u64,
-    ) -> Result<Vec<u8>, Error> {
-        self.check(incarnation)?;
-        let holding = self.holding(cell);
-        let held = holding.lock()?;
-        let Some(state) = held.logs.get(&(key, log)) else { return Ok(Vec::new()) };
-        let available = state.end.saturating_sub(offset).min(len) as usize;
-        if available == 0 {
-            return Ok(Vec::new());
-        }
-        let path = log_path(cell, key, log);
-        let file = self.open_cached((cell, key, log), &path)?;
-        let mut bytes = vec![0; available];
-        file.read_at(&mut bytes, offset).with_context(|| format!("reading {path}"))?;
-        Ok(bytes)
-    }
-
-    /// Drops `cell`'s logs that no take will read: with `through`, those of the configuration
-    /// `key` to it, which the bucket holds, the head naming the segments they wrote, and nothing of
-    /// any other configuration; without, every configuration's before `key`, which the head names
-    /// no more. A writer replacing its configuration drops the new one's logs as the bucket takes
-    /// them while the head still names the one before, whose logs a take would read (Codex's
-    /// review of TASK-537.3.5): only a writer whose head names `key` drops those before.
-    pub fn drop_logs(
-        &self,
-        (cell, key, incarnation): (CellId, Key, u64),
-        through: Option<u64>,
-    ) -> Result<(), Error> {
-        self.check(incarnation)?;
-        let holding = self.holding(cell);
-        let mut held = holding.lock()?;
-        let gone: Vec<(Key, u64)> = (held.logs.keys())
-            .filter(|&&(of, log)| match through {
-                Some(last) => of == key && log <= last,
-                None => of < key,
-            })
-            .copied()
-            .collect();
-        self.remove(cell, &mut held, &gone)
-    }
-
-    /// The cells the directory holds logs or a promise of, and the configurations it holds logs
-    /// of: what [`Replicas::sweep`] looks at, against each cell's head.
-    /// cladefs: as it keeps them in memory, its directory listed once, as it opened (board 8451).
-    pub fn cells(&self) -> Result<Vec<(CellId, Vec<Key>)>, Error> {
-        let kept: Vec<(CellId, Arc<Mutex<Held>>)> =
-            self.cells.lock().unwrap().iter().map(|(&cell, held)| (cell, held.clone())).collect();
-        let mut cells: BTreeMap<(u64, u64), Vec<Key>> = BTreeMap::new();
-        for (cell, held) in kept {
-            let held = held.lock().unwrap();
-            if held.is_empty() {
-                continue;
-            }
-            let keys = match &held.unread {
-                Some(names) => {
-                    let keys = names.iter().filter_map(|name| parse_name(name)?.1);
-                    keys.collect::<BTreeSet<Key>>().into_iter().collect()
-                }
-                None => held.configurations(),
-            };
-            cells.insert((cell.tenant, cell.id), keys);
-        }
-        Ok(cells.into_iter().map(|((tenant, id), keys)| (CellId { tenant, id }, keys)).collect())
-    }
-
-    /// Drops what the directory holds of `cell` that its head names no more ([`Swept`]).
-    pub fn sweep(&self, cell: CellId, swept: Swept) -> Result<(), Error> {
-        let holding = self.holding(cell);
-        let mut held = holding.lock()?;
-        let gone: Vec<(Key, u64)> = match swept {
-            // A replicated cell whose head names no configuration yet: its first may be being
-            // installed, or active since the head was read. Nothing goes (the spec sweeps only
-            // what the head names a configuration later than; TASK-537.3.2's review).
-            Swept::Unconfigured => return Ok(()),
-            Swept::Before(active) => {
-                held.logs.keys().filter(|&&(of, _)| of < active).copied().collect()
-            }
-            Swept::Gone => held.logs.keys().copied().collect(),
-        };
-        self.remove(cell, &mut held, &gone)?;
-        if swept == Swept::Gone {
-            // Every promise, of `u64::MAX` too (board 8449: removing those before `u64::MAX` kept
-            // its file, while the promise held went to 0, accepting appends it promised to refuse):
-            // the promise held 0 only once all are gone, durably.
-            self.remove_promises(cell, &mut held, ..)?;
-            held.promise = 0;
-        }
-        Ok(())
     }
 
     /// Removes the files of `held`'s promises of epochs in `epochs`, durably: those a removal
@@ -780,54 +577,383 @@ impl<D: Dir> Replicas<D> {
         Ok(())
     }
 
+    /// cladefs: admits `bytes` more appended, if this shard's disk has room for them, as the
+    /// disk governor says (board 8451): what the returned pledge holds until it goes, the bytes
+    /// written, counted in the directory's footprint as they are.
+    fn admit(&self, bytes: u64) -> Result<Option<crate::footprint::Pledge>, Refused> {
+        let Some(footprint) = self.dir.footprint() else { return Ok(None) };
+        let admitted = footprint.admit(bytes, 0);
+        admitted.map(Some).map_err(|full| Refused::Disk { bytes, full: full.to_string() })
+    }
+}
+
+impl<D: Dir> Replicas<D> {
+    /// The replica directory `dir`: of the incarnation its file names, or a new one, made, if it
+    /// holds nothing of a member's yet (a file system's own `lost+found`, or an incarnation's file
+    /// a crash left half made, aside). A directory holding a member's files and no incarnation is
+    /// refused: what its logs were promised can't be known. Each configuration's logs hold at most
+    /// `most` bytes.
+    pub fn open(dir: D, most: u64) -> Result<Self, Error> {
+        Self::open_all(vec![dir], most)
+    }
+
+    /// Opens the replica directory `dir` as [`Replicas::open`] does, a new incarnation, if one is
+    /// made, `new`'s: as the simulation draws it from its seed, so that a run replays (TASK-680).
+    /// It must not be 0.
+    pub fn open_as(dir: D, most: u64, new: impl FnOnce() -> u64) -> Result<Self, Error> {
+        let mut new = Some(new);
+        Self::open_all_as(vec![dir], most, move || new.take().expect("one shard")())
+    }
+
+    /// Opens a JBOD replica store across `dirs` (one or more directories), spreading cells across
+    /// them by rendezvous hash while keeping every directory in frozen format v4.
+    pub fn open_all(dirs: Vec<D>, most: u64) -> Result<Self, Error> {
+        Self::open_all_as(dirs, most, || {
+            loop {
+                let number: u64 = rand::random();
+                if number != 0 {
+                    break number;
+                }
+            }
+        })
+    }
+
+    /// Like [`Replicas::open_all`], drawing new shard incarnations from `new`.
+    pub fn open_all_as(
+        dirs: Vec<D>,
+        most: u64,
+        mut new: impl FnMut() -> u64,
+    ) -> Result<Self, Error> {
+        if dirs.is_empty() {
+            return Err(anyhow!("at least one replica directory is required").into());
+        }
+        let mut shards = Vec::with_capacity(dirs.len());
+        for dir in dirs {
+            shards.push(Shard::open_as(dir, &mut new)?);
+        }
+        let incarnation = composite_incarnation(&shards);
+        Ok(Self { shards, incarnation, most, logs_most: LOGS_MOST })
+    }
+
+    /// The shard owning `cell`: whichever shard already holds files for `cell`, or the shard
+    /// maximizing the rendezvous hash score over `(shard.incarnation, cell)`.
+    fn shard_for(&self, cell: CellId) -> &Shard<D> {
+        if self.shards.len() == 1 {
+            return &self.shards[0];
+        }
+        if let Some(shard) = self.shards.iter().find(|shard| shard.has_cell(cell)) {
+            return shard;
+        }
+        self.shards
+            .iter()
+            .max_by(|a, b| {
+                shard_score(a.incarnation, cell)
+                    .cmp(&shard_score(b.incarnation, cell))
+                    .then_with(|| a.incarnation.cmp(&b.incarnation))
+            })
+            .expect("at least one shard")
+    }
+
+    /// This, holding at most `logs` logs of a configuration, fewer than [`LOGS_MOST`], as a test
+    /// reaches the bound without making as many.
+    #[cfg(test)]
+    fn holding_at_most(self, logs: usize) -> Self {
+        Self { logs_most: logs, ..self }
+    }
+
+    #[cfg(test)]
+    fn open_files(&self) -> usize {
+        self.shards.iter().map(|shard| shard.files.lock().unwrap().len()).sum()
+    }
+
+    /// The directory's incarnation: what a configuration naming this host as a member names.
+    pub fn incarnation(&self) -> u64 {
+        self.incarnation
+    }
+
+    /// Appends `bytes` at `offset` of the log `log` of `cell`'s configuration `key`, whose writer's
+    /// epoch is `key.epoch`, to this member named in `incarnation`, and syncs it: the log's end,
+    /// synced. Bytes before the end again are not written again, as a writer catching a member up
+    /// sends what it may have had: the same, as a configuration's log is written once. An append
+    /// past the end writes nothing, and answers the end, from which the writer sends again. A
+    /// segment's log not begun with this build's `wal::LOG_MAGIC` is refused, written not, so that
+    /// a writer of another format gets no ack of this member's (board 8457).
+    pub fn append(
+        &self,
+        (cell, key, incarnation): (CellId, Key, u64),
+        log: u64,
+        offset: u64,
+        bytes: &[u8],
+    ) -> Result<u64, Error> {
+        self.check(incarnation)?;
+        let shard = self.shard_for(cell);
+        let holding = shard.holding(cell);
+        let mut held = holding.lock()?;
+        if key.epoch < held.promise {
+            return Err(Refused::Fenced { promise: held.promise }.into());
+        }
+        // Nothing to append makes nothing: no file a writer's empty appends would make by the
+        // thousand, past the bound, which counts bytes (Codex's review of TASK-537.3.2).
+        if bytes.is_empty() {
+            return Ok(held.logs.get(&(key, log)).map_or(0, |state| state.end));
+        }
+        let path = log_path(cell, key, log);
+        // What it would append, checked before any file is made: an append past the end, all of
+        // it held already, or past the bound, leaves nothing behind.
+        let end = held.logs.get(&(key, log)).map_or(0, |state| state.end);
+        if offset > end || offset + bytes.len() as u64 <= end {
+            return Ok(end);
+        }
+        // A segment's log's first bytes, this append's of them: of a format this build reads, or
+        // refused (board 8457, doc-28). Its own extents' frames say this directory's version, and
+        // the writer's formats (which name `replica::FORMAT`) are checked where its stream of
+        // appends enters (`cladefsd::peers`).
+        if log & 1 == 0
+            && let Some(given) = log_start_refused(offset, bytes)
+        {
+            let at = format!("log {log} of {cell} at {offset}");
+            return Err(Refused::format(at, given).into());
+        }
+        let would = held.bytes(key) + (offset + bytes.len() as u64 - end);
+        if would > self.most {
+            return Err(Refused::Full { would, most: self.most }.into());
+        }
+        if !held.logs.contains_key(&(key, log)) && held.logs_of(key) >= self.logs_most {
+            return Err(Refused::Logs { most: self.logs_most }.into());
+        }
+        // cladefs: a configuration new here, past those a cell's logs are of (board 8451).
+        if held.logs_of(key) == 0 && held.configurations().len() >= CONFIGURATIONS_MOST {
+            return Err(Refused::Configurations { cell, most: CONFIGURATIONS_MOST }.into());
+        }
+        // cladefs: what it adds, admitted by the disk governor before any file is made, held
+        // until written (board 8451).
+        let _pledge = shard.admit(offset + bytes.len() as u64 - end)?;
+        let mut created_file = None;
+        if !held.logs.contains_key(&(key, log)) {
+            // Its file made, it is held at once, empty, however its first append ends: a failure
+            // after leaves a file the next append opens, and drops and sweeps remove. Its
+            // `dir_synced` flag stays false until `sync_dir("")` succeeds (board 5418).
+            match shard.dir.create(&path, false) {
+                Ok(file) => {
+                    let file = Arc::new(file);
+                    shard.cache_file((cell, key, log), file.clone());
+                    created_file = Some(file);
+                    held.logs.insert((key, log), Log { end: 0, dir_synced: false });
+                }
+                Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+                    // Made by an append that failed before it was held (or before its dir sync):
+                    // what it holds, if any of it was written, read as a reopening would, and the
+                    // directory synced before acknowledging anything (board 5418).
+                    let file =
+                        shard.dir.open(&path, false).with_context(|| format!("opening {path}"))?;
+                    let mut found = Log::read(cell, log, &file, &path)?;
+                    found.dir_synced = false;
+                    let found_end = found.end;
+                    held.logs.insert((key, log), found);
+                    if found_end != 0 {
+                        shard.dir.sync_dir("").context("syncing the replica directory")?;
+                        held.logs.get_mut(&(key, log)).unwrap().dir_synced = true;
+                        drop(file);
+                        drop(held);
+                        drop(holding);
+                        return self.append((cell, key, incarnation), log, offset, bytes);
+                    }
+                    let file = Arc::new(file);
+                    shard.cache_file((cell, key, log), file.clone());
+                    created_file = Some(file);
+                }
+                Err(err) => {
+                    return Err(anyhow::Error::from(err).context(format!("making {path}")).into());
+                }
+            }
+        }
+        // Ensure the new log's directory entry is durable before writing or acknowledging any
+        // append, including retries after an earlier `sync_dir` failure (board 5418).
+        if !held.logs.get(&(key, log)).unwrap().dir_synced {
+            shard.dir.sync_dir("").context("syncing the replica directory")?;
+            held.logs.get_mut(&(key, log)).unwrap().dir_synced = true;
+        }
+        let state = held.logs.get_mut(&(key, log)).unwrap();
+        let new = &bytes[(end - offset) as usize..];
+        let file = match created_file {
+            Some(file) => file,
+            None => shard.open_cached((cell, key, log), &path)?,
+        };
+        file.write_at(new, state.end).with_context(|| format!("writing {path}"))?;
+        file.sync().with_context(|| format!("syncing {path}"))?;
+        state.end += new.len() as u64;
+        Ok(state.end)
+    }
+
+    /// Fences `cell` at `epoch`, for this member named in `incarnation`: its promise raised to it,
+    /// on the disk, before this returns; then the ends of the logs it holds of the configuration
+    /// `key`. Refused if a later epoch fenced it already.
+    pub fn fence(
+        &self,
+        (cell, key, incarnation): (CellId, Key, u64),
+        epoch: u64,
+    ) -> Result<Vec<(u64, u64)>, Error> {
+        self.check(incarnation)?;
+        let shard = self.shard_for(cell);
+        let holding = shard.holding(cell);
+        let mut held = holding.lock()?;
+        if epoch < held.promise {
+            return Err(Refused::Fenced { promise: held.promise }.into());
+        }
+        if epoch > held.promise {
+            // A file of each promise, made and synced before the ones before go: a crash
+            // between leaves both, the greatest read. Nothing renamed over another (TASK-537.3.4's
+            // review: `Dir::rename` renames to no file there). A fence at this epoch that failed
+            // partway left its file, made again here (board 5420).
+            let path = promise_path(cell, epoch);
+            let made = match shard.dir.create(&path, false) {
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                    shard.dir.open(&path, false)
+                }
+                made => made,
+            };
+            let file = made.with_context(|| format!("making {path}"))?;
+            held.promises.insert(epoch);
+            file.sync().with_context(|| format!("syncing {path}"))?;
+            shard.dir.sync_dir("").context("syncing the replica directory")?;
+            // Made: the promise, from here on, whatever of the rest fails. The files before it
+            // going fail no fence: they are left as a crash leaves them, the next fence's to remove.
+            held.promise = epoch;
+            if let Err(err) = shard.remove_promises(cell, &mut held, ..epoch) {
+                log::warn!("replicas: {cell}'s promises before {epoch}: {err:#}");
+            }
+        }
+        Ok((held.logs.range((key, 0)..=(key, u64::MAX)))
+            .map(|(&(_, log), state)| (log, state.end))
+            .collect())
+    }
+
+    /// `len` bytes at `offset` of the log `log` of `cell`'s configuration `key`, as far as it holds
+    /// them: fewer past its end, none of a log it does not hold.
+    pub fn read(
+        &self,
+        (cell, key, incarnation): (CellId, Key, u64),
+        log: u64,
+        offset: u64,
+        len: u64,
+    ) -> Result<Vec<u8>, Error> {
+        self.check(incarnation)?;
+        let shard = self.shard_for(cell);
+        let holding = shard.holding(cell);
+        let held = holding.lock()?;
+        let Some(state) = held.logs.get(&(key, log)) else { return Ok(Vec::new()) };
+        let available = state.end.saturating_sub(offset).min(len) as usize;
+        if available == 0 {
+            return Ok(Vec::new());
+        }
+        let path = log_path(cell, key, log);
+        let file = shard.open_cached((cell, key, log), &path)?;
+        let mut bytes = vec![0; available];
+        file.read_at(&mut bytes, offset).with_context(|| format!("reading {path}"))?;
+        Ok(bytes)
+    }
+
+    /// Drops `cell`'s logs that no take will read: with `through`, those of the configuration
+    /// `key` to it, which the bucket holds, the head naming the segments they wrote, and nothing of
+    /// any other configuration; without, every configuration's before `key`, which the head names
+    /// no more. A writer replacing its configuration drops the new one's logs as the bucket takes
+    /// them while the head still names the one before, whose logs a take would read (Codex's
+    /// review of TASK-537.3.5): only a writer whose head names `key` drops those before.
+    pub fn drop_logs(
+        &self,
+        (cell, key, incarnation): (CellId, Key, u64),
+        through: Option<u64>,
+    ) -> Result<(), Error> {
+        self.check(incarnation)?;
+        let shard = self.shard_for(cell);
+        let holding = shard.holding(cell);
+        let mut held = holding.lock()?;
+        let gone: Vec<(Key, u64)> = (held.logs.keys())
+            .filter(|&&(of, log)| match through {
+                Some(last) => of == key && log <= last,
+                None => of < key,
+            })
+            .copied()
+            .collect();
+        shard.remove(cell, &mut held, &gone)
+    }
+
+    /// The cells the directory holds logs or a promise of, and the configurations it holds logs
+    /// of: what [`Replicas::sweep`] looks at, against each cell's head.
+    /// cladefs: as it keeps them in memory, each directory listed once, as it opened (board 8451).
+    pub fn cells(&self) -> Result<Vec<(CellId, Vec<Key>)>, Error> {
+        let mut cells: BTreeMap<(u64, u64), BTreeSet<Key>> = BTreeMap::new();
+        for shard in &self.shards {
+            let kept: Vec<(CellId, Arc<Mutex<Held>>)> = shard
+                .cells
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(&cell, held)| (cell, held.clone()))
+                .collect();
+            for (cell, held) in kept {
+                let held = held.lock().unwrap();
+                if held.is_empty() {
+                    continue;
+                }
+                let entry = cells.entry((cell.tenant, cell.id)).or_default();
+                match &held.unread {
+                    Some(names) => {
+                        for key in names.iter().filter_map(|name| parse_name(name)?.1) {
+                            entry.insert(key);
+                        }
+                    }
+                    None => {
+                        for key in held.configurations() {
+                            entry.insert(key);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(cells
+            .into_iter()
+            .map(|((tenant, id), keys)| (CellId { tenant, id }, keys.into_iter().collect()))
+            .collect())
+    }
+
+    /// Drops what the directory holds of `cell` that its head names no more ([`Swept`]).
+    pub fn sweep(&self, cell: CellId, swept: Swept) -> Result<(), Error> {
+        if swept == Swept::Unconfigured {
+            // A replicated cell whose head names no configuration yet: its first may be being
+            // installed, or active since the head was read. Nothing goes (the spec sweeps only
+            // what the head names a configuration later than; TASK-537.3.2's review).
+            return Ok(());
+        }
+        for shard in &self.shards {
+            if self.shards.len() > 1 && !shard.has_cell(cell) {
+                continue;
+            }
+            let holding = shard.holding(cell);
+            let mut held = holding.lock()?;
+            let gone: Vec<(Key, u64)> = match swept {
+                Swept::Unconfigured => unreachable!(),
+                Swept::Before(active) => {
+                    held.logs.keys().filter(|&&(of, _)| of < active).copied().collect()
+                }
+                Swept::Gone => held.logs.keys().copied().collect(),
+            };
+            shard.remove(cell, &mut held, &gone)?;
+            if swept == Swept::Gone {
+                // Every promise, of `u64::MAX` too (board 8449: removing those before `u64::MAX`
+                // kept its file, while the promise held went to 0, accepting appends it promised
+                // to refuse): the promise held 0 only once all are gone, durably.
+                shard.remove_promises(cell, &mut held, ..)?;
+                held.promise = 0;
+            }
+        }
+        Ok(())
+    }
+
     fn check(&self, incarnation: u64) -> Result<(), Refused> {
         match incarnation == self.incarnation {
             true => Ok(()),
             false => Err(Refused::Incarnation { asked: incarnation, ours: self.incarnation }),
-        }
-    }
-
-    /// What the directory holds of `cell`, held for a call of it ([`Holding`]): its entry, or one
-    /// made, empty, so that calls of a cell new here are served one at a time too.
-    fn holding(&self, cell: CellId) -> Holding<'_, D> {
-        let held = self.cells.lock().unwrap().entry(cell).or_default().clone();
-        Holding { replicas: self, cell, held }
-    }
-
-    /// Reads the files `held` names unread ([`Held::unread`]), `cell`'s, from the disk: kept unread
-    /// if any fails to be, to be read again by the next call.
-    fn read_held(&self, cell: CellId, held: &mut Held) -> Result<(), Error> {
-        let Some(names) = held.unread.take() else { return Ok(()) };
-        let mut read = Held::default();
-        let reading = (|| {
-            for name in &names {
-                match parse_name(name) {
-                    Some((_, None)) => {
-                        let epoch = last_number(name).expect("a promise's name, read");
-                        // A crash between a promise and the removal of the one before leaves both.
-                        read.promise = read.promise.max(epoch);
-                        read.promises.insert(epoch);
-                    }
-                    Some((_, Some(key))) => {
-                        let log = last_number(name).expect("a log's name, read");
-                        let file = (self.dir.open(name, false))
-                            .with_context(|| format!("opening {name}"))?;
-                        read.logs.insert((key, log), Log::read(cell, log, &file, name)?);
-                    }
-                    None => {}
-                }
-            }
-            Ok::<_, Error>(())
-        })();
-        match reading {
-            Ok(()) => {
-                *held = read;
-                Ok(())
-            }
-            Err(err) => {
-                held.unread = Some(names);
-                Err(err)
-            }
         }
     }
 
@@ -845,7 +971,8 @@ impl<D: Dir> Replicas<D> {
         active: Option<Key>,
     ) -> Result<(), Error> {
         self.check(incarnation)?;
-        let holding = self.holding(cell);
+        let shard = self.shard_for(cell);
+        let holding = shard.holding(cell);
         let mut held = holding.lock()?;
         let left = |of: &Key| of.epoch <= key.epoch && *of < key && Some(*of) != active;
         let gone: Vec<(Key, u64)> =
@@ -856,14 +983,15 @@ impl<D: Dir> Replicas<D> {
                 gone.iter().map(|&(of, _)| of).collect::<BTreeSet<_>>()
             );
         }
-        self.remove(cell, &mut held, &gone)
+        shard.remove(cell, &mut held, &gone)
     }
 
     /// cladefs: notes that `cell`'s head, read from the bucket, said `seen` (board 8445): kept while
     /// the cell holds files here, the newest of what was read, to admit its calls by while the bucket
     /// is out of reach ([`Replicas::seen`]). Each of a head's fields only grows.
     pub fn saw(&self, cell: CellId, seen: Seen) -> Result<(), Error> {
-        let holding = self.holding(cell);
+        let shard = self.shard_for(cell);
+        let holding = shard.holding(cell);
         let mut held = holding.lock()?;
         let newest =
             |was: Seen| (was.epoch, was.end, was.active) < (seen.epoch, seen.end, seen.active);
@@ -878,48 +1006,40 @@ impl<D: Dir> Replicas<D> {
     /// take of the head since (board 8445): a promise no later than its epoch, no later than any
     /// head's since; appends and drops of a configuration superseded since, which no take reads.
     pub fn seen(&self, cell: CellId) -> Result<Option<Seen>, Error> {
-        let holding = self.holding(cell);
+        let shard = self.shard_for(cell);
+        let holding = shard.holding(cell);
         let held = holding.lock()?;
         Ok(held.seen)
     }
 
-    /// cladefs: admits `bytes` more appended, if the directory's disk has room for them, as the
-    /// disk governor says (board 8451): what the returned pledge holds until it goes, the bytes
-    /// written, counted in the directory's footprint as they are.
-    fn admit(&self, bytes: u64) -> Result<Option<crate::footprint::Pledge>, Refused> {
-        let Some(footprint) = self.dir.footprint() else { return Ok(None) };
-        let admitted = footprint.admit(bytes, 0);
-        admitted.map(Some).map_err(|full| Refused::Disk { bytes, full: full.to_string() })
-    }
-
-    /// cladefs: how many cells it keeps in memory, read or not.
+    /// cladefs: how many cells it keeps in memory across all shards, read or not.
     #[cfg(test)]
     fn cells_kept(&self) -> usize {
-        self.cells.lock().unwrap().len()
+        self.shards.iter().map(|shard| shard.cells.lock().unwrap().len()).sum()
     }
 }
 
-/// cladefs: what the directory holds of a cell, held for a call of it: its entry dropped as the
+/// cladefs: what a shard holds of a cell, held for a call of it: its entry dropped as the
 /// last call ends, if it holds nothing then (board 8451), so that calls of cells holding nothing,
 /// a peer's by the hundred thousand, leave nothing in memory.
 struct Holding<'a, D: Dir> {
-    replicas: &'a Replicas<D>,
+    shard: &'a Shard<D>,
     cell: CellId,
     held: Arc<Mutex<Held>>,
 }
 
 impl<D: Dir> Holding<'_, D> {
-    /// What the directory holds of the cell, under its lock, its files read if they were not.
+    /// What the shard holds of the cell, under its lock, its files read if they were not.
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Held>, Error> {
         let mut held = self.held.lock().unwrap();
-        self.replicas.read_held(self.cell, &mut held)?;
+        self.shard.read_held(self.cell, &mut held)?;
         Ok(held)
     }
 }
 
 impl<D: Dir> Drop for Holding<'_, D> {
     fn drop(&mut self) {
-        let mut cells = self.replicas.cells.lock().unwrap();
+        let mut cells = self.shard.cells.lock().unwrap();
         // Held by the map and this alone: no other call holds it, or waits for it; none takes it
         // from the map while the map is locked.
         let alone = Arc::strong_count(&self.held) == 2

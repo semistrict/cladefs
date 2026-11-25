@@ -44,7 +44,7 @@ fn free_space_admission_reserves_space_for_unwritten_fills() {
         // fill landed left room for two).
         started.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
         let limit = cache.bytes();
-        let (fits, evicted) = cache.kept.lock().unwrap().make_room(limit, needed);
+        let (fits, evicted) = cache.shards[0].kept.lock().unwrap().make_room(limit, needed);
         resume.send(()).unwrap();
         writer.join().unwrap();
         scenario.teardown();
@@ -78,7 +78,7 @@ fn failed_cache_fills_release_their_admission() {
         result.expect_err("the admitted fill must reach the injected failure");
         assert_eq!((cache.bytes(), cache.disk().cache_writing.get()), (kept, writing));
         let limit = cache.bytes() + needed;
-        let (fits, evicted) = cache.kept.lock().unwrap().make_room(limit, needed);
+        let (fits, evicted) = cache.shards[0].kept.lock().unwrap().make_room(limit, needed);
         assert!(fits, "failed tail = {failing_tail}: the next fill must fit");
         assert!(evicted.is_empty(), "a failed fill must release its admission");
     }

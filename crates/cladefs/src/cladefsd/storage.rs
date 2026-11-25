@@ -86,18 +86,187 @@ pub(super) fn use_bucket_on(daemon: &Arc<Daemon>, bucket: impl Into<Arc<RoutedBu
     super::telemetry::watch_stats(Arc::downgrade(daemon), Arc::downgrade(&bucket));
 }
 
+/// Parses `CLADEFSD_PART_CACHE` into one or more JBOD shard directories: colon-separated paths
+/// (`std::env::split_paths`), with shell-style glob patterns (`*`, `?`, `[...]`) expanded per
+/// component. A glob that matches nothing fails hard.
+pub(super) fn parse_part_cache_dirs(raw: &std::ffi::OsStr) -> Result<Vec<PathBuf>, String> {
+    let mut dirs = Vec::new();
+    for entry in std::env::split_paths(raw) {
+        if entry.as_os_str().is_empty() {
+            continue;
+        }
+        let has_glob = entry.to_str().is_some_and(|s| s.contains(['*', '?', '[']));
+        if has_glob {
+            let mut matched = expand_glob(&entry)?;
+            if matched.is_empty() {
+                return Err(format!(
+                    "CLADEFSD_PART_CACHE: glob {} matched no directories",
+                    entry.display()
+                ));
+            }
+            matched.sort();
+            dirs.extend(matched);
+        } else {
+            dirs.push(entry);
+        }
+    }
+    Ok(dirs)
+}
+
+/// Expands a path containing glob wildcards (`*`, `?`, `[...]`) across directory components.
+fn expand_glob(pattern: &std::path::Path) -> Result<Vec<PathBuf>, String> {
+    let mut current = vec![PathBuf::new()];
+    for comp in pattern.components() {
+        let mut next = Vec::new();
+        match comp {
+            std::path::Component::RootDir
+            | std::path::Component::Prefix(_)
+            | std::path::Component::CurDir
+            | std::path::Component::ParentDir => {
+                for base in current {
+                    next.push(base.join(comp));
+                }
+            }
+            std::path::Component::Normal(seg) => {
+                let pat = seg.to_str();
+                if let Some(pat) = pat
+                    && pat.contains(['*', '?', '['])
+                {
+                    for base in current {
+                        let scan = if base.as_os_str().is_empty() {
+                            std::path::Path::new(".")
+                        } else {
+                            base.as_path()
+                        };
+                        let entries = match host_fs::read_dir(scan) {
+                            Ok(entries) => entries,
+                            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                            Err(err) => {
+                                return Err(format!(
+                                    "CLADEFSD_PART_CACHE: reading {} for {}: {err}",
+                                    scan.display(),
+                                    pattern.display()
+                                ));
+                            }
+                        };
+                        for entry in entries {
+                            let entry = entry.map_err(|err| {
+                                format!(
+                                    "CLADEFSD_PART_CACHE: reading {} for {}: {err}",
+                                    scan.display(),
+                                    pattern.display()
+                                )
+                            })?;
+                            let name = entry.file_name();
+                            if let Some(name) = name.to_str()
+                                && glob_match(pat, name)
+                            {
+                                next.push(base.join(name));
+                            }
+                        }
+                    }
+                } else {
+                    for base in current {
+                        next.push(base.join(seg));
+                    }
+                }
+            }
+        }
+        current = next;
+    }
+    Ok(current.into_iter().filter(|p| host_fs::is_dir(p)).collect())
+}
+
+/// Minimal glob matcher supporting `*`, `?`, and `[...]` character classes (no path separators).
+fn glob_match(pattern: &str, text: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let t: Vec<char> = text.chars().collect();
+    let (mut pi, mut ti) = (0usize, 0usize);
+    let (mut star_p, mut star_t) = (None, 0usize);
+    while ti < t.len() {
+        if pi < p.len() && p[pi] == '*' {
+            star_p = Some(pi);
+            star_t = ti;
+            pi += 1;
+        } else if pi < p.len() && p[pi] == '?' {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == '[' {
+            if let Some(end) = p[pi + 1..].iter().position(|&c| c == ']') {
+                let class = &p[pi + 1..pi + 1 + end];
+                let negate = class.first() == Some(&'!') || class.first() == Some(&'^');
+                let chars = if negate { &class[1..] } else { class };
+                let mut matched = false;
+                let mut i = 0;
+                while i < chars.len() {
+                    if i + 2 < chars.len() && chars[i + 1] == '-' {
+                        if t[ti] >= chars[i] && t[ti] <= chars[i + 2] {
+                            matched = true;
+                        }
+                        i += 3;
+                    } else {
+                        if t[ti] == chars[i] {
+                            matched = true;
+                        }
+                        i += 1;
+                    }
+                }
+                if matched != negate {
+                    pi = pi + 2 + end;
+                    ti += 1;
+                } else if let Some(sp) = star_p {
+                    star_t += 1;
+                    ti = star_t;
+                    pi = sp + 1;
+                } else {
+                    return false;
+                }
+            } else if p[pi] == t[ti] {
+                pi += 1;
+                ti += 1;
+            } else if let Some(sp) = star_p {
+                star_t += 1;
+                ti = star_t;
+                pi = sp + 1;
+            } else {
+                return false;
+            }
+        } else if pi < p.len() && p[pi] == t[ti] {
+            pi += 1;
+            ti += 1;
+        } else if let Some(sp) = star_p {
+            star_t += 1;
+            ti = star_t;
+            pi = sp + 1;
+        } else {
+            return false;
+        }
+    }
+    while pi < p.len() && p[pi] == '*' {
+        pi += 1;
+    }
+    pi == p.len()
+}
+
 /// cladefs: where the daemon keeps its part cache, and how much it may keep there, as the
-/// environment says: the directory `CLADEFSD_PART_CACHE` names, if it names one (empty, it names
-/// none); the bytes of objects `CLADEFSD_PART_CACHE_BYTES` gives, a budget, as a host whose cache
-/// shares its disk with its cells needs (TASK-406.1), or, unset, none: as many as the disk governor
-/// leaves it (doc-22). Read at the daemon's start, which opens the cache then ([`open_part_cache`],
+/// environment says: one or more colon-separated directories (or glob patterns) in
+/// `CLADEFSD_PART_CACHE`, if set (empty, it names none); the aggregate bytes of objects
+/// `CLADEFSD_PART_CACHE_BYTES` gives, a budget, as a host whose cache shares its disk with its
+/// cells needs (TASK-406.1), or, unset, none: as many as the disk governor leaves each disk
+/// (doc-22). Read at the daemon's start, which opens the cache then ([`open_part_cache`],
 /// board 8595), to refuse what it can't use.
-pub fn cache_config() -> Result<Option<(PathBuf, u64)>, String> {
+pub fn cache_config() -> Result<Option<(Vec<PathBuf>, u64)>, String> {
     let set = |var| node_local::env::var_os(var).filter(|value| !value.is_empty());
-    let dir = set("CLADEFSD_PART_CACHE");
+    let dirs = match set("CLADEFSD_PART_CACHE") {
+        Some(raw) => {
+            let dirs = parse_part_cache_dirs(&raw)?;
+            if dirs.is_empty() { None } else { Some(dirs) }
+        }
+        None => None,
+    };
     let capacity = match set("CLADEFSD_PART_CACHE_BYTES") {
         None => u64::MAX,
-        Some(_) if dir.is_none() => {
+        Some(_) if dirs.is_none() => {
             return Err("CLADEFSD_PART_CACHE_BYTES is set, but CLADEFSD_PART_CACHE names no \
                         directory for the cache"
                 .to_owned());
@@ -112,7 +281,7 @@ pub fn cache_config() -> Result<Option<(PathBuf, u64)>, String> {
             Some(bytes) => bytes,
         },
     };
-    Ok(dir.map(|dir| (dir.into(), capacity)))
+    Ok(dirs.map(|dirs| (dirs, capacity)))
 }
 
 /// cladefs: `daemon`'s part cache, if it opened one ([`part_cache`]): opening none.
@@ -139,11 +308,18 @@ pub(super) fn open_part_cache(daemon: &Daemon) -> Result<Option<Arc<Cache>>, Str
         return Ok(cache.clone());
     }
     let cache = match cache_config()? {
-        Some((dir, capacity)) => match local_cell::upload::blocking(|| {
-            Cache::open_on(daemon.host.bucket_host(), &dir, capacity)
+        Some((dirs, capacity)) => match local_cell::upload::blocking(|| {
+            Cache::open_all_on(daemon.host.bucket_host(), &dirs, capacity)
         }) {
             Ok(cache) => Some(Arc::new(cache)),
-            Err(err) => return Err(format!("CLADEFSD_PART_CACHE: {}: {err}", dir.display())),
+            Err(err) => {
+                let shown = if dirs.len() == 1 {
+                    dirs[0].display().to_string()
+                } else {
+                    dirs.iter().map(|d| d.display().to_string()).collect::<Vec<_>>().join(":")
+                };
+                return Err(format!("CLADEFSD_PART_CACHE: {shown}: {err}"));
+            }
         },
         None => None,
     };
@@ -231,6 +407,24 @@ mod tests {
             );
         }
         set("");
-        assert_eq!(cache_config(), Ok(Some((dir.path().to_owned(), u64::MAX))));
+        assert_eq!(cache_config(), Ok(Some((vec![dir.path().to_owned()], u64::MAX))));
+    }
+
+    #[test]
+    fn jbod_cache_config_splits_and_expands_globs() {
+        let dir = tempfile::tempdir().unwrap();
+        let d0 = dir.path().join("nvme0").join("part-cache");
+        let d1 = dir.path().join("nvme1").join("part-cache");
+        std::fs::create_dir_all(&d0).unwrap();
+        std::fs::create_dir_all(&d1).unwrap();
+
+        let joined = std::env::join_paths([&d0, &d1]).unwrap();
+        assert_eq!(parse_part_cache_dirs(&joined).unwrap(), vec![d0.clone(), d1.clone()]);
+
+        let glob = dir.path().join("nvme*").join("part-cache");
+        assert_eq!(parse_part_cache_dirs(glob.as_os_str()).unwrap(), vec![d0, d1]);
+
+        let missing = dir.path().join("missing*").join("part-cache");
+        assert!(parse_part_cache_dirs(missing.as_os_str()).is_err());
     }
 }

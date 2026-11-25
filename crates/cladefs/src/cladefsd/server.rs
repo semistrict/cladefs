@@ -204,17 +204,18 @@ struct Policy {
 
 /// cladefs: where a tenant's VM processes name cells ([`Policy`]).
 enum CellDirs {
-    /// In its directory alone, canonical (TASK-43.4).
-    Dir(PathBuf),
+    /// In its directory (or JBOD directories) alone, canonical, sorted and deduplicated
+    /// (TASK-43.4).
+    Dirs(Arc<[PathBuf]>),
     /// In the daemon's roots, if it has any ([`roots`]); anywhere, if it has none: the default
     /// tenant's.
     Roots(Option<Arc<[PathBuf]>>),
 }
 
 impl Policy {
-    /// A granted tenant's, whose cells are in `dir`, canonical.
-    fn granted(dir: PathBuf) -> Self {
-        Self { cell_dirs: CellDirs::Dir(dir) }
+    /// A granted tenant's, whose cells are in `dirs`, canonical, sorted and deduplicated.
+    fn granted(dirs: Vec<PathBuf>) -> Self {
+        Self { cell_dirs: CellDirs::Dirs(dirs.into()) }
     }
 
     /// The default tenant's ([`default_tenant_on`]).
@@ -389,18 +390,39 @@ pub(super) fn default_tenant() -> Result<Arc<Tenant>, Errno> {
 impl Tenant {
     /// A new tenant on `daemon`, granted, of the ID `id` in the bucket (TASK-364), whose cells are
     /// in `dir`, with an arena of its own.
+    #[cfg(not(madsim))]
     pub(super) fn new_on(
         daemon: &Arc<Daemon>,
         id: u64,
         dir: impl AsRef<Path>,
     ) -> std::io::Result<Arc<Self>> {
-        let dir = dir.as_ref();
-        let (dir, disk) = local_cell::upload::blocking(|| -> std::io::Result<_> {
-            let dir = host_fs::canonicalize(&dir)?;
-            let disk = Some(super::disk::Disk::new_on(daemon, id, &dir)?);
-            Ok((dir, disk))
+        Self::new_many_on(daemon, id, &[dir.as_ref().to_path_buf()])
+    }
+
+    /// A new tenant on `daemon`, granted, of the ID `id` in the bucket, whose cells may live in
+    /// any of the JBOD directories `dirs`, with an arena of its own and an aggregate disk limit.
+    pub(super) fn new_many_on(
+        daemon: &Arc<Daemon>,
+        id: u64,
+        dirs: &[PathBuf],
+    ) -> std::io::Result<Arc<Self>> {
+        if dirs.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "a granted tenant needs at least one directory",
+            ));
+        }
+        let (dirs, disk) = local_cell::upload::blocking(|| -> std::io::Result<_> {
+            let mut canon = Vec::with_capacity(dirs.len());
+            for dir in dirs {
+                canon.push(host_fs::canonicalize(dir)?);
+            }
+            canon.sort();
+            canon.dedup();
+            let disk = Some(super::disk::Disk::new_many_on(daemon, id, &canon)?);
+            Ok((canon, disk))
         })?;
-        let policy = Policy::granted(dir);
+        let policy = Policy::granted(dirs);
         let tenant = Arc::new(Self {
             daemon: Arc::clone(daemon),
             id,
@@ -427,7 +449,7 @@ impl Tenant {
     /// daemon's user's (TASK-155), which reach any tenant's cells, and make them of the default
     /// tenant's.
     fn granted(&self) -> Option<u64> {
-        self.dir().map(|_| self.id)
+        self.dirs().map(|_| self.id)
     }
 
     /// cladefs: `EACCES` if it is granted and the cell at `path` is another tenant's cell, or
@@ -444,13 +466,19 @@ impl Tenant {
         }
     }
 
-    /// Its cells' directory, if it is a granted tenant's: the default tenant has none
-    /// ([`CellDirs::Roots`]).
-    pub fn dir(&self) -> Option<&Path> {
+    /// Its cells' directories, canonical and sorted, if it is a granted tenant's: the default
+    /// tenant has none ([`CellDirs::Roots`]).
+    pub fn dirs(&self) -> Option<&[PathBuf]> {
         match &self.policy.cell_dirs {
-            CellDirs::Dir(dir) => Some(dir),
+            CellDirs::Dirs(dirs) => Some(dirs),
             CellDirs::Roots(_) => None,
         }
+    }
+
+    /// Its first cells' directory, if it is a granted tenant's: the default tenant has none
+    /// ([`CellDirs::Roots`]).
+    pub fn dir(&self) -> Option<&Path> {
+        self.dirs().and_then(|dirs| dirs.first()).map(PathBuf::as_path)
     }
 
     /// Its arena of physical memory.
@@ -479,7 +507,7 @@ impl Tenant {
     /// `EACCES` unless it is where they name cells ([`CellDirs`]).
     fn holds(&self, path: &Path) -> Result<(), Errno> {
         let held = match &self.policy.cell_dirs {
-            CellDirs::Dir(dir) => in_dir(path, dir),
+            CellDirs::Dirs(dirs) => dirs.iter().any(|dir| in_dir(path, dir)),
             CellDirs::Roots(Some(roots)) => {
                 let key = cell_dir_key(path);
                 roots.iter().any(|root| key_in_dir(&key, root))

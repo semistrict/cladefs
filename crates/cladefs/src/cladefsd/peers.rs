@@ -406,13 +406,19 @@ pub(super) async fn start_on(
         Peers::new(address, move |peer| link(&linking_daemon, &linking, peer, (&linked, region)));
     asking.set(peers);
     crate::bucket::ask_peers_on(&daemon.host, bucket.clone(), asking)?;
-    let replicas = match node_local::env::var_os("CLADEFSD_REPLICAS") {
-        Some(dir) => Some(
-            local_cell::upload::blocking(|| {
-                replicas(daemon.host.local(), std::path::Path::new(&dir))
-            })
-            .map_err(|err| failed(&err))?,
-        ),
+    let replicas = match node_local::env::var_os("CLADEFSD_REPLICAS").filter(|v| !v.is_empty()) {
+        Some(raw) => {
+            let dirs: Vec<std::path::PathBuf> =
+                std::env::split_paths(&raw).filter(|p| !p.as_os_str().is_empty()).collect();
+            if dirs.is_empty() {
+                None
+            } else {
+                Some(
+                    local_cell::upload::blocking(|| replicas(daemon.host.local(), &dirs))
+                        .map_err(|err| failed(&err))?,
+                )
+            }
+        }
         None => None,
     };
     if let Some(replicas) = &replicas {
@@ -948,18 +954,41 @@ fn for_good(err: &std::io::Error) -> bool {
     )
 }
 
-/// cladefs: the daemon's replica directory at `dir` (`CLADEFSD_REPLICAS`, doc-21), made if it is
-/// not there: each cell's logs held to the lag bound in bytes, which bounds a writer's.
+/// cladefs: the daemon's replica directories (`CLADEFSD_REPLICAS`, colon-separated for JBOD,
+/// doc-21), each made if it is not there: each cell's logs held to the lag bound in bytes, which
+/// bounds a writer's.
 fn replicas(
     local: &Arc<local_cell::Host>,
-    dir: &std::path::Path,
+    dirs: &[std::path::PathBuf],
 ) -> Result<Arc<Replicas<HostDir>>, String> {
-    // cladefs: made durable, its promises with it (TASK-708).
-    let made = host_fs::create_dir_all_durably(dir).and_then(|()| HostDir::new_on(local, dir));
-    let dir = made.map_err(|err| format!("the replica directory {}: {err}", dir.display()))?;
-    let replicas = Replicas::open(dir, members_most())
+    if dirs.is_empty() {
+        return Err("CLADEFSD_REPLICAS names no directory".to_owned());
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut host_dirs = Vec::with_capacity(dirs.len());
+    for dir in dirs {
+        // cladefs: made durable, its promises with it (TASK-708).
+        host_fs::create_dir_all_durably(dir)
+            .map_err(|err| format!("the replica directory {}: {err}", dir.display()))?;
+        let canon = host_fs::canonicalize(dir)
+            .map_err(|err| format!("the replica directory {}: {err}", dir.display()))?;
+        if !seen.insert(canon.clone()) {
+            return Err(format!(
+                "CLADEFSD_REPLICAS: duplicate replica directory {}",
+                dir.display()
+            ));
+        }
+        let opened = HostDir::new_on(local, &canon)
+            .map_err(|err| format!("the replica directory {}: {err}", dir.display()))?;
+        host_dirs.push(opened);
+    }
+    let replicas = Replicas::open_all(host_dirs, members_most())
         .map_err(|err| format!("the replica directory: {err}"))?;
-    log::info!("cladefsd: replica directory, incarnation {}", replicas.incarnation());
+    log::info!(
+        "cladefsd: replica store ({} shard(s)), incarnation {}",
+        dirs.len(),
+        replicas.incarnation()
+    );
     Ok(Arc::new(replicas))
 }
 

@@ -71,9 +71,10 @@ pub(super) async fn boot_daemon(
     // for bucket-backed migrations when CLADEFSD_ROOTS is unset (board 11530): validate at boot
     // whether or not CLADEFSD_EPHEMERAL is set.
     if set_os("CLADEFSD_EPHEMERAL_CELLS").is_some() {
-        let root = local_cell::upload::blocking(super::migration::target::cells_root)
+        let roots = local_cell::upload::blocking(super::migration::target::cells_roots)
             .map_err(anyhow::Error::msg)?;
-        log::info!("cladefsd: migrated cells root {}", root.display());
+        let shown = roots.iter().map(|r| r.display().to_string()).collect::<Vec<_>>().join(":");
+        log::info!("cladefsd: migrated cells roots {shown}");
     }
     // cladefs: its ephemeral cells' directory, if it keeps any (doc-25, TASK-698.3): those it
     // handed over let go of (board 5730), and the references of those it holds no more retired,

@@ -5,12 +5,12 @@
 # Killer: cladefsd::tests::hostile::a_compromised_vm_process_harms_no_tenant_beside_it
 --- a/crates/cladefs/src/cladefsd/server.rs
 +++ b/crates/cladefs/src/cladefsd/server.rs
-@@ -375,7 +375,7 @@
+@@ -510,7 +510,7 @@
      /// `EACCES` unless it is where they name cells ([`CellDirs`]).
      fn holds(&self, path: &Path) -> Result<(), Errno> {
          let held = match &self.policy.cell_dirs {
--            CellDirs::Dir(dir) => in_dir(path, dir),
-+            CellDirs::Dir(_) => true,
+-            CellDirs::Dirs(dirs) => dirs.iter().any(|dir| in_dir(path, dir)),
++            CellDirs::Dirs(_) => true,
              CellDirs::Roots(Some(roots)) => {
                  let key = cell_dir_key(path);
                  roots.iter().any(|root| key_in_dir(&key, root))

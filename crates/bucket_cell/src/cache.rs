@@ -26,34 +26,223 @@ use crate::object;
 use extent_frame::{Frame, Parts, TRAILER};
 use host_fs::File;
 use host_fs::FileExt as _;
+use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 /// The number an object's tail is kept by, among its parts, which count from 0: its footer, table
 /// and trailer, after its parts, which a fetcher of another of the host's cells reads here rather
 /// than from the bucket (TASK-92.22), and without which none of its parts can be read.
 const TAIL: u64 = u64::MAX;
 
+/// Runtime health state of a JBOD part-cache shard, modelled on RustFS's
+/// `RuntimeDriveHealthState` and JuiceFS's `dcState`: a failing disk stops receiving new bucket
+/// fetches and is isolated while surviving disks keep serving, and background probes restore it
+/// once I/O succeeds again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ShardHealth {
+    /// Healthy and accepting reads, fills, and adoptions.
+    Online = 0,
+    /// Saw repeated I/O errors recently; excluded from new bucket fills while probed.
+    Suspect = 1,
+    /// Persistently failing I/O; skipped on reads and fills until probes succeed.
+    Offline = 2,
+    /// Probes succeeded after failure; verifying stability before returning to `Online`.
+    Returning = 3,
+}
+
+impl ShardHealth {
+    /// Metric value for `cladefsd_part_cache_shard_state`.
+    pub const fn as_u64(self) -> u64 {
+        self as u64
+    }
+
+    fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::Suspect,
+            2 => Self::Offline,
+            3 => Self::Returning,
+            _ => Self::Online,
+        }
+    }
+}
+
+/// Errors within [`HEALTH_WINDOW`] that move an `Online` shard to `Suspect`.
+const SUSPECT_ERRORS: u32 = 3;
+/// Consecutive errors while `Suspect` (or time spent `Suspect`) that move a shard to `Offline`.
+const OFFLINE_ERRORS: u32 = 10;
+const OFFLINE_AFTER: Duration = Duration::from_secs(30 * 60);
+/// Consecutive probe successes that promote `Offline` -> `Returning` -> `Online`.
+const RETURNING_SUCCESSES: u32 = 3;
+const HEALTH_WINDOW: Duration = Duration::from_secs(60);
+
+#[derive(Debug)]
+struct HealthInner {
+    window_start: Instant,
+    window_errors: u32,
+    suspect_since: Option<Instant>,
+    consecutive_errors: u32,
+    probe_successes: u32,
+}
+
+#[derive(Debug)]
+struct ShardHealthState {
+    state: AtomicU8,
+    inner: Mutex<HealthInner>,
+}
+
+impl ShardHealthState {
+    fn new() -> Self {
+        Self {
+            state: AtomicU8::new(ShardHealth::Online as u8),
+            inner: Mutex::new(HealthInner {
+                window_start: Instant::now(),
+                window_errors: 0,
+                suspect_since: None,
+                consecutive_errors: 0,
+                probe_successes: 0,
+            }),
+        }
+    }
+
+    fn get(&self) -> ShardHealth {
+        ShardHealth::from_u8(self.state.load(Ordering::Acquire))
+    }
+
+    fn is_online(&self) -> bool {
+        self.get() == ShardHealth::Online
+    }
+
+    fn is_offline(&self) -> bool {
+        self.get() == ShardHealth::Offline
+    }
+
+    fn on_io_success(&self) {
+        if self.is_online() {
+            return;
+        }
+        let mut inner = self.inner.lock().unwrap();
+        inner.consecutive_errors = 0;
+        let current = self.get();
+        match current {
+            ShardHealth::Online => {}
+            ShardHealth::Suspect => {
+                inner.probe_successes += 1;
+                if inner.probe_successes >= RETURNING_SUCCESSES {
+                    inner.probe_successes = 0;
+                    inner.suspect_since = None;
+                    inner.window_errors = 0;
+                    self.state.store(ShardHealth::Online as u8, Ordering::Release);
+                }
+            }
+            ShardHealth::Offline => {
+                inner.probe_successes = 1;
+                self.state.store(ShardHealth::Returning as u8, Ordering::Release);
+            }
+            ShardHealth::Returning => {
+                inner.probe_successes += 1;
+                if inner.probe_successes >= RETURNING_SUCCESSES {
+                    inner.probe_successes = 0;
+                    inner.suspect_since = None;
+                    inner.window_errors = 0;
+                    self.state.store(ShardHealth::Online as u8, Ordering::Release);
+                }
+            }
+        }
+    }
+
+    fn on_io_error(&self, dir: &Path, err: &io::Error) {
+        if !is_disk_io_error(err) {
+            return;
+        }
+        let mut inner = self.inner.lock().unwrap();
+        let now = Instant::now();
+        if now.duration_since(inner.window_start) >= HEALTH_WINDOW {
+            inner.window_start = now;
+            inner.window_errors = 0;
+        }
+        inner.window_errors = inner.window_errors.saturating_add(1);
+        inner.consecutive_errors = inner.consecutive_errors.saturating_add(1);
+        inner.probe_successes = 0;
+        let current = self.get();
+        let next = match current {
+            ShardHealth::Online if inner.window_errors >= SUSPECT_ERRORS => {
+                inner.suspect_since = Some(now);
+                ShardHealth::Suspect
+            }
+            ShardHealth::Suspect
+                if inner.consecutive_errors >= OFFLINE_ERRORS
+                    || inner
+                        .suspect_since
+                        .is_some_and(|s| now.duration_since(s) >= OFFLINE_AFTER) =>
+            {
+                ShardHealth::Offline
+            }
+            ShardHealth::Returning => ShardHealth::Offline,
+            other => other,
+        };
+        if next != current {
+            self.state.store(next as u8, Ordering::Release);
+            log::error!(
+                "cladefs: part cache shard {} health {current:?} -> {next:?} after I/O error: {err}",
+                dir.display()
+            );
+        }
+    }
+}
+
+/// Whether `err` indicates a failing storage device (rather than missing/corrupt entry).
+fn is_disk_io_error(err: &io::Error) -> bool {
+    matches!(
+        err.raw_os_error(),
+        Some(libc::EIO | libc::ENODEV | libc::ENXIO | libc::EROFS | libc::ESTALE)
+    ) || matches!(err.kind(), io::ErrorKind::TimedOut | io::ErrorKind::BrokenPipe)
+}
+
 /// The cache's lock is held only to change what it keeps, not across its files' I/O: a part's
 /// write, or its eviction, is done outside it, the part busy meanwhile, and an object's file
 /// removed, or replaced by one adopted, so too, the object's key removing; neither is kept or read
 /// until done (TASK-92.21).
+///
+/// Supports JBOD across one or more independent [`Shard`]s (each on its own directory /
+/// [`HostDisk`]): bucket fetches distribute across healthy shards by capacity-weighted rendezvous
+/// hashing, while adoptions (`adopt`) route directly to the shard on the source file's filesystem
+/// so `rename(2)` never crosses filesystems (`EXDEV`), and lookups check shard indices in memory.
 #[derive(Debug)]
 pub struct Cache {
+    shards: Vec<Shard>,
+    /// Total budget across all shards (`u64::MAX` when governed by disk headroom alone).
+    total_budget: u64,
+    /// Round-robin cursor for selecting a healthy shard's `versions` directory.
+    versions_rr: AtomicUsize,
+}
+
+/// One disk shard of a [`Cache`]: its own directory, [`HostDisk`], sparse files, in-memory LRU
+/// index, persistent disk ID, and runtime health state.
+#[derive(Debug)]
+struct Shard {
     files: Files,
+    /// Persistent random non-zero ID stored in `<root>/.disk-id`, keeping rendezvous hashing
+    /// stable even if configured paths are reordered.
+    disk_id: u64,
+    /// Last sampled filesystem size in bytes, used as placement weight for heterogeneous JBOD.
+    disk_size: AtomicU64,
     /// The most it keeps, its budget, if it has one.
-    budget: u64,
-    /// The most the disk governor leaves it ([`Cache::set_limit`]): `u64::MAX` until it says.
+    budget: AtomicU64,
+    /// The most the disk governor leaves it ([`Shard::set_limit`]): `u64::MAX` until it says.
     governed: AtomicU64,
     kept: Mutex<Index>,
     /// cladefs: beside its files, on their filesystem, the cells at versions its host opens of its
     /// own ([`Cache::versions`], board 6589).
     versions: PathBuf,
+    /// Runtime disk health state for JBOD failover.
+    health: ShardHealthState,
     /// The directory, locked, so that no other cache opens it while this one has it.
     _lock: host_fs::Flock,
 }
@@ -301,30 +490,92 @@ const VERSIONS: &str = "cladefs-versions";
 /// what punching a hole frees whole.
 const BLOCK: u64 = extent_frame::ALIGN;
 
-impl Cache {
-    /// The cache in `dir` on the process's default host outside `madsim` ([`Cache::open_on`]).
-    #[cfg(not(madsim))]
-    pub fn open(dir: &Path, budget: u64) -> io::Result<Self> {
-        Self::open_on(crate::Host::process(), dir, budget)
-    }
+/// Persistent disk-ID file stored at the root of each part-cache shard (beside `cladefs-parts/`
+/// and `cladefs-versions/`), keeping rendezvous hashing stable across path reorderings.
+const DISK_ID: &str = ".disk-id";
 
-    /// The cache in `dir` on `host`, keeping at most `budget` bytes of objects (`u64::MAX`, none),
-    /// and what the disk governor leaves it, once it says ([`Cache::set_limit`]): what an earlier
-    /// one kept, read from its files, those that fail their checks removed, then evicted, those
-    /// read least recently first, as far as `budget` needs; and its directory of cells at versions
-    /// emptied ([`Cache::versions`]). Fails while another cache has the directory.
-    pub fn open_on(host: &crate::Host, dir: &Path, budget: u64) -> io::Result<Self> {
+/// Probe file written/read/removed when probing a `Suspect`/`Offline`/`Returning` shard.
+const PROBE_FILE: &str = ".health-probe";
+
+/// Reads or creates a persistent non-zero random disk ID in `<root>/.disk-id`.
+fn load_or_create_disk_id(root: &Path) -> io::Result<u64> {
+    let path = root.join(DISK_ID);
+    match host_fs::read_to_string(&path) {
+        Ok(text) => {
+            if let Ok(id) = text.trim().parse::<u64>()
+                && id != 0
+            {
+                return Ok(id);
+            }
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err),
+    }
+    let id = rand::random::<u64>() | 1;
+    let tmp = root.join(".disk-id.new");
+    host_fs::write(&tmp, format!("{id}\n"))?;
+    host_fs::rename(&tmp, &path)?;
+    Ok(id)
+}
+
+/// Computes a weighted rendezvous score in `(0, +inf)` for `(disk_id, key)` with `weight >= 1`.
+/// Using `-weight / ln(u)` for uniform `u in (0, 1)` picks shard `k` with exact probability
+/// `weight_k / sum(weight)` and moves the minimal fraction of keys when shards are added/removed.
+fn weighted_score(disk_id: u64, weight: u64, key: &str) -> f64 {
+    let mut hasher = Sha256::new();
+    hasher.update(disk_id.to_le_bytes());
+    hasher.update((key.len() as u64).to_le_bytes());
+    hasher.update(key.as_bytes());
+    let digest = hasher.finalize();
+    let h = u64::from_le_bytes(digest[..8].try_into().expect("sha256 has 32 bytes"));
+    let u = ((h >> 11) as f64 + 0.5) / ((1u64 << 53) as f64);
+    -(weight.max(1) as f64) / u.ln()
+}
+
+/// Apportions `total` proportionally to `weights`, assigning any remainder to the largest shards
+/// so the sum equals `total` (unless `total == u64::MAX`, in which case every shard gets
+/// `u64::MAX`).
+fn apportion(total: u64, weights: &[u64]) -> Vec<u64> {
+    let n = weights.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    if total == u64::MAX {
+        return vec![u64::MAX; n];
+    }
+    let sum: u128 = weights.iter().map(|&w| u128::from(w.max(1))).sum();
+    let mut shares: Vec<u64> = weights
+        .iter()
+        .map(|&w| ((u128::from(total) * u128::from(w.max(1))) / sum) as u64)
+        .collect();
+    let mut rem = total.saturating_sub(shares.iter().copied().sum::<u64>());
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by_key(|&i| std::cmp::Reverse(weights[i]));
+    for i in order {
+        if rem == 0 {
+            break;
+        }
+        shares[i] = shares[i].saturating_add(1);
+        rem -= 1;
+    }
+    shares
+}
+
+impl Shard {
+    fn open_on(host: &crate::Host, dir: &Path, budget: u64) -> io::Result<Self> {
         let versions = dir.join(VERSIONS);
-        let dir = dir.join(FILES);
-        host_fs::create_dir_all(&dir)?;
-        let lock = lock(&dir)?;
+        let parts_dir = dir.join(FILES);
+        host_fs::create_dir_all(&parts_dir)?;
+        let lock = lock(&parts_dir)?;
+        let disk_id = load_or_create_disk_id(dir)?;
         // What an earlier cache's host left of its cells at versions, which it alone had: they
         // hold nothing of their own.
         match host_fs::remove_dir_all(&versions) {
             Err(err) if err.kind() != io::ErrorKind::NotFound => return Err(err),
             _ => host_fs::create_dir(&versions)?,
         }
-        let files = Files::new_on(host, dir)?;
+        let files = Files::new_on(host, parts_dir)?;
+        let sample_size = files.disk.sample().map_or(1, |s| s.size.max(1));
         let mut found = Vec::new();
         files.walk(Path::new(""), &mut found)?;
         // By when each was written last: it was read then, if not since.
@@ -334,45 +585,91 @@ impl Cache {
             kept.take(found.bytes());
             kept.insert(&key, found);
         }
-        let governed = AtomicU64::new(u64::MAX);
-        let kept = Mutex::new(kept);
-        let cache = Self { files, budget, governed, kept, versions, _lock: lock };
-        cache.set_limit(u64::MAX)?;
-        Ok(cache)
+        let shard = Self {
+            files,
+            disk_id,
+            disk_size: AtomicU64::new(sample_size),
+            budget: AtomicU64::new(budget),
+            governed: AtomicU64::new(u64::MAX),
+            kept: Mutex::new(kept),
+            versions,
+            health: ShardHealthState::new(),
+            _lock: lock,
+        };
+        shard.set_limit(u64::MAX)?;
+        Ok(shard)
     }
 
-    /// cladefs: keeps no more than `bytes` of objects, nor its budget, from now on, evicting what
-    /// was read least recently down to that at once: what the disk governor leaves it of its
-    /// filesystem (doc-22). Returns what it keeps then.
-    pub fn set_limit(&self, bytes: u64) -> io::Result<u64> {
+    fn set_budget(&self, budget: u64) -> io::Result<u64> {
+        self.budget.store(budget, Ordering::Relaxed);
+        let (_, evicted) = self.kept.lock().unwrap().make_room(self.capacity(), 0);
+        self.evict(evicted)?;
+        Ok(self.bytes())
+    }
+
+    fn set_limit(&self, bytes: u64) -> io::Result<u64> {
         self.governed.store(bytes, Ordering::Relaxed);
         let (_, evicted) = self.kept.lock().unwrap().make_room(self.capacity(), 0);
         self.evict(evicted)?;
         Ok(self.bytes())
     }
 
-    #[cfg(test)]
-    pub(crate) fn path(&self, key: &str) -> PathBuf {
-        self.files.path(key)
+    fn weight(&self) -> u64 {
+        let allowance = self.files.disk.allowance();
+        if allowance < u64::MAX {
+            allowance.max(1)
+        } else {
+            self.disk_size.load(Ordering::Relaxed).max(1)
+        }
     }
 
-    /// The directory the cache keeps its objects in.
-    pub fn dir(&self) -> &Path {
-        &self.files.dir
+    fn record_io<T>(&self, res: io::Result<T>) -> io::Result<T> {
+        match &res {
+            Ok(_) => self.health.on_io_success(),
+            Err(err) => self.health.on_io_error(&self.files.dir, err),
+        }
+        res
     }
 
-    /// cladefs: the directory, on the filesystem of the cache's files, of the cells at versions
-    /// the cache's host opens of its own, to fork them (board 6589): as every cell the cache
-    /// serves, they must be on it, as a cell elsewhere is refused (TASK-359). They hold nothing of
-    /// their own, their every extent the bucket's: the cache empties it as it opens, as no other
-    /// cache has it.
-    pub fn versions(&self) -> &Path {
-        &self.versions
+    fn probe(&self) {
+        if self.health.is_online() {
+            return;
+        }
+        let Some(root) = self.files.dir.parent() else { return };
+        let path = root.join(PROBE_FILE);
+        let res = (|| -> io::Result<()> {
+            host_fs::write(&path, b"ok")?;
+            let read = host_fs::read(&path)?;
+            // Best-effort cleanup of the temporary probe file; probe outcome is decided by the
+            // read-back check and logged on error below.
+            if let Err(err) = host_fs::remove_file(&path) {
+                log::warn!("cladefs: removing probe file {}: {err}", path.display());
+            }
+            if read != b"ok" {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "probe mismatch"));
+            }
+            Ok(())
+        })();
+        match self.record_io(res) {
+            Ok(()) => {}
+            Err(err) => log::warn!(
+                "cladefs: part cache shard {} health probe failed: {err}",
+                root.display()
+            ),
+        }
     }
 
-    /// The tail of the object at `key`, if it is kept, checked against its CRCs: one that fails
-    /// is dropped, its object with it.
-    pub fn tail(&self, key: &str) -> io::Result<Option<object::Tail>> {
+    fn has_key(&self, key: &str) -> bool {
+        let kept = self.kept.lock().unwrap();
+        kept.objects.contains_key(key)
+    }
+
+    fn holds(&self, key: &str, part: u64) -> bool {
+        let kept = self.kept.lock().unwrap();
+        kept.objects.get(key).is_some_and(|object| object.kept.contains_key(&part))
+    }
+
+    fn tail(&self, key: &str) -> io::Result<Option<object::Tail>> {
         let (place, frame) = {
             let mut kept = self.kept.lock().unwrap();
             let Some(object) = kept.objects.get(key).filter(|object| object.readable()) else {
@@ -395,17 +692,7 @@ impl Cache {
         }
     }
 
-    /// Whether part `part` of the object at `key` is kept, as the cache's index has it: reading
-    /// nothing of its file, nor counting it read, as [`Cache::part`] does. A part is named by its
-    /// object's key and its number for good, as a key is written once (TASK-407).
-    pub fn holds(&self, key: &str, part: u64) -> bool {
-        let kept = self.kept.lock().unwrap();
-        kept.objects.get(key).is_some_and(|object| object.kept.contains_key(&part))
-    }
-
-    /// The stored bytes of part `part` of the object at `key`, if it is kept, and they pass the CRC
-    /// its tail, kept with it, gives: one that fails is dropped.
-    pub fn part(&self, key: &str, part: u64) -> io::Result<Option<Vec<u8>>> {
+    fn part(&self, key: &str, part: u64) -> io::Result<Option<Vec<u8>>> {
         let stored = {
             let mut kept = self.kept.lock().unwrap();
             let Some(object) = kept.objects.get(key) else { return Ok(None) };
@@ -425,30 +712,31 @@ impl Cache {
         Ok(None)
     }
 
-    /// The bytes at `place` in the file of the object at `key`: none if the file went, or shrank,
-    /// behind the cache's back, which then forgets the object.
     fn read(&self, key: &str, place: Range<u64>) -> io::Result<Option<Vec<u8>>> {
         match self.files.read(key, place) {
-            Ok(bytes) => Ok(Some(bytes)),
+            Ok(bytes) => {
+                self.health.on_io_success();
+                Ok(Some(bytes))
+            }
             Err(err)
                 if matches!(err.kind(), io::ErrorKind::NotFound | io::ErrorKind::UnexpectedEof) =>
             {
                 self.forget(key)?;
                 Ok(None)
             }
-            Err(err) => Err(err),
+            Err(err) => {
+                self.health.on_io_error(&self.files.dir, &err);
+                Err(err)
+            }
         }
     }
 
-    /// Keeps `tail`, the tail of the object at `key`, as read, evicting what was read least
-    /// recently to make room: unless no room can be made, or its object is being removed,
-    /// forgotten, or kept or written already. One kept at its key of other parts, which a key
-    /// written once never has (TASK-407), but a file the cache found corrupt, goes first, unless
-    /// parts of it are busy.
-    pub fn keep_tail(&self, key: &str, tail: &object::Tail) -> io::Result<()> {
+    /// Keeps `tail` on this shard. Returns `Ok(true)` if kept (or already kept/busy), `Ok(false)`
+    /// if `tail` did not fit this shard's capacity (allowing JBOD failover to another shard).
+    fn keep_tail(&self, key: &str, tail: &object::Tail) -> io::Result<bool> {
         let len = tail.bytes.len() as u64;
         if len > self.capacity() {
-            return Ok(());
+            return Ok(false);
         }
         let mut kept = self.kept.lock().unwrap();
         if let Some(object) = kept.objects.get(key)
@@ -463,11 +751,11 @@ impl Cache {
         match kept.objects.get(key) {
             Some(object) if object.readable() && object.parts == tail.parts => {
                 kept.touch(key, TAIL);
-                return Ok(());
+                return Ok(true);
             }
             // Being written, or forgotten; or another object, parts of it busy.
-            Some(_) => return Ok(()),
-            None if kept.removing.contains(key) => return Ok(()),
+            Some(_) => return Ok(true),
+            None if kept.removing.contains(key) => return Ok(true),
             None => {}
         }
         kept.objects.insert(key.to_owned(), Object::writing(tail.parts.clone(), TAIL));
@@ -481,21 +769,18 @@ impl Cache {
         drop(kept);
         let evicting = self.evict(evicted);
         if !fits {
-            return evicting;
+            evicting?;
+            return Ok(false);
         }
         let frame = tail.parts.frame;
         let written = evicting
             .and_then(|()| self.files.create(key, frame.size()))
             .and_then(|()| self.files.write(key, frame.tail().start, &tail.bytes));
-        self.settle(key, TAIL, written)
+        self.record_io(self.settle(key, TAIL, written))?;
+        Ok(true)
     }
 
-    /// Keeps `bytes`, the stored bytes of part `part` of the object at `key`, checked against the
-    /// CRC its tail gives, where its tail, kept, says it is stored, evicting what was read least
-    /// recently to make room: unless no room can be made, or its object's tail isn't kept, or it
-    /// is kept or busy already. One kept torn, as a crash may leave a part, a reader finds failing
-    /// its CRC first ([`Cache::part`]), which drops it, and then keeps it anew.
-    pub fn keep_part(&self, key: &str, part: u64, bytes: &[u8]) -> io::Result<()> {
+    fn keep_part(&self, key: &str, part: u64, bytes: &[u8]) -> io::Result<()> {
         let stored = {
             let kept = self.kept.lock().unwrap();
             let stored =
@@ -534,11 +819,9 @@ impl Cache {
         }
         let written =
             evicting.and_then(|()| self.files.write(key, stored.offset, &bytes[..len as usize]));
-        self.settle(key, part, written)
+        self.record_io(self.settle(key, part, written))
     }
 
-    /// Part `part` of the object at `key` is written, or failed to be: kept, or not, and its
-    /// object's file removed if that leaves it nothing.
     fn settle(&self, key: &str, part: u64, written: io::Result<()>) -> io::Result<()> {
         let gone = self.kept.lock().unwrap().written(key, part, written.is_ok());
         if let Err(err) = self.evict(Vec::from_iter(gone)) {
@@ -547,13 +830,7 @@ impl Cache {
         written
     }
 
-    /// Takes the object framed whole in the file at `from`, on the cache's filesystem, as the one
-    /// at `key`, by renaming it, evicting what was read least recently to make room: then it is
-    /// kept as any is, its parts evicted as fetched ones are. Returns whether it took it: not if no
-    /// room can be made, or the object it keeps at `key` is busy, and then the file is left where
-    /// it is. One it keeps at `key` already, it replaces. cladefs: its file's blocks, the cell's,
-    /// are the cache's once it takes it, the disk holding as much as before (doc-22).
-    pub fn adopt(&self, key: &str, from: &Path) -> io::Result<bool> {
+    fn adopt(&self, key: &str, from: &Path) -> io::Result<bool> {
         let found = found(from, key, self.files.holes)?.ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidData, format!("{}: no object", from.display()))
         })?;
@@ -592,23 +869,23 @@ impl Cache {
         match renamed {
             Ok(()) => {
                 kept.insert(key, found);
+                self.health.on_io_success();
                 Ok(true)
             }
             Err(err) => {
                 kept.give(len);
+                self.health.on_io_error(&self.files.dir, &err);
                 Err(err)
             }
         }
     }
 
-    /// Drops the object at `key`: one whose copy failed its CRCs.
-    pub fn forget(&self, key: &str) -> io::Result<()> {
+    fn forget(&self, key: &str) -> io::Result<()> {
         let gone = self.kept.lock().unwrap().forget(key);
         self.evict(Vec::from_iter(gone))
     }
 
-    /// Drops part `part` of the object at `key`, if it is kept: its tail, the object.
-    pub(crate) fn forget_part(&self, key: &str, part: u64) -> io::Result<()> {
+    fn forget_part(&self, key: &str, part: u64) -> io::Result<()> {
         let evicted = {
             let mut kept = self.kept.lock().unwrap();
             match kept.objects.get(key) {
@@ -619,28 +896,15 @@ impl Cache {
         self.evict(Vec::from_iter(evicted))
     }
 
-    /// cladefs: the disk of its filesystem (doc-22).
-    pub fn disk(&self) -> &Arc<HostDisk> {
-        &self.files.disk
+    fn capacity(&self) -> u64 {
+        self.budget.load(Ordering::Relaxed).min(self.governed.load(Ordering::Relaxed))
     }
 
-    /// The most bytes of objects it keeps: its budget, or what the disk governor leaves it, the
-    /// less.
-    pub fn capacity(&self) -> u64 {
-        self.budget.min(self.governed.load(Ordering::Relaxed))
-    }
-
-    /// How many bytes of objects are kept.
-    pub fn bytes(&self) -> u64 {
+    fn bytes(&self) -> u64 {
         self.kept.lock().unwrap().bytes
     }
 
-    /// Does with the files what evicting left to do ([`Index::evict`]), holding no lock: punches
-    /// parts' holes, or removes objects' files; then they are no longer busy, which may leave an
-    /// object forgotten meanwhile nothing, its file removed then too.
     fn evict(&self, mut evicted: Vec<Evicted>) -> io::Result<()> {
-        // Its object's file removed meanwhile, with the object's last part, which another put
-        // evicted: its hole with it.
         let present = |done: io::Result<()>| match done {
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
             done => done,
@@ -651,12 +915,20 @@ impl Cache {
             at += 1;
             match next {
                 Evicted::Punch { key, part, place } => {
-                    done = done.and(present(self.files.punch(key, place.clone())));
+                    let res = present(self.files.punch(key, place.clone()));
+                    if let Err(err) = &res {
+                        self.health.on_io_error(&self.files.dir, err);
+                    }
+                    done = done.and(res);
                     let gone = self.kept.lock().unwrap().freed(key, *part);
                     evicted.extend(gone);
                 }
                 Evicted::Remove(key) => {
-                    done = done.and(present(self.files.remove(key)));
+                    let res = present(self.files.remove(key));
+                    if let Err(err) = &res {
+                        self.health.on_io_error(&self.files.dir, err);
+                    }
+                    done = done.and(res);
                     self.kept.lock().unwrap().removing.remove(key);
                 }
             }
@@ -665,12 +937,415 @@ impl Cache {
     }
 }
 
-/// cladefs: what it kept, its files, stays on its disk, which another opening of it counts anew.
-impl Drop for Cache {
+/// cladefs: what a shard kept, its files, stays on its disk, which another opening of it counts
+/// anew.
+impl Drop for Shard {
     fn drop(&mut self) {
         let kept = self.kept.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner);
         let bytes = kept.bytes;
         kept.give(bytes);
+    }
+}
+
+impl Cache {
+    /// The cache in `dir` on the process's default host outside `madsim` ([`Cache::open_on`]).
+    #[cfg(not(madsim))]
+    pub fn open(dir: &Path, budget: u64) -> io::Result<Self> {
+        Self::open_on(crate::Host::process(), dir, budget)
+    }
+
+    /// The JBOD cache across `dirs` on the process's default host outside `madsim`.
+    #[cfg(not(madsim))]
+    pub fn open_all(dirs: &[PathBuf], budget: u64) -> io::Result<Self> {
+        Self::open_all_on(crate::Host::process(), dirs, budget)
+    }
+
+    /// The cache in `dir` on `host`, keeping at most `budget` bytes of objects (`u64::MAX`, none),
+    /// and what the disk governor leaves it, once it says ([`Cache::set_limit`]): what an earlier
+    /// one kept, read from its files, those that fail their checks removed, then evicted, those
+    /// read least recently first, as far as `budget` needs; and its directory of cells at versions
+    /// emptied ([`Cache::versions`]). Fails while another cache has the directory.
+    pub fn open_on(host: &crate::Host, dir: &Path, budget: u64) -> io::Result<Self> {
+        Self::open_all_on(host, &[dir.to_owned()], budget)
+    }
+
+    /// Opens a JBOD part cache across one or more directories `dirs` on `host`, keeping at most
+    /// `budget` bytes of objects across all shards combined (`u64::MAX` for unlimited, governed
+    /// per-filesystem by the disk governor). When `budget` is finite, it is apportioned across
+    /// shards proportionally to each shard's filesystem size. Refuses an empty list or duplicate
+    /// directories.
+    pub fn open_all_on(host: &crate::Host, dirs: &[PathBuf], budget: u64) -> io::Result<Self> {
+        if dirs.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "part cache requires at least one directory",
+            ));
+        }
+        let mut seen_dirs = HashSet::new();
+        let mut seen_devs = HashSet::new();
+        let mut shards = Vec::with_capacity(dirs.len());
+        for dir in dirs {
+            host_fs::create_dir_all(dir)?;
+            let canonical = host_fs::canonicalize(dir)?;
+            if !seen_dirs.insert(canonical.clone()) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{}: duplicate part cache directory", dir.display()),
+                ));
+            }
+            let shard = Shard::open_on(host, dir, u64::MAX)?;
+            if let Some(dev) = shard.files.disk.dev()
+                && !seen_devs.insert(dev)
+            {
+                log::warn!(
+                    "cladefs: part cache directory {} shares filesystem {dev:#x} with another shard",
+                    dir.display()
+                );
+            }
+            shards.push(shard);
+        }
+        let weights: Vec<u64> =
+            shards.iter().map(|s| s.disk_size.load(Ordering::Relaxed)).collect();
+        let budgets = apportion(budget, &weights);
+        for (shard, shard_budget) in shards.iter().zip(budgets) {
+            shard.set_budget(shard_budget)?;
+        }
+        Ok(Self { shards, total_budget: budget, versions_rr: AtomicUsize::new(0) })
+    }
+
+    /// Ranks shard indices for `key` by weighted rendezvous score (highest first), skipping
+    /// `Offline` shards (or non-`Online` shards when `online_only` is set).
+    fn ranked_shards(&self, key: &str, online_only: bool) -> Vec<usize> {
+        if self.shards.len() == 1 {
+            let s = &self.shards[0];
+            let ok = if online_only { !s.health.is_offline() } else { true };
+            return if ok { vec![0] } else { Vec::new() };
+        }
+        let mut scored: Vec<(usize, f64)> = self
+            .shards
+            .iter()
+            .enumerate()
+            .filter(
+                |(_, s)| {
+                    if online_only { s.health.is_online() } else { !s.health.is_offline() }
+                },
+            )
+            .map(|(i, s)| (i, weighted_score(s.disk_id, s.weight(), key)))
+            .collect();
+        scored.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        scored.into_iter().map(|(i, _)| i).collect()
+    }
+
+    /// cladefs: keeps no more than `bytes` of objects across all shards combined, nor its budget,
+    /// from now on, evicting what was read least recently down to that at once. Returns what it
+    /// keeps then.
+    pub fn set_limit(&self, bytes: u64) -> io::Result<u64> {
+        if self.shards.len() == 1 {
+            return self.shards[0].set_limit(bytes);
+        }
+        let weights: Vec<u64> =
+            self.shards.iter().map(|s| s.disk_size.load(Ordering::Relaxed)).collect();
+        let limits = apportion(bytes, &weights);
+        let mut total = 0u64;
+        for (shard, limit) in self.shards.iter().zip(limits) {
+            total += shard.set_limit(limit)?;
+        }
+        Ok(total)
+    }
+
+    /// cladefs: governs the part-cache shard(s) living on `disk`, setting their governed limit to
+    /// `bytes` (what `disk`'s cells leave of its allowance, doc-22) and updating `disk_size` for
+    /// weighted JBOD placement. Returns `Ok(None)` if no shard lives on `disk`.
+    pub fn set_limit_on(
+        &self,
+        disk: &Arc<HostDisk>,
+        bytes: u64,
+        disk_size: u64,
+    ) -> io::Result<Option<u64>> {
+        let matching: Vec<&Shard> =
+            self.shards.iter().filter(|s| Arc::ptr_eq(&s.files.disk, disk)).collect();
+        if matching.is_empty() {
+            return Ok(None);
+        }
+        let n = matching.len() as u64;
+        let per = if bytes == u64::MAX { u64::MAX } else { bytes / n };
+        let mut kept = 0u64;
+        for shard in matching {
+            if disk_size > 0 {
+                shard.disk_size.store(disk_size, Ordering::Relaxed);
+            }
+            kept += shard.set_limit(per)?;
+        }
+        Ok(Some(kept))
+    }
+
+    /// Re-probes any `Suspect`, `Offline`, or `Returning` shards so recovered disks rejoin
+    /// automatically.
+    pub fn probe_unhealthy(&self) {
+        for shard in &self.shards {
+            shard.probe();
+        }
+    }
+
+    /// Runtime health state of each shard paired with its [`HostDisk`], for metrics.
+    pub fn shard_states(&self) -> Vec<(Arc<HostDisk>, ShardHealth)> {
+        self.shards.iter().map(|s| (s.files.disk.clone(), s.health.get())).collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn path(&self, key: &str) -> PathBuf {
+        for shard in &self.shards {
+            if shard.has_key(key) {
+                return shard.files.path(key);
+            }
+        }
+        let idx = self.ranked_shards(key, false).into_iter().next().unwrap_or(0);
+        self.shards[idx].files.path(key)
+    }
+
+    /// The first shard's directory where the cache keeps its objects.
+    pub fn dir(&self) -> &Path {
+        &self.shards[0].files.dir
+    }
+
+    /// All shard object directories.
+    pub fn dirs(&self) -> Vec<&Path> {
+        self.shards.iter().map(|s| s.files.dir.as_path()).collect()
+    }
+
+    /// Human-readable display of the cache's shard directories (`:`-separated when multiple).
+    pub fn dirs_display(&self) -> String {
+        self.shards.iter().map(|s| s.files.dir.display().to_string()).collect::<Vec<_>>().join(":")
+    }
+
+    /// cladefs: a directory, on the filesystem of one of the cache's healthy shards, for cells at
+    /// versions the host opens of its own, to fork them (board 6589): as every cell the cache
+    /// serves, they must sit on a shard's filesystem (TASK-359). Spread round-robin across healthy
+    /// shards so temporary version dirs share JBOD IOPS.
+    pub fn versions(&self) -> &Path {
+        if self.shards.len() == 1 {
+            return &self.shards[0].versions;
+        }
+        let start = self.versions_rr.fetch_add(1, Ordering::Relaxed) % self.shards.len();
+        for offset in 0..self.shards.len() {
+            let shard = &self.shards[(start + offset) % self.shards.len()];
+            if shard.health.is_online() {
+                return &shard.versions;
+            }
+        }
+        &self.shards[start].versions
+    }
+
+    /// The tail of the object at `key`, if it is kept on any shard, checked against its CRCs: one
+    /// that fails is dropped, its object with it.
+    pub fn tail(&self, key: &str) -> io::Result<Option<object::Tail>> {
+        if self.shards.len() == 1 {
+            return self.shards[0].tail(key);
+        }
+        let ranked = self.ranked_shards(key, false);
+        let mut last_err = None;
+        for idx in ranked {
+            let shard = &self.shards[idx];
+            if !shard.has_key(key) {
+                continue;
+            }
+            match shard.tail(key) {
+                Ok(Some(tail)) => return Ok(Some(tail)),
+                Ok(None) => {}
+                Err(err) => last_err = Some(err),
+            }
+        }
+        match last_err {
+            Some(err) => Err(err),
+            None => Ok(None),
+        }
+    }
+
+    /// Whether part `part` of the object at `key` is kept on any non-offline shard, as the cache's
+    /// index has it: reading nothing of its file, nor counting it read, as [`Cache::part`] does.
+    pub fn holds(&self, key: &str, part: u64) -> bool {
+        if self.shards.len() == 1 {
+            return self.shards[0].holds(key, part);
+        }
+        self.shards.iter().any(|s| !s.health.is_offline() && s.holds(key, part))
+    }
+
+    /// The stored bytes of part `part` of the object at `key`, if it is kept, and they pass the CRC
+    /// its tail, kept with it, gives: one that fails is dropped.
+    pub fn part(&self, key: &str, part: u64) -> io::Result<Option<Vec<u8>>> {
+        if self.shards.len() == 1 {
+            return self.shards[0].part(key, part);
+        }
+        let ranked = self.ranked_shards(key, false);
+        let mut last_err = None;
+        for idx in ranked {
+            let shard = &self.shards[idx];
+            if !shard.has_key(key) {
+                continue;
+            }
+            match shard.part(key, part) {
+                Ok(Some(bytes)) => return Ok(Some(bytes)),
+                Ok(None) => {}
+                Err(err) => last_err = Some(err),
+            }
+        }
+        match last_err {
+            Some(err) => Err(err),
+            None => Ok(None),
+        }
+    }
+
+    /// Keeps `tail`, the tail of the object at `key`, as read, evicting what was read least
+    /// recently to make room. Across JBOD shards, tries healthy shards in weighted rendezvous
+    /// order so a full or failing shard transparently fails over to the next healthy shard.
+    pub fn keep_tail(&self, key: &str, tail: &object::Tail) -> io::Result<()> {
+        if self.shards.len() == 1 {
+            self.shards[0].keep_tail(key, tail)?;
+            return Ok(());
+        }
+        // If any non-offline shard already holds `key`, update/touch it in place rather than
+        // duplicating across shards.
+        for shard in &self.shards {
+            if !shard.health.is_offline() && shard.has_key(key) {
+                shard.keep_tail(key, tail)?;
+                return Ok(());
+            }
+        }
+        let mut ranked = self.ranked_shards(key, true);
+        if ranked.is_empty() {
+            ranked = self.ranked_shards(key, false);
+        }
+        let mut last_err = None;
+        for idx in ranked {
+            match self.shards[idx].keep_tail(key, tail) {
+                Ok(true) => return Ok(()),
+                Ok(false) => continue,
+                Err(err) => last_err = Some(err),
+            }
+        }
+        match last_err {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
+    }
+
+    /// Keeps `bytes`, the stored bytes of part `part` of the object at `key`, on the shard that
+    /// holds its tail.
+    pub fn keep_part(&self, key: &str, part: u64, bytes: &[u8]) -> io::Result<()> {
+        if self.shards.len() == 1 {
+            return self.shards[0].keep_part(key, part, bytes);
+        }
+        for shard in &self.shards {
+            if !shard.health.is_offline() && shard.has_key(key) {
+                return shard.keep_part(key, part, bytes);
+            }
+        }
+        Ok(())
+    }
+
+    /// Takes the object framed whole in the file at `from`, on one of the cache's filesystems, as
+    /// the one at `key`, by renaming it onto the shard living on `from`'s filesystem (never
+    /// crossing filesystems with `EXDEV`), evicting what was read least recently there to make
+    /// room. If another shard held an earlier copy of `key`, it is forgotten there.
+    pub fn adopt(&self, key: &str, from: &Path) -> io::Result<bool> {
+        if self.shards.len() == 1 {
+            return self.shards[0].adopt(key, from);
+        }
+        use host_fs::MetadataExt as _;
+        let from_dev = host_fs::metadata(from)?.dev();
+        let mut candidates: Vec<usize> = self
+            .shards
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.files.disk.dev() == Some(from_dev) && !s.health.is_offline())
+            .map(|(i, _)| i)
+            .collect();
+        if candidates.is_empty() {
+            return Err(io::Error::from_raw_os_error(libc::EXDEV));
+        }
+        // When multiple shards share one filesystem (e.g. unit tests on one tempdir), pick by
+        // weighted rendezvous score; on JBOD production hosts there is one shard per filesystem.
+        candidates.sort_by(|&a, &b| {
+            let sa = weighted_score(self.shards[a].disk_id, self.shards[a].weight(), key);
+            let sb = weighted_score(self.shards[b].disk_id, self.shards[b].weight(), key);
+            sb.total_cmp(&sa).then_with(|| a.cmp(&b))
+        });
+        let target = candidates[0];
+        let adopted = self.shards[target].adopt(key, from)?;
+        if adopted {
+            for (i, shard) in self.shards.iter().enumerate() {
+                if i != target && shard.has_key(key) {
+                    if let Err(err) = shard.forget(key) {
+                        log::warn!("cladefs: forgetting superseded copy of {key}: {err}");
+                    }
+                }
+            }
+        }
+        Ok(adopted)
+    }
+
+    /// Drops the object at `key`: one whose copy failed its CRCs.
+    pub fn forget(&self, key: &str) -> io::Result<()> {
+        let mut done = Ok(());
+        for shard in &self.shards {
+            if shard.has_key(key) {
+                done = done.and(shard.forget(key));
+            }
+        }
+        done
+    }
+
+    /// Drops part `part` of the object at `key`, if it is kept: its tail, the object.
+    #[cfg(test)]
+    pub(crate) fn forget_part(&self, key: &str, part: u64) -> io::Result<()> {
+        let mut done = Ok(());
+        for shard in &self.shards {
+            if shard.has_key(key) {
+                done = done.and(shard.forget_part(key, part));
+            }
+        }
+        done
+    }
+
+    /// cladefs: the disk of the first shard's filesystem (doc-22).
+    pub fn disk(&self) -> &Arc<HostDisk> {
+        &self.shards[0].files.disk
+    }
+
+    /// cladefs: all host disks backing this cache's JBOD shards.
+    pub fn disks(&self) -> Vec<Arc<HostDisk>> {
+        self.shards.iter().map(|s| s.files.disk.clone()).collect()
+    }
+
+    /// Whether any shard of this cache lives on the filesystem `dev` (`st_dev`), allowing
+    /// zero-copy `rename(2)` adoption from cell directories on `dev`.
+    pub fn has_disk(&self, dev: u64) -> bool {
+        self.shards.iter().any(|s| s.files.disk.dev() == Some(dev))
+    }
+
+    /// How many bytes the shard(s) on `disk` currently hold, or `None` if no shard is on `disk`.
+    pub fn bytes_on(&self, disk: &Arc<HostDisk>) -> Option<u64> {
+        let mut found = false;
+        let mut sum = 0u64;
+        for shard in &self.shards {
+            if Arc::ptr_eq(&shard.files.disk, disk) {
+                found = true;
+                sum += shard.bytes();
+            }
+        }
+        found.then_some(sum)
+    }
+
+    /// The most bytes of objects it keeps across all shards combined: its budget, or what the disk
+    /// governor leaves them, the less.
+    pub fn capacity(&self) -> u64 {
+        let sum = self.shards.iter().fold(0u64, |acc, s| acc.saturating_add(s.capacity()));
+        self.total_budget.min(sum)
+    }
+
+    /// How many bytes of objects are kept across all shards combined.
+    pub fn bytes(&self) -> u64 {
+        self.shards.iter().map(Shard::bytes).sum()
     }
 }
 
@@ -1140,14 +1815,19 @@ mod tests {
     }
 
     impl Cache {
-        /// Its index, checked.
+        /// Its index, checked across all shards.
         fn check(&self) {
-            self.kept.lock().unwrap().check();
+            for shard in &self.shards {
+                shard.kept.lock().unwrap().check();
+            }
         }
 
-        /// The keys of the objects it holds.
+        /// The keys of the objects it holds across all shards.
         fn keys(&self) -> Vec<String> {
-            let mut keys = Vec::from_iter(self.kept.lock().unwrap().objects.keys().cloned());
+            let mut keys = Vec::new();
+            for shard in &self.shards {
+                keys.extend(shard.kept.lock().unwrap().objects.keys().cloned());
+            }
             keys.sort();
             keys
         }
@@ -1500,7 +2180,7 @@ mod tests {
             kept
         };
         let kept = read(&cache);
-        assert!(cache.kept.lock().unwrap().removing.is_empty());
+        assert!(cache.shards[0].kept.lock().unwrap().removing.is_empty());
         drop(cache);
         assert_eq!(read(&Cache::open(dir.path(), 6 * PART).unwrap()), kept);
     }
@@ -1875,7 +2555,7 @@ mod tests {
     fn crash_workload(dir: &Path, wal: &Path, cut: Arc<Cut>) {
         let [a, b, c, d, e] = crash_objects();
         let mut cache = Cache::open(dir, CRASH_CAPACITY).unwrap();
-        cache.files.cut = Some(cut);
+        cache.shards[0].files.cut = Some(cut);
         // A crash past a change makes none after it: what fails then is not the cache's.
         let keep = |object: &Object, parts: &[u64]| {
             let _ = cache.keep_tail(&object.key, &object.tail);
@@ -1986,5 +2666,103 @@ mod tests {
                 });
             }
         });
+    }
+
+    #[test]
+    fn jbod_opens_multiple_shards_spreads_and_reopens() {
+        let dir1 = tempfile::tempdir().unwrap();
+        let dir2 = tempfile::tempdir().unwrap();
+        let dirs = [dir1.path().to_path_buf(), dir2.path().to_path_buf()];
+        let objects: Vec<Object> = (0..12)
+            .map(|i| Object::noise(&format!("segments/0000000000001/{i:013}"), PART, i + 10))
+            .collect();
+        let cap = 32 * PART;
+        let cache = Cache::open_all(&dirs, cap).unwrap();
+        assert_eq!(cache.dirs().len(), 2);
+        assert!(dir1.path().join(".disk-id").exists());
+        assert!(dir2.path().join(".disk-id").exists());
+        for obj in &objects {
+            obj.keep(&cache);
+        }
+        cache.check();
+        let s0 = cache.shards[0].bytes();
+        let s1 = cache.shards[1].bytes();
+        assert!(s0 > 0 && s1 > 0, "objects should spread across both shards: s0={s0}, s1={s1}");
+        assert_eq!(cache.bytes(), s0 + s1);
+        drop(cache);
+
+        let reopened = Cache::open_all(&dirs, cap).unwrap();
+        reopened.check();
+        assert_eq!(reopened.bytes(), s0 + s1);
+        for obj in &objects {
+            assert_eq!(obj.read(&reopened, 0).as_deref(), Some(obj.part(0)));
+        }
+    }
+
+    #[test]
+    fn jbod_refuses_duplicate_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let dirs = [dir.path().to_path_buf(), dir.path().to_path_buf()];
+        let err = Cache::open_all(&dirs, 4 * PART).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn jbod_adopt_routes_and_forgets_superseded_copy() {
+        let dir1 = tempfile::tempdir().unwrap();
+        let dir2 = tempfile::tempdir().unwrap();
+        let wal = tempfile::tempdir().unwrap();
+        let dirs = [dir1.path().to_path_buf(), dir2.path().to_path_buf()];
+        let cache = Cache::open_all(&dirs, 8 * PART).unwrap();
+        let first = Object::noise(KEY, PART, 1);
+        first.keep(&cache);
+        assert_eq!(cache.keys(), vec![KEY.to_owned()]);
+
+        let second = Object::noise(KEY, PART, 2);
+        let from = second.write_to(wal.path());
+        assert!(cache.adopt(KEY, &from).unwrap());
+        cache.check();
+        assert_eq!(cache.keys(), vec![KEY.to_owned()]);
+        assert_eq!(second.read(&cache, 0).as_deref(), Some(second.part(0)));
+    }
+
+    #[test]
+    fn jbod_health_transitions_failover_and_recovery() {
+        let state = ShardHealthState::new();
+        let eio = io::Error::from_raw_os_error(libc::EIO);
+        let dummy = Path::new("/tmp/shard");
+        assert_eq!(state.get(), ShardHealth::Online);
+        state.on_io_error(dummy, &eio);
+        state.on_io_error(dummy, &eio);
+        assert_eq!(state.get(), ShardHealth::Online);
+        state.on_io_error(dummy, &eio);
+        assert_eq!(state.get(), ShardHealth::Suspect);
+        for _ in 0..7 {
+            state.on_io_error(dummy, &eio);
+        }
+        assert_eq!(state.get(), ShardHealth::Offline);
+        state.on_io_success();
+        assert_eq!(state.get(), ShardHealth::Returning);
+        state.on_io_success();
+        assert_eq!(state.get(), ShardHealth::Returning);
+        state.on_io_success();
+        assert_eq!(state.get(), ShardHealth::Online);
+
+        let dir1 = tempfile::tempdir().unwrap();
+        let dir2 = tempfile::tempdir().unwrap();
+        let dirs = [dir1.path().to_path_buf(), dir2.path().to_path_buf()];
+        let cache = Cache::open_all(&dirs, 8 * PART).unwrap();
+        for _ in 0..OFFLINE_ERRORS {
+            cache.shards[0].health.on_io_error(dir1.path(), &eio);
+        }
+        assert!(cache.shards[0].health.is_offline());
+        for i in 0..6u64 {
+            let obj = Object::noise(&format!("segments/0000000000002/{i:013}"), PART, i + 100);
+            obj.keep(&cache);
+            assert_eq!(obj.read(&cache, 0).as_deref(), Some(obj.part(0)));
+        }
+        assert_eq!(cache.shards[0].bytes(), 0, "offline shard must not receive new fills");
+        assert!(cache.shards[1].bytes() > 0, "healthy shard must absorb failover fills");
+        cache.check();
     }
 }

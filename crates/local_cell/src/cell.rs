@@ -1197,14 +1197,14 @@ impl<D: Dir> Recovering<D> {
         // before them is (TASK-411.9).
         recovered.close(&*dir, cell, &keys, false)?;
         // cladefs: what the bucket acknowledged goes into the host's cache by a rename, which can't
-        // cross filesystems: a cell elsewhere than the cache is refused, not left to read every
-        // segment back from the bucket (TASK-359).
+        // cross filesystems: a cell elsewhere than any of the cache's JBOD disks is refused, not
+        // left to read every segment back from the bucket (TASK-359).
         if let (Some(cache), Some(here)) = (&cache, dir.disk().and_then(|disk| disk.dev())) {
             ensure!(
-                cache.disk().dev() == Some(here),
+                cache.has_disk(here),
                 "the cell is on another filesystem than the host's cache at {}: the cell's \
                  segments go into the cache by renaming them",
-                cache.dir().display()
+                cache.dirs_display()
             );
         }
         // Stamped as the directory holds them: those the rebase stamps anew upload so.

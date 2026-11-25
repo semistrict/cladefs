@@ -41,29 +41,49 @@ impl Grants {
     /// (`EINVAL`), whose cells are in `dir`, its socket, given to the uid and gid `given` names,
     /// the daemon's own for each it does not ([`owner`]), and returns its path: a new tenant's,
     /// which a thread of its own serves; or, granted already, its socket, given again, to them
-    /// alone (`EEXIST` with another directory). A tenant revoked whose VM processes live on is the
-    /// one granted again, its socket new: those it connects then share its arena with them, and
-    /// the cells they have open (TASK-79.36), which, another tenant's, they could not.
+    /// alone (`EEXIST` with another directory).
+    #[cfg(test)]
     pub fn grant(
         &self,
         id: u64,
         dir: &Path,
         given: (Option<u32>, Option<u32>),
     ) -> Result<PathBuf, Errno> {
+        self.grant_many(id, &[dir.to_path_buf()], given)
+    }
+
+    /// Grants the tenant of the ID `id` in the bucket across one or more JBOD directories `dirs`.
+    /// A tenant revoked whose VM processes live on is the one granted again, its socket new: those
+    /// it connects then share its arena with them, and the cells they have open (TASK-79.36),
+    /// which, another tenant's, they could not.
+    pub fn grant_many(
+        &self,
+        id: u64,
+        dirs: &[PathBuf],
+        given: (Option<u32>, Option<u32>),
+    ) -> Result<PathBuf, Errno> {
         check_tenant(id)?;
+        if dirs.is_empty() {
+            return Err(Errno::EINVAL);
+        }
         let (uid, gid) = owner(given);
-        let dir = dir.canonicalize().map_err(errno)?;
+        let mut canon = Vec::with_capacity(dirs.len());
+        for dir in dirs {
+            canon.push(dir.canonicalize().map_err(errno)?);
+        }
+        canon.sort();
+        canon.dedup();
         let mut granted = self.granted.lock().unwrap();
         if let Some(grant) = granted.get(&id) {
-            if grant.tenant.dir() != Some(&dir) {
+            if grant.tenant.dirs() != Some(canon.as_slice()) {
                 return Err(Errno::EEXIST);
             }
             give(&grant.socket, uid, gid)?;
             return Ok(grant.socket.clone());
         }
-        let tenant = match super::memory::alive_on(&self.daemon, id, &dir) {
+        let tenant = match super::memory::alive_on(&self.daemon, id, &canon) {
             Some(tenant) => tenant,
-            None => Tenant::new_on(&self.daemon, id, &dir).map_err(errno)?,
+            None => Tenant::new_many_on(&self.daemon, id, &canon).map_err(errno)?,
         };
         let socket = self.sockets.join(socket_name(id));
         remove_stale(&socket)?;
@@ -95,11 +115,15 @@ impl Grants {
         let key = super::cells::cell_dir_key(path);
         let granted = self.granted.lock().unwrap();
         let mut grants = granted.values().map(|grant| &grant.tenant);
-        grants.find(|tenant| tenant.dir().is_some_and(|dir| key_in_dir(&key, dir))).map(|t| t.id())
+        grants
+            .find(|tenant| {
+                tenant.dirs().is_some_and(|dirs| dirs.iter().any(|dir| key_in_dir(&key, dir)))
+            })
+            .map(|t| t.id())
     }
 
     /// Whether the cells at `one` and `other` are of one tenant, or of none: their paths in one
-    /// tenant's directory, as VM processes name them.
+    /// tenant's directory (or JBOD directories), as VM processes name them.
     pub fn same_tenant(&self, one: &Path, other: &Path) -> bool {
         let one = super::cells::cell_dir_key(one);
         let other = super::cells::cell_dir_key(other);
@@ -107,8 +131,13 @@ impl Grants {
         let tenant_of = |path: &Path| {
             granted
                 .values()
-                .filter_map(|grant| grant.tenant.dir())
-                .find(|dir| key_in_dir(path, dir))
+                .find(|grant| {
+                    grant
+                        .tenant
+                        .dirs()
+                        .is_some_and(|dirs| dirs.iter().any(|dir| key_in_dir(path, dir)))
+                })
+                .map(|grant| grant.tenant.id())
         };
         tenant_of(&one) == tenant_of(&other)
     }
@@ -179,4 +208,41 @@ fn remove_stale(socket: &Path) -> Result<(), Errno> {
 /// The errno of `err`, or `EIO`.
 fn errno(err: std::io::Error) -> Errno {
     err.raw_os_error().map_or(Errno::EIO, Errno::from_raw)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jbod_grant_many_tracks_same_tenant_across_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let socks = dir.path().join("socks");
+        let d0 = dir.path().join("nvme0");
+        let d1 = dir.path().join("nvme1");
+        let other = dir.path().join("other");
+        std::fs::create_dir_all(&socks).unwrap();
+        std::fs::create_dir_all(&d0).unwrap();
+        std::fs::create_dir_all(&d1).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+
+        let daemon = Daemon::new();
+        let grants = Grants::new(daemon, socks);
+        let sock = grants.grant_many(7, &[d0.clone(), d1.clone()], (None, None)).unwrap();
+        // Re-granting with reordered dirs is idempotent.
+        let again = grants.grant_many(7, &[d1.clone(), d0.clone()], (None, None)).unwrap();
+        assert_eq!(sock, again);
+        // Re-granting with a different directory set fails with EEXIST.
+        assert_eq!(grants.grant_many(7, &[d0.clone()], (None, None)), Err(Errno::EEXIST));
+
+        let c0 = d0.join("cell-a");
+        let c1 = d1.join("cell-b");
+        let c_other = other.join("cell-c");
+        assert_eq!(grants.tenant_at(&c0), Some(7));
+        assert_eq!(grants.tenant_at(&c1), Some(7));
+        assert_eq!(grants.tenant_at(&c_other), None);
+        assert!(grants.same_tenant(&c0, &c1), "cells on two JBOD dirs of same tenant must match");
+        assert!(!grants.same_tenant(&c0, &c_other));
+        grants.revoke(7).unwrap();
+    }
 }

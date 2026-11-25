@@ -43,7 +43,9 @@ use crate::Errno;
 use bucket_cell::host_disk::{self, HostDisk};
 use local_cell::footprint::{self, Allotment};
 use std::collections::HashMap;
+#[cfg(test)]
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 /// What a cell a tenant's VM process makes is admitted as ([`footprint::STORE_MADE`]).
@@ -90,22 +92,61 @@ impl Registry {
     }
 }
 
-/// A tenant's disk: the allotment of its directory.
+/// A tenant's disk: one [`Allotment`] per granted directory (one per JBOD disk), plus an optional
+/// aggregate [`footprint::Group`] when a tenant spans multiple directories so its byte limit
+/// applies to the sum across all its directories.
 pub struct Disk {
     /// Its tenant's ID.
     tenant: u64,
-    allotment: Arc<Allotment>,
+    allotments: Vec<Arc<Allotment>>,
+    group: Option<Arc<footprint::Group>>,
 }
 
 impl Disk {
     /// The disk of the tenant of the ID `tenant` on `daemon`, whose directory is `dir`: its cells
     /// counted, those this process hasn't counted yet by one listing each, limited as its ID is.
+    #[cfg(test)]
     pub(super) fn new_on(daemon: &Daemon, tenant: u64, dir: &Path) -> std::io::Result<Arc<Self>> {
-        let allotment = footprint::allotment_on(daemon.host.local(), dir)?;
+        Self::new_many_on(daemon, tenant, &[dir.to_path_buf()])
+    }
+
+    /// The disk of the tenant of the ID `tenant` on `daemon`, spanning one or more JBOD
+    /// directories `dirs`: each directory gets its own per-disk [`Allotment`] for weighted
+    /// per-disk shares under pressure, and when `dirs.len() > 1` they share a single
+    /// [`footprint::Group`] enforcing the tenant's aggregate byte limit.
+    pub(super) fn new_many_on(
+        daemon: &Daemon,
+        tenant: u64,
+        dirs: &[PathBuf],
+    ) -> std::io::Result<Arc<Self>> {
+        if dirs.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "a tenant disk needs at least one directory",
+            ));
+        }
+        let group = (dirs.len() > 1).then(footprint::Group::new);
+        let mut allotments = Vec::with_capacity(dirs.len());
+        for dir in dirs {
+            let allotment =
+                footprint::allotment_in_group_on(daemon.host.local(), dir, group.clone())?;
+            allotments.push(allotment);
+        }
+        let effective_group = allotments.iter().find_map(|a| a.group().cloned()).or(group);
         let mut registry = daemon.disk.registry.lock().unwrap();
-        allotment.set_limit(registry.limit(tenant));
-        allotment.set_weight(registry.weight(tenant));
-        let disk = Arc::new(Self { tenant, allotment });
+        let limit = registry.limit(tenant);
+        let weight = registry.weight(tenant);
+        if let Some(group) = &effective_group {
+            group.set_limit(limit);
+        } else {
+            for allotment in &allotments {
+                allotment.set_limit(limit);
+            }
+        }
+        for allotment in &allotments {
+            allotment.set_weight(weight);
+        }
+        let disk = Arc::new(Self { tenant, allotments, group: effective_group });
         registry.disks.retain(|alive| alive.strong_count() > 0);
         registry.disks.push(Arc::downgrade(&disk));
         Ok(disk)
@@ -117,19 +158,23 @@ impl Disk {
         Self::new_on(Daemon::process(), tenant, dir)
     }
 
-    /// What it takes, in bytes: what its cells' files take, counted as they write.
+    /// What it takes, in bytes: what its cells' files take across all its directories, counted as
+    /// they write.
     pub fn used(&self) -> u64 {
-        self.allotment.bytes()
+        self.allotments.iter().map(|allotment| allotment.bytes()).sum()
     }
 
     /// Its limit, if it has one.
     pub fn limit(&self) -> Option<u64> {
-        self.allotment.limit()
+        match &self.group {
+            Some(group) => group.limit(),
+            None => self.allotments[0].limit(),
+        }
     }
 
-    /// Whether its last write was refused, its limit or every tenant's reached.
+    /// Whether any of its allotments refused its last write, its limit or every tenant's reached.
     pub(super) fn is_full(&self) -> bool {
-        self.allotment.is_full()
+        self.allotments.iter().any(|allotment| allotment.is_full())
     }
 }
 
@@ -152,7 +197,13 @@ pub(super) fn set_limit_on(
         None => limits.remove(&id),
     };
     for disk in registry.alive().filter(|disk| disk.tenant == id) {
-        disk.allotment.set_limit(bytes);
+        if let Some(group) = &disk.group {
+            group.set_limit(bytes);
+        } else {
+            for allotment in &disk.allotments {
+                allotment.set_limit(bytes);
+            }
+        }
     }
     Ok(())
 }
@@ -170,7 +221,9 @@ pub(super) fn set_weight_on(daemon: &Daemon, tenant: u64, weight: u64) -> Result
     let mut registry = daemon.disk.registry.lock().unwrap();
     registry.weights.get_or_insert_with(HashMap::new).insert(tenant, weight);
     for disk in registry.alive().filter(|disk| disk.tenant == tenant) {
-        disk.allotment.set_weight(weight);
+        for allotment in &disk.allotments {
+            allotment.set_weight(weight);
+        }
     }
     Ok(())
 }
@@ -243,9 +296,10 @@ pub fn count(tenant: Option<u64>) -> Result<Counted, Errno> {
 }
 
 /// The allotments of `disks`, a tenant's, each once, as one tenant granted again with its
-/// directory has two disks of it.
+/// directory has two disks of it, and a JBOD tenant spans several directories.
 fn allotments(disks: &[Arc<Disk>]) -> Vec<&Arc<Allotment>> {
-    let mut allotments: Vec<&Arc<Allotment>> = disks.iter().map(|disk| &disk.allotment).collect();
+    let mut allotments: Vec<&Arc<Allotment>> =
+        disks.iter().flat_map(|disk| disk.allotments.iter()).collect();
     allotments.sort_by_key(|allotment| Arc::as_ptr(allotment));
     allotments.dedup_by(|one, other| Arc::ptr_eq(one, other));
     allotments
@@ -412,15 +466,19 @@ fn govern_disks(
             allowance = allowance.min(fixed.saturating_sub(others));
         }
         let spare = allowance.saturating_sub(disk.cells.committed());
-        // Derived first: the part cache keeps what the cells leave, down a band below it once it
-        // must give back, so that it doesn't evict at every look.
-        if let Some(cache) = cache.as_ref().filter(|cache| Arc::ptr_eq(cache.disk(), disk)) {
-            let limit = match cache.bytes() > spare {
+        // Derived first: each part cache shard on this disk keeps what the cells leave, down a
+        // band below it once it must give back, so that it doesn't evict at every look.
+        if let Some(cache) = &cache
+            && let Some(held) = cache.bytes_on(disk)
+        {
+            let limit = match held > spare {
                 true => spare.saturating_sub(headroom / 4),
                 false => spare,
             };
-            if let Err(err) = cache.set_limit(limit) {
-                log::warn!("cladefsd: evicting the part cache to {limit} bytes: {err}");
+            if let Err(err) = cache.set_limit_on(disk, limit, sample.size) {
+                log::warn!(
+                    "cladefsd: evicting the part cache on disk {dev:#x} to {limit} bytes: {err}"
+                );
             }
         }
         let was = disk.under_pressure();
@@ -439,6 +497,9 @@ fn govern_disks(
             );
             disk.urge();
         }
+    }
+    if let Some(cache) = &cache {
+        cache.probe_unhealthy();
     }
 }
 
@@ -700,14 +761,14 @@ mod tests {
         let disk = heavy_cell.footprint().disk().unwrap().clone();
         let committed = disk.cells.committed();
         let others =
-            committed - heavy_disk.allotment.committed() - light_disk.allotment.committed();
+            committed - heavy_disk.allotments[0].committed() - light_disk.allotments[0].committed();
 
         governing(committed + MIB / 2);
         assert!(disk.under_pressure());
         let base = committed + MIB / 2 - others;
-        assert_eq!(heavy_disk.allotment.share(), Some(base * 3 / 4));
-        assert_eq!(light_disk.allotment.share(), Some(base / 4));
-        let light_room = base / 4 - light_disk.allotment.committed();
+        assert_eq!(heavy_disk.allotments[0].share(), Some(base * 3 / 4));
+        assert_eq!(light_disk.allotments[0].share(), Some(base / 4));
+        let light_room = base / 4 - light_disk.allotments[0].committed();
         let past = light_room / (1 + bucket_cell::host_disk::RESERVE_FACTOR) + MIB / 64;
         let refused = light_cell.footprint().admit(past, 0).map(drop);
         assert_eq!(refused, Err(DiskFull::Share));
@@ -752,7 +813,10 @@ mod tests {
         );
 
         governing(committed + 64 * MIB);
-        assert_eq!((heavy_disk.allotment.share(), light_disk.allotment.share()), (None, None));
+        assert_eq!(
+            (heavy_disk.allotments[0].share(), light_disk.allotments[0].share()),
+            (None, None)
+        );
         assert!(light_cell.footprint().admit(past, 0).is_ok());
     }
 

@@ -36,9 +36,9 @@ use std::sync::{Arc, Mutex};
 pub struct Config {
     /// The mount point, a directory: `CLADEFSD_MOUNT`.
     pub mountpoint: PathBuf,
-    /// The directory the attached cell directories are in, each at `TENANT/CELL`:
-    /// `CLADEFSD_MOUNT_STORES`.
-    pub cell_dirs: PathBuf,
+    /// One or more JBOD directories the attached cell directories live in, each at `TENANT/CELL`:
+    /// `CLADEFSD_MOUNT_STORES` (colon-separated).
+    pub cell_dirs: Vec<PathBuf>,
     /// Whether users other than the daemon's may use the mount, as its files' permissions say
     /// (FUSE's `allow_other`): `CLADEFSD_MOUNT_ALLOW_OTHER=1`.
     pub allow_other: bool,
@@ -61,11 +61,18 @@ impl Config {
             }
             return Ok(None);
         };
-        let cell_dirs = var("CLADEFSD_MOUNT_STORES").ok_or_else(|| {
+        let raw_dirs = var("CLADEFSD_MOUNT_STORES").ok_or_else(|| {
             "CLADEFSD_MOUNT is set, but CLADEFSD_MOUNT_STORES names no directory for its \
              cell directories"
                 .to_owned()
         })?;
+        let cell_dirs: Vec<PathBuf> =
+            std::env::split_paths(&raw_dirs).filter(|dir| !dir.as_os_str().is_empty()).collect();
+        if cell_dirs.is_empty() {
+            return Err("CLADEFSD_MOUNT is set, but CLADEFSD_MOUNT_STORES names no directory for \
+                        its cell directories"
+                .to_owned());
+        }
         let allow_other = match var("CLADEFSD_MOUNT_ALLOW_OTHER").as_deref() {
             None | Some("0") => false,
             Some("1") => true,
@@ -73,7 +80,7 @@ impl Config {
                 return Err(format!("CLADEFSD_MOUNT_ALLOW_OTHER is 0 or 1, not {other}"));
             }
         };
-        Ok(Some(Self { mountpoint: mountpoint.into(), cell_dirs: cell_dirs.into(), allow_other }))
+        Ok(Some(Self { mountpoint: mountpoint.into(), cell_dirs, allow_other }))
     }
 }
 
@@ -93,22 +100,23 @@ pub(super) struct State {
 /// `bucket`, the host's: before the control API serves, whose Mount service it is ([`service_on`]).
 #[cfg(not(madsim))]
 pub(super) fn start_on(daemon: &Daemon, config: &Config, bucket: String) -> Result<(), Error> {
-    std::fs::create_dir_all(&config.cell_dirs).map_err(|err| {
-        Error::new(
-            anyhow::Error::new(err).context(format!("making {}", config.cell_dirs.display())),
-        )
-    })?;
+    for dir in &config.cell_dirs {
+        std::fs::create_dir_all(dir).map_err(|err| {
+            Error::new(anyhow::Error::new(err).context(format!("making {}", dir.display())))
+        })?;
+    }
     let mut options = MountOptions::new();
     options.allow_other(config.allow_other);
     let mount = options.mount_cells(&config.mountpoint).map_err(|err| {
         err.context(format!("mounting a directory of cells at {}", config.mountpoint.display()))
     })?;
+    let shown =
+        config.cell_dirs.iter().map(|d| d.display().to_string()).collect::<Vec<_>>().join(":");
     log::info!(
-        "cladefsd: cells mounted at {}, their cell directories in {}",
+        "cladefsd: cells mounted at {}, their cell directories in {shown}",
         config.mountpoint.display(),
-        config.cell_dirs.display()
     );
-    let cells = CellSource { dir: config.cell_dirs.clone(), bucket };
+    let cells = CellSource { dirs: config.cell_dirs.clone(), bucket };
     let replaced = daemon.mount.mount.lock().unwrap().replace((mount, cells));
     assert!(replaced.is_none(), "the daemon mounts its cells once");
     daemon.mount.mounted.store(true, Ordering::Release);
@@ -223,17 +231,21 @@ mod tests {
             config(&[("CLADEFSD_MOUNT", "/m"), ("CLADEFSD_MOUNT_STORES", "/s")]),
             Ok(Some(Config {
                 mountpoint: "/m".into(),
-                cell_dirs: "/s".into(),
+                cell_dirs: vec!["/s".into()],
                 allow_other: false
             }))
         );
         assert_eq!(
             config(&[
                 ("CLADEFSD_MOUNT", "/m"),
-                ("CLADEFSD_MOUNT_STORES", "/s"),
+                ("CLADEFSD_MOUNT_STORES", "/s1:/s2"),
                 ("CLADEFSD_MOUNT_ALLOW_OTHER", "1")
             ]),
-            Ok(Some(Config { mountpoint: "/m".into(), cell_dirs: "/s".into(), allow_other: true }))
+            Ok(Some(Config {
+                mountpoint: "/m".into(),
+                cell_dirs: vec!["/s1".into(), "/s2".into()],
+                allow_other: true
+            }))
         );
     }
 
