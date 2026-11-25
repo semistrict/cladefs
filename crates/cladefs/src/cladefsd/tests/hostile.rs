@@ -2452,8 +2452,8 @@ fn what_requests_hold_is_within_the_credit() {
         })
         .collect();
     let map_many_mappings: Vec<_> = (0..map_many_count)
-        .map(|n| crate::WindowMapping {
-            window_offset: (n % WINDOW_PAGES) * ps,
+        .map(|_| crate::WindowMapping {
+            window_offset: 0,
             len: ps,
             contents: crate::MappingContents::Zeros,
         })

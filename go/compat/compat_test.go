@@ -106,7 +106,7 @@ func TestAFieldAddedBreaksNoCaller(t *testing.T) {
 func TestARenamedOrRenumberedFieldIsRefused(t *testing.T) {
 	r := newRepo(t)
 	r.edit(cladefsd, "  string to = 3;\n", "  string destination = 3;\n")
-	r.edit(mount, "  uint64 capacity = 4;\n", "  uint64 capacity = 5;\n")
+	r.edit(mount, "  uint64 capacity = 4;\n", "  uint64 capacity = 99;\n")
 	r.commit("fields moved")
 	status, said := r.check()
 	if status != 1 {

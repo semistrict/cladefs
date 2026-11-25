@@ -833,8 +833,7 @@ async fn clean_close_checkpoint_threshold_and_frees() {
     uploader.close().await;
     cell.close().await.unwrap();
     drop(cell);
-    let after_threshold =
-        bucket_cell::head::get(&*bucket, CELL).await.unwrap().unwrap().checkpoint;
+    let after_threshold = bucket_cell::head::get(&*bucket, CELL).await.unwrap().unwrap().checkpoint;
     assert_ne!(
         after_threshold, after_free,
         "clean close at checkpoint_min_on_close must advance checkpoint"

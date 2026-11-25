@@ -850,7 +850,6 @@ dependencies = [
  "mimalloc",
  "object_store",
  "opentelemetry",
- "percent-encoding",
  "prost 0.14.4",
  "rand 0.10.3",
  "reqwest",
