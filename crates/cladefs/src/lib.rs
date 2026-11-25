@@ -50,8 +50,8 @@ pub use cladefs_core::{
     Prefault, describe_windows, guest_access_failed, guest_thread_started, userfaultfd_accessible,
 };
 pub use cladefs_fs::{
-    Attr, Compactions, DirEntry, FileType, Filesystem, Image, Inode, Node, Options, Owner,
-    RenameFlags, SetAttr, SetTime, StatFs, Storage, TreeCompactions, VolumeMetadata, XattrMode,
+    Attr, Compactions, DirEntry, FileType, Filesystem, Inode, Node, Options, Owner, RenameFlags,
+    SetAttr, SetTime, StatFs, Storage, TreeCompactions, XattrMode,
 };
 #[cfg(target_os = "linux")]
 pub use cladefs_wire::{CellClient, DaemonConnection, DaemonDevice, Unmapped};

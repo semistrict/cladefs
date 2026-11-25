@@ -88,13 +88,12 @@ board 10598).
   and the `SecondStage` trait that follows a window's pages: the daemon's connection to a VM process implements it;
   `dax/uffd.rs` is the VM process's own second stage, in the host memory that
   KVM follows (`architecture.md`, DAX on Linux).
-- `filesystem.rs`, `volume.rs`, `image.rs` and `node.rs` hold the host's view
-  of an Fxfs image: `Filesystem` and `Image`, which format, fill and check
+- `filesystem.rs` and `node.rs` hold the host's view of an Fxfs image:
+  `Filesystem` formats, opens, fills and checks single-volume (`"default"`)
   images, such as the cells a guest's Fxfs mounts, through `crates/fxfs-posix`
-  as the guest's kernel does. A `Filesystem` is a volume whose nodes are `Node`
-  handles, each holding its node, with the checks Linux's VFS makes for the
-  guest; `volume.rs` keeps the nodes held, and runs the volume's one unmount.
-  An `Image`'s volumes share its journal, space and executor.
+  as the guest's kernel does. Its nodes are `Node` handles, each holding its
+  node, with the checks Linux's VFS makes for the guest; `filesystem.rs` keeps
+  the nodes held, and runs the filesystem's one unmount.
 - `import.rs` makes filesystems of container images (TASK-39.5): an OCI image
   layout's layers, or a `docker export` tarball, applied as the OCI image spec
   applies changesets (whiteouts, opaque directories), files keeping their

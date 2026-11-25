@@ -848,6 +848,34 @@ pub(crate) type Clock = Arc<dyn Fn(Duration) -> BoxFuture<'static, ()> + Send + 
 /// which polls it as a seed says (TASK-680).
 pub(crate) type Spawn = Arc<dyn Fn(BoxFuture<'static, ()>) + Send + Sync>;
 
+#[cfg(not(madsim))]
+thread_local! {
+    // Per thread, outside the simulation: `cladefs::filesystem::EnterFuture` enters a multi-thread
+    // runtime handle on non-multi-thread caller threads (`current_thread` or
+    // `futures::executor::block_on`) so Fxfs background tasks spawn on a live runtime, where
+    // `tokio::task::block_in_place` would panic (board 11691).
+    static WITHOUT_BLOCK_IN_PLACE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Runs `work` with `tokio::task::block_in_place` disabled in [`blocking`] on the current OS
+/// thread (used when entering a multi-thread `Handle` from a non-multi-thread thread, board 11691).
+pub fn without_block_in_place<T>(work: impl FnOnce() -> T) -> T {
+    #[cfg(madsim)]
+    return work();
+    #[cfg(not(madsim))]
+    {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                WITHOUT_BLOCK_IN_PLACE.with(|depth| depth.set(depth.get() - 1));
+            }
+        }
+        WITHOUT_BLOCK_IN_PLACE.with(|depth| depth.set(depth.get() + 1));
+        let _reset = Reset;
+        work()
+    }
+}
+
 /// Runs `work`, which blocks on the cell's disk, on the uploaders' runtime: on its thread, which
 /// hands its other tasks to another meanwhile; or as it is, on a thread no runtime runs, as the
 /// simulation's (`tokio::task::block_in_place` runs it so there). cladefs: the daemon's async
@@ -861,11 +889,15 @@ pub fn blocking<T>(work: impl FnOnce() -> T) -> T {
     // other to hand its tasks to (`block_in_place` panics there): it runs it as it is, as a thread
     // no runtime runs does (TASK-685.3).
     #[cfg(not(madsim))]
-    match tokio::runtime::Handle::try_current().map(|runtime| runtime.runtime_flavor()) {
-        Ok(tokio::runtime::RuntimeFlavor::MultiThread) => {
-            tokio::task::block_in_place(|| host_fs::may_block(work))
-        }
-        _ => host_fs::may_block(work),
+    if WITHOUT_BLOCK_IN_PLACE.with(|depth| depth.get() == 0)
+        && matches!(
+            tokio::runtime::Handle::try_current().map(|runtime| runtime.runtime_flavor()),
+            Ok(tokio::runtime::RuntimeFlavor::MultiThread)
+        )
+    {
+        tokio::task::block_in_place(|| host_fs::may_block(work))
+    } else {
+        host_fs::may_block(work)
     }
 }
 

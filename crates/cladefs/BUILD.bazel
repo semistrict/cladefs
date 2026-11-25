@@ -270,7 +270,6 @@ _INTEGRATION_TESTS = {
     "governor": {"linux": True, "common": False, "bins": [], "data": []},
     "grants": {"linux": True, "common": True, "bins": ["cladefsd"], "data": []},
     "handover": {"linux": True, "common": False, "bins": ["cladefsd"], "data": []},
-    "image": {"linux": False, "common": False, "bins": [], "data": []},
     "import": {"linux": False, "common": False, "bins": ["cladefsctl"], "data": []},
     "isolation": {"linux": True, "common": True, "bins": ["cladefsd"], "data": []},
     "memory": {"linux": True, "common": True, "bins": [], "data": []},

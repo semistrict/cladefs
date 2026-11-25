@@ -332,6 +332,10 @@ async fn passes_run_among_an_image_and_its_forks_commits() {
     });
     block_on(async {
         drop(fork.close().await.unwrap());
+        // Wait for any pre-close pass to finish so `fs.close()`'s commit always starts a pass
+        // after `fork`'s clean-close checkpoint lands (board 11691: faster inline close can
+        // otherwise finish before `fork.close()`'s pass exits).
+        let _ = collecting.collected();
         drop(fs.close().await.unwrap());
     });
     // The passes among the commits deleted.
@@ -367,8 +371,10 @@ fn images_dropped_as_their_pass_runs_leave_their_bucket_whole() {
     let (path, fork_path) = (dir.path().join("image"), dir.path().join("fork"));
     let scenario = fail::FailScenario::setup();
     let (mut files, mut forked) = (Files::new(), Files::new());
-    block_on(async {
-        let fs = Filesystem::format(Storage::create(&path, SIZE).await.unwrap()).await.unwrap();
+    let first = block_on(async {
+        let storage = Storage::create(&path, SIZE).await.unwrap();
+        let collecting = storage.collecting().unwrap().clone();
+        let fs = Filesystem::format(storage).await.unwrap();
         churn(&fs, &mut files, 1, 2).await;
         let storage = fs.close().await.unwrap();
         let fork = Filesystem::mount(fork_storage(&storage, &fork_path).await).await.unwrap();
@@ -380,6 +386,9 @@ fn images_dropped_as_their_pass_runs_leave_their_bucket_whole() {
         churn(&fork, &mut forked, 3, 1).await;
         drop(fork.close().await.unwrap());
         drop(fs.close().await.unwrap());
+        // Wait for the held-up pass and record what it deleted if both images closed and wrote
+        // their clean-close checkpoints before `sleep(500)` elapsed (board 11691).
+        collecting.collected()
     });
     // Opened again, they share a collector this holds, which counts what their commits'
     // passes, still held up, delete as they are closed and dropped again.
@@ -396,7 +405,10 @@ fn images_dropped_as_their_pass_runs_leave_their_bucket_whole() {
     scenario.teardown();
     let collecting = collecting.unwrap();
     let (started, alone) = (collecting.collected(), collecting.pass_now());
-    assert!(started.deleted + alone.deleted > 0, "{started:?}, then alone {alone:?}");
+    assert!(
+        first.deleted + started.deleted + alone.deleted > 0,
+        "first {first:?}, started {started:?}, then alone {alone:?}"
+    );
     assert_eq!(collecting.collected_alone(), Vec::<String>::new(), "collected alone");
     drop(collecting);
     block_on(async {

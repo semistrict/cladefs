@@ -12,16 +12,13 @@ static ALLOCATOR: cladefs_core::heap::Bounded = cladefs_core::heap::Bounded;
 
 pub mod filesystem;
 pub mod fuse;
-pub mod image;
 pub mod import;
 pub mod node;
 #[cfg(test)]
 mod sparse_shrink_tests;
 pub mod storage;
-pub mod volume;
 
-pub use filesystem::{Filesystem, Node, Options};
-pub use image::{Compactions, Image, TreeCompactions, VolumeMetadata};
+pub use filesystem::{Compactions, Filesystem, Node, Options, TreeCompactions};
 pub use node::{
     Attr, DirEntry, FileType, Inode, Owner, RenameFlags, SetAttr, SetTime, StatFs, XattrMode,
 };
