@@ -1429,10 +1429,7 @@ impl Server {
         if size > MAX_WRITE {
             return Err(Errno::EINVAL);
         }
-        let mut data = vec![0; size as usize];
-        let read = self.node(header.nodeid, Errno::EISDIR)?.1.read(offset, &mut data).await?;
-        data.truncate(read);
-        Ok(data)
+        self.node(header.nodeid, Errno::EISDIR)?.1.read_vec(offset, size as usize).await
     }
 
     async fn write(&self, header: &InHeader, body: &mut Body<'_>) -> Result<Vec<u8>> {

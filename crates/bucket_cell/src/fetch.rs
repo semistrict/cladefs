@@ -412,6 +412,22 @@ impl Memory {
         self.recent.bytes()
     }
 
+    /// Peak bytes held in the unified recent/unpacked part cache.
+    pub fn recent_peak(&self) -> u64 {
+        self.recent.peak()
+    }
+
+    /// Current byte limit of the unified recent/unpacked part cache.
+    pub fn recent_limit(&self) -> u64 {
+        self.recent.limit()
+    }
+
+    /// Resizes the unified recent/unpacked part cache to `limit` bytes, evicting least-recently-used
+    /// entries down to `limit`, and returns the bytes still held (board 12313).
+    pub fn size_recent_to(&self, limit: u64) -> u64 {
+        self.recent.size_to(limit)
+    }
+
     /// Evicts cached parts least-recently-used first down to `target` bytes, returning the bytes
     /// still held.
     pub fn evict_recent_to(&self, target: u64) -> u64 {
@@ -578,9 +594,20 @@ enum FetchedPart {
     Gone,
 }
 
+/// How many zstd-compressed bucket parts this process unpacked (decompressed) since it started
+/// (board 12313): mirrors `local_cell::framed::unpacks()`.
+// The process's count, every simulated host's together, as `local_cell::framed::UNPACKS` is.
+static UNPACKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many zstd-compressed bucket parts this process unpacked (decompressed) since it started.
+pub fn unpacks() -> u64 {
+    UNPACKS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 #[derive(Clone)]
 enum PartBacking {
     Slice(Arc<[u8]>),
+    Boxed(Arc<Box<[u8]>>),
     Owned(Arc<dyn AsRef<[u8]> + Send + Sync>),
 }
 
@@ -596,6 +623,13 @@ impl PartBytes {
     pub fn from_arc(bytes: Arc<[u8]>) -> Self {
         let held = bytes.len() as u64;
         Self { bytes: PartBacking::Slice(bytes), held }
+    }
+
+    /// Wraps an owned `Box<[u8]>` without copying the slice bytes (board 12313), allowing
+    /// [`PartMemory::take_spare_buf`] to reclaim and reuse the buffer on LRU eviction.
+    pub fn from_box(bytes: Box<[u8]>) -> Self {
+        let held = bytes.len() as u64;
+        Self { bytes: PartBacking::Boxed(Arc::new(bytes)), held }
     }
 
     /// Wraps an arbitrary shared byte buffer (such as an aligned direct-I/O buffer) with its held
@@ -616,6 +650,7 @@ impl std::ops::Deref for PartBytes {
     fn deref(&self) -> &[u8] {
         match &self.bytes {
             PartBacking::Slice(bytes) => bytes,
+            PartBacking::Boxed(bytes) => bytes,
             PartBacking::Owned(bytes) => (**bytes).as_ref(),
         }
     }
@@ -665,18 +700,18 @@ impl PartKey {
     }
 }
 
-/// Shared, governed LRU cache of recent bucket parts and unpacked local framed parts (board 6026).
+/// Shared, governed LRU cache of recent bucket parts and unpacked local framed parts (board 6026,
+/// board 12313).
 ///
 /// Uses `std::sync::Mutex` so it is safe to lock from `Drop` (such as `local_cell::framed::Framed`)
 /// without creating Shuttle schedule points (TASK-675).
 pub struct PartMemory {
-    limit: u64,
     kept: Mutex<Recent>,
 }
 
 impl Default for PartMemory {
     fn default() -> Self {
-        Self { limit: RECENT, kept: Mutex::default() }
+        Self { kept: Mutex::new(Recent::new(RECENT)) }
     }
 }
 
@@ -688,7 +723,7 @@ pub fn shared_parts() -> &'static Arc<PartMemory> {
 
 impl PartMemory {
     pub fn new(limit: u64) -> Arc<Self> {
-        Arc::new(Self { limit, kept: Mutex::default() })
+        Arc::new(Self { kept: Mutex::new(Recent::new(limit)) })
     }
 
     /// Bytes currently held by cached parts.
@@ -696,11 +731,57 @@ impl PartMemory {
         self.kept.lock().unwrap().bytes
     }
 
+    /// Peak bytes held by cached parts.
+    pub fn peak(&self) -> u64 {
+        self.kept.lock().unwrap().peak
+    }
+
+    /// Current byte limit of this cache.
+    pub fn limit(&self) -> u64 {
+        self.kept.lock().unwrap().limit
+    }
+
+    /// Updates the cache's byte limit to `limit`, evicting least-recently-used entries down to it,
+    /// and returns bytes still held (board 12313).
+    pub fn size_to(&self, limit: u64) -> u64 {
+        let mut kept = self.kept.lock().unwrap();
+        kept.limit = limit;
+        kept.evict_to(limit);
+        kept.bytes
+    }
+
     /// Evicts least-recently-used parts until at most `target` bytes remain, returning bytes held.
     pub fn evict_to(&self, target: u64) -> u64 {
         let mut kept = self.kept.lock().unwrap();
         kept.evict_to(target);
         kept.bytes
+    }
+
+    /// When inserting a new `len`-byte unpacked part would exceed the cache's limit, reclaims the
+    /// least-recently-used entry's `Box<[u8]>` if it is uniquely owned and has exact length `len`
+    /// (board 12313). Reusing an already-faulted 1 MiB buffer avoids repeated `mmap`/`munmap` and
+    /// anonymous page-fault churn when `M_MMAP_THRESHOLD == 1 MiB` without retaining idle memory.
+    pub fn take_spare_buf(&self, len: usize) -> Option<Box<[u8]>> {
+        let mut kept = self.kept.lock().unwrap();
+        if kept.limit == 0 || kept.bytes.saturating_add(len as u64) <= kept.limit {
+            return None;
+        }
+        let reusable = matches!(
+            kept.parts.peek_oldest(),
+            Some((_, Fetched::Unpacked(PartBytes { bytes: PartBacking::Boxed(arc), .. })))
+                if arc.len() == len && Arc::strong_count(arc) == 1
+        );
+        if !reusable {
+            return None;
+        }
+        let (id, dropped) = kept.parts.pop_oldest()?;
+        kept.bytes -= Recent::entry_size(&id, &dropped);
+        match dropped {
+            Fetched::Unpacked(PartBytes { bytes: PartBacking::Boxed(arc), .. }) => {
+                Arc::into_inner(arc)
+            }
+            _ => None,
+        }
     }
 
     /// Looks up a local framed file's unpacked part.
@@ -714,11 +795,7 @@ impl PartMemory {
 
     /// Inserts a local framed file's unpacked part.
     pub fn put_local(&self, file: u64, part: u64, bytes: PartBytes) {
-        self.kept.lock().unwrap().put(
-            PartKey::Local(file, part),
-            Fetched::Unpacked(bytes),
-            self.limit,
-        );
+        self.kept.lock().unwrap().put(PartKey::Local(file, part), Fetched::Unpacked(bytes));
     }
 
     /// Drops all unpacked parts belonging to local framed file opening `file`.
@@ -748,7 +825,7 @@ impl PartMemory {
     }
 
     fn put_bucket(&self, key: &str, part: u64, fetched: Fetched) {
-        self.kept.lock().unwrap().put(PartKey::Bucket(Arc::from(key), part), fetched, self.limit);
+        self.kept.lock().unwrap().put(PartKey::Bucket(Arc::from(key), part), fetched);
     }
 
     /// Inserts `fetched` only if no `forget_bucket` has run since `expected_gen` was captured
@@ -758,7 +835,7 @@ impl PartMemory {
         if kept.forget_gen != expected_gen {
             return;
         }
-        kept.put(PartKey::Bucket(Arc::from(key), part), fetched, self.limit);
+        kept.put(PartKey::Bucket(Arc::from(key), part), fetched);
     }
 
     /// Stores `fetched` if no unpacked plaintext entry already occupies `(key, part)`.
@@ -768,7 +845,7 @@ impl PartMemory {
         if matches!(kept.parts.peek(&id), Some(Fetched::Unpacked(_))) {
             return;
         }
-        kept.put(id, fetched, self.limit);
+        kept.put(id, fetched);
     }
 
     fn forget_bucket(&self, mut matches: impl FnMut(&str) -> bool) -> usize {
@@ -791,14 +868,19 @@ impl PartMemory {
 }
 
 /// The parts fetched or unpacked last, least recently used first, and the bytes they take.
-#[derive(Default)]
 struct Recent {
     parts: LruMap<PartKey, Fetched>,
     bytes: u64,
+    peak: u64,
+    limit: u64,
     forget_gen: u64,
 }
 
 impl Recent {
+    fn new(limit: u64) -> Self {
+        Self { parts: LruMap::new(), bytes: 0, peak: 0, limit, forget_gen: 0 }
+    }
+
     fn entry_size(id: &PartKey, fetched: &Fetched) -> u64 {
         match fetched {
             Fetched::Stored { bytes } => bytes.len() as u64 + id.stored_overhead(),
@@ -806,12 +888,13 @@ impl Recent {
         }
     }
 
-    fn put(&mut self, id: PartKey, fetched: Fetched, limit: u64) {
+    fn put(&mut self, id: PartKey, fetched: Fetched) {
         self.bytes += Self::entry_size(&id, &fetched);
         if let Some(replaced) = self.parts.insert(id.clone(), fetched) {
             self.bytes -= Self::entry_size(&id, &replaced);
         }
-        self.evict_to(limit);
+        self.evict_to(self.limit);
+        self.peak = self.peak.max(self.bytes);
     }
 
     fn evict_to(&mut self, target: u64) {
@@ -1079,19 +1162,31 @@ impl<B: Bucket> Fetcher<B> {
                     plain
                 }
                 FetchedPart::Data(Fetched::Stored { bytes }) => {
-                    let plain: Arc<[u8]> = match opened_part.as_is() {
-                        true => bytes,
-                        false => match opened_part.unpack(&bytes) {
-                            Ok(unpacked) => unpacked.into(),
+                    let plain = if opened_part.as_is() {
+                        PartBytes::from_arc(bytes)
+                    } else {
+                        let len = opened_part.len() as usize;
+                        let mut out = self
+                            .shared
+                            .memory
+                            .recent
+                            .take_spare_buf(len)
+                            .unwrap_or_else(|| vec![0; len].into_boxed_slice());
+                        match opened_part.unpack_copy_into(&bytes, &mut out) {
+                            Ok(()) => {
+                                if opened_part.stored.encoding == extent_frame::Encoding::Zstd {
+                                    UNPACKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                }
+                                PartBytes::from_box(out)
+                            }
                             Err(extent_frame::Error::Corrupt(err)) => {
                                 return Err(Error::Corrupt(format!(
                                     "part {number} of {key}: {err}"
                                 )));
                             }
                             Err(err) => return Err(Error::from(err)),
-                        },
+                        }
                     };
-                    let plain = PartBytes::from_arc(plain);
                     if self.shared.cache.is_some() {
                         self.shared.memory.recent.put_bucket_at_gen(
                             key,
@@ -1323,6 +1418,43 @@ impl Drop for Reading<'_> {
     }
 }
 
+/// Unpacks an owned stored part buffer in place (avoiding copying the stored ciphertext and
+/// avoiding copying the unpacked 1 MiB plaintext into `Arc<[u8]>`, board 12313).
+fn unpack_owned(
+    opened_part: &extent_frame::Part,
+    key: &str,
+    number: u64,
+    mut stored: Vec<u8>,
+    recent: &PartMemory,
+) -> Result<PartBytes, Error> {
+    let len = opened_part.len() as usize;
+    let map_err = |err| match err {
+        extent_frame::Error::Corrupt(err) => {
+            Error::Corrupt(format!("part {number} of {key}: {err}"))
+        }
+        err => Error::from(err),
+    };
+    match opened_part.stored.encoding {
+        extent_frame::Encoding::Raw => {
+            let opened_len = opened_part.open(&mut stored).map_err(map_err)?.len();
+            if opened_len != len {
+                return Err(Error::Corrupt(format!(
+                    "part {number} of {key}: an object's raw part, of the wrong length"
+                )));
+            }
+            stored.truncate(len);
+            Ok(PartBytes::from_box(stored.into_boxed_slice()))
+        }
+        extent_frame::Encoding::Zstd => {
+            let mut out =
+                recent.take_spare_buf(len).unwrap_or_else(|| vec![0; len].into_boxed_slice());
+            opened_part.unpack_into(&mut stored, &mut out).map_err(map_err)?;
+            UNPACKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(PartBytes::from_box(out))
+        }
+    }
+}
+
 impl<B: Bucket> Fetching<B> {
     /// Part `part` of the object at `key`, whose tail is `tail`, checked against the CRC the tail
     /// gives: kept, in memory, as one fetched since its first reader looked there is, or in the
@@ -1400,6 +1532,44 @@ impl<B: Bucket> Fetching<B> {
                 fetched
             }
         };
+        // For demand reads (`!need_stored`), unpack once inside the shared flight in place so
+        // concurrent readers share one decrypt+decompress, avoid copying the stored/unpacked
+        // buffers, and never insert `Stored` into `PartMemory` only to replace it immediately
+        // (board 12313). Read-ahead (`Priority::Ahead`) and peer serving (`need_stored`) still
+        // retain `Stored` without decompressing.
+        let demand = !need_stored
+            && self
+                .memory
+                .parts
+                .lock()
+                .unwrap()
+                .flights
+                .get(&id)
+                .is_some_and(|w| w.priority == Priority::Demand);
+        if demand {
+            let forget_gen = self.memory.recent.forget_gen();
+            match tail.opened(&self.memory.keys, key) {
+                Ok(opened_parts) => {
+                    let opened_part = part_of(&opened_parts, key, part)?;
+                    if !opened_part.as_is() && opened_part.check_open().is_ok() {
+                        let plain =
+                            unpack_owned(&opened_part, key, part, bytes, &self.memory.recent)?;
+                        let fetched = Fetched::Unpacked(plain);
+                        if self.cache.is_some() {
+                            self.memory.recent.put_bucket_at_gen(
+                                key,
+                                part,
+                                fetched.clone(),
+                                forget_gen,
+                            );
+                        }
+                        return Ok(FetchedPart::Data(fetched));
+                    }
+                }
+                Err(Error::NoKey(_)) => {}
+                Err(err) => return Err(err),
+            }
+        }
         let fetched = Fetched::Stored { bytes: bytes.into() };
         if self.cache.is_some() {
             if need_stored {
@@ -3310,5 +3480,98 @@ mod tests {
         drop(slot);
         pool.run_until_stalled();
         assert_eq!(bucket.waiting(), 0, "cancelled stored_part issued an orphaned GET");
+    }
+
+    /// board 12313: `PartMemory::size_to` grows past `RECENT` and shrinks under governor pressure,
+    /// tracks `peak`, and `take_spare_buf` recycles uniquely-owned LRU `Box<[u8]>` buffers when
+    /// full without retaining idle memory.
+    #[test]
+    fn part_memory_sizes_dynamically_tracks_peak_and_recycles_buffers() {
+        let len = 4096usize;
+        let parts = PartMemory::new(2 * len as u64);
+        assert_eq!((parts.limit(), parts.bytes(), parts.peak()), (2 * len as u64, 0, 0));
+
+        // Fill to limit: no spare buffer recycled while below/at limit without overflow.
+        let b0 = vec![1u8; len].into_boxed_slice();
+        let b0_ptr = b0.as_ptr();
+        parts.put_local(1, 0, PartBytes::from_box(b0));
+        assert!(parts.take_spare_buf(len).is_none());
+        parts.put_local(1, 1, PartBytes::from_box(vec![2u8; len].into_boxed_slice()));
+        assert_eq!((parts.bytes(), parts.peak()), (2 * len as u64, 2 * len as u64));
+
+        // Next insert of `len` would exceed limit: `take_spare_buf` reclaims oldest (part 0) buffer
+        // in place (same allocation pointer, zero new heap allocation).
+        let recycled = parts.take_spare_buf(len).expect("recycled oldest buffer");
+        assert_eq!(recycled.as_ptr(), b0_ptr);
+        assert_eq!(parts.bytes(), len as u64);
+        assert!(parts.get_local(1, 0).is_none());
+        parts.put_local(1, 2, PartBytes::from_box(recycled));
+
+        // Grow past initial limit and verify peak updates.
+        parts.size_to(4 * len as u64);
+        assert_eq!(parts.limit(), 4 * len as u64);
+        parts.put_local(1, 3, PartBytes::from_box(vec![3u8; len].into_boxed_slice()));
+        parts.put_local(1, 4, PartBytes::from_box(vec![4u8; len].into_boxed_slice()));
+        assert_eq!((parts.bytes(), parts.peak()), (4 * len as u64, 4 * len as u64));
+
+        // Shrink under pressure evicts LRU entries and lowers limit; peak stays high-water mark.
+        assert_eq!(parts.size_to(len as u64), len as u64);
+        assert_eq!(
+            (parts.limit(), parts.bytes(), parts.peak()),
+            (len as u64, len as u64, 4 * len as u64)
+        );
+        assert_eq!(parts.size_to(0), 0);
+        assert!(parts.take_spare_buf(len).is_none());
+    }
+
+    /// board 12313: concurrent `Priority::Demand` reads of one compressed part coalesce into a
+    /// single zstd decompression, while `Priority::Ahead` fetches without decompressing until a
+    /// demand read arrives.
+    #[test]
+    fn concurrent_demand_reads_coalesce_zstd_unpack_and_ahead_stays_stored() {
+        let data = pattern(2 * PART);
+        let bucket = bucket(&data);
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Arc::new(Cache::open(dir.path(), 8 * PART).unwrap());
+        let fetchers = host(&bucket, &cache, 4);
+        let mut reads = Reads::new();
+
+        // 1. Four concurrent demand readers of part 0 coalesce into ONE unpack.
+        let before = unpacks();
+        let handles: Vec<_> = fetchers
+            .iter()
+            .enumerate()
+            .map(|(i, f)| {
+                reads.read(f, location(2 * PART), (i as u64) * 4096, 128, Priority::Demand)
+            })
+            .collect();
+        complete_all(&bucket, &mut reads);
+        for (i, h) in handles.into_iter().enumerate() {
+            let off = i * 4096;
+            assert_eq!(reads.result(h), Some(Ok(data[off..off + 128].to_vec())));
+        }
+        assert_eq!(
+            unpacks() - before,
+            1,
+            "four concurrent demand readers must share one zstd unpack"
+        );
+
+        // 2. `fetch_ahead` of part 1 fetches stored bytes without decompressing; demand unpacks once.
+        let before_ahead = unpacks();
+        let fetched = reads.fetch_ahead(&fetchers[0], location(2 * PART), PART, PART);
+        complete_all(&bucket, &mut reads);
+        assert_eq!(*fetched.borrow(), Some(Ok(1)));
+        assert_eq!(unpacks() - before_ahead, 0, "fetch_ahead must not decompress");
+
+        let h = reads.read(&fetchers[1], location(2 * PART), PART + 64, 128, Priority::Demand);
+        complete_all(&bucket, &mut reads);
+        assert_eq!(reads.result(h), Some(Ok(data[PART as usize + 64..][..128].to_vec())));
+        assert_eq!(unpacks() - before_ahead, 1, "first demand read after fetch_ahead unpacks once");
+
+        // Subsequent demand read hits unpacked PartMemory with zero additional unpacks.
+        let h2 = reads.read(&fetchers[2], location(2 * PART), PART + 1024, 128, Priority::Demand);
+        complete_all(&bucket, &mut reads);
+        assert_eq!(reads.result(h2), Some(Ok(data[PART as usize + 1024..][..128].to_vec())));
+        assert_eq!(unpacks() - before_ahead, 1, "cached unpacked part must not re-decompress");
     }
 }

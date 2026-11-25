@@ -8129,4 +8129,26 @@ async fn unpacked_parts_are_counted_and_evicted_by_govern() {
     );
     super::memory::govern(0).await;
     assert_eq!(unpacked.bytes(), 0, "govern(0) must evict unpacked parts");
+    assert_eq!(parts.limit(), 0, "govern(0) must lower PartMemory limit to 0");
+    // Restore limit so tests sharing this process under `cargo test` are unaffected.
+    super::memory::govern(u64::MAX).await;
+    assert_eq!(parts.limit(), bucket_cell::fetch::RECENT);
+}
+
+/// board 12313: `recent_limit_for` scales `PartMemory` to half the remaining room when FUSE cells
+/// are attached (never exceeding `room`), while keeping VM-only daemons capped at `RECENT`.
+#[test]
+fn recent_limit_scales_for_fuse_and_stays_bounded_for_vms() {
+    let recent = bucket_cell::fetch::RECENT;
+    // VM-only daemon (no FUSE cells attached): capped at RECENT, shrunk under pressure.
+    assert_eq!(super::memory::recent_limit_for(0, false), 0);
+    assert_eq!(super::memory::recent_limit_for(recent / 2, false), recent / 2);
+    assert_eq!(super::memory::recent_limit_for(4 << 30, false), recent);
+
+    // FUSE cells attached: scales to room / 2 (never below RECENT.min(room), never past room).
+    assert_eq!(super::memory::recent_limit_for(0, true), 0);
+    assert_eq!(super::memory::recent_limit_for(recent / 2, true), recent / 2);
+    assert_eq!(super::memory::recent_limit_for(recent, true), recent);
+    assert_eq!(super::memory::recent_limit_for(256 << 20, true), 128 << 20);
+    assert_eq!(super::memory::recent_limit_for(4 << 30, true), 2 << 30);
 }

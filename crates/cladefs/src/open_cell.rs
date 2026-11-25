@@ -1082,10 +1082,13 @@ impl OpenCell {
             {
                 let (location, len) = (in_bucket.location.clone(), data.len() as u64);
                 // cladefs: what the cell holds of it now, if a relocation moved it meanwhile
-                // (doc-27), read as first, into a buffer of its own.
-                let mut here = vec![0; data.len()];
-                let again =
-                    || local_cell::upload::blocking(|| self.local.read(extent, offset, &mut here));
+                // (doc-27), read as first, into a buffer allocated only if the bucket reports it
+                // lost (board 12313).
+                let again = || {
+                    let mut here = vec![0; data.len()];
+                    local_cell::upload::blocking(|| self.local.read(extent, offset, &mut here))?;
+                    Ok(here)
+                };
                 let fetcher = self.fetcher();
                 let followed = fetcher.read_following(extent, location, (offset, len), again);
                 match followed.await.map_err(fetch_errno)? {
@@ -1093,7 +1096,7 @@ impl OpenCell {
                         data[..fetched.len()].copy_from_slice(&fetched);
                         data[fetched.len()..].fill(0);
                     }
-                    crate::bucket::Followed::Here(()) => data.copy_from_slice(&here),
+                    crate::bucket::Followed::Here(here) => data.copy_from_slice(&here),
                 }
                 Ok(())
             }

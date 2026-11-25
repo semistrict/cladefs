@@ -56,6 +56,18 @@ fn main() -> anyhow::Result<()> {
     use std::io::Write as _;
     use std::path::PathBuf;
     cladefs::cladefsd::logging::to_stderr()?;
+    // Give back freed 1 MiB part/segment buffers promptly and size standalone `cladefs-mount`'s
+    // unpacked-part cache above the 64 MiB default when host RAM allows (board 12313).
+    cladefs::cladefsd::memory::return_large_allocations();
+    match cladefs::cladefsd::governor::host_memory() {
+        Ok(host) => {
+            let limit = (host.available / 4).clamp(bucket_cell::fetch::RECENT, 1 << 30);
+            bucket_cell::fetch::shared_parts().size_to(limit);
+        }
+        Err(err) => {
+            log::warn!("cladefs-mount: reading host memory for part cache sizing: {err}");
+        }
+    }
     // Before any thread is started, which would take the signals otherwise.
     cladefs::stacks::on_sigquit().context("handling SIGQUIT")?;
     let stop = cladefs::signals::Signals::block(&[libc::SIGINT, libc::SIGTERM])

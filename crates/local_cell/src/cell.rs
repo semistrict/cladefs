@@ -2575,14 +2575,21 @@ impl<D: Dir> LocalCell<D> {
     }
 
     /// A part of a framed file, read, checked and unpacked.
-    pub fn read_packed(&self, part: &Packed<D::File>) -> Result<Arc<Aligned>, Error> {
+    pub fn read_packed(
+        &self,
+        part: &Packed<D::File>,
+    ) -> Result<bucket_cell::fetch::PartBytes, Error> {
         let stored = read_aligned(&*part.file, part.stored().offset, part.stored().len as usize)?;
         self.unpack(part, stored)
     }
 
     /// A part of a framed file, unpacked from `stored`, its stored bytes and any after them, read
     /// from its file, checked against its CRC; reads of it find it unpacked for a while.
-    pub fn unpack(&self, part: &Packed<D::File>, stored: Aligned) -> Result<Arc<Aligned>, Error> {
+    pub fn unpack(
+        &self,
+        part: &Packed<D::File>,
+        stored: Aligned,
+    ) -> Result<bucket_cell::fetch::PartBytes, Error> {
         let unpacked = crate::framed::unpacked_for(self.dir.host());
         part.unpack(stored, &unpacked)
     }

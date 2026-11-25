@@ -168,6 +168,15 @@ pub(super) fn counts_on(daemon: &Daemon) -> (usize, usize, crate::fuse::Counts) 
     (0, 0, crate::fuse::Counts::default())
 }
 
+/// cladefs: whether `daemon`'s FUSE mount currently has any cells attached or detaching: while
+/// FUSE serves cells (`OpenCellDevice::read` bypasses `ExtentCache`, board 8260), the memory
+/// governor scales `PartMemory` with remaining room so multi-file reads don't thrash zstd
+/// decompression (board 12313).
+pub(super) fn has_attached_on(daemon: &Daemon) -> bool {
+    let (attached, detaching, _) = counts_on(daemon);
+    attached + detaching > 0
+}
+
 /// Whether `daemon` mounted its cells and has not closed them, as [`close_on`] does, or failed to:
 /// what a drain past its bound left.
 pub(super) fn left_on(daemon: &Daemon) -> bool {

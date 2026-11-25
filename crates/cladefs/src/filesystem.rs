@@ -920,6 +920,21 @@ impl Node {
         self.read_vectored(offset, &mut [VolatileSliceMut::from(buf)]).await
     }
 
+    /// Reads up to `len` bytes from this file at `offset`, returning them directly in a single
+    /// buffer (board 12313): fewer than `len` only at the end of the file.
+    pub async fn read_vec(&self, offset: u64, len: usize) -> Result<Vec<u8>> {
+        let volume = self.file()?;
+        let ino = self.ino();
+        volume
+            .run(move |fxfs| async move {
+                let mut data = vec![0; len];
+                let read = fxfs.read_into(ino, offset, &mut [&mut data[..]]).await;
+                data.truncate(read.map_err(errno)?);
+                Ok(data)
+            })
+            .await
+    }
+
     /// Reads from this file at `offset` into `bufs` in turn, memory that may change meanwhile, and
     /// returns how much was read: less than asked only at the end of the file.
     ///
@@ -931,17 +946,8 @@ impl Node {
         offset: u64,
         bufs: &mut [VolatileSliceMut<'_>],
     ) -> Result<usize> {
-        let volume = self.file()?;
         let len = bufs.iter().map(VolatileSliceMut::len).sum::<usize>();
-        let ino = self.ino();
-        let data = volume
-            .run(move |fxfs| async move {
-                let mut data = vec![0; len];
-                let read = fxfs.read_into(ino, offset, &mut [&mut data[..]]).await;
-                data.truncate(read.map_err(errno)?);
-                Ok(data)
-            })
-            .await?;
+        let data = self.read_vec(offset, len).await?;
         let mut rest = &data[..];
         for buf in bufs {
             rest = &rest[buf.copy_from(rest)..];

@@ -129,6 +129,13 @@ impl<K: Ord + Clone, V> LruMap<K, V> {
         Some(value)
     }
 
+    /// Peeks at the least recently used entry without removing it.
+    pub fn peek_oldest(&self) -> Option<(&K, &V)> {
+        let key = self.by_use.values().next()?;
+        let (value, _) = self.entries.get(key)?;
+        Some((key, value))
+    }
+
     /// Removes and returns the least recently used entry.
     pub fn pop_oldest(&mut self) -> Option<(K, V)> {
         let (_, key) = self.by_use.pop_first()?;
