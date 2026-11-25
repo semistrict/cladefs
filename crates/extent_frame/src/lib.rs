@@ -62,6 +62,9 @@
 // Every unsafe block says why it is sound, other threads included (TASK-444.4).
 #![deny(clippy::undocumented_unsafe_blocks)]
 
+#[cfg(all(not(feature = "crypto"), not(feature = "pure-zstd")))]
+compile_error!("extent_frame requires either the `crypto` or `pure-zstd` feature");
+
 pub mod segment;
 pub mod spent;
 pub mod table;
@@ -69,10 +72,14 @@ pub mod table;
 pub use extent_keys::xts::SECTOR;
 pub use extent_keys::{KeyId, Salt, Secret};
 
+#[cfg(feature = "crypto")]
+use extent_keys::Aead;
+#[cfg(feature = "crypto")]
 use extent_keys::xts::Xts;
-use extent_keys::{Aead, MAC_LEN, SALT_LEN, TAG_LEN};
+use extent_keys::{MAC_LEN, SALT_LEN, TAG_LEN};
 use std::collections::HashMap;
 use std::ops::Range;
+#[cfg(feature = "crypto")]
 use std::sync::Arc;
 
 /// Each this many bytes of an object's data, the last fewer, is a part, stored on its own, with
@@ -167,9 +174,11 @@ const MAGIC: [u8; 8] = *b"cladefs3";
 /// The zstd level parts are compressed at, unless `CLADEFS_ZSTD_LEVEL` says another, to measure it
 /// against (TASK-29.4): the fastest, as sealing and closing segments wait for it. At 0, parts are
 /// stored raw, as before compression.
+#[cfg(feature = "crypto")]
 const LEVEL: i32 = 1;
 
 /// The zstd level parts are compressed at: `CLADEFS_ZSTD_LEVEL`'s, or [`LEVEL`].
+#[cfg(feature = "crypto")]
 fn level() -> i32 {
     // The process's environment, read once: the same for every simulated host.
     static CHOSEN: std::sync::LazyLock<i32> =
@@ -183,25 +192,82 @@ fn level() -> i32 {
     *CHOSEN
 }
 
+/// Pure-Rust Castagnoli (iSCSI) CRC32C lookup table, used in keyless wasm32 builds without
+/// `crc-fast` (and cross-checked against `crc-fast` in unit tests).
+#[cfg(any(not(feature = "crypto"), test))]
+const CRC32C_TABLE: [u32; 256] = {
+    let mut table = [0u32; 256];
+    let mut i = 0;
+    while i < 256 {
+        let mut crc = i as u32;
+        let mut bit = 0;
+        while bit < 8 {
+            crc = if crc & 1 != 0 { (crc >> 1) ^ 0x82f6_3b78 } else { crc >> 1 };
+            bit += 1;
+        }
+        table[i] = crc;
+        i += 1;
+    }
+    table
+};
+
+#[cfg(any(not(feature = "crypto"), test))]
+fn crc32c_pure_update(mut crc: u32, bytes: &[u8]) -> u32 {
+    for &byte in bytes {
+        crc = CRC32C_TABLE[((crc ^ u32::from(byte)) & 0xff) as usize] ^ (crc >> 8);
+    }
+    crc
+}
+
 /// The CRC32C of `bytes`.
 pub fn crc(bytes: &[u8]) -> u32 {
-    crc_fast::checksum(crc_fast::CrcAlgorithm::Crc32Iscsi, bytes) as u32
+    #[cfg(feature = "crypto")]
+    {
+        crc_fast::checksum(crc_fast::CrcAlgorithm::Crc32Iscsi, bytes) as u32
+    }
+    #[cfg(not(feature = "crypto"))]
+    {
+        !crc32c_pure_update(!0u32, bytes)
+    }
 }
 
 /// Streaming CRC32C hasher, matching [`crc`] without buffering the whole input in memory.
+#[cfg(feature = "crypto")]
 pub struct Crc(crc_fast::Digest);
+
+#[cfg(not(feature = "crypto"))]
+pub struct Crc(u32);
 
 impl Crc {
     pub fn new() -> Self {
-        Self(crc_fast::Digest::new(crc_fast::CrcAlgorithm::Crc32Iscsi))
+        #[cfg(feature = "crypto")]
+        {
+            Self(crc_fast::Digest::new(crc_fast::CrcAlgorithm::Crc32Iscsi))
+        }
+        #[cfg(not(feature = "crypto"))]
+        {
+            Self(!0u32)
+        }
     }
 
     pub fn update(&mut self, bytes: &[u8]) {
+        #[cfg(feature = "crypto")]
         self.0.update(bytes);
+        #[cfg(not(feature = "crypto"))]
+        {
+            self.0 = crc32c_pure_update(self.0, bytes);
+        }
     }
 
     pub fn finish(self) -> u32 {
-        self.0.finalize() as u32
+        #[cfg(feature = "crypto")]
+        {
+            self.0.finalize() as u32
+        }
+        #[cfg(not(feature = "crypto"))]
+        {
+            !self.0
+        }
     }
 }
 
@@ -319,17 +385,21 @@ pub enum Keyed {
 }
 
 /// What HKDF derives an object's subkey that encrypts its parts with, as its info.
+#[cfg(feature = "crypto")]
 const PARTS_INFO: &[u8] = b"cladefs frame parts";
 
 /// What HKDF derives an object's subkey that authenticates its footer and table with, as its info.
+#[cfg(feature = "crypto")]
 const MAC_INFO: &[u8] = b"cladefs frame mac";
 
 /// cladefs: what HKDF derives a raw file's XTS subkeys with, as their info's first piece
 /// ([`Xts::derive`], TASK-411.5): an object of the file's sectors' parts' too (TASK-411.23).
+#[cfg(feature = "crypto")]
 const RAW_FILE_INFO: &[u8] = b"cladefs raw file";
 
 /// cladefs: what HKDF derives the subkey that tags the parts of an object of a raw file's sectors
 /// with, as its info (TASK-411.23).
+#[cfg(feature = "crypto")]
 const RAW_PART_TAG_INFO: &[u8] = b"cladefs raw part tag";
 
 /// cladefs: an object's subkeys, derived from its DEK and its salt (TASK-411.2): one that encrypts
@@ -339,6 +409,7 @@ const RAW_PART_TAG_INFO: &[u8] = b"cladefs raw part tag";
 /// that pack an object's parts ([`PartPacker::pack`]) and by its readers. cladefs: of an object of
 /// a raw file's sectors, the raw file's own, from the salt drawn for it, which encrypts the file as
 /// it is written and tags its parts as it is framed in place ([`ObjectKey::sectors`], TASK-411.23).
+#[cfg(feature = "crypto")]
 pub struct ObjectKey {
     id: KeyId,
     salt: Salt,
@@ -350,6 +421,7 @@ pub struct ObjectKey {
 }
 
 /// cladefs: what an object's parts are encrypted, tagged or encrypted under, as it is keyed.
+#[cfg(feature = "crypto")]
 enum PartKey {
     /// AES-256-GCM: its parts encrypted, or tagged alone (TASK-411.2, TASK-411.3).
     Aead(Aead),
@@ -358,6 +430,7 @@ enum PartKey {
     Sectors { xts: Box<Xts>, tag: Secret },
 }
 
+#[cfg(feature = "crypto")]
 impl ObjectKey {
     fn new(dek: &Secret, id: KeyId, salt: Salt, keyed: Keyed) -> Self {
         let parts = match keyed {
@@ -519,6 +592,7 @@ impl ObjectKey {
     }
 }
 
+#[cfg(feature = "crypto")]
 impl std::fmt::Debug for ObjectKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut debug = f.debug_struct("ObjectKey");
@@ -530,6 +604,7 @@ impl std::fmt::Debug for ObjectKey {
 #[derive(Clone, Debug)]
 enum Opening {
     /// It is encrypted, or authenticated, under a key the reader holds: its subkeys.
+    #[cfg(feature = "crypto")]
     Open(Arc<ObjectKey>),
     /// It is encrypted under a key the reader doesn't hold: its parts are checked, not opened.
     Locked(KeyId),
@@ -544,6 +619,13 @@ impl Opening {
     /// is authenticated under a key the reader doesn't hold, and the reader holds its objects
     /// encrypted (TASK-411.3).
     fn of(encryption: Encryption, keys: &dyn Keys) -> Result<Self, Error> {
+        #[cfg(feature = "crypto")]
+        let opened = |dek: &Secret, key: KeyId, salt: Salt, keyed: Keyed| {
+            Self::Open(Arc::new(ObjectKey::new(dek, key, salt, keyed)))
+        };
+        #[cfg(not(feature = "crypto"))]
+        let opened =
+            |dek: &Secret, _key: KeyId, _salt: Salt, _keyed: Keyed| -> Self { dek.absurd() };
         Ok(match encryption {
             // cladefs: a raw file's sectors as an encrypted object's parts (TASK-411.23).
             Encryption::Encrypted { key, salt } | Encryption::Sectors { key, salt } => {
@@ -553,15 +635,13 @@ impl Opening {
                             Encryption::Sectors { .. } => Keyed::Sectors,
                             _ => Keyed::Encrypted,
                         };
-                        Self::Open(Arc::new(ObjectKey::new(dek, key, salt, keyed)))
+                        opened(dek, key, salt, keyed)
                     }
                     None => Self::Locked(key),
                 }
             }
             Encryption::Authenticated { key, salt } => match keys.dek(key) {
-                Some(dek) => {
-                    Self::Open(Arc::new(ObjectKey::new(dek, key, salt, Keyed::Authenticated)))
-                }
+                Some(dek) => opened(dek, key, salt, Keyed::Authenticated),
                 None if keys.encrypted() => return Err(Error::NoKey(key)),
                 None => Self::Unchecked(key),
             },
@@ -569,6 +649,7 @@ impl Opening {
     }
 
     /// The object's subkeys, if the reader holds them.
+    #[cfg(feature = "crypto")]
     fn key(&self) -> Option<&ObjectKey> {
         match self {
             Self::Open(key) => Some(key),
@@ -581,6 +662,7 @@ impl Opening {
 impl PartialEq for Opening {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
+            #[cfg(feature = "crypto")]
             (Self::Open(one), Self::Open(other)) => {
                 (one.id, one.salt, one.keyed) == (other.id, other.salt, other.keyed)
             }
@@ -602,6 +684,7 @@ pub enum Encoding {
 
 impl Encoding {
     /// Its byte in a table's entry.
+    #[cfg(feature = "crypto")]
     fn byte(self) -> u8 {
         match self {
             Self::Raw => 0,
@@ -636,6 +719,35 @@ impl Stored {
     }
 }
 
+/// Pure-Rust zstd decompression used in keyless `wasm32` builds (`pure-zstd` feature).
+#[cfg(feature = "pure-zstd")]
+#[cfg_attr(
+    feature = "crypto",
+    allow(dead_code, reason = "used by keyless wasm32 builds without crypto and tested directly")
+)]
+fn decode_zstd_pure(packed: &[u8], out: &mut [u8]) -> Result<(), Corrupt> {
+    use std::io::Read as _;
+    let mut decoder = ruzstd::decoding::StreamingDecoder::new(packed)
+        .map_err(|err| corrupt(format_args!("part, by zstd: {err}")))?;
+    let mut written = 0;
+    while written < out.len() {
+        let n = decoder
+            .read(&mut out[written..])
+            .map_err(|err| corrupt(format_args!("part, by zstd: {err}")))?;
+        if n == 0 {
+            return Err(corrupt("compressed part, of the wrong length"));
+        }
+        written += n;
+    }
+    let mut extra = [0u8; 1];
+    let more =
+        decoder.read(&mut extra).map_err(|err| corrupt(format_args!("part, by zstd: {err}")))?;
+    if more != 0 {
+        return Err(corrupt("compressed part, of the wrong length"));
+    }
+    Ok(())
+}
+
 /// Decodes `packed`, a part's packed bytes, opened if it was encrypted, stored `encoding`, into
 /// `out`, which is as long as the part.
 fn decode(encoding: Encoding, packed: &[u8], out: &mut [u8]) -> Result<(), Corrupt> {
@@ -643,10 +755,17 @@ fn decode(encoding: Encoding, packed: &[u8], out: &mut [u8]) -> Result<(), Corru
         Encoding::Raw if packed.len() == out.len() => out.copy_from_slice(packed),
         Encoding::Raw => return Err(corrupt("raw part, of the wrong length")),
         Encoding::Zstd => {
-            let unpacked = zstd::bulk::decompress_to_buffer(packed, out)
-                .map_err(|err| corrupt(format_args!("part, by zstd: {err}")))?;
-            if unpacked != out.len() {
-                return Err(corrupt("compressed part, of the wrong length"));
+            #[cfg(feature = "crypto")]
+            {
+                let unpacked = zstd::bulk::decompress_to_buffer(packed, out)
+                    .map_err(|err| corrupt(format_args!("part, by zstd: {err}")))?;
+                if unpacked != out.len() {
+                    return Err(corrupt("compressed part, of the wrong length"));
+                }
+            }
+            #[cfg(all(not(feature = "crypto"), feature = "pure-zstd"))]
+            {
+                decode_zstd_pure(packed, out)?;
             }
         }
     }
@@ -685,7 +804,9 @@ impl Part {
     pub fn check_open(&self) -> Result<(), Error> {
         match &self.opening {
             Opening::Locked(key) => Err(Error::NoKey(*key)),
-            Opening::Open(_) | Opening::Unchecked(_) => Ok(()),
+            #[cfg(feature = "crypto")]
+            Opening::Open(_) => Ok(()),
+            Opening::Unchecked(_) => Ok(()),
         }
     }
 
@@ -694,10 +815,14 @@ impl Part {
     /// (TASK-411.3); checks them against its tag and decrypts them, if a raw file's sectors
     /// (TASK-411.23). Authenticated under a key its reader doesn't hold, as they are.
     fn open_in_place(&self, bytes: &mut [u8]) -> Result<(), Error> {
+        #[cfg(feature = "crypto")]
         let (index, encoding) = (self.index, self.stored.encoding);
+        #[cfg(not(feature = "crypto"))]
+        let _ = bytes;
         match &self.opening {
             Opening::Unchecked(_) => Ok(()),
             Opening::Locked(key) => Err(Error::NoKey(*key)),
+            #[cfg(feature = "crypto")]
             Opening::Open(key) => Ok(match key.keyed {
                 Keyed::Encrypted => key.open_part(index, encoding, self.len(), bytes, &self.tag),
                 Keyed::Authenticated => {
@@ -735,6 +860,7 @@ impl Part {
         match (&self.opening, self.stored.encoding) {
             (Opening::Unchecked(_), encoding) => decode(encoding, checked, &mut out)?,
             // cladefs: checked where it is, then unpacked (TASK-411.3).
+            #[cfg(feature = "crypto")]
             (Opening::Open(key), encoding) if key.keyed == Keyed::Authenticated => {
                 key.check_part(self.index, encoding, self.len(), checked, &self.tag)?;
                 decode(encoding, checked, &mut out)?;
@@ -757,439 +883,455 @@ impl Part {
     }
 }
 
-/// A part, packed: compressed, or raw if compressing does not shrink it.
-fn pack_part(data: &[u8], compressor: &mut zstd::bulk::Compressor<'_>) -> Option<Vec<u8>> {
-    // Room for no more than the raw part: compressing what will not fit fails.
-    let mut packed = Vec::with_capacity(data.len().saturating_sub(1));
-    match compressor.compress_to_buffer(data, &mut packed) {
-        Ok(_) if !packed.is_empty() && packed.len() < data.len() => Some(packed),
-        _ => None,
-    }
-}
+#[cfg(feature = "crypto")]
+mod packing {
+    use super::*;
 
-/// cladefs: a part of an object's data, packed on its own ([`PartPacker::pack`]): compressed, if
-/// that shrinks it, or raw; encrypted, or tagged, under its object's key; the CRC of its bytes as
-/// stored, and its tag (TASK-336, TASK-411.2). Or compressed alone, in memory, to be encrypted once
-/// its object's key is drawn ([`PartPacker::compress`], [`PackedPart::encrypted`], TASK-421): no
-/// object takes it so ([`Packer::push_stored`]).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PackedPart {
-    /// Its index in its object, which its nonce is.
-    index: u64,
-    encoding: Encoding,
-    /// Its bytes as stored, unless they are the part's, as they are: raw, authenticated alone or
-    /// compressed alone.
-    stored: Option<Vec<u8>>,
-    crc: u32,
-    tag: Tag,
-    /// cladefs: how its object is keyed (TASK-411.3); none, compressed alone, in memory.
-    keyed: Option<Keyed>,
-}
-
-impl PackedPart {
-    pub fn encoding(&self) -> Encoding {
-        self.encoding
-    }
-
-    /// The CRC32C of its bytes as stored.
-    pub fn crc(&self) -> u32 {
-        self.crc
-    }
-
-    /// Its bytes as stored, `part`'s, the part it packs, or others.
-    fn stored<'a>(&'a self, part: &'a [u8]) -> &'a [u8] {
-        self.stored.as_deref().unwrap_or(part)
-    }
-
-    /// cladefs: its bytes as stored, unless they are the part's own, raw: compressed, or encrypted.
-    /// What a cell holds of a part compressed as its segment fills, with the part's bytes if these
-    /// are none (TASK-400).
-    pub fn stored_bytes(&self) -> Option<&[u8]> {
-        self.stored.as_deref()
-    }
-
-    /// cladefs: the bytes of memory [`PackedPart::stored_bytes`] take.
-    pub fn stored_capacity(&self) -> usize {
-        self.stored.as_ref().map_or(0, Vec::capacity)
-    }
-
-    /// cladefs: lets go of what the buffer of [`PackedPart::stored_bytes`] holds past them: a
-    /// part's room, which compressing took (TASK-400).
-    pub fn shrink_to_fit(&mut self) {
-        if let Some(stored) = &mut self.stored {
-            stored.shrink_to_fit();
+    /// A part, packed: compressed, or raw if compressing does not shrink it.
+    fn pack_part(data: &[u8], compressor: &mut zstd::bulk::Compressor<'_>) -> Option<Vec<u8>> {
+        // Room for no more than the raw part: compressing what will not fit fails.
+        let mut packed = Vec::with_capacity(data.len().saturating_sub(1));
+        match compressor.compress_to_buffer(data, &mut packed) {
+            Ok(_) if !packed.is_empty() && packed.len() < data.len() => Some(packed),
+            _ => None,
         }
     }
 
-    /// cladefs: it, compressed alone ([`PartPacker::compress`]), of `len` bytes of data, `stored`
-    /// its bytes as stored then ([`PackedPart::stored_bytes`], or the part's own), encrypted under
-    /// `key`, its object's: as [`PartPacker::pack`] packs the part under `key`, byte for byte. What
-    /// a cell's framing in a copy makes of a part packed ahead and held in memory, as the extent
-    /// cache holds data, encrypted only once its framing draws its object's key (TASK-421).
-    pub fn encrypted(&self, len: u64, stored: &[u8], key: &ObjectKey) -> PackedPart {
-        assert_eq!(self.keyed, None, "a part compressed alone");
-        assert!(key.encrypts(), "encrypted under an encrypted object's key");
-        let mut bytes = stored.to_vec();
-        let tag = key.encrypt_part(self.index, self.encoding, len, &mut bytes);
-        let crc = crc(&bytes);
-        let (index, encoding, keyed) = (self.index, self.encoding, Some(Keyed::Encrypted));
-        PackedPart { index, encoding, stored: Some(bytes), crc, tag, keyed }
-    }
-}
-
-/// cladefs: a part of an object framed in place, stored raw where its data was written (TASK-310):
-/// its bytes, the CRC32C of its stored bytes, and its tag, of a raw file's sectors (TASK-411.23).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct RawPart {
-    pub len: u64,
-    pub crc: u32,
-    pub tag: [u8; TAG_LEN],
-}
-
-impl RawPart {
-    /// Part `index` of an object framed in place, `stored` its stored bytes, its raw file's XTS
-    /// sectors under `key`, tagged ([`ObjectKey::sectors`]).
-    pub fn of(index: u64, stored: &[u8], key: &ObjectKey) -> Self {
-        let tag = key.tag_sectors(index, stored);
-        Self { len: stored.len() as u64, crc: crc(stored), tag }
-    }
-}
-
-/// cladefs: packs parts of an object's data one at a time, as [`Packer::push`] packs each: so that
-/// a cell packs a segment's parts on threads of its own, each part read there, rather than all its
-/// data read on one thread first (TASK-336).
-pub struct PartPacker {
-    /// None at level 0, which stores parts raw.
-    compressor: Option<zstd::bulk::Compressor<'static>>,
-}
-
-impl Default for PartPacker {
-    fn default() -> Self {
-        let compressor = (level() != 0)
-            .then(|| zstd::bulk::Compressor::new(level()).expect("zstd makes a compressor"));
-        Self { compressor }
-    }
-}
-
-impl PartPacker {
-    pub fn new() -> Self {
-        Self::default()
+    /// cladefs: a part of an object's data, packed on its own ([`PartPacker::pack`]): compressed, if
+    /// that shrinks it, or raw; encrypted, or tagged, under its object's key; the CRC of its bytes as
+    /// stored, and its tag (TASK-336, TASK-411.2). Or compressed alone, in memory, to be encrypted once
+    /// its object's key is drawn ([`PartPacker::compress`], [`PackedPart::encrypted`], TASK-421): no
+    /// object takes it so ([`Packer::push_stored`]).
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct PackedPart {
+        /// Its index in its object, which its nonce is.
+        index: u64,
+        encoding: Encoding,
+        /// Its bytes as stored, unless they are the part's, as they are: raw, authenticated alone or
+        /// compressed alone.
+        stored: Option<Vec<u8>>,
+        crc: u32,
+        tag: Tag,
+        /// cladefs: how its object is keyed (TASK-411.3); none, compressed alone, in memory.
+        keyed: Option<Keyed>,
     }
 
-    /// `part`, part `index` of an object's data, packed, as [`Packer::push`] packs it: encrypted
-    /// under `key`, its object's ([`Packer::key`]), if it is encrypted (TASK-411.2); cladefs:
-    /// tagged under it, if it is authenticated (TASK-411.3).
-    pub fn pack(&mut self, index: u64, part: &[u8], key: &ObjectKey) -> PackedPart {
-        let (encoding, compressed) = self.compressed(part);
-        let len = part.len() as u64;
-        let (stored, tag) = match key.keyed {
-            Keyed::Encrypted => {
-                let mut stored = compressed.unwrap_or_else(|| part.to_vec());
-                let tag = key.encrypt_part(index, encoding, len, &mut stored);
-                (Some(stored), tag)
+    impl PackedPart {
+        pub fn encoding(&self) -> Encoding {
+            self.encoding
+        }
+
+        /// The CRC32C of its bytes as stored.
+        pub fn crc(&self) -> u32 {
+            self.crc
+        }
+
+        /// Its bytes as stored, `part`'s, the part it packs, or others.
+        pub(super) fn stored<'a>(&'a self, part: &'a [u8]) -> &'a [u8] {
+            self.stored.as_deref().unwrap_or(part)
+        }
+
+        /// cladefs: its bytes as stored, unless they are the part's own, raw: compressed, or encrypted.
+        /// What a cell holds of a part compressed as its segment fills, with the part's bytes if these
+        /// are none (TASK-400).
+        pub fn stored_bytes(&self) -> Option<&[u8]> {
+            self.stored.as_deref()
+        }
+
+        /// cladefs: the bytes of memory [`PackedPart::stored_bytes`] take.
+        pub fn stored_capacity(&self) -> usize {
+            self.stored.as_ref().map_or(0, Vec::capacity)
+        }
+
+        /// cladefs: lets go of what the buffer of [`PackedPart::stored_bytes`] holds past them: a
+        /// part's room, which compressing took (TASK-400).
+        pub fn shrink_to_fit(&mut self) {
+            if let Some(stored) = &mut self.stored {
+                stored.shrink_to_fit();
             }
-            Keyed::Authenticated => {
-                let tag = key.tag_part(index, encoding, len, compressed.as_deref().unwrap_or(part));
-                (compressed, tag)
-            }
-            Keyed::Sectors => unreachable!("a raw file's sectors are framed in place"),
+        }
+
+        /// cladefs: it, compressed alone ([`PartPacker::compress`]), of `len` bytes of data, `stored`
+        /// its bytes as stored then ([`PackedPart::stored_bytes`], or the part's own), encrypted under
+        /// `key`, its object's: as [`PartPacker::pack`] packs the part under `key`, byte for byte. What
+        /// a cell's framing in a copy makes of a part packed ahead and held in memory, as the extent
+        /// cache holds data, encrypted only once its framing draws its object's key (TASK-421).
+        pub fn encrypted(&self, len: u64, stored: &[u8], key: &ObjectKey) -> PackedPart {
+            assert_eq!(self.keyed, None, "a part compressed alone");
+            assert!(key.encrypts(), "encrypted under an encrypted object's key");
+            let mut bytes = stored.to_vec();
+            let tag = key.encrypt_part(self.index, self.encoding, len, &mut bytes);
+            let crc = crc(&bytes);
+            let (index, encoding, keyed) = (self.index, self.encoding, Some(Keyed::Encrypted));
+            PackedPart { index, encoding, stored: Some(bytes), crc, tag, keyed }
+        }
+    }
+
+    /// cladefs: a part of an object framed in place, stored raw where its data was written (TASK-310):
+    /// its bytes, the CRC32C of its stored bytes, and its tag, of a raw file's sectors (TASK-411.23).
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct RawPart {
+        pub len: u64,
+        pub crc: u32,
+        pub tag: [u8; TAG_LEN],
+    }
+
+    impl RawPart {
+        /// Part `index` of an object framed in place, `stored` its stored bytes, its raw file's XTS
+        /// sectors under `key`, tagged ([`ObjectKey::sectors`]).
+        pub fn of(index: u64, stored: &[u8], key: &ObjectKey) -> Self {
+            let tag = key.tag_sectors(index, stored);
+            Self { len: stored.len() as u64, crc: crc(stored), tag }
+        }
+    }
+
+    /// cladefs: packs parts of an object's data one at a time, as [`Packer::push`] packs each: so that
+    /// a cell packs a segment's parts on threads of its own, each part read there, rather than all its
+    /// data read on one thread first (TASK-336).
+    pub struct PartPacker {
+        /// None at level 0, which stores parts raw.
+        compressor: Option<zstd::bulk::Compressor<'static>>,
+    }
+
+    impl Default for PartPacker {
+        fn default() -> Self {
+            let compressor = (level() != 0)
+                .then(|| zstd::bulk::Compressor::new(level()).expect("zstd makes a compressor"));
+            Self { compressor }
+        }
+    }
+
+    impl PartPacker {
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        /// `part`, part `index` of an object's data, packed, as [`Packer::push`] packs it: encrypted
+        /// under `key`, its object's ([`Packer::key`]), if it is encrypted (TASK-411.2); cladefs:
+        /// tagged under it, if it is authenticated (TASK-411.3).
+        pub fn pack(&mut self, index: u64, part: &[u8], key: &ObjectKey) -> PackedPart {
+            let (encoding, compressed) = self.compressed(part);
+            let len = part.len() as u64;
+            let (stored, tag) = match key.keyed {
+                Keyed::Encrypted => {
+                    let mut stored = compressed.unwrap_or_else(|| part.to_vec());
+                    let tag = key.encrypt_part(index, encoding, len, &mut stored);
+                    (Some(stored), tag)
+                }
+                Keyed::Authenticated => {
+                    let tag =
+                        key.tag_part(index, encoding, len, compressed.as_deref().unwrap_or(part));
+                    (compressed, tag)
+                }
+                Keyed::Sectors => unreachable!("a raw file's sectors are framed in place"),
+            };
+            let crc = crc(stored.as_deref().unwrap_or(part));
+            PackedPart { index, encoding, stored, crc, tag, keyed: Some(key.keyed) }
+        }
+
+        /// cladefs: `part`, part `index` of an object's data, compressed alone, in memory, as
+        /// [`PartPacker::pack`] would compress it: what a cell holds of a part packed ahead of its
+        /// framing, encrypted only once that draws its object's key ([`PackedPart::encrypted`],
+        /// TASK-421). No object takes it as it is.
+        pub fn compress(&mut self, index: u64, part: &[u8]) -> PackedPart {
+            let (encoding, stored) = self.compressed(part);
+            let crc = crc(stored.as_deref().unwrap_or(part));
+            PackedPart { index, encoding, stored, crc, tag: [0; TAG_LEN], keyed: None }
+        }
+
+        /// How `part` is stored, and its bytes compressed, if compressing shrinks it.
+        fn compressed(&mut self, part: &[u8]) -> (Encoding, Option<Vec<u8>>) {
+            let compressed =
+                self.compressor.as_mut().and_then(|compressor| pack_part(part, compressor));
+            let encoding = if compressed.is_some() { Encoding::Zstd } else { Encoding::Raw };
+            (encoding, compressed)
+        }
+
+        /// cladefs: the bytes `part`, a part of an object's data, or a piece of one, is stored in:
+        /// compressed, or raw if that is no smaller. What a cell samples a segment's parts by, to tell
+        /// whether compressing them is worth writing it again (TASK-310). Encryption adds no byte.
+        pub fn packed_len(&mut self, part: &[u8]) -> u64 {
+            let compressor = self.compressor.as_mut();
+            let packed = compressor.and_then(|compressor| pack_part(part, compressor));
+            packed.map_or(part.len(), |packed| packed.len()) as u64
+        }
+    }
+
+    /// cladefs: [`PartPacker::packed_len`], with a packer of its own (TASK-310).
+    pub fn packed_len(part: &[u8]) -> u64 {
+        PartPacker::new().packed_len(part)
+    }
+
+    /// `data`'s parts, packed, the first part `first` of its object, under `key`, its object's: on
+    /// threads of their own if there are several.
+    fn pack_parts(data: &[u8], first: u64, key: &ObjectKey) -> Vec<PackedPart> {
+        let parts: Vec<&[u8]> = data.chunks(PART as usize).collect();
+        let threads = std::thread::available_parallelism()
+            .map_or(1, |threads| threads.get())
+            .min(parts.len());
+        let pack = |first: u64, parts: &[&[u8]]| {
+            let mut packer = PartPacker::new();
+            let parts = parts.iter().zip(first..);
+            parts.map(|(part, index)| packer.pack(index, part, key)).collect::<Vec<_>>()
         };
-        let crc = crc(stored.as_deref().unwrap_or(part));
-        PackedPart { index, encoding, stored, crc, tag, keyed: Some(key.keyed) }
+        if threads <= 1 {
+            return pack(first, &parts);
+        }
+        let each = parts.len().div_ceil(threads);
+        std::thread::scope(|scope| {
+            let packing: Vec<_> = (parts.chunks(each).zip((first..).step_by(each)))
+                .map(|(parts, first)| scope.spawn(move || pack(first, parts)))
+                .collect();
+            packing.into_iter().flat_map(|thread| thread.join().unwrap()).collect()
+        })
     }
 
-    /// cladefs: `part`, part `index` of an object's data, compressed alone, in memory, as
-    /// [`PartPacker::pack`] would compress it: what a cell holds of a part packed ahead of its
-    /// framing, encrypted only once that draws its object's key ([`PackedPart::encrypted`],
-    /// TASK-421). No object takes it as it is.
-    pub fn compress(&mut self, index: u64, part: &[u8]) -> PackedPart {
-        let (encoding, stored) = self.compressed(part);
-        let crc = crc(stored.as_deref().unwrap_or(part));
-        PackedPart { index, encoding, stored, crc, tag: [0; TAG_LEN], keyed: None }
+    /// Frames an object written front to back: its parts, given in order, then its footer.
+    #[derive(Debug)]
+    pub struct Packer {
+        pub(super) stored: Vec<Stored>,
+        pub(super) tags: Vec<Tag>,
+        pub(super) data_len: u64,
+        /// The bytes of the object so far.
+        pub(super) end: u64,
+        /// cladefs: its subkeys (TASK-411.2).
+        pub(super) key: Arc<ObjectKey>,
     }
 
-    /// How `part` is stored, and its bytes compressed, if compressing shrinks it.
-    fn compressed(&mut self, part: &[u8]) -> (Encoding, Option<Vec<u8>>) {
-        let compressed =
-            self.compressor.as_mut().and_then(|compressor| pack_part(part, compressor));
-        let encoding = if compressed.is_some() { Encoding::Zstd } else { Encoding::Raw };
-        (encoding, compressed)
-    }
+    impl Packer {
+        /// A packer of an object encrypted, given its cell's DEK and which it is, `encrypt`, under
+        /// subkeys of the DEK from a salt drawn for it alone (TASK-411.2).
+        pub fn new((dek, id): (&Secret, KeyId)) -> Self {
+            Self::keyed((dek, id, Keyed::Encrypted))
+        }
 
-    /// cladefs: the bytes `part`, a part of an object's data, or a piece of one, is stored in:
-    /// compressed, or raw if that is no smaller. What a cell samples a segment's parts by, to tell
-    /// whether compressing them is worth writing it again (TASK-310). Encryption adds no byte.
-    pub fn packed_len(&mut self, part: &[u8]) -> u64 {
-        let compressor = self.compressor.as_mut();
-        let packed = compressor.and_then(|compressor| pack_part(part, compressor));
-        packed.map_or(part.len(), |packed| packed.len()) as u64
-    }
-}
+        /// cladefs: a packer of an object, given its cell's DEK, which it is, and how, `keyed` under
+        /// subkeys of the DEK from a salt drawn for it alone: encrypted, or authenticated alone
+        /// (TASK-411.3).
+        pub fn keyed((dek, id, keyed): (&Secret, KeyId, Keyed)) -> Self {
+            assert_ne!(keyed, Keyed::Sectors, "a raw file's sectors are framed in place");
+            Self::with(Arc::new(ObjectKey::new(dek, id, Salt::random(), keyed)))
+        }
 
-/// cladefs: [`PartPacker::packed_len`], with a packer of its own (TASK-310).
-pub fn packed_len(part: &[u8]) -> u64 {
-    PartPacker::new().packed_len(part)
-}
+        /// cladefs: a packer of an object framed in place, its parts raw ([`Packer::push_raw_parts`]),
+        /// from a cell's raw file, whose sectors `key` encrypted ([`ObjectKey::sectors`]): the
+        /// object's parts are those sectors, as they are (TASK-411.23).
+        pub fn in_place(key: Arc<ObjectKey>) -> Self {
+            assert_eq!(key.keyed, Keyed::Sectors, "framed in place under a raw file's sectors key");
+            Self::with(key)
+        }
 
-/// `data`'s parts, packed, the first part `first` of its object, under `key`, its object's: on
-/// threads of their own if there are several.
-fn pack_parts(data: &[u8], first: u64, key: &ObjectKey) -> Vec<PackedPart> {
-    let parts: Vec<&[u8]> = data.chunks(PART as usize).collect();
-    let threads =
-        std::thread::available_parallelism().map_or(1, |threads| threads.get()).min(parts.len());
-    let pack = |first: u64, parts: &[&[u8]]| {
-        let mut packer = PartPacker::new();
-        let parts = parts.iter().zip(first..);
-        parts.map(|(part, index)| packer.pack(index, part, key)).collect::<Vec<_>>()
-    };
-    if threads <= 1 {
-        return pack(first, &parts);
-    }
-    let each = parts.len().div_ceil(threads);
-    std::thread::scope(|scope| {
-        let packing: Vec<_> = (parts.chunks(each).zip((first..).step_by(each)))
-            .map(|(parts, first)| scope.spawn(move || pack(first, parts)))
-            .collect();
-        packing.into_iter().flat_map(|thread| thread.join().unwrap()).collect()
-    })
-}
+        pub(super) fn with(key: Arc<ObjectKey>) -> Self {
+            Self { stored: Vec::new(), tags: Vec::new(), data_len: 0, end: 0, key }
+        }
 
-/// Frames an object written front to back: its parts, given in order, then its footer.
-#[derive(Debug)]
-pub struct Packer {
-    stored: Vec<Stored>,
-    tags: Vec<Tag>,
-    data_len: u64,
-    /// The bytes of the object so far.
-    end: u64,
-    /// cladefs: its subkeys (TASK-411.2).
-    key: Arc<ObjectKey>,
-}
+        /// The bytes of the object so far.
+        pub fn end(&self) -> u64 {
+            self.end
+        }
 
-impl Packer {
-    /// A packer of an object encrypted, given its cell's DEK and which it is, `encrypt`, under
-    /// subkeys of the DEK from a salt drawn for it alone (TASK-411.2).
-    pub fn new((dek, id): (&Secret, KeyId)) -> Self {
-        Self::keyed((dek, id, Keyed::Encrypted))
-    }
+        /// cladefs: its subkeys: what the threads that pack its parts encrypt them under
+        /// ([`PartPacker::pack`], TASK-411.2).
+        pub fn key(&self) -> &ObjectKey {
+            &self.key
+        }
 
-    /// cladefs: a packer of an object, given its cell's DEK, which it is, and how, `keyed` under
-    /// subkeys of the DEK from a salt drawn for it alone: encrypted, or authenticated alone
-    /// (TASK-411.3).
-    pub fn keyed((dek, id, keyed): (&Secret, KeyId, Keyed)) -> Self {
-        assert_ne!(keyed, Keyed::Sectors, "a raw file's sectors are framed in place");
-        Self::with(Arc::new(ObjectKey::new(dek, id, Salt::random(), keyed)))
-    }
+        /// cladefs: how the object is encrypted, as its trailer will say (TASK-411.2).
+        pub fn encryption(&self) -> Encryption {
+            self.key.encryption()
+        }
 
-    /// cladefs: a packer of an object framed in place, its parts raw ([`Packer::push_raw_parts`]),
-    /// from a cell's raw file, whose sectors `key` encrypted ([`ObjectKey::sectors`]): the
-    /// object's parts are those sectors, as they are (TASK-411.23).
-    pub fn in_place(key: Arc<ObjectKey>) -> Self {
-        assert_eq!(key.keyed, Keyed::Sectors, "framed in place under a raw file's sectors key");
-        Self::with(key)
-    }
+        /// cladefs: the index of the object's next part (TASK-411.2).
+        pub fn next_part(&self) -> u64 {
+            self.stored.len() as u64
+        }
 
-    fn with(key: Arc<ObjectKey>) -> Self {
-        Self { stored: Vec::new(), tags: Vec::new(), data_len: 0, end: 0, key }
-    }
+        /// cladefs: whether every part so far is stored raw, none compressing: what an object framed in
+        /// place holds, raw (TASK-310, TASK-411.23).
+        pub fn stored_raw(&self) -> bool {
+            self.stored.iter().all(|stored| stored.encoding == Encoding::Raw)
+        }
 
-    /// The bytes of the object so far.
-    pub fn end(&self) -> u64 {
-        self.end
-    }
+        /// cladefs: its key, of an object framed in place, raw: a raw file's sectors key
+        /// ([`Packer::in_place`]).
+        fn raw_key(&self) -> &ObjectKey {
+            assert_eq!(
+                self.key.keyed,
+                Keyed::Sectors,
+                "an encrypted object's bytes are not its data"
+            );
+            &self.key
+        }
 
-    /// cladefs: its subkeys: what the threads that pack its parts encrypt them under
-    /// ([`PartPacker::pack`], TASK-411.2).
-    pub fn key(&self) -> &ObjectKey {
-        &self.key
-    }
+        /// cladefs: packs the object's first parts as stored, each raw, compressing none, given by
+        /// their lengths, CRCs and tags ([`RawPart::of`]), as a cell reads and checksums them on
+        /// threads of its own (TASK-336): of an object framed in place ([`Packer::in_place`]), a raw
+        /// file's sectors, their ciphertext, each part tagged (TASK-411.23).
+        pub fn push_raw_parts(&mut self, parts: impl IntoIterator<Item = RawPart>) {
+            assert_eq!(self.end, 0, "raw parts first");
+            self.raw_key();
+            for RawPart { len, crc, tag } in parts {
+                assert!(self.data_len.is_multiple_of(PART), "parts follow a part cut short");
+                let whole = len.is_multiple_of(SECTOR as u64);
+                assert!(whole, "a part of a raw file's sectors, {len} bytes, is whole sectors");
+                let offset = self.end;
+                self.stored.push(Stored { offset, len, crc, encoding: Encoding::Raw });
+                self.tags.push(tag);
+                self.data_len += len;
+                self.end += len;
+            }
+        }
 
-    /// cladefs: how the object is encrypted, as its trailer will say (TASK-411.2).
-    pub fn encryption(&self) -> Encryption {
-        self.key.encryption()
-    }
+        /// Packs `data`, the object's next parts: whole parts, but for the object's last. Returns the
+        /// object's next bytes, which follow those returned before.
+        pub fn push(&mut self, data: &[u8]) -> Vec<u8> {
+            let mut bytes = Vec::new();
+            let packed = pack_parts(data, self.next_part(), self.key());
+            for (part, packed) in data.chunks(PART as usize).zip(packed) {
+                self.push_part(&mut bytes, part, &packed);
+            }
+            bytes
+        }
 
-    /// cladefs: the index of the object's next part (TASK-411.2).
-    pub fn next_part(&self) -> u64 {
-        self.stored.len() as u64
-    }
+        /// cladefs: packs `part`, the object's next part, as `packed`, [`PartPacker::pack`]'s of it,
+        /// says, appending the object's next bytes to `bytes` (TASK-336). A whole part, but for the
+        /// object's last; packed as the object's next, encrypted under its key if it is encrypted.
+        pub fn push_part(&mut self, bytes: &mut Vec<u8>, part: &[u8], packed: &PackedPart) {
+            self.push_stored(bytes, part.len() as u64, packed.stored(part), packed);
+        }
 
-    /// cladefs: whether every part so far is stored raw, none compressing: what an object framed in
-    /// place holds, raw (TASK-310, TASK-411.23).
-    pub fn stored_raw(&self) -> bool {
-        self.stored.iter().all(|stored| stored.encoding == Encoding::Raw)
-    }
-
-    /// cladefs: its key, of an object framed in place, raw: a raw file's sectors key
-    /// ([`Packer::in_place`]).
-    fn raw_key(&self) -> &ObjectKey {
-        assert_eq!(self.key.keyed, Keyed::Sectors, "an encrypted object's bytes are not its data");
-        &self.key
-    }
-
-    /// cladefs: packs the object's first parts as stored, each raw, compressing none, given by
-    /// their lengths, CRCs and tags ([`RawPart::of`]), as a cell reads and checksums them on
-    /// threads of its own (TASK-336): of an object framed in place ([`Packer::in_place`]), a raw
-    /// file's sectors, their ciphertext, each part tagged (TASK-411.23).
-    pub fn push_raw_parts(&mut self, parts: impl IntoIterator<Item = RawPart>) {
-        assert_eq!(self.end, 0, "raw parts first");
-        self.raw_key();
-        for RawPart { len, crc, tag } in parts {
+        /// cladefs: [`Packer::push_part`], of a part of `len` bytes of data given by its bytes as
+        /// stored, `stored`: compressed or encrypted if `packed` is, else the part's own. So that a
+        /// cell packs a part as its segment fills, and holds it compressed, its data gone, until the
+        /// segment's framing (TASK-400).
+        pub fn push_stored(
+            &mut self,
+            bytes: &mut Vec<u8>,
+            len: u64,
+            stored: &[u8],
+            packed: &PackedPart,
+        ) {
             assert!(self.data_len.is_multiple_of(PART), "parts follow a part cut short");
-            let whole = len.is_multiple_of(SECTOR as u64);
-            assert!(whole, "a part of a raw file's sectors, {len} bytes, is whole sectors");
-            let offset = self.end;
-            self.stored.push(Stored { offset, len, crc, encoding: Encoding::Raw });
-            self.tags.push(tag);
+            assert_eq!(packed.index, self.next_part(), "a part packed as the object's next");
+            assert_eq!(packed.keyed, Some(self.key.keyed), "a part encrypted as its object is");
+            match &packed.stored {
+                Some(packed) => debug_assert!(packed[..] == *stored, "a part packed, stored so"),
+                None => assert_eq!(stored.len() as u64, len, "a raw part, stored as it is"),
+            }
+            let offset = self.end.next_multiple_of(ALIGN);
+            bytes.resize(bytes.len() + (offset - self.end) as usize, 0);
+            bytes.extend_from_slice(stored);
+            let stored_len = stored.len() as u64;
+            let encoding = packed.encoding;
+            self.stored.push(Stored { offset, len: stored_len, crc: packed.crc, encoding });
+            self.tags.push(packed.tag);
             self.data_len += len;
-            self.end += len;
+            self.end = offset + stored_len;
+        }
+
+        /// The object's last bytes, which follow those [`Packer::push`] returned: `footer`, the table,
+        /// and the trailer.
+        pub fn finish(self, footer: &[u8]) -> Vec<u8> {
+            self.finish_parts(footer).0
+        }
+
+        /// cladefs: [`Packer::finish`]'s bytes, and the object's parts, as its writer reads them:
+        /// opened under its key, which its writer holds, needing no [`Keys`] to find it (TASK-411.2).
+        pub fn finish_parts(self, footer: &[u8]) -> (Vec<u8>, Parts) {
+            let table = Table { stored: &self.stored, tags: &self.tags };
+            let tail = tail(table, self.data_len, self.end, footer, &self.key);
+            let frame = Frame::of_trailer(&tail).expect("a trailer as packed");
+            let opening = Opening::Open(self.key);
+            (tail, Parts { frame, stored: self.stored, tags: self.tags, opening })
         }
     }
 
-    /// Packs `data`, the object's next parts: whole parts, but for the object's last. Returns the
-    /// object's next bytes, which follow those returned before.
-    pub fn push(&mut self, data: &[u8]) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        let packed = pack_parts(data, self.next_part(), self.key());
-        for (part, packed) in data.chunks(PART as usize).zip(packed) {
-            self.push_part(&mut bytes, part, &packed);
+    /// An object's table: where its parts are stored, and their tags.
+    #[derive(Clone, Copy)]
+    struct Table<'a> {
+        stored: &'a [Stored],
+        tags: &'a [Tag],
+    }
+
+    /// The last bytes of an object of `data_len` bytes of data, whose parts are as `table` says, ending
+    /// at `end`, encrypted under `key`: `footer`, the table, and the trailer.
+    fn tail(table: Table<'_>, data_len: u64, end: u64, footer: &[u8], key: &ObjectKey) -> Vec<u8> {
+        let mut bytes = footer.to_vec();
+        let start = bytes.len();
+        for (stored, tag) in table.stored.iter().zip(table.tags) {
+            bytes.extend_from_slice(&stored.offset.to_le_bytes());
+            bytes.extend_from_slice(&(stored.len as u32).to_le_bytes());
+            bytes.extend_from_slice(&stored.crc.to_le_bytes());
+            bytes.push(stored.encoding.byte());
+            bytes.extend_from_slice(tag);
         }
+        bytes.extend_from_slice(&data_len.to_le_bytes());
+        bytes.extend_from_slice(&end.to_le_bytes());
+        bytes.extend_from_slice(&(footer.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&crc(footer).to_le_bytes());
+        let mut encryption = [0; ENCRYPTION_LEN];
+        encryption[0] = match key.keyed {
+            Keyed::Encrypted => 1,
+            Keyed::Authenticated => 2,
+            Keyed::Sectors => 3,
+        };
+        encryption[1..9].copy_from_slice(&key.id.cell.to_le_bytes());
+        encryption[9..13].copy_from_slice(&key.id.generation.to_le_bytes());
+        encryption[13..].copy_from_slice(&key.salt.0);
+        bytes.extend_from_slice(&encryption);
+        bytes.extend_from_slice(&key.mac.mac(footer));
+        // The table's MAC covers the trailer before it, the footer's MAC, the encryption, the lengths,
+        // and the version, which is after it: so that no version is read as another.
+        let version = FORMAT.current.to_le_bytes();
+        let mac = key.mac.mac_of(&[&bytes[start..], &version]);
+        bytes.extend_from_slice(&mac);
+        // And its CRC, the MAC too.
+        bytes.extend_from_slice(&crc(&bytes[start..]).to_le_bytes());
+        bytes.extend_from_slice(&version);
+        bytes.extend_from_slice(&MAGIC);
         bytes
     }
 
-    /// cladefs: packs `part`, the object's next part, as `packed`, [`PartPacker::pack`]'s of it,
-    /// says, appending the object's next bytes to `bytes` (TASK-336). A whole part, but for the
-    /// object's last; packed as the object's next, encrypted under its key if it is encrypted.
-    pub fn push_part(&mut self, bytes: &mut Vec<u8>, part: &[u8], packed: &PackedPart) {
-        self.push_stored(bytes, part.len() as u64, packed.stored(part), packed);
+    /// cladefs: the whole object `object`, of `footer` in place of its own: its parts as they are,
+    /// stored where they are, then a tail anew, so that its data reads as it did, nothing unpacked or
+    /// packed again. What a host's write-ahead log uploads of a segment its writer's chain stamped anew
+    /// after a takeover (doc-14, Opening a store; TASK-165.9). Fails if `object` is not a whole object.
+    /// An encrypted object's new footer and table are authenticated under its own subkeys, from its
+    /// salt, which its parts stay encrypted under: so `keys` must hold its DEK, its table checked
+    /// against its MAC first, or it fails ([`Error::NoKey`], TASK-411.2); cladefs: an authenticated
+    /// one's alike (TASK-411.3).
+    pub fn restamp(object: &[u8], footer: &[u8], keys: &dyn Keys) -> Result<Vec<u8>, Error> {
+        let parts = Parts::of(object, keys)?;
+        let key = match &parts.opening {
+            Opening::Locked(key) | Opening::Unchecked(key) => return Err(Error::NoKey(*key)),
+            Opening::Open(key) => key,
+        };
+        let (frame, table) = (parts.frame, Table { stored: &parts.stored, tags: &parts.tags });
+        let mut bytes = object[..frame.stored_len as usize].to_vec();
+        bytes.extend_from_slice(&tail(table, frame.data_len, frame.stored_len, footer, key));
+        Ok(bytes)
     }
 
-    /// cladefs: [`Packer::push_part`], of a part of `len` bytes of data given by its bytes as
-    /// stored, `stored`: compressed or encrypted if `packed` is, else the part's own. So that a
-    /// cell packs a part as its segment fills, and holds it compressed, its data gone, until the
-    /// segment's framing (TASK-400).
-    pub fn push_stored(
-        &mut self,
-        bytes: &mut Vec<u8>,
-        len: u64,
-        stored: &[u8],
-        packed: &PackedPart,
-    ) {
-        assert!(self.data_len.is_multiple_of(PART), "parts follow a part cut short");
-        assert_eq!(packed.index, self.next_part(), "a part packed as the object's next");
-        assert_eq!(packed.keyed, Some(self.key.keyed), "a part encrypted as its object is");
-        match &packed.stored {
-            Some(packed) => debug_assert!(packed[..] == *stored, "a part packed, stored so"),
-            None => assert_eq!(stored.len() as u64, len, "a raw part, stored as it is"),
-        }
-        let offset = self.end.next_multiple_of(ALIGN);
-        bytes.resize(bytes.len() + (offset - self.end) as usize, 0);
-        bytes.extend_from_slice(stored);
-        let stored_len = stored.len() as u64;
-        let encoding = packed.encoding;
-        self.stored.push(Stored { offset, len: stored_len, crc: packed.crc, encoding });
-        self.tags.push(packed.tag);
-        self.data_len += len;
-        self.end = offset + stored_len;
+    /// The bytes of an object of `data` and `footer`, encrypted under the DEK `encrypt` gives, and
+    /// which it is ([`Packer::new`]).
+    pub fn framed(data: &[u8], footer: &[u8], (dek, id): (&Secret, KeyId)) -> Vec<u8> {
+        framed_keyed(data, footer, (dek, id, Keyed::Encrypted))
     }
 
-    /// The object's last bytes, which follow those [`Packer::push`] returned: `footer`, the table,
-    /// and the trailer.
-    pub fn finish(self, footer: &[u8]) -> Vec<u8> {
-        self.finish_parts(footer).0
-    }
-
-    /// cladefs: [`Packer::finish`]'s bytes, and the object's parts, as its writer reads them:
-    /// opened under its key, which its writer holds, needing no [`Keys`] to find it (TASK-411.2).
-    pub fn finish_parts(self, footer: &[u8]) -> (Vec<u8>, Parts) {
-        let table = Table { stored: &self.stored, tags: &self.tags };
-        let tail = tail(table, self.data_len, self.end, footer, &self.key);
-        let frame = Frame::of_trailer(&tail).expect("a trailer as packed");
-        let opening = Opening::Open(self.key);
-        (tail, Parts { frame, stored: self.stored, tags: self.tags, opening })
+    /// cladefs: the bytes of an object of `data` and `footer`, keyed as `keyed` says: under its DEK,
+    /// which it is, and how ([`Packer::keyed`], TASK-411.3).
+    pub fn framed_keyed(data: &[u8], footer: &[u8], keyed: (&Secret, KeyId, Keyed)) -> Vec<u8> {
+        let mut packer = Packer::keyed(keyed);
+        let mut bytes = packer.push(data);
+        bytes.extend_from_slice(&packer.finish(footer));
+        bytes
     }
 }
 
-/// An object's table: where its parts are stored, and their tags.
-#[derive(Clone, Copy)]
-struct Table<'a> {
-    stored: &'a [Stored],
-    tags: &'a [Tag],
-}
-
-/// The last bytes of an object of `data_len` bytes of data, whose parts are as `table` says, ending
-/// at `end`, encrypted under `key`: `footer`, the table, and the trailer.
-fn tail(table: Table<'_>, data_len: u64, end: u64, footer: &[u8], key: &ObjectKey) -> Vec<u8> {
-    let mut bytes = footer.to_vec();
-    let start = bytes.len();
-    for (stored, tag) in table.stored.iter().zip(table.tags) {
-        bytes.extend_from_slice(&stored.offset.to_le_bytes());
-        bytes.extend_from_slice(&(stored.len as u32).to_le_bytes());
-        bytes.extend_from_slice(&stored.crc.to_le_bytes());
-        bytes.push(stored.encoding.byte());
-        bytes.extend_from_slice(tag);
-    }
-    bytes.extend_from_slice(&data_len.to_le_bytes());
-    bytes.extend_from_slice(&end.to_le_bytes());
-    bytes.extend_from_slice(&(footer.len() as u64).to_le_bytes());
-    bytes.extend_from_slice(&crc(footer).to_le_bytes());
-    let mut encryption = [0; ENCRYPTION_LEN];
-    encryption[0] = match key.keyed {
-        Keyed::Encrypted => 1,
-        Keyed::Authenticated => 2,
-        Keyed::Sectors => 3,
-    };
-    encryption[1..9].copy_from_slice(&key.id.cell.to_le_bytes());
-    encryption[9..13].copy_from_slice(&key.id.generation.to_le_bytes());
-    encryption[13..].copy_from_slice(&key.salt.0);
-    bytes.extend_from_slice(&encryption);
-    bytes.extend_from_slice(&key.mac.mac(footer));
-    // The table's MAC covers the trailer before it, the footer's MAC, the encryption, the lengths,
-    // and the version, which is after it: so that no version is read as another.
-    let version = FORMAT.current.to_le_bytes();
-    let mac = key.mac.mac_of(&[&bytes[start..], &version]);
-    bytes.extend_from_slice(&mac);
-    // And its CRC, the MAC too.
-    bytes.extend_from_slice(&crc(&bytes[start..]).to_le_bytes());
-    bytes.extend_from_slice(&version);
-    bytes.extend_from_slice(&MAGIC);
-    bytes
-}
-
-/// cladefs: the whole object `object`, of `footer` in place of its own: its parts as they are,
-/// stored where they are, then a tail anew, so that its data reads as it did, nothing unpacked or
-/// packed again. What a host's write-ahead log uploads of a segment its writer's chain stamped anew
-/// after a takeover (doc-14, Opening a store; TASK-165.9). Fails if `object` is not a whole object.
-/// An encrypted object's new footer and table are authenticated under its own subkeys, from its
-/// salt, which its parts stay encrypted under: so `keys` must hold its DEK, its table checked
-/// against its MAC first, or it fails ([`Error::NoKey`], TASK-411.2); cladefs: an authenticated
-/// one's alike (TASK-411.3).
-pub fn restamp(object: &[u8], footer: &[u8], keys: &dyn Keys) -> Result<Vec<u8>, Error> {
-    let parts = Parts::of(object, keys)?;
-    let key = match &parts.opening {
-        Opening::Locked(key) | Opening::Unchecked(key) => return Err(Error::NoKey(*key)),
-        Opening::Open(key) => key,
-    };
-    let (frame, table) = (parts.frame, Table { stored: &parts.stored, tags: &parts.tags });
-    let mut bytes = object[..frame.stored_len as usize].to_vec();
-    bytes.extend_from_slice(&tail(table, frame.data_len, frame.stored_len, footer, key));
-    Ok(bytes)
-}
-
-/// The bytes of an object of `data` and `footer`, encrypted under the DEK `encrypt` gives, and
-/// which it is ([`Packer::new`]).
-pub fn framed(data: &[u8], footer: &[u8], (dek, id): (&Secret, KeyId)) -> Vec<u8> {
-    framed_keyed(data, footer, (dek, id, Keyed::Encrypted))
-}
-
-/// cladefs: the bytes of an object of `data` and `footer`, keyed as `keyed` says: under its DEK,
-/// which it is, and how ([`Packer::keyed`], TASK-411.3).
-pub fn framed_keyed(data: &[u8], footer: &[u8], keyed: (&Secret, KeyId, Keyed)) -> Vec<u8> {
-    let mut packer = Packer::keyed(keyed);
-    let mut bytes = packer.push(data);
-    bytes.extend_from_slice(&packer.finish(footer));
-    bytes
-}
+#[cfg(feature = "crypto")]
+pub use packing::{
+    PackedPart, Packer, PartPacker, RawPart, framed, framed_keyed, packed_len, restamp,
+};
 
 /// Where the pieces of an object [`framed`] are, as its trailer says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1321,9 +1463,12 @@ impl Frame {
         if bytes.len() as u64 != self.footer_len || crc(bytes) != self.footer_crc {
             return Err(corrupt("footer, by its CRC"));
         }
+        #[cfg(feature = "crypto")]
         if let Some(key) = opening.key() {
             key.mac.verify(bytes, &self.footer_mac).map_err(|_| corrupt("footer, by its MAC"))?;
         }
+        #[cfg(not(feature = "crypto"))]
+        let _ = opening;
         Ok(bytes)
     }
 
@@ -1409,8 +1554,10 @@ impl Parts {
     }
 
     fn in_suffix(frame: Frame, suffix: &[u8], keys: &dyn Keys) -> Result<Self, Error> {
+        #[allow(unused_variables)]
         let (stored, tags, table) = frame.stored_in(suffix)?;
         let opening = Opening::of(frame.encryption, keys)?;
+        #[cfg(feature = "crypto")]
         if let Some(key) = opening.key() {
             let trailer = suffix.len() - TRAILER as usize;
             let authenticated =
@@ -1512,7 +1659,7 @@ pub fn footer<'a>(bytes: &'a [u8], keys: &dyn Keys) -> Result<&'a [u8], Error> {
     Ok(parts.check_footer(&bytes[footer.start as usize..footer.end as usize])?)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "crypto"))]
 mod tests {
     use super::*;
     use std::cell::RefCell;
@@ -2607,6 +2754,50 @@ mod tests {
         assert_eq!(stored_in(vec![zstd(0, 40), zstd(4097, 100)]), place);
         assert_eq!(stored_in(vec![zstd(0, 40), zstd(0, 100)]), place);
         assert_eq!(stored_in(vec![zstd(0, 40), zstd(8192, 8192 - 1)]), place);
+    }
+
+    /// cladefs: the pure-Rust Castagnoli CRC32C used in keyless `wasm32` builds matches
+    /// `crc_fast` across edge lengths and arbitrary incremental splits.
+    #[test]
+    fn pure_crc32c_matches_crc_fast() {
+        for len in [0usize, 1, 2, 7, 15, 63, 64, 65, 1024, 4096, 65536] {
+            let data = random(len as u64);
+            let fast = crc(&data);
+            let pure = !crc32c_pure_update(!0u32, &data);
+            assert_eq!(pure, fast, "whole length {len}");
+
+            let mut state = !0u32;
+            let mut offset = 0;
+            for step in [1usize, 3, 7, 13, 29, 64, 511, 4097] {
+                if offset >= data.len() {
+                    break;
+                }
+                let end = (offset + step).min(data.len());
+                state = crc32c_pure_update(state, &data[offset..end]);
+                offset = end;
+            }
+            if offset < data.len() {
+                state = crc32c_pure_update(state, &data[offset..]);
+            }
+            assert_eq!(!state, fast, "incremental length {len}");
+        }
+    }
+
+    /// cladefs: the pure-Rust zstd decoder (`ruzstd`) matches C `zstd` decompression and rejects
+    /// wrong output lengths.
+    #[cfg(feature = "pure-zstd")]
+    #[test]
+    fn pure_zstd_matches_c_zstd() {
+        let data = pattern(PART);
+        let compressed = zstd::bulk::compress(&data, 3).unwrap();
+        let mut out = vec![0u8; data.len()];
+        decode_zstd_pure(&compressed, &mut out).unwrap();
+        assert_eq!(out, data);
+
+        let mut short = vec![0u8; data.len() - 1];
+        assert!(decode_zstd_pure(&compressed, &mut short).is_err());
+        let mut long = vec![0u8; data.len() + 1];
+        assert!(decode_zstd_pure(&compressed, &mut long).is_err());
     }
 
     #[test]

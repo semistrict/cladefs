@@ -11,26 +11,26 @@ publish = false
 base32_id.workspace = true
 # cladefs: AES-256-XTS for raw files, which aws-lc-rs has not (TASK-411.5): Fuchsia's storage_xts
 # (BSD-3-Clause) over RustCrypto's aes (MIT OR Apache-2.0), its key schedules zeroed on drop.
-aes = { workspace = true, features = ["zeroize"] }
-aws-lc-rs.workspace = true
+aes = { workspace = true, features = ["zeroize"], optional = true }
+aws-lc-rs = { workspace = true, optional = true }
 # cladefs: aws-lc's EVP interface, which aws-lc-rs builds on already, for AES-256-GCM's tag of
 # associated data given a piece at a time (`Aead::tag`, board 10553), which aws-lc-rs takes whole.
-aws-lc-sys.workspace = true
+aws-lc-sys = { workspace = true, optional = true }
 # cladefs: atexit(3), which stops random draws as the process exits (src/random.rs, TASK-650).
 formats.workspace = true
 fprint.workspace = true
-libc.workspace = true
+libc = { workspace = true, optional = true }
 # cladefs: AWS KMS (kms/aws.rs, TASK-411.17), its calls on the shared KMS runtime.
-aws-config.workspace = true
-aws-sdk-kms.workspace = true
+aws-config = { workspace = true, optional = true }
+aws-sdk-kms = { workspace = true, optional = true }
 # cladefs: OpenBao's Transit engine as a KMS (TASK-411.16), over HTTP(S): reqwest (MIT OR
 # Apache-2.0) with rustls (Apache-2.0 OR ISC OR MIT) over aws-lc-rs, the system's roots verified by
 # rustls-platform-verifier (MIT OR Apache-2.0); on the shared KMS runtime (tokio, MIT); its
 # requests and replies JSON (serde_json, MIT OR Apache-2.0) holding base64 (MIT OR Apache-2.0),
 # their bodies' buffers zeroed (bytes, MIT), its URL parsed by url (MIT OR Apache-2.0). Each is in
 # the build already, through object_store and bucket_cell.
-base64.workspace = true
-bytes = "1.12.1"
+base64 = { workspace = true, optional = true }
+bytes = { version = "1.12.1", optional = true }
 # cladefs: Google Cloud KMS's REST API (TASK-411.18), each in the build already through object_store
 # and bucket_cell: reqwest (MIT OR Apache-2.0) over rustls, serde_json (MIT OR Apache-2.0),
 # base64 (MIT OR Apache-2.0), crc-fast's CRC32C (MIT OR Apache-2.0) for its integrity fields,
@@ -39,23 +39,23 @@ bytes = "1.12.1"
 # have them. Azure Key Vault's REST API (kms/azure.rs, TASK-633.6) uses the same crates, no other:
 # reqwest, serde_json, base64, url and tokio, its tokens fetched from Azure's authority or the
 # instance metadata service by hand.
-crc-fast.workspace = true
+crc-fast = { workspace = true, optional = true }
 # cladefs: one fetch of an Azure token shared by every call waiting for it (`Shared`, board 8475):
 # futures (MIT OR Apache-2.0), in the build already.
-futures.workspace = true
-object_store.workspace = true
-reqwest = { version = "0.13.5", default-features = false, features = ["rustls"] }
+futures = { workspace = true, optional = true }
+object_store = { workspace = true, optional = true }
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls"], optional = true }
 serde.workspace = true
-serde_json = "1.0.154"
-storage_xts.workspace = true
+serde_json = { version = "1.0.154", optional = true }
+storage_xts = { workspace = true, optional = true }
 # The `testing` feature's: an OpenBao dev server's files (TASK-411.16).
 tempfile = { workspace = true, optional = true }
 thiserror.workspace = true
 # tokio itself, outside the madsim simulation (doc-24).
-tokio = { version = "=1.53.1", default-features = false, features = ["rt", "rt-multi-thread", "net", "time", "sync"] }
-url.workspace = true
-zerocopy.workspace = true
-zeroize = { workspace = true, features = ["serde"] }
+tokio = { version = "=1.53.1", default-features = false, features = ["rt", "rt-multi-thread", "net", "time", "sync"], optional = true }
+url = { workspace = true, optional = true }
+zerocopy = { workspace = true, optional = true }
+zeroize = { workspace = true, features = ["serde"], optional = true }
 
 [dev-dependencies]
 assert_matches.workspace = true
@@ -68,8 +68,31 @@ tokio = { version = "=1.53.1", default-features = false, features = ["io-util"] 
 workspace = true
 
 [features]
+# cladefs: `default-features = false` exposes only pure data types and constants (`KeyId`, `Salt`,
+# `Wrapped`, `Secret`, `xts::SECTOR`) for keyless wasm32 builds without aws-lc or OS/HTTP deps.
+default = ["crypto"]
+crypto = [
+    "dep:aes",
+    "dep:aws-lc-rs",
+    "dep:aws-lc-sys",
+    "dep:libc",
+    "dep:aws-config",
+    "dep:aws-sdk-kms",
+    "dep:base64",
+    "dep:bytes",
+    "dep:crc-fast",
+    "dep:futures",
+    "dep:object_store",
+    "dep:reqwest",
+    "dep:serde_json",
+    "dep:storage_xts",
+    "dep:tokio",
+    "dep:url",
+    "dep:zerocopy",
+    "dep:zeroize",
+]
 # cladefs: what tests of encryption at rest outside this crate need, as its own have it: a KMS that
 # counts the calls made of it (`testing::Counted`); AWS KMS's emulator (`testing::LocalAwsKms`,
 # TASK-411.17) and an OpenBao dev server (`testing::openbao::DevServer`, TASK-411.16), started for a
 # test.
-testing = ["dep:tempfile"]
+testing = ["crypto", "dep:tempfile"]

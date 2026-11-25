@@ -14,18 +14,30 @@
 // Every unsafe block says why it is sound, other threads included (TASK-444.4).
 #![deny(clippy::undocumented_unsafe_blocks)]
 
+#[cfg(feature = "crypto")]
 use aws_lc_rs::aead::{AES_256_GCM, Aad, LessSafeKey, NONCE_LEN, Nonce, UnboundKey};
+#[cfg(feature = "crypto")]
 use aws_lc_rs::key_wrap::{AES_256, KeyEncryptionKey, KeyWrap};
+#[cfg(feature = "crypto")]
 use aws_lc_rs::{hkdf, hmac};
 use fprint::TypeFingerprint;
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "crypto")]
 use zeroize::Zeroize;
 
+#[cfg(feature = "crypto")]
 pub mod kms;
+#[cfg(feature = "crypto")]
 pub mod random;
+#[cfg(feature = "crypto")]
 pub mod xts;
+#[cfg(not(feature = "crypto"))]
+pub mod xts {
+    /// The bytes of a sector: kept in keyless builds for frame alignment checks.
+    pub const SECTOR: usize = 4096;
+}
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(all(feature = "crypto", any(test, feature = "testing")))]
 pub mod testing;
 
 /// The bytes of a key: AES-256's, HMAC-SHA256's, HKDF-SHA256's output.
@@ -52,8 +64,24 @@ pub struct Unauthentic(pub &'static str);
 /// A secret key of [`KEY_LEN`] bytes: zeroed when dropped, never printed, never serialized, and not
 /// [`Clone`], so that each copy is one someone made on purpose. What leaves memory is a key
 /// [`Wrapped`] by another, or by a KMS.
+#[cfg(feature = "crypto")]
 pub struct Secret(Box<[u8; KEY_LEN]>);
 
+/// Uninhabited placeholder for [`Secret`] in keyless builds (`default-features = false`): no key
+/// can ever be constructed or held, while trait signatures such as `extent_frame::Keys` stay
+/// identical.
+#[cfg(not(feature = "crypto"))]
+pub struct Secret(std::convert::Infallible);
+
+#[cfg(not(feature = "crypto"))]
+impl Secret {
+    /// Unreachable: no `Secret` can ever be constructed in keyless builds.
+    pub fn absurd(&self) -> ! {
+        match self.0 {}
+    }
+}
+
+#[cfg(feature = "crypto")]
 impl Secret {
     /// A new key, from the system's random generator.
     pub fn random() -> Self {
@@ -146,6 +174,7 @@ impl Secret {
     }
 }
 
+#[cfg(feature = "crypto")]
 impl Drop for Secret {
     fn drop(&mut self) {
         self.0.zeroize();
@@ -162,6 +191,7 @@ impl std::fmt::Debug for Secret {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Salt(pub [u8; SALT_LEN]);
 
+#[cfg(feature = "crypto")]
 impl Salt {
     /// A new salt, from the system's random generator.
     pub fn random() -> Self {
@@ -185,12 +215,14 @@ pub struct KeyId {
 
 /// AES-256-GCM under one key, which seals with nonces its user makes unique for it: a subkey's
 /// parts' indices, as each object has a subkey of its own.
+#[cfg(feature = "crypto")]
 pub struct Aead {
     sealing: LessSafeKey,
     /// cladefs: its key, for [`Aead::tag`], which goes through aws-lc's EVP interface.
     key: Secret,
 }
 
+#[cfg(feature = "crypto")]
 impl Aead {
     pub fn new(key: &Secret) -> Self {
         let unbound = UnboundKey::new(&AES_256_GCM, &key.0[..]).expect("a 256-bit AES-GCM key");
@@ -299,6 +331,7 @@ impl Aead {
 }
 
 /// The 96-bit nonce of `nonce`: zeros, then `nonce` big-endian.
+#[cfg(feature = "crypto")]
 fn nonce_bytes(nonce: u64) -> [u8; NONCE_LEN] {
     let mut bytes = [0; NONCE_LEN];
     bytes[NONCE_LEN - 8..].copy_from_slice(&nonce.to_be_bytes());
@@ -306,11 +339,12 @@ fn nonce_bytes(nonce: u64) -> [u8; NONCE_LEN] {
 }
 
 /// [`nonce_bytes`], as aws-lc-rs takes a nonce.
+#[cfg(feature = "crypto")]
 fn nonce_of(nonce: u64) -> Nonce {
     Nonce::assume_unique_for_key(nonce_bytes(nonce))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "crypto"))]
 mod tests {
     use super::*;
 

@@ -10,14 +10,22 @@ publish = false
 [dependencies]
 base32_id.workspace = true
 bincode.workspace = true
-crc-fast.workspace = true
-extent_keys.workspace = true
+crc-fast = { workspace = true, optional = true }
+extent_keys = { path = "../extent_keys", default-features = false }
 formats.workspace = true
 fprint.workspace = true
+ruzstd = { workspace = true, optional = true }
 serde.workspace = true
-storage_device.workspace = true
+storage_device = { path = "../storage_device", default-features = false }
 thiserror.workspace = true
-zstd.workspace = true
+zstd = { workspace = true, optional = true }
+
+[features]
+# cladefs: `default-features = false, features = ["pure-zstd"]` builds keyless framing readers in
+# pure Rust for wasm32 (`gc_wasm`), without C zstd, crc-fast, or aws-lc.
+default = ["crypto"]
+crypto = ["extent_keys/crypto", "dep:crc-fast", "dep:zstd"]
+pure-zstd = ["dep:ruzstd"]
 
 [lints]
 workspace = true

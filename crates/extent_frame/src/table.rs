@@ -12,7 +12,9 @@
 //! ([`crate::Encryption::Authenticated`], TASK-411.3): metadata, which the collector reads holding
 //! no key (doc-16, What is encrypted).
 
-use crate::{Corrupt, Error, KeyId, Keyed, Keys, Secret, crc};
+use crate::{Corrupt, Error, Keys, crc};
+#[cfg(feature = "crypto")]
+use crate::{KeyId, Keyed, Secret};
 use bincode::Options as _;
 use fprint::TypeFingerprint;
 use serde::{Deserialize, Serialize};
@@ -94,6 +96,7 @@ pub fn encode_footer(footer: &TableFooter, version: u32) -> Vec<u8> {
 /// cell, the order [`TableFooter::block`] finds them by), `rest`, and cladefs: `appendix`
 /// ([`Appendix`]); authenticated under the DEK `key` gives, and which it is
 /// ([`crate::Packer::keyed`], TASK-411.3), its footer stamped with `version` (doc-28, board 10038).
+#[cfg(feature = "crypto")]
 pub fn encode<'a>(
     entries: impl IntoIterator<Item = (ExtentId, &'a str, u64, u64)>,
     rest: Vec<u8>,
@@ -235,6 +238,35 @@ impl TableFooter {
         self.blocks.get(at)
     }
 
+    /// Calls `visit(id, key_index)` for every entry in the block `index` describes, checking its
+    /// length, entry alignment, key bounds, and CRC without cloning key strings.
+    #[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
+    pub fn visit_block(
+        &self,
+        bytes: &[u8],
+        index: &Block,
+        mut visit: impl FnMut(ExtentId, usize),
+    ) -> Result<(), Corrupt> {
+        // Past what this host addresses: not the block's length, refused.
+        if usize::try_from(index.len).ok() != Some(bytes.len())
+            || !bytes.len().is_multiple_of(ENTRY)
+            || crc(bytes) != index.crc
+        {
+            return Err(corrupt("block"));
+        }
+        for entry in bytes.as_chunks::<ENTRY>().0 {
+            let (cell, rest) = entry.split_first_chunk::<8>().ok_or_else(|| corrupt("entry"))?;
+            let (sequence, rest) = rest.split_first_chunk::<8>().ok_or_else(|| corrupt("entry"))?;
+            let (key, _) = rest.split_first_chunk::<4>().ok_or_else(|| corrupt("entry"))?;
+            let key = usize::try_from(u32::from_le_bytes(*key)).map_err(|_| corrupt("key"))?;
+            if key >= self.keys.len() {
+                return Err(corrupt("key"));
+            }
+            visit(ExtentId::new(u64::from_le_bytes(*cell), u64::from_le_bytes(*sequence)), key);
+        }
+        Ok(())
+    }
+
     /// The entries of the block `index` describes, whose bytes are `bytes`, checked against its
     /// CRC.
     #[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
@@ -293,7 +325,7 @@ pub fn decode(bytes: &[u8], keys: &dyn Keys, format: formats::Format) -> Result<
     Ok(Decoded { footer, entries, appendix })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "crypto"))]
 mod tests {
     use super::*;
 

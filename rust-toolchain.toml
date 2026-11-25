@@ -10,6 +10,6 @@
 [toolchain]
 channel = "1.100.0"
 components = ["clippy", "rustfmt"]
-# The guest tests' agent, and Firecracker under its seccomp filter, are built for musl.
-targets = ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"]
+# The guest tests' agent and Firecracker are built for musl; the Cloudflare Worker GC for wasm32.
+targets = ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl", "wasm32-unknown-unknown"]
 profile = "minimal"
