@@ -38,7 +38,7 @@ pub mod vars;
 pub use azure::TOKEN_VAR as AZURE_TOKEN_VAR;
 pub use gcp::TOKEN_VAR as GCP_TOKEN_VAR;
 pub use local::{KekVersion, LOCAL_WRAPPED_LEN, LocalKms};
-pub use names::{KeyNames, Staged};
+pub use names::{KeyNames, OverrideFiles, Staged};
 pub use trust::{Origin, Trust};
 pub use vars::{KMS_VAR, Vars};
 
@@ -152,12 +152,23 @@ pub fn from_url(url: &str) -> Result<Shared, String> {
 /// `origin`, which, one the registry of buckets records, reaches what the host allows alone
 /// (board 8525, [`trust`]), refused before any file or connection is opened.
 pub fn from_url_with(url: &str, vars: &Vars, origin: Origin) -> Result<Shared, String> {
+    from_url_with_files(url, vars, origin, None)
+}
+
+/// cladefs: like [`from_url_with`], sharing `keys=FILE` override cells in `files` across KMS
+/// instances of the same host (board 10466).
+pub fn from_url_with_files(
+    url: &str,
+    vars: &Vars,
+    origin: Origin,
+    files: Option<&OverrideFiles>,
+) -> Result<Shared, String> {
     match url.split_once("://").map(|(scheme, _)| scheme) {
         Some("local") => local::from_url(url, origin),
-        Some("openbao" | "openbaos") => openbao::from_url(url, vars, origin),
-        Some("aws-kms") => aws::from_url(url, vars, origin),
-        Some("gcp-kms") => gcp::from_url(url, vars, origin),
-        Some("azure-kv") => azure::from_url(url, vars, origin),
+        Some("openbao" | "openbaos") => openbao::from_url(url, vars, origin, files),
+        Some("aws-kms") => aws::from_url(url, vars, origin, files),
+        Some("gcp-kms") => gcp::from_url(url, vars, origin, files),
+        Some("azure-kv") => azure::from_url(url, vars, origin, files),
         _ => Err(format!(
             "{url:?} names no KMS: local:///DIR, openbao://, aws-kms://, gcp-kms:// or azure-kv:// \
              (doc-16)"

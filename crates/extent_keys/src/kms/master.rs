@@ -168,14 +168,17 @@ impl MasterKeys {
                  one way"
             )),
             (Some(text), None) => Self::parse(text, MASTER_KEY_VAR).map(Some),
-            (None, Some(path)) => {
-                let source = format!("{MASTER_KEY_FILE_VAR} {path}");
-                let mut bytes = std::fs::read(&path).map_err(|err| format!("{source}: {err}"))?;
-                let keys = Self::of_file(&bytes, &source);
-                bytes.zeroize();
-                keys.map(Some)
-            }
+            (None, Some(path)) => Self::from_file(std::path::Path::new(path)).map(Some),
         }
+    }
+
+    /// cladefs: the master keys in the file at `path`, zeroizing what was read once parsed.
+    pub fn from_file(path: &std::path::Path) -> Result<Self, String> {
+        let source = format!("{MASTER_KEY_FILE_VAR} {}", path.display());
+        let mut bytes = std::fs::read(path).map_err(|err| format!("{source}: {err}"))?;
+        let keys = Self::of_file(&bytes, &source);
+        bytes.zeroize();
+        keys
     }
 
     /// The newest: what wraps.

@@ -9,7 +9,7 @@
 use super::background::Background;
 use super::http::{self, Unread};
 use super::retry::{self, Failed};
-use super::{Error, KeyNames, Kms, Origin, Vars};
+use super::{Error, KeyNames, Kms, Origin, OverrideFiles, Vars};
 use crate::{KEY_LEN, Secret, Unauthentic, Wrapped};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -165,13 +165,18 @@ struct Inner {
 }
 
 /// The KMS `url` names ([`super::from_url_with`]), of `origin`, its token as `vars` give it.
-pub(super) fn from_url(url: &str, vars: &Vars, origin: Origin) -> Result<super::Shared, String> {
+pub(super) fn from_url(
+    url: &str,
+    vars: &Vars,
+    origin: Origin,
+    files: Option<&OverrideFiles>,
+) -> Result<super::Shared, String> {
     let token = Token::of_vars(vars).map_err(|why| format!("{url:?}: {why}"))?;
-    Ok(Arc::new(OpenBao::of(url, token, origin)?))
+    Ok(Arc::new(OpenBao::of(url, token, origin, files)?))
 }
 
 pub(super) fn check_url(url: &str, origin: Origin) -> Result<(), String> {
-    ParsedUrl::of(url, origin).map(drop)
+    ParsedUrl::of(url, origin, None).map(drop)
 }
 
 struct ParsedUrl {
@@ -187,7 +192,7 @@ struct ParsedUrl {
 impl ParsedUrl {
     /// A recorded URL reaches only the permitted hosts, uses TLS remotely, and names no host
     /// files. The checks run before opening any of the files (board 8525).
-    fn of(url: &str, origin: Origin) -> Result<Self, String> {
+    fn of(url: &str, origin: Origin, files: Option<&OverrideFiles>) -> Result<Self, String> {
         let at = |why: &dyn std::fmt::Display| format!("{url:?}: {why}");
         let parsed = url::Url::parse(url).map_err(|err| at(&err))?;
         let tls = match parsed.scheme() {
@@ -242,7 +247,7 @@ impl ParsedUrl {
 impl OpenBao {
     /// The KMS `url` names (see [`OpenBao`]), calling with `token`: the host's own.
     pub fn new(url: &str, token: Token) -> Result<Self, String> {
-        Self::of(url, token, Origin::Host)
+        Self::of(url, token, Origin::Host, None)
     }
 
     fn of(

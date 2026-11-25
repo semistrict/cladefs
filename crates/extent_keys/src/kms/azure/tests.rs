@@ -17,7 +17,7 @@ fn overrides_naming_no_vault_are_refused() {
     let keys = dir.path().join("keys");
     std::fs::write(&keys, "7 https://evil.example/keys/x\n").unwrap();
     let url = format!("azure-kv://v.vault.azure.net?key=t-{{tenant}}&keys={}", keys.display());
-    let refused = parse(&url, Origin::Host).unwrap_err();
+    let refused = parse(&url, Origin::Host, None).unwrap_err();
     assert!(
         refused.starts_with(&format!(
             "{url:?}: the key overrides' line 1: tenant 7's key, \"https://evil.example/keys/x\", names no key: \"evil.example\" is no vault's host"
@@ -29,7 +29,7 @@ fn overrides_naming_no_vault_are_refused() {
 #[test]
 fn urls_naming_no_vault_or_no_keys_are_refused() {
     let usage = "azure-kv://VAULT_HOST?key=TEMPLATE[&keys=FILE][&alg=ALG][&endpoint=URL]";
-    let refused = |url: &str| parse(url, Origin::Host).unwrap_err();
+    let refused = |url: &str| parse(url, Origin::Host, None).unwrap_err();
     let domains = "NAME.vault.azure.net, NAME.managedhsm.azure.net, NAME.vault.azure.cn, \
                    NAME.managedhsm.azure.cn, NAME.vault.usgovcloudapi.net, \
                    NAME.managedhsm.usgovcloudapi.net";
@@ -48,7 +48,7 @@ fn urls_naming_no_vault_or_no_keys_are_refused() {
         assert!(refused(&url).contains("the endpoint, "), "{url}: {}", refused(&url));
     }
     let local = "azure-kv://v.vault.azure.net?key=t-{tenant}&endpoint=http://localhost:8443";
-    assert_eq!(parse(local, Origin::Host).unwrap().vault, "http://localhost:8443");
+    assert_eq!(parse(local, Origin::Host, None).unwrap().vault, "http://localhost:8443");
     let url = "azure-kv://v.vault.azure.net?key=t-{tenant}&region=x";
     assert_eq!(refused(url), format!("{url:?}: no parameter \"region\": {usage}"));
     let url = "azure-kv://v.vault.azure.net?key=t-{tenant}&alg=RSA1_5";
@@ -414,7 +414,7 @@ fn operational_forbidden_responses_are_io_errors() {
 
 #[test]
 fn explicit_key_state_refusals_are_scoped_to_the_requested_version() {
-    for code in ["KeyDisabled", "KeyRevoked", "KeyDeleted", "KeyPurged"] {
+    for code in ["KeyDisabled", "KeyRevoked", "KeyExpired", "KeyDeleted", "KeyPurged"] {
         for body in [
             format!(r#"{{"error":{{"code":"{code}"}}}}"#),
             format!(r#"{{"error":{{"code":"Forbidden","innererror":{{"code":"{code}"}}}}}}"#),
@@ -551,7 +551,8 @@ fn tokens_are_for_the_audience_of_each_vault() {
     );
     assert_eq!(audience_of("evil.example"), None);
     let parsed =
-        parse("azure-kv://h.managedhsm.azure.net?key=t-{tenant}&alg=A256KW", Origin::Host).unwrap();
+        parse("azure-kv://h.managedhsm.azure.net?key=t-{tenant}&alg=A256KW", Origin::Host, None)
+            .unwrap();
     assert_eq!(parsed.audience, "https://managedhsm.azure.net");
     let fake = Arc::new(Mutex::new(Fake::default()));
     let server = serve(&fake);

@@ -6,7 +6,7 @@
 //! [`AwsKms`], `aws-kms://REGION?key=TEMPLATE[&keys=FILE][&endpoint=URL]`.
 
 use super::background::Background;
-use super::{Error, KeyNames, Kms, Origin, Vars};
+use super::{Error, KeyNames, Kms, Origin, OverrideFiles, Vars};
 use crate::{KEY_LEN, Secret, Unauthentic, Wrapped};
 use aws_sdk_kms::error::{ProvideErrorMetadata, SdkError};
 use aws_sdk_kms::primitives::Blob;
@@ -18,13 +18,18 @@ use zeroize::{Zeroize as _, Zeroizing};
 
 /// The [`AwsKms`] `url` names ([`super::from_url_with`]), of `origin`, its credentials as `vars`
 /// give them ([`Credentials::of`]).
-pub(super) fn from_url(url: &str, vars: &Vars, origin: Origin) -> Result<super::Shared, String> {
+pub(super) fn from_url(
+    url: &str,
+    vars: &Vars,
+    origin: Origin,
+    files: Option<&OverrideFiles>,
+) -> Result<super::Shared, String> {
     let credentials = Credentials::of(vars).map_err(|why| format!("{url:?}: {why}"))?;
-    Ok(Arc::new(AwsKms::of(url, credentials, origin)?))
+    Ok(Arc::new(AwsKms::of(url, credentials, origin, files)?))
 }
 
 pub(super) fn check_url(url: &str, origin: Origin) -> Result<(), String> {
-    Parsed::of(url, origin).map(drop)
+    Parsed::of(url, origin, None).map(drop)
 }
 
 /// Whether `account` is a 12-digit AWS account ID.
@@ -334,7 +339,7 @@ struct Parsed {
 impl Parsed {
     /// The region, key names and optional endpoint of an AWS KMS URL. A recorded URL names no
     /// file and reaches only an allowed endpoint (board 8525) and AWS account (board 9686).
-    fn of(url: &str, origin: Origin) -> Result<Self, String> {
+    fn of(url: &str, origin: Origin, files: Option<&OverrideFiles>) -> Result<Self, String> {
         let parsed = url::Url::parse(url).map_err(|err| format!("{url:?}: {err}"))?;
         let refused = |why: &str| format!("{url:?} names no AWS KMS: {why}");
         if parsed.scheme() != "aws-kms" {
@@ -365,16 +370,21 @@ impl Parsed {
         }
         // Any name: AWS KMS takes a key's ID, alias or ARN, in this account or another.
         let query_pairs = query.iter().map(|(n, v)| (n.as_str(), v.as_str()));
-        let names =
-            KeyNames::of_query(query_pairs, origin, |_| Ok(())).map_err(|why| refused(&why))?;
+        let names = KeyNames::of_query_in(query_pairs, origin, |_| Ok(()), files)
+            .map_err(|why| refused(&why))?;
         origin.aws_key_template(names.template()).map_err(|why| refused(&why))?;
         Ok(Self { region: region.to_owned(), endpoint, names })
     }
 }
 
 impl AwsKms {
-    fn of(url: &str, credentials: Credentials, origin: Origin) -> Result<Self, String> {
-        let Parsed { region, endpoint, names } = Parsed::of(url, origin)?;
+    fn of(
+        url: &str,
+        credentials: Credentials,
+        origin: Origin,
+        files: Option<&OverrideFiles>,
+    ) -> Result<Self, String> {
+        let Parsed { region, endpoint, names } = Parsed::of(url, origin, files)?;
         Ok(Self::with(&region, endpoint, names, credentials))
     }
 

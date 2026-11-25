@@ -48,7 +48,8 @@ use extent_keys::{Secret, Unauthentic, Wrapped};
 use futures::StreamExt as _;
 use futures::future::BoxFuture;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::{Arc, Mutex};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 use tokio::sync::OnceCell;
 
@@ -61,17 +62,30 @@ pub use extent_keys::kms::KMS_VAR;
 /// asked once a tenant that long at most however many cells' KEKs the host wraps and unwraps.
 pub const FRESH_FOR: Duration = Duration::from_secs(60);
 
-/// A KMS over a bucket: tenants' KEKs kept in it, each wrapped by a master key (see the module).
-pub struct BucketKms<B> {
-    bucket: Arc<B>,
+/// Shared master-key cell and its sealing fence (board 10466, hotbed review 117): every
+/// [`BucketKms`] on a host naming the same master-key file shares both, so a reload removing a
+/// master key fences sealing across every existing and lazily-opened bucket sharing that file.
+struct SharedKeys {
     /// Its master keys: as given, or as a reload gave them since ([`ByBucket::reload`], board
     /// 8487).
     keys: Mutex<Arc<MasterKeys>>,
     /// Held shared by each KEK object's making, from its master key taken until its create is
     /// answered, and whole by a reload removing master keys from its checks until its keys are
     /// in use ([`BucketKms::fenced`]): so that no object sealed under a key removed lands unseen
-    /// by the check (board 8487, hotbed review 79).
+    /// by the check (board 8487, hotbed review 79, hotbed review 117).
     sealing: Arc<tokio::sync::RwLock<()>>,
+}
+
+impl SharedKeys {
+    fn new(keys: MasterKeys) -> Arc<Self> {
+        Arc::new(Self { keys: Mutex::new(Arc::new(keys)), sealing: Arc::default() })
+    }
+}
+
+/// A KMS over a bucket: tenants' KEKs kept in it, each wrapped by a master key (see the module).
+pub struct BucketKms<B> {
+    bucket: Arc<B>,
+    shared: Arc<SharedKeys>,
     held: Mutex<HeldKeks>,
     fresh_for: Duration,
     /// The identity of its bucket (TASK-633.6), which the keys it wraps name, once read: 0 for a
@@ -95,14 +109,24 @@ struct Held {
 impl<B: Bucket> BucketKms<B> {
     /// The KMS keeping tenants' KEKs in `bucket`, under `keys`, the newest first.
     pub fn new(bucket: Arc<B>, keys: MasterKeys) -> Self {
+        Self::with_shared_keys(bucket, SharedKeys::new(keys))
+    }
+
+    /// cladefs: the same, sharing `shared` (master keys and sealing fence) with other bucket
+    /// KMSes on the same host naming the same master-key file (board 10466, hotbed review 117).
+    fn with_shared_keys(bucket: Arc<B>, shared: Arc<SharedKeys>) -> Self {
         Self {
             bucket,
-            keys: Mutex::new(Arc::new(keys)),
-            sealing: Arc::default(),
+            shared,
             held: Mutex::default(),
             fresh_for: FRESH_FOR,
             identity: Mutex::default(),
         }
+    }
+
+    /// Its shared master-key and fence cell (board 10466, hotbed review 117).
+    fn shared_keys(&self) -> Arc<SharedKeys> {
+        self.shared.clone()
     }
 
     /// Has it take `identity` as its bucket's, known from elsewhere (the registry of buckets).
@@ -139,39 +163,42 @@ impl<B: Bucket> BucketKms<B> {
 
     /// Its master keys, as now.
     pub fn keys(&self) -> Arc<MasterKeys> {
-        self.keys.lock().unwrap().clone()
+        self.shared.keys.lock().unwrap().clone()
     }
 
     /// cladefs: has it use `keys` from its next KEK object on (board 8487): its KEKs held stay, as
     /// they are the same whatever key wraps their objects.
     fn set_keys(&self, keys: Arc<MasterKeys>) {
-        *self.keys.lock().unwrap() = keys;
-    }
-
-    /// cladefs: once every KEK object being made is answered, none made more until the guard
-    /// returned is dropped (`sealing`).
-    async fn fenced(&self) -> tokio::sync::OwnedRwLockWriteGuard<()> {
-        self.sealing.clone().write_owned().await
+        *self.shared.keys.lock().unwrap() = keys;
     }
 
     /// cladefs: refuses removing `removed`, of its master keys, its bucket numbered `number`, while
     /// a KEK object in it is under one (its tenant would open no cell here once its KEK was read
-    /// again); else fenced ([`BucketKms::fenced`]), from before the check, so that none is made
-    /// under one unseen by it: the fence its caller holds until its keys are in use.
-    async fn unsealed(
-        &self,
-        number: u16,
-        removed: &[MasterKeyId],
-    ) -> Result<tokio::sync::OwnedRwLockWriteGuard<()>, Unreloaded> {
+    /// again). Caller holds `self.shared.sealing` exclusively so no KEK object is made under a
+    /// removed key concurrently across any bucket sharing `self.shared` (hotbed review 117).
+    async fn check_unsealed(&self, number: u16, removed: &[MasterKeyId]) -> Result<(), Unreloaded> {
         let name = format!("bucket {number}");
-        let fence = within(format!("{name}'s KEK objects being made"), self.fenced()).await?;
         match sealed_under(&*self.bucket, removed, &name).await? {
-            None => Ok(fence),
+            None => Ok(()),
             Some((tenant, id)) => Err(Unreloaded::InUse(format!(
                 "{name}: tenant {tenant}'s KEK object is under master key {id}: rotate them under \
                  another first (cladefs-gc --rotate-master-key), then remove it"
             ))),
         }
+    }
+
+    /// Acquires the shared sealing fence and checks that no KEK object in `self.bucket` is sealed
+    /// under `removed`.
+    #[cfg(test)]
+    async fn unsealed(
+        &self,
+        number: u16,
+        removed: &[MasterKeyId],
+    ) -> Result<tokio::sync::OwnedRwLockWriteGuard<()>, Unreloaded> {
+        let label = format!("bucket {number}'s KEK objects being made");
+        let fence = within(label, self.shared.sealing.clone().write_owned()).await?;
+        self.check_unsealed(number, removed).await?;
+        Ok(fence)
     }
 
     /// Shreds `tenant` ([`destroy`]), and forgets its KEK here.
@@ -228,7 +255,7 @@ impl<B: Bucket> BucketKms<B> {
         }
         let kek = TenantKek::random();
         // Held until its create is answered: no reload removes its key meanwhile.
-        let _sealing = self.sealing.read().await;
+        let _sealing = self.shared.sealing.read().await;
         let keys = self.keys();
         let newest = keys.newest();
         let sealed = KekObject::seal(newest, tenant, &kek);
@@ -670,21 +697,27 @@ pub fn from_vars<B: Bucket>(
 ) -> Result<HostKms<B>, String> {
     match vars.get(KMS_VAR) {
         Some(url) => {
-            let kms = named(vars, url, Origin::Host, KMS_VAR)?;
+            let kms = named(vars, url, Origin::Host, KMS_VAR, None)?;
             Ok(HostKms::Named(url.to_owned(), kms))
         }
         None => over_bucket(vars, bucket),
     }
 }
 
-/// The KMS named by `url`, with the credentials `vars` give.
-fn named(vars: &Vars, url: &str, origin: Origin, source: &str) -> Result<kms::Shared, String> {
+/// The KMS named by `url`, with the credentials `vars` give, sharing `keys=FILE` cells in `files`.
+fn named(
+    vars: &Vars,
+    url: &str,
+    origin: Origin,
+    source: &str,
+    files: Option<&kms::OverrideFiles>,
+) -> Result<kms::Shared, String> {
     let given =
         [MASTER_KEY_VAR, MASTER_KEY_FILE_VAR].into_iter().find(|name| vars.get(name).is_some());
     if let Some(name) = given {
         log::warn!("cladefs: {name} is set, and unused: {source} names the KMS");
     }
-    kms::from_url_with(url, vars, origin).map_err(|why| format!("{source}: {why}"))
+    kms::from_url_with_files(url, vars, origin, files).map_err(|why| format!("{source}: {why}"))
 }
 
 /// cladefs: the bucket KMS over `bucket()`, given master keys, as [`from_vars`] chooses it when no
@@ -729,6 +762,13 @@ pub struct ByBucket {
     own_number: Mutex<Option<u16>>,
     chosen: Mutex<BTreeMap<u16, Arc<OnceCell<Chosen>>>>,
     named: Mutex<HashMap<KmsKey, Arc<OnceCell<kms::Shared>>>>,
+    /// Per-host shared `keys=FILE` override cells (board 10466): read once on first use and
+    /// changed only by [`ByBucket::reload`].
+    override_files: kms::OverrideFiles,
+    /// Per-host shared master-key file cells (board 10466, hotbed review 117): read once on first
+    /// use and changed only by [`ByBucket::reload`]. Weak so failed constructions leave no stale
+    /// entry.
+    master_key_files: Mutex<HashMap<PathBuf, Weak<SharedKeys>>>,
     /// How long [`ByBucket::shred`] waits for each other bucket: [`SHRED_WITHIN`], but in tests.
     shred_within: std::time::Duration,
     /// Held by a reload ([`ByBucket::reload`]): one at a time, so that what one checked is what it
@@ -740,12 +780,25 @@ impl ByBucket {
     /// The KMSes of the buckets `home`, the host's routed bucket, reaches, its own `own`, the
     /// others' chosen from the registry and `vars`, the host's environment ([`Vars::from_env`]).
     pub fn new(home: Arc<RoutedBucket>, own: HostKms<ObjectBucket>, vars: Arc<Vars>) -> Self {
+        let override_files = kms::OverrideFiles::default();
+        let mut master_key_files = HashMap::new();
         let named = match &own {
-            HostKms::Named(url, kms) => HashMap::from([(
-                KmsKey(url.as_str().into()),
-                Arc::new(OnceCell::new_with(Some(kms.clone()))),
-            )]),
-            HostKms::Bucket(_) => HashMap::new(),
+            HostKms::Named(url, kms) => {
+                if let Some(names) = kms.names_dyn() {
+                    override_files.register(names);
+                }
+                HashMap::from([(
+                    KmsKey(url.as_str().into()),
+                    Arc::new(OnceCell::new_with(Some(kms.clone()))),
+                )])
+            }
+            HostKms::Bucket(kms) => {
+                if let Some(path) = vars.get(MASTER_KEY_FILE_VAR) {
+                    master_key_files
+                        .insert(PathBuf::from(path), Arc::downgrade(&kms.shared_keys()));
+                }
+                HashMap::new()
+            }
         };
         Self {
             home,
@@ -754,6 +807,8 @@ impl ByBucket {
             own_number: Mutex::default(),
             chosen: Mutex::default(),
             named: Mutex::new(named),
+            override_files,
+            master_key_files: Mutex::new(master_key_files),
             shred_within: SHRED_WITHIN,
             reloading: tokio::sync::Mutex::new(()),
         }
@@ -825,6 +880,7 @@ impl ByBucket {
     pub async fn reload(&self) -> Result<Reloaded, Unreloaded> {
         let _one = self.reloading.lock().await;
         let mut staged = Vec::new();
+        let mut override_texts = HashMap::new();
         let named: Vec<(KmsKey, kms::Shared)> = self
             .named
             .lock()
@@ -834,11 +890,13 @@ impl ByBucket {
             .collect();
         for (key, kms) in &named {
             let Some(names) = kms.names_dyn() else { continue };
-            let reread =
-                names.reread().map_err(|why| Unreloaded::Malformed(format!("{key}: {why}")))?;
+            let reread = names
+                .reread_in(&mut override_texts)
+                .map_err(|why| Unreloaded::Malformed(format!("{key}: {why}")))?;
             staged.extend(reread.map(|reread| (key.clone(), reread)));
         }
-        let mut keys = Vec::new();
+        let mut pending = Vec::new();
+        let mut master_file_keys: HashMap<PathBuf, Arc<MasterKeys>> = HashMap::new();
         for (number, kms, own) in self.bucket_kmses_held().await? {
             let source = format!("bucket {number}'s bucket KMS");
             let numbered;
@@ -849,11 +907,36 @@ impl ByBucket {
                     &numbered
                 }
             };
-            let given = MasterKeys::from_vars(vars)
-                .map_err(|why| Unreloaded::Malformed(format!("{source}: {why}")))?
-                .ok_or_else(|| {
-                    Unreloaded::Malformed(format!("{source}: no master key given any more"))
-                })?;
+            let given = match (vars.get(MASTER_KEY_VAR), vars.get(MASTER_KEY_FILE_VAR)) {
+                (None, None) => {
+                    return Err(Unreloaded::Malformed(format!(
+                        "{source}: no master key given any more"
+                    )));
+                }
+                (Some(_), Some(_)) => {
+                    return Err(Unreloaded::Malformed(format!(
+                        "{source}: both {MASTER_KEY_VAR} and {MASTER_KEY_FILE_VAR} are set: give \
+                         the master keys one way"
+                    )));
+                }
+                (Some(text), None) => Arc::new(
+                    MasterKeys::parse(text, MASTER_KEY_VAR)
+                        .map_err(|why| Unreloaded::Malformed(format!("{source}: {why}")))?,
+                ),
+                (None, Some(path)) => {
+                    let path_buf = PathBuf::from(path);
+                    match master_file_keys.get(&path_buf) {
+                        Some(cached) => cached.clone(),
+                        None => {
+                            let loaded = Arc::new(MasterKeys::from_file(Path::new(path)).map_err(
+                                |why| Unreloaded::Malformed(format!("{source}: {why}")),
+                            )?);
+                            master_file_keys.insert(path_buf, loaded.clone());
+                            loaded
+                        }
+                    }
+                }
+            };
             let held = kms.keys();
             if given.ids() == held.ids() {
                 continue;
@@ -863,20 +946,54 @@ impl ByBucket {
                 given_ids.iter().filter(|id| !held_ids.contains(id)).copied().collect();
             let removed: Vec<_> =
                 held_ids.iter().filter(|id| !given_ids.contains(id)).copied().collect();
-            // Removing keys: no KEK object made under one from the check until the keys are in use.
-            let fence = match removed.is_empty() {
-                true => None,
-                false => {
-                    self.unrecorded(number, &removed).await?;
-                    Some(kms.unsealed(number, &removed).await?)
+            pending.push((kms, given, MasterKeysReloaded { bucket: number, added, removed }));
+        }
+        // Acquire the shared sealing write fence once per unique SharedKeys cell that removes keys,
+        // before checking any bucket (hotbed review 117). This blocks both existing and lazily
+        // opened buckets sharing that file from sealing under a removed key until reload finishes.
+        let mut fences: Vec<(Arc<SharedKeys>, tokio::sync::OwnedRwLockWriteGuard<()>)> = Vec::new();
+        for (kms, _, changed) in &pending {
+            if changed.removed.is_empty() {
+                continue;
+            }
+            let shared = kms.shared_keys();
+            if fences.iter().any(|(locked, _)| Arc::ptr_eq(locked, &shared)) {
+                continue;
+            }
+            let label = format!("bucket {}'s KEK objects being made", changed.bucket);
+            let guard = within(label, shared.sealing.clone().write_owned()).await?;
+            fences.push((shared, guard));
+        }
+        // Re-scan held buckets AFTER acquiring the shared sealing fences so any bucket lazily
+        // opened against one of those shared master-key files before the fence was acquired is
+        // checked for unrecorded/sealed KEKs too (hotbed review 117).
+        if !fences.is_empty() {
+            for (number, kms, _) in self.bucket_kmses_held().await? {
+                if pending.iter().any(|(_, _, changed)| changed.bucket == number) {
+                    continue;
                 }
-            };
-            keys.push((
-                kms,
-                Arc::new(given),
-                fence,
-                MasterKeysReloaded { bucket: number, added, removed },
-            ));
+                let shared = kms.shared_keys();
+                let Some((_, given, sibling)) =
+                    pending.iter().find(|(other, _, _)| Arc::ptr_eq(&other.shared_keys(), &shared))
+                else {
+                    continue;
+                };
+                pending.push((
+                    kms,
+                    given.clone(),
+                    MasterKeysReloaded {
+                        bucket: number,
+                        added: sibling.added.clone(),
+                        removed: sibling.removed.clone(),
+                    },
+                ));
+            }
+        }
+        for (kms, _, changed) in &pending {
+            if !changed.removed.is_empty() {
+                self.unrecorded(changed.bucket, &changed.removed).await?;
+                kms.check_unsealed(changed.bucket, &changed.removed).await?;
+            }
         }
         for (key, staged) in &staged {
             for &tenant in staged.renamed() {
@@ -884,16 +1001,18 @@ impl ByBucket {
             }
         }
         let mut reloaded = Reloaded::default();
-        for (_, staged) in staged {
+        for (_, staged) in &staged {
             reloaded.renamed.extend_from_slice(staged.renamed());
-            // One reload at a time (`reloading`), and only a reload swaps the overrides.
-            staged.apply().expect("reloads are one at a time");
         }
+        // One reload at a time (`reloading`), and only a reload swaps the overrides; instances
+        // sharing one `keys=FILE` cell swap it once (board 10466).
+        kms::Staged::apply_all(staged.into_iter().map(|(_, s)| s))
+            .expect("reloads are one at a time");
         reloaded.renamed.sort_unstable();
         reloaded.renamed.dedup();
-        for (kms, given, fence, changed) in keys {
+        // Swap every changed master-key cell while every fence is still held.
+        for (kms, given, changed) in pending {
             kms.set_keys(given);
-            drop(fence);
             log::warn!(
                 "cladefs: bucket {}'s bucket KMS: master keys reloaded, now {}",
                 changed.bucket,
@@ -901,6 +1020,7 @@ impl ByBucket {
             );
             reloaded.master_keys.push(changed);
         }
+        drop(fences);
         if !reloaded.renamed.is_empty() {
             log::warn!(
                 "cladefs: the KMS's key overrides reloaded, renaming tenants {:?}",
@@ -1023,6 +1143,34 @@ impl ByBucket {
         entry.cloned().ok_or(crate::Error::NoBucket(number))
     }
 
+    /// Master keys for a bucket's `vars`, reusing the shared per-host cell (keys and sealing
+    /// fence) when `vars` names a master-key file another live bucket KMS on this host already
+    /// loaded (board 10466, hotbed review 117).
+    fn master_keys_for(&self, vars: &Vars) -> Result<Arc<SharedKeys>, String> {
+        match (vars.get(MASTER_KEY_VAR), vars.get(MASTER_KEY_FILE_VAR)) {
+            (None, None) => Err(no_kms()),
+            (Some(_), Some(_)) => Err(format!(
+                "both {MASTER_KEY_VAR} and {MASTER_KEY_FILE_VAR} are set: give the master keys \
+                 one way"
+            )),
+            (Some(text), None) => {
+                let keys = MasterKeys::parse(text, MASTER_KEY_VAR)?;
+                Ok(SharedKeys::new(keys))
+            }
+            (None, Some(path)) => {
+                let mut files = self.master_key_files.lock().unwrap();
+                let key_path = Path::new(path);
+                if let Some(shared) = files.get(key_path).and_then(Weak::upgrade) {
+                    return Ok(shared);
+                }
+                let loaded = MasterKeys::from_file(key_path)?;
+                let shared = SharedKeys::new(loaded);
+                files.insert(key_path.to_path_buf(), Arc::downgrade(&shared));
+                Ok(shared)
+            }
+        }
+    }
+
     /// The KMS of the bucket numbered `number`, another than the host's, chosen (see the type).
     /// Its bucket KMS too, if it is that.
     async fn other(&self, number: u16) -> Result<Chosen, String> {
@@ -1038,7 +1186,8 @@ impl ByBucket {
                 .map(|chosen| (chosen, None));
         }
         // The bucket is opened only when it keeps its tenants' KEKs (board 5528).
-        let keys = MasterKeys::from_vars(&vars)?.ok_or_else(no_kms)?;
+        let shared_keys = self.master_keys_for(&vars)?;
+        let keys = shared_keys.keys.lock().unwrap().clone();
         if let Some(id) = &entry.details.master_key_id
             && !keys.ids().iter().any(|held| held.to_string() == *id)
         {
@@ -1054,7 +1203,7 @@ impl ByBucket {
                  the bucket: {err}"
             )
         })?;
-        let kms = Arc::new(BucketKms::new(bucket, keys));
+        let kms = Arc::new(BucketKms::with_shared_keys(bucket, shared_keys));
         kms.identify(entry.id);
         let key = KmsKey(format!("the bucket KMS of bucket {number}").into());
         Ok(((key, kms.clone()), Some(kms)))
@@ -1086,7 +1235,11 @@ impl ByBucket {
             None => (Origin::Host, KMS_VAR),
         };
         let slot = self.named.lock().unwrap().entry(key.clone()).or_default().clone();
-        let kms = slot.get_or_try_init(|| async { named(vars, url, origin, source) }).await?;
+        let kms = slot
+            .get_or_try_init(|| async {
+                named(vars, url, origin, source, Some(&self.override_files))
+            })
+            .await?;
         Ok((key, kms.clone()))
     }
 
@@ -2351,6 +2504,209 @@ mod tests {
                 kms.unwrap(7, &wrapped).await.is_err(),
                 "a subsequent unwrap must still see tenant 7 destroyed"
             );
+        });
+    }
+
+    /// board 10466: every KMS instance on a host naming the same `keys=FILE` or master-key file
+    /// shares one overrides / master-keys cell, read on first use and changed only by `reload()`.
+    /// Reaching a new bucket with its own credentials after the file was edited (and before reload,
+    /// or after a refused reload) still sees the old names/keys until a valid reload applies.
+    #[test]
+    fn lazy_bucket_kms_shares_keys_and_master_key_files_until_reloaded() {
+        use crate::identity::Details;
+        use crate::layout::CellId;
+        use extent_keys::kms::openbao::TOKEN_ENV;
+
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let mk = |name: &str| {
+                let path = dir.path().join(name);
+                std::fs::create_dir(&path).unwrap();
+                format!("file://{}", path.display())
+            };
+
+            // Part A: `keys=FILE` shared across buckets with distinct credentials.
+            let urls = [mk("a-home"), mk("a-two")];
+            let [home, two] = urls.each_ref().map(|u| ObjectBucket::from_url(u).unwrap());
+            identity::format(&home, &Details::default()).await.unwrap();
+            identity::add(
+                &home,
+                &Details::default(),
+                &two,
+                Details { url: Some(urls[1].clone()), ..Details::default() },
+            )
+            .await
+            .unwrap();
+
+            let keys_file = dir.path().join("keys.txt");
+            std::fs::write(&keys_file, "7 key-old\n").unwrap();
+            let kms_url = format!(
+                "openbao://127.0.0.1:8200/transit?key=t-{{tenant}}&keys={}",
+                keys_file.display()
+            );
+            let vars = vec![
+                (KMS_VAR.to_owned(), kms_url.clone()),
+                (TOKEN_ENV.to_owned(), "s.host-token".to_owned()),
+                (format!("CLADEFSD_BUCKET_2_{TOKEN_ENV}"), "s.bucket2-token".to_owned()),
+            ];
+            let home_routed = Arc::new(home.routed(Arc::new(Registered::new(Vec::new()))));
+            let vars_shared = vars_of(&vars);
+            let own = from_vars(&vars_shared, || Ok(home_routed.own())).unwrap();
+            let by_bucket = ByBucket::new(home_routed.clone(), own, vars_shared);
+
+            // Create a cell head for tenant 7 in bucket 1 so renaming tenant 7 is refused.
+            let cell = CellId { tenant: 7, id: 1u64 << 48 | 1 };
+            home_routed
+                .own()
+                .put(
+                    &layout::head(cell),
+                    bytes::Bytes::from_static(b"head"),
+                    crate::bucket::PutMode::Create,
+                )
+                .await
+                .unwrap();
+
+            // Edit keys=FILE to rename tenant 7: reload is refused with InUse.
+            std::fs::write(&keys_file, "7 key-new\n").unwrap();
+            assert!(matches!(by_bucket.reload().await, Err(Unreloaded::InUse(_))));
+
+            // Lazily reaching bucket 2 (its own credentials -> distinct KMS instance) MUST still
+            // see "key-old", never reading the unreloaded edit from disk.
+            let (_, b1_kms) = by_bucket.of(1).await.unwrap();
+            let (_, b2_kms) = by_bucket.of(2).await.unwrap();
+            assert!(!Arc::ptr_eq(&b1_kms, &b2_kms), "bucket 2 has its own KMS instance");
+            assert_eq!(b1_kms.names_dyn().unwrap().of(7), "key-old");
+            assert_eq!(b2_kms.names_dyn().unwrap().of(7), "key-old");
+
+            // A valid edit (keeping tenant 7, adding tenant 8) applies on reload to BOTH buckets.
+            std::fs::write(&keys_file, "7 key-old\n8 key-eight\n").unwrap();
+            let reloaded = by_bucket.reload().await.unwrap();
+            assert_eq!(reloaded.renamed, vec![8]);
+            assert_eq!(b1_kms.names_dyn().unwrap().of(8), "key-eight");
+            assert_eq!(b2_kms.names_dyn().unwrap().of(8), "key-eight");
+
+            // Part B: `CLADEFS_MASTER_KEY_FILE` (and per-bucket shared master key files).
+            let urls = [mk("b-home"), mk("b-two"), mk("b-three"), mk("b-four")];
+            let [b_home, b_two, b_three, b_four] =
+                urls.each_ref().map(|u| ObjectBucket::from_url(u).unwrap());
+            identity::format(&b_home, &Details::default()).await.unwrap();
+            for (idx, bucket) in [(1, &b_two), (2, &b_three), (3, &b_four)] {
+                identity::add(
+                    &b_home,
+                    &Details::default(),
+                    bucket,
+                    Details { url: Some(urls[idx].clone()), ..Details::default() },
+                )
+                .await
+                .unwrap();
+            }
+
+            let k1 = "11".repeat(32);
+            let k2 = "22".repeat(32);
+            let k3 = "33".repeat(32);
+            let k4 = "44".repeat(32);
+            let id1 = MasterKeys::parse(&k1, "t").unwrap().newest().id();
+            let id2 = MasterKeys::parse(&k2, "t").unwrap().newest().id();
+            let id3 = MasterKeys::parse(&k3, "t").unwrap().newest().id();
+            let id4 = MasterKeys::parse(&k4, "t").unwrap().newest().id();
+
+            let host_master = dir.path().join("host-master.key");
+            let pair_master = dir.path().join("pair-master.key");
+            std::fs::write(&host_master, format!("{k1}\n")).unwrap();
+            std::fs::write(&pair_master, format!("{k3}\n")).unwrap();
+
+            let vars = vec![
+                (MASTER_KEY_FILE_VAR.to_owned(), host_master.display().to_string()),
+                (
+                    format!("CLADEFSD_BUCKET_3_{MASTER_KEY_FILE_VAR}"),
+                    pair_master.display().to_string(),
+                ),
+                (
+                    format!("CLADEFSD_BUCKET_4_{MASTER_KEY_FILE_VAR}"),
+                    pair_master.display().to_string(),
+                ),
+            ];
+            let b_home_routed = Arc::new(b_home.routed(Arc::new(Registered::new(Vec::new()))));
+            let vars_shared = vars_of(&vars);
+            let own = from_vars(&vars_shared, || Ok(b_home_routed.own())).unwrap();
+            let by_bucket = ByBucket::new(b_home_routed, own, vars_shared);
+
+            // Edit host_master without calling reload(); lazily reaching bucket 2 MUST still wrap
+            // under id1, matching bucket 1.
+            std::fs::write(&host_master, format!("{k2},{k1}\n")).unwrap();
+            let (_, m2) = by_bucket.of(2).await.unwrap();
+            m2.wrap_dyn(7, &Secret::random()).await.unwrap();
+            let b2_kek = object(&b_two, 7).unwrap();
+            assert_eq!(&b2_kek[22..30], &id1.0, "lazy bucket 2 read unreloaded master key file");
+
+            // Open bucket 3 with pair_master (k3), then edit pair_master without reload; lazy
+            // bucket 4 sharing pair_master MUST still see id3.
+            let (_, m3) = by_bucket.of(3).await.unwrap();
+            m3.wrap_dyn(7, &Secret::random()).await.unwrap();
+            std::fs::write(&pair_master, format!("{k4},{k3}\n")).unwrap();
+            let (_, m4) = by_bucket.of(4).await.unwrap();
+            m4.wrap_dyn(7, &Secret::random()).await.unwrap();
+            let b4_kek = object(&b_four, 7).unwrap();
+            assert_eq!(&b4_kek[22..30], &id3.0, "lazy bucket 4 read unreloaded master key file");
+
+            // After reload(), new KEKs in bucket 2 wrap under id2 and in bucket 4 under id4.
+            let reloaded = by_bucket.reload().await.unwrap();
+            assert_eq!(reloaded.master_keys.len(), 4);
+            m2.wrap_dyn(8, &Secret::random()).await.unwrap();
+            assert_eq!(&object(&b_two, 8).unwrap()[22..30], &id2.0);
+            m4.wrap_dyn(8, &Secret::random()).await.unwrap();
+            assert_eq!(&object(&b_four, 8).unwrap()[22..30], &id4.0);
+
+            // Part C (hotbed review 117): a lazily-opened bucket sharing the host's master-key
+            // file shares its sealing fence too, so removing an unused newest key cannot race with
+            // the lazy bucket sealing a KEK under that removed key.
+            let urls = [mk("c-home"), mk("c-two")];
+            let [c_home, c_two] = urls.each_ref().map(|u| ObjectBucket::from_url(u).unwrap());
+            identity::format(&c_home, &Details::default()).await.unwrap();
+            identity::add(
+                &c_home,
+                &Details::default(),
+                &c_two,
+                Details { url: Some(urls[1].clone()), ..Details::default() },
+            )
+            .await
+            .unwrap();
+            let c_master = dir.path().join("c-master.key");
+            std::fs::write(&c_master, format!("{k2},{k1}\n")).unwrap();
+            let c_vars =
+                vars_of(&[(MASTER_KEY_FILE_VAR.to_owned(), c_master.display().to_string())]);
+            let c_home_routed = Arc::new(c_home.routed(Arc::new(Registered::new(Vec::new()))));
+            let c_own = from_vars(&c_vars, || Ok(c_home_routed.own())).unwrap();
+            let c_shared = c_own.bucket().unwrap().shared_keys();
+            let c_by_bucket = Arc::new(ByBucket::new(c_home_routed, c_own, c_vars));
+
+            // Simulate a reload removing unused newest key k2 having already acquired the shared
+            // sealing write fence: a lazily-opened bucket 2 sharing c-master MUST share the same
+            // sealing RwLock, so its wrap waits until the fence drops and then seals under k1.
+            let fence = c_shared.sealing.clone().write_owned().await;
+            let (_, c_m2) = c_by_bucket.of(2).await.unwrap();
+            let secret = Secret::random();
+            let secret_bytes = *secret.expose();
+            let wrap_task = tokio::spawn({
+                let c_m2 = c_m2.clone();
+                async move { c_m2.wrap_dyn(9, &secret).await }
+            });
+            // Yield a few times: wrap_task MUST stay blocked behind the shared sealing fence.
+            for _ in 0..5 {
+                tokio::task::yield_now().await;
+            }
+            assert!(
+                !wrap_task.is_finished(),
+                "lazy bucket 2 escaped shared sealing fence during master-key reload"
+            );
+            // Swap shared keys to k1-only (as reload does before dropping the fence) and release.
+            *c_shared.keys.lock().unwrap() = Arc::new(MasterKeys::parse(&k1, "t").unwrap());
+            drop(fence);
+            let wrapped = wrap_task.await.unwrap().unwrap();
+            assert_eq!(&object(&c_two, 9).unwrap()[22..30], &id1.0);
+            c_m2.forget_dyn(9);
+            assert_eq!(c_m2.unwrap_dyn(9, &wrapped).await.unwrap().expose(), &secret_bytes);
         });
     }
 }
