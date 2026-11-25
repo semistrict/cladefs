@@ -192,6 +192,7 @@ class Ci(unittest.TestCase):
         self.assertIn("push:\n    branches: [main]\n", text)
         self.assertEqual(workflow_job(text, "sandboxes"),
                          "    if: github.event_name == 'push'\n"
+                         "    needs: firecracker-lock\n"
                          "    uses: ./.github/workflows/sandboxes.yml\n\n")
         sandboxes = (ROOT / ".github" / "workflows" / "sandboxes.yml").read_text()
         self.assertIn("on:\n  workflow_call:\n  workflow_dispatch:\n", sandboxes)
@@ -221,6 +222,18 @@ class Ci(unittest.TestCase):
         self.assertIn("CLADEFS_TEST_PARTS: ${{ matrix.parts }}", macos)
         self.assertIn("run: scripts/test.sh --no-fail-fast", macos)
         self.assertIn("submodules: true", macos)
+
+    def test_firecracker_lock_gates_slow_jobs(self):
+        """Board 10216: a fast job checks vendor/firecracker.lock before slow Rust/Firecracker
+        builds spin up, so a stale lock fails in under a minute instead of mid-suite."""
+        text = CI.read_text()
+        gate = workflow_job(text, "firecracker-lock")
+        self.assertIn("submodules: true", gate)
+        self.assertIn("scripts/firecracker-cargo.sh --check", gate)
+        self.assertNotIn("apt-install", gate)
+        for slow in ["test", "macos", "pjdfstest-fuse", "object-stores", "soak", "sandboxes",
+                     "musl-release"]:
+            self.assertIn("    needs: firecracker-lock\n", workflow_job(text, slow), slow)
 
 
 class Concurrency(unittest.TestCase):

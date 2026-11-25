@@ -37,8 +37,22 @@ permissions:
   contents: read
 
 jobs:
+  # board 10216: fail fast before slow Rust/Firecracker builds if vendor/firecracker.lock is stale.
+  firecracker-lock:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+      - name: Rust, as vendor/firecracker/rust-toolchain.toml pins it
+        run: (cd vendor/firecracker && rustup toolchain install)
+      - name: vendor/firecracker.lock matches Cargo resolution
+        run: scripts/firecracker-cargo.sh --check
+
   test:
     name: test (${{ matrix.parts }})
+    needs: firecracker-lock
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     strategy:
@@ -165,6 +179,7 @@ jobs:
   # guest's, the VMM's and the daemon's own are Linux's.
   macos:
     name: macos (${{ matrix.parts }})
+    needs: firecracker-lock
     runs-on: macos-15
     timeout-minutes: 90
     strategy:
@@ -197,6 +212,7 @@ jobs:
         run: scripts/test.sh --no-fail-fast
 
   pjdfstest-fuse:
+    needs: firecracker-lock
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -246,6 +262,7 @@ jobs:
   # binary (MPL-2.0), which scripts/test-openbao.sh fetches, checked by its digest, each test
   # starting a dev server of its own (TASK-411.16): no secrets.
   object-stores:
+    needs: firecracker-lock
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -291,6 +308,7 @@ jobs:
   # it; Hunt runs it for half an hour each night. On the root disk, which has room for what it
   # writes, some 7 GiB.
   soak:
+    needs: firecracker-lock
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
@@ -427,6 +445,7 @@ jobs:
   # workflow_dispatch). Its long mode is ubu1's, by hand (scripts/qualify.sh, TASK-330.5).
   sandboxes:
     if: github.event_name == 'push'
+    needs: firecracker-lock
     uses: ./.github/workflows/sandboxes.yml
 
   # guide/: the codebase guide, which cites code by exact snippets. Its build fails when a snippet
@@ -607,6 +626,7 @@ jobs:
   # Debian, and Fedora Asahi (16 KiB pages) with zero glibc version coupling.
   musl-release:
     name: musl release (${{ matrix.target }})
+    needs: firecracker-lock
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     strategy:
