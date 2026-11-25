@@ -27,6 +27,43 @@ pub(super) fn check_url(url: &str, origin: Origin) -> Result<(), String> {
     Parsed::of(url, origin).map(drop)
 }
 
+/// Whether `account` is a 12-digit AWS account ID.
+pub(super) fn valid_account(account: &str) -> bool {
+    account.len() == 12 && account.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// The literal 12-digit AWS account ID of an AWS KMS ARN (`arn:PARTITION:kms:REGION:ACCOUNT:RES`),
+/// if `name` is one (board 9686).
+pub(super) fn arn_account(name: &str) -> Option<&str> {
+    let mut parts = name.splitn(6, ':');
+    let arn = parts.next()?;
+    let partition = parts.next()?;
+    let service = parts.next()?;
+    let region = parts.next()?;
+    let account = parts.next()?;
+    let resource = parts.next()?;
+    let valid = arn == "arn"
+        && !partition.is_empty()
+        && !partition.contains('{')
+        && service == "kms"
+        && !region.is_empty()
+        && valid_account(account)
+        && !resource.is_empty();
+    valid.then_some(account)
+}
+
+/// The literal AWS account ID named by a host's own `aws-kms://` URL's `key` template, if it is
+/// an ARN (board 9686).
+pub(super) fn url_account(url: &str) -> Option<String> {
+    // Non-URL or non-aws-kms: none, refused when the host's own KMS is built.
+    let parsed = url::Url::parse(url).ok()?;
+    if parsed.scheme() != "aws-kms" {
+        return None;
+    }
+    let template = parsed.query_pairs().find(|(name, _)| name == "key")?.1;
+    arn_account(&template).map(str::to_owned)
+}
+
 /// The variables its credentials are read from ([`Credentials::of`]), as AWS's SDKs read them: a
 /// bucket's own replace the host's as one (board 8485, `super::vars`).
 pub(super) const CREDENTIAL_VARS: &[&str] = &[
@@ -296,7 +333,7 @@ struct Parsed {
 
 impl Parsed {
     /// The region, key names and optional endpoint of an AWS KMS URL. A recorded URL names no
-    /// file and reaches only an allowed endpoint (board 8525).
+    /// file and reaches only an allowed endpoint (board 8525) and AWS account (board 9686).
     fn of(url: &str, origin: Origin) -> Result<Self, String> {
         let parsed = url::Url::parse(url).map_err(|err| format!("{url:?}: {err}"))?;
         let refused = |why: &str| format!("{url:?} names no AWS KMS: {why}");
@@ -330,6 +367,7 @@ impl Parsed {
         let query_pairs = query.iter().map(|(n, v)| (n.as_str(), v.as_str()));
         let names =
             KeyNames::of_query(query_pairs, origin, |_| Ok(())).map_err(|why| refused(&why))?;
+        origin.aws_key_template(names.template()).map_err(|why| refused(&why))?;
         Ok(Self { region: region.to_owned(), endpoint, names })
     }
 }
@@ -561,7 +599,7 @@ mod tests {
 
     /// The KMS `url` names, the host's own, calling with the standard chain's credentials.
     fn of_host(url: &str) -> Result<AwsKms, String> {
-        AwsKms::of(url, Credentials::Chain, Origin::Host)
+        AwsKms::of(url, Credentials::Chain, Origin::Host, None)
     }
 
     #[test]

@@ -41,7 +41,8 @@ const GROUPS: [&[&str]; 5] = [
 ];
 
 /// The variables read besides: what a recorded KMS URL may reach ([`trust`]), each its own.
-const OTHERS: [&str; 2] = [trust::HOSTS_VAR, trust::LOCAL_VAR];
+const OTHERS: [&str; 4] =
+    [trust::HOSTS_VAR, trust::LOCAL_VAR, trust::GCP_PROJECTS_VAR, trust::AWS_ACCOUNTS_VAR];
 
 /// What starts each variable of a numbered bucket's own, before its number.
 const NUMBERED: &str = "CLADEFSD_BUCKET_";
@@ -220,6 +221,8 @@ mod tests {
             "GOOGLE_APPLICATION_CREDENTIALS",
             "AZURE_CLIENT_SECRET",
             "CLADEFSD_KMS_HOSTS",
+            "CLADEFSD_KMS_GCP_PROJECTS",
+            "CLADEFSD_KMS_AWS_ACCOUNTS",
             "CLADEFSD_BUCKET_0_CLADEFS_KMS",
             "CLADEFSD_BUCKET_2_AWS_ACCESS_KEY_ID",
             "CLADEFSD_BUCKET_65535_CLADEFS_KMS_AZURE_TOKEN",

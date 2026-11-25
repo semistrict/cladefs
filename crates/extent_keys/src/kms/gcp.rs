@@ -103,8 +103,40 @@ pub(super) fn check_url(url: &str, origin: Origin) -> Result<(), String> {
     parse(url, origin).map(drop)
 }
 
+/// Whether `project` is syntactically a GCP project ID: lowercase letters, digits, hyphens, or a
+/// domain-scoped `example.com:id`.
+pub(super) fn valid_project(project: &str) -> bool {
+    let project_char = |c: char| matches!(c, 'a'..='z' | '0'..='9' | '-' | '.' | ':');
+    !project.is_empty() && project.chars().all(project_char)
+}
+
+/// Literal GCP project IDs named by a host's own `gcp-kms://` URL (its ring's, and its template's
+/// if the template is a full resource name without `{tenant}` in the project segment; board 9686).
+pub(super) fn url_projects(url: &str) -> Vec<String> {
+    let Some(rest) = url.strip_prefix("gcp-kms://") else { return Vec::new() };
+    let (ring, query) = rest.split_once('?').unwrap_or((rest, ""));
+    let segments: Vec<&str> = ring.split('/').collect();
+    let mut projects = Vec::new();
+    if let ["projects", project, "locations", _, "keyRings", _] = segments[..]
+        && valid_project(project)
+    {
+        projects.push(project.to_owned());
+    }
+    for (name, value) in url::form_urlencoded::parse(query.as_bytes()) {
+        if name == "key"
+            && let Some(rest) = value.strip_prefix("projects/")
+            && let Some(project) = rest.split('/').next()
+            && valid_project(project)
+            && !projects.iter().any(|existing| existing == project)
+        {
+            projects.push(project.to_owned());
+        }
+    }
+    projects
+}
+
 /// The key ring `url` names and its tenants' keys' names, each checked: of `origin` the registry of
-/// buckets, no file of the host's named (board 8525).
+/// buckets, no file of the host's named (board 8525) and only allowed GCP projects (board 9686).
 fn parse(url: &str, origin: Origin) -> Result<(String, KeyNames), String> {
     let usage = "gcp-kms://projects/P/locations/L/keyRings/R?key=TEMPLATE[&keys=FILE]";
     let rest = url.strip_prefix("gcp-kms://").expect("a gcp-kms:// URL");
@@ -114,6 +146,7 @@ fn parse(url: &str, origin: Origin) -> Result<(String, KeyNames), String> {
         return Err(format!("{url:?} names no key ring: {usage}"));
     };
     check_ring(project, location, id).map_err(|why| format!("{url:?}: {why}"))?;
+    origin.gcp_project(project).map_err(|why| format!("{url:?}: {why}"))?;
     let query: Vec<(String, String)> =
         url::form_urlencoded::parse(query.as_bytes()).into_owned().collect();
     if let Some((name, _)) = query.iter().find(|(name, _)| !matches!(&name[..], "key" | "keys")) {
@@ -124,14 +157,20 @@ fn parse(url: &str, origin: Origin) -> Result<(String, KeyNames), String> {
         .map_err(|why| format!("{url:?}: {why}"))?;
     // The template, as the longest tenant names it: its other tenants' names are as valid.
     check_key(&names.of(u64::MAX)).map_err(|why| format!("{url:?}: the key template, {why}"))?;
+    // A template naming keys whole names their project: one the host allows, as the template has
+    // it, so that a project containing `{tenant}` is refused too (board 9686).
+    if let Some(rest) = names.template().strip_prefix("projects/") {
+        let template_project = rest.split('/').next().unwrap_or_default();
+        origin
+            .gcp_project(template_project)
+            .map_err(|why| format!("{url:?}: the key template, {why}"))?;
+    }
     Ok((ring.to_owned(), names))
 }
 
 /// Checks a key ring's resource name, of `project`, `location` and `id`, is one Cloud KMS has.
 fn check_ring(project: &str, location: &str, id: &str) -> Result<(), String> {
-    // A project's ID: lowercase letters, digits and hyphens, or a domain's, `example.com:id`.
-    let project_char = |c: char| matches!(c, 'a'..='z' | '0'..='9' | '-' | '.' | ':');
-    if project.is_empty() || !project.chars().all(project_char) {
+    if !valid_project(project) {
         return Err(format!("no project {project:?}"));
     }
     let location_char = |c: char| matches!(c, 'a'..='z' | '0'..='9' | '-');

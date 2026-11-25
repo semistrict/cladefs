@@ -232,6 +232,14 @@ bucket KMS over that bucket, its tenants' KEKs kept in it. A bucket given any of
 `CLADEFS_MASTER_KEY` or `CLADEFS_MASTER_KEY_FILE` as its own takes none of the host's three. A
 master key's ID recorded with
 `--master-key-id` must be among those given, or the bucket's cells are refused (`EACCES`). A KMS
+URL recorded in the registry is untrusted (`Origin::Recorded`): it may name no host files
+(`keys=FILE`, `ca=FILE`), `local://` only if `CLADEFSD_KMS_LOCAL=1`, OpenBao or Azure Key Vault
+hosts only those in `CLADEFSD_KMS_HOSTS` or the host's own `CLADEFS_KMS` (OpenBao over cleartext
+only on loopback), GCP Cloud KMS projects (both key ring and full-resource key template) only those
+in `CLADEFSD_KMS_GCP_PROJECTS` or the host's own `CLADEFS_KMS`, and AWS KMS key template ARNs only
+accounts in `CLADEFSD_KMS_AWS_ACCOUNTS` or the host's own `CLADEFS_KMS` (non-ARN key IDs and
+aliases resolve in the host's own account; `endpoint=` only AWS KMS over HTTPS, loopback, or
+`CLADEFSD_KMS_HOSTS`). A KMS
 refusing a tenant refuses it in the buckets under that KMS alone. The host's own bucket's cells are
 under the KMS its own environment names, as below.
 
