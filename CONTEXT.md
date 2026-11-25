@@ -415,6 +415,10 @@ _Avoid_: durable, durable locally
 A commit on the disks of f+1 of its configuration's 2f+1 members, the writer's counting as one (doc-21); between Local and Uploaded, and released by Uploaded too.
 _Avoid_: durable, quorum-committed
 
+**Fast WAL**:
+A commit appended via an offset-checked write to an appendable zonal object store (`tenants/<T>/cells/<C>/wal/<epoch>/<segment>`, Amazon S3 Express One Zone today, GCS Rapid Storage via gRPC `BidiWriteObject` planned, doc-29), or acknowledged in the cold regional bucket. Compute nodes stay stateless cache-only with zero local disk `fsync`s; large extents (`>= 256 KiB` by default) upload directly to the cold regional bucket before referencing them metadata-only in the fast WAL.
+_Avoid_: zonal log, express WAL (say Fast WAL)
+
 **Uploaded**:
 A commit whose segments the bucket has acknowledged.
 _Avoid_: durable

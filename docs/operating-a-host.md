@@ -162,6 +162,25 @@ taking it forced (`cladefsctl take --force DIR CAPACITY CELL TOKEN`,
 and the bucket, and lose what only the others held; `StatCell`'s `forced_after`
 names the last commit the bucket held, past which commits told Replicated may be lost.
 
+### Fast WAL cells (appendable zonal object storage)
+
+When compute hosts have access to an appendable zonal object store (Amazon S3
+Express One Zone today; GCS Rapid Storage via gRPC `BidiWriteObject` is planned
+and currently rejected at boot), set `CLADEFSD_FAST_WAL_BUCKET` to its URL
+(`s3://...`, doc-29). The daemon probes offset-checked append semantics at boot
+and refuses to start if the bucket does not honor them. Optional
+`CLADEFSD_FAST_WAL_LARGE_EXTENT_BYTES` overrides the 256 KiB large-write
+direct-to-cold-bucket threshold. For cross-AZ takeover recovery, set
+`CLADEFSD_FAST_WAL_ALLOWED_BUCKETS` to a comma-separated allowlist of trusted
+fast WAL bucket URLs; takeover refuses any bucket URL in a cell head outside
+`CLADEFSD_FAST_WAL_BUCKET` and that allowlist. Fast WAL cells
+(`CreateCellRequest.fast_wal = true`, `FsyncLevel.FSYNC_LEVEL_FAST_WAL`) perform
+zero local disk `fsync`s and keep compute nodes 100% stateless cache-only; losing
+any node at any time loses zero acknowledged commits, and takeover from another
+host fences and recovers the active WAL automatically. Fast WAL cannot be
+combined with peer replication (`replicas >= 1` or an active peer configuration;
+disable replication with `replicas = 0` and `SyncCell` first).
+
 ### Buckets and their numbers
 
 Every bucket has a **bucket number**, which the high bits of every cell ID it gives carry, so that

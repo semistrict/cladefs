@@ -24,6 +24,7 @@ recovery.
 | Ordered | `COMMIT` returned: cladefsd has it, in order: its data in the cell directory's files, its commit record in cladefsd's memory (`Pending`, `Store::commit_locked`) | as `fsync` returns |
 | Local | the data synced, then the record written and synced (`Store::make_durable`) | within 50 ms at the median (32 ms on main); the crash bound, 1 s, at most (below) |
 | Replicated | of a replicated cell (doc-21): on the disks of f+1 of its configuration's 2f+1 members, the writer's own Local copy one, each synced; or Uploaded | a member's round trip and sync, overlapping the writer's own (TASK-537.3.3) |
+| Fast WAL | of a fast-WAL cell (doc-29): appended via offset-checked write to an appendable zonal object store (`CLADEFSD_FAST_WAL_BUCKET`), with extents >= 256 KiB pre-uploaded to the cold regional bucket, or Uploaded | one zonal append RTT (~2-3 ms; 0 ms linger when serial, adaptive group commit under concurrency) |
 | Uploaded | in the bucket, a contiguous prefix, acknowledged by the head's swap while the writer holds it | the lag (below) |
 
 *Revised 2026-11-08 (TASK-221, the user's decision: the window is what main achieves):* "within
@@ -109,6 +110,26 @@ as above. With f = 1 (three members):
 StatCell says `degraded`, `members_up` and `active_replicas`; `/metrics` says
 `cladefsd_replication_degraded{cell}` and `cladefsd_replication_members_up{cell}`, and the daemon
 logs a warning as a cell is degraded and as it is no more.
+
+### A fast-WAL cell's (doc-29)
+
+*Added 2026-11-25 (doc-29):* a cell made or taken with `fast_wal = true` (`CreateCell`) performs
+zero local disk `fsync`s on the commit critical path: compute nodes hold cache-only state and never
+rely on local SSD for acknowledged commits. Its sync family (`COMMIT_UPLOADED`) returns once
+appended to the cell's fast WAL in the configured appendable zonal bucket
+(`CLADEFSD_FAST_WAL_BUCKET`; S3 Express One Zone implemented today, GCS Rapid Storage planned), or
+acknowledged in the cold regional bucket, whichever first; `SyncCell` waits for the cold regional
+bucket. Its guest `fsync` waits for `FSYNC_LEVEL_FAST_WAL` or `FSYNC_LEVEL_ORDERED` as configured.
+Large extents (`>= 256 KiB` by default) are pre-uploaded directly to the cold regional bucket
+before writing a metadata-only reference into the fast WAL, avoiding double upload.
+
+| Failure | fsync (FastWal) acknowledged | sync acknowledged | Verified by |
+|---|---|---|---|
+| Guest crash, VMM killed, cladefsd killed, host lost with disk | kept: takeover fences the active WAL segment across rollovers, replays missing commits (verifying pre-uploaded large extents), flushes cold segments, and switches `head.fast_wal` atomically in one head CAS | kept | `specs/fast-wal/FastWal.tla` (5 models, 14 mutations); `local_cell::fast_wal::tests::upload_open_fast_wal_crash_wipe_local_disk_recovers_inline_and_large_and_cross_az`; `local_cell::fast_wal::tests::takeover_fences_recovers_large_extents_and_rejects_zombie_after_sweep` |
+| Fast WAL zonal bucket transiently unavailable | kept: marks `fast_wal_degraded = true`, urges immediate cold regional bucket upload, and releases waiters once the cold head acknowledges | kept | `specs/fast-wal/FastWal.tla` (`FastWalUploads`, `WalSkipsUnacked`); `local_cell::fast_wal::tests::delayed_append_reconciles_offset_without_falsely_acking_next_batch` |
+| Writer fenced by takeover on another host (same or different AZ) | old writer's delayed appends fail precondition against fence/rolled 16-byte tombstones; returns `EROFS` | old writer fenced | `specs/fast-wal/FastWal.tla`; `local_cell::fast_wal::tests::takeover_fences_recovers_large_extents_and_rejects_zombie_after_sweep`; `local_cell::fast_wal::tests::cfwf_fence_rejects_tampered_offset_and_epoch_and_preserves_next_sequence` |
+
+`StatCell` reports `fast_wal`, `fast_wal_bucket`, `fast_wal_degraded`, and `fsync`.
 
 ### An ephemeral cell's (doc-25, TASK-698)
 
