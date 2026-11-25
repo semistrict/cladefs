@@ -103,11 +103,17 @@ use std::sync::Arc;
 use storage_device::ExtentId;
 
 /// How many cells a pass recovers at once, and how many origins' states.
+#[cfg(not(target_arch = "wasm32"))]
 const RECOVERIES_AT_ONCE: usize = 16;
+#[cfg(target_arch = "wasm32")]
+const RECOVERIES_AT_ONCE: usize = 1;
 
 /// How many of the checkpoints a pass read whole it keeps for the recoveries after: those of forks
 /// of a base, recovered one after another, which start from the base's.
+#[cfg(not(target_arch = "wasm32"))]
 const CHECKPOINTS_KEPT: usize = 4;
+#[cfg(target_arch = "wasm32")]
+const CHECKPOINTS_KEPT: usize = 0;
 
 /// cladefs: how a collector's passes hold their cells (TASK-395.5): the default holds none, its
 /// passes taking their cells whatever another holds, but a pass holding it for a time, as the
@@ -254,7 +260,6 @@ pub async fn collect_cell(
 /// cells it is passing over. A pass reads a record again only once it changed, as it lists the
 /// records again (TASK-92.7). What is worth keeping across passes is under the cell's prefix, in
 /// its lease, which any collector process reads (TASK-395.6, [`crate::passed`]).
-#[derive(Default)]
 pub struct Collector {
     /// cladefs: how its passes hold their cells (TASK-395.5).
     holding: Holding,
@@ -264,6 +269,21 @@ pub struct Collector {
     /// cladefs: tenants known to be shredded (from `events`), whose live cells are ended and whose
     /// read evidence and orphaned ephemeral references are reclaimed.
     shredded: Arc<BTreeSet<u64>>,
+    /// cladefs: read checkpoints by streaming their tails and 1 MiB parts on demand instead of
+    /// materializing the full `imbl::OrdMap<ExtentId, Location>`, bounding peak RAM to a few MiB
+    /// per cell (default on `wasm32` for Cloudflare Workers' 128 MiB isolate limit).
+    stream_checkpoints: bool,
+}
+
+impl Default for Collector {
+    fn default() -> Self {
+        Self {
+            holding: Holding::default(),
+            budget: None,
+            shredded: Arc::new(BTreeSet::new()),
+            stream_checkpoints: cfg!(target_arch = "wasm32"),
+        }
+    }
 }
 
 /// cladefs: what a pass over a cell keeps as it reads it, and drops with it.
@@ -271,6 +291,8 @@ pub struct Collector {
 struct Remembered {
     /// The heads read, each with the version it was read at, by key.
     heads: BTreeMap<String, (String, Head)>,
+    /// Whether this pass streams checkpoints rather than materializing full `State` maps.
+    stream_checkpoints: bool,
 }
 
 impl Collector {
@@ -293,6 +315,12 @@ impl Collector {
     /// reclaiming their read evidence (board 2940) and orphaned ephemeral references.
     pub fn shredded(self, shredded: Arc<BTreeSet<u64>>) -> Self {
         Self { shredded, ..self }
+    }
+
+    /// cladefs: one whose passes stream checkpoint tails and 1 MiB parts on demand instead of
+    /// decoding full `State` maps into memory.
+    pub fn stream_checkpoints(self, stream_checkpoints: bool) -> Self {
+        Self { stream_checkpoints, ..self }
     }
 
     /// cladefs: whether a pass may delete `objects` objects of `bytes` bytes, as its budget says,
@@ -319,10 +347,13 @@ impl Collector {
         own: Option<&O>,
         holder: u64,
     ) -> Result<Report, Error> {
+        #[cfg(feature = "full")]
         let number = match own {
             Some(own) => crate::identity::get(own).await?.map(|identity| identity.number),
             None => None,
         };
+        #[cfg(not(feature = "full"))]
+        let _ = own;
         if let Some(log) = crate::events::get(bucket).await? {
             let mut merged = (*self.shredded).clone();
             merged.extend(log.shredded_set());
@@ -340,6 +371,7 @@ impl Collector {
                     break;
                 }
             };
+            #[cfg(feature = "full")]
             if let (Some(own), Some(number)) = (own, number)
                 && layout::routed_to(&cell.prefix()).is_some_and(|of| of != number)
             {
@@ -381,6 +413,7 @@ impl Collector {
     /// A pin unrefreshed for [`crate::mirror::PIN_STALE`], its mirror's host dead, keeps nothing:
     /// its mirror is begun again here, taking it over, and the copy kept this pass whatever that
     /// mirror came to.
+    #[cfg(feature = "full")]
     pub async fn collect_copy(
         &self,
         bucket: &impl Bucket,
@@ -602,7 +635,8 @@ impl Collector {
             let skipped = Report { skipped: 1, ..Report::default() };
             return Ok((self.trim_evidence(bucket, cell, listed, skipped).await?, None));
         }
-        let mut remembered = Remembered::default();
+        let mut remembered =
+            Remembered { stream_checkpoints: self.stream_checkpoints, ..Remembered::default() };
         let survey = remembered.survey(bucket, cell, taken.epoch, Writes::Some, listed, false);
         let Some(pass) = survey.await? else {
             return Ok((Report::default(), None));
@@ -774,7 +808,8 @@ impl Collector {
     pub async fn dry_run_cell(&self, bucket: &impl Bucket, cell: CellId) -> Result<DryRun, Error> {
         let epoch = passed::epoch(bucket, cell).await?;
         let listed = first_listing(bucket, cell).await?;
-        let mut remembered = Remembered::default();
+        let mut remembered =
+            Remembered { stream_checkpoints: self.stream_checkpoints, ..Remembered::default() };
         let shredded_cell =
             cell.tenant != layout::DEFAULT_TENANT && self.shredded.contains(&cell.tenant);
         let Some(pass) =
@@ -857,9 +892,16 @@ impl Remembered {
                     None => referenced(bucket, cell).await?,
                 };
                 let by = KeptBy::Referred;
-                keep_origins(bucket, &checkpoints, &mut live, &referenced, by)
-                    .await
-                    .map(|()| referenced)
+                keep_origins(
+                    bucket,
+                    &checkpoints,
+                    &mut live,
+                    &referenced,
+                    by,
+                    self.stream_checkpoints,
+                )
+                .await
+                .map(|()| referenced)
             }
             Err(error) => Err(error),
         };
@@ -905,9 +947,18 @@ impl Remembered {
         if rules().collector_abandons {
             abandon(bucket, cell, record, writes).await?;
         }
-        let origins =
-            recover_live(bucket, checkpoints, cell, record.as_ref(), live, writes).await?;
-        keep_origins(bucket, checkpoints, live, &origins, KeptBy::Version).await
+        let origins = recover_live(
+            bucket,
+            checkpoints,
+            cell,
+            record.as_ref(),
+            live,
+            writes,
+            self.stream_checkpoints,
+        )
+        .await?;
+        keep_origins(bucket, checkpoints, live, &origins, KeptBy::Version, self.stream_checkpoints)
+            .await
     }
 
     /// `cell`'s record, if it has one, read: as the pass's listing of the whole cell, `listed`,
@@ -1081,6 +1132,7 @@ async fn read_record(
 /// (hotbed review 94). None: `child` is dead, and its reference in a mirror's copy is retired here
 /// even if its own pass already ran and this copy's marks were deleted before a late write of the
 /// reference landed.
+#[cfg(feature = "full")]
 async fn has_references(bucket: &impl Bucket, child: CellId) -> Result<bool, bucket::Refused> {
     let prefix = layout::references(child);
     let mut after = None;
@@ -1132,10 +1184,33 @@ async fn keep_origins(
     live: &mut Live,
     origins: &BTreeSet<(CellId, u64)>,
     by: KeptBy,
+    stream: bool,
 ) -> Result<(), Error> {
     let mut unkept: BTreeMap<CellId, BTreeSet<u64>> = BTreeMap::new();
     for &(parent, at) in origins.iter().filter(|&origin| live.origins.insert(*origin)) {
         unkept.entry(parent).or_default().insert(at);
+    }
+    if stream {
+        let walks = futures::stream::iter(unkept)
+            .map(|(parent, ats)| async move {
+                let walked = recovery::recover_ats_keys(checkpoints, parent, &ats).await;
+                (parent, ats, walked)
+            })
+            .buffer_unordered(RECOVERIES_AT_ONCE)
+            .collect::<Vec<_>>()
+            .await;
+        for (parent, ats, walked) in walks {
+            match walked {
+                Ok((named, touched)) => live.keep_keys(named, touched),
+                Err(Error::Lost(_)) if by == KeptBy::Referred => {
+                    for at in ats {
+                        keep_referred(bucket, checkpoints, live, (parent, at), true).await?;
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        return Ok(());
     }
     let walks = futures::stream::iter(unkept)
         .map(|(parent, ats)| async move {
@@ -1150,7 +1225,7 @@ async fn keep_origins(
             Ok((walked, touched)) => live.keep_walked(walked, touched),
             Err(Error::Lost(_)) if by == KeptBy::Referred => {
                 for at in ats {
-                    keep_referred(bucket, checkpoints, live, (parent, at)).await?;
+                    keep_referred(bucket, checkpoints, live, (parent, at), false).await?;
                 }
             }
             Err(error) => return Err(error),
@@ -1167,7 +1242,28 @@ async fn keep_referred(
     checkpoints: &Checkpoints<'_, impl Bucket>,
     live: &mut Live,
     (parent, at): (CellId, u64),
+    stream: bool,
 ) -> Result<(), Error> {
+    if stream {
+        match recovery::recover_at_keys(checkpoints, parent, at).await {
+            Ok((named, touched)) => live.keep_keys(named, touched),
+            Err(Error::Lost(_)) => {
+                let Some(child) = needing(bucket, (parent, at)).await? else {
+                    live.unsettled = true;
+                    return Ok(());
+                };
+                match recovery::recover_at_keys(checkpoints, parent, at).await {
+                    Ok((named, touched)) => live.keep_keys(named, touched),
+                    Err(Error::Lost(lost)) => {
+                        return Err(Error::Lost(format!("{lost}, which {child} lives on")));
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            Err(error) => return Err(error),
+        }
+        return Ok(());
+    }
     match recovery::recover_at(checkpoints, parent, at).await {
         Ok((state, touched)) => live.keep_origin(&state, touched),
         Err(Error::Lost(_)) => {
@@ -1229,9 +1325,31 @@ async fn recover_live(
     record: Option<&Head>,
     live: &mut Live,
     writes: Writes,
+    stream: bool,
 ) -> Result<BTreeSet<(CellId, u64)>, Error> {
     let mut origins = BTreeSet::new();
     let Some(record) = record.filter(|record| !record.deleted()) else { return Ok(origins) };
+    if stream {
+        let recovered = match recovery::recover_live_keys(checkpoints, cell, record.origin()).await
+        {
+            Ok(recovered) => recovered,
+            Err(Error::Lost(lost)) => match lost_is_ok(bucket, cell, record, writes).await? {
+                true => {
+                    live.unsettled = true;
+                    return Ok(origins);
+                }
+                false => return Err(Error::Lost(lost)),
+            },
+            Err(error) => return Err(error),
+        };
+        if rules().versions_kept
+            && let Some(head) = &recovered.head
+        {
+            origins.extend(head.versions.iter().map(|version| (cell, version.at)));
+        }
+        live.add_keys(cell, recovered);
+        return Ok(origins);
+    }
     // Recovered from its head, read after the listing: what its writer may name ([`behind`]), and
     // what it may yet name ([`Ended::ahead`]).
     let recovered = match recovery::recover_layers(checkpoints, cell, record.origin()).await {
@@ -1372,6 +1490,32 @@ impl Live {
             }
         }
         self.cells.entry(cell).or_default().push(ended);
+    }
+
+    /// Folds in `recovered`, a live cell recovered by streaming checkpoint tails and parts.
+    fn add_keys(&mut self, cell: CellId, recovered: recovery::RecoveredKeys) {
+        let ended = Ended {
+            end: recovered.end(),
+            epoch: recovered.epoch(),
+            checkpoint: recovered.checkpoint(),
+        };
+        self.touched.extend(recovered.touched);
+        for key in recovered.named {
+            if !self.named.contains(&key) {
+                self.named.insert(key);
+            }
+        }
+        self.cells.entry(cell).or_default().push(ended);
+    }
+
+    /// Keeps `named` object keys and `touched` objects from streaming origin/version recovery.
+    fn keep_keys(&mut self, named: rustc_hash::FxHashSet<String>, touched: BTreeSet<String>) {
+        self.keep_read(touched);
+        for key in named {
+            if !self.named.contains(&key) {
+                self.named.insert(key);
+            }
+        }
     }
 
     /// cladefs: keeps `state`, an origin's, whole, for the forks of it to other cells, which
@@ -1696,7 +1840,7 @@ impl Removal<'_> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full"))]
 mod tests {
     use super::*;
     use crate::batch::{Commit, SegmentBuilder};
@@ -3942,6 +4086,222 @@ mod tests {
                 .unwrap()
                 .state;
             assert!(state.extents.contains_key(&ExtentId::new(shared.id, 1)));
+        });
+    }
+
+    /// Clones every object in `src` into a fresh `Direct(SimBucket)` so streaming and full
+    /// collector passes can be compared side-by-side on identical initial bucket state.
+    async fn clone_bucket(src: &Direct) -> Direct {
+        let dst = Direct(SimBucket::new());
+        for meta in bucket::list(src, "").await.unwrap() {
+            let obj = bucket::get(src, &meta.key).await.unwrap().unwrap();
+            dst.put(&meta.key, obj.bytes.into(), PutMode::Overwrite).await.unwrap();
+        }
+        dst
+    }
+
+    /// cladefs: streaming checkpoint recovery takes the tail-only fast path (zero full checkpoint
+    /// GETs) when no tail segments shadowed checkpointed extents, and matches full recovery.
+    #[test]
+    fn streaming_checkpoints_fast_path_reads_only_tail() {
+        block_on(async {
+            let sim = SimBucket::new();
+            let direct = Arc::new(Direct(sim.clone()));
+            let cell = test_cell(1);
+            lifecycle::create(&*direct, cell, 0).await.unwrap();
+            let writer = Writer::open(direct.clone(), cell, 10, 0).await.unwrap();
+            let mut extents = Vec::new();
+            for seq in 1..=64u64 {
+                extents.push((ExtentId::new(1, seq), vec![seq as u8; 64]));
+            }
+            commit(&writer, Commit { tag: 1, extents, ..Commit::default() }).await;
+            let cp_seg = writer.checkpoint().await.unwrap().unwrap();
+            let cp_key = layout::checkpoint(cell, cp_seg, writer.epoch());
+
+            // Also add an unreferenced stray segment so both passes delete something.
+            let stray = layout::segment(cell, 999, 999);
+            let bytes =
+                layout::with_footer(b"", &(), crate::testing::encrypting(layout::test_cell(1)));
+            direct.put(&stray, bytes.into(), PutMode::Overwrite).await.unwrap();
+
+            let full_bucket = clone_bucket(&direct).await;
+            let full_report = Collector::new()
+                .stream_checkpoints(false)
+                .collect_cell(&full_bucket, cell, 1)
+                .await
+                .unwrap();
+
+            let (stream_report, asked) = sim
+                .served(Collector::new().stream_checkpoints(true).collect_cell(&*direct, cell, 1));
+            let stream_report = stream_report.unwrap();
+
+            assert_eq!(stream_report, full_report);
+            assert_eq!(keys(&*direct).await, keys(&full_bucket).await);
+            assert!(
+                !asked.iter().any(|req| req == &format!("get {cp_key}")),
+                "fast path must not GET full checkpoint {cp_key}: {asked:?}"
+            );
+        });
+    }
+
+    /// cladefs: streaming checkpoint recovery across a multi-part (>1 MiB) checkpoint where
+    /// 64 KiB table blocks straddle the 1 MiB `extent_frame::PART` boundary reclaims the exact
+    /// same segments freed in tail segments as full recovery.
+    #[test]
+    fn streaming_checkpoints_reclaim_freed_segments_across_multipart_checkpoint() {
+        block_on(async {
+            let direct = Arc::new(Direct(SimBucket::new()));
+            let cell = test_cell(1);
+            lifecycle::create(&*direct, cell, 0).await.unwrap();
+            let writer = Writer::open(direct.clone(), cell, 10, 0).await.unwrap();
+
+            // Segment 1: extents that will ALL be freed after the checkpoint.
+            let freed_extents: Vec<ExtentId> =
+                (1..=16u64).map(|seq| ExtentId::new(1, seq)).collect();
+            let seg1_extents: Vec<_> =
+                freed_extents.iter().map(|&id| (id, vec![0xAA; 16])).collect();
+            commit(&writer, Commit { tag: 1, extents: seg1_extents, ..Commit::default() }).await;
+            let freed_seg_key = writer.location(freed_extents[0]).unwrap().key;
+
+            // Segment 2: enough extents (~45,000, ~2.1 MiB table uncompressed) so the checkpoint
+            // spans multiple 1 MiB `extent_frame::PART`s and table blocks straddle part seams.
+            let mut kept_extents = Vec::with_capacity(45_000);
+            for seq in 17..=45_016u64 {
+                kept_extents.push((ExtentId::new(1, seq), vec![(seq & 0xff) as u8; 1]));
+            }
+            commit(&writer, Commit { tag: 2, extents: kept_extents, ..Commit::default() }).await;
+            let kept_seg_key = writer.location(ExtentId::new(1, 17)).unwrap().key;
+
+            let cp_seg = writer.checkpoint().await.unwrap().unwrap();
+            let cp_key = layout::checkpoint(cell, cp_seg, writer.epoch());
+            let cp_obj = bucket::get(&*direct, &cp_key).await.unwrap().unwrap();
+            let cp_parts = extent_frame::Parts::of(&cp_obj.bytes, &extent_frame::NoKeys).unwrap();
+            assert!(
+                cp_parts.frame.data_len > extent_frame::PART,
+                "expected multi-part checkpoint (>1 MiB), got {} bytes",
+                cp_parts.frame.data_len
+            );
+
+            // Tail segment frees every extent of segment 1 while leaving segment 2 alive.
+            commit(&writer, Commit { tag: 3, frees: freed_extents, ..Commit::default() }).await;
+
+            let full_bucket = clone_bucket(&direct).await;
+            let stream_bucket = clone_bucket(&direct).await;
+
+            let full_report = Collector::new()
+                .stream_checkpoints(false)
+                .collect_cell(&full_bucket, cell, 1)
+                .await
+                .unwrap();
+            let stream_report = Collector::new()
+                .stream_checkpoints(true)
+                .collect_cell(&stream_bucket, cell, 1)
+                .await
+                .unwrap();
+
+            assert_eq!(stream_report, full_report);
+            assert_eq!(keys(&stream_bucket).await, keys(&full_bucket).await);
+            assert!(
+                !keys(&stream_bucket).await.contains(&freed_seg_key),
+                "freed segment should be reclaimed"
+            );
+            assert!(keys(&stream_bucket).await.contains(&kept_seg_key), "live segment must remain");
+        });
+    }
+
+    /// cladefs: streaming checkpoint recovery matches full recovery across multi-version cells
+    /// (`head.versions`) and cross-cell forks without checkpoints of their own.
+    #[test]
+    fn streaming_checkpoints_match_full_on_versions_and_cross_cell_forks() {
+        block_on(async {
+            let direct = Arc::new(Direct(SimBucket::new()));
+            let parent = test_cell(1);
+            let child = test_cell(2);
+            lifecycle::create(&*direct, parent, 0).await.unwrap();
+            let writer = Writer::open(direct.clone(), parent, 10, 0).await.unwrap();
+
+            let ext_v1 = ExtentId::new(1, 1);
+            let ext_v2 = ExtentId::new(1, 2);
+            let ext_live = ExtentId::new(1, 3);
+            commit(
+                &writer,
+                Commit {
+                    tag: 1,
+                    extents: vec![(ext_v1, b"v1".to_vec()), (ext_live, b"live".to_vec())],
+                    ..Commit::default()
+                },
+            )
+            .await;
+            let v1_at = crate::testing::versioned_by(&writer, Vec::new(), 0x10).await;
+            writer.checkpoint().await.unwrap();
+
+            // Fork child from v1, then drop v1, free ext_v1, add ext_v2 and cut v2.
+            let origin = Origin { parent, at: v1_at, epoch: writer.epoch() };
+            crate::testing::fork_version(&*direct, child, 0x10, origin, 0x200).await.unwrap();
+            writer.drop_versions(&BTreeSet::from([0x10])).await.unwrap();
+
+            commit(
+                &writer,
+                Commit {
+                    tag: 2,
+                    extents: vec![(ext_v2, b"v2".to_vec())],
+                    frees: vec![ext_v1],
+                    ..Commit::default()
+                },
+            )
+            .await;
+            let _v2_at = crate::testing::versioned_by(&writer, Vec::new(), 0x20).await;
+            writer.checkpoint().await.unwrap();
+            commit(&writer, Commit { tag: 3, frees: vec![ext_v2], ..Commit::default() }).await;
+
+            let full_bucket = clone_bucket(&direct).await;
+            let stream_bucket = clone_bucket(&direct).await;
+
+            let full_report =
+                Collector::new().stream_checkpoints(false).collect(&full_bucket, 1).await.unwrap();
+            let stream_report =
+                Collector::new().stream_checkpoints(true).collect(&stream_bucket, 1).await.unwrap();
+
+            assert_eq!(stream_report, full_report);
+            assert_eq!(keys(&stream_bucket).await, keys(&full_bucket).await);
+        });
+    }
+
+    /// cladefs: streaming checkpoint recovery verifies block CRCs when scanning shadowed extents
+    /// and rejects corrupt checkpoint data instead of silently trusting the footer.
+    #[test]
+    fn streaming_checkpoints_reject_corrupt_block_when_shadowed() {
+        block_on(async {
+            let direct = Arc::new(Direct(SimBucket::new()));
+            let cell = test_cell(1);
+            lifecycle::create(&*direct, cell, 0).await.unwrap();
+            let writer = Writer::open(direct.clone(), cell, 10, 0).await.unwrap();
+            let e1 = ExtentId::new(1, 1);
+            let e2 = ExtentId::new(1, 2);
+            commit(
+                &writer,
+                Commit {
+                    tag: 1,
+                    extents: vec![(e1, b"one".to_vec()), (e2, b"two".to_vec())],
+                    ..Commit::default()
+                },
+            )
+            .await;
+            let cp_seg = writer.checkpoint().await.unwrap().unwrap();
+            commit(&writer, Commit { tag: 2, frees: vec![e1], ..Commit::default() }).await;
+
+            // Corrupt the first byte of the checkpoint's part 0 so its CRC fails.
+            let cp_key = layout::checkpoint(cell, cp_seg, writer.epoch());
+            let mut bytes = bucket::get(&*direct, &cp_key).await.unwrap().unwrap().bytes;
+            bytes[0] ^= 0xff;
+            direct.put(&cp_key, bytes.into(), PutMode::Overwrite).await.unwrap();
+
+            let err = Collector::new()
+                .stream_checkpoints(true)
+                .collect_cell(&*direct, cell, 1)
+                .await
+                .unwrap_err();
+            assert!(matches!(err, Error::Corrupt(_)), "expected Corrupt, got {err:?}");
         });
     }
 }

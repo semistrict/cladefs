@@ -21,7 +21,9 @@
 //! Numbers 0 ([`NAMED`], the IDs tests name) and 65535 ([`NONE`], as `u64::MAX` names no cell) are
 //! no bucket's.
 
-use crate::bucket::{self, Bucket, Created, Updated};
+use crate::bucket::{self, Bucket};
+#[cfg(feature = "full")]
+use crate::bucket::{Created, Updated};
 use crate::{Error, layout};
 use fprint::TypeFingerprint;
 use serde::{Deserialize, Serialize};
@@ -67,6 +69,7 @@ pub struct Details {
 
 impl Details {
     /// These, each missing one taken from `others`.
+    #[cfg(feature = "full")]
     fn or(self, others: &Self) -> Self {
         let or = |mine: Option<String>, theirs: &Option<String>| mine.or_else(|| theirs.clone());
         Self {
@@ -208,6 +211,7 @@ async fn registry_versioned(
 /// Formats `bucket`, unless it was formatted or added: the root of buckets of its own, number
 /// [`ROOT`], its registry recording it alone, with `details`. Its identity either way. Formattings
 /// at once agree on the one that landed first; one that stopped short of the registry is finished.
+#[cfg(feature = "full")]
 pub async fn format(bucket: &impl Bucket, details: &Details) -> Result<Identity, Error> {
     let identity = match get(bucket).await? {
         Some(found) => found,
@@ -238,6 +242,7 @@ pub async fn format(bucket: &impl Bucket, details: &Details) -> Result<Identity,
 /// identity is finished by another of the same URL. `root` unformatted is formatted, the root;
 /// refused if it is another bucket ([`Error::NotRoot`]), as is `new` if it is a bucket already
 /// ([`Error::Formatted`]), or if no number is left ([`Error::NoNumbers`]).
+#[cfg(feature = "full")]
 pub async fn add(
     root: &impl Bucket,
     root_details: &Details,
@@ -297,6 +302,7 @@ pub async fn add(
 /// the ID: so that recording again finishes a spread a failure cut short. Refused if `root` is
 /// another bucket ([`Error::NotRoot`]), keeps no registry ([`Error::Lost`]), or records no bucket
 /// `number` ([`Error::NoBucket`]).
+#[cfg(feature = "full")]
 pub async fn record_master_key(
     root: &impl Bucket,
     number: u16,
@@ -341,6 +347,7 @@ pub fn verified(entry: &Entry, found: Option<Identity>) -> Result<Identity, Erro
 }
 
 /// Copies `registry` to `bucket`'s root, unless it holds one as new or newer: no copy goes back.
+#[cfg(feature = "full")]
 pub async fn spread(registry: &Registry, bucket: &impl Bucket) -> Result<(), Error> {
     let bytes = layout::encode(registry);
     loop {
@@ -363,6 +370,7 @@ pub async fn spread(registry: &Registry, bucket: &impl Bucket) -> Result<(), Err
 /// cladefs: copies `registry` to `bucket`'s root only after verifying `bucket`'s identity matches
 /// `entry` ([`verified`], board 8365): so a stale or swapped URL in `registry` never overwrites an
 /// unrelated bucket's registry.
+#[cfg(feature = "full")]
 pub async fn spread_to(
     registry: &Registry,
     entry: &Entry,
@@ -372,7 +380,7 @@ pub async fn spread_to(
     spread(registry, bucket).await
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full"))]
 mod tests {
     use super::*;
     use crate::object_bucket::ObjectBucket;

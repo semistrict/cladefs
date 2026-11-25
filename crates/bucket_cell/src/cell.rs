@@ -8,8 +8,7 @@
 //! writer, never another ([`Error::OtherKind`](crate::Error::OtherKind)). Here: kinds, and the
 //! listing of a bucket's cells.
 
-use crate::bucket;
-use crate::bucket::Bucket;
+use crate::bucket::{self, Bucket, BucketSend};
 use crate::layout::{self, CellId};
 use fprint::TypeFingerprint;
 use futures::{Stream, StreamExt as _};
@@ -52,10 +51,24 @@ impl Kind {
 /// cladefs: a listing refused, the stream's last item, [`bucket::Refused`] (board 5861).
 pub fn listed<B: Bucket>(
     bucket: &B,
-) -> impl Stream<Item = Result<CellId, bucket::Refused>> + Send + '_ {
-    tenants(bucket).flat_map(move |tenant| match tenant {
-        Ok(tenant) => of_tenant(bucket, tenant).boxed(),
-        Err(refused) => futures::stream::once(std::future::ready(Err(refused))).boxed(),
+) -> impl Stream<Item = Result<CellId, bucket::Refused>> + BucketSend + '_ {
+    tenants(bucket).flat_map(move |tenant| {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            match tenant {
+                Ok(tenant) => of_tenant(bucket, tenant).boxed(),
+                Err(refused) => futures::stream::once(std::future::ready(Err(refused))).boxed(),
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            match tenant {
+                Ok(tenant) => of_tenant(bucket, tenant).boxed_local(),
+                Err(refused) => {
+                    futures::stream::once(std::future::ready(Err(refused))).boxed_local()
+                }
+            }
+        }
     })
 }
 
@@ -63,7 +76,7 @@ pub fn listed<B: Bucket>(
 /// page at a time, listing none of their cells' objects. A page refused, its last item.
 pub fn tenants<B: Bucket>(
     bucket: &B,
-) -> impl Stream<Item = Result<u64, bucket::Refused>> + Send + '_ {
+) -> impl Stream<Item = Result<u64, bucket::Refused>> + BucketSend + '_ {
     let tenants = bucket::prefixes(bucket, layout::TENANTS.to_owned());
     tenants.filter_map(|prefix| {
         std::future::ready(match prefix {
@@ -79,7 +92,7 @@ pub fn tenants<B: Bucket>(
 pub fn of_tenant<B: Bucket>(
     bucket: &B,
     tenant: u64,
-) -> impl Stream<Item = Result<CellId, bucket::Refused>> + Send + '_ {
+) -> impl Stream<Item = Result<CellId, bucket::Refused>> + BucketSend + '_ {
     let cells = bucket::prefixes(bucket, layout::cells_of(tenant));
     cells.filter_map(|prefix| {
         std::future::ready(match prefix {
@@ -89,7 +102,7 @@ pub fn of_tenant<B: Bucket>(
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full"))]
 mod tests {
     use super::*;
     use crate::bucket::LIST_PAGE;

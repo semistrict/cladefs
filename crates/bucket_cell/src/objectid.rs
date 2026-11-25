@@ -28,10 +28,15 @@
 //! record of one, deleted, goes with its dead cell, no recorder making it again
 //! (`record::Record::removable`).
 
+#[cfg(feature = "full")]
 use crate::bucket::{self, Bucket, Created};
+#[cfg(feature = "full")]
 use crate::{Error, identity, layout};
+#[cfg(feature = "full")]
 use fprint::TypeFingerprint;
+#[cfg(feature = "full")]
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "full")]
 use std::sync::Mutex;
 
 /// How many IDs a block holds: an ID's low bits number it in its block, its high bits name the
@@ -40,6 +45,7 @@ pub const ID_BLOCK: u64 = 1 << 24;
 
 /// How many blocks a bucket has: the bits of an ID between its bucket's number and its number in
 /// its block.
+#[cfg(feature = "full")]
 const BUCKET_BLOCKS: u64 = 1 << 24;
 
 /// Where an ID's bucket's number begins.
@@ -52,112 +58,127 @@ pub fn bucket_of(id: u64) -> u16 {
 
 /// A random ID no allocator gives, not 0, for tests that name a cell's ID themselves: under
 /// [`identity::NAMED`], no bucket's number.
+#[cfg(feature = "full")]
 pub fn named() -> u64 {
     (rand::random::<u64>() >> (u64::BITS - BUCKET_SHIFT)).max(1)
 }
 
-/// What a block's object holds: the bucket layout version first (doc-28, board 10038), then its
-/// taker, a random number its allocator chose, so that the taking's create, landed though its
-/// answer was lost, is its own when tried again ([`bucket::create`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
-pub(crate) struct BlockTaker {
-    pub format: u32,
-    pub taker: u64,
-}
+#[cfg(feature = "full")]
+mod alloc {
+    use super::*;
 
-impl BlockTaker {
-    pub(crate) fn of(taker: u64) -> Self {
-        Self { format: layout::FORMAT.current, taker }
+    /// What a block's object holds: the bucket layout version first (doc-28, board 10038), then its
+    /// taker, a random number its allocator chose, so that the taking's create, landed though its
+    /// answer was lost, is its own when tried again ([`bucket::create`]).
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
+    pub(crate) struct BlockTaker {
+        pub format: u32,
+        pub taker: u64,
     }
 
-    #[cfg(test)]
-    pub(crate) fn decode(bytes: &[u8]) -> Result<Self, Error> {
-        let format: u32 = layout::decode(bytes.get(..4).unwrap_or(bytes))?;
-        let format = layout::FORMAT.check(format).map_err(|_| Error::BucketFormat(format))?;
-        match format {
-            31.. => layout::decode(bytes),
-            _ => unreachable!("FORMAT.check enforces oldest..=current"),
+    impl BlockTaker {
+        pub(crate) fn of(taker: u64) -> Self {
+            Self { format: layout::FORMAT.current, taker }
+        }
+
+        #[cfg(test)]
+        pub(crate) fn decode(bytes: &[u8]) -> Result<Self, Error> {
+            let format: u32 = layout::decode(bytes.get(..4).unwrap_or(bytes))?;
+            let format = layout::FORMAT.check(format).map_err(|_| Error::BucketFormat(format))?;
+            match format {
+                31.. => layout::decode(bytes),
+                _ => unreachable!("FORMAT.check enforces oldest..=current"),
+            }
         }
     }
-}
 
-/// Gives object IDs out of blocks it takes in its bucket, each once. One a process has for each
-/// bucket, as every one it makes, at once, takes a block of its own.
-pub struct Allocator {
-    /// Its bucket's number, once learned.
-    number: Mutex<Option<u16>>,
-    /// Its block, if it took one, and the number in it of the next ID it gives.
-    block: Mutex<Option<(u64, u64)>>,
-}
-
-impl Default for Allocator {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Allocator {
-    /// One with no block yet.
-    pub const fn new() -> Self {
-        Self { number: Mutex::new(None), block: Mutex::new(None) }
+    /// Gives object IDs out of blocks it takes in its bucket, each once. One a process has for each
+    /// bucket, as every one it makes, at once, takes a block of its own.
+    pub struct Allocator {
+        /// Its bucket's number, once learned.
+        number: Mutex<Option<u16>>,
+        /// Its block, if it took one, and the number in it of the next ID it gives.
+        pub(super) block: Mutex<Option<(u64, u64)>>,
     }
 
-    /// A new ID of `bucket`'s, given by no other: the next of its block, or the first of a block it
-    /// takes, its last given. Refused if `bucket` is of another format.
-    pub async fn next(&self, bucket: &impl Bucket) -> Result<u64, Error> {
-        loop {
-            if let Some(id) = self.given() {
-                return Ok(id);
+    impl Default for Allocator {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl Allocator {
+        /// One with no block yet.
+        pub const fn new() -> Self {
+            Self { number: Mutex::new(None), block: Mutex::new(None) }
+        }
+
+        /// A new ID of `bucket`'s, given by no other: the next of its block, or the first of a block it
+        /// takes, its last given. Refused if `bucket` is of another format.
+        pub async fn next(&self, bucket: &impl Bucket) -> Result<u64, Error> {
+            loop {
+                if let Some(id) = self.given() {
+                    return Ok(id);
+                }
+                let taken = take(bucket, self.number(bucket).await?).await?;
+                let mut block = self.block.lock().unwrap();
+                // Another call's taking may have come first, its block given out by now or not: this
+                // one's is given out next, its own wasted otherwise, which no ID of is given.
+                if block.is_none_or(|(_, next)| next == ID_BLOCK) {
+                    *block = Some((taken, 0));
+                }
             }
-            let taken = take(bucket, self.number(bucket).await?).await?;
+        }
+
+        /// Its bucket's number: learned once, the bucket formatted, a root of its own, if it has none.
+        async fn number(&self, bucket: &impl Bucket) -> Result<u16, Error> {
+            if let Some(number) = *self.number.lock().unwrap() {
+                return Ok(number);
+            }
+            let details = identity::Details::default();
+            let number = identity::format(bucket, &details).await?.number;
+            *self.number.lock().unwrap() = Some(number);
+            Ok(number)
+        }
+
+        /// The next ID of its block, if it has one with any left.
+        fn given(&self) -> Option<u64> {
             let mut block = self.block.lock().unwrap();
-            // Another call's taking may have come first, its block given out by now or not: this
-            // one's is given out next, its own wasted otherwise, which no ID of is given.
-            if block.is_none_or(|(_, next)| next == ID_BLOCK) {
-                *block = Some((taken, 0));
+            let (taken, next) = block.as_mut().filter(|(_, next)| *next < ID_BLOCK)?;
+            let id = *taken * ID_BLOCK + *next;
+            debug_assert!(identity::given(bucket_of(id)), "{id:x} of no bucket's number");
+            *next += 1;
+            Some(id)
+        }
+    }
+
+    /// Takes a block of the bucket numbered `number`, `bucket`, that no allocator took, at random, and
+    /// returns it.
+    pub(super) async fn take(
+        bucket: &impl Bucket,
+        number: u16,
+    ) -> Result<u64, crate::bucket::Refused> {
+        assert!(identity::given(number), "bucket number {number} is no bucket's");
+        let bytes = layout::encode(&BlockTaker::of(rand::random()));
+        loop {
+            let block = u64::from(number) * BUCKET_BLOCKS + rand::random::<u64>() % BUCKET_BLOCKS;
+            match bucket::create(bucket, &layout::objectid_block(block), bytes.clone()).await? {
+                Created::Created(_) => return Ok(block),
+                // Another's: another block.
+                Created::Exists(_) => {}
             }
         }
     }
-
-    /// Its bucket's number: learned once, the bucket formatted, a root of its own, if it has none.
-    async fn number(&self, bucket: &impl Bucket) -> Result<u16, Error> {
-        if let Some(number) = *self.number.lock().unwrap() {
-            return Ok(number);
-        }
-        let details = identity::Details::default();
-        let number = identity::format(bucket, &details).await?.number;
-        *self.number.lock().unwrap() = Some(number);
-        Ok(number)
-    }
-
-    /// The next ID of its block, if it has one with any left.
-    fn given(&self) -> Option<u64> {
-        let mut block = self.block.lock().unwrap();
-        let (taken, next) = block.as_mut().filter(|(_, next)| *next < ID_BLOCK)?;
-        let id = *taken * ID_BLOCK + *next;
-        debug_assert!(identity::given(bucket_of(id)), "{id:x} of no bucket's number");
-        *next += 1;
-        Some(id)
-    }
 }
 
-/// Takes a block of the bucket numbered `number`, `bucket`, that no allocator took, at random, and
-/// returns it.
-async fn take(bucket: &impl Bucket, number: u16) -> Result<u64, crate::bucket::Refused> {
-    assert!(identity::given(number), "bucket number {number} is no bucket's");
-    let bytes = layout::encode(&BlockTaker::of(rand::random()));
-    loop {
-        let block = u64::from(number) * BUCKET_BLOCKS + rand::random::<u64>() % BUCKET_BLOCKS;
-        match bucket::create(bucket, &layout::objectid_block(block), bytes.clone()).await? {
-            Created::Created(_) => return Ok(block),
-            // Another's: another block.
-            Created::Exists(_) => {}
-        }
-    }
-}
+#[cfg(feature = "full")]
+pub use alloc::Allocator;
+#[cfg(all(test, feature = "full"))]
+pub(crate) use alloc::BlockTaker;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full"))]
 mod tests {
+    use super::alloc::take;
     use super::*;
     use crate::object_bucket::ObjectBucket;
     use std::collections::BTreeSet;

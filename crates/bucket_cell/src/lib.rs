@@ -52,63 +52,170 @@ compile_error!(
      (`-p PACKAGE`), not across the workspace, whose dev-dependencies turn it on (TASK-320)"
 );
 
+#[cfg(feature = "full")]
 pub mod batch;
 pub mod bucket;
+#[cfg(feature = "full")]
 pub mod bucket_kms;
+#[cfg(feature = "full")]
 pub mod buggify;
+#[cfg(feature = "full")]
 pub mod cache;
 pub mod cell;
 pub mod checkpoint;
+#[cfg(feature = "full")]
 pub mod client;
+#[cfg(feature = "full")]
 pub mod clock;
 pub mod collector;
+#[cfg(feature = "full")]
 pub mod direct;
 pub mod events;
 pub mod evidence;
+#[cfg(feature = "full")]
 pub mod faults;
+#[cfg(feature = "full")]
 pub mod fetch;
-#[cfg(test)]
+#[cfg(all(test, feature = "full"))]
 mod golden;
 pub mod head;
-#[cfg(test)]
+#[cfg(all(test, feature = "full"))]
 mod heap;
+#[cfg(feature = "full")]
 pub mod host;
+#[cfg(feature = "full")]
 pub mod host_disk;
+#[cfg(feature = "full")]
 pub use host::Host;
+#[cfg(target_arch = "wasm32")]
+use getrandom as _;
+
 pub mod identity;
+#[cfg(feature = "full")]
 pub mod keys;
+#[cfg(not(feature = "full"))]
+pub mod keys {
+    //! Minimal keyless types used by `Head`, `head`, and `recovery` in pure-Rust `keyless-gc`
+    //! builds without `aws-lc` or KMS backends.
+    use crate::Error;
+    use crate::layout::CellId;
+    use extent_frame::{KeyId, Keys, Secret};
+    use extent_keys::Wrapped;
+    use fprint::TypeFingerprint;
+    use serde::{Deserialize, Serialize};
+    use std::sync::Arc;
+
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
+    pub struct Kek {
+        pub generation: u32,
+        pub wrapped: Wrapped,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
+    pub struct Dek {
+        pub generation: u32,
+        pub kek: u32,
+        pub wrapped: Wrapped,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
+    pub struct InheritedDek {
+        pub cell: CellId,
+        pub dek: Dek,
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Ring;
+
+    pub struct RingView;
+
+    impl Keys for RingView {
+        fn dek(&self, _id: KeyId) -> Option<&Secret> {
+            None
+        }
+    }
+
+    impl Ring {
+        pub fn keyless() -> Arc<Self> {
+            Arc::new(Self)
+        }
+
+        pub fn is_empty(&self) -> bool {
+            true
+        }
+
+        pub fn of(&self, _cell: u64) -> RingView {
+            RingView
+        }
+    }
+
+    pub fn shredded(cell: CellId) -> Error {
+        Error::Kms(format!("cell {cell} was shredded"))
+    }
+}
 pub mod layout;
 pub mod lifecycle;
+#[cfg(feature = "full")]
 pub mod local;
+#[cfg(feature = "full")]
 pub mod lru;
+#[cfg(feature = "full")]
 pub mod mirror;
+#[cfg(not(feature = "full"))]
+pub mod mirror {
+    //! Minimal mirror trait for `Bucket::mirrors` in keyless single-bucket GC builds.
+    use crate::Error;
+    use crate::bucket::{BucketFuture, BucketSend, BucketSync, Refused};
+    use crate::layout::CellId;
+
+    pub trait Here: BucketSend + BucketSync {
+        fn marked(&self, parent: CellId, at: u64) -> BucketFuture<'_, Result<bool, Error>>;
+        fn create<'a>(
+            &'a self,
+            key: &'a str,
+            bytes: Vec<u8>,
+        ) -> BucketFuture<'a, Result<(), Refused>>;
+        fn retire<'a>(&'a self, keys: &'a [&'a str]) -> BucketFuture<'a, Result<usize, Refused>>;
+    }
+}
 pub mod object;
+#[cfg(feature = "full")]
 pub mod object_bucket;
 pub mod objectid;
 pub mod passed;
+#[cfg(feature = "full")]
 pub mod peer;
 pub mod record;
 pub mod recovery;
+#[cfg(feature = "full")]
 pub mod routed;
-#[cfg(any(test, feature = "testing"))]
+#[cfg(all(feature = "full", any(test, feature = "testing")))]
 #[cfg(not(madsim))]
 pub mod s3_server;
+#[cfg(feature = "full")]
 pub mod sweep;
+#[cfg(feature = "full")]
 pub mod trace;
+#[cfg(feature = "full")]
 pub mod wal;
+#[cfg(feature = "full")]
 pub mod writer;
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(all(feature = "full", any(test, feature = "testing")))]
 pub mod testing;
 
+#[cfg(feature = "full")]
 pub use batch::{Commit, SegmentBuilder};
 pub use bucket::Bucket;
 /// The bytes a [`Bucket`] writes: shared, so that a write tried again holds them once.
 pub use bytes::Bytes;
+#[cfg(feature = "full")]
 pub use fetch::read;
 pub use layout::Location;
 pub use recovery::{Recovered, State, recover};
+#[cfg(feature = "full")]
 pub use wal::{Rebased, TakenCell, Wal};
+#[cfg(feature = "full")]
 pub use writer::{Body, Objects, Writer};
 
 /// Extent IDs' sequence numbers carry the epoch of the writer that minted them above this bit,

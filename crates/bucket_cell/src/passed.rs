@@ -351,7 +351,7 @@ pub(crate) async fn epoch(bucket: &impl Bucket, cell: CellId) -> Result<u64, Err
     Ok(read(bucket, cell).await?.map_or(0, |lease| lease.epoch))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full"))]
 mod tests {
     use super::*;
     use crate::bucket::Version;

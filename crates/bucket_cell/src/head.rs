@@ -324,7 +324,7 @@ async fn overwrite(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full"))]
 mod tests {
     use super::*;
     use crate::layout::test_cell;

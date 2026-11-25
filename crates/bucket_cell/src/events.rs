@@ -23,9 +23,11 @@
 
 use crate::bucket::{self, Bucket, Created, IfChanged, Updated, Version};
 use crate::layout::{self, CellId};
+#[cfg(feature = "full")]
 use crate::routed::RoutedBucket;
 use prost::Message as _;
 use std::collections::BTreeSet;
+#[cfg(feature = "full")]
 use std::sync::Arc;
 
 /// Frozen format family of the `events` object (doc-28): every later build reads every version
@@ -326,6 +328,7 @@ pub fn decode(bytes: &[u8]) -> Result<EventLog, crate::Error> {
 
 /// The authoritative bucket holding [`layout::EVENTS`]: root bucket #1 when `home` is formatted
 /// and routed, else `home.own()`.
+#[cfg(feature = "full")]
 pub async fn authority<B: Bucket>(home: &RoutedBucket<B>) -> Result<Arc<B>, crate::Error> {
     if !home.is_routed() {
         return Ok(home.own());
@@ -340,6 +343,7 @@ pub async fn authority<B: Bucket>(home: &RoutedBucket<B>) -> Result<Arc<B>, crat
 }
 
 /// The bucket number of `home` for [`PeersUpdated`] / [`BucketPeers`] (`0` if unformatted).
+#[cfg(feature = "full")]
 pub async fn bucket_number<B: Bucket>(home: &RoutedBucket<B>) -> Result<u32, crate::Error> {
     Ok(crate::identity::get(&*home.own()).await?.map_or(0, |id| u32::from(id.number)))
 }
@@ -420,7 +424,7 @@ impl Poller {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full"))]
 mod tests {
     use super::*;
     use crate::object_bucket::{ObjectBucket, Request};

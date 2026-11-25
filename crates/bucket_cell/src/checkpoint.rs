@@ -10,15 +10,20 @@
 
 use crate::Error;
 use crate::layout::{self, Location};
-use crate::recovery::{Lengths, State};
+#[cfg(feature = "full")]
+use crate::recovery::Lengths;
+use crate::recovery::State;
 use bincode::Options as _;
-use extent_frame::table::{self, Block, Entry, TableFooter};
+#[cfg(feature = "full")]
+use extent_frame::table::Block;
+use extent_frame::table::{self, Entry, TableFooter};
 use storage_device::ExtentId;
 
 pub use extent_frame::table::TABLE_BLOCK;
 
 /// The checkpoint of `state`. cladefs: authenticated, not encrypted, under the DEK `encrypting`
 /// gives: metadata, which the collector reads holding no key (doc-16, TASK-411.3).
+#[cfg(feature = "full")]
 pub fn encode(state: &State, encrypting: impl layout::KeyArg) -> Vec<u8> {
     encode_kept(state, encrypting.as_key()).0
 }
@@ -29,6 +34,7 @@ pub fn encode(state: &State, encrypting: impl layout::KeyArg) -> Vec<u8> {
 /// appendix, which a recovery reads with the rest and a lookup never does
 /// (`extent_frame::table::Appendix`): each by the segment's number and its writer's epoch, as its
 /// key names them, as varints, a few bytes each, not its key's tens.
+#[cfg(feature = "full")]
 pub fn encode_kept(state: &State, encrypting: impl layout::KeyArg) -> (Vec<u8>, Lengths) {
     let encrypting = encrypting.as_key();
     let lengths = state.named_lengths();
@@ -61,6 +67,7 @@ pub fn encode_kept(state: &State, encrypting: impl layout::KeyArg) -> (Vec<u8>, 
 
 /// Encodes a checkpoint's appendix of segment lengths prefixed with the current bucket layout
 /// version (doc-28, board 10038).
+#[cfg(feature = "full")]
 pub(crate) fn encode_appendix(numbered: &[(u64, u64, u64)]) -> Vec<u8> {
     let mut bytes = layout::FORMAT.current.to_le_bytes().to_vec();
     varint().serialize_into(&mut bytes, numbered).expect("objects serialize");
@@ -132,12 +139,19 @@ impl Table {
         &self.state
     }
 
+    /// Consumes the table into its footer and extent-less state.
+    pub(crate) fn into_parts(self) -> (TableFooter, State) {
+        (self.footer, self.state)
+    }
+
     /// The block that would hold `extent`'s entry, if the checkpoint has one: where in its data.
+    #[cfg(feature = "full")]
     pub(crate) fn block(&self, extent: ExtentId) -> Option<&Block> {
         self.footer.block(extent)
     }
 
     /// Where `extent` is, if `bytes`, those of `block`, hold its entry.
+    #[cfg(feature = "full")]
     pub(crate) fn find(
         &self,
         bytes: &[u8],
@@ -149,7 +163,7 @@ impl Table {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full"))]
 mod tests {
     use super::*;
     use crate::bucket::{Bucket, ByteRange, Meta, Object, PutMode, Version};

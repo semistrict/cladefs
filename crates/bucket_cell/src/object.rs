@@ -80,7 +80,7 @@ pub async fn tail(bucket: &impl Bucket, key: &str) -> Result<Option<Tail>, Error
     Ok(Some(Tail::of(key, bytes)?))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full"))]
 mod tests {
     use super::*;
     use crate::bucket::PutMode;

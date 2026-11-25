@@ -11,6 +11,44 @@
 
 use bytes::Bytes;
 use std::future::Future;
+use std::pin::Pin;
+
+/// cladefs: target-conditional `Send` bound for [`Bucket`] implementations and their futures:
+/// `Send` everywhere native multi-threaded executors run, relaxed on single-threaded `wasm32`
+/// where JS `Promise` futures (`JsFuture`) are `!Send`.
+#[cfg(not(target_arch = "wasm32"))]
+pub trait BucketSend: Send {}
+#[cfg(not(target_arch = "wasm32"))]
+impl<T: Send> BucketSend for T {}
+
+#[cfg(target_arch = "wasm32")]
+pub trait BucketSend {}
+#[cfg(target_arch = "wasm32")]
+impl<T> BucketSend for T {}
+
+/// cladefs: target-conditional `Sync` bound for [`Bucket`] implementations.
+#[cfg(not(target_arch = "wasm32"))]
+pub trait BucketSync: Sync {}
+#[cfg(not(target_arch = "wasm32"))]
+impl<T: Sync> BucketSync for T {}
+
+#[cfg(target_arch = "wasm32")]
+pub trait BucketSync {}
+#[cfg(target_arch = "wasm32")]
+impl<T> BucketSync for T {}
+
+/// Boxed future with [`BucketSend`] (equivalent to `futures::future::BoxFuture` on native targets,
+/// `LocalBoxFuture` on `wasm32`).
+#[cfg(not(target_arch = "wasm32"))]
+pub type BucketFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+#[cfg(target_arch = "wasm32")]
+pub type BucketFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
+
+/// Boxed stream with [`BucketSend`].
+#[cfg(not(target_arch = "wasm32"))]
+pub type BucketStream<'a, T> = Pin<Box<dyn futures::Stream<Item = T> + Send + 'a>>;
+#[cfg(target_arch = "wasm32")]
+pub type BucketStream<'a, T> = Pin<Box<dyn futures::Stream<Item = T> + 'a>>;
 
 /// An object's version, which a conditional update names: S3 names it by its ETag, GCS by its
 /// generation.
@@ -61,6 +99,7 @@ impl Listing {
     /// after `page.after` (here the key of the last of the page before), in the order of their
     /// keys among each other, `page.max` of them at most, and the last one's key as where the next
     /// page starts, if any are left.
+    #[cfg(feature = "full")]
     pub(crate) fn page(self, page: Page<'_>) -> Self {
         assert!((1..=LIST_PAGE).contains(&page.max), "a page of 1 to {LIST_PAGE}: {}", page.max);
         let after = |key: &str| page.after.is_none_or(|after| key > after);
@@ -235,8 +274,8 @@ impl ByteRange {
 }
 
 /// A bucket of objects, or a prefix of one.
-pub trait Bucket: Send + Sync + 'static {
-    fn get(&self, key: &str) -> impl Future<Output = Result<Object, Error>> + Send;
+pub trait Bucket: BucketSend + BucketSync + 'static {
+    fn get(&self, key: &str) -> impl Future<Output = Result<Object, Error>> + BucketSend;
 
     /// cladefs: reads the object at `key` only if its version differs from `if_none_match`
     /// (`If-None-Match` HTTP conditional GET). Returns `Ok(None)` when unchanged (304 Not
@@ -245,7 +284,7 @@ pub trait Bucket: Send + Sync + 'static {
         &self,
         key: &str,
         if_none_match: &Version,
-    ) -> impl Future<Output = Result<Option<Object>, Error>> + Send {
+    ) -> impl Future<Output = Result<Option<Object>, Error>> + BucketSend {
         async move {
             let object = self.get(key).await?;
             if object.meta.version == *if_none_match {
@@ -259,12 +298,12 @@ pub trait Bucket: Send + Sync + 'static {
         &self,
         key: &str,
         range: ByteRange,
-    ) -> impl Future<Output = Result<Vec<u8>, Error>> + Send;
+    ) -> impl Future<Output = Result<Vec<u8>, Error>> + BucketSend;
 
-    fn head(&self, key: &str) -> impl Future<Output = Result<Meta, Error>> + Send;
+    fn head(&self, key: &str) -> impl Future<Output = Result<Meta, Error>> + BucketSend;
 
     /// The objects whose keys start with `prefix`, in the order of their keys.
-    fn list(&self, prefix: &str) -> impl Future<Output = Result<Vec<Meta>, Error>> + Send;
+    fn list(&self, prefix: &str) -> impl Future<Output = Result<Vec<Meta>, Error>> + BucketSend;
 
     /// cladefs: a page of one level of the keys under `prefix`, empty or ending with `/`, by
     /// delimiter `/` (S3's and GCS's `delimiter=/`, TASK-395.5): the objects right under it, and
@@ -277,17 +316,17 @@ pub trait Bucket: Send + Sync + 'static {
         &self,
         prefix: &str,
         page: Page<'_>,
-    ) -> impl Future<Output = Result<Listing, Error>> + Send;
+    ) -> impl Future<Output = Result<Listing, Error>> + BucketSend;
 
     fn put(
         &self,
         key: &str,
         bytes: Bytes,
         mode: PutMode,
-    ) -> impl Future<Output = Result<Version, Error>> + Send;
+    ) -> impl Future<Output = Result<Version, Error>> + BucketSend;
 
     /// Deletes the object at `key`. Deleting none is no error.
-    fn delete(&self, key: &str) -> impl Future<Output = Result<(), Error>> + Send;
+    fn delete(&self, key: &str) -> impl Future<Output = Result<(), Error>> + BucketSend;
 
     /// cladefs: deletes the object at `key` only if it is of `version` (board 9229): S3's
     /// DeleteObject with `If-Match`, GCS's with `x-goog-if-generation-match`, a file bucket's under
@@ -302,7 +341,7 @@ pub trait Bucket: Send + Sync + 'static {
         &self,
         key: &str,
         version: &Version,
-    ) -> impl Future<Output = Result<(), Error>> + Send {
+    ) -> impl Future<Output = Result<(), Error>> + BucketSend {
         let _ = (key, version);
         std::future::ready(Err(Error::Unsupported))
     }
@@ -314,7 +353,7 @@ pub trait Bucket: Send + Sync + 'static {
     fn supports_conditional_delete(
         &self,
         key: &str,
-    ) -> impl Future<Output = Result<bool, Error>> + Send {
+    ) -> impl Future<Output = Result<bool, Error>> + BucketSend {
         let _ = key;
         std::future::ready(Ok(true))
     }
@@ -323,7 +362,7 @@ pub trait Bucket: Send + Sync + 'static {
     /// one request where the backend deletes many at once (S3's DeleteObjects), else, as here, one
     /// each, [`DELETES_AT_ONCE`] at once. Deleting none is no error. It fails if a delete did,
     /// which may or may not have taken effect, nor need the others have.
-    fn delete_batch(&self, keys: &[&str]) -> impl Future<Output = Result<(), Error>> + Send {
+    fn delete_batch(&self, keys: &[&str]) -> impl Future<Output = Result<(), Error>> + BucketSend {
         use futures::StreamExt as _;
         futures::stream::iter(keys)
             .map(|key| self.delete(key))
@@ -336,7 +375,7 @@ pub trait Bucket: Send + Sync + 'static {
     /// refuses more (`429`), so its bucket waits out the second since it last wrote the key, as
     /// each write of the key does first anyway. For a writer to gather, until then, all its next
     /// write of the key is to say: a cell's head, its one key written again and again.
-    fn rewritable(&self, key: &str) -> impl Future<Output = ()> + Send {
+    fn rewritable(&self, key: &str) -> impl Future<Output = ()> + BucketSend {
         let _ = key;
         std::future::ready(())
     }
@@ -350,7 +389,7 @@ pub trait Bucket: Send + Sync + 'static {
     fn now(&self) -> u64;
 
     /// Waits before a request that failed `failures` times in a row goes again.
-    fn pause(&self, failures: u32) -> impl Future<Output = ()> + Send {
+    fn pause(&self, failures: u32) -> impl Future<Output = ()> + BucketSend {
         let _ = failures;
         std::future::ready(())
     }
@@ -570,7 +609,7 @@ pub(crate) async fn list_delimited_page(
 pub(crate) fn prefixes<B: Bucket>(
     bucket: &B,
     prefix: String,
-) -> impl futures::Stream<Item = Result<String, Refused>> + Send + '_ {
+) -> impl futures::Stream<Item = Result<String, Refused>> + BucketSend + '_ {
     use futures::StreamExt as _;
     // The page after the one listed last: none once the last was, or one was refused.
     let first = Some(None::<String>);
@@ -656,6 +695,7 @@ pub(crate) async fn delete(bucket: &impl Bucket, key: &str) -> Result<(), Refuse
 /// delete having landed, though its answer was lost, or another write of the key since having
 /// made it another's, which it leaves. A bucket that can't make the delete conditional refuses it
 /// ([`Refusal::Request`]): never retried, nor sent unconditionally.
+#[cfg(feature = "full")]
 pub(crate) async fn delete_if(
     bucket: &impl Bucket,
     key: &str,
@@ -673,6 +713,7 @@ pub(crate) async fn delete_if(
 
 /// cladefs: verifies that the bucket serving `key` supports [`Bucket::delete_if`] (board 10567),
 /// retrying transient routing failures and refusing with [`Refusal::Request`] when it does not.
+#[cfg(feature = "full")]
 pub(crate) async fn require_conditional_delete(
     bucket: &impl Bucket,
     key: &str,
@@ -799,7 +840,7 @@ pub(crate) async fn update(
 /// cladefs: what every bucket must do, which cells rely on (TASK-165.1), with objects under
 /// `root`, which it leaves as it found them: a bucket in memory, on the host's filesystem, the
 /// simulation's, and S3's and Azure's servers alike run it.
-#[cfg(test)]
+#[cfg(all(test, feature = "full"))]
 pub(crate) async fn conformance(bucket: &impl Bucket, root: &str) {
     let key = &format!("{root}/object");
     // A version no object has: GCS's generation 0 is none, but a write conditional on it is one

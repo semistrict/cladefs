@@ -6,48 +6,60 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
+[[bin]]
+name = "cladefs-gc"
+required-features = ["full"]
+
+[[bin]]
+name = "cladefs-gc-fill"
+required-features = ["full"]
+
 [dependencies]
 formats.workspace = true
 fprint.workspace = true
-host_fs.workspace = true
+host_fs = { workspace = true, optional = true }
 base32_id.workspace = true
-async-trait.workspace = true
+async-trait = { workspace = true, optional = true }
 # cladefs: the frames of where a read missed every cache, resolved only when shown (TASK-672.2).
-backtrace = "0.3.77"
+backtrace = { version = "0.3.77", optional = true }
 bincode.workspace = true
 bytes = "1.12.1"
-extent_frame.workspace = true
-extent_keys.workspace = true
+extent_frame = { path = "../extent_frame", default-features = false }
+extent_keys = { path = "../extent_keys", default-features = false }
 fail = "0.5.1"
 futures.workspace = true
-humantime = "2.4.0"
-hyper = { version = "1.12.0", default-features = false }
+humantime = { version = "2.4.0", optional = true }
+hyper = { version = "1.12.0", default-features = false, optional = true }
 # cladefs: the dates of a backend's responses, its clock (`clock`, board 8467).
-chrono = { version = "0.4.45", default-features = false, features = ["std", "alloc"] }
+chrono = { version = "0.4.45", default-features = false, features = ["std", "alloc"], optional = true }
 # cladefs: the S3 server in memory, for other crates' tests too (`testing`, TASK-449).
 http-body-util = { version = "0.1.5", optional = true }
 hyper-util = { version = "0.1.21", features = ["tokio"], optional = true }
 imbl = { version = "7.0.2", features = ["serde"] }
-libc.workspace = true
+libc = { workspace = true, optional = true }
 log.workspace = true
-object_store.workspace = true
-opentelemetry = { version = "0.33.1", default-features = false, features = ["trace"] }
+object_store = { workspace = true, optional = true }
+opentelemetry = { version = "0.33.1", default-features = false, features = ["trace"], optional = true }
 prost.workspace = true
-rand.workspace = true
-reqwest = { version = "0.13.5", default-features = false, features = ["stream"] }
+rand = { workspace = true, optional = true }
+reqwest = { version = "0.13.5", default-features = false, features = ["stream"], optional = true }
 rustc-hash.workspace = true
 serde.workspace = true
-serde_json = "1.0.154"
+serde_json = { version = "1.0.154", optional = true }
 sha2.workspace = true
-storage_device.workspace = true
+storage_device = { path = "../storage_device", default-features = false }
 thiserror.workspace = true
-tokio.workspace = true
-url.workspace = true
+tokio = { workspace = true, optional = true }
+url = { workspace = true, optional = true }
 # cladefs: the paths of a conditional delete's requests, decoded (`client::conditioned`, board 9229).
-percent-encoding = "2.3.2"
+percent-encoding = { version = "2.3.2", optional = true }
 
 [target.'cfg(target_env = "musl")'.dependencies]
 mimalloc.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Enables `getrandom` 0.2's JS backend on `wasm32-unknown-unknown` for transitive deps (`rand_core`).
+getrandom = { version = "0.2.17", features = ["js"] }
 
 [dev-dependencies]
 http-body-util = "0.1.5"
@@ -66,12 +78,38 @@ node_local.workspace = true
 workspace = true
 
 [features]
+# cladefs: `default-features = false, features = ["keyless-gc"]` compiles only the keyless
+# garbage-collector protocol in pure Rust for wasm32 (`gc_wasm`), without HTTP, tokio, disk,
+# or aws-lc dependencies.
+default = ["full"]
+full = [
+    "extent_frame/crypto",
+    "extent_keys/crypto",
+    "storage_device/full",
+    "dep:host_fs",
+    "dep:async-trait",
+    "dep:backtrace",
+    "dep:humantime",
+    "dep:hyper",
+    "dep:chrono",
+    "dep:libc",
+    "dep:object_store",
+    "dep:opentelemetry",
+    "dep:rand",
+    "dep:reqwest",
+    "dep:serde_json",
+    "dep:tokio",
+    "dep:url",
+    "dep:percent-encoding",
+]
+keyless-gc = ["extent_frame/pure-zstd"]
 # cladefs: what tests of the protocol outside this crate need, as its own have it: a bucket whose
 # requests take effect when the test says (`testing::SimBucket`), and the protocol's rules, which
 # they may turn off (`set_rules`), as local_cell's simulation does (TASK-88). cladefs: and the S3 server in memory (`s3_server`), whose
 # connections a restore's tests count (TASK-449); and a KMS of the tests' (`keys::testing`,
 # TASK-411.28: every cell encrypted, every test too).
 testing = [
+    "full",
     "extent_keys/testing",
     "dep:http-body-util",
     "dep:hyper-util",

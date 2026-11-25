@@ -93,7 +93,7 @@ impl Head {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full"))]
 mod tests {
     use super::*;
     use crate::layout::{FORMAT, encode, test_cell};

@@ -29,13 +29,21 @@
 //! cannot read. So a recording is written once, with no retries, and the collector deletes
 //! evidence without fencing anyone ([`doomed`]).
 
+#[cfg(feature = "full")]
 use crate::Error;
-use crate::bucket::{self, Bucket, Meta, PutMode};
-use crate::layout::{self, CellId, Origin};
+use crate::bucket::Meta;
+#[cfg(feature = "full")]
+use crate::bucket::{self, Bucket, PutMode};
+#[cfg(feature = "full")]
+use crate::layout::Origin;
+use crate::layout::{self, CellId};
 use fprint::TypeFingerprint;
+#[cfg(feature = "full")]
 use futures::StreamExt as _;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+#[cfg(feature = "full")]
+use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet};
 use storage_device::ExtentId;
 
 /// How many of a tenant's newest recordings of a version predict its next fork's reads, and are
@@ -62,12 +70,14 @@ pub struct Unit {
 }
 
 /// The version a fork's evidence is of, and the tenant whose forks' it is.
+#[cfg(feature = "full")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Of {
     pub origin: Origin,
     pub tenant: u64,
 }
 
+#[cfg(feature = "full")]
 impl Of {
     /// The prefix its recordings are under.
     pub fn prefix(&self) -> String {
@@ -82,12 +92,14 @@ impl Of {
 
 /// A recording's footer: its bucket layout version first ([`layout::FORMAT`], doc-28, board
 /// 10038), then the key it was written at.
+#[cfg(feature = "full")]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
 pub(crate) struct Footer {
     pub(crate) format: u32,
     pub(crate) key: String,
 }
 
+#[cfg(feature = "full")]
 impl Footer {
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, Error> {
         let format: u32 = layout::decode(bytes.get(..4).unwrap_or(bytes))?;
@@ -100,6 +112,7 @@ impl Footer {
 }
 
 /// The object of the recording of `units` at `key`, encrypted as `encrypting` says.
+#[cfg(feature = "full")]
 pub fn encode(key: &str, units: &[Unit], encrypting: impl layout::KeyArg) -> Vec<u8> {
     let footer = Footer { format: layout::FORMAT.current, key: key.to_owned() };
     layout::with_footer(&layout::encode(&units), &footer, encrypting.as_key())
@@ -108,6 +121,7 @@ pub fn encode(key: &str, units: &[Unit], encrypting: impl layout::KeyArg) -> Vec
 /// The units of the recording at `key` whose object is `bytes`, by a reader holding `keys`: refused
 /// if of an unsupported format ([`Error::EvidenceFormat`]), written at another key, or under a key
 /// it lacks.
+#[cfg(feature = "full")]
 pub fn decode(key: &str, bytes: &[u8], keys: &dyn extent_frame::Keys) -> Result<Vec<Unit>, Error> {
     let footer = Footer::decode(extent_frame::footer(bytes, keys)?)?;
     if footer.key != key {
@@ -118,6 +132,7 @@ pub fn decode(key: &str, bytes: &[u8], keys: &dyn extent_frame::Keys) -> Result<
 
 /// Writes a recording of `units`, of `of`, encrypted as `encrypting` says, at a new key: once, by a
 /// conditional create, retrying nothing. Returns its key.
+#[cfg(feature = "full")]
 pub async fn write(
     bucket: &impl Bucket,
     of: Of,
@@ -131,6 +146,7 @@ pub async fn write(
 }
 
 /// What a read of a version's evidence found.
+#[cfg(feature = "full")]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Read {
     /// The tenant's newest recordings read, newest first.
@@ -142,6 +158,7 @@ pub struct Read {
 /// The newest [`KEPT`] recordings of `of` of the last [`KEPT_FOR`], by the bucket's time, read by
 /// a reader holding `keys`, many at once: each asked once, what fails skipped and counted. None if
 /// the listing failed, which it says why of.
+#[cfg(feature = "full")]
 pub async fn read(
     bucket: &impl Bucket,
     of: Of,
@@ -186,6 +203,7 @@ fn newest<'a>(listed: impl Iterator<Item = &'a Meta>) -> Vec<&'a Meta> {
 
 /// What a version's next fork will read, as its tenant's recordings predict it: every unit any of
 /// them read, each first where any of them read it first, in that order (TASK-702.1).
+#[cfg(feature = "full")]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Prediction {
     pub units: Vec<Unit>,
@@ -193,6 +211,7 @@ pub struct Prediction {
     pub recordings: usize,
 }
 
+#[cfg(feature = "full")]
 impl Prediction {
     /// The prediction `recordings` make.
     pub fn of(recordings: &[Vec<Unit>]) -> Self {
@@ -246,7 +265,7 @@ pub(crate) fn doomed<'a>(
     doomed
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full"))]
 mod tests {
     use super::*;
     use crate::layout::test_cell;
