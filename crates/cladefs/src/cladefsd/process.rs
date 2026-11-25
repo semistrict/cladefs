@@ -166,7 +166,9 @@ pub fn anon_budget() -> AnonBudget {
 }
 
 fn budget(daemon: &Daemon, state: &mut State) -> AnonBudget {
-    state.writers = state.writers.max(super::cells::open_count(daemon) as u64);
+    let (attached, detaching, _) = super::mount::counts_on(daemon);
+    state.writers =
+        state.writers.max((super::cells::open_count(daemon) + attached + detaching) as u64);
     state.in_flight = state.in_flight.max(super::memory::in_flight_held_on(daemon));
     state.extents = state.extents.max(extents_held_on(daemon));
     AnonBudget {

@@ -246,6 +246,36 @@ pub(crate) fn decoded_held_on(host: &crate::Host) -> bucket_cell::recovery::Held
         .fold(bucket_cell::recovery::Held::default(), std::ops::Add::add)
 }
 
+/// cladefs: estimated bytes of idle decoded states retained strongly across `host`'s buckets
+/// (board 11554).
+#[cfg(any(target_os = "linux", madsim, test))]
+pub(crate) fn decoded_kept_bytes_on(host: &crate::Host) -> u64 {
+    let buckets = host.host_cells().buckets.lock().unwrap();
+    (buckets.values())
+        .filter_map(|bucket| bucket_cell::Bucket::decoded(&**bucket))
+        .map(bucket_cell::recovery::Decoded::kept_bytes)
+        .sum()
+}
+
+/// cladefs: evicts strong idle decoded states across `host`'s buckets until at most `target` bytes
+/// remain, returning the total bytes evicted (board 11554).
+#[cfg(any(target_os = "linux", madsim, test))]
+pub(crate) fn evict_decoded_on(host: &crate::Host, target: u64) -> u64 {
+    let buckets: Vec<Arc<RoutedBucket>> =
+        host.host_cells().buckets.lock().unwrap().values().cloned().collect();
+    let mut left = target;
+    let mut evicted = 0;
+    for bucket in buckets {
+        let Some(decoded) = bucket_cell::Bucket::decoded(&*bucket) else { continue };
+        let kept = decoded.kept_bytes();
+        if kept > left {
+            evicted += decoded.evict_to(left);
+        }
+        left = left.saturating_sub(decoded.kept_bytes());
+    }
+    evicted
+}
+
 /// cladefs: what the decoded states of the cells this process's buckets keep, or its cells hold
 /// as the maps of the extents they share, hold: each once, however many cells share it
 /// (`bucket_cell::recovery::Decoded::held`, TASK-453).

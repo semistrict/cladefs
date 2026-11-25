@@ -523,9 +523,8 @@ fn mount(mountpoint: &Path, allow_other: bool) -> anyhow::Result<(File, How)> {
 /// `CAP_SYS_ADMIN`): any other file system not connected there is refused, named. Anything else
 /// wrong with the mount point, mounting it says.
 fn detach_dead(mountpoint: &Path) -> anyhow::Result<()> {
-    match std::fs::metadata(mountpoint) {
-        Err(error) if error.raw_os_error() == Some(libc::ENOTCONN) => {}
-        _ => return Ok(()),
+    if !is_not_connected(mountpoint) {
+        return Ok(());
     }
     // Its directory's path as the kernel says it: the mount point itself answers nothing.
     let (Some(parent), Some(name)) = (mountpoint.parent(), mountpoint.file_name()) else {
@@ -552,6 +551,24 @@ fn detach_dead(mountpoint: &Path) -> anyhow::Result<()> {
     detached.with_context(|| format!("detaching the dead cladefs mount at {}", at.display()))?;
     log::warn!("fuse: detached the dead cladefs mount at {}, its server gone", at.display());
     Ok(())
+}
+
+/// Whether `mountpoint` is a disconnected FUSE mount (`ENOTCONN`). Checks both `stat(2)` and
+/// `statfs(2)` because Linux VFS can serve `stat(2)` from a cached root inode's `attr_valid`
+/// window even after the FUSE server dies, whereas `statfs(2)` is uncached in FUSE and always
+/// hits the dead connection (board 11554).
+fn is_not_connected(mountpoint: &Path) -> bool {
+    match std::fs::metadata(mountpoint) {
+        Err(error) => return error.raw_os_error() == Some(libc::ENOTCONN),
+        Ok(_) => {}
+    }
+    let Ok(path) = CString::new(mountpoint.as_os_str().as_bytes()) else { return false };
+    let mut stat = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: `statfs(2)` takes a NUL-terminated path and writes into a caller-owned `statfs`.
+    if unsafe { libc::statfs(path.as_ptr(), stat.as_mut_ptr()) } == 0 {
+        return false;
+    }
+    io::Error::last_os_error().raw_os_error() == Some(libc::ENOTCONN)
 }
 
 /// The type of the file system `mountinfo`, a `/proc/PID/mountinfo`'s, says is mounted at `at` on

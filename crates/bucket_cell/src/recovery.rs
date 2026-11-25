@@ -781,11 +781,68 @@ pub struct Decoded {
 
 /// The states [`Decoded`] keeps, by their checkpoints' keys, and those, oldest first; and every one
 /// it decoded others may hold still.
-#[derive(Default)]
 struct States {
     states: HashMap<String, Arc<State>>,
     order: VecDeque<String>,
     live: HashMap<String, Live>,
+    /// Maximum estimated bytes held by strong references in `states` (board 11554).
+    max_bytes: u64,
+}
+
+impl Default for States {
+    fn default() -> Self {
+        Self {
+            states: HashMap::new(),
+            order: VecDeque::new(),
+            live: HashMap::new(),
+            max_bytes: Decoded::DEFAULT_KEEP_BYTES,
+        }
+    }
+}
+
+impl States {
+    /// Estimated heap bytes of the strong references currently retained in `self.states` if every
+    /// external caller dropped its handle: a rebased state only counts its delta when the state it
+    /// was rebased on is also retained strongly in `self.states`, so a small fork of an oversized
+    /// base cannot pin that base's shared persistent map nodes in `self.states` after the base
+    /// closes (board 11554).
+    fn kept_bytes(&self) -> u64 {
+        let mut maps: Vec<(&Arc<State>, Changes)> = Vec::new();
+        for (key, state) in &self.states {
+            let len = state.extents.len();
+            let made_of =
+                self.live.get(key).and_then(|live| live.made_of.as_ref()).filter(|(made_of, _)| {
+                    made_of.strong_count() > 0
+                        && self
+                            .states
+                            .values()
+                            .any(|kept| std::ptr::eq(Arc::as_ptr(kept), made_of.as_ptr()))
+                });
+            let own = made_of.map_or(Changes::all(len), |(_, changes)| changes.within(len));
+            match maps.iter_mut().find(|(other, _)| other.extents.ptr_eq(&state.extents)) {
+                Some((_, most)) if own.bytes() > most.bytes() => *most = own,
+                Some(_) => {}
+                None => maps.push((state, own)),
+            }
+        }
+        maps.iter().map(|(_, own)| own.bytes()).sum()
+    }
+
+    /// Evicts oldest strong entries from `self.states` until both `order.len() <= Decoded::KEEP`
+    /// and `kept_bytes() <= target`. Returns the removed `Arc<State>`s so callers can drop them
+    /// outside the mutex lock.
+    fn evict_to(&mut self, target: u64) -> Vec<Arc<State>> {
+        let mut evicted = Vec::new();
+        while self.order.len() > Decoded::KEEP
+            || (!self.order.is_empty() && self.kept_bytes() > target)
+        {
+            let oldest = self.order.pop_front().unwrap();
+            if let Some(state) = self.states.remove(&oldest) {
+                evicted.push(state);
+            }
+        }
+        evicted
+    }
 }
 
 /// A state decoded, which others may hold still ([`Decoded`]): how many of its extents each cell
@@ -878,6 +935,36 @@ impl Decoded {
     /// How many states it keeps: a host's forks open from a few bases' newest checkpoints at once.
     const KEEP: usize = 16;
 
+    /// Default byte cap on idle decoded states kept strongly in [`States::states`] (board 11554):
+    /// large checkpoints (such as multi-million-extent workspace bases) are still shared across
+    /// concurrent open cells via [`States::live`] weak references, but are freed once their last
+    /// open cell closes rather than pinning gigabytes in the daemon indefinitely.
+    pub const DEFAULT_KEEP_BYTES: u64 = 256 << 20;
+
+    #[cfg(test)]
+    fn with_max_bytes(max_bytes: u64) -> Self {
+        Self { kept: Mutex::new(States { max_bytes, ..States::default() }) }
+    }
+
+    /// Estimated heap bytes of strong entries currently retained in the idle decoded cache.
+    pub fn kept_bytes(&self) -> u64 {
+        self.kept.lock().unwrap().kept_bytes()
+    }
+
+    /// Evicts oldest strong entries from the idle decoded cache until at most `target` bytes
+    /// remain, returning the bytes evicted. Open cells still share live states via weak refs.
+    pub fn evict_to(&self, target: u64) -> u64 {
+        let (before, after, evicted) = {
+            let mut kept = self.kept.lock().unwrap();
+            let before = kept.kept_bytes();
+            let evicted = kept.evict_to(target);
+            let after = kept.kept_bytes();
+            (before, after, evicted)
+        };
+        drop(evicted);
+        before.saturating_sub(after)
+    }
+
     /// The state the checkpoint at `key` holds, if it kept it, or another holds it still.
     fn get(&self, key: &str) -> Option<Arc<State>> {
         let kept = self.kept.lock().unwrap();
@@ -913,21 +1000,23 @@ impl Decoded {
             state.extents = extents;
             made_of = Some((Arc::downgrade(&alike), changes));
         }
-        let mut kept = self.kept.lock().unwrap();
-        if let Some(held) = kept.live.get(key).and_then(|live| live.state.upgrade()) {
-            return held;
-        }
-        let state = Arc::new(state);
-        kept.live.retain(|_, live| live.state.strong_count() > 0);
-        let live = Live { state: Arc::downgrade(&state), cells, made_of };
-        kept.live.insert(key.to_owned(), live);
-        if kept.states.insert(key.to_owned(), state.clone()).is_none() {
-            kept.order.push_back(key.to_owned());
-        }
-        while kept.order.len() > Self::KEEP {
-            let oldest = kept.order.pop_front().unwrap();
-            kept.states.remove(&oldest);
-        }
+        let (state, evicted) = {
+            let mut kept = self.kept.lock().unwrap();
+            if let Some(held) = kept.live.get(key).and_then(|live| live.state.upgrade()) {
+                return held;
+            }
+            let state = Arc::new(state);
+            kept.live.retain(|_, live| live.state.strong_count() > 0);
+            let live = Live { state: Arc::downgrade(&state), cells, made_of };
+            kept.live.insert(key.to_owned(), live);
+            if kept.states.insert(key.to_owned(), state.clone()).is_none() {
+                kept.order.push_back(key.to_owned());
+            }
+            let max_bytes = kept.max_bytes;
+            let evicted = kept.evict_to(max_bytes);
+            (state, evicted)
+        };
+        drop(evicted);
         state
     }
 
@@ -1932,5 +2021,60 @@ mod tests {
             let lost = recover_version(&*bucket, cell, at, &ring).await.map(|_| ());
             assert_eq!(lost, Err(Error::Lost(layout::head(cell))));
         });
+    }
+
+    /// Board 11554: `Decoded` bounds its strong idle cache by bytes and supports governor eviction,
+    /// while still sharing any state held by an open caller through its weak `live` table and
+    /// freeing oversized states immediately once their last caller drops.
+    #[test]
+    fn decoded_bounds_idle_states_by_bytes_and_evicts() {
+        let make = |cell: u64, count: u64| {
+            let mut state = State::new(test_cell(cell));
+            for seq in 1..=count {
+                state.extents.insert(
+                    ExtentId::new(cell, seq),
+                    Location { key: format!("seg/{cell}/{seq}"), offset: 0, len: 4096 },
+                );
+            }
+            state
+        };
+        // Budget fits 4 extents (4 * ENTRY_BYTES), so two 3-extent states exceed it.
+        let decoded = Decoded::with_max_bytes(4 * ENTRY_BYTES);
+        let first = decoded.keep("cp/1", make(1, 3));
+        assert_eq!(decoded.kept_bytes(), 3 * ENTRY_BYTES);
+        let second = decoded.keep("cp/2", make(2, 3));
+        // `cp/1` evicted from strong cache to stay within 4 * ENTRY_BYTES, but still shared while
+        // `first` is held.
+        assert_eq!(decoded.kept_bytes(), 3 * ENTRY_BYTES);
+        assert!(Arc::ptr_eq(&decoded.get("cp/1").unwrap(), &first));
+        assert!(Arc::ptr_eq(&decoded.get("cp/2").unwrap(), &second));
+        drop(first);
+        assert!(decoded.get("cp/1").is_none());
+        // Oversized state (6 extents > 4-extent budget) is shared while held, then gone on drop.
+        // A small fork rebased onto it while it is live must not stay pinned in `states` either,
+        // or its persistent map would retain the oversized base after both close.
+        let huge = decoded.keep("cp/huge", make(3, 6));
+        assert_eq!(decoded.kept_bytes(), 0);
+        assert!(Arc::ptr_eq(&decoded.get("cp/huge").unwrap(), &huge));
+        let mut fork_state = make(3, 6);
+        fork_state.extents.insert(
+            ExtentId::new(30, 1),
+            Location { key: "seg/30/1".into(), offset: 0, len: 4096 },
+        );
+        let fork = decoded.keep("cp/huge-fork", fork_state);
+        assert_eq!(decoded.kept_bytes(), 0);
+        assert!(Arc::ptr_eq(&decoded.get("cp/huge-fork").unwrap(), &fork));
+        drop(huge);
+        drop(fork);
+        assert!(decoded.get("cp/huge").is_none());
+        assert!(decoded.get("cp/huge-fork").is_none());
+        // Governor eviction drops remaining strong idle entries down to target.
+        drop(second);
+        let _warm = decoded.keep("cp/warm", make(4, 2));
+        drop(_warm);
+        assert_eq!(decoded.kept_bytes(), 2 * ENTRY_BYTES);
+        assert_eq!(decoded.evict_to(0), 2 * ENTRY_BYTES);
+        assert_eq!(decoded.kept_bytes(), 0);
+        assert!(decoded.get("cp/warm").is_none());
     }
 }

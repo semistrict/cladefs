@@ -198,6 +198,7 @@ pub(super) fn governed_bytes_on(daemon: &Daemon) -> u64 {
         + fetch_mem.tails_bytes()
         + daemon.host.local().pages().bytes()
         + local_cell::framing_buffers_bytes()
+        + crate::host_cell::decoded_kept_bytes_on(&daemon.host)
 }
 
 /// cladefs: the memory the process's default daemon's governor governs.
@@ -246,6 +247,10 @@ pub(super) async fn govern_on(daemon: &Daemon, allowance: u64) {
     let room = room.saturating_sub(pages.bytes());
     if local_cell::framing_buffers_bytes() > room {
         local_cell::evict_framing_buffers_to(room);
+    }
+    let room = room.saturating_sub(local_cell::framing_buffers_bytes());
+    if crate::host_cell::decoded_kept_bytes_on(&daemon.host) > room {
+        crate::host_cell::evict_decoded_on(&daemon.host, room);
     }
     let weighted: Vec<(u64, u64)> = {
         let registry = daemon.memory.registry.lock().unwrap();

@@ -915,6 +915,11 @@ fn a_daemon_mounts_over_the_mount_of_one_killed() {
     let first = dir.path().join("first");
     std::fs::create_dir(&first).unwrap();
     let (mut killed, _, m) = cladefsd_mounting(&first, &bucket, 1);
+    // Access the mountpoint before killing the first daemon so the kernel populates its root
+    // inode/dentry cache (board 11554: cached root attributes previously hid ENOTCONN from
+    // detach_dead).
+    std::fs::metadata(&m).unwrap();
+    assert_eq!(names(&m), Vec::<String>::new());
     killed.0.kill().unwrap();
     killed.0.wait().unwrap();
     let dead = std::fs::metadata(&m).unwrap_err();

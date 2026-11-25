@@ -1161,15 +1161,18 @@ impl Server {
     }
 
     async fn getattr(&self, header: &InHeader) -> Result<Vec<u8>> {
-        let (attr, inode) = match self.target(header.nodeid)? {
-            Target::Cells(dir) => (self.cells_attr(dir), dir),
+        let (attr, inode, valid) = match self.target(header.nodeid)? {
+            // Directories of cells come and go as cells attach and detach; do not cache their
+            // attributes for 24h in the kernel (also ensures a dead mount returns ENOTCONN on
+            // stat, board 11554).
+            Target::Cells(dir) => (self.cells_attr(dir), dir, 0),
             Target::Node(slot, node) => {
                 let attr = node.getattr().await?;
                 let inode = self.inode(slot, attr.inode.0)?;
-                (attr, inode)
+                (attr, inode, TIMEOUT_SECS)
             }
         };
-        Ok(attr_out(&attr, inode).as_bytes().to_vec())
+        Ok(attr_out_for(&attr, inode, valid).as_bytes().to_vec())
     }
 
     async fn setattr(&self, header: &InHeader, body: &mut Body<'_>) -> Result<Vec<u8>> {
@@ -1792,8 +1795,12 @@ fn entry_out(nodeid: u64, inode: u64, valid: u64, attr: &Attr) -> EntryOut {
 }
 
 fn attr_out(attr: &Attr, inode: u64) -> AttrOut {
+    attr_out_for(attr, inode, TIMEOUT_SECS)
+}
+
+fn attr_out_for(attr: &Attr, inode: u64, attr_valid: u64) -> AttrOut {
     let attr = fuse_attr(attr, inode);
-    AttrOut { attr_valid: TIMEOUT_SECS, attr_valid_nsec: 0, dummy: 0, attr }
+    AttrOut { attr_valid, attr_valid_nsec: 0, dummy: 0, attr }
 }
 
 /// A created file's open: it needs no handle, nor flushing as it is closed, and its cached pages
