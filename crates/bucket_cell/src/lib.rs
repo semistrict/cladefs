@@ -85,10 +85,10 @@ mod heap;
 pub mod host;
 #[cfg(feature = "full")]
 pub mod host_disk;
-#[cfg(feature = "full")]
-pub use host::Host;
 #[cfg(target_arch = "wasm32")]
 use getrandom as _;
+#[cfg(feature = "full")]
+pub use host::Host;
 
 pub mod identity;
 #[cfg(feature = "full")]
