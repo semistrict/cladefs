@@ -424,7 +424,10 @@ fn explicit_key_state_refusals_are_scoped_to_the_requested_version() {
             assert!(!wrap.transient);
             let unwrap = refusal(9, ID, Op::Unwrap("old"), 403, body.as_bytes()).failed;
             match (code, unwrap.error) {
-                ("KeyDisabled" | "KeyRevoked", Error::VersionDisabled { tenant: 9, version })
+                (
+                    "KeyDisabled" | "KeyRevoked" | "KeyExpired",
+                    Error::VersionDisabled { tenant: 9, version },
+                )
                 | ("KeyDeleted" | "KeyPurged", Error::VersionGone { tenant: 9, version }) => {
                     assert_eq!(version, "old");
                 }
@@ -436,6 +439,103 @@ fn explicit_key_state_refusals_are_scoped_to_the_requested_version() {
     let missing =
         refusal(9, ID, Op::Unwrap("old"), 404, br#"{"error":{"code":"KeyNotFound"}}"#).failed;
     assert!(matches!(missing.error, Error::VersionGone { tenant: 9, version } if version == "old"));
+}
+
+/// board 9384: against a fake Key Vault whose current version `v2` wraps and unwraps normally,
+/// unwrapping under a disabled (`KeyDisabled`) or expired (`KeyExpired`) older version `v1`
+/// returns `Error::VersionDisabled` naming that version — never tenant-wide `Error::Revoked` —
+/// and a missing older version `v0` returns `Error::VersionGone`; wrapping under a disabled or
+/// expired current version stays `Error::Revoked`.
+#[test]
+fn disabled_or_expired_older_version_refuses_its_unwrap_alone() {
+    let current_version = Arc::new(Mutex::new("v1"));
+    let version_for_server = current_version.clone();
+    let server = Server::start(move |base, request| {
+        let path = request.route();
+        if path.ends_with("/oauth2/v2.0/token") {
+            return Response::of(
+                200,
+                r#"{"token_type":"Bearer","expires_in":3600,"access_token":"token-1"}"#,
+            );
+        }
+        let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+        match segments[..] {
+            ["keys", "expired-9", "wrapkey"] => Response::of(
+                403,
+                r#"{"error":{"code":"Forbidden","message":"Operation wrapKey is not allowed on an expired key.","innererror":{"code":"KeyExpired"}}}"#,
+            ),
+            ["keys", name, "wrapkey"] => {
+                let req: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                let mut value = decode(req["value"].as_str().unwrap()).unwrap();
+                value.reverse();
+                let ver = *version_for_server.lock().unwrap();
+                Response::of(
+                    200,
+                    format!(
+                        r#"{{"kid":"{base}/keys/{name}/{ver}","value":"{}"}}"#,
+                        BASE64URL.encode(value)
+                    ),
+                )
+            }
+            ["keys", _, "v1", "unwrapkey"] => Response::of(
+                403,
+                r#"{"error":{"code":"Forbidden","message":"Operation unwrapKey is not allowed on a disabled key.","innererror":{"code":"KeyDisabled"}}}"#,
+            ),
+            ["keys", _, "v1exp", "unwrapkey"] => Response::of(
+                403,
+                r#"{"error":{"code":"Forbidden","message":"Operation unwrapKey is not allowed on an expired key.","innererror":{"code":"KeyExpired"}}}"#,
+            ),
+            ["keys", _, "v0", "unwrapkey"] => Response::of(
+                404,
+                r#"{"error":{"code":"KeyNotFound","message":"A key with (name/id) t-9/v0 was not found in this key vault."}}"#,
+            ),
+            ["keys", name, "v2", "unwrapkey"] => {
+                let req: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                let mut value = decode(req["value"].as_str().unwrap()).unwrap();
+                value.reverse();
+                Response::of(
+                    200,
+                    format!(
+                        r#"{{"kid":"{base}/keys/{name}/v2","value":"{}"}}"#,
+                        BASE64URL.encode(value)
+                    ),
+                )
+            }
+            _ => Response::of(404, r#"{"error":{"code":"NotFound","message":"no such path"}}"#),
+        }
+    });
+    let base = server.base();
+    let kms = over(base, "t-{tenant}", None);
+    let key_old = Secret::random();
+    let wrapped_v1 = block_on(kms.wrap(9, &key_old)).unwrap();
+    *current_version.lock().unwrap() = "v1exp";
+    let wrapped_v1exp = block_on(kms.wrap(9, &key_old)).unwrap();
+    *current_version.lock().unwrap() = "v0";
+    let wrapped_v0 = block_on(kms.wrap(9, &key_old)).unwrap();
+    // Rotate to enabled v2 while older versions are disabled, expired, or missing.
+    *current_version.lock().unwrap() = "v2";
+    let key_new = Secret::random();
+    let wrapped_v2 = block_on(kms.wrap(9, &key_new)).unwrap();
+    assert_eq!(block_on(kms.unwrap(9, &wrapped_v2)).unwrap().expose(), key_new.expose());
+
+    assert!(matches!(
+        block_on(kms.unwrap(9, &wrapped_v1)),
+        Err(Error::VersionDisabled { tenant: 9, version }) if version == "v1"
+    ));
+    assert!(matches!(
+        block_on(kms.unwrap(9, &wrapped_v1exp)),
+        Err(Error::VersionDisabled { tenant: 9, version }) if version == "v1exp"
+    ));
+    assert!(matches!(
+        block_on(kms.unwrap(9, &wrapped_v0)),
+        Err(Error::VersionGone { tenant: 9, version }) if version == "v0"
+    ));
+    // Wrapping under an expired current key remains tenant-wide Revoked.
+    let expired = over(base, "expired-{tenant}", None);
+    assert!(matches!(
+        block_on(expired.wrap(9, &Secret::random())),
+        Err(Error::Revoked { tenant: 9 })
+    ));
 }
 
 /// TASK-633.6 (review): each vault's tokens are for its own audience: a Managed HSM's, a sovereign

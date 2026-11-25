@@ -816,10 +816,14 @@ fn refusal(tenant: u64, id: &str, op: Op<'_>, code: u16, body: &[u8]) -> Failure
         | (403, "KeyDeleted" | "KeyPurged", Op::Unwrap(version)) => {
             return refused(Error::VersionGone { tenant, version: version.to_owned() });
         }
-        (403, "KeyDisabled" | "KeyRevoked", Op::Unwrap(version)) => {
+        (403, "KeyDisabled" | "KeyRevoked" | "KeyExpired", Op::Unwrap(version)) => {
             return refused(Error::VersionDisabled { tenant, version: version.to_owned() });
         }
-        (403, "KeyDisabled" | "KeyRevoked" | "KeyDeleted" | "KeyPurged", Op::Wrap) => {
+        (
+            403,
+            "KeyDisabled" | "KeyRevoked" | "KeyExpired" | "KeyDeleted" | "KeyPurged",
+            Op::Wrap,
+        ) => {
             return refused(Error::Revoked { tenant });
         }
         (400, _, Op::Unwrap(_)) => {
