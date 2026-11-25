@@ -5,7 +5,6 @@
 // cladefs's own: where a device keeps data, as backlog doc-4's extent store names it.
 
 use fprint::TypeFingerprint;
-#[cfg(feature = "full")]
 use fuchsia_sync::Mutex;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
@@ -66,12 +65,10 @@ pub struct OtherCell(pub ExtentId);
 ///
 /// A filesystem's sequence numbers only grow, so those open are a range, which a seal empties, and
 /// which starts no earlier than it did: there is no way to have a sealed extent read as open.
-#[cfg(feature = "full")]
 #[derive(Debug, Default)]
 pub struct OpenExtents(Mutex<Minted>);
 
 /// The sequence numbers `first..next` of `cell` minted since the last seal.
-#[cfg(feature = "full")]
 #[derive(Debug, Default)]
 struct Minted {
     cell: u64,
@@ -79,7 +76,6 @@ struct Minted {
     next: u64,
 }
 
-#[cfg(feature = "full")]
 impl OpenExtents {
     /// Records that `extent` was just minted. One no newer than the last of its cell is as it
     /// was, sealed if it is. A cell takes over from another as a store forks, sealed.
@@ -167,7 +163,7 @@ impl PartialOrd for ExtentRange {
     }
 }
 
-#[cfg(all(test, feature = "full"))]
+#[cfg(test)]
 mod tests {
     use super::{ExtentId, OpenExtents};
 
