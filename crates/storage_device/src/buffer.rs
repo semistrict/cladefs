@@ -22,20 +22,6 @@ use std::ptr::NonNull;
 use std::slice::SliceIndex;
 use std::task::{Context, Poll};
 
-pub(super) fn round_down<T>(value: T, granularity: T) -> T
-where
-    T: num::Num + Copy,
-{
-    value - value % granularity
-}
-
-pub(super) fn round_up<T>(value: T, granularity: T) -> T
-where
-    T: num::Num + Copy,
-{
-    round_down(value + granularity - T::one(), granularity)
-}
-
 /// The most a buffer is aligned to: a page, as the guest kernel's allocator aligns no further
 /// (`cladefs_rt_alloc`), and as the host's `O_DIRECT` and the guest's DMA need no more.
 const MAX_ALIGN: usize = 4096;
@@ -80,7 +66,7 @@ impl TransferBudget {
 
     /// A buffer of `size` bytes, or what to wait on before asking again.
     fn try_allocate(&self, size: usize) -> Result<Buffer<'_>, EventListener> {
-        let charged = round_up(size.max(1), self.block_size);
+        let charged = size.max(1).next_multiple_of(self.block_size);
         {
             let mut used = self.used.lock();
             if *used != 0 && *used + charged > self.limit {
