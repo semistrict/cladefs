@@ -34,14 +34,16 @@ Crashes, corruption and deadlocks need only a reachable path; "unlikely in pract
 dismiss one.
 
 **Recording in hotbed (required):**
-- If you can reach `hotbed` and were given a review ID `<id>`, claim it with
-  `hotbed review start <id>`, submit all surviving findings (if any: hotbed refuses an empty list)
-  via `hotbed review findings <id>`
+- If you can reach `hotbed` and were given a review ID `<id>`, claim/join it with
+  `hotbed review start <id> --model <your exact model ID> --subagent verifying-reviewer`, submit
+  all surviving findings (`{"findings": []}` if none survive) via
+  `hotbed review findings <id> --model <your exact model ID> --subagent verifying-reviewer`
   (JSON matching `{"findings": [{"file", "line", "short_summary" (<=60 chars), "summary",
   "failure_scenario" (include the reproducer), "category", "severity" ("important" |
   "pre_existing" | "nit"), "verdict" ("CONFIRMED" | "PLAUSIBLE"), "locations": [{"path",
   "start_line", "end_line", "excerpt"}]}]}`), and end with
-  `hotbed review finish <id> --summary "<summary>"` (or `hotbed review fail <id> --reason "<why>"`).
+  `hotbed review finish <id> --model <your exact model ID> --subagent verifying-reviewer --summary "<summary>"`
+  (or `hotbed review fail <id> --model <your exact model ID> --subagent verifying-reviewer --reason "<why>"`).
 - If you are running in a network-isolated read-only sandbox (cannot reach `hotbed`), always
   include a fenced ` ```json hotbed-findings ` block at the end of your report with that exact
   `{"findings": [...]}` payload (`{"findings": []}` if none survive) so the caller or

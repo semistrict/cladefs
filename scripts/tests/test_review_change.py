@@ -134,6 +134,7 @@ class ReviewChangeTest(unittest.TestCase):
 
     def test_records_review_and_findings_in_hotbed_by_default(self):
         done = self.review("--base", "origin/main", "--task", "board 6902",
+                           "--implementer-model", "gemini-4-neon",
                            extra_env={"FAKE_FINDINGS": "1"})
         self.assertEqual(done.returncode, 0, done.stderr)
         findings = f"{self.fake / 'review.md.findings.json'}"
@@ -142,10 +143,10 @@ class ReviewChangeTest(unittest.TestCase):
             "review request -s test-sess --title Codex review: origin/main (board 6902) "
             "--instructions verifying-reviewer instructions; what HEAD brings beyond origin/main "
             "(`git diff origin/main...HEAD`, `git log origin/main..HEAD`), serving board 6902 "
-            "--base origin/main --head HEAD --json",
-            "review start -s test-sess 77 --model test-model",
-            f"review findings -s test-sess 77 --file {findings}",
-            "review finish -s test-sess 77 --summary Codex review, 1 finding(s): "
+            "--model gemini-4-neon --base origin/main --head HEAD --json",
+            "review start -s test-sess 77 --model test-model --subagent codex-exec",
+            f"review findings -s test-sess 77 --model test-model --subagent codex-exec --file {findings}",
+            "review finish -s test-sess 77 --model test-model --subagent codex-exec --summary Codex review, 1 finding(s): "
             "One finding survives review.",
             "review link 77 --json",
         ])
@@ -163,8 +164,8 @@ class ReviewChangeTest(unittest.TestCase):
         self.assertEqual(done.stdout, "no findings\n")
         self.assertEqual((self.fake / "hotbed.log").read_text().splitlines(), [
             "session current --json",
-            "review start -s test-sess 77 --model test-model",
-            "review fail -s test-sess 77 --reason Codex's report carries no findings for hotbed "
+            "review start -s test-sess 77 --model test-model --subagent codex-exec",
+            "review fail -s test-sess 77 --model test-model --subagent codex-exec --reason Codex's report carries no findings for hotbed "
             f"(see {self.fake / 'review.md'})",
         ])
 
@@ -173,8 +174,8 @@ class ReviewChangeTest(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual((self.fake / "hotbed.log").read_text().splitlines(), [
             "session current --json",
-            "review start -s test-sess 77 --model test-model",
-            "review finish -s test-sess 77 --summary Codex review, 0 finding(s): no findings",
+            "review start -s test-sess 77 --model test-model --subagent codex-exec",
+            "review finish -s test-sess 77 --model test-model --subagent codex-exec --summary Codex review, 0 finding(s): no findings",
             "review link 77 --json",
         ])
 
@@ -184,7 +185,7 @@ class ReviewChangeTest(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         log = (self.fake / "hotbed.log").read_text().splitlines()
         self.assertEqual(log[:3], ["session current --json", "session start --json",
-                                   "review start -s new-sess 77 --model test-model"])
+                                   "review start -s new-sess 77 --model test-model --subagent codex-exec"])
         self.assertEqual(log[-1], "session end -s new-sess")
 
     def test_no_change_named_fails(self):

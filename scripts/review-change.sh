@@ -11,9 +11,9 @@
 # cockpit link). `codex review` takes no instructions of ours with --commit, so the change is named
 # in them instead.
 #
-#   scripts/review-change.sh --commit SHA [--task "board N"] [--review ID] [--out FILE]
-#   scripts/review-change.sh --base BRANCH [--task "board N"] [--review ID] [--out FILE]
-#   scripts/review-change.sh --uncommitted [--task "board N"] [--review ID] [--out FILE]
+#   scripts/review-change.sh --commit SHA [--task "board N"] [--review ID] [--implementer-model MODEL] [--out FILE]
+#   scripts/review-change.sh --base BRANCH [--task "board N"] [--review ID] [--implementer-model MODEL] [--out FILE]
+#   scripts/review-change.sh --uncommitted [--task "board N"] [--review ID] [--implementer-model MODEL] [--out FILE]
 #
 # --review ID takes up a review already requested; --no-hotbed records none, for offline runs only.
 # A finding counts once it has a reproducer in one of the project's oracles (TASK-444): the review
@@ -23,7 +23,7 @@ set -euo pipefail
 # The checkout this script is in, which needn't be a git repository for its arguments to be read.
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 agent="$root/.claude/agents/verifying-reviewer.md"
-mode="" name="" change="" task="" out="" review_id="" use_hotbed=1
+mode="" name="" change="" task="" out="" review_id="" implementer_model="${HOTBED_MODEL:-}" use_hotbed=1
 while (($#)); do
     case $1 in
         --commit) mode=commit; name=$2; change="the commit $2 (\`git show $2\`)"; shift 2 ;;
@@ -33,6 +33,7 @@ while (($#)); do
             shift ;;
         --task) task=$2; shift 2 ;;
         --review) review_id=$2; shift 2 ;;
+        --implementer-model) implementer_model=$2; shift 2 ;;
         --no-hotbed) use_hotbed=0; shift ;;
         --out) out=$2; shift 2 ;;
         *) echo "review-change.sh: unknown argument $1" >&2; exit 2 ;;
@@ -85,6 +86,9 @@ if ((use_hotbed)); then
     if [[ -z $review_id ]]; then
         request=(review request -s "$session" --title "Codex review: $name${task:+ ($task)}"
             --instructions "verifying-reviewer instructions; $change${task:+, serving $task}")
+        if [[ -n $implementer_model ]]; then
+            request+=(--model "$implementer_model")
+        fi
         case $mode in
             commit) request+=(--base "$name^" --head "$name") ;;
             base) request+=(--base "$name" --head HEAD) ;;
@@ -96,14 +100,14 @@ if ((use_hotbed)); then
     # configured one.
     model=${CODEX_MODEL:-$(sed -n 's/^model = "\(.*\)"$/\1/p' "${CODEX_HOME:-$HOME/.codex}/config.toml")}
     [[ -n $model ]] || { echo "review-change.sh: no Codex model: set CODEX_MODEL" >&2; exit 2; }
-    hotbed review start -s "$session" "$review_id" --model "$model" > /dev/null
+    hotbed review start -s "$session" "$review_id" --model "$model" --subagent codex-exec > /dev/null
     instructions+=$'\n\n'"This is hotbed review $review_id. Your sandbox can't reach hotbed: end your report with the \`\`\`json hotbed-findings block (\`{\"findings\": []}\` if none survive)."
 fi
 
 # Fails the hotbed review with REASON, then the script.
 fail() {
     if ((use_hotbed)); then
-        hotbed review fail -s "$session" "$review_id" --reason "$1" > /dev/null
+        hotbed review fail -s "$session" "$review_id" --model "$model" --subagent codex-exec --reason "$1" > /dev/null
     fi
     echo "review-change.sh: $1" >&2
     exit 1
@@ -119,8 +123,8 @@ if ((use_hotbed)); then
     summary=$(python3 "$root/scripts/review-findings.py" "$out" "$out.findings.json") \
         || fail "Codex's report carries no findings for hotbed (see $out)"
     if [[ -e $out.findings.json ]]; then
-        hotbed review findings -s "$session" "$review_id" --file "$out.findings.json" > /dev/null
+        hotbed review findings -s "$session" "$review_id" --model "$model" --subagent codex-exec --file "$out.findings.json" > /dev/null
     fi
-    hotbed review finish -s "$session" "$review_id" --summary "$summary" > /dev/null
+    hotbed review finish -s "$session" "$review_id" --model "$model" --subagent codex-exec --summary "$summary" > /dev/null
     echo "review-change.sh: hotbed review $review_id, $(hotbed review link "$review_id" --json | json_field data url)" >&2
 fi
