@@ -398,20 +398,6 @@ impl<B: Bucket> Bucket for RoutedBucket<B> {
         }
     }
 
-    async fn delete_if(&self, key: &str, version: &Version) -> Result<(), Error> {
-        match self.member(key).await? {
-            Some(member) => member.delete_if(key, version).await,
-            None => self.home.delete_if(key, version).await,
-        }
-    }
-
-    async fn supports_conditional_delete(&self, key: &str) -> Result<bool, Error> {
-        match self.member(key).await? {
-            Some(member) => member.supports_conditional_delete(key).await,
-            None => self.home.supports_conditional_delete(key).await,
-        }
-    }
-
     async fn delete_batch(&self, keys: &[&str]) -> Result<(), Error> {
         if self.route.is_none() {
             return self.home.delete_batch(keys).await;
@@ -615,11 +601,6 @@ mod tests {
         async fn delete(&self, key: &str) -> Result<(), Error> {
             self.requests.fetch_add(1, Ordering::Relaxed);
             self.objects.delete(key).await
-        }
-
-        async fn delete_if(&self, key: &str, version: &Version) -> Result<(), Error> {
-            self.requests.fetch_add(1, Ordering::Relaxed);
-            self.objects.delete_if(key, version).await
         }
 
         fn now(&self) -> u64 {

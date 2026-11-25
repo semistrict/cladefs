@@ -10,49 +10,51 @@
 //! A mirror of `parent`'s version at `at` into this bucket, B, from the parent's, A, in the order
 //! `specs/buckets` checks:
 //!
-//! 1. In B, its **pin** ([`layout::pin`]), a reference of its own under the parent's prefix, which
-//!    keeps what it copies from B's collector while it copies
-//!    ([`crate::collector::Collector::collect_copy`]). One mirror of a version holds it at a time,
-//!    its bytes its own: another's standing, the mirror is under way, and this one does nothing
-//!    ([`Mirrored::UnderWay`]). A pin unrefreshed for [`PIN_STALE`] is its mirror's no longer, its
-//!    host dead: the next mirror takes it over.
+//! 1. In B, a best-effort prefix `LIST` on [`layout::pins`] checks for an active (non-stale) pin
+//!    from another mirror run to avoid duplicate cross-region copy egress ([`Mirrored::UnderWay`]).
+//!    If none stands, this run draws a fresh random run ID and creates its own write-once **pin**
+//!    ([`layout::pin`], `PutMode::Create`), a reference under the parent's prefix that keeps what
+//!    it copies from B's collector while it copies ([`crate::collector::Collector::collect_copy`]).
+//!    A pin unrefreshed for [`PIN_STALE`] is stale, its host dead: another mirror run proceeds with
+//!    its own fresh run ID, and B's collector reaps stale pins.
 //! 2. Its **marker read in B**: there already, marked by a mirror begun before, on to step 7
 //!    (`mirrorResumesMarked`), with no hold: the marking mirror's stands until B's collector
-//!    deletes it, with the marker, and one written again after that would stand for good
-//!    (`mirrorHoldsUnmarked`).
-//! 3. In A, its **hold** ([`layout::hold`]), a reference of its own under the parent's prefix
-//!    there (`mirrorHolds`), before it reads the head: it keeps the version whole in A, and the
-//!    parent's cell from being removed with what the version inherits from other cells, which the
-//!    mirror does not copy, while the copy stands. B's collector deletes it as the copy goes.
-//! 4. The parent's **head read in A**, naming the version, or the mirror is given up, its hold and
-//!    pin dropped (`mirrorChecks`): [`Mirrored::Unnamed`].
+//!    deletes all holds for this bucket via prefix `LIST`, with the marker, and one written again
+//!    after that would stand for good (`mirrorHoldsUnmarked`).
+//! 3. In A, its own write-once **hold** ([`layout::hold`], `PutMode::Create`), a reference under
+//!    the parent's prefix there (`mirrorHolds`), before it reads the head: it keeps the version
+//!    whole in A, and the parent's cell from being removed with what the version inherits from
+//!    other cells, which the mirror does not copy, while the copy stands. B's collector deletes
+//!    all holds matching [`layout::holds`] as the copy goes.
+//! 4. The parent's **head read in A**, naming the version, or the mirror is given up, its own hold
+//!    and pin dropped (`mirrorChecks`): [`Mirrored::Unnamed`].
 //! 5. **Every object of the version under the parent's prefix copied** into B, create-only: the
 //!    checkpoint at the version, what recovering it read and the objects its extents are in, read
 //!    where the router sends them. An object gone from A gives the mirror up, whatever order the
 //!    copies end in (board 8439). Its pin refreshed as it goes, by its host's clock (board 8469),
-//!    the mirror given up if it is no longer its own.
+//!    the mirror given up if its pin was reaped as stale.
 //! 6. In B, the create-only **marker** ([`layout::mirror`]), once every object is copied
-//!    (`markerAfterCopy`), its pin refreshed right before, naming the epoch of the checkpoint it
-//!    copied, written while its pin is its own ([`PIN_HELD`]): from then on, reads of the version
-//!    in B are served there ([`crate::object_bucket::ObjectBucket`]).
+//!    (`markerAfterCopy`), its pin refreshed right before, written while its pin is held
+//!    ([`PIN_HELD`]): from then on, reads of the version in B are served there
+//!    ([`crate::object_bucket::ObjectBucket`]).
 //! 7. **The children of B referring in A listed**, after the marker (`mirrorListsAfterMark`), and
 //!    their references written in B; then, the head read again in A naming the version still
 //!    (`mirrorRereadsBeforeRetiring`), retired in A.
-//! 8. The pin dropped, if still its own.
+//! 8. Its own pin unconditionally deleted.
 //!
-//! A pin is a lease: a mirror creates its marker, which its pin guards, only within [`PIN_HELD`] of
-//! a write of its pin that landed, so that it lands before the pin is stale and another mirror may
-//! take it over (board 8441). Letting go, it deletes its hold, and its pin, only if they are still
-//! of its own write ([`Bucket::delete_if`], board 9229, `releasesOwn`): a delete it sent landing
-//! however late, after the next mirror took the pin over and wrote the hold again, deletes neither.
-//! Its hold's bytes are its own, its pin's nonce, so that the next mirror's write of the hold is of
-//! another version even where a version is the bytes' hash (S3's e-tag).
+//! Each run's pin and hold keys are write-once and disjoint per run (board 11699, `releasesOwn`):
+//! letting go deletes its own hold (first) and pin with plain unconditional `DELETE`
+//! ([`bucket::delete`]), so a delete landing however late never removes another run's pin or hold
+//! and requires zero conditional-DELETE support on any backend. A pin is still refreshed as a lease
+//! while copying: a mirror creates its marker only within [`PIN_HELD`] of a refresh that landed
+//! (board 8441).
 //!
-//! Every step is create-only, idempotent, or a deletion: a mirror stopped anywhere is begun again
-//! from the start, its pin taken over once stale, what it wrote kept. B's collector begins it
-//! again, finding its pin stale. The next fork of the version into B, and the next opening of a
-//! child of it in B, begin one stopped before its marker, once its pin is stale: one stopped after
-//! it, they find marked, and leave to B's collector, the children not yet moved referring in A.
+//! Every step is create-only, idempotent, or a deletion of this run's own key: a mirror stopped
+//! anywhere is resumed by a fresh run, what earlier runs wrote kept, and B's collector reaps stale
+//! pins (deleting their matching hold in A first when unmarked). The next fork of the version into
+//! B, and the next opening of a child of it in B, begin one stopped before its marker once its pin
+//! is stale: one stopped after it, they find marked, and leave to B's collector, the children not
+//! yet moved referring in A.
 //!
 //! A fork into B refers in B once the marker is there ([`Here`], [`crate::lifecycle`]).
 
@@ -130,10 +132,11 @@ pub trait Here: Send + Sync {
     fn retire<'a>(&'a self, keys: &'a [&'a str]) -> BoxFuture<'a, Result<usize, Refused>>;
 }
 
-/// A mirror's pin, held: its bytes, its own, of its `nonce`, and the version of its last write.
+/// A mirror run's write-once pin, held: its disjoint `run` ID, key, bytes, and the version of its
+/// last refresh.
 struct Pin {
+    run: u64,
     key: String,
-    nonce: u64,
     bytes: Vec<u8>,
     version: Version,
     /// When the write of it that landed last was sent, by the host's monotonic clock (board 8469):
@@ -142,34 +145,51 @@ struct Pin {
     sent: Instant,
 }
 
+/// What [`Pin::mark`] came to.
+enum Mark {
+    /// Marker exists in `own` (created by this run or already there).
+    Marked,
+    /// Pin was lost before `PUT marker` was ever sent: safe to delete this run's hold.
+    NotAttempted,
+    /// Pin was lost after `PUT marker` was sent at least once: the marker may have landed, so this
+    /// run's hold must stand for B's collector (`MarkedHeld`).
+    Uncertain,
+}
+
 impl Pin {
-    /// The pin of the mirror of `parent`'s version at `at` in `own`, made, or taken over from a
-    /// mirror whose pin is stale: none if another mirror's stands.
+    /// Creates a fresh per-run pin of `parent`'s version at `at` in `own` (`PutMode::Create`),
+    /// after a best-effort prefix `LIST` on [`layout::pins`] to skip copying when another mirror
+    /// already holds a non-stale pin ([`Mirrored::UnderWay`], board 11699).
     async fn take(own: &impl Bucket, parent: CellId, at: u64) -> Result<Option<Self>, Refused> {
-        let key = layout::pin(parent, at);
-        let nonce = rand::random();
-        let bytes = layout::encode(&Reference::of(nonce));
+        let existing = bucket::list(own, &layout::pins(parent, at)).await?;
+        if existing
+            .iter()
+            .any(|meta| matches!(layout::kind(&meta.key), Kind::Pin { .. }) && !stale(own, meta))
+        {
+            return Ok(None);
+        }
+        let run = rand::random();
+        let key = layout::pin(parent, at, run);
+        let bytes = layout::encode(&Reference::of(run));
         let sent = Instant::now();
-        let version = match bucket::create(own, &key, bytes.clone()).await? {
-            Created::Created(version) => version,
-            Created::Exists(found) if stale(own, &found.meta) => {
-                match bucket::update(own, &key, bytes.clone(), &found.meta.version).await? {
-                    Updated::Updated(version) => version,
-                    Updated::Changed => return Ok(None),
-                }
-            }
-            Created::Exists(_) => return Ok(None),
+        let Created::Created(version) = bucket::create(own, &key, bytes.clone()).await? else {
+            return Ok(None);
         };
-        Ok(Some(Self { key, nonce, bytes, version, sent }))
+        Ok(Some(Self { run, key, bytes, version, sent }))
     }
 
-    /// The bytes of its mirror's hold: its own, by its nonce, as its pin's are (board 9229).
+    /// The write-once hold key of this mirror run in the parent's bucket (board 11699).
+    fn hold_key(&self, parent: CellId, at: u64, number: u16) -> String {
+        layout::hold(parent, at, number, self.run)
+    }
+
+    /// The bytes of this mirror run's hold.
     fn hold(&self) -> Vec<u8> {
-        layout::encode(&Reference::of(self.nonce))
+        layout::encode(&Reference::of(self.run))
     }
 
     /// Writes it again, if [`PIN_REFRESH`] passed since it was last written, by its host's clock,
-    /// or `now`: false if it is no longer this mirror's, taken over or deleted as stale.
+    /// or `now`: false if it was reaped as stale or overwritten.
     async fn refresh(&mut self, own: &impl Bucket, now: bool) -> Result<bool, Refused> {
         if !now && self.sent.elapsed() < PIN_REFRESH {
             return Ok(true);
@@ -184,80 +204,77 @@ impl Pin {
         })
     }
 
-    /// Sends `request`, of `key` in `bucket`, while the pin is this mirror's ([`PIN_HELD`]), and
-    /// again while it fails, as [`bucket`]'s calls do: before each try, the pin written again once
-    /// [`PIN_REFRESH`] passed, and again while that write landed past its lease. What it answered;
-    /// none, and `request` sent no more, once the pin is no longer this mirror's (board 8441): a
-    /// mirror stopped past its lease, its pin taken over since, then writes nothing the next
-    /// mirror's pin guards.
+    /// Sends `request`, of `key` in `bucket`, while the pin is held ([`PIN_HELD`]), and again
+    /// while it fails, as [`bucket`]'s calls do: before each try, the pin written again once
+    /// [`PIN_REFRESH`] passed, and again while that write landed past its lease. Returns the
+    /// answer, or `None` once the pin is gone (board 8441), alongside whether `request` was ever
+    /// invoked.
     async fn holding<T, F: Future<Output = Result<T, bucket::Error>>>(
         &mut self,
         own: &impl Bucket,
         bucket: &impl Bucket,
         key: &str,
         mut request: impl FnMut() -> F,
-    ) -> Result<Option<T>, Refused> {
+    ) -> Result<(Option<T>, bool), Refused> {
         let mut failures = 0;
+        let mut attempted = false;
         loop {
             if !self.refresh(own, false).await? {
-                return Ok(None);
+                return Ok((None, attempted));
             }
             // Written again, but landing past its lease: written again once more first.
             if self.sent.elapsed() >= PIN_HELD {
                 continue;
             }
+            attempted = true;
             match request().await {
-                Ok(answer) => return Ok(Some(answer)),
+                Ok(answer) => return Ok((Some(answer), attempted)),
                 Err(error) => bucket::failed(bucket, &mut failures, error, key).await?,
             }
         }
     }
 
-    /// Deletes it, if it is still of this mirror's last write (board 9229): taken over since, of
-    /// another's, it stands, however late the delete lands.
+    /// Unconditionally deletes this run's own pin (board 11699): disjoint per run, so even a
+    /// delete landing arbitrarily late never removes another run's pin (`releasesOwn`).
     async fn release(self, own: &impl Bucket) -> Result<(), Refused> {
-        bucket::delete_if(own, &self.key, &self.version).await
+        bucket::delete(own, &self.key).await
     }
 
-    /// [`Pin::release`], deleting `hold` in `bucket` first if the pin is still this mirror's,
-    /// written again first, conditionally, and the hold still of this mirror's write, its bytes
-    /// its own (board 9229): read, and deleted only if of the version read. A mirror whose pin
-    /// another took over since leaves both: that mirror's copy may be marked, its hold this one's
-    /// bytes, written over it as this one went on, paused past its lease (hotbed review 53). The
-    /// next mirror taking the pin over after the refresh writes the hold again, of its own bytes:
-    /// it stands, the delete landing however late.
+    /// Unconditionally deletes this run's own `hold` in `bucket` first, then this run's own pin
+    /// in `own` (board 11699): disjoint per run, so neither delete can remove another run's hold
+    /// or pin however late it lands. Deleting `hold` before `pin` ensures that a crash between
+    /// the two leaves the pin in B for B's collector to reap.
     async fn release_holding(
-        mut self,
+        self,
         own: &impl Bucket,
         bucket: &impl Bucket,
         hold: &str,
     ) -> Result<(), Refused> {
-        if !self.refresh(own, true).await? {
-            return Ok(());
-        }
-        if let Some(held) = bucket::get(bucket, hold).await?
-            && held.bytes == self.hold()
-        {
-            bucket::delete_if(bucket, hold, &held.meta.version).await?;
-        }
+        bucket::delete(bucket, hold).await?;
         self.release(own).await
     }
 
-    /// Creates the marker at `marker` in `own`, while the pin is its own ([`Pin::holding`]):
-    /// false, and none created, if it is no longer. One there already, written by this call or
-    /// another mirror's, marks the version all the same.
-    async fn mark(&mut self, own: &impl Bucket, marker: &str) -> Result<bool, Refused> {
+    /// Creates the marker at `marker` in `own`, while the pin is held ([`Pin::holding`]).
+    /// One there already, written by this call or another mirror's, marks the version all the
+    /// same.
+    async fn mark(&mut self, own: &impl Bucket, marker: &str) -> Result<Mark, Refused> {
         let marked = bytes::Bytes::from(layout::encode(&Mirror::NOW));
-        let created = self.holding(own, own, marker, move || {
-            let marked = marked.clone();
-            async move {
-                match own.put(marker, marked, PutMode::Create).await {
-                    Err(bucket::Error::AlreadyExists) => Ok(()),
-                    put => put.map(drop),
+        let (created, attempted) = self
+            .holding(own, own, marker, move || {
+                let marked = marked.clone();
+                async move {
+                    match own.put(marker, marked, PutMode::Create).await {
+                        Err(bucket::Error::AlreadyExists) => Ok(()),
+                        put => put.map(drop),
+                    }
                 }
-            }
-        });
-        Ok(created.await?.is_some())
+            })
+            .await?;
+        Ok(match (created.is_some(), attempted) {
+            (true, _) => Mark::Marked,
+            (false, false) => Mark::NotAttempted,
+            (false, true) => Mark::Uncertain,
+        })
     }
 }
 
@@ -389,14 +406,10 @@ pub async fn mirror(
     parent: CellId,
     at: u64,
 ) -> Result<Mirrored, Error> {
-    // A backend that refuses conditional deletes (Azure through object_store) cannot safely
-    // release a pin or hold. Check both buckets before either reference is written (board 10567).
-    let (pin_key, hold) = (layout::pin(parent, at), layout::hold(parent, at, number));
-    bucket::require_conditional_delete(own, &pin_key).await?;
-    bucket::require_conditional_delete(bucket, &hold).await?;
     let Some(mut pin) = Pin::take(own, parent, at).await? else {
         return Ok(Mirrored::UnderWay);
     };
+    let hold = pin.hold_key(parent, at, number);
     failpoint!("mirror::pinned");
     let marker = layout::mirror(parent, at);
     let copied = match bucket::get(own, &marker).await? {
@@ -410,14 +423,29 @@ pub async fn mirror(
         }
         // Its hold in the parent's bucket, before it reads the head there (`mirrorHolds`).
         None => match hold_then_copy(bucket, own, &mut pin, (parent, at), &hold).await {
-            Ok(Copied::Whole { count })
-                if pin.refresh(own, true).await? && pin.mark(own, &marker).await? =>
-            {
-                failpoint!("mirror::marked");
-                count
+            Ok(Copied::Whole { count }) => {
+                if !pin.refresh(own, true).await? {
+                    let_go(bucket, own, pin, &hold).await?;
+                    return Ok(Mirrored::GaveUp(TAKEN.to_owned()));
+                }
+                match pin.mark(own, &marker).await? {
+                    Mark::Marked => {
+                        failpoint!("mirror::marked");
+                        count
+                    }
+                    Mark::NotAttempted => {
+                        let_go(bucket, own, pin, &hold).await?;
+                        return Ok(Mirrored::GaveUp(TAKEN.to_owned()));
+                    }
+                    // `PUT marker` was sent at least once before the pin was lost: it may have
+                    // landed, so leave this run's hold for B's collector (`MarkedHeld`).
+                    Mark::Uncertain => return Ok(Mirrored::GaveUp(TAKEN.to_owned())),
+                }
             }
-            // Its pin another's now, and its hold that mirror's too.
-            Ok(Copied::Whole { .. } | Copied::Taken) => {
+            // Pin was lost during copy, before `PUT marker` was ever sent: release our own hold
+            // and pin so neither leaks.
+            Ok(Copied::Taken) => {
+                let_go(bucket, own, pin, &hold).await?;
                 return Ok(Mirrored::GaveUp(TAKEN.to_owned()));
             }
             Ok(Copied::Unnamed) => {
@@ -459,23 +487,14 @@ async fn hold_then_copy(
     copy(bucket, own, pin, parent, at).await
 }
 
-/// Writes `hold`, of `pin`'s mirror's own bytes, over any there (board 9229): a hold another
-/// mirror of the version wrote, its pin since taken over, is this one's now, of another version,
-/// which that mirror's delete, landing late, leaves. Retried while it fails.
+/// Creates this run's write-once `hold` (`PutMode::Create`, board 11699): disjoint per run, never
+/// colliding with another mirror run's hold.
 async fn write_hold(bucket: &impl Bucket, hold: &str, pin: &Pin) -> Result<(), Refused> {
-    let bytes = bytes::Bytes::from(pin.hold());
-    let mut failures = 0;
-    loop {
-        match bucket.put(hold, bytes.clone(), PutMode::Overwrite).await {
-            Ok(_) => return Ok(()),
-            Err(error) => bucket::failed(bucket, &mut failures, error, hold).await?,
-        }
-    }
+    bucket::create(bucket, hold, pin.hold()).await.map(drop)
 }
 
-/// Gives a mirror up: its hold deleted in the parent's bucket, then its pin, each only if still of
-/// its own write, its pin its own still, written again first. A pin another mirror took over, the
-/// hold is that mirror's too, which it leaves.
+/// Gives a mirror run up: unconditionally deletes this run's own `hold` in the parent's bucket,
+/// then its own `pin` in `own` (board 11699).
 async fn let_go(
     bucket: &impl Bucket,
     own: &impl Bucket,
@@ -749,7 +768,7 @@ mod tests {
         sim.advance(2 * PIN_STALE);
         let own = sim.at(1).own();
         let mut pin = pinned(&sim, &own);
-        let written = format!("@1 put {}", layout::pin(PARENT, 3));
+        let written = format!("@1 put {}", pin.key);
         sim.step_back(PIN_STALE);
         let refresh = |pin: &mut Pin| sim.served(pin.refresh(&*own, false));
         assert_eq!(refresh(&mut pin), (Ok(true), vec![]), "refreshed early");
@@ -795,28 +814,26 @@ mod tests {
         }
     }
 
-    /// board 8441, board 9229: a mirror letting go sends its hold's delete; its host stops past
-    /// its lease, the delete in flight all that time (nothing bounds it: no whole-request timeout,
-    /// a file bucket's lock); the next mirror of the version takes its pin over and writes the hold
-    /// again; then the old delete lands, and the old mirror goes on to delete its pin. Neither
-    /// deletes what the next mirror wrote: each is conditional on the old one's own write. Before,
-    /// a lease alone fenced them, and the late delete took the next mirror's hold, its copy then
-    /// marked with nothing keeping the parent's cell in A.
+    /// board 8441, board 9229, board 11699: a mirror letting go sends its hold's plain
+    /// unconditional delete; its host stops past its lease, the delete in flight all that time;
+    /// the next mirror of the version starts with its own fresh per-run pin and hold keys; then
+    /// the old delete lands, and the old mirror goes on to delete its own pin. Neither deletes
+    /// what the next mirror wrote because each run has disjoint write-once pin and hold keys.
     #[test]
     fn late_deletes_of_mirrors_letting_go_leave_the_next_ones_hold_and_pin() {
         let runtime = paused();
         let _entered = runtime.enter();
         let sim = SimBucket::new();
         let (bucket, own) = (sim.at(1), sim.at(1).own());
-        let (pin_key, hold) = (layout::pin(PARENT, 3), layout::hold(PARENT, 3, 1));
         let first = pinned(&sim, &own);
-        sim.served(write_hold(&*bucket, &hold, &first)).0.unwrap();
+        let first_hold = first.hold_key(PARENT, 3, 1);
+        sim.served(write_hold(&*bucket, &first_hold, &first)).0.unwrap();
 
-        // Its hold's delete sent, and held in flight.
-        let deleting = format!("@2 delete {hold}");
+        // Its hold's unconditional delete sent, and held in flight.
+        let deleting = format!("@2 delete {first_hold}");
         let in_flight = |asked: &str| asked.starts_with(&deleting);
         let mut context = Context::from_waker(futures::task::noop_waker_ref());
-        let mut letting_go = std::pin::pin!(first.release_holding(&*own, &*bucket, &hold));
+        let mut letting_go = std::pin::pin!(first.release_holding(&*own, &*bucket, &first_hold));
         loop {
             assert!(letting_go.as_mut().poll(&mut context).is_pending());
             if (0..sim.waiting()).any(|index| in_flight(&sim.describe(index))) {
@@ -825,12 +842,13 @@ mod tests {
             sim.complete(0, Fault::None);
         }
 
-        // Its host stopped past its lease; the next mirror takes the pin over, and holds.
+        // Its host stopped past its lease; the next mirror starts with fresh disjoint pin & hold.
         sim.advance(PIN_STALE + 1);
         advance(&runtime, Duration::from_millis(PIN_STALE + 1));
         let next = served_but(&sim, Pin::take(&*own, PARENT, 3), in_flight);
-        let next = next.expect("the pin taken").unwrap().expect("the pin stale, taken over");
-        served_but(&sim, write_hold(&*bucket, &hold, &next), in_flight).unwrap().unwrap();
+        let next = next.expect("the pin created").unwrap().expect("the old pin stale, new run");
+        let next_hold = next.hold_key(PARENT, 3, 1);
+        served_but(&sim, write_hold(&*bucket, &next_hold, &next), in_flight).unwrap().unwrap();
 
         // The old delete lands; the old mirror goes on, and ends.
         let held = (0..sim.waiting()).find(|&index| in_flight(&sim.describe(index))).unwrap();
@@ -838,47 +856,50 @@ mod tests {
         let (released, _) = sim.served(letting_go);
         assert_eq!(released, Ok(()));
         let hold =
-            block_on(Direct(bucket.clone()).get(&hold)).expect("the next mirror's hold gone");
+            block_on(Direct(bucket.clone()).get(&next_hold)).expect("the next mirror's hold gone");
         assert_eq!(hold.bytes, next.hold(), "the hold");
-        let pin = block_on(Direct(own.clone()).get(&pin_key)).expect("the next mirror's pin gone");
+        let pin = block_on(Direct(own.clone()).get(&next.key)).expect("the next mirror's pin gone");
         assert_eq!(pin.bytes, next.bytes, "the pin");
     }
 
-    /// hotbed review 53: a mirror paused past its lease after it found no marker, before its hold,
-    /// while the next mirror took its pin over, marked and let its pin go, its hold standing for
-    /// the marked copy; going on, it writes the hold over, of its own bytes, and gives up (its
-    /// version named no more): letting go, it finds its pin another's, gone, and leaves the hold,
-    /// the marked copy's still. Deleting a hold of its own bytes, its pin not its own, took the
-    /// marked copy's.
+    /// hotbed review 53, board 11699: a mirror paused past its lease after it found no marker,
+    /// before its hold, while the next mirror wrote its own hold, marked and dropped its pin;
+    /// going on, the paused mirror creates its own per-run hold and gives up, deleting its own
+    /// hold and pin without touching the marked copy's hold.
     #[test]
     fn mirrors_resumed_past_their_lease_leave_a_marked_copys_hold() {
         let runtime = paused();
         let _entered = runtime.enter();
         let sim = SimBucket::new();
         let (bucket, own) = (sim.at(1), sim.at(1).own());
-        let hold = layout::hold(PARENT, 3, 1);
         let paused_one = pinned(&sim, &own);
+        let paused_hold = paused_one.hold_key(PARENT, 3, 1);
         sim.advance(PIN_STALE + 1);
         advance(&runtime, Duration::from_millis(PIN_STALE + 1));
         let next = pinned(&sim, &own);
-        sim.served(write_hold(&*bucket, &hold, &next)).0.unwrap();
+        let next_hold = next.hold_key(PARENT, 3, 1);
+        sim.served(write_hold(&*bucket, &next_hold, &next)).0.unwrap();
         assert_eq!(sim.served(next.release(&*own)).0, Ok(()));
 
-        sim.served(write_hold(&*bucket, &hold, &paused_one)).0.unwrap();
-        assert_eq!(sim.served(paused_one.release_holding(&*own, &*bucket, &hold)).0, Ok(()));
-        assert!(sim.stored().contains(&format!("@2/{hold}")), "the marked copy's hold deleted");
+        sim.served(write_hold(&*bucket, &paused_hold, &paused_one)).0.unwrap();
+        assert_eq!(sim.served(paused_one.release_holding(&*own, &*bucket, &paused_hold)).0, Ok(()));
+        assert!(sim.stored().contains(&format!("@2/{next_hold}")), "the marked copy's hold gone");
+        assert!(
+            !sim.stored().contains(&format!("@2/{paused_hold}")),
+            "the paused run's own hold left behind"
+        );
     }
 
-    /// board 9229: a mirror letting go deletes its own hold and pin, with nothing else in the way:
-    /// the conditions leave nothing standing that is its own.
+    /// board 9229, board 11699: a mirror letting go deletes its own hold and pin, with nothing
+    /// else in the way.
     #[test]
     fn mirrors_letting_go_delete_their_own_hold_and_pin() {
         let runtime = paused();
         let _entered = runtime.enter();
         let sim = SimBucket::new();
         let (bucket, own) = (sim.at(1), sim.at(1).own());
-        let hold = layout::hold(PARENT, 3, 1);
         let pin = pinned(&sim, &own);
+        let hold = pin.hold_key(PARENT, 3, 1);
         sim.served(write_hold(&*bucket, &hold, &pin)).0.unwrap();
         assert_eq!(sim.served(pin.release_holding(&*own, &*bucket, &hold)).0, Ok(()));
         assert_eq!(sim.keys(), Vec::<String>::new());

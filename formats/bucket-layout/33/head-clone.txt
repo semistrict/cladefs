@@ -1,0 +1,30 @@
+Head {
+    format: 33,
+    owner: 102,
+    made: Clone(
+        Origin {
+            parent: CellId {
+                tenant: 47,
+                id: 281474976710661,
+            },
+            at: 11,
+            epoch: 2,
+        },
+    ),
+    kind: Some(
+        Memory,
+    ),
+    keks: [],
+    shredded: true,
+    deks: [],
+    inherited: [],
+    epoch: 18446744073709551615,
+    holder: 0,
+    token: 18446744073709551615,
+    end: 0,
+    swaps: 0,
+    runs: [],
+    checkpoint: None,
+    versions: [],
+    replication: None,
+}

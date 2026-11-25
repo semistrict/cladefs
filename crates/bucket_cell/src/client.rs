@@ -101,58 +101,6 @@ pub(crate) fn names(bucket: &str, url: &reqwest::Url) -> bool {
     !local && (labelled || pathed)
 }
 
-/// cladefs: the condition of a delete of one object (board 9229), which `object_store` sends no
-/// request for: the header saying it (S3's `If-Match`, GCS's `x-goog-if-generation-match`), the
-/// object's path in its bucket, and whether a request carried it. [`conditioned`] puts it on the
-/// DELETE of that path the future it runs sends through a [`Connector`]'s client.
-#[derive(Debug)]
-pub(crate) struct Condition {
-    pub header: (reqwest::header::HeaderName, reqwest::header::HeaderValue),
-    pub path: String,
-    sent: std::sync::atomic::AtomicBool,
-}
-
-tokio::task_local! {
-    /// The condition of the delete [`conditioned`] runs: what its requests, in its task, carry.
-    static CONDITION: Condition;
-}
-
-/// cladefs: runs `delete`, a delete through a [`Connector`]'s client of the object at `path`, its
-/// DELETE request carrying `header` (board 9229); and whether a request did. One that did not was
-/// sent some other way than a DELETE of the object alone through the client (a batch's), and
-/// unconditioned: a caller makes sure none is ([`crate::object_bucket`]'s single deletes).
-pub(crate) async fn conditioned<T>(
-    header: (reqwest::header::HeaderName, reqwest::header::HeaderValue),
-    path: String,
-    delete: impl Future<Output = T>,
-) -> (T, bool) {
-    let condition = Condition { header, path, sent: std::sync::atomic::AtomicBool::new(false) };
-    CONDITION
-        .scope(condition, async {
-            let deleted = delete.await;
-            (deleted, CONDITION.with(|condition| condition.sent.load(Ordering::Relaxed)))
-        })
-        .await
-}
-
-/// Puts the condition of the delete under way in this task, if any, on `request`, if it is that
-/// delete's: a DELETE of the condition's path, as `url`, decoded, ends with it.
-fn condition(request: &mut reqwest::Request) {
-    if request.method() != reqwest::Method::DELETE {
-        return;
-    }
-    let path = percent_encoding::percent_decode_str(request.url().path()).decode_utf8_lossy();
-    let path = path.into_owned();
-    // No delete conditioned in this task: nothing to add.
-    let _ = CONDITION.try_with(|condition| {
-        if path.strip_suffix(condition.path.as_str()).is_some_and(|rest| rest.ends_with('/')) {
-            let (name, value) = condition.header.clone();
-            request.headers_mut().insert(name, value);
-            condition.sent.store(true, Ordering::Relaxed);
-        }
-    });
-}
-
 /// The user agent of a client whose options name none.
 const USER_AGENT: &str = concat!("cladefs/", env!("CARGO_PKG_VERSION"));
 
@@ -293,9 +241,6 @@ impl object_store::client::HttpService for Watched {
         let dated = names(&self.bucket, &url);
         let mut sent = reqwest::Request::new(parts.method, url);
         *sent.headers_mut() = parts.headers;
-        // cladefs: after its signing, of the headers it names alone: S3 takes an `If-Match`
-        // unsigned, and GCS's requests carry a bearer token, signing none (board 9229).
-        condition(&mut sent);
         let progress = Arc::new(Progress::new());
         let body = Sending { body, slice: Bytes::new(), progress: progress.clone() };
         *sent.body_mut() = Some(reqwest::Body::wrap(body));

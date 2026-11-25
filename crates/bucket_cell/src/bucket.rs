@@ -289,36 +289,6 @@ pub trait Bucket: Send + Sync + 'static {
     /// Deletes the object at `key`. Deleting none is no error.
     fn delete(&self, key: &str) -> impl Future<Output = Result<(), Error>> + Send;
 
-    /// cladefs: deletes the object at `key` only if it is of `version` (board 9229): S3's
-    /// DeleteObject with `If-Match`, GCS's with `x-goog-if-generation-match`, a file bucket's under
-    /// its lock. [`Error::Precondition`] if no object of `version` is there, another's or none, so
-    /// that a delete landing late, after another writer's write of the key, deletes nothing of
-    /// theirs. [`Error::Unsupported`] where the bucket can't make the delete conditional (Azure's,
-    /// through `object_store`, deletes in batches it can't condition), as by default: never
-    /// deleted unconditionally instead. Every bucket a host reads and writes through says how it
-    /// makes one (memory, files, the clouds', routed, the simulation's); a test's wrapper that
-    /// says nothing refuses.
-    fn delete_if(
-        &self,
-        key: &str,
-        version: &Version,
-    ) -> impl Future<Output = Result<(), Error>> + Send {
-        let _ = (key, version);
-        std::future::ready(Err(Error::Unsupported))
-    }
-
-    /// cladefs: whether [`Bucket::delete_if`] can conditionally delete `key` on the bucket that
-    /// serves it (board 10567): false when the backend refuses conditional deletes
-    /// (`Deletes::Refused`), letting callers like [`crate::mirror::mirror`] refuse up front
-    /// before writing a pin or hold without issuing extra network probe requests.
-    fn supports_conditional_delete(
-        &self,
-        key: &str,
-    ) -> impl Future<Output = Result<bool, Error>> + Send {
-        let _ = key;
-        std::future::ready(Ok(true))
-    }
-
     /// cladefs: deletes the objects at `keys`, at most [`DELETE_BATCH`] of them (TASK-395.5): in
     /// one request where the backend deletes many at once (S3's DeleteObjects), else, as here, one
     /// each, [`DELETES_AT_ONCE`] at once. Deleting none is no error. It fails if a delete did,
@@ -651,42 +621,6 @@ pub(crate) async fn delete(bucket: &impl Bucket, key: &str) -> Result<(), Refuse
     }
 }
 
-/// cladefs: deletes the object at `key` if it is of `version`, retried while it fails
-/// ([`Bucket::delete_if`], board 9229): done once no object of `version` is there, this call's
-/// delete having landed, though its answer was lost, or another write of the key since having
-/// made it another's, which it leaves. A bucket that can't make the delete conditional refuses it
-/// ([`Refusal::Request`]): never retried, nor sent unconditionally.
-pub(crate) async fn delete_if(
-    bucket: &impl Bucket,
-    key: &str,
-    version: &Version,
-) -> Result<(), Refused> {
-    let mut failures = 0;
-    loop {
-        match bucket.delete_if(key, version).await {
-            Ok(()) | Err(Error::Precondition | Error::NotFound) => return Ok(()),
-            Err(Error::Unsupported) => return Err(Refused::of(key, Refusal::Request)),
-            Err(error) => failed(bucket, &mut failures, error, key).await?,
-        }
-    }
-}
-
-/// cladefs: verifies that the bucket serving `key` supports [`Bucket::delete_if`] (board 10567),
-/// retrying transient routing failures and refusing with [`Refusal::Request`] when it does not.
-pub(crate) async fn require_conditional_delete(
-    bucket: &impl Bucket,
-    key: &str,
-) -> Result<(), Refused> {
-    let mut failures = 0;
-    loop {
-        match bucket.supports_conditional_delete(key).await {
-            Ok(true) => return Ok(()),
-            Ok(false) | Err(Error::Unsupported) => return Err(Refused::of(key, Refusal::Request)),
-            Err(error) => failed(bucket, &mut failures, error, key).await?,
-        }
-    }
-}
-
 /// What [`create`] found.
 pub(crate) enum Created {
     /// The object holds what was written, of this version: this call wrote it, or one before it
@@ -941,28 +875,6 @@ pub(crate) async fn conformance(bucket: &impl Bucket, root: &str) {
     bucket.delete(key).await.unwrap();
 }
 
-/// cladefs: what a bucket's conditional deletes do (board 9229), with an object under `root`,
-/// which it leaves as it found it: if it makes them (`made`), a delete of another version, or of
-/// no object, deletes nothing, [`Error::Precondition`]; one of the object's version deletes it. If
-/// not, it refuses each, [`Error::Unsupported`], deleting nothing.
-#[cfg(test)]
-pub(crate) async fn conditional_deletes(bucket: &impl Bucket, root: &str, made: bool) {
-    let key = &format!("{root}/deleted-if");
-    let first = bucket.put(key, vec![1].into(), PutMode::Create).await.unwrap();
-    let second = bucket.put(key, vec![2].into(), PutMode::Update(first.clone())).await.unwrap();
-    if !made {
-        assert_eq!(bucket.delete_if(key, &second).await, Err(Error::Unsupported));
-        assert_eq!(bucket.get(key).await.unwrap().bytes, [2]);
-        bucket.delete(key).await.unwrap();
-        return;
-    }
-    assert_eq!(bucket.delete_if(key, &first).await, Err(Error::Precondition), "another version");
-    assert_eq!(bucket.get(key).await.unwrap().bytes, [2]);
-    assert_eq!(bucket.delete_if(key, &second).await, Ok(()));
-    assert_eq!(bucket.head(key).await.map(|meta| meta.size), Err(Error::NotFound));
-    assert_eq!(bucket.delete_if(key, &second).await, Err(Error::Precondition), "none there");
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1086,14 +998,6 @@ mod tests {
 
         fn delete(&self, key: &str) -> impl Future<Output = Result<(), Error>> + Send {
             self.0.delete(key)
-        }
-
-        fn delete_if(
-            &self,
-            key: &str,
-            version: &Version,
-        ) -> impl Future<Output = Result<(), Error>> + Send {
-            self.0.delete_if(key, version)
         }
 
         fn now(&self) -> u64 {

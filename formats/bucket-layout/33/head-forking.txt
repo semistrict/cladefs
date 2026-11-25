@@ -1,0 +1,31 @@
+Head {
+    format: 33,
+    owner: 85,
+    made: Forking {
+        origin: Origin {
+            parent: CellId {
+                tenant: 47,
+                id: 281474976710661,
+            },
+            at: 11,
+            epoch: 2,
+        },
+        version: 205,
+    },
+    kind: Some(
+        Sqlite,
+    ),
+    keks: [],
+    shredded: false,
+    deks: [],
+    inherited: [],
+    epoch: 0,
+    holder: 0,
+    token: 0,
+    end: 0,
+    swaps: 0,
+    runs: [],
+    checkpoint: None,
+    versions: [],
+    replication: None,
+}

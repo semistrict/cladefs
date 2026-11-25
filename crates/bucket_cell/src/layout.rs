@@ -112,7 +112,13 @@ pub struct Child {
 /// every version from 31 on.
 /// 32: `Fsync::Local` removed from `Head`'s replication wish (`Ordered` and `Replicated` alone);
 /// version 31 heads carrying `v31::Fsync::Local` decode as [`Fsync::Ordered`] with a warning.
-pub const FORMAT: formats::Format = formats::Format::new("bucket layout", 31, 32);
+/// 33 (board 11699): per-run write-once mirror pin (`refs/<at>/mirror-pins/<run>`) and hold
+/// (`refs/<at>/mirror-holds/<B>/<run>`) keys added under `/`-terminated prefixes so `releasesOwn`
+/// holds by key disjointness under plain unconditional `DELETE` (deleting `Bucket::delete_if`)
+/// without colliding with legacy files on `file://` buckets; legacy v31/v32 single-key pins
+/// (`refs/<at>/mirror`) and holds (`refs/<at>/mirror.<B>`) still decode as [`Kind::Pin`] and
+/// [`Kind::Hold`] and are cleaned up by the collector.
+pub const FORMAT: formats::Format = formats::Format::new("bucket layout", 31, 33);
 
 /// cladefs: the prefix of every tenant's cells' objects: all the bucket's cells (TASK-364).
 pub const TENANTS: &str = "tenants/";
@@ -129,8 +135,12 @@ const RETIRED: &str = "retired/";
 /// cladefs: under a cell's prefix in another bucket, the markers of its versions mirrored there
 /// ([`mirror`], TASK-633.8).
 const MIRRORS: &str = "mirrors/";
-/// cladefs: the last part of a mirror's pin's key, where a reference's names its child ([`pin`]).
+/// cladefs: the legacy v31/v32 name of a mirror's pin key and hold prefix ([`legacy_pin`]).
 const PIN: &str = "mirror";
+/// cladefs: v33 `/`-terminated prefix of per-run mirror pins under `refs/<at>/` ([`pins`]).
+const MIRROR_PINS: &str = "mirror-pins/";
+/// cladefs: v33 `/`-terminated prefix of per-run mirror holds under `refs/<at>/` ([`holds`]).
+const MIRROR_HOLDS: &str = "mirror-holds/";
 /// cladefs: where an ephemeral cell's reference names its host's incarnation, before its child
 /// ([`ephemeral_reference`], doc-25); and, at the bucket's root, the prefix of the index of those
 /// references by bucket and incarnation ([`ephemeral_index`]) and of incarnations' tombstones
@@ -382,23 +392,67 @@ pub fn decommissioned_of(key: &str) -> Option<(u16, u64)> {
     Some((bucket, number(incarnation)?))
 }
 
-/// cladefs: the pin of the mirror of `parent`'s version at the end of its segment `at` in another
-/// bucket (doc-23, Mirrors; TASK-633.8): a reference of the mirror's own, among those of the
-/// version's children there, which keeps the copy from that bucket's collector while it is made,
-/// as a child's reference keeps what it inherits.
-pub fn pin(parent: CellId, at: u64) -> String {
+/// cladefs: the legacy v31/v32 single-key mirror pin of `parent`'s version at `at` in another
+/// bucket (`refs/<at>/mirror`), retained for backwards-compatible decoding and GC cleanup.
+pub fn legacy_pin(parent: CellId, at: u64) -> String {
     format!("{}{PIN}", origin(parent, at))
 }
 
-/// cladefs: the hold of the mirror of `parent`'s version at the end of its segment `at` in the
-/// bucket numbered `bucket`, in the parent's bucket (doc-23, Mirrors; TASK-633.8): a reference of
-/// the mirror's own, among those of the version's children there, which keeps the version's state
-/// there whole, and the parent's cell from being removed, with what the version inherits from
-/// other cells, while the copy stands: its children, referring in the mirror's bucket, read there
-/// what the mirror copied, and in their cells what it did not. The mirror writes it before it reads
-/// the parent's head; the mirror's bucket's collector deletes it, the copy going.
-pub fn hold(parent: CellId, at: u64, bucket: u16) -> String {
+/// cladefs: the `/`-terminated prefix of every v33 per-run mirror pin of `parent`'s version at
+/// the end of its segment `at` in another bucket (`refs/<at>/mirror-pins/`, board 11699).
+pub fn pins(parent: CellId, at: u64) -> String {
+    format!("{}{MIRROR_PINS}", origin(parent, at))
+}
+
+/// cladefs: the write-once pin of mirror run `run` for `parent`'s version at the end of its
+/// segment `at` in another bucket (doc-23, Mirrors; TASK-633.8; board 11699): a reference of the
+/// mirror run's own, among those of the version's children there, which keeps the copy from that
+/// bucket's collector while it is made, as a child's reference keeps what it inherits. Disjoint per
+/// run so plain unconditional DELETE letting go never removes another run's pin.
+pub fn pin(parent: CellId, at: u64, run: u64) -> String {
+    format!("{}{}", pins(parent, at), Padded(run))
+}
+
+/// cladefs: the legacy v31/v32 single-key mirror hold of `parent`'s version at `at` for `bucket`
+/// in the parent's bucket (`refs/<at>/mirror.<B>`), retained for backwards-compatible decoding and
+/// GC cleanup.
+pub fn legacy_hold(parent: CellId, at: u64, bucket: u16) -> String {
     format!("{}{PIN}.{}", origin(parent, at), Padded(u64::from(bucket)))
+}
+
+/// cladefs: the `/`-terminated prefix of every v33 per-run mirror hold of `parent`'s version at
+/// the end of its segment `at` for the bucket numbered `bucket`, in the parent's bucket
+/// (`refs/<at>/mirror-holds/<B>/`, board 11699).
+pub fn holds(parent: CellId, at: u64, bucket: u16) -> String {
+    format!("{}{MIRROR_HOLDS}{}/", origin(parent, at), Padded(u64::from(bucket)))
+}
+
+/// cladefs: the write-once hold of mirror run `run` for `parent`'s version at the end of its
+/// segment `at` in the bucket numbered `bucket`, in the parent's bucket (doc-23, Mirrors;
+/// TASK-633.8; board 11699): a reference of the mirror run's own, among those of the version's
+/// children there, which keeps the version's state there whole, and the parent's cell from being
+/// removed, with what the version inherits from other cells, while the copy stands. Disjoint per
+/// run so plain unconditional DELETE letting go never removes another run's hold; the mirror's
+/// bucket's collector lists [`holds`] (and checks [`legacy_hold`]) and deletes all holds for
+/// `bucket` as the copy goes.
+pub fn hold(parent: CellId, at: u64, bucket: u16, run: u64) -> String {
+    format!("{}{}", holds(parent, at, bucket), Padded(run))
+}
+
+/// cladefs: the hold key in the parent's bucket corresponding to pin key `key` in `bucket`
+/// (board 11699): maps a v33 per-run pin (`refs/<at>/mirror-pins/<run>`) to its matching per-run
+/// hold (`refs/<at>/mirror-holds/<B>/<run>`) and a legacy v31/v32 pin (`refs/<at>/mirror`) to its
+/// legacy hold (`refs/<at>/mirror.<B>`). None if `key` is not a pin.
+pub fn hold_of_pin(key: &str, bucket: u16) -> Option<String> {
+    let (cell, rest) = in_cell(key)?;
+    let rest = rest.strip_prefix(REFS)?;
+    let (at, name) = rest.split_once('/')?;
+    let at = number(at)?;
+    if name == PIN {
+        return Some(legacy_hold(cell, at, bucket));
+    }
+    let run = name.strip_prefix(MIRROR_PINS)?;
+    Some(hold(cell, at, bucket, number(run)?))
 }
 
 /// cladefs: the marker of the mirror of `parent`'s version at the end of its segment `at` in
@@ -676,24 +730,34 @@ pub fn kind(key: &str) -> Kind {
             Some((cell, number(at)?, child))
         };
         if let Some(rest) = rest.strip_prefix(REFS) {
-            if let Some(at) = rest.strip_suffix(PIN).and_then(|at| at.strip_suffix('/')) {
-                return Some(Kind::Pin { parent: cell, at: number(at)? });
-            }
-            if let Some((at, held)) = rest.split_once('/')
-                && let Some(bucket) = held.strip_prefix(PIN).and_then(|held| held.strip_prefix('.'))
-            {
-                // Not a bucket's number: no hold's key.
-                let bucket = u16::try_from(number(bucket)?).ok()?;
-                return Some(Kind::Hold { parent: cell, at: number(at)?, bucket });
-            }
-            if let Some((at, rest)) = rest.split_once('/')
-                && let Some(rest) = rest.strip_prefix(EPHEMERAL).and_then(|r| r.strip_prefix('.'))
-            {
-                let (incarnation, child) = rest.split_once('.')?;
-                let (tenant, child) = child.split_once('.')?;
-                let child = CellId { tenant: number(tenant)?, id: number(child)? };
-                let (at, incarnation) = (number(at)?, number(incarnation)?);
-                return Some(Kind::Ephemeral { parent: cell, at, incarnation, child });
+            if let Some((at, name)) = rest.split_once('/') {
+                if name == PIN {
+                    return Some(Kind::Pin { parent: cell, at: number(at)? });
+                }
+                if let Some(run) = name.strip_prefix(MIRROR_PINS) {
+                    number(run)?;
+                    return Some(Kind::Pin { parent: cell, at: number(at)? });
+                }
+                if let Some(rest) = name.strip_prefix(MIRROR_HOLDS) {
+                    let (bucket, run) = rest.split_once('/')?;
+                    number(run)?;
+                    // Not a bucket's number: no hold's key.
+                    let bucket = u16::try_from(number(bucket)?).ok()?;
+                    return Some(Kind::Hold { parent: cell, at: number(at)?, bucket });
+                }
+                if let Some(bucket) = name.strip_prefix(PIN).and_then(|rest| rest.strip_prefix('.'))
+                {
+                    // Legacy v31/v32 single-key hold (`refs/<at>/mirror.<B>`).
+                    let bucket = u16::try_from(number(bucket)?).ok()?;
+                    return Some(Kind::Hold { parent: cell, at: number(at)?, bucket });
+                }
+                if let Some(rest) = name.strip_prefix(EPHEMERAL).and_then(|r| r.strip_prefix('.')) {
+                    let (incarnation, child) = rest.split_once('.')?;
+                    let (tenant, child) = child.split_once('.')?;
+                    let child = CellId { tenant: number(tenant)?, id: number(child)? };
+                    let (at, incarnation) = (number(at)?, number(incarnation)?);
+                    return Some(Kind::Ephemeral { parent: cell, at, incarnation, child });
+                }
             }
             let (parent, at, child) = fork(rest)?;
             return Some(Kind::Reference { parent, at, child });
@@ -1418,10 +1482,25 @@ mod tests {
         assert_eq!(retired_of(&reference(cell, 7, child)), Some(retired(cell, 7, child)));
         assert_eq!(retired_of(&retired(cell, 7, child)), None);
         assert!(!retired(cell, 7, child).starts_with(&references(cell)));
-        // cladefs: a mirror's pin, among its version's references, and its marker (TASK-633.8).
-        assert_eq!(kind(&pin(cell, 7)), Kind::Pin { parent: cell, at: 7 });
-        assert_eq!(kind(&hold(cell, 7, 3)), Kind::Hold { parent: cell, at: 7, bucket: 3 });
-        assert_eq!(hold(cell, 7, 0x1234), format!("{}mirror.{}", origin(cell, 7), Padded(0x1234)));
+        // cladefs: a mirror's pin and hold — both v33 per-run and legacy v31/v32 single-key forms
+        // (TASK-633.8, board 11699) — and its marker.
+        assert_eq!(kind(&legacy_pin(cell, 7)), Kind::Pin { parent: cell, at: 7 });
+        assert_eq!(kind(&pin(cell, 7, 0)), Kind::Pin { parent: cell, at: 7 });
+        assert_eq!(kind(&pin(cell, 7, 0x2a)), Kind::Pin { parent: cell, at: 7 });
+        assert_eq!(kind(&pin(cell, 7, u64::MAX)), Kind::Pin { parent: cell, at: 7 });
+        assert!(pins(cell, 7).ends_with('/'));
+        assert!(pin(cell, 7, 0x2a).starts_with(&pins(cell, 7)));
+        assert_eq!(kind(&legacy_hold(cell, 7, 3)), Kind::Hold { parent: cell, at: 7, bucket: 3 });
+        assert_eq!(kind(&hold(cell, 7, 3, 0x2a)), Kind::Hold { parent: cell, at: 7, bucket: 3 });
+        assert!(holds(cell, 7, 3).ends_with('/'));
+        assert!(hold(cell, 7, 3, 0x2a).starts_with(&holds(cell, 7, 3)));
+        assert_eq!(
+            hold(cell, 7, 0x1234, 0x2a),
+            format!("{}mirror-holds/{}/{}", origin(cell, 7), Padded(0x1234), Padded(0x2a))
+        );
+        assert_eq!(hold_of_pin(&legacy_pin(cell, 7), 3), Some(legacy_hold(cell, 7, 3)));
+        assert_eq!(hold_of_pin(&pin(cell, 7, 0x2a), 3), Some(hold(cell, 7, 3, 0x2a)));
+        assert_eq!(hold_of_pin(&hold(cell, 7, 3, 0x2a), 3), None);
         assert_eq!(
             kind(&format!("{}mirror.0003", origin(cell, 7))),
             Kind::Unknown,
@@ -1432,9 +1511,23 @@ mod tests {
             Kind::Unknown,
             "bucket numbers past u16::MAX are refused"
         );
-        assert_eq!(owner(&hold(cell, 7, 3)), Some(cell));
-        assert!(pin(cell, 7).starts_with(&origin(cell, 7)));
-        assert_eq!(retired_of(&pin(cell, 7)), None);
+        for malformed in [
+            format!("{}mirror-pins/bad", origin(cell, 7)),
+            format!("{}mirror-pins/{}/extra", origin(cell, 7), Padded(1)),
+            format!("{}mirror-holds/{}/bad", origin(cell, 7), Padded(3)),
+            format!("{}mirror-holds/{}/{}/extra", origin(cell, 7), Padded(3), Padded(1)),
+            format!(
+                "{}mirror-holds/{}/{}",
+                origin(cell, 7),
+                Padded(u64::from(u16::MAX) + 1),
+                Padded(1)
+            ),
+        ] {
+            assert_eq!(kind(&malformed), Kind::Unknown, "{malformed}");
+        }
+        assert_eq!(owner(&hold(cell, 7, 3, 0x2a)), Some(cell));
+        assert!(pin(cell, 7, 0x2a).starts_with(&origin(cell, 7)));
+        assert_eq!(retired_of(&pin(cell, 7, 0x2a)), None);
         assert_eq!(kind(&mirror(cell, 7)), Kind::Mirror { cell, at: 7 });
         // cladefs: an ephemeral cell's reference, among its version's, and its index (doc-25).
         let ephemeral = ephemeral_reference(cell, 7, 0x2a, child);
@@ -1479,7 +1572,7 @@ mod tests {
             assert_eq!(kind(malformed), Kind::Unknown, "{malformed}");
         }
         assert!(mirror(cell, 7).starts_with(&mirrors(cell)));
-        assert_eq!((owner(&pin(cell, 7)), owner(&mirror(cell, 7))), (Some(cell), Some(cell)));
+        assert_eq!((owner(&pin(cell, 7, 0x2a)), owner(&mirror(cell, 7))), (Some(cell), Some(cell)));
         assert_eq!(kind(&format!("{}mirrors/x", cell.prefix())), Kind::Unknown);
         assert_eq!(kind(&format!("{}2", origin(cell, 7))), Kind::Unknown);
         assert_eq!(kind(&origin(cell, 7)), Kind::Unknown);

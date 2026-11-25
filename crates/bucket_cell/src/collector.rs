@@ -392,7 +392,9 @@ impl Collector {
         let alive = crate::head::get(bucket, cell).await?.is_some_and(|head| !head.deleted());
         let listed = bucket::list(own, &cell.prefix()).await?;
         let (mut pinned, mut referring) = (false, Vec::new());
-        let mut stale = Vec::new();
+        // Stale pins grouped by version `at`, each carrying its key (v33 per-run or legacy
+        // v31/v32) so the pass resumes the mirror once per version and then reaps the stale pins.
+        let mut stale: BTreeMap<u64, Vec<&str>> = BTreeMap::new();
         // The versions of the copy, by what is listed of them: whose mirrors' holds go with it.
         let mut ats = BTreeSet::new();
         let marks: BTreeSet<&str> = (listed.iter())
@@ -411,7 +413,9 @@ impl Collector {
             match layout::kind(&meta.key) {
                 // cladefs: keys of formats before this one, refused as a pass over the cell does.
                 Kind::Former { cell, format } => return Err(Error::Format { cell, format }),
-                Kind::Pin { at, .. } if crate::mirror::stale(own, meta) => stale.push(at),
+                Kind::Pin { at, .. } if crate::mirror::stale(own, meta) => {
+                    stale.entry(at).or_default().push(meta.key.as_str());
+                }
                 Kind::Pin { .. } => pinned = true,
                 Kind::Reference { at, child, .. } => referring.push((at, child, meta.key.as_str())),
                 _ => {}
@@ -434,12 +438,30 @@ impl Collector {
                 false => gone.push(key),
             }
         }
-        // Nothing of it needed, it goes whole: its mirrors' holds there first, which keep there
-        // what it inherits, of every version of it here, a mirror's that marked none too,
-        // unreported, as they are its mirrors'; then its markers here, then what they named, then
-        // the marks.
+        // Nothing of it needed, it goes whole: all holds in A for this bucket of every version of
+        // the copy (found via prefix LIST, covering both v33 per-run holds and legacy v31/v32
+        // single-key holds, board 11699) go first, then its markers here, then what they named,
+        // then the marks.
         let whole = !(alive || pinned || !stale.is_empty() || standing);
-        let holds: Vec<String> = ats.iter().map(|&at| layout::hold(cell, at, number)).collect();
+        let mut holds = Vec::new();
+        if whole {
+            for &at in &ats {
+                if let Some(meta) =
+                    bucket::head(bucket, &layout::legacy_hold(cell, at, number)).await?
+                {
+                    holds.push(meta.key);
+                }
+                for meta in bucket::list(bucket, &layout::holds(cell, at, number)).await? {
+                    if matches!(
+                        layout::kind(&meta.key),
+                        Kind::Hold { parent, at: held_at, bucket: of }
+                            if parent == cell && held_at == at && of == number
+                    ) {
+                        holds.push(meta.key);
+                    }
+                }
+            }
+        }
         let holds: Vec<&str> = holds.iter().map(String::as_str).collect();
         let of = |kind: fn(&Kind) -> bool| -> Vec<&Meta> {
             listed.iter().filter(|meta| kind(&layout::kind(&meta.key))).collect()
@@ -476,13 +498,31 @@ impl Collector {
             lifecycle::retire(own, &gone).await?;
             report.retired += gone.len();
         }
-        for at in &stale {
-            let resumed = crate::mirror::mirror(bucket, own, number, cell, *at).await?;
+        for (&at, stale_pins) in &stale {
+            let resumed = crate::mirror::mirror(bucket, own, number, cell, at).await?;
             log::info!("collector: {cell}'s mirror at {at:x}, its pin stale, again: {resumed:?}");
-            // The references it moved here and retired there, whether there or not.
-            if let crate::mirror::Mirrored::Done { retired, .. } = resumed {
-                report.retired += retired;
+            // Reap stale per-run (and legacy) pins once resumed (board 11699): when the version
+            // is marked, leave matching holds in A for GcUnhold; when unmarked, delete each stale
+            // pin's matching hold in A first, then the stale pin in B so a crash between leaves
+            // the pin for the next pass.
+            let reap_holds = match resumed {
+                crate::mirror::Mirrored::UnderWay => continue,
+                crate::mirror::Mirrored::Done { retired, .. } => {
+                    report.retired += retired;
+                    false
+                }
+                crate::mirror::Mirrored::Unnamed => true,
+                crate::mirror::Mirrored::GaveUp(_) => {
+                    bucket::get(own, &layout::mirror(cell, at)).await?.is_none()
+                }
+            };
+            if reap_holds {
+                let stale_holds: Vec<String> =
+                    stale_pins.iter().filter_map(|key| layout::hold_of_pin(key, number)).collect();
+                let stale_holds: Vec<&str> = stale_holds.iter().map(String::as_str).collect();
+                bucket::delete_all(bucket, &stale_holds).await?;
             }
+            bucket::delete_all(own, stale_pins).await?;
         }
         if !whole {
             return Ok(report);
@@ -2113,14 +2153,6 @@ mod tests {
             self.answered(self.bucket.delete(key))
         }
 
-        fn delete_if(
-            &self,
-            key: &str,
-            version: &Version,
-        ) -> impl Future<Output = Result<(), BucketError>> + Send {
-            self.answered(self.bucket.delete_if(key, version))
-        }
-
         fn now(&self) -> u64 {
             self.bucket.now()
         }
@@ -2342,14 +2374,6 @@ mod tests {
 
         fn delete(&self, key: &str) -> impl Future<Output = Result<(), BucketError>> + Send {
             self.bucket.delete(key)
-        }
-
-        fn delete_if(
-            &self,
-            key: &str,
-            version: &Version,
-        ) -> impl Future<Output = Result<(), BucketError>> + Send {
-            self.bucket.delete_if(key, version)
         }
 
         fn now(&self) -> u64 {
