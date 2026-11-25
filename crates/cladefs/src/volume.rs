@@ -103,6 +103,10 @@ pub(crate) struct HeldNode {
     pub file_type: FileType,
     /// Whether no name links it any more: it is freed once it is let go of.
     pub unlinked: bool,
+    /// Generation counter for `security.capability` presence: 0 means definitely absent; nonzero
+    /// means the inode may have a `security.capability` xattr (incremented on setxattr, cleared to
+    /// 0 only if unchanged after confirming/removing absence).
+    pub security_cap_gen: u64,
     /// The directory a directory is in, which it holds, so that a rename can find whether it
     /// would move a directory into itself.
     parent: Option<u64>,
@@ -194,6 +198,7 @@ impl Volume {
         let held = HeldNode {
             file_type: FileType::Directory,
             unlinked: false,
+            security_cap_gen: 1,
             parent: None,
             holds: 1,
             children: 0,
@@ -253,18 +258,21 @@ impl Volume {
     }
 
     /// A new hold on the node `object_id` of `file_type`, until the unmount begins (`ENOTCONN`),
-    /// found in the directory `parent`, which is held.
+    /// found in the directory `parent`, which is held. If `fresh` is true (newly created node),
+    /// it starts known to have no `security.capability` xattr.
     pub fn hold(
         self: &Arc<Self>,
         object_id: u64,
         file_type: FileType,
         parent: Option<u64>,
+        fresh: bool,
     ) -> Result<Hold> {
         let mut state = self.state.lock().unwrap();
         let mounted = state.open()?;
         let held = mounted.nodes.entry(object_id).or_insert_with(|| HeldNode {
             file_type,
             unlinked: false,
+            security_cap_gen: if fresh { 0 } else { 1 },
             parent: None,
             holds: 0,
             children: 0,
@@ -286,6 +294,32 @@ impl Volume {
     pub fn with_held<T>(&self, hold: &Hold, f: impl FnOnce(&HeldNode) -> T) -> Result<T> {
         let mut state = self.state.lock().unwrap();
         Ok(f(state.mounted()?.held(hold.object_id)))
+    }
+
+    /// Marks `hold`'s node as possibly having a `security.capability` xattr, bumping its
+    /// generation counter so a racing privilege-clear cannot clear this update.
+    pub fn mark_security_cap(&self, hold: &Hold) {
+        let mut state = self.state.lock().unwrap();
+        if let Ok(mounted) = state.open()
+            && let Some(held) = mounted.nodes.get_mut(&hold.object_id)
+        {
+            held.security_cap_gen = held.security_cap_gen.wrapping_add(1).max(1);
+        }
+    }
+
+    /// Clears `hold`'s `security.capability` presence bit if its generation still matches
+    /// `expected_gen`.
+    pub fn clear_security_cap_if(&self, hold: &Hold, expected_gen: u64) {
+        if expected_gen == 0 {
+            return;
+        }
+        let mut state = self.state.lock().unwrap();
+        if let Ok(mounted) = state.open()
+            && let Some(held) = mounted.nodes.get_mut(&hold.object_id)
+            && held.security_cap_gen == expected_gen
+        {
+            held.security_cap_gen = 0;
+        }
     }
 
     /// Whether no name links the node that `hold` holds any more, for an operation under way:

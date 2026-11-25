@@ -105,16 +105,6 @@ fn attr(block_size: u32, attr: &fxfs_posix::Attr) -> Result<Attr> {
     })
 }
 
-/// The times of a change at `now`: its modification time, and its status change time.
-fn changed_at(now: u64) -> fxfs_posix::SetAttr {
-    fxfs_posix::SetAttr {
-        valid: fxfs_posix::SET_MTIME | fxfs_posix::SET_CTIME,
-        mtime_ns: now,
-        ctime_ns: now,
-        ..Default::default()
-    }
-}
-
 /// The time of a change at `now` of a node's status alone: its status change time.
 fn status_changed_at(now: u64) -> fxfs_posix::SetAttr {
     fxfs_posix::SetAttr { valid: fxfs_posix::SET_CTIME, ctime_ns: now, ..Default::default() }
@@ -446,10 +436,17 @@ impl Node {
         self.volume()
     }
 
+    /// The node's type, which never changes, its volume, and its `security.capability` generation.
+    fn file_type_and_cap(&self) -> Result<(FileType, u64, Arc<Volume>)> {
+        let volume = self.volume()?;
+        let (file_type, cap_gen) =
+            volume.with_held(&self.0, |held| (held.file_type, held.security_cap_gen))?;
+        Ok((file_type, cap_gen, volume))
+    }
+
     /// The node's type, which never changes, and its volume.
     fn file_type(&self) -> Result<(FileType, Arc<Volume>)> {
-        let volume = self.volume()?;
-        let file_type = volume.with_held(&self.0, |held| held.file_type)?;
+        let (file_type, _, volume) = self.file_type_and_cap()?;
         Ok((file_type, volume))
     }
 
@@ -461,14 +458,20 @@ impl Node {
         }
     }
 
+    /// The volume of this file, whose contents are read and written, and its `security.capability`
+    /// generation: `EISDIR` if the node is a directory, and `EINVAL` if a symlink.
+    fn file_and_cap(&self) -> Result<(Arc<Volume>, u64)> {
+        match self.file_type_and_cap()? {
+            (FileType::Directory, _, _) => Err(Errno::EISDIR),
+            (FileType::Symlink, _, _) => Err(Errno::EINVAL),
+            (_, cap_gen, volume) => Ok((volume, cap_gen)),
+        }
+    }
+
     /// The volume of this file, whose contents are read and written: `EISDIR` if the node is a
     /// directory, and `EINVAL` if a symlink.
     fn file(&self) -> Result<Arc<Volume>> {
-        match self.file_type()? {
-            (FileType::Directory, _) => Err(Errno::EISDIR),
-            (FileType::Symlink, _) => Err(Errno::EINVAL),
-            (_, volume) => Ok(volume),
-        }
+        self.file_and_cap().map(|(volume, _)| volume)
     }
 
     /// Fails with `ENOENT` if the directory `dir` of `volume`, which is held, is removed: nothing
@@ -500,7 +503,7 @@ impl Node {
                 // Held before the name can go (`Volume::namespace`).
                 let _names = held.namespace.read().await;
                 let found = find(&fxfs, dir, &name).await?.ok_or(Errno::ENOENT)?;
-                handle(&held, &found, dir)
+                handle(&held, &found, dir, false)
             })
             .await
     }
@@ -527,9 +530,33 @@ impl Node {
     /// Changes the node's attributes, and its status change time, whatever it changes, as Linux's
     /// `notify_change` does: a chown to the owner and group it has too (TASK-149.37). Returns them.
     pub async fn setattr(&self, set: &SetAttr) -> Result<Attr> {
-        let (file_type, volume) = self.file_type()?;
+        self.setattr_with(set, None, false).await
+    }
+
+    /// cladefs: FUSE `SETATTR` entry point supporting an explicit `ctime` (flushed by Linux's
+    /// `FUSE_WRITEBACK_CACHE`) and optional `security.capability` removal (`FUSE_HANDLE_KILLPRIV_V2`).
+    pub(crate) async fn setattr_fuse(
+        &self,
+        set: &SetAttr,
+        explicit_ctime: Option<std::time::SystemTime>,
+        kill_security_cap: bool,
+    ) -> Result<Attr> {
+        self.setattr_with(set, explicit_ctime, kill_security_cap).await
+    }
+
+    async fn setattr_with(
+        &self,
+        set: &SetAttr,
+        explicit_ctime: Option<std::time::SystemTime>,
+        kill_security_cap: bool,
+    ) -> Result<Attr> {
+        let (file_type, cap_gen, volume) = self.file_type_and_cap()?;
         let now = now()?;
-        let mut change = status_changed_at(now);
+        let ctime_ns = match explicit_ctime {
+            Some(ctime) => nanos_from_time(ctime)?,
+            None => now,
+        };
+        let mut change = status_changed_at(ctime_ns);
         if let Some(size) = set.size {
             match file_type {
                 FileType::Directory => return Err(Errno::EISDIR),
@@ -537,7 +564,7 @@ impl Node {
                 _ => {}
             }
             // A truncation changes the file's contents, as a write does.
-            change.valid |= changed_at(now).valid;
+            change.valid |= fxfs_posix::SET_MTIME;
             change.mtime_ns = now;
             change.valid |= fxfs_posix::SET_SIZE;
             change.size = size;
@@ -557,6 +584,10 @@ impl Node {
         if let Some(mtime) = set.mtime {
             change.valid |= fxfs_posix::SET_MTIME;
             change.mtime_ns = nanos_from_time(mtime.resolve())?;
+        }
+        let kill_cap = kill_security_cap && file_type != FileType::Directory && cap_gen != 0;
+        if kill_cap {
+            change.valid |= fxfs_posix::SET_KILL_SECURITY_CAP;
         }
         let (perm, kill_suid_sgid) = (set.perm, set.kill_suid_sgid);
         let (ino, block_size) = (self.ino(), volume.block_size());
@@ -587,6 +618,9 @@ impl Node {
                 attr(block_size, &fxfs.attr(ino).await.map_err(errno)?)
             })
             .await?;
+        if kill_cap {
+            volume.clear_security_cap_if(&self.0, cap_gen);
+        }
         self.linked(&volume, attr)
     }
 
@@ -621,7 +655,7 @@ impl Node {
                     return Err(Errno::EEXIST);
                 }
                 let made = make(fxfs, dir, name).await.map_err(errno)?;
-                handle(&held, &made, dir)
+                handle(&held, &made, dir, true)
             })
             .await
     }
@@ -918,7 +952,29 @@ impl Node {
     /// Writes `data` to this file at `offset`, extending it if that is past its end, and returns
     /// how much was written.
     pub async fn write(&self, offset: u64, data: &[u8]) -> Result<usize> {
-        self.write_vectored(offset, &[VolatileSlice::from(data)]).await
+        let (volume, _) = self.file_and_cap()?;
+        if data.is_empty() {
+            return Ok(0);
+        }
+        let (written, _) = self.write_owned(volume, 0, offset, data.to_vec(), true, false).await?;
+        Ok(written)
+    }
+
+    /// cladefs: FUSE `WRITE` entry point with optional timestamp update (skipped for writeback
+    /// cache flushes where the kernel owns mtime/ctime) and optional privilege clearing
+    /// (`FUSE_HANDLE_KILLPRIV_V2`). Returns `(written, mode_changed)`.
+    pub(crate) async fn write_fuse(
+        &self,
+        offset: u64,
+        data: &[u8],
+        update_times: bool,
+        kill_priv: bool,
+    ) -> Result<(usize, bool)> {
+        let (volume, cap_gen) = self.file_and_cap()?;
+        if data.is_empty() {
+            return Ok((0, false));
+        }
+        self.write_owned(volume, cap_gen, offset, data.to_vec(), update_times, kill_priv).await
     }
 
     /// Writes `bufs` in turn to this file at `offset`, memory that may change meanwhile, and
@@ -927,26 +983,59 @@ impl Node {
     /// What `bufs` hold is copied, then written, a MiB at a time, in a transaction each.
     /// Dropping the future once the write has begun leaves it to complete.
     pub async fn write_vectored(&self, offset: u64, bufs: &[VolatileSlice<'_>]) -> Result<usize> {
-        let volume = self.file()?;
-        let mut data = vec![0; bufs.iter().map(VolatileSlice::len).sum::<usize>()];
+        let (volume, _) = self.file_and_cap()?;
+        let len: usize = bufs.iter().map(VolatileSlice::len).sum();
+        if len == 0 {
+            return Ok(0);
+        }
+        let mut data = vec![0; len];
         let mut at = 0;
         for buf in bufs {
             at += buf.copy_to(&mut data[at..]);
         }
-        if data.is_empty() {
-            return Ok(0);
-        }
+        let (written, _) = self.write_owned(volume, 0, offset, data, true, false).await?;
+        Ok(written)
+    }
+
+    async fn write_owned(
+        &self,
+        volume: Arc<Volume>,
+        cap_gen: u64,
+        offset: u64,
+        data: Vec<u8>,
+        update_times: bool,
+        kill_priv: bool,
+    ) -> Result<(usize, bool)> {
         offset.checked_add(data.len() as u64).ok_or(Errno::EFBIG)?;
-        let (ino, now) = (self.ino(), now()?);
-        volume
+        let (ino, now) = (self.ino(), if update_times { Some(now()?) } else { None });
+        let kill_cap = kill_priv && cap_gen != 0;
+        let (written, mode_changed) = volume
             .run(move |fxfs| async move {
-                for (chunk, written) in data.chunks(WRITE_CHUNK).zip((0..).step_by(WRITE_CHUNK)) {
-                    fxfs.write(ino, offset + written as u64, chunk).await.map_err(errno)?;
+                let chunks = data.len().div_ceil(WRITE_CHUNK);
+                let mut mode_changed = false;
+                for (index, (chunk, written)) in
+                    data.chunks(WRITE_CHUNK).zip((0..).step_by(WRITE_CHUNK)).enumerate()
+                {
+                    let is_last = index + 1 == chunks;
+                    mode_changed |= fxfs
+                        .write_at(
+                            ino,
+                            offset + written as u64,
+                            chunk,
+                            if is_last { now } else { None },
+                            is_last && kill_priv,
+                            is_last && kill_cap,
+                        )
+                        .await
+                        .map_err(errno)?;
                 }
-                fxfs.setattr(ino, &changed_at(now)).await.map_err(errno)?;
-                Ok(data.len())
+                Ok((data.len(), mode_changed))
             })
-            .await
+            .await?;
+        if kill_cap {
+            volume.clear_security_cap_if(&self.0, cap_gen);
+        }
+        Ok((written, mode_changed))
     }
 
     /// Allocates `len` bytes of this file at `offset`, extending it if they are past its end, as
@@ -954,15 +1043,35 @@ impl Node {
     /// write takes new blocks (fxfs-posix's `allocate`). It changes the file's modification time,
     /// as Linux's fallocate does (`file_modified`, the guest's too).
     pub async fn allocate(&self, offset: u64, len: u64) -> Result<()> {
-        let volume = self.file()?;
+        self.allocate_fuse(offset, len, false, false).await?;
+        Ok(())
+    }
+
+    /// cladefs: FUSE `FALLOCATE` entry point with optional privilege clearing
+    /// (`FUSE_HANDLE_KILLPRIV_V2`, since `fuse_fallocate_in` carries no `KILL_SUIDGID` flag).
+    /// Returns whether `S_ISUID` or `S_ISGID` was cleared.
+    pub(crate) async fn allocate_fuse(
+        &self,
+        offset: u64,
+        len: u64,
+        kill_suid_sgid: bool,
+        kill_security_cap: bool,
+    ) -> Result<bool> {
+        let (volume, cap_gen) = self.file_and_cap()?;
         let end = offset.checked_add(len).filter(|_| len > 0).ok_or(Errno::EINVAL)?;
         let (ino, now) = (self.ino(), now()?);
-        volume
+        let kill_cap = kill_security_cap && cap_gen != 0;
+        let mode_changed = volume
             .run(move |fxfs| async move {
-                fxfs.allocate(ino, offset..end).await.map_err(errno)?;
-                fxfs.setattr(ino, &changed_at(now)).await.map_err(errno)
+                fxfs.allocate_at(ino, offset..end, now, kill_suid_sgid, kill_cap)
+                    .await
+                    .map_err(errno)
             })
-            .await
+            .await?;
+        if kill_cap {
+            volume.clear_security_cap_if(&self.0, cap_gen);
+        }
+        Ok(mode_changed)
     }
 
     /// Writes back the node's data and metadata, and for a directory, the filesystem's.
@@ -983,17 +1092,25 @@ impl Node {
     /// The value of the node's extended attribute `name`. Fails with `ENODATA` if it has none of
     /// that name.
     pub async fn getxattr(&self, name: &[u8]) -> Result<Vec<u8>> {
-        let volume = self.volume()?;
+        let (_, cap_gen, volume) = self.file_type_and_cap()?;
+        let is_cap = name == b"security.capability";
         let (ino, name) = (self.ino(), name.to_vec());
-        volume
+        let res = volume
             .run(move |fxfs| async move { fxfs.get_xattr(ino, &name).await.map_err(xattr_errno) })
-            .await
+            .await;
+        if is_cap && res == Err(Errno::ENODATA) {
+            volume.clear_security_cap_if(&self.0, cap_gen);
+        }
+        res
     }
 
     /// Sets the node's extended attribute `name` to `value`, as `mode` says, changing its status
     /// change time, as Linux's filesystems do (the guest's `cladefs_vfs_xattr_set`).
     pub async fn setxattr(&self, name: &[u8], value: &[u8], mode: XattrMode) -> Result<()> {
         let volume = self.volume()?;
+        if name == b"security.capability" {
+            volume.mark_security_cap(&self.0);
+        }
         let (ino, name, value, now) = (self.ino(), name.to_vec(), value.to_vec(), now()?);
         let mode = match mode {
             XattrMode::Set => SetExtendedAttributeMode::Set,
@@ -1002,8 +1119,7 @@ impl Node {
         };
         volume
             .run(move |fxfs| async move {
-                fxfs.set_xattr(ino, &name, &value, mode).await.map_err(xattr_errno)?;
-                fxfs.setattr(ino, &status_changed_at(now)).await.map_err(errno)
+                fxfs.set_xattr_at(ino, &name, &value, mode, now).await.map_err(xattr_errno)
             })
             .await
     }
@@ -1020,14 +1136,18 @@ impl Node {
     /// Removes the node's extended attribute `name`, changing its status change time. Fails with
     /// `ENODATA` if it has none of that name.
     pub async fn removexattr(&self, name: &[u8]) -> Result<()> {
-        let volume = self.volume()?;
+        let (_, cap_gen, volume) = self.file_type_and_cap()?;
+        let is_cap = name == b"security.capability";
         let (ino, name, now) = (self.ino(), name.to_vec(), now()?);
         volume
             .run(move |fxfs| async move {
-                fxfs.remove_xattr(ino, &name).await.map_err(xattr_errno)?;
-                fxfs.setattr(ino, &status_changed_at(now)).await.map_err(errno)
+                fxfs.remove_xattr_at(ino, &name, now).await.map_err(xattr_errno)
             })
-            .await
+            .await?;
+        if is_cap {
+            volume.clear_security_cap_if(&self.0, cap_gen);
+        }
+        Ok(())
     }
 }
 
@@ -1039,9 +1159,14 @@ impl std::fmt::Debug for Node {
 
 /// A new handle to the node `found`, of `volume`, found in the directory `dir`, and its
 /// attributes.
-fn handle(volume: &Arc<Volume>, found: &fxfs_posix::Attr, dir: u64) -> Result<(Node, Attr)> {
+fn handle(
+    volume: &Arc<Volume>,
+    found: &fxfs_posix::Attr,
+    dir: u64,
+    fresh: bool,
+) -> Result<(Node, Attr)> {
     let attr = attr(volume.block_size(), found)?;
-    let hold = volume.hold(found.ino, attr.file_type, Some(dir))?;
+    let hold = volume.hold(found.ino, attr.file_type, Some(dir), fresh)?;
     Ok((Node(Arc::new(hold)), attr))
 }
 

@@ -14,13 +14,25 @@ use crate::object_store::HandleOwner;
 use crate::object_store::allocator::Reservation;
 use crate::object_store::extent_record::ExtentValue;
 use crate::object_store::journal::{checksums_record_bytes, mutation_record_bytes};
-use crate::object_store::object_record::{ObjectKey, ObjectValue};
+use crate::object_store::object_record::{ObjectKey, ObjectValue, Timestamp};
 use crate::object_store::store_object_handle::MAX_DATA_CHECKSUMS_PER_RECORD;
 use crate::object_store::transaction::{self, Mutation, Options, Transaction};
-use anyhow::{Error, anyhow, ensure};
+use anyhow::{Error, anyhow, bail, ensure};
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 use storage_device::{ExtentId, ExtentRange, SealedExtent};
+
+/// cladefs: optional metadata updates committed atomically in the last transaction of
+/// [`DataObjectHandle::write_many_with_attrs`], avoiding a second transaction per write.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct WriteAttrs {
+    /// Update both `modification_time` and `change_time` to this timestamp.
+    pub change_time: Option<Timestamp>,
+    /// Clear `S_ISUID` and (when `S_IXGRP` is set) `S_ISGID` on the object's mode.
+    pub kill_suid_sgid: bool,
+    /// Remove the `security.capability` extended attribute if present.
+    pub kill_security_cap: bool,
+}
 
 /// cladefs: one of `write_many`'s writes: `data`, its bytes, to `range` of the file, which covers
 /// `blocks`.
@@ -45,7 +57,19 @@ impl<S: HandleOwner> DataObjectHandle<S> {
     /// transaction, and a round trip to the device, per batch of them rather than per page
     /// (TASK-92.10).
     pub async fn write_many(&self, writes: &[(u64, &[u8])]) -> Result<(), Error> {
-        self.write_many_paid(writes, None).await
+        self.write_many_paid(writes, None, WriteAttrs::default()).await?;
+        Ok(())
+    }
+
+    /// cladefs: `write_many`, committing `attrs` (mtime/ctime and optional privilege clearing) in
+    /// the final write transaction instead of a separate `setattr` transaction. Returns whether
+    /// `attrs.kill_suid_sgid` cleared `S_ISUID` or `S_ISGID` on the object's mode.
+    pub async fn write_many_with_attrs(
+        &self,
+        writes: &[(u64, &[u8])],
+        attrs: WriteAttrs,
+    ) -> Result<bool, Error> {
+        self.write_many_paid(writes, None, attrs).await
     }
 
     /// cladefs: `write_many`, its blocks paid for from `reserved`, which a page cache reserved as it
@@ -58,7 +82,8 @@ impl<S: HandleOwner> DataObjectHandle<S> {
         writes: &[(u64, &[u8])],
         reserved: &Reservation,
     ) -> Result<(), Error> {
-        self.write_many_paid(writes, Some(reserved)).await
+        self.write_many_paid(writes, Some(reserved), WriteAttrs::default()).await?;
+        Ok(())
     }
 
     /// cladefs: `write_many`, paid for from `reserved` if given (`write_many_reserved`). A
@@ -74,12 +99,14 @@ impl<S: HandleOwner> DataObjectHandle<S> {
         &self,
         writes: &[(u64, &[u8])],
         reserved: Option<&Reservation>,
-    ) -> Result<(), Error> {
+        attrs: WriteAttrs,
+    ) -> Result<bool, Error> {
         let writes = self.blocks_of(writes)?;
         let mut rest = &writes[..];
+        let mut mode_changed = false;
         while !rest.is_empty() {
             let mut packed = true;
-            let (transaction, after) = loop {
+            let (mut transaction, after) = loop {
                 let mut transaction = match reserved {
                     None => self.new_transaction().await?,
                     Some(reserved) => {
@@ -106,6 +133,9 @@ impl<S: HandleOwner> DataObjectHandle<S> {
                     Err(error) => return Err(error),
                 }
             };
+            if after.is_empty() {
+                mode_changed = self.txn_apply_write_attrs(&mut transaction, attrs).await?;
+            }
             // cladefs: fault injection, a crash between the bytes and the commit (`FAIL_COMMITS`).
             let injected = FAIL_COMMITS
                 .try_update(Ordering::Relaxed, Ordering::Relaxed, |left| left.checked_sub(1))
@@ -116,7 +146,70 @@ impl<S: HandleOwner> DataObjectHandle<S> {
             transaction.commit().await?;
             rest = after;
         }
-        Ok(())
+        Ok(mode_changed)
+    }
+
+    /// cladefs: applies `attrs` (mtime/ctime, suid/sgid clearing, and `security.capability`
+    /// removal) inside `transaction`, which already holds `LockKey::object(store_id, object_id)`.
+    /// Returns whether `posix_attributes.mode` was modified.
+    async fn txn_apply_write_attrs(
+        &self,
+        transaction: &mut Transaction<'_>,
+        attrs: WriteAttrs,
+    ) -> Result<bool, Error> {
+        let mut mode_changed = false;
+        if attrs.change_time.is_some() || attrs.kill_suid_sgid {
+            let store = self.store();
+            let mut mutation = store.txn_get_object_mutation(transaction, self.object_id()).await?;
+            let mut changed = false;
+            if let ObjectValue::Object { ref mut attributes, .. } = mutation.item.value {
+                if let Some(now) = attrs.change_time {
+                    attributes.modification_time = now;
+                    attributes.change_time = now;
+                    changed = true;
+                }
+                if attrs.kill_suid_sgid
+                    && let Some(posix) = &mut attributes.posix_attributes
+                {
+                    const S_ISUID: u32 = 0o4000;
+                    const S_ISGID: u32 = 0o2000;
+                    const S_IXGRP: u32 = 0o0010;
+                    let mut mode = posix.mode;
+                    mode &= !S_ISUID;
+                    if mode & S_IXGRP != 0 {
+                        mode &= !S_ISGID;
+                    }
+                    if mode != posix.mode {
+                        posix.mode = mode;
+                        changed = true;
+                        mode_changed = true;
+                    }
+                }
+            } else {
+                bail!(
+                    anyhow!(FxfsError::Inconsistent)
+                        .context("txn_apply_write_attrs: Expected object value")
+                );
+            }
+            if changed {
+                transaction.add(store.store_object_id(), Mutation::ObjectStore(mutation));
+            }
+        }
+        if attrs.kill_security_cap {
+            match self
+                .handle
+                .remove_extended_attribute_in_transaction(
+                    transaction,
+                    b"security.capability".to_vec(),
+                )
+                .await
+            {
+                Ok(()) => {}
+                Err(error) if FxfsError::NotFound.matches(&error) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(mode_changed)
     }
 
     /// cladefs: how many of `writes`, one at least, `transaction` has room for, as written by one
