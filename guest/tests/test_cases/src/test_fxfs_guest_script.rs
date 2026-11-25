@@ -164,7 +164,7 @@ mod host {
         // the tests' own, as a guest run's are under the run's (scripts/test-e2e.sh).
         cladefs::bucket::testing::encrypted();
         let killed = |files: &[Vec<u8>], seed: u64, output: &[u8]| {
-            let dir = tempdir::TempDir::new("killed").unwrap();
+            let dir = tempfile::Builder::new().prefix("killed").tempdir().unwrap();
             std::fs::write(dir.path().join("seed"), seed.to_string()).unwrap();
             std::fs::write(dir.path().join("console.txt"), b"").unwrap();
             let image = dir.path().join("cladefs.img");

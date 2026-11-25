@@ -138,11 +138,12 @@ impl Served {
 /// The time an HTTP date (`Sun, 06 Nov 1994 08:49:37 GMT`, RFC 9110's IMF-fixdate, as every
 /// backend sends it) names, in milliseconds since the Unix epoch: None for what is none, or
 /// before the epoch, which the clock then takes nothing from. A backend's response, untrusted
-/// ([`chrono`]'s parser checks every field).
+/// (`httpdate::parse_http_date` checks every field).
 fn http_date(date: &[u8]) -> Option<u64> {
     let date = std::str::from_utf8(date).ok()?; // None: no date, which says nothing.
-    let date = chrono::DateTime::parse_from_rfc2822(date).ok()?; // None: no date, as above.
-    u64::try_from(date.timestamp_millis()).ok() // None: before the epoch, as above.
+    let time = httpdate::parse_http_date(date).ok()?; // None: no date, as above.
+    let since = time.duration_since(UNIX_EPOCH).ok()?; // None: before the epoch, as above.
+    u64::try_from(since.as_millis()).ok() // None: out of range, as above.
 }
 
 #[cfg(test)]

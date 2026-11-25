@@ -1176,7 +1176,7 @@ mod tests {
     /// console, not a wait for ever; one whose guest connects, its connection.
     #[test]
     fn accepts_end_once_their_vms_do() {
-        let dir = tempdir::TempDir::new("accept").unwrap();
+        let dir = tempfile::Builder::new().prefix("accept").tempdir().unwrap();
         let path = dir.path().join("vsock");
         let listener = UnixListener::bind(&path).unwrap();
         let mut gone = firecracker(dir.path(), &["true"]);
@@ -1248,7 +1248,7 @@ mod tests {
         assert!(kept.len() <= REPORT_BYTES, "{} bytes kept", kept.len());
         assert!(kept.starts_with("[ 1.0] BUG: unable to handle page fault\n"), "{kept}");
         assert!(kept.ends_with("(the rest of the report, past 16 KiB, is in the console)\n"));
-        let dir = tempdir::TempDir::new("console").unwrap();
+        let dir = tempfile::Builder::new().prefix("console").tempdir().unwrap();
         let path = dir.path().join("gpf.console.txt");
         let gpf = "[ 3.0] Oops: general protection fault, probably for non-canonical address 0xdead000000000122: 0000 [#1] SMP NOPTI";
         std::fs::write(&path, format!("{gpf}\n")).unwrap();
@@ -1263,7 +1263,7 @@ mod tests {
     /// looked into (KCSAN_REVIEWED_CHANGE, KCSAN_REVIEWED_PEERS).
     #[test]
     fn consoles_fail_on_their_kernels_complaints() {
-        let dir = tempdir::TempDir::new("console").unwrap();
+        let dir = tempfile::Builder::new().prefix("console").tempdir().unwrap();
         let checked = |name: &str, console: &str| {
             let path = dir.path().join(name);
             std::fs::write(&path, console).unwrap();

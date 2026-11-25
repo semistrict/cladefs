@@ -382,7 +382,7 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
                 // is not the case's.
                 let fork = cells_dir.join("fork-recorded");
                 fork_to(&fork)?;
-                let sockets = tempdir::TempDir::new("cladefs-fork")?;
+                let sockets = tempfile::Builder::new().prefix("cladefs-fork").tempdir()?;
                 let (socket, mut daemon) = daemon(test_setup, sockets.path(), iterations)?;
                 let output = std::fs::File::create(test_setup.tmp_dir.join("recorded-fork.txt"))?;
                 role(test_setup, "fork", &fork, &socket, Some(output))?;
@@ -395,7 +395,7 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
                 let fork = cells_dir.join(format!("fork-{i}"));
                 fork_to(&fork)?;
                 // A socket's path is short: the daemon's directory is a temporary one of its own.
-                let sockets = tempdir::TempDir::new("cladefs-fork")?;
+                let sockets = tempfile::Builder::new().prefix("cladefs-fork").tempdir()?;
                 let (socket, daemon) = match backend {
                     Backend::FxfsGuestDaxForkCold | Backend::FxfsGuestDaxForkPredicted => {
                         let (socket, daemon) = daemon(test_setup, sockets.path(), i)?;
@@ -1192,7 +1192,7 @@ mod guest {
             "CLADEFS_BENCH_SQLITE_WORKLOAD must name a SQLite transaction workload"
         );
         // Keep sidecars isolated, including those SQLite leaves after a killed writer.
-        let root = tempdir::TempDir::new_in(MNT, "sqlite").unwrap();
+        let root = tempfile::Builder::new().prefix("sqlite").tempdir_in(MNT).unwrap();
         for mode in Mode::ALL {
             sqlite::recovery(root.path(), mode);
             for batch in [1, 100] {

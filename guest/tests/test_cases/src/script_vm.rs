@@ -210,7 +210,6 @@ fn keep_or_remove(dir: &Path, kept: Option<&PathBuf>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempdir::TempDir;
 
     #[test]
     fn a_process_that_ends_ends() {
@@ -222,7 +221,7 @@ mod tests {
 
     #[test]
     fn a_process_past_its_deadline_is_killed() {
-        let dir = TempDir::new("deadline").unwrap();
+        let dir = tempfile::Builder::new().prefix("deadline").tempdir().unwrap();
         let marker = dir.path().join("pid");
         let mut command = Command::new("sh");
         command.arg("-c").arg(format!("echo $$ > {}; exec sleep 600", marker.display()));
@@ -274,7 +273,7 @@ mod tests {
     /// A shrink through replays of a process each, told what the guest would be.
     #[test]
     fn a_report_says_the_smallest_script_that_failed_and_how_to_replay_it() {
-        let dir = TempDir::new("replays").unwrap();
+        let dir = tempfile::Builder::new().prefix("replays").tempdir().unwrap();
         let test_setup = TestSetup { test_case: "case".to_owned(), tmp_dir: dir.path().to_owned() };
         let seed = 77;
         let replays = Replays {
@@ -309,7 +308,7 @@ mod tests {
     /// A replay that runs out of its time fails as a hang.
     #[test]
     fn a_hang_is_shrunk() {
-        let dir = TempDir::new("replays").unwrap();
+        let dir = tempfile::Builder::new().prefix("replays").tempdir().unwrap();
         let test_setup = TestSetup { test_case: "case".to_owned(), tmp_dir: dir.path().to_owned() };
         let replays = Replays {
             runner: fake_runner(dir.path(), true),
@@ -341,7 +340,7 @@ mod tests {
 
     #[test]
     fn the_smallest_replays_directory_replaces_the_one_before() {
-        let dir = TempDir::new("replays").unwrap();
+        let dir = tempfile::Builder::new().prefix("replays").tempdir().unwrap();
         let (first, second, kept) =
             (dir.path().join("1"), dir.path().join("2"), dir.path().join("kept"));
         for (replay, name) in [(&first, "first"), (&second, "second")] {

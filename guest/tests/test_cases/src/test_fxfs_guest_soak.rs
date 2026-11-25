@@ -1179,7 +1179,7 @@ RUN apk add --no-cache postgresql postgresql-contrib
         }
 
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
-            let sockets = tempdir::TempDir::new("cladefs-soak")?;
+            let sockets = tempfile::Builder::new().prefix("cladefs-soak").tempdir()?;
             let ran = Soak::new(&test_setup, sockets.path()).and_then(|mut soak| soak.repeat());
             match ran {
                 Ok(()) => {

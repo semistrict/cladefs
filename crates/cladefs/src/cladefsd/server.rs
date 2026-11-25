@@ -2996,8 +2996,14 @@ impl VmProcess {
             Self::Unkillable => return std::future::pending().await,
         };
         // A pidfd is readable once its process has exited.
-        let exited =
-            tokio::io::unix::AsyncFd::with_interest(pidfd.as_fd(), tokio::io::Interest::READABLE);
+        // SAFETY: `pidfd` is an `OwnedFd` owned by `self` and outlives `exited`, so the descriptor
+        // stays valid and open until `AsyncFd` drops and deregisters it from the reactor.
+        let exited = unsafe {
+            tokio::io::unix::AsyncFd::register_with_interest(
+                pidfd.as_fd(),
+                tokio::io::Interest::READABLE,
+            )
+        };
         exited?.readable().await.map(drop)
     }
 

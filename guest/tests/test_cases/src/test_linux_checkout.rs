@@ -158,7 +158,7 @@ RUN git clone --bare --depth 1 --branch v6.18 https://github.com/torvalds/linux 
             let root = setup_rootfs(test_setup)?;
             // A daemon of the case's own, whose memory the host measures, its socket's path short,
             // as Unix sockets' must be; its bucket a directory, whose bytes the host measures.
-            let sockets = tempdir::TempDir::new("cladefs-linux")?;
+            let sockets = tempfile::Builder::new().prefix("cladefs-linux").tempdir()?;
             let cladefsd = sockets.path().join("cladefsd.sock");
             let metrics = metrics_address()?;
             let bucket = dir.join("bucket");

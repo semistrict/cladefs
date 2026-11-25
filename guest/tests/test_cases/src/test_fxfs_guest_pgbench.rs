@@ -598,7 +598,7 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
             // A daemon of its own, whose bucket answers 25 ms late, as the sandbox team's RustFS
             // did, or as CLADEFS_BUCKET_LATENCY_MS says; its socket's path short, as Unix sockets'
             // must be.
-            let sockets = tempdir::TempDir::new("cladefs-pgbench")?;
+            let sockets = tempfile::Builder::new().prefix("cladefs-pgbench").tempdir()?;
             let socket = sockets.path().join("cladefsd.sock");
             let given = std::env::var_os("CLADEFS_BUCKET_LATENCY_MS");
             let bucket = std::env::var_os("CLADEFSD_BUCKET");

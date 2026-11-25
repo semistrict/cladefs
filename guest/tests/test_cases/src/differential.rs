@@ -222,7 +222,7 @@ mod tests {
     use crate::script_run::{Options, ext4_largest, fill};
     use std::fs;
     use std::os::unix::fs::FileExt;
-    use tempdir::TempDir;
+    use tempfile::TempDir;
 
     fn effect(step: Step, changed: Vec<Changed>) -> Effect {
         Effect { step, outcome: Ok(0), refused: false, changed }
@@ -333,7 +333,7 @@ mod tests {
     }
 
     fn on_the_host() -> Host {
-        let dir = TempDir::new("differential").unwrap();
+        let dir = tempfile::Builder::new().prefix("differential").tempdir().unwrap();
         let ext4 = |name: &str| {
             let at = dir.path().join(name);
             fs::create_dir(&at).unwrap();
@@ -407,7 +407,10 @@ mod tests {
     #[test]
     #[ignore = "needs root, to loop-mount a filesystem (script_run::tests::Loop)"]
     fn refusals_are_adopted_by_the_reference() {
-        let (theirs, ours) = (TempDir::new("reference").unwrap(), TempDir::new("subject").unwrap());
+        let (theirs, ours) = (
+            tempfile::Builder::new().prefix("reference").tempdir().unwrap(),
+            tempfile::Builder::new().prefix("subject").tempdir().unwrap(),
+        );
         let room = Loop::new(theirs.path(), 300 << 20, "mkfs.ext4", &["-q", "-F"]);
         let ext4 = Loop::new(ours.path(), 8 << 20, "mkfs.ext4", &["-q", "-F", "-m", "0"]);
         let options = Options { copies_clones: true, seeks: true, ..Options::default() };

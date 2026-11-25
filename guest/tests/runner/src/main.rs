@@ -12,7 +12,7 @@ use std::io::Write;
 use std::panic::catch_unwind;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use tempdir::TempDir;
+use tempfile::Builder as TempDirBuilder;
 use test_cases::{
     Report, Shard, ShouldRun, Tag, Test, TestCase, TestOutcome, TestSetup, encrypted, test_cases,
 };
@@ -704,9 +704,11 @@ fn run_tests(
             fs::create_dir_all(&path).context("Failed to create base directory")?;
             path
         }
-        None => TempDir::new_in("/tmp", "cladefs-guest-tests")
+        None => TempDirBuilder::new()
+            .prefix("cladefs-guest-tests")
+            .tempdir_in("/tmp")
             .context("Failed to create temp base directory")?
-            .into_path(),
+            .keep(),
     };
 
     let mut results: Vec<TestResult> = Vec::new();
@@ -1092,7 +1094,7 @@ mod tests {
     /// those whose kernels complained, in their names' order (TASK-311).
     #[test]
     fn a_failed_tests_kernel_reports_are_its_consoles_first() {
-        let dir = tempdir::TempDir::new("reports").unwrap();
+        let dir = TempDirBuilder::new().prefix("reports").tempdir().unwrap();
         let oops =
             "[ 2.0] Oops: invalid opcode: 0000 [#1] SMP NOPTI\n[ 2.0] ---[ end trace 0 ]---\n";
         let lockup = "[ 3.0] watchdog: BUG: soft lockup - CPU#1 stuck for 22s! [dockerd:9]\n";

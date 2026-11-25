@@ -27,36 +27,11 @@ ignore = [
     # XML, and inferno only writes SVG. board 2804 moves off it.
     { id = "RUSTSEC-2026-0194", reason = "quick-xml 0.26 via pprof's flamegraph, which reads no XML: board 2804" },
     { id = "RUSTSEC-2026-0195", reason = "quick-xml 0.26 via pprof's flamegraph, which reads no XML: board 2804" },
-    # zip 8.6.0, which fxfs-unicode reads the Unicode Character Database's zip with, extracting
-    # nothing to disk: board 10232.
-    { id = "RUSTSEC-2026-0367", reason = "zip 8.6.0, extraction; nothing extracts: board 10232" },
-    { id = "RUSTSEC-2026-0368", reason = "zip 8.6.0, extraction; nothing extracts: board 10232" },
-    { id = "RUSTSEC-2026-0369", reason = "zip 8.6.0, extraction; nothing extracts: board 10232" },
-    { id = "RUSTSEC-2026-0429", reason = "zip 8.6.0, extraction; nothing extracts: board 10232" },
-    { id = "RUSTSEC-2026-0545", reason = "zip 8.6.0, AES entries; the UCD zip has none: board 10232" },
-    { id = "RUSTSEC-2026-0546", reason = "zip 8.6.0, extraction; nothing extracts: board 10232" },
-    { id = "RUSTSEC-2026-0547", reason = "zip 8.6.0, legacy decoders; the UCD zip, checksummed, uses none: board 10232" },
-    { id = "RUSTSEC-2026-0548", reason = "zip 8.6.0, ZipStreamReader; unused: board 10232" },
-    # The TLS stack the daemon reaches buckets and KMSes over: board 10234.
-    { id = "RUSTSEC-2026-0382", reason = "rustls-webpki, distrusted intermediates: board 10234" },
-    { id = "RUSTSEC-2026-0383", reason = "webpki-root-certs, distrusted emSign intermediates: board 10234" },
-    { id = "RUSTSEC-2026-0285", reason = "rustls 0.23.43 in vendor/firecracker.lock alone: board 10234" },
-    { id = "RUSTSEC-2026-0346", reason = "rustls 0.23.43 in vendor/firecracker.lock alone: board 10234" },
-    { id = "RUSTSEC-2026-0348", reason = "rustls 0.23.43 in vendor/firecracker.lock alone: board 10234" },
-    { id = "RUSTSEC-2026-0349", reason = "rustls 0.23.43 in vendor/firecracker.lock alone: board 10234" },
-    # Crates a release fixes: board 10236.
-    { id = "RUSTSEC-2026-0592", reason = "url 2.5.8, nested blob: origins: board 10236" },
-    { id = "RUSTSEC-2026-0385", reason = "ctutils via digest, non-constant-time masks: board 10236" },
-    { id = "RUSTSEC-2026-0414", reason = "pulldown-cmark via prost-build, at build time: board 10236" },
-    { id = "RUSTSEC-2026-0433", reason = "pulldown-cmark via prost-build, at build time: board 10236" },
-    { id = "RUSTSEC-2026-0386", reason = "tokio 1.53.1, AsyncFd::new unsound: board 10236" },
-    { crate = "chacha20@0.10.0", reason = "yanked, via rand, in vendor/firecracker.lock: board 10236" },
-    # Unmaintained, and guest/tests' tempdir: board 10238.
-    { id = "RUSTSEC-2026-0440", reason = "astral-tokio-tar, unmaintained: board 10238" },
-    { id = "RUSTSEC-2026-0542", reason = "humantime, unmaintained: board 10238" },
-    { id = "RUSTSEC-2026-0543", reason = "chrono, unmaintained: board 10238" },
-    { id = "RUSTSEC-2018-0017", reason = "tempdir in guest/tests, deprecated: board 10238" },
-    { id = "RUSTSEC-2023-0018", reason = "remove_dir_all via guest/tests' tempdir, TOCTOU in its tests' cleanup: board 10238" },
+    # Transitive-only unmaintained crates (direct cladefs deps removed in board 10238):
+    # humantime is pulled strictly transitively by object_store; chrono strictly transitively by
+    # object_store and madsim-tonic. Follow upstream releases.
+    { id = "RUSTSEC-2026-0542", reason = "humantime, unmaintained; transitive-only via object_store (direct deps removed: board 10238)" },
+    { id = "RUSTSEC-2026-0543", reason = "chrono, unmaintained; transitive-only via object_store and madsim-tonic (direct deps removed: board 10238)" },
 ]
 
 [licenses]

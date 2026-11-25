@@ -390,7 +390,7 @@ mod tests {
     /// offset; the others, and a cell-less directory, find nothing.
     #[test]
     fn files_holding_known_plaintext_are_named() {
-        let dir = tempdir::TempDir::new("encrypted").unwrap();
+        let dir = tempfile::Builder::new().prefix("encrypted").tempdir().unwrap();
         let clean: Vec<u8> = crate::canary::stream(10_000).iter().map(|byte| !byte).collect();
         std::fs::write(dir.path().join("clean"), clean).unwrap();
         let mut held = vec![0u8; CHUNK - 3];

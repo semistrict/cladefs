@@ -270,10 +270,38 @@ struct Text<'a> {
     now: SystemTime,
 }
 
+/// Formats `SystemTime` as UTC RFC 3339 with six fractional digits (`YYYY-MM-DDTHH:MM:SS.ffffffZ`).
+struct Rfc3339Micros(SystemTime);
+
+impl fmt::Display for Rfc3339Micros {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let since = self.0.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default();
+        let secs = since.as_secs();
+        let micros = since.subsec_micros();
+        let days = (secs / 86_400) as i64;
+        let sod = secs % 86_400;
+        let hour = sod / 3_600;
+        let min = (sod % 3_600) / 60;
+        let sec = sod % 60;
+        // Howard Hinnant's civil_from_days: proleptic Gregorian date from days since 1970-01-01.
+        let z = days + 719_468;
+        let era = z.div_euclid(146_097);
+        let doe = z.rem_euclid(146_097) as u64;
+        let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+        let y = yoe as i64 + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let day = doy - (153 * mp + 2) / 5 + 1;
+        let month = if mp < 10 { mp + 3 } else { mp - 9 };
+        let year = y + i64::from(month <= 2);
+        write!(f, "{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}.{micros:06}Z")
+    }
+}
+
 impl fmt::Display for Text<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let record = self.record;
-        let now = humantime::format_rfc3339_micros(self.now);
+        let now = Rfc3339Micros(self.now);
         write!(f, "{now} {} {}: ", record.level(), record.target())?;
         write!(Escaped(&mut *f), "{}", record.args())?;
         record.key_values().visit(&mut KeyValues(Escaped(&mut *f))).map_err(|_| fmt::Error)?;
@@ -340,7 +368,7 @@ fn json(
     now: SystemTime,
 ) -> String {
     let mut out = String::from("{\"timestamp\":");
-    string(&mut out, &humantime::format_rfc3339_micros(now).to_string());
+    string(&mut out, &Rfc3339Micros(now).to_string());
     out.push_str(",\"level\":");
     string(&mut out, record.level().as_str());
     out.push_str(",\"target\":");
@@ -526,5 +554,18 @@ mod tests {
             line(Format::Text, &record, request(7, Some("/stores/\n")), trace(), at()),
             r"2026-11-08T12:34:56.789012Z WARN cladefs::cladefsd::server: opening x\n2026-11-08T00:00:00Z ERROR cladefs: forged path=/a\nINFO cladefs: forged\r\x1b[2J name=café\u{85}\x7f\t request_id=7 store=/stores/\n trace_id=4bf92f3577b34da6a3ce929d0e0e4736 span_id=00f067aa0ba902b7"
         );
+    }
+
+    #[test]
+    fn rfc3339_micros_handles_epoch_and_leap_dates() {
+        use super::Rfc3339Micros;
+        let fmt = |secs, nanos| {
+            Rfc3339Micros(SystemTime::UNIX_EPOCH + Duration::new(secs, nanos)).to_string()
+        };
+        assert_eq!(fmt(0, 0), "1970-01-01T00:00:00.000000Z");
+        // 2024-02-29T23:59:59.999999Z (leap year).
+        assert_eq!(fmt(1_709_251_199, 999_999_999), "2024-02-29T23:59:59.999999Z");
+        // 2100-03-01T00:00:00.000000Z (non-leap century year).
+        assert_eq!(fmt(4_107_542_400, 0), "2100-03-01T00:00:00.000000Z");
     }
 }

@@ -109,7 +109,7 @@ mod host {
             let bytes = file_bytes()?;
             // Its socket's path short, as Unix sockets' must be; its metrics, which say what its
             // memory holds.
-            let sockets = tempdir::TempDir::new("cladefs-bigmap")?;
+            let sockets = tempfile::Builder::new().prefix("cladefs-bigmap").tempdir()?;
             let socket = sockets.path().join("cladefsd.sock");
             let metrics = crate::measure::metrics_address()?;
             let metrics_at = metrics.to_string();

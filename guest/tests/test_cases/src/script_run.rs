@@ -1709,7 +1709,6 @@ pub(crate) mod tests {
     use super::*;
     use crate::script::{HOSTILE, ONE_FILE, Place, SEVERAL_FILES, TRIES, WIDE, shrink_failure};
     use std::process::Command;
-    use tempdir::TempDir;
 
     /// The room left on a filesystem full enough: a script's files, full of holes, come to less
     /// than a MiB and a half on average, and 2 MiB left saw few refusals. 1 MiB left saw none on
@@ -1737,7 +1736,7 @@ pub(crate) mod tests {
 
     #[test]
     fn one_files_script_passes_on_this_hosts_filesystem() {
-        let dir = TempDir::new("script").unwrap();
+        let dir = tempfile::Builder::new().prefix("script").tempdir().unwrap();
         let names = names(dir.path(), ONE_FILE);
         let (script, len) = numbered(ONE_FILE, 1);
         let mut run = Run::new(&names, Options::default());
@@ -1751,7 +1750,7 @@ pub(crate) mod tests {
     #[test]
     #[ignore = "needs root, to loop-mount a filesystem (script_run::tests::Loop)"]
     fn several_files_script_passes_on_a_filesystem_with_reflinks() {
-        let dir = TempDir::new("script").unwrap();
+        let dir = tempfile::Builder::new().prefix("script").tempdir().unwrap();
         let xfs = Loop::reflinks(dir.path());
         let names = names(&xfs.mountpoint, SEVERAL_FILES);
         for seed in 1..=seeds() {
@@ -1770,7 +1769,7 @@ pub(crate) mod tests {
     #[test]
     #[ignore = "needs root, to loop-mount a filesystem (script_run::tests::Loop)"]
     fn wide_scripts_pass_on_a_filesystem_with_reflinks() {
-        let dir = TempDir::new("script").unwrap();
+        let dir = tempfile::Builder::new().prefix("script").tempdir().unwrap();
         let xfs = Loop::reflinks(dir.path());
         let names = names(&xfs.mountpoint, WIDE);
         for seed in 1..=seeds() {
@@ -1788,7 +1787,7 @@ pub(crate) mod tests {
     #[test]
     #[ignore = "needs root, to loop-mount a filesystem (script_run::tests::Loop)"]
     fn wide_scripts_pass_on_a_filesystem_without_reflinks() {
-        let dir = TempDir::new("script").unwrap();
+        let dir = tempfile::Builder::new().prefix("script").tempdir().unwrap();
         let ext4 = Loop::new(dir.path(), 300 << 20, "mkfs.ext4", &["-q", "-F"]);
         let names = names(&ext4.mountpoint, WIDE);
         let (script, len) = numbered(WIDE, 1);
@@ -1807,7 +1806,7 @@ pub(crate) mod tests {
     #[test]
     #[ignore = "needs root, to loop-mount a filesystem (script_run::tests::Loop)"]
     fn hostile_scripts_pass_on_xfs_and_ext4() {
-        let dir = TempDir::new("script").unwrap();
+        let dir = tempfile::Builder::new().prefix("script").tempdir().unwrap();
         let at = |name: &str| {
             let at = dir.path().join(name);
             fs::create_dir(&at).unwrap();
@@ -1844,7 +1843,7 @@ pub(crate) mod tests {
     #[test]
     #[ignore = "needs root, to loop-mount a filesystem (script_run::tests::Loop)"]
     fn a_write_stopped_short_in_a_hole_leaves_zeros() {
-        let dir = TempDir::new("script").unwrap();
+        let dir = tempfile::Builder::new().prefix("script").tempdir().unwrap();
         let ext4 = Loop::new(dir.path(), 300 << 20, "mkfs.ext4", &["-q", "-F"]);
         let names = names(&ext4.mountpoint, HOSTILE);
         let mut run = Run::new(&names, Options::default());
@@ -1882,7 +1881,7 @@ pub(crate) mod tests {
     #[test]
     #[ignore = "needs root, to loop-mount a filesystem (script_run::tests::Loop)"]
     fn a_direct_read_past_an_append_stopped_short_reads_the_file() {
-        let dir = TempDir::new("script").unwrap();
+        let dir = tempfile::Builder::new().prefix("script").tempdir().unwrap();
         let ext4 = Loop::reference(dir.path());
         let names = names(&ext4.mountpoint, HOSTILE);
         let mut run = Run::new(&names, Options::default());
@@ -1911,7 +1910,7 @@ pub(crate) mod tests {
     #[test]
     fn files_made_anew_are_not_an_earlier_runs() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = TempDir::new("script").unwrap();
+        let dir = tempfile::Builder::new().prefix("script").tempdir().unwrap();
         let names = names(dir.path(), ONE_FILE);
         drop(Run::new(&names, Options::default()));
         fs::set_permissions(&names[0], fs::Permissions::from_mode(0o600)).unwrap();
@@ -1926,7 +1925,7 @@ pub(crate) mod tests {
     #[test]
     #[ignore = "needs root, to loop-mount a filesystem (script_run::tests::Loop)"]
     fn hostile_steps_come_to_what_the_model_says() {
-        let dir = TempDir::new("script").unwrap();
+        let dir = tempfile::Builder::new().prefix("script").tempdir().unwrap();
         let ext4 = Loop::new(dir.path(), 300 << 20, "mkfs.ext4", &["-q", "-F"]);
         let names = names(&ext4.mountpoint, HOSTILE);
         let largest = ext4_largest(ext4.mountpoint.to_str().unwrap());
@@ -2013,7 +2012,7 @@ pub(crate) mod tests {
     #[test]
     #[ignore = "needs root, to loop-mount a filesystem (script_run::tests::Loop)"]
     fn a_steps_effect_says_its_outcome_and_the_times_it_changed() {
-        let dir = TempDir::new("script").unwrap();
+        let dir = tempfile::Builder::new().prefix("script").tempdir().unwrap();
         let xfs = Loop::reflinks(dir.path());
         let names = names(&xfs.mountpoint, WIDE);
         let mut run = Run::new(&names, Options::default());
@@ -2065,7 +2064,7 @@ pub(crate) mod tests {
     #[test]
     #[ignore = "needs root, to loop-mount a filesystem (script_run::tests::Loop)"]
     fn private_writes_and_reopens_leave_the_file() {
-        let dir = TempDir::new("script").unwrap();
+        let dir = tempfile::Builder::new().prefix("script").tempdir().unwrap();
         let ext4 = Loop::new(dir.path(), 300 << 20, "mkfs.ext4", &["-q", "-F"]);
         let names = names(&ext4.mountpoint, WIDE);
         let mut run = Run::new(&names, Options::default());
@@ -2095,7 +2094,7 @@ pub(crate) mod tests {
     #[test]
     #[ignore = "needs root, to loop-mount a filesystem (script_run::tests::Loop)"]
     fn a_byte_that_differs_says_what_changed_it() {
-        let dir = TempDir::new("script").unwrap();
+        let dir = tempfile::Builder::new().prefix("script").tempdir().unwrap();
         let xfs = Loop::reflinks(dir.path());
         let names = names(&xfs.mountpoint, WIDE);
         let mut run = Run::new(&names, Options::default());
@@ -2139,7 +2138,7 @@ pub(crate) mod tests {
     #[test]
     #[ignore = "needs root, to loop-mount a filesystem (script_run::tests::Loop)"]
     fn a_hole_over_data_fails() {
-        let dir = TempDir::new("script").unwrap();
+        let dir = tempfile::Builder::new().prefix("script").tempdir().unwrap();
         let ext4 = Loop::new(dir.path(), 300 << 20, "mkfs.ext4", &["-q", "-F"]);
         let names = names(&ext4.mountpoint, WIDE);
         let mut run = Run::new(&names, Options { seeks: true, ..Options::default() });
@@ -2155,7 +2154,7 @@ pub(crate) mod tests {
     #[test]
     #[ignore = "needs root, to loop-mount a filesystem (script_run::tests::Loop)"]
     fn clones_do_as_the_model_says() {
-        let dir = TempDir::new("script").unwrap();
+        let dir = tempfile::Builder::new().prefix("script").tempdir().unwrap();
         let xfs = Loop::reflinks(dir.path());
         let mix = Mix { files: 2, ..ONE_FILE };
         let names = names(&xfs.mountpoint, mix);
@@ -2287,7 +2286,7 @@ pub(crate) mod tests {
     #[test]
     #[ignore = "needs root, to loop-mount a filesystem (script_run::tests::Loop)"]
     fn a_filesystem_with_no_room_refuses_and_leaves_the_files_as_the_model_says() {
-        let dir = TempDir::new("script").unwrap();
+        let dir = tempfile::Builder::new().prefix("script").tempdir().unwrap();
         let ext4 = Loop::new(dir.path(), 8 << 20, "mkfs.ext4", &["-q", "-F", "-m", "0"]);
         // With no clones: ext4 has none.
         let mix = Mix { clones: false, ..SEVERAL_FILES };
@@ -2298,7 +2297,7 @@ pub(crate) mod tests {
     #[test]
     #[ignore = "needs root, to loop-mount a filesystem (script_run::tests::Loop)"]
     fn a_filesystem_with_reflinks_and_no_room_refuses_and_leaves_the_files_as_the_model_says() {
-        let dir = TempDir::new("script").unwrap();
+        let dir = tempfile::Builder::new().prefix("script").tempdir().unwrap();
         let xfs = Loop::reflinks(dir.path());
         refuses_on(&xfs.mountpoint, SEVERAL_FILES);
     }
@@ -2312,7 +2311,7 @@ pub(crate) mod tests {
     #[test]
     #[ignore = "needs root, to loop-mount a filesystem (script_run::tests::Loop)"]
     fn a_filesystem_filled_has_the_room_asked_once_the_ballast_closes() {
-        let dir = TempDir::new("script").unwrap();
+        let dir = tempfile::Builder::new().prefix("script").tempdir().unwrap();
         let xfs = Loop::reflinks(dir.path());
         fill(xfs.mountpoint.join("ballast").to_str().unwrap(), LEFT);
         let left = free(xfs.mountpoint.to_str().unwrap());
@@ -2322,7 +2321,7 @@ pub(crate) mod tests {
     /// On a filesystem that has room, no write dies and is taken for a refusal.
     #[test]
     fn a_write_killed_with_room_left_fails() {
-        let dir = TempDir::new("script").unwrap();
+        let dir = tempfile::Builder::new().prefix("script").tempdir().unwrap();
         let names = names(dir.path(), ONE_FILE);
         let mut run = Run::new(&names, Options::default());
         // A child's write past the mapping of an empty file dies of it.
@@ -2336,7 +2335,7 @@ pub(crate) mod tests {
     /// would leave it.
     #[test]
     fn a_byte_that_differs_from_the_model_fails_the_script() {
-        let dir = TempDir::new("script").unwrap();
+        let dir = tempfile::Builder::new().prefix("script").tempdir().unwrap();
         let names = names(dir.path(), ONE_FILE);
         let mut run = Run::new(&names, Options::default());
         let write = Op::Write { file: 0, place: Place::At(100), len: 1000, data: 1 };
@@ -2364,7 +2363,7 @@ pub(crate) mod tests {
         let (script, len) = numbered(mix, seed);
         let pair = [700, 2300];
         let attempt = |drops: &str| -> Option<Failure> {
-            let dir = TempDir::new("script").unwrap();
+            let dir = tempfile::Builder::new().prefix("script").tempdir().unwrap();
             let names = names(dir.path(), mix);
             let mut run = Run::new(&names, Options::default());
             let kept = script::kept(drops, len).unwrap();

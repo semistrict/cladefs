@@ -797,7 +797,7 @@ mod host {
             let layout = dir.join("cells-image");
             image(&root, &layout)?;
             // Short, as a Unix socket's path is.
-            let sockets = tempdir::TempDir::new("cladefs-cells")?;
+            let sockets = tempfile::Builder::new().prefix("cladefs-cells").tempdir()?;
             let socket = sockets.path().join("cladefsd.sock");
             let metrics = crate::measure::metrics_address()?;
             let metrics_at = metrics.to_string();

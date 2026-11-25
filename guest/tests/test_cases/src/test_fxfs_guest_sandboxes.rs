@@ -582,7 +582,7 @@ RUN apk add --no-cache postgresql postgresql-contrib git
             let layout = dir.join("sandbox-image");
             image(dir, &root, &layout)?;
             // Short, as a Unix socket's path is.
-            let sockets = tempdir::TempDir::new("cladefs-sandboxes")?;
+            let sockets = tempfile::Builder::new().prefix("cladefs-sandboxes").tempdir()?;
             let mut hosts = Vec::new();
             for (at, name) in ["host-a", "host-b"].into_iter().enumerate() {
                 let socket = sockets.path().join(format!("{name}.sock"));

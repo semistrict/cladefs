@@ -184,7 +184,7 @@ mod host {
             let dir = &test_setup.tmp_dir;
             let stats = dir.join("cladefsd-stats.txt");
             // Short, as a Unix socket's path is.
-            let sockets = tempdir::TempDir::new("cladefs-bucket-soak")?;
+            let sockets = tempfile::Builder::new().prefix("cladefs-bucket-soak").tempdir()?;
             let socket = sockets.path().join("cladefsd.sock");
             let (upload_memory, endpoint) = (UPLOAD_MEMORY.to_string(), bucket.endpoint());
             let env = [

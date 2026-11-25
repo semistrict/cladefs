@@ -30,7 +30,7 @@ nix = { version = "0.29.0", features = ["fs", "socket", "ioctl"] }
 anyhow = "1.0.95"
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
-tempdir = "0.3.7"
+tempfile = "3.2"
 # cladefs's automounter of shared volumes, which the guest runs and whose asks the host answers
 # (TASK-136.6).
 fxfs-automount = { path = "../../../crates/fxfs-automount" }

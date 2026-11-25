@@ -35,17 +35,13 @@ use crate::filesystem::{Filesystem, Node};
 use crate::node::{FileType, Owner, SetAttr, SetTime, XattrMode};
 use crate::storage::Storage;
 use anyhow::{Context as _, bail, ensure};
-use futures::StreamExt as _;
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{BufRead, BufReader, Read};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
-use std::task::{Context, Poll};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::io::{AsyncRead, AsyncReadExt as _, ReadBuf};
 
 /// The prefix of a whiteout's name.
 const WHITEOUT: &[u8] = b".wh.";
@@ -439,22 +435,13 @@ impl Importer {
         };
         self.made.clear();
         self.kept.clear();
-        // cladefs: walked as it is awaited, its entries held across the filesystem's awaits, which
-        // the `tar` crate's, not `Send`, were not (board 5614).
-        let failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let mut archive = tokio_tar::Archive::new(InPlace { layer, failed: failed.clone() });
-        let mut entries = archive.entries().context("reading the layer")?;
-        while let Some(entry) = entries.next().await {
-            // What the walk itself refused, not a read of the layer, is the image's fault: a PAX
-            // record it parses, a header's checksum (TASK-79.88).
-            let read = std::sync::atomic::Ordering::Relaxed;
-            let mut entry = match entry {
-                Ok(entry) => entry,
-                Err(err) if !failed.load(read) => return Err(refused(err)),
-                Err(err) => return Err(anyhow::Error::new(err).context("reading the layer")),
-            };
-            let path = entry.path_bytes().context("reading the layer")?.into_owned();
-            self.entry(&mut entry)
+        // cladefs: walked synchronously in place with a `Send` reader built on `tar::Header`, so
+        // the walk stays `Send` across filesystem awaits without `tar::Archive`'s `!Send`
+        // `RefCell` or an unmaintained async tar fork (boards 5614, 10238).
+        let mut archive = TarReader::new(layer);
+        while let Some(entry) = archive.next_entry()? {
+            let path = entry.path.clone();
+            self.entry(&entry, &mut archive)
                 .await
                 .with_context(|| format!("applying {:?}", String::from_utf8_lossy(&path)))?;
         }
@@ -464,19 +451,17 @@ impl Importer {
     /// Applies the layer's entry `entry`.
     async fn entry(
         &mut self,
-        entry: &mut LayerEntry<impl AsyncRead + Unpin + Send>,
+        entry: &TarEntry,
+        archive: &mut TarReader<impl Read + Send>,
     ) -> anyhow::Result<()> {
-        let entry_type = entry.header().entry_type();
-        if entry_type.is_pax_global_extensions() {
-            return Ok(());
-        }
-        let path = normalize(&entry.path_bytes()?)?;
+        let entry_type = entry.header.entry_type();
+        let path = normalize(&entry.path)?;
         let Some((parent, name)) = split(&path) else {
             // The root, which only takes the entry's attributes.
             if !entry_type.is_dir() {
                 return Err(refused("the root is not a directory"));
             }
-            let metadata = metadata(entry).await?;
+            let metadata = metadata(entry)?;
             return self.update_directory(&self.root(), &path, metadata).await;
         };
         if name == OPAQUE {
@@ -485,7 +470,7 @@ impl Importer {
         if let Some(whited_out) = name.strip_prefix(WHITEOUT) {
             return self.remove_lower(&join(parent, whited_out)).await;
         }
-        let metadata = metadata(entry).await?;
+        let metadata = metadata(entry)?;
         let dir = self.directory(parent).await?;
         match dir.lookup(name).await {
             Ok((existing, attr))
@@ -507,14 +492,14 @@ impl Importer {
         self.made.insert(path.clone());
         let (perm, owner) = (metadata.perm, metadata.owner);
         let (node, attr) = match entry_type {
-            tokio_tar::EntryType::Directory => {
+            tar::EntryType::Directory => {
                 let (made, _) = dir.mkdir(name, perm, owner).await?;
                 let made = self.remember_directory(&path, made);
                 return self.update_directory(&made, &path, metadata).await;
             }
-            tokio_tar::EntryType::Link => {
-                let target = entry.link_name_bytes()?.ok_or_else(|| refused("no link target"))?;
-                let target = normalize(&target)?;
+            tar::EntryType::Link => {
+                let target = entry.link_name.as_deref().ok_or_else(|| refused("no link target"))?;
+                let target = normalize(target)?;
                 let target = self.find(&target).await?;
                 let target = target.ok_or_else(|| refused("the link's target is missing"))?;
                 // A hard link is its target's node, which keeps the target's attributes: the
@@ -522,28 +507,26 @@ impl Importer {
                 target.link(&dir, name).await?;
                 return Ok(());
             }
-            tokio_tar::EntryType::Regular
-            | tokio_tar::EntryType::Continuous
-            | tokio_tar::EntryType::GNUSparse => dir.create(name, perm, owner).await?,
-            tokio_tar::EntryType::Symlink => {
-                let target =
-                    entry.link_name_bytes()?.ok_or_else(|| refused("no symlink target"))?;
-                dir.symlink(name, &target, owner).await?
+            tar::EntryType::Regular | tar::EntryType::Continuous => {
+                dir.create(name, perm, owner).await?
             }
-            tokio_tar::EntryType::Char
-            | tokio_tar::EntryType::Block
-            | tokio_tar::EntryType::Fifo => {
+            tar::EntryType::Symlink => {
+                let target =
+                    entry.link_name.as_deref().ok_or_else(|| refused("no symlink target"))?;
+                dir.symlink(name, target, owner).await?
+            }
+            tar::EntryType::Char | tar::EntryType::Block | tar::EntryType::Fifo => {
                 let (file_type, rdev) = match entry_type {
-                    tokio_tar::EntryType::Fifo => (FileType::Fifo, 0),
-                    tokio_tar::EntryType::Char => (FileType::CharDevice, device(entry.header())?),
-                    _ => (FileType::BlockDevice, device(entry.header())?),
+                    tar::EntryType::Fifo => (FileType::Fifo, 0),
+                    tar::EntryType::Char => (FileType::CharDevice, device(&entry.header)?),
+                    _ => (FileType::BlockDevice, device(&entry.header)?),
                 };
                 dir.mknod(name, file_type, perm, rdev, owner).await?
             }
             other => return Err(refused(format!("entries of type {other:?} are not supported"))),
         };
         if attr.file_type == FileType::File {
-            write_contents(&node, entry, &mut self.chunk).await?;
+            write_contents(&node, archive, entry.size, &mut self.chunk).await?;
         }
         set_metadata(&node, &metadata).await
     }
@@ -721,15 +704,15 @@ impl Importer {
 /// a chunk at a time, and leaving their runs of zeros a block long as holes.
 async fn write_contents(
     file: &Node,
-    entry: &mut LayerEntry<impl AsyncRead + Unpin + Send>,
+    archive: &mut TarReader<impl Read + Send>,
+    size: u64,
     chunk: &mut [u8],
 ) -> anyhow::Result<()> {
-    let size = entry.effective_size();
     // Where the data written ends: the file's size, as it was empty.
     let mut written = 0;
     let mut offset = 0;
     while offset < size {
-        let len = read_entry(entry, chunk).await?;
+        let len = archive.read_entry_data(chunk)?;
         ensure!(len > 0, "the layer ends in the file, at {offset} of {size} bytes");
         // One write a run of data: a write waits for Fxfs's pager to let it dirty its pages,
         // which it asks for together, so a run of blocks costs one round trip, not one each.
@@ -842,37 +825,46 @@ fn refused(what: impl std::fmt::Display + Send + Sync + 'static) -> anyhow::Erro
 
 /// What `entry` says of the node it makes: its header, and its PAX records, which take
 /// precedence.
-async fn metadata(
-    entry: &mut LayerEntry<impl AsyncRead + Unpin + Send>,
-) -> anyhow::Result<Metadata> {
-    let header = entry.header();
-    let perm = (header.mode()? & 0o7777) as u16;
+fn metadata(entry: &TarEntry) -> anyhow::Result<Metadata> {
+    let header = &entry.header;
+    let perm = (header.mode().map_err(refused)? & 0o7777) as u16;
     let too_large = |_| refused("the owner's uid or gid is too large");
-    let mut uid = u32::try_from(header.uid()?).map_err(too_large)?;
-    let mut gid = u32::try_from(header.gid()?).map_err(too_large)?;
-    let mtime = since_epoch(Duration::from_secs(header.mtime()?))?;
+    let mut uid = header.uid().map_err(refused)?;
+    let mut gid = header.gid().map_err(refused)?;
+    let mtime = since_epoch(Duration::from_secs(header.mtime().map_err(refused)?))?;
     let mut times = Times { atime: mtime, mtime };
     let mut atime = None;
-    let mut xattrs = Vec::new();
-    let pax = entry.pax_extensions().await?;
-    for record in pax.into_iter().flatten() {
-        let record = record?;
-        let key = record.key()?;
+    let mut xattrs = BTreeMap::new();
+    for (key, value) in &entry.pax {
         if let Some(name) = key.strip_prefix(PAX_XATTR) {
-            xattrs.push((name.as_bytes().to_vec(), record.value_bytes().to_vec()));
+            xattrs.insert(name.as_bytes().to_vec(), value.clone());
             continue;
         }
-        match key {
-            "uid" => uid = record.value()?.parse().map_err(|_| refused("the PAX uid"))?,
-            "gid" => gid = record.value()?.parse().map_err(|_| refused("the PAX gid"))?,
-            "mtime" => times.mtime = pax_time(record.value()?)?,
-            "atime" => atime = Some(pax_time(record.value()?)?),
+        let text = || std::str::from_utf8(value);
+        match key.as_str() {
+            "uid" => {
+                uid = text()
+                    .map_err(|_| refused("failed to parse pax uid"))?
+                    .parse()
+                    .map_err(|_| refused("failed to parse pax uid"))?;
+            }
+            "gid" => {
+                gid = text()
+                    .map_err(|_| refused("failed to parse pax gid"))?
+                    .parse()
+                    .map_err(|_| refused("failed to parse pax gid"))?;
+            }
+            "mtime" => times.mtime = pax_time(text().map_err(|_| refused("the PAX time"))?)?,
+            "atime" => atime = Some(pax_time(text().map_err(|_| refused("the PAX time"))?)?),
             _ => {}
         }
     }
+    let uid = u32::try_from(uid).map_err(too_large)?;
+    let gid = u32::try_from(gid).map_err(too_large)?;
     times.atime = atime.unwrap_or(times.mtime);
-    // Sorted, so that they are set in the same order, however the layer lists them.
-    xattrs.sort();
+    // BTreeMap keeps the last value per key (so local PAX overrides global PAX) and yields
+    // names in sorted order, however the layer lists them.
+    let xattrs = xattrs.into_iter().collect();
     Ok(Metadata { perm, owner: Owner { uid, gid }, times, xattrs })
 }
 
@@ -902,9 +894,11 @@ fn since_epoch(since: Duration) -> anyhow::Result<SystemTime> {
 
 /// The device a device node's header names, as Linux encodes it for user space (`new_encode_dev`,
 /// as glibc's `makedev`), which Fxfs keeps.
-fn device(header: &tokio_tar::Header) -> anyhow::Result<u32> {
-    let major = header.device_major()?.ok_or_else(|| refused("no device major number"))?;
-    let minor = header.device_minor()?.ok_or_else(|| refused("no device minor number"))?;
+fn device(header: &tar::Header) -> anyhow::Result<u32> {
+    let major =
+        header.device_major().map_err(refused)?.ok_or_else(|| refused("no device major number"))?;
+    let minor =
+        header.device_minor().map_err(refused)?.ok_or_else(|| refused("no device minor number"))?;
     if major >= 1 << 12 || minor >= 1 << 20 {
         return Err(refused(format!("device {major}:{minor} is too large")));
     }
@@ -962,56 +956,308 @@ fn inside(path: &[u8]) -> Range<Vec<u8>> {
     [path, b"/"].concat()..[path, b"0"].concat()
 }
 
-/// A layer's entry, as its walk gives it.
-type LayerEntry<R> = tokio_tar::Entry<tokio_tar::Archive<R>>;
+/// Maximum size of a single tar extension payload (PAX or GNU long name/link), and maximum
+/// cumulative retained PAX metadata per entry or across global PAX headers, bounding untrusted
+/// archive memory (AGENTS.md, Trust boundaries).
+const MAX_EXTENSION: u64 = 1 << 20;
+const MAX_RETAINED_PAX: usize = 1 << 20;
+/// Maximum consecutive extension headers before a real entry.
+const MAX_EXTENSIONS: usize = 64;
 
-/// cladefs: a layer, read as its walk awaits it ([`tokio_tar`]), in place: the file, or what
-/// decompresses it, read on the awaiting thread, a disk read, synchronous as the extent store's are
-/// (board 2944), never pending (board 5614). `failed` says whether a read of it failed, which tells
-/// the walk's own refusals from the layer's I/O errors.
-struct InPlace<R> {
-    layer: R,
-    failed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+/// Whether a PAX key affects entry resolution or metadata; unknown keys are ignored rather than
+/// retained in `global_pax` or `local_pax`.
+fn relevant_pax_key(key: &str) -> bool {
+    matches!(key, "path" | "linkpath" | "size" | "uid" | "gid" | "mtime" | "atime")
+        || key.starts_with(PAX_XATTR)
+        || key.starts_with("GNU.sparse.")
 }
 
-impl<R: Read + Unpin> AsyncRead for InPlace<R> {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        _: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        let this = self.get_mut();
+/// A tar entry's parsed metadata, owned so it is `Send` across filesystem awaits.
+struct TarEntry {
+    header: tar::Header,
+    path: Vec<u8>,
+    link_name: Option<Vec<u8>>,
+    size: u64,
+    pax: Vec<(String, Vec<u8>)>,
+}
+
+/// cladefs: streaming `Send` tar archive reader built directly on `tar::Header` (board 10238).
+/// Replaces `astral-tokio-tar` (unmaintained, RUSTSEC-2026-0440) without `tar::Archive`'s `!Send`
+/// `RefCell`.
+struct TarReader<R> {
+    layer: R,
+    global_pax: BTreeMap<String, Vec<u8>>,
+    global_pax_bytes: usize,
+    remaining: u64,
+    padding: u64,
+}
+
+impl<R: Read> TarReader<R> {
+    fn new(layer: R) -> Self {
+        Self { layer, global_pax: BTreeMap::new(), global_pax_bytes: 0, remaining: 0, padding: 0 }
+    }
+
+    fn read_entry_data(&mut self, buf: &mut [u8]) -> anyhow::Result<usize> {
+        let cap = usize::try_from(self.remaining).unwrap_or(usize::MAX).min(buf.len());
+        if cap == 0 {
+            return Ok(0);
+        }
+        let read = read_full(&mut self.layer, &mut buf[..cap]).context("reading the layer")?;
+        self.remaining -= read as u64;
+        Ok(read)
+    }
+
+    fn skip_remaining(&mut self) -> anyhow::Result<()> {
+        let mut scratch = [0u8; 4096];
+        while self.remaining > 0 {
+            let want = usize::try_from(self.remaining).unwrap_or(scratch.len()).min(scratch.len());
+            let read =
+                read_full(&mut self.layer, &mut scratch[..want]).context("reading the layer")?;
+            if read == 0 {
+                return Err(refused("the layer ends in the entry"));
+            }
+            self.remaining -= read as u64;
+        }
+        while self.padding > 0 {
+            let want = usize::try_from(self.padding).unwrap_or(scratch.len()).min(scratch.len());
+            let read =
+                read_full(&mut self.layer, &mut scratch[..want]).context("reading the layer")?;
+            if read == 0 {
+                self.padding = 0;
+                break;
+            }
+            self.padding -= read as u64;
+        }
+        Ok(())
+    }
+
+    fn read_extension_payload(&mut self, size: u64) -> anyhow::Result<Vec<u8>> {
+        if size > MAX_EXTENSION {
+            return Err(refused(format!(
+                "tar extension header of {size} bytes exceeds {MAX_EXTENSION}"
+            )));
+        }
+        let len = usize::try_from(size).map_err(|_| refused("tar extension header too large"))?;
+        let mut buf = vec![0u8; len];
+        let read = read_full(&mut self.layer, &mut buf).context("reading the layer")?;
+        if read != len {
+            return Err(refused("truncated tar extension header"));
+        }
+        self.padding = tar_padding(size);
+        self.skip_remaining()?;
+        Ok(buf)
+    }
+
+    fn next_entry(&mut self) -> anyhow::Result<Option<TarEntry>> {
+        self.skip_remaining()?;
+        let mut gnu_longname: Option<Vec<u8>> = None;
+        let mut gnu_longlink: Option<Vec<u8>> = None;
+        let mut local_pax: Vec<(String, Vec<u8>)> = Vec::new();
+        let mut local_pax_bytes: usize = 0;
+        let mut extensions: usize = 0;
         loop {
-            match this.layer.read(buf.initialize_unfilled()) {
-                Ok(read) => {
-                    buf.advance(read);
-                    return Poll::Ready(Ok(()));
+            let mut raw = [0u8; 512];
+            let read = read_full(&mut self.layer, &mut raw).context("reading the layer")?;
+            let at_end = if read == 0 {
+                true
+            } else if read < raw.len() {
+                return Err(refused("truncated tar header"));
+            } else {
+                raw.iter().all(|&b| b == 0)
+            };
+            if at_end {
+                if gnu_longname.is_some() || gnu_longlink.is_some() || !local_pax.is_empty() {
+                    return Err(refused("tar extension header was not followed by a member"));
                 }
-                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(err) => {
-                    this.failed.store(true, std::sync::atomic::Ordering::Relaxed);
-                    return Poll::Ready(Err(err));
+                return Ok(None);
+            }
+            verify_tar_checksum(&raw)?;
+            let header = tar::Header::from_byte_slice(&raw).clone();
+            let header_size = header.entry_size().map_err(refused)?;
+            match header.entry_type() {
+                tar::EntryType::GNULongName => {
+                    extensions += 1;
+                    if extensions > MAX_EXTENSIONS {
+                        return Err(refused("too many consecutive tar extension headers"));
+                    }
+                    let mut bytes = self.read_extension_payload(header_size)?;
+                    while bytes.last() == Some(&0) {
+                        bytes.pop();
+                    }
+                    gnu_longname = Some(bytes);
+                }
+                tar::EntryType::GNULongLink => {
+                    extensions += 1;
+                    if extensions > MAX_EXTENSIONS {
+                        return Err(refused("too many consecutive tar extension headers"));
+                    }
+                    let mut bytes = self.read_extension_payload(header_size)?;
+                    while bytes.last() == Some(&0) {
+                        bytes.pop();
+                    }
+                    gnu_longlink = Some(bytes);
+                }
+                tar::EntryType::XHeader => {
+                    extensions += 1;
+                    if extensions > MAX_EXTENSIONS {
+                        return Err(refused("too many consecutive tar extension headers"));
+                    }
+                    let bytes = self.read_extension_payload(header_size)?;
+                    for (key, value) in parse_pax(&bytes)? {
+                        if !relevant_pax_key(&key) {
+                            continue;
+                        }
+                        let added = key
+                            .len()
+                            .checked_add(value.len())
+                            .ok_or_else(|| refused("PAX metadata exceeds limit"))?;
+                        local_pax_bytes = local_pax_bytes
+                            .checked_add(added)
+                            .filter(|&total| total <= MAX_RETAINED_PAX)
+                            .ok_or_else(|| refused("PAX metadata exceeds limit"))?;
+                        local_pax.push((key, value));
+                    }
+                }
+                tar::EntryType::XGlobalHeader => {
+                    extensions += 1;
+                    if extensions > MAX_EXTENSIONS {
+                        return Err(refused("too many consecutive tar extension headers"));
+                    }
+                    let bytes = self.read_extension_payload(header_size)?;
+                    for (key, value) in parse_pax(&bytes)? {
+                        if !relevant_pax_key(&key) {
+                            continue;
+                        }
+                        if value.is_empty() {
+                            if let Some(prev) = self.global_pax.remove(&key) {
+                                self.global_pax_bytes =
+                                    self.global_pax_bytes.saturating_sub(key.len() + prev.len());
+                            }
+                            continue;
+                        }
+                        let prev_bytes =
+                            self.global_pax.get(&key).map_or(0, |prev| key.len() + prev.len());
+                        let new_bytes = key
+                            .len()
+                            .checked_add(value.len())
+                            .ok_or_else(|| refused("global PAX metadata exceeds limit"))?;
+                        let next_total = self
+                            .global_pax_bytes
+                            .saturating_sub(prev_bytes)
+                            .checked_add(new_bytes)
+                            .filter(|&total| total <= MAX_RETAINED_PAX)
+                            .ok_or_else(|| refused("global PAX metadata exceeds limit"))?;
+                        self.global_pax_bytes = next_total;
+                        self.global_pax.insert(key, value);
+                    }
+                }
+                _ => {
+                    if header.entry_type() == tar::EntryType::GNUSparse
+                        || local_pax.iter().any(|(k, _)| k.starts_with("GNU.sparse."))
+                        || self.global_pax.keys().any(|k| k.starts_with("GNU.sparse."))
+                    {
+                        return Err(refused("GNU sparse tar entries are not supported"));
+                    }
+                    let pax_find = |list: &[(String, Vec<u8>)], name: &str| {
+                        list.iter().rev().find(|(k, _)| k == name).map(|(_, v)| v.clone())
+                    };
+                    let path = pax_find(&local_pax, "path")
+                        .or(gnu_longname)
+                        .or_else(|| self.global_pax.get("path").cloned())
+                        .unwrap_or_else(|| header.path_bytes().into_owned());
+                    let link_name = pax_find(&local_pax, "linkpath")
+                        .or(gnu_longlink)
+                        .or_else(|| self.global_pax.get("linkpath").cloned())
+                        .or_else(|| header.link_name_bytes().map(|b| b.into_owned()))
+                        .filter(|b| !b.is_empty());
+                    let size = match pax_find(&local_pax, "size")
+                        .or_else(|| self.global_pax.get("size").cloned())
+                    {
+                        Some(raw_size) => std::str::from_utf8(&raw_size)
+                            .map_err(|_| refused("failed to parse pax size"))?
+                            .parse::<u64>()
+                            .map_err(|_| refused("failed to parse pax size"))?,
+                        None => header_size,
+                    };
+                    let mut pax: Vec<(String, Vec<u8>)> =
+                        self.global_pax.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                    pax.extend(local_pax);
+                    self.remaining = size;
+                    self.padding = tar_padding(size);
+                    return Ok(Some(TarEntry { header, path, link_name, size, pax }));
                 }
             }
         }
     }
 }
 
-/// Reads from `entry` into `buf` until it is full or `entry` ends, and returns how much it read.
-async fn read_entry(
-    entry: &mut (impl AsyncRead + Unpin),
-    buf: &mut [u8],
-) -> std::io::Result<usize> {
-    let mut len = 0;
-    while len < buf.len() {
-        match entry.read(&mut buf[len..]).await {
-            Ok(0) => break,
-            Ok(read) => len += read,
-            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(err) => return Err(err),
-        }
+#[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
+fn tar_padding(size: u64) -> u64 {
+    let rem = size % 512;
+    if rem == 0 { 0 } else { 512u64.saturating_sub(rem) }
+}
+
+/// Validates a 512-byte tar header's checksum against both unsigned and signed byte sums.
+#[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
+fn verify_tar_checksum(raw: &[u8; 512]) -> anyhow::Result<()> {
+    let header = tar::Header::from_byte_slice(raw);
+    let expected = header.cksum().map_err(refused)?;
+    let mut unsigned_sum: u32 = 0;
+    let mut signed_sum: i32 = 0;
+    for (idx, &byte) in raw.iter().enumerate() {
+        let effective = if (148..156).contains(&idx) { b' ' } else { byte };
+        unsigned_sum = unsigned_sum
+            .checked_add(u32::from(effective))
+            .ok_or_else(|| refused("tar checksum overflow"))?;
+        signed_sum = signed_sum
+            .checked_add(i32::from(effective as i8))
+            .ok_or_else(|| refused("tar checksum overflow"))?;
     }
-    Ok(len)
+    if expected == unsigned_sum || i64::from(expected) == i64::from(signed_sum) {
+        Ok(())
+    } else {
+        Err(refused("tar header checksum mismatch"))
+    }
+}
+
+/// Parses PAX extended header records (`<len> <key>=<value>\n`) from untrusted tar bytes.
+#[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
+fn parse_pax(data: &[u8]) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
+    let mut out = Vec::new();
+    let mut pos: usize = 0;
+    while pos < data.len() {
+        let rest = data.get(pos..).ok_or_else(|| refused("truncated PAX record"))?;
+        let space = rest
+            .iter()
+            .position(|&b| b == b' ')
+            .ok_or_else(|| refused("PAX record missing length delimiter"))?;
+        let len_bytes = rest.get(..space).ok_or_else(|| refused("PAX record length"))?;
+        let len_str = std::str::from_utf8(len_bytes).map_err(|_| refused("PAX record length"))?;
+        let record_len: usize = len_str.parse().map_err(|_| refused("PAX record length"))?;
+        let body_start = space.checked_add(1).ok_or_else(|| refused("PAX record overflow"))?;
+        if record_len <= body_start {
+            return Err(refused("PAX record length too small"));
+        }
+        let end = pos.checked_add(record_len).ok_or_else(|| refused("PAX record overflow"))?;
+        let record = data.get(pos..end).ok_or_else(|| refused("truncated PAX record"))?;
+        if record.last() != Some(&b'\n') {
+            return Err(refused("PAX record missing trailing newline"));
+        }
+        let body_end = record_len.checked_sub(1).ok_or_else(|| refused("PAX record length"))?;
+        let body = record.get(body_start..body_end).ok_or_else(|| refused("PAX record body"))?;
+        let eq = body
+            .iter()
+            .position(|&b| b == b'=')
+            .ok_or_else(|| refused("PAX record missing '='"))?;
+        let key_bytes = body.get(..eq).ok_or_else(|| refused("PAX record key"))?;
+        let key =
+            std::str::from_utf8(key_bytes).map_err(|_| refused("PAX record key not UTF-8"))?;
+        let val_start = eq.checked_add(1).ok_or_else(|| refused("PAX record overflow"))?;
+        let value = body.get(val_start..).ok_or_else(|| refused("PAX record value"))?;
+        out.push((key.to_owned(), value.to_vec()));
+        pos = end;
+    }
+    Ok(out)
 }
 
 /// Reads from `reader` into `buf` until it is full or `reader` ends, and returns how much it read.
@@ -1482,5 +1728,145 @@ mod tests {
             error.to_string(),
             format!("the image has no manifest for linux/{architecture}")
         );
+    }
+
+    #[test]
+    fn tar_reader_refuses_malformed_pax_and_bad_checksum() {
+        assert_eq!(parse_pax(b"12 path=a/b\n").unwrap(), [("path".to_owned(), b"a/b".to_vec())]);
+        for bad in [
+            &b"notalen a=b\n"[..],
+            b"3 a=b\n",
+            b"13 path=a/b\n",
+            b"12 path=a/b ",
+            b"12 noequals\n",
+            b"999999999999999999999999999 a=b\n",
+        ] {
+            let err = parse_pax(bad).unwrap_err();
+            assert_eq!(err.downcast_ref::<Errno>(), Some(&Errno::EINVAL), "{bad:?}: {err:#}");
+        }
+        let mut raw = [0u8; 512];
+        raw[0] = b'x';
+        let err = verify_tar_checksum(&raw).unwrap_err();
+        assert_eq!(err.downcast_ref::<Errno>(), Some(&Errno::EINVAL), "{err:#}");
+        raw[148..155].copy_from_slice(b"0000000");
+        let err = verify_tar_checksum(&raw).unwrap_err();
+        assert_eq!(err.downcast_ref::<Errno>(), Some(&Errno::EINVAL), "{err:#}");
+    }
+
+    /// Hotbed review 106: GNU sparse entries (both `GNUSparse` type `'S'` and PAX `GNU.sparse.*`),
+    /// dangling extension headers at EOF or zero blocks, and unbounded global PAX accumulation are
+    /// each refused with `EINVAL`.
+    #[test]
+    fn tar_reader_refuses_sparse_dangling_extensions_and_unbounded_global_pax() {
+        let append_raw = |out: &mut Vec<u8>, kind: tar::EntryType, name: &str, payload: &[u8]| {
+            let mut h = tar::Header::new_gnu();
+            h.set_entry_type(kind);
+            h.set_path(name).unwrap();
+            h.set_size(payload.len() as u64);
+            h.set_mode(0o644);
+            h.set_uid(0);
+            h.set_gid(0);
+            h.set_mtime(0);
+            h.set_cksum();
+            out.extend_from_slice(h.as_bytes());
+            out.extend_from_slice(payload);
+            let pad = tar_padding(payload.len() as u64) as usize;
+            out.resize(out.len() + pad, 0);
+        };
+        let pax_record = |k: &str, v: &[u8]| {
+            let body_len = k.len() + 1 + v.len() + 1;
+            let mut total = body_len + 2;
+            loop {
+                let prefix = format!("{total} ");
+                if prefix.len() + body_len == total {
+                    let mut rec = prefix.into_bytes();
+                    rec.extend_from_slice(k.as_bytes());
+                    rec.push(b'=');
+                    rec.extend_from_slice(v);
+                    rec.push(b'\n');
+                    return rec;
+                }
+                total = prefix.len() + body_len;
+            }
+        };
+
+        // 1. GNU sparse entry type 'S' is refused instead of silently writing packed bytes.
+        let mut sparse_s = Vec::new();
+        append_raw(&mut sparse_s, tar::EntryType::GNUSparse, "sparse", b"packed");
+        let err = TarReader::new(sparse_s.as_slice()).next_entry().err().expect("refused");
+        assert_eq!(err.downcast_ref::<Errno>(), Some(&Errno::EINVAL), "{err:#}");
+
+        // 2. PAX GNU.sparse.* entry is refused.
+        let mut sparse_pax = Vec::new();
+        let rec = pax_record("GNU.sparse.major", b"1");
+        append_raw(&mut sparse_pax, tar::EntryType::XHeader, "PaxHeaders", &rec);
+        append_raw(&mut sparse_pax, tar::EntryType::Regular, "sparse", b"packed");
+        let err = TarReader::new(sparse_pax.as_slice()).next_entry().err().expect("refused");
+        assert_eq!(err.downcast_ref::<Errno>(), Some(&Errno::EINVAL), "{err:#}");
+
+        // 3. Dangling GNULongName / GNULongLink / XHeader at EOF or zero block is refused.
+        for (kind, payload) in [
+            (tar::EntryType::GNULongName, b"long-name-without-member\0".as_slice()),
+            (tar::EntryType::GNULongLink, b"long-link-without-member\0".as_slice()),
+            (tar::EntryType::XHeader, b"12 path=a/b\n".as_slice()),
+        ] {
+            let mut dangling_eof = Vec::new();
+            append_raw(&mut dangling_eof, kind, "ext", payload);
+            let err = TarReader::new(dangling_eof.as_slice()).next_entry().err().expect("refused");
+            assert_eq!(err.downcast_ref::<Errno>(), Some(&Errno::EINVAL), "{kind:?} eof: {err:#}");
+
+            let mut dangling_zero = dangling_eof;
+            dangling_zero.extend_from_slice(&[0u8; 512]);
+            let err = TarReader::new(dangling_zero.as_slice()).next_entry().err().expect("refused");
+            assert_eq!(err.downcast_ref::<Errno>(), Some(&Errno::EINVAL), "{kind:?} zero: {err:#}");
+        }
+
+        // 4. Unknown global PAX keys are not retained, and retained global PAX keys are bounded.
+        let mut unknown_global = Vec::new();
+        for i in 0..20 {
+            let rec = pax_record(&format!("VENDOR.junk.{i}"), &vec![b'x'; 100_000]);
+            append_raw(&mut unknown_global, tar::EntryType::XGlobalHeader, "pax", &rec);
+            append_raw(&mut unknown_global, tar::EntryType::Directory, "./", b"");
+        }
+        let mut reader = TarReader::new(unknown_global.as_slice());
+        while reader.next_entry().unwrap().is_some() {}
+        assert_eq!(reader.global_pax_bytes, 0);
+
+        let mut huge_global = Vec::new();
+        for i in 0..20 {
+            let rec = pax_record(&format!("SCHILY.xattr.user.k{i}"), &vec![b'x'; 100_000]);
+            append_raw(&mut huge_global, tar::EntryType::XGlobalHeader, "pax", &rec);
+            append_raw(&mut huge_global, tar::EntryType::Directory, "./", b"");
+        }
+        let mut reader = TarReader::new(huge_global.as_slice());
+        let mut refused_err = None;
+        loop {
+            match reader.next_entry() {
+                Ok(Some(_)) => {}
+                Ok(None) => break,
+                Err(err) => {
+                    refused_err = Some(err);
+                    break;
+                }
+            }
+        }
+        let err = refused_err.expect("unbounded global PAX should be refused");
+        assert_eq!(err.downcast_ref::<Errno>(), Some(&Errno::EINVAL), "{err:#}");
+
+        // 5. Local PAX xattrs override global PAX xattrs regardless of lexical value order.
+        for (global_val, local_val) in
+            [(b"z-global".as_slice(), b"a-local".as_slice()), (b"a-global", b"z-local")]
+        {
+            let mut archive = Vec::new();
+            let global_rec = pax_record("SCHILY.xattr.user.origin", global_val);
+            let local_rec = pax_record("SCHILY.xattr.user.origin", local_val);
+            append_raw(&mut archive, tar::EntryType::XGlobalHeader, "pax-global", &global_rec);
+            append_raw(&mut archive, tar::EntryType::XHeader, "pax-local", &local_rec);
+            append_raw(&mut archive, tar::EntryType::Regular, "file", b"data");
+            let mut reader = TarReader::new(archive.as_slice());
+            let entry = reader.next_entry().unwrap().expect("file entry");
+            let meta = metadata(&entry).unwrap();
+            assert_eq!(meta.xattrs, vec![(b"user.origin".to_vec(), local_val.to_vec())]);
+        }
     }
 }

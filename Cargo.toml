@@ -67,7 +67,7 @@ ruzstd = { version = "0.8.2", default-features = false, features = ["std"] }
 js-sys = "0.3.106"
 wasm-bindgen = "0.2.129"
 wasm-bindgen-futures = "0.4.79"
-url = "2.5.8"
+url = "2.5.9"
 sha2 = "0.11.0"
 # Controlled schedules for concurrency tests (awslabs/shuttle, Apache-2.0): cladefs's crates' `shuttle`
 # features (backlog doc-8 testing 2).
@@ -111,7 +111,7 @@ syn = { version = "2.0.119", features = ["full", "visit", "visit-mut", "extra-tr
 # madsim's tokio (doc-24, TASK-685.1): tokio itself, built normally, which madsim-tokio re-exports;
 # madsim's simulated one under `--cfg madsim`. Crates outside the simulation (fuchsia-async's
 # executors, FUSE, the KMS backends over HTTP) name tokio itself, at the version Cargo.lock holds:
-# 1.53.1; fuchsia-async's tasks and timers are madsim's under it (board 5687).
+# 1.54.1; fuchsia-async's tasks and timers are madsim's under it (board 5687).
 tokio = { package = "madsim-tokio", version = "=0.2.30", default-features = false, features = ["rt", "rt-multi-thread", "net", "time", "sync", "macros"] }
 zerocopy = { version = "0.8.48", features = ["derive", "simd"] }
 zeroize = "1.9.1"

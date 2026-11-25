@@ -231,7 +231,7 @@ mod tests {
 
     #[test]
     fn committed_updates_survive_reopen() {
-        let root = tempdir::TempDir::new("sqlite-transactions").unwrap();
+        let root = tempfile::Builder::new().prefix("sqlite-transactions").tempdir().unwrap();
         for mode in Mode::ALL {
             for batch in [1, 100] {
                 // What each phase took, as the observer says: the measurement's.
@@ -252,7 +252,7 @@ mod tests {
 
     #[test]
     fn killed_writer_recovers_only_committed_updates() {
-        let root = tempdir::TempDir::new("sqlite-recovery").unwrap();
+        let root = tempfile::Builder::new().prefix("sqlite-recovery").tempdir().unwrap();
         for mode in Mode::ALL {
             recovery(root.path(), mode);
         }
@@ -260,7 +260,7 @@ mod tests {
 
     #[test]
     fn wal_reader_keeps_snapshot_during_writer_commit() {
-        let root = tempdir::TempDir::new("sqlite-snapshot").unwrap();
+        let root = tempfile::Builder::new().prefix("sqlite-snapshot").tempdir().unwrap();
         snapshot(root.path());
     }
 }

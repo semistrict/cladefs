@@ -772,7 +772,7 @@ RUN find / -xdev -name '*.pyc' -delete
             let layout = dir.join("sandbox-image");
             image(&root, &layout)?;
             // Short, as a Unix socket's path is: the test's directory, named after its case, isn't.
-            let sockets = tempdir::TempDir::new("cladefs-pysandbox")?;
+            let sockets = tempfile::Builder::new().prefix("cladefs-pysandbox").tempdir()?;
             let mut hosts = start_hosts(test_setup, &bucket.endpoint(), sockets.path())?;
             let version = make_base(&hosts[0], &dir.join("python.base"), &layout, measured)?;
 

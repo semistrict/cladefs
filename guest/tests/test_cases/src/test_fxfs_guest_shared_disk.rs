@@ -180,7 +180,7 @@ mod host {
             let root = setup_rootfs(test_setup)?;
             let dir = &test_setup.tmp_dir;
             // Short, as a Unix socket's path is.
-            let sockets = tempdir::TempDir::new("cladefs-shared-disk")?;
+            let sockets = tempfile::Builder::new().prefix("cladefs-shared-disk").tempdir()?;
             let socket = sockets.path().join("cladefsd.sock");
             // Its bucket and part cache in the case's directory, on the cells' disk
             // (crate::common::spawn_daemon's defaults), unless this process names others.

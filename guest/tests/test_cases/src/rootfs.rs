@@ -180,7 +180,10 @@ pub fn prepare_rootfs(image: &Image, dest: &Path) -> anyhow::Result<()> {
     let containerfile = image.containerfile;
     // cladefs: the build's context, its downloads alone, from the host's cache, rather than this
     // process's directory, whatever it held.
-    let context = tempdir::TempDir::new("cladefs-rootfs-context").context("the build's context")?;
+    let context = tempfile::Builder::new()
+        .prefix("cladefs-rootfs-context")
+        .tempdir()
+        .context("the build's context")?;
     let cache = cache_dir()?;
     for download in image.downloads {
         let cached = download.fetched(&cache)?;
@@ -265,7 +268,6 @@ pub fn prepare_rootfs(image: &Image, dest: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempdir::TempDir;
 
     /// A download of `bytes`' hash from `sources`, for a test's life (the process's).
     fn lua(bytes: &[u8], sources: &[&str]) -> Download {
@@ -304,7 +306,7 @@ mod tests {
     /// and what that serves is cached, checked by its sha256.
     #[test]
     fn a_download_comes_from_the_first_source_that_serves_it() {
-        let dir = TempDir::new("downloads").unwrap();
+        let dir = tempfile::Builder::new().prefix("downloads").tempdir().unwrap();
         let mirror = served(dir.path(), "mirrored", b"lua");
         let cache = dir.path().join("cache");
         let fetched = lua(b"lua", &[&unreachable(), &mirror]).fetched(&cache).unwrap();
@@ -317,7 +319,7 @@ mod tests {
     /// again only if the cache's copy isn't as its sha256 says.
     #[test]
     fn a_cached_download_needs_no_source() {
-        let dir = TempDir::new("downloads").unwrap();
+        let dir = tempfile::Builder::new().prefix("downloads").tempdir().unwrap();
         let cache = dir.path().join("cache");
         fs::create_dir(&cache).unwrap();
         fs::write(cache.join("lua.tar.gz"), b"lua").unwrap();
@@ -337,7 +339,7 @@ mod tests {
     /// download fails, saying what each source served.
     #[test]
     fn a_source_serving_other_bytes_is_passed_over() {
-        let dir = TempDir::new("downloads").unwrap();
+        let dir = tempfile::Builder::new().prefix("downloads").tempdir().unwrap();
         let wrong = served(dir.path(), "wrong", b"luna");
         let right = served(dir.path(), "right", b"lua");
         let cache = dir.path().join("cache");

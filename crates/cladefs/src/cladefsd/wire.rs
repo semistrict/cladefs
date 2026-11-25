@@ -76,9 +76,17 @@ impl Socket {
     /// `stream`, the caller's, non-blocking, to write.
     fn writing(stream: Stream) -> io::Result<Self> {
         #[cfg(not(madsim))]
-        return Ok(Self {
-            fd: tokio::io::unix::AsyncFd::with_interest(stream, tokio::io::Interest::WRITABLE)?,
-        });
+        {
+            // SAFETY: `stream` is moved into `AsyncFd` and owns the socket descriptor, so it stays
+            // valid and open until `AsyncFd` drops and deregisters it before closing `stream`.
+            let fd = unsafe {
+                tokio::io::unix::AsyncFd::register_with_interest(
+                    stream,
+                    tokio::io::Interest::WRITABLE,
+                )?
+            };
+            return Ok(Self { fd });
+        }
         #[cfg(madsim)]
         return Ok(Self { stream });
     }
@@ -87,7 +95,12 @@ impl Socket {
     fn reading(stream: Stream) -> io::Result<Self> {
         stream.set_nonblocking(true)?;
         #[cfg(not(madsim))]
-        return Ok(Self { fd: tokio::io::unix::AsyncFd::new(stream)? });
+        {
+            // SAFETY: `stream` is moved into `AsyncFd` and owns the socket descriptor, so it stays
+            // valid and open until `AsyncFd` drops and deregisters it before closing `stream`.
+            let fd = unsafe { tokio::io::unix::AsyncFd::register(stream)? };
+            return Ok(Self { fd });
+        }
         #[cfg(madsim)]
         return Ok(Self { stream });
     }

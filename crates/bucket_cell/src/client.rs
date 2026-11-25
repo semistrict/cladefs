@@ -104,6 +104,134 @@ pub(crate) fn names(bucket: &str, url: &reqwest::Url) -> bool {
 /// The user agent of a client whose options name none.
 const USER_AGENT: &str = concat!("cladefs/", env!("CARGO_PKG_VERSION"));
 
+/// Parses a human-readable duration (`"30s"`, `"0.5s"`, `"1m 30s"`, `"500ms"`, `"100us"`, `"2h"`,
+/// etc.), matching `humantime::parse_duration` (including fractional components and unit aliases)
+/// for `object_store`'s `ClientConfigKey` timeout options.
+#[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
+fn parse_duration(input: &str) -> Result<Duration, String> {
+    let bytes = input.as_bytes();
+    let mut i: usize = 0;
+    let mut total = Duration::ZERO;
+    let mut any = false;
+    while i < bytes.len() {
+        while let Some(&b) = bytes.get(i) {
+            if b.is_ascii_whitespace() {
+                i = i.checked_add(1).ok_or_else(|| "duration too long".to_owned())?;
+            } else {
+                break;
+            }
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        let num_start = i;
+        while let Some(&b) = bytes.get(i) {
+            if b.is_ascii_digit() {
+                i = i.checked_add(1).ok_or_else(|| "duration too long".to_owned())?;
+            } else {
+                break;
+            }
+        }
+        if i == num_start {
+            return Err(format!("expected number in duration {input:?}"));
+        }
+        let whole: u64 = input
+            .get(num_start..i)
+            .ok_or_else(|| format!("invalid duration {input:?}"))?
+            .parse()
+            .map_err(|_| format!("duration number overflow in {input:?}"))?;
+        let mut frac_num: u128 = 0;
+        let mut frac_scale: u128 = 1;
+        if bytes.get(i) == Some(&b'.') {
+            i = i.checked_add(1).ok_or_else(|| "duration too long".to_owned())?;
+            let frac_start = i;
+            let mut kept: u32 = 0;
+            while let Some(&b) = bytes.get(i) {
+                if b.is_ascii_digit() {
+                    if kept < 9 {
+                        let digit = u128::from(b.saturating_sub(b'0'));
+                        frac_num = frac_num
+                            .checked_mul(10)
+                            .and_then(|v| v.checked_add(digit))
+                            .ok_or_else(|| "duration overflow".to_owned())?;
+                        frac_scale = frac_scale
+                            .checked_mul(10)
+                            .ok_or_else(|| "duration overflow".to_owned())?;
+                        kept = kept.checked_add(1).ok_or_else(|| "duration overflow".to_owned())?;
+                    }
+                    i = i.checked_add(1).ok_or_else(|| "duration too long".to_owned())?;
+                } else {
+                    break;
+                }
+            }
+            if i == frac_start {
+                return Err(format!("expected fractional digits in duration {input:?}"));
+            }
+        }
+        while let Some(&b) = bytes.get(i) {
+            if b.is_ascii_whitespace() {
+                i = i.checked_add(1).ok_or_else(|| "duration too long".to_owned())?;
+            } else {
+                break;
+            }
+        }
+        let unit_start = i;
+        while let Some(&b) = bytes.get(i) {
+            if !b.is_ascii_whitespace() && !b.is_ascii_digit() {
+                i = i.checked_add(1).ok_or_else(|| "duration too long".to_owned())?;
+            } else {
+                break;
+            }
+        }
+        let unit = input
+            .get(unit_start..i)
+            .ok_or_else(|| format!("invalid duration unit in {input:?}"))?;
+        let unit_nanos: u128 = match unit {
+            "nanos" | "nsec" | "ns" | "nanosec" | "nanosecs" | "nanosecond" | "nanoseconds" => 1,
+            "usec" | "us" | "µs" | "μs" | "microsec" | "microsecs" | "microsecond"
+            | "microseconds" => 1_000,
+            "millis" | "msec" | "ms" | "millisec" | "millisecs" | "millisecond"
+            | "milliseconds" => 1_000_000,
+            "sec" | "secs" | "s" | "second" | "seconds" => 1_000_000_000,
+            "min" | "mins" | "m" | "minute" | "minutes" => 60_000_000_000,
+            "hr" | "hrs" | "h" | "hour" | "hours" => 3_600_000_000_000,
+            "day" | "days" | "d" => 86_400_000_000_000,
+            "wk" | "wks" | "week" | "weeks" | "w" => 604_800_000_000_000,
+            // 30.44 days = 2_630_016 s, matching humantime.
+            "month" | "months" | "M" => 2_630_016_000_000_000,
+            // 365.25 days = 31_557_600 s, matching humantime.
+            "yr" | "yrs" | "year" | "years" | "y" => 31_557_600_000_000_000,
+            _ => return Err(format!("unknown duration unit {unit:?} in {input:?}")),
+        };
+        let whole_nanos = u128::from(whole)
+            .checked_mul(unit_nanos)
+            .ok_or_else(|| format!("duration overflow in {input:?}"))?;
+        let frac_nanos = frac_num
+            .checked_mul(unit_nanos)
+            .and_then(|v| v.checked_div(frac_scale))
+            .ok_or_else(|| format!("duration overflow in {input:?}"))?;
+        let part_nanos = whole_nanos
+            .checked_add(frac_nanos)
+            .ok_or_else(|| format!("duration overflow in {input:?}"))?;
+        let secs = u64::try_from(
+            part_nanos.checked_div(1_000_000_000).ok_or_else(|| "duration overflow".to_owned())?,
+        )
+        .map_err(|_| format!("duration overflow in {input:?}"))?;
+        let nanos = u32::try_from(
+            part_nanos.checked_rem(1_000_000_000).ok_or_else(|| "duration overflow".to_owned())?,
+        )
+        .map_err(|_| format!("duration overflow in {input:?}"))?;
+        total = total
+            .checked_add(Duration::new(secs, nanos))
+            .ok_or_else(|| format!("duration overflow in {input:?}"))?;
+        any = true;
+    }
+    if !any {
+        return Err("empty duration".to_owned());
+    }
+    Ok(total)
+}
+
 /// A reqwest client built from `options` as `object_store` builds its own (0.14.2,
 /// `ClientOptions::client`, which is its crate's alone), from what the options say of each key.
 /// Root certificates, which only `object_store`'s API adds, cladefs adds none of.
@@ -115,7 +243,7 @@ fn reqwest_client(options: &ClientOptions) -> object_store::Result<reqwest::Clie
         source: format!("{}: {error}", key.as_ref()).into(),
     };
     let duration = |key: Key| {
-        (value(key).map(|value| humantime::parse_duration(&value)).transpose())
+        (value(key).map(|value| parse_duration(&value)).transpose())
             .map_err(|error| invalid(key, &error))
     };
     let flag = |key: Key| match value(key).map(|value| value.to_ascii_lowercase()).as_deref() {
@@ -504,5 +632,32 @@ mod tests {
                 "no bytes moved for 30s"
             );
         });
+    }
+
+    #[test]
+    fn parse_duration_handles_units_composites_and_errors() {
+        assert_eq!(parse_duration("30s").unwrap(), Duration::from_secs(30));
+        assert_eq!(parse_duration("0.5s").unwrap(), Duration::from_millis(500));
+        assert_eq!(parse_duration("1.5m").unwrap(), Duration::from_secs(90));
+        assert_eq!(parse_duration("0.25h").unwrap(), Duration::from_secs(900));
+        assert_eq!(parse_duration("500ms").unwrap(), Duration::from_millis(500));
+        assert_eq!(parse_duration("500millis").unwrap(), Duration::from_millis(500));
+        assert_eq!(parse_duration("100nanos").unwrap(), Duration::from_nanos(100));
+        assert_eq!(parse_duration("2wk").unwrap(), Duration::from_secs(1_209_600));
+        assert_eq!(parse_duration("1yr").unwrap(), Duration::from_secs(31_557_600));
+        assert_eq!(parse_duration("1m 30s").unwrap(), Duration::from_secs(90));
+        assert_eq!(parse_duration("2h5m100µs").unwrap(), Duration::new(7500, 100_000));
+        assert_eq!(parse_duration(" 1 day 2 hours ").unwrap(), Duration::from_secs(93_600));
+        let options = ClientOptions::new().with_config(ClientConfigKey::ConnectTimeout, "0.5s");
+        reqwest_client(&options).unwrap();
+        assert!(parse_duration("").is_err());
+        assert!(parse_duration("   ").is_err());
+        assert!(parse_duration("30").is_err());
+        assert!(parse_duration("0.s").is_err());
+        assert!(parse_duration(".5s").is_err());
+        assert!(parse_duration("0.5.5s").is_err());
+        assert!(parse_duration("30lightyears").is_err());
+        assert!(parse_duration("s").is_err());
+        assert!(parse_duration("18446744073709551615y").is_err());
     }
 }
