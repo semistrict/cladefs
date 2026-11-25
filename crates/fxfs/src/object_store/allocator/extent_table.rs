@@ -329,6 +329,10 @@ impl Records {
         let key = AllocatorKey::new(extent, 0..size);
         self.0.push(AllocatorItem { key, value: AllocatorValue::None });
     }
+
+    fn extend(&mut self, other: Records) {
+        self.0.extend(other.0);
+    }
 }
 
 impl IntoIterator for Records {
@@ -650,6 +654,31 @@ impl ExtentTable {
             });
         }
         Dropped { records: Records::default(), kept: 0 }
+    }
+
+    /// cladefs: drops an allocation in a staging extent whose write the device refused with
+    /// `SealedExtent`, so zero bytes of `range` ever reached the device (TASK-592, board 2580).
+    /// Retires the already-sealed extent from `self.staging`, unpins it without advancing its
+    /// reach, and returns `kept = 0` so the transaction's reservation gets all its bytes back.
+    pub(super) fn drop_sealed_allocation(
+        &mut self,
+        range: &ExtentRange,
+        owner_object_id: u64,
+    ) -> Dropped {
+        let mut records = Records::default();
+        if self.staging.as_ref().is_some_and(|staging| staging.extent == range.extent) {
+            let old = self.staging.take().unwrap();
+            records.extend(self.unpin(old.extent));
+        }
+        if self.is_pinned(range.extent) {
+            records.extend(self.unpin(range.extent));
+            return Dropped { records, kept: 0 };
+        }
+        // If not pinned (e.g. already dropped or non-shared), fall back to normal drop.
+        let mut dropped = self.drop_allocation(range, owner_object_id);
+        records.extend(dropped.records);
+        dropped.records = records;
+        dropped
     }
 
     /// Drops a pin of `extent`, if pins hold it. Once none do, a pending one dies, as no

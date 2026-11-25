@@ -733,8 +733,25 @@ impl OpenCell {
             }
             (false, false) => self.commit_version(admitted, None, false).await?,
         };
-        self.make_uploaded().await?;
-        failpoint!("fork::uploaded");
+        let uploaded = async {
+            self.make_uploaded().await?;
+            failpoint!("fork::uploaded");
+            Ok::<(), Error>(())
+        }
+        .await;
+        if let Err(err) = uploaded {
+            // cladefs: undo the scratch version committed for this fork when uploading or the
+            // handoff fails before `fork_through_on` takes ownership of it (board 5546, TASK-639).
+            if let Err(drop_err) =
+                uploader.drop_versions(&std::collections::BTreeSet::from([id])).await
+            {
+                log::error!(
+                    "cladefs: fork of {:?} failed before fork_through, its version {id:x} not dropped: {drop_err}",
+                    self.cell(),
+                );
+            }
+            return Err(err);
+        }
         host_cell::fork_through_on(
             &self.host,
             admitted.local(),

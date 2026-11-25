@@ -362,4 +362,77 @@ mod tests {
         fsck(fs.clone()).await.expect("fsck failed");
         fs.close().await.expect("close failed");
     }
+
+    /// TASK-592 (board 2580): on a filesystem filled by dirty reservations, a reserved writeback
+    /// of up to `STAGED_MAX` (here 48 blocks) whose packed write into an already-allocated staging
+    /// extent is refused with `SealedExtent` gets its full allocation back into its reservation
+    /// and succeeds on the unpacked retry, with all data intact.
+    #[fuchsia_async::run_singlethreaded(test)]
+    async fn test_seal_refused_reserved_writeback_succeeds_when_full() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use storage_device::fake_device::{FakeDevice, Op};
+        use storage_device::{DeviceHolder, ExtentId, SealedExtent};
+
+        let refuse_next = Arc::new(AtomicBool::new(false));
+        let refused_count = Arc::new(AtomicUsize::new(0));
+        let refuse_flag = refuse_next.clone();
+        let refused_ctr = refused_count.clone();
+        let mut fake = FakeDevice::new(8192, BLOCK as u32);
+        fake.set_op_callback(move |op| {
+            if matches!(op, Op::Write) && refuse_flag.swap(false, Ordering::SeqCst) {
+                refused_ctr.fetch_add(1, Ordering::SeqCst);
+                return Err(SealedExtent(ExtentId::new(0, 1)).into());
+            }
+            Ok(())
+        });
+        let fs = FxFilesystem::new_empty(DeviceHolder::new(fake)).await.expect("new_empty failed");
+        let allocator = fs.allocator();
+        let dirty = DirtyReservation::new(&fs.root_store());
+        let prior = create_file(&fs).await;
+        let file = create_file(&fs).await;
+        let other = create_file(&fs).await;
+
+        // Commit a small packed write first so the staging extent is already `Allocated`: with the
+        // TASK-592 bug, dropping a seal-refused packed allocation in it committed `kept = 48 * 4K`
+        // out of `taken.reservation`, starving the unpacked retry.
+        prior.write_many(&[(0, &[0xaa; BLOCK as usize])]).await.expect("prior packed write");
+
+        const RUN_BLOCKS: u64 = 48;
+        let file_ino = file.object_id();
+        dirty.reserve(file_ino, RUN_BLOCKS * BLOCK).expect("reserve file run");
+        let other_ino = other.object_id();
+        let mut other_blocks = 0u64;
+        while dirty.reserve(other_ino, BLOCK).is_ok() {
+            other_blocks += 1;
+        }
+        assert!(other_blocks > 0);
+        // Drain any remaining unreserved bytes so the allocator cannot top up the retry.
+        let _full = allocator.clone().reserve_with(None, |limit| limit);
+
+        let payload: Vec<Vec<u8>> =
+            (0..RUN_BLOCKS).map(|i| vec![(i as u8).wrapping_add(1); BLOCK as usize]).collect();
+        let writes: Vec<(u64, &[u8])> =
+            payload.iter().enumerate().map(|(i, b)| (i as u64 * BLOCK, &b[..])).collect();
+
+        let taken = dirty.take(file_ino, RUN_BLOCKS * BLOCK);
+        refuse_next.store(true, Ordering::SeqCst);
+        file.write_many_reserved(&writes, &taken.reservation)
+            .await
+            .expect("reserved writeback must succeed after SealedExtent retry on a full fs");
+        assert_eq!(refused_count.load(Ordering::SeqCst), 1, "SealedExtent callback did not fire");
+        dirty.written(taken);
+        drop(_full);
+        dirty.release(other_ino, other_blocks * BLOCK);
+        assert_eq!((dirty.reserved.amount(), dirty.inner.lock().owed), (0, 0));
+
+        let contents = file.contents(usize::MAX).await.expect("contents failed");
+        assert_eq!(contents.len(), (RUN_BLOCKS * BLOCK) as usize);
+        for (i, expected) in payload.iter().enumerate() {
+            let off = i * BLOCK as usize;
+            assert_eq!(&contents[off..off + BLOCK as usize], &expected[..], "block {i}");
+        }
+        fsck(fs.clone()).await.expect("fsck failed");
+        fs.close().await.expect("close failed");
+    }
 }

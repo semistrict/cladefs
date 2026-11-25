@@ -926,6 +926,10 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
 
         let mut allocated = 0;
         let allocator = store.allocator();
+        // cladefs: records the staging extent if `write_aligned` is refused with `SealedExtent` so
+        // dropping this transaction does not charge the unwritten range against the reservation
+        // (TASK-592, board 2580). Declared before `writes` so it outlives the futures borrowing it.
+        let sealed_extent = fuchsia_sync::Mutex::new(None);
         let mut writes = FuturesOrdered::new();
 
         while !buf.is_empty() {
@@ -947,19 +951,28 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
 
             // cladefs: box each `write_aligned` future so `FuturesOrdered` and
             // `multi_write_internal` stay small on 16 KiB guest kernel stacks (TASK-26.9).
+            let sealed_ref = &sealed_extent;
             writes.push_back(crate::boxed(|| async move {
-                Result::<_, Error>::Ok((
-                    extent,
-                    device_range.start,
-                    len,
-                    self.write_aligned(
+                let checksums = match self
+                    .write_aligned(
                         head.as_ref(),
                         extent,
                         device_range.start,
                         WriteOptions::default(),
                     )
-                    .await?,
-                ))
+                    .await
+                {
+                    Ok(checksums) => checksums,
+                    Err(error) => {
+                        if shared
+                            && error.chain().any(|cause| cause.is::<storage_device::SealedExtent>())
+                        {
+                            *sealed_ref.lock() = Some(extent);
+                        }
+                        return Err(error);
+                    }
+                };
+                Result::<_, Error>::Ok((extent, device_range.start, len, checksums))
             }));
         }
 
@@ -974,7 +987,7 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
 
         // cladefs: box the `try_join!` branches so `multi_write` does not keep `writes` and
         // `deallocate_old_extents` side-by-side on 16 KiB guest kernel stacks (TASK-26.9).
-        let ((mutations, checksums), deallocated) = try_join!(
+        let joined = try_join!(
             crate::boxed(|| async {
                 let mut current_range = 0..0;
                 let mut mutations = Vec::new();
@@ -1023,7 +1036,16 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
                 }
                 Result::<_, Error>::Ok(deallocated)
             })
-        )?;
+        );
+        let ((mutations, checksums), deallocated) = match joined {
+            Ok(ok) => ok,
+            Err(error) => {
+                if let Some(extent) = *sealed_extent.lock() {
+                    transaction.sealed_extent = Some(extent);
+                }
+                return Err(error);
+            }
+        };
 
         for m in mutations {
             transaction.add(store_id, m);

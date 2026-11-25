@@ -1207,13 +1207,8 @@ impl ObjectStore {
         // cladefs: below them, what the store has of a base, which is no part of the size above:
         // no compaction rewrites it, so no reservation pays for that.
         fs.allocator().add_base_cells(&base_cells);
-        let block_size = store.block_size();
-        let handles = base_layers
-            .into_iter()
-            .map(|layer| BaseLayerObject::new(fs.device(), block_size, layer))
-            .collect::<Result<Vec<_>, _>>()?;
         let base_layers =
-            layers_from_handles(handles).await.context("Failed to read base layers")?;
+            Self::open_base_layers(fs.device(), store.block_size(), &base_layers).await?;
         store.tree.append_open_layers(base_layers);
 
         fs.object_manager().update_reservation(
@@ -1222,6 +1217,51 @@ impl ObjectStore {
         );
 
         Ok(store)
+    }
+
+    /// cladefs: validates and opens `base_layers` (alignment, bounds, device reads, layer version)
+    /// without mutating filesystem state, so `new_volume_over_base` fails before committing a
+    /// broken volume (TASK-597, board 2590).
+    pub(crate) async fn open_base_layers(
+        device: Arc<dyn storage_device::Device>,
+        block_size: storage_units::BlockSize,
+        base_layers: &[crate::object_store::base_layer::BaseLayer],
+    ) -> Result<Vec<Arc<dyn crate::lsm_tree::types::Layer<ObjectKey, ObjectValue>>>, Error> {
+        let handles = base_layers
+            .iter()
+            .cloned()
+            .map(|layer| BaseLayerObject::new(device.clone(), block_size, layer))
+            .collect::<Result<Vec<_>, _>>()?;
+        layers_from_handles(handles).await.context("Failed to read base layers")
+    }
+
+    /// cladefs: constructs and attaches a newly committed volume over already-opened `base_layers`
+    /// (`new_volume_over_base`, TASK-597). Infallible once the volume's commit succeeds.
+    pub(crate) fn open_new_over_base(
+        parent_store: &Arc<ObjectStore>,
+        handle: DataObjectHandle<ObjectStore>,
+        info: StoreInfo,
+        base_layers: Vec<Arc<dyn crate::lsm_tree::types::Layer<ObjectKey, ObjectValue>>>,
+        object_cache: Option<Box<dyn ObjectCache<ObjectKey, ObjectValue>>>,
+    ) -> Arc<ObjectStore> {
+        debug_assert!(info.layers.is_empty());
+        let store_object_id = handle.object_id();
+        let last_object_id = info.last_object_id;
+        let base_cells = info.base_cells.clone();
+        let fs = parent_store.filesystem();
+        let store = ObjectStore::new(
+            Some(parent_store.clone()),
+            store_object_id,
+            fs.clone(),
+            info,
+            object_cache,
+            last_object_id,
+        );
+        assert!(store.store_info_handle.set(handle).is_ok(), "Failed to set store_info_handle!");
+        fs.allocator().add_base_cells(&base_cells);
+        store.tree.append_open_layers(base_layers);
+        fs.object_manager().update_reservation(store_object_id, 0);
+        store
     }
 
     #[cfg(test)]

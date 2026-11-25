@@ -532,8 +532,12 @@ impl FxFilesystem {
         debug_assert_not_too_long!(self.graveyard.wait_for_reap());
         debug_assert_not_too_long!(self.background_tasks.clone().cancel());
         // cladefs: what dropped allocations left in shared extents, which the next mount counts.
-        if !self.options().read_only {
-            self.allocator().record_reaches().await?;
+        // Do not return early on failure: close must still flush the journal, terminate the flush
+        // task, and close the device (TASK-623, board 2644).
+        let reach_status =
+            if self.options().read_only { Ok(()) } else { self.allocator().record_reaches().await };
+        if let Err(e) = &reach_status {
+            error!(error:? = e; "Failed to record reaches during close");
         }
         self.journal.stop_compactions().await;
         let sync_status = if self.options().read_only {
@@ -578,7 +582,7 @@ impl FxFilesystem {
         // Regardless of whether sync succeeds, we should close the device, since otherwise we will
         // crash instead of exiting gracefully.
         self.device().close().await.context("Failed to close device")?;
-        sync_status.map(|_| ())
+        reach_status.and(sync_status.map(|_| ()))
     }
 
     pub fn device(&self) -> Arc<dyn Device> {
@@ -2235,5 +2239,97 @@ mod tests {
         let fs =
             FxFilesystemBuilder::new().read_only(true).open(device).await.expect("open failed");
         fs.close().await.expect("Close failed");
+    }
+
+    /// TASK-623 (board 2644): when `record_reaches` fails during `FxFilesystem::close` (e.g.
+    /// `Hooks::on_pre_commit` failing the reach transaction), `close` still syncs the journal,
+    /// stops background tasks, and calls `device().close()`, while keeping the reach pending in
+    /// `unrecorded_reaches` and returning the error.
+    #[fuchsia_async::run_singlethreaded(test)]
+    async fn test_close_still_closes_device_when_record_reaches_fails() {
+        use crate::hooks::Hooks;
+        use crate::object_store::transaction::{AllocatorMutation, Mutation};
+
+        let (mut hooks, hooks_handle) = Hooks::new();
+        let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
+        let fs = FxFilesystemBuilder::new()
+            .format(true)
+            .hooks(hooks_handle)
+            .open(device)
+            .await
+            .expect("new_empty failed");
+        let root_store = fs.root_store();
+        let root_dir = Directory::open(&root_store, root_store.root_directory_object_id())
+            .await
+            .expect("open root");
+        let dir_lock =
+            lock_keys![LockKey::object(root_store.store_object_id(), root_dir.object_id())];
+
+        // 1. Create a file and write 1 block via `write_many` so the staging extent is Allocated.
+        let mut txn =
+            root_store.new_transaction(dir_lock.clone(), Options::default()).await.unwrap();
+        let f1 = root_dir.create_child_file(&mut txn, "f1").await.unwrap();
+        let f2 = root_dir.create_child_file(&mut txn, "f2").await.unwrap();
+        txn.commit().await.unwrap();
+        f1.write_many(&[(0, &[0x11; 4096])]).await.unwrap();
+
+        // 2. Allocate in the shared staging extent and drop the transaction without committing so
+        // `allocator.unrecorded_reaches` has a pending entry.
+        {
+            let mut dropped_txn =
+                root_store.new_transaction(lock_keys![], Options::default()).await.unwrap();
+            let _ = fs
+                .allocator()
+                .allocate_shared(&mut dropped_txn, root_store.store_object_id(), 4096)
+                .await
+                .unwrap();
+        }
+        assert!(
+            fs.allocator().has_unrecorded_reaches(),
+            "expected a pending reach from the dropped staging allocation"
+        );
+
+        // 3. Commit a real write after the last sync so we can verify `close` wrote the journal.
+        f2.write_many(&[(0, &[0x22; 4096])]).await.unwrap();
+
+        // 4. Fail `record_reaches`'s commit via `Hooks::on_pre_commit`.
+        hooks.set_pre_commit(|txn| {
+            let is_reach = txn.mutations().iter().any(|m| {
+                matches!(m.mutation, Mutation::Allocator(AllocatorMutation::Reach { .. }))
+            });
+            if is_reach {
+                anyhow::bail!(FxfsError::Internal);
+            }
+            Ok(())
+        });
+
+        let err = fs.close().await.expect_err("close must report the record_reaches failure");
+        assert!(FxfsError::Internal.matches(&err), "{err:#}");
+        // AC #2: the reach is still pending in `unrecorded_reaches`.
+        assert!(
+            fs.allocator().has_unrecorded_reaches(),
+            "failed record_reaches commit must leave its reach pending"
+        );
+
+        // AC #1 & #3: `device().close()` was called (`root()` fails on a closed FakeDevice) and
+        // the journal was written out before closing (f2's bytes survive reopen).
+        drop(hooks);
+        let device = fs.take_device().await;
+        assert!(
+            device.root().await.is_err(),
+            "FakeDevice should already be closed by FxFilesystem::close"
+        );
+        device.reopen(false);
+        let reopened = FxFilesystem::open(device).await.expect("reopen failed");
+        let reopened_root = reopened.root_store();
+        let reopened_dir =
+            Directory::open(&reopened_root, reopened_root.root_directory_object_id())
+                .await
+                .unwrap();
+        let (f2_id, _) = reopened_dir.lookup("f2").await.unwrap().expect("f2 missing");
+        let reopened_f2 =
+            ObjectStore::open_object(&reopened_root, f2_id, Default::default()).await.unwrap();
+        assert_eq!(reopened_f2.contents(usize::MAX).await.unwrap()[..], [0x22; 4096]);
+        reopened.close().await.unwrap();
     }
 }

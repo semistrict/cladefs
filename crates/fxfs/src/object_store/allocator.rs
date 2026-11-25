@@ -2194,7 +2194,11 @@ impl JournalingObject for Allocator {
             // the extent counted it again, and a full device's mount then found less free than its
             // filesystem had held (TASK-211).
             let Dropped { records, kept } =
-                inner.extents.drop_allocation(&device_range, data_owner);
+                if transaction.sealed_extent == Some(device_range.extent) {
+                    inner.extents.drop_sealed_allocation(&device_range, data_owner)
+                } else {
+                    inner.extents.drop_allocation(&device_range, data_owner)
+                };
             if let Some(reservation) = transaction.allocator_reservation {
                 let res_owner = reservation.owner_object_id();
                 inner.add_reservation(res_owner, len - kept);

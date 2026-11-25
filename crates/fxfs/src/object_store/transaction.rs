@@ -591,6 +591,10 @@ pub struct Transaction<'a> {
     /// (`Journal::make_room`). What an allocation for it short of room syncs commits nothing,
     /// which would wait for that lock, its own task's (TASK-233).
     pub holding_commits: bool,
+
+    /// cladefs: a staging extent whose write the device refused with `SealedExtent`, so no bytes
+    /// of this transaction's allocation in it ever reached the device (TASK-592, board 2580).
+    pub(crate) sealed_extent: Option<storage_device::ExtentId>,
 }
 
 impl<'a> Transaction<'a> {
@@ -625,6 +629,7 @@ impl<'a> Transaction<'a> {
             mutation_bytes: 0,
             checksum_bytes: 0,
             holding_commits: false,
+            sealed_extent: None,
         };
 
         ScopeGuard::into_inner(guard);
