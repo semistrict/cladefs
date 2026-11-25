@@ -264,6 +264,49 @@ impl<S: ReadObjectHandle> CachingObjectHandle<S> {
             to_deallocate.len() as u64 * CHUNK_SIZE
         );
     }
+
+    /// cladefs: total bytes currently held in `Present` or `Expired` chunks (TASK-596).
+    pub fn cached_bytes(&self) -> usize {
+        self.chunks
+            .lock()
+            .iter()
+            .map(|chunk| match chunk {
+                Chunk::Present(c) => c.len(),
+                Chunk::Expired(d) => d.len(),
+                Chunk::Missing | Chunk::Pending => 0,
+            })
+            .sum()
+    }
+
+    /// cladefs: number of chunks currently held in `Present` or `Expired` state (TASK-596).
+    pub fn cached_chunks(&self) -> usize {
+        self.chunks
+            .lock()
+            .iter()
+            .filter(|chunk| matches!(chunk, Chunk::Present(_) | Chunk::Expired(_)))
+            .count()
+    }
+
+    /// cladefs: immediately evicts up to `max_chunks` `Present` or `Expired` chunks, returning how
+    /// many were evicted (TASK-596). Deallocation happens outside the lock.
+    pub fn evict_chunks(&self, max_chunks: usize) -> usize {
+        if max_chunks == 0 {
+            return 0;
+        }
+        let mut to_deallocate = Vec::new();
+        {
+            let mut chunks = self.chunks.lock();
+            for chunk in chunks.iter_mut() {
+                if to_deallocate.len() >= max_chunks {
+                    break;
+                }
+                if matches!(chunk, Chunk::Present(_) | Chunk::Expired(_)) {
+                    to_deallocate.push(std::mem::take(chunk));
+                }
+            }
+        }
+        to_deallocate.len()
+    }
 }
 
 impl<S: ReadObjectHandle> ObjectHandle for CachingObjectHandle<S> {

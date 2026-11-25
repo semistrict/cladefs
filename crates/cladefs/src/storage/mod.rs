@@ -404,6 +404,11 @@ impl Storage {
         Self { device: DeviceHolder::new(device), kind: Kind::Memory }
     }
 
+    #[cfg(test)]
+    pub(crate) fn from_device(device: DeviceHolder) -> Self {
+        Self { device, kind: Kind::Memory }
+    }
+
     /// Whether the storage's I/O bypasses the host's page cache: an image's does, or it opens not
     /// at all (TASK-433.6); memory has none to bypass.
     pub fn bypasses_page_cache(&self) -> bool {

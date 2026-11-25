@@ -1451,8 +1451,9 @@ impl OpenCell {
     /// each took a change of their own (TASK-92.14).
     pub async fn map_many(&self, mappings: &[WindowMapping]) -> Result<()> {
         let start = std::time::Instant::now();
-        // What each maps, as far as the first that fails.
-        let mut pieces = Vec::new();
+        // What each maps, as far as the first that fails. Pre-size to `mappings.len()` so a large
+        // `MAP_MANY` avoids 2x Vec growth overhead above `MAP_MANY_HELD` (TASK-614, board 2624).
+        let mut pieces = Vec::with_capacity(mappings.len());
         let mut failed = None;
         for (at, mapping) in mappings.iter().enumerate() {
             let WindowMapping { window_offset, len, contents } = *mapping;
@@ -1480,18 +1481,32 @@ impl OpenCell {
             }
         }
         self.dax.lock(&self.halt)?.as_mut().ok_or(Errno::ENOSYS)?.map_many(&pieces);
-        // Each recorded as its own MAP would have it, the one that failed too, but zeros'.
+        // Each recorded as its own MAP would have it, the one that failed too, but zeros'. When no
+        // refused accesses wait to be matched, only the tail of `WindowChanges::MOST` entries can
+        // remain in the ring buffer (avoiding millions of wasted `Instant::now()` calls on a large
+        // `MAP_MANY`).
         let tried = failed.map_or(mappings.len(), |(at, _)| at + 1);
         let mut changes = self.changes.lock(&self.halt)?;
+        let record_from = if changes.has_refused() {
+            0
+        } else {
+            tried.saturating_sub(crate::dax::WindowChanges::MOST)
+        };
         let mut maps = 0;
         for (at, mapping) in mappings[..tried].iter().enumerate() {
             let result = match failed {
                 Some((failed, errno)) if failed == at => Err(errno),
                 _ => Ok(()),
             };
+            let is_extent = matches!(mapping.contents, MappingContents::Extent { .. });
+            if is_extent {
+                maps += 1;
+            }
+            if at < record_from {
+                continue;
+            }
             let change = match mapping.contents {
                 MappingContents::Extent { extent, offset } => {
-                    maps += 1;
                     WindowChangeKind::Map { extent, offset, result }
                 }
                 MappingContents::Zeros if result.is_ok() => WindowChangeKind::Zeros,

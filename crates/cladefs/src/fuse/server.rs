@@ -35,11 +35,11 @@
 
 use super::abi::*;
 use crate::error::{Errno, Error, Result};
-use crate::filesystem::{Filesystem, Node, valid_name};
+use crate::filesystem::{EntriesStart, Filesystem, Node, valid_name};
 use crate::node::XattrMode;
 use crate::node::{Attr, DirEntry, FileType, Inode, Owner, RenameFlags, S_ISGID, SetAttr, SetTime};
 use event_listener::Event;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::mem::size_of;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -432,9 +432,47 @@ struct OpenDirs {
     open: HashMap<u64, Arc<OpenDir>>,
 }
 
-/// An open directory: its entries as it held them as it was opened, which its reads list in
-/// turn, an offset an entry's index past `.` and `..`, so that they list each entry once, however
-/// the directory changes meanwhile. Inode numbers are the kernel's.
+/// Bounded read-ahead entries fetched beyond one FUSE `READDIR` reply's worst-case capacity
+/// (TASK-619, board 2634).
+const READDIR_READAHEAD: usize = 32;
+/// Hard upper bound on entries fetched in a single Fxfs `readdir` page (TASK-619, board 2634).
+const READDIR_MAX_BATCH: usize = 1024;
+/// Minimum wire size of one FUSE `Dirent` (24-byte header + 1-byte name, 8-byte aligned).
+const MIN_DIRENT_LEN: usize = (size_of::<Dirent>() + 1).next_multiple_of(8);
+
+/// Streaming cursor over a real Fxfs directory: holds at most one bounded read-ahead batch rather
+/// than the whole directory, resuming by name (`EntriesStart::After`) across mutations so each
+/// unchanged entry is listed once (TASK-619, board 2634).
+struct DirCursor {
+    /// Next sequential FUSE offset (starts at 2, after `.` = 0 and `..` = 1).
+    next_offset: u64,
+    /// Last entry name emitted at `next_offset - 1`.
+    last_name: Option<Vec<u8>>,
+    /// Bounded read-ahead buffer of entries starting at `next_offset`.
+    buffered: VecDeque<DirEntry>,
+    /// True once Fxfs reached end-of-directory when filling `buffered`.
+    eof: bool,
+    /// Bookmark `(start_offset, last_name_before_start)` of the previous reply so a retry at that
+    /// offset resumes by name rather than index.
+    prev: Option<(u64, Option<Vec<u8>>)>,
+}
+
+impl DirCursor {
+    fn new() -> Self {
+        Self { next_offset: 2, last_name: None, buffered: VecDeque::new(), eof: false, prev: None }
+    }
+}
+
+enum DirListing {
+    /// Virtual directory of the server's own (tenant/cell directories): small and in-memory.
+    Cells(Vec<DirEntry>),
+    /// Real Fxfs directory streamed in bounded pages (TASK-619, board 2634).
+    Node(futures::lock::Mutex<DirCursor>),
+}
+
+/// An open directory: virtual cells directories keep their small listing; Fxfs directories stream
+/// lazily in bounded pages so memory per handle does not grow with directory size (TASK-619).
+/// Inode numbers are the kernel's.
 struct OpenDir {
     dir: Target,
     /// The directory's node ID.
@@ -443,7 +481,7 @@ struct OpenDir {
     inode: u64,
     /// `..`'s inode.
     parent: u64,
-    entries: Vec<DirEntry>,
+    listing: DirListing,
 }
 
 impl Server {
@@ -1441,7 +1479,7 @@ impl Server {
             // Cells come and go: the kernel caches none of its entries.
             Target::Cells(dir) => (self.open_cells(dir)?, 0),
             Target::Node(slot, dir) => {
-                let open = self.open_dir(header.nodeid, slot, dir).await?;
+                let open = self.open_dir(header.nodeid, slot, dir)?;
                 // The mount is the directory's only writer, so the kernel may cache its entries.
                 (open, FOPEN_KEEP_CACHE | FOPEN_CACHE_DIR)
             }
@@ -1474,15 +1512,18 @@ impl Server {
             })
             .collect();
         let target = Target::Cells(dir);
-        Ok(OpenDir { dir: target, nodeid: dir, inode: dir, parent: of.parent, entries })
+        Ok(OpenDir {
+            dir: target,
+            nodeid: dir,
+            inode: dir,
+            parent: of.parent,
+            listing: DirListing::Cells(entries),
+        })
     }
 
-    /// The directory `dir` of the cell in `slot`, whose node ID is `nodeid`, opened.
-    async fn open_dir(&self, nodeid: u64, slot: u16, dir: Node) -> Result<OpenDir> {
-        let mut entries = dir.entries().await?;
-        for entry in &mut entries {
-            entry.inode = Inode(self.inode(slot, entry.inode.0)?);
-        }
+    /// The directory `dir` of the cell in `slot`, whose node ID is `nodeid`, opened lazily: reads
+    /// no entries from Fxfs on `OPENDIR` (TASK-619, board 2634).
+    fn open_dir(&self, nodeid: u64, slot: u16, dir: Node) -> Result<OpenDir> {
         let inode = self.inode(slot, dir.inode().0)?;
         let parent = match dir.parent()? {
             // A cell's root, which is its own parent, is in a directory of the server's own.
@@ -1492,28 +1533,49 @@ impl Server {
             }
             parent => self.inode(slot, parent.0)?,
         };
-        Ok(OpenDir { dir: Target::Node(slot, dir), nodeid, inode, parent, entries })
+        Ok(OpenDir {
+            dir: Target::Node(slot, dir),
+            nodeid,
+            inode,
+            parent,
+            listing: DirListing::Node(futures::lock::Mutex::new(DirCursor::new())),
+        })
     }
 
     /// Lists the open directory's entries from the offset asked, as many as fit in the size asked,
     /// each with its offset, the offset to list the next from: `.`, `..`, then those the
     /// directory holds. At offset 0 the listing is refreshed from the current directory so an
     /// older handle or a rewound handle (`rewinddir`) never serves stale entries into the kernel's
-    /// `FOPEN_CACHE_DIR` cache (TASK-554, board 2504). With `plus`, each has its node's entry, and
-    /// a lookup of it, but `.` and `..`, which the kernel takes no lookups of, and entries removed
-    /// since the listing was taken are left out.
+    /// `FOPEN_CACHE_DIR` cache (TASK-554, board 2504). For Fxfs directories, entries are streamed
+    /// in bounded pages rather than copied whole on `OPENDIR` (TASK-619, board 2634). With `plus`,
+    /// each has its node's entry, and a lookup of it, but `.` and `..`, which the kernel takes no
+    /// lookups of, and entries removed since the listing was taken are left out.
     async fn readdir(&self, body: &mut Body<'_>, plus: bool) -> Result<Vec<u8>> {
         let ReadIn { fh, offset, size, .. } = body.read()?;
         if size > MAX_WRITE {
             return Err(Errno::EINVAL);
         }
         let open = self.dirs.lock().unwrap().open.get(&fh).cloned().ok_or(Errno::EBADF)?;
+        match &open.listing {
+            DirListing::Cells(_) => self.readdir_cells(fh, open, offset, size, plus).await,
+            DirListing::Node(cursor) => {
+                let Target::Node(slot, dir) = &open.dir else { unreachable!() };
+                self.readdir_node(&open, *slot, dir, cursor, offset, size, plus).await
+            }
+        }
+    }
+
+    async fn readdir_cells(
+        &self,
+        fh: u64,
+        open: Arc<OpenDir>,
+        offset: u64,
+        size: u32,
+        plus: bool,
+    ) -> Result<Vec<u8>> {
         let open = if offset == 0 {
-            let fresh = match &open.dir {
-                Target::Cells(dir) => self.open_cells(*dir)?,
-                Target::Node(slot, dir) => self.open_dir(open.nodeid, *slot, dir.clone()).await?,
-            };
-            let fresh = Arc::new(fresh);
+            let Target::Cells(dir) = open.dir else { unreachable!() };
+            let fresh = Arc::new(self.open_cells(dir)?);
             let mut dirs = self.dirs.lock().unwrap();
             if let Some(slot) = dirs.open.get_mut(&fh) {
                 *slot = Arc::clone(&fresh);
@@ -1522,12 +1584,13 @@ impl Server {
         } else {
             open
         };
+        let DirListing::Cells(entries) = &open.listing else { unreachable!() };
         let dots = [(&b"."[..], open.inode), (b"..", open.parent)].map(|(name, inode)| DirEntry {
             inode: Inode(inode),
             file_type: FileType::Directory,
             name: name.to_vec(),
         });
-        let listed = dots.iter().chain(&open.entries).enumerate().skip(offset as usize);
+        let listed = dots.iter().chain(entries).enumerate().skip(offset as usize);
         let mut reply = Vec::new();
         for (index, entry) in listed {
             let dirent_len = (size_of::<Dirent>() + entry.name.len()).next_multiple_of(8);
@@ -1565,6 +1628,155 @@ impl Server {
                 reply.extend_from_slice(found.as_bytes());
             }
             push_dirent(&mut reply, &entry, index as u64 + 1, dirent_len);
+        }
+        Ok(reply)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn readdir_node(
+        &self,
+        open: &OpenDir,
+        slot: u16,
+        dir: &Node,
+        cursor: &futures::lock::Mutex<DirCursor>,
+        offset: u64,
+        size: u32,
+        plus: bool,
+    ) -> Result<Vec<u8>> {
+        let mut cursor = cursor.lock().await;
+        if offset == 0 {
+            *cursor = DirCursor::new();
+        }
+        let mut reply = Vec::new();
+        let mut cur_offset = offset;
+        let extra = if plus { size_of::<EntryOut>() } else { 0 };
+        for (dot_off, name, inode) in
+            [(0u64, &b"."[..], open.inode), (1u64, &b".."[..], open.parent)]
+        {
+            if cur_offset == dot_off {
+                let dirent_len = (size_of::<Dirent>() + name.len()).next_multiple_of(8);
+                let len = dirent_len + extra;
+                if reply.len() + len > size as usize {
+                    return Ok(reply);
+                }
+                if plus {
+                    reply.extend_from_slice(EntryOut::default().as_bytes());
+                }
+                let entry = DirEntry {
+                    inode: Inode(inode),
+                    file_type: FileType::Directory,
+                    name: name.to_vec(),
+                };
+                cur_offset += 1;
+                push_dirent(&mut reply, &entry, cur_offset, dirent_len);
+            }
+        }
+        if cur_offset < 2 {
+            return Ok(reply);
+        }
+
+        // Align the streaming cursor to `cur_offset`: sequential reads reuse the bounded
+        // read-ahead buffer and resume by name (`EntriesStart::After`), retries at the previous
+        // reply's start offset reuse its saved name, and arbitrary `seekdir` falls back to an
+        // index start.
+        let mut index_seek = false;
+        if cur_offset == cursor.next_offset {
+            cursor.prev = Some((cur_offset, cursor.last_name.clone()));
+        } else if let Some((prev_off, prev_name)) = cursor.prev.clone()
+            && prev_off == cur_offset
+        {
+            cursor.next_offset = cur_offset;
+            cursor.last_name = prev_name;
+            cursor.buffered.clear();
+            cursor.eof = false;
+        } else {
+            cursor.next_offset = cur_offset;
+            cursor.last_name = None;
+            cursor.buffered.clear();
+            cursor.eof = false;
+            cursor.prev = None;
+            index_seek = true;
+        }
+
+        let min_entry_len = MIN_DIRENT_LEN + extra;
+        while reply.len() + min_entry_len <= size as usize {
+            if cursor.buffered.is_empty() {
+                if cursor.eof {
+                    break;
+                }
+                let remaining_bytes = (size as usize).saturating_sub(reply.len());
+                let reply_entries = (remaining_bytes / min_entry_len).max(1);
+                let batch_limit = (reply_entries + READDIR_READAHEAD).min(READDIR_MAX_BATCH);
+                let start = if index_seek {
+                    EntriesStart::Index(cur_offset - 2)
+                } else if let Some(last) = cursor.last_name.as_deref() {
+                    EntriesStart::After(last)
+                } else {
+                    EntriesStart::Index(0)
+                };
+                let (mut page, has_more) = dir.entries_page(start, batch_limit).await?;
+                for entry in &mut page {
+                    entry.inode = Inode(self.inode(slot, entry.inode.0)?);
+                }
+                cursor.buffered.extend(page);
+                cursor.eof = !has_more;
+                index_seek = false;
+                if cursor.buffered.is_empty() {
+                    break;
+                }
+            }
+            let Some(mut entry) = cursor.buffered.pop_front() else { break };
+            let dirent_len = (size_of::<Dirent>() + entry.name.len()).next_multiple_of(8);
+            let len = dirent_len + extra;
+            if reply.len() + len > size as usize {
+                cursor.buffered.push_front(entry);
+                break;
+            }
+            if plus {
+                let found = match self.lookup_in(&open.dir, &entry.name).await {
+                    Ok(Found::Cells(sub)) => entry_out(sub, sub, 0, &self.cells_attr(sub)),
+                    Ok(Found::Node(slot, found)) => {
+                        match self.entry(slot, (open.nodeid, &entry.name), found) {
+                            Ok(found) => {
+                                entry.inode = Inode(found.attr.ino);
+                                found
+                            }
+                            // Failing past entries already in the reply: those go, and the next
+                            // read asks again from there.
+                            Err(_) if !reply.is_empty() => {
+                                cursor.buffered.push_front(entry);
+                                break;
+                            }
+                            Err(errno) => {
+                                cursor.buffered.push_front(entry);
+                                return Err(errno);
+                            }
+                        }
+                    }
+                    // Removed since the page was read: advance past it so we never revisit it.
+                    Err(Errno::ENOENT) => {
+                        cur_offset += 1;
+                        cursor.last_name = Some(entry.name);
+                        cursor.next_offset = cur_offset;
+                        continue;
+                    }
+                    // The entries so far took lookups, which the kernel forgets only if it gets
+                    // them.
+                    Err(_) if !reply.is_empty() => {
+                        cursor.buffered.push_front(entry);
+                        break;
+                    }
+                    Err(errno) => {
+                        cursor.buffered.push_front(entry);
+                        return Err(errno);
+                    }
+                };
+                reply.extend_from_slice(found.as_bytes());
+            }
+            cur_offset += 1;
+            push_dirent(&mut reply, &entry, cur_offset, dirent_len);
+            cursor.last_name = Some(entry.name);
+            cursor.next_offset = cur_offset;
         }
         Ok(reply)
     }
@@ -1847,5 +2059,194 @@ mod tests {
             assert_eq!(server.swap(server.swap(id)), id);
         }
         block_on(server.into_filesystem().close()).unwrap();
+    }
+
+    /// TASK-619 (board 2634): `OPENDIR` reads zero entries from Fxfs, a single 4096-byte `READDIR`
+    /// of a 100,000-entry directory reads at most one reply's worth plus bounded read-ahead, and
+    /// streaming across concurrent directory mutations still lists every unchanged entry once.
+    #[test]
+    fn opendir_and_one_readdir_do_not_walk_a_large_directory() {
+        use fxfs::object_handle::ObjectHandle as _;
+        use fxfs::object_store::ObjectDescriptor;
+        use fxfs::object_store::directory::Directory;
+        use fxfs::object_store::transaction::{LockKey, Options, lock_keys};
+        use zerocopy::{FromBytes, IntoBytes};
+
+        const TOTAL: usize = 100_000;
+        const BATCH: usize = 500;
+        // Build a 100,000-entry directory quickly by inserting links in batched Fxfs transactions
+        // on a temporary Tokio runtime (FxFilesystem spawns background tasks on Tokio).
+        let device = storage_device::DeviceHolder::new(
+            storage_device::fake_device::FakeDevice::new(262_144, 512),
+        );
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let device = rt.block_on(async move {
+            let fxfs = fxfs::filesystem::FxFilesystem::new_empty(device).await.unwrap();
+            let root_vol = fxfs::object_store::volume::root_volume((*fxfs).clone()).await.unwrap();
+            let store = root_vol
+                .new_volume(
+                    crate::filesystem::VOLUME_NAME,
+                    fxfs::object_store::NewChildStoreOptions::default(),
+                )
+                .await
+                .unwrap();
+            let root_dir = Directory::open(&store, store.root_directory_object_id()).await.unwrap();
+            let dir_lock =
+                lock_keys![LockKey::object(store.store_object_id(), root_dir.object_id())];
+            // One target file that all 100,000 directory entries name (fast, valid Fxfs directory).
+            let target_id = {
+                let mut txn =
+                    store.new_transaction(dir_lock.clone(), Options::default()).await.unwrap();
+                let handle = root_dir.create_child_file(&mut txn, "seed").await.unwrap();
+                txn.commit().await.unwrap();
+                handle.object_id()
+            };
+            for chunk in (0..TOTAL).step_by(BATCH) {
+                let mut txn =
+                    store.new_transaction(dir_lock.clone(), Options::default()).await.unwrap();
+                for i in chunk..(chunk + BATCH).min(TOTAL) {
+                    let name = format!("f{i:06}");
+                    root_dir
+                        .insert_child(&mut txn, &name, target_id, ObjectDescriptor::File)
+                        .await
+                        .unwrap();
+                }
+                txn.commit().await.unwrap();
+            }
+            drop((root_dir, store, root_vol));
+            fxfs.close().await.unwrap();
+            let device = fxfs.take_device().await;
+            device.reopen(false);
+            device
+        });
+        drop(rt);
+
+        let fs = block_on(Filesystem::mount(crate::Storage::from_device(device))).unwrap();
+        let server = Server::new(fs, Box::new(|_| Ok(())));
+
+        let send = |unique: u64, opcode: u32, nodeid: u64, body: &[u8]| -> Vec<u8> {
+            let header = InHeader {
+                len: (size_of::<InHeader>() + body.len()) as u32,
+                opcode,
+                unique,
+                nodeid,
+                uid: 0,
+                gid: 0,
+                pid: 1,
+                padding: 0,
+            };
+            let mut req = header.as_bytes().to_vec();
+            req.extend_from_slice(body);
+            let raw = block_on(server.handle(&req)).unwrap().unwrap();
+            let (out, payload) = OutHeader::read_from_prefix(&raw).unwrap();
+            assert_eq!(out.error, 0, "opcode {opcode} failed with errno {}", -out.error);
+            payload.to_vec()
+        };
+
+        // 1. OPENDIR reads zero entries from Fxfs.
+        crate::filesystem::READDIR_EMITS.store(0, Ordering::Relaxed);
+        let open_payload = send(1, opcode::OPENDIR, ROOT_ID, &[]);
+        let (open_out, _) = OpenOut::read_from_prefix(&open_payload).unwrap();
+        assert_eq!(
+            crate::filesystem::READDIR_EMITS.load(Ordering::Relaxed),
+            0,
+            "OPENDIR must not walk Fxfs directory entries"
+        );
+
+        // 2. One 4096-byte READDIR emits at most one reply's worth + bounded read-ahead.
+        let read_in = ReadIn { fh: open_out.fh, offset: 0, size: 4096, ..Default::default() };
+        let readdir_payload = send(2, opcode::READDIR, ROOT_ID, read_in.as_bytes());
+        assert!(!readdir_payload.is_empty());
+        let emits = crate::filesystem::READDIR_EMITS.load(Ordering::Relaxed);
+        let max_expected = (4096 / MIN_DIRENT_LEN + READDIR_READAHEAD + 1) as u64;
+        assert!(
+            emits > 0 && emits <= max_expected,
+            "one 4096-byte READDIR emitted {emits} Fxfs entries (expected <= {max_expected}, total {TOTAL})"
+        );
+
+        // Clean release.
+        let rel = ReleaseIn { fh: open_out.fh, ..Default::default() };
+        send(3, opcode::RELEASEDIR, ROOT_ID, rel.as_bytes());
+        block_on(server.into_filesystem().close()).unwrap();
+
+        // 3. Streaming across concurrent mutations lists every unchanged entry exactly once, and
+        // rewinddir (offset 0) sees newly added entries.
+        let fs2 = block_on(Filesystem::format(crate::Storage::memory(16 << 20))).unwrap();
+        let root2 = fs2.root().clone();
+        for i in 0..80u32 {
+            block_on(root2.create(
+                format!("entry-{i:03}").as_bytes(),
+                0o644,
+                Owner { uid: 0, gid: 0 },
+            ))
+            .unwrap();
+        }
+        let server2 = Server::new(fs2, Box::new(|_| Ok(())));
+        let send2 = |unique: u64, opcode: u32, nodeid: u64, body: &[u8]| -> Vec<u8> {
+            let header = InHeader {
+                len: (size_of::<InHeader>() + body.len()) as u32,
+                opcode,
+                unique,
+                nodeid,
+                uid: 0,
+                gid: 0,
+                pid: 1,
+                padding: 0,
+            };
+            let mut req = header.as_bytes().to_vec();
+            req.extend_from_slice(body);
+            let raw = block_on(server2.handle(&req)).unwrap().unwrap();
+            let (out, payload) = OutHeader::read_from_prefix(&raw).unwrap();
+            assert_eq!(out.error, 0, "opcode {opcode} failed with errno {}", -out.error);
+            payload.to_vec()
+        };
+        let open2 = OpenOut::read_from_prefix(&send2(1, opcode::OPENDIR, ROOT_ID, &[])).unwrap().0;
+        let mut offset = 0u64;
+        let mut seen = Vec::new();
+        let mut mutated = false;
+        let mut unique = 2u64;
+        loop {
+            let ri = ReadIn { fh: open2.fh, offset, size: 512, ..Default::default() };
+            let payload = send2(unique, opcode::READDIR, ROOT_ID, ri.as_bytes());
+            unique += 1;
+            if payload.is_empty() {
+                break;
+            }
+            let mut rest = payload.as_slice();
+            while !rest.is_empty() {
+                let (d, after) = Dirent::read_from_prefix(rest).unwrap();
+                let name = String::from_utf8(after[..d.namelen as usize].to_vec()).unwrap();
+                let padded = (size_of::<Dirent>() + d.namelen as usize).next_multiple_of(8)
+                    - size_of::<Dirent>();
+                rest = &after[padded..];
+                offset = d.off;
+                if name != "." && name != ".." {
+                    seen.push(name);
+                }
+            }
+            if !mutated && seen.len() >= 10 {
+                // Remove an early entry and a late entry, and add a new entry mid-listing.
+                block_on(root2.unlink(b"entry-000")).unwrap();
+                block_on(root2.unlink(b"entry-079")).unwrap();
+                block_on(root2.create(b"entry-000-new", 0o644, Owner { uid: 0, gid: 0 })).unwrap();
+                mutated = true;
+            }
+        }
+        // Every unchanged entry (001..079) was listed exactly once with no duplicates.
+        let mut counts = HashMap::new();
+        for name in &seen {
+            *counts.entry(name.as_str()).or_insert(0usize) += 1;
+        }
+        for i in 1..79u32 {
+            let expected = format!("entry-{i:03}");
+            assert_eq!(counts.get(expected.as_str()).copied(), Some(1), "entry {expected}");
+        }
+        send2(
+            unique,
+            opcode::RELEASEDIR,
+            ROOT_ID,
+            ReleaseIn { fh: open2.fh, ..Default::default() }.as_bytes(),
+        );
+        block_on(server2.into_filesystem().close()).unwrap();
     }
 }

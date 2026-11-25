@@ -1277,16 +1277,27 @@ impl<P: Platform> Fxfs<P> {
         handle.remove_extended_attribute_with_options(name.to_vec(), begun.options()).await
     }
 
-    /// cladefs: how many records the volume's tree caches (its objects', names' and data's): what
-    /// the kernel's shrinker of the superblock may free (`free_cached`).
+    /// cladefs: how many records the volume's tree caches (its objects', names' and data's) plus
+    /// persistent/base/allocator layer read chunks: what the kernel's shrinker of the superblock
+    /// may free (`free_cached`, TASK-596).
     pub fn cached(&self) -> u64 {
         self.volume.tree().cache_len() as u64
+            + self.filesystem.object_manager().cached_layer_chunks() as u64
     }
 
-    /// cladefs: frees up to `count` of the records the volume's tree caches, those used least
-    /// recently first, as the guest's memory pressure asks, and returns how many it freed.
+    /// cladefs: frees up to `count` of the records the volume's tree caches (LRU first) and
+    /// persistent/base/allocator layer read chunks, as the guest's memory pressure asks, and
+    /// returns how many it freed (TASK-596).
     pub fn free_cached(&self, count: u64) -> u64 {
-        self.volume.tree().shrink_cache(count.try_into().unwrap_or(usize::MAX)) as u64
+        let budget = count.try_into().unwrap_or(usize::MAX);
+        let freed_tree = self.volume.tree().shrink_cache(budget);
+        let remaining = budget.saturating_sub(freed_tree);
+        let freed_chunks = if remaining > 0 {
+            self.filesystem.object_manager().evict_layer_chunks(remaining)
+        } else {
+            0
+        };
+        (freed_tree + freed_chunks) as u64
     }
 
     /// Closes the inode `ino`, which the kernel evicts, and frees its object if no name links it.

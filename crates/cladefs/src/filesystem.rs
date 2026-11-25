@@ -29,6 +29,20 @@ use fxfs_posix::ReaddirStart;
 use std::future::Future;
 use std::num::NonZeroU8;
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// cladefs: counts entries emitted by `fxfs.readdir` across `Node::entries` and
+/// `Node::entries_page` for tests verifying bounded streaming `READDIR` (TASK-619, board 2634).
+#[cfg(test)]
+pub(crate) static READDIR_EMITS: AtomicU64 = AtomicU64::new(0);
+
+/// Where a bounded directory listing (`Node::entries_page`) begins (TASK-619, board 2634).
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum EntriesStart<'a> {
+    Index(u64),
+    After(&'a [u8]),
+}
 
 /// The errno of `error`, an Fxfs operation's, as Fxfs's VFSs give it (`fxfs_posix::errno`).
 fn errno(error: anyhow::Error) -> Errno {
@@ -782,6 +796,8 @@ impl Node {
             .run(move |fxfs| async move {
                 let mut entries = Vec::new();
                 let listed = fxfs.readdir(dir, ReaddirStart::Index(0), |name, ino, kind| {
+                    #[cfg(test)]
+                    READDIR_EMITS.fetch_add(1, Ordering::Relaxed);
                     // Fxfs's types are those a mode may have.
                     let file_type = FileType::from_mode(kind).unwrap_or(FileType::File);
                     entries.push(DirEntry { inode: Inode(ino), file_type, name: name.into() });
@@ -789,6 +805,46 @@ impl Node {
                 });
                 listed.await.map_err(errno)?;
                 Ok(entries)
+            })
+            .await
+    }
+
+    /// cladefs: reads at most `limit` entries of this directory starting at `start` (plus at most
+    /// one extra Fxfs emit to detect whether more entries follow), returning `(entries, has_more)`
+    /// (TASK-619, board 2634).
+    pub(crate) async fn entries_page(
+        &self,
+        start: EntriesStart<'_>,
+        limit: usize,
+    ) -> Result<(Vec<DirEntry>, bool)> {
+        let volume = self.directory()?;
+        let dir = self.ino();
+        let owned = match start {
+            EntriesStart::Index(index) => (Some(index), None),
+            EntriesStart::After(name) => (None, Some(name.to_vec())),
+        };
+        volume
+            .run(move |fxfs| async move {
+                let mut entries = Vec::with_capacity(limit.min(256));
+                let mut has_more = false;
+                let start = match &owned {
+                    (Some(index), _) => ReaddirStart::Index(*index),
+                    (None, Some(name)) => ReaddirStart::After(name.as_slice()),
+                    (None, None) => unreachable!(),
+                };
+                let listed = fxfs.readdir(dir, start, |name, ino, kind| {
+                    #[cfg(test)]
+                    READDIR_EMITS.fetch_add(1, Ordering::Relaxed);
+                    if entries.len() >= limit {
+                        has_more = true;
+                        return false;
+                    }
+                    let file_type = FileType::from_mode(kind).unwrap_or(FileType::File);
+                    entries.push(DirEntry { inode: Inode(ino), file_type, name: name.into() });
+                    true
+                });
+                listed.await.map_err(errno)?;
+                Ok((entries, has_more))
             })
             .await
     }

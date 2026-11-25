@@ -1204,7 +1204,7 @@ impl Window {
     /// in the window, then their pages in memory mapped, in runs across the pieces, where a `MAP`
     /// each made a change of its own, of a run at least (TASK-92.14). What a snapshot's window
     /// held is mapped again so, as its VM is restored.
-    fn map_many(self: &Arc<Self>, pieces: &[Piece<'_>]) {
+    fn map_many<'a>(self: &Arc<Self>, pieces: impl IntoIterator<Item = Piece<'a>>) {
         let ps = page_size();
         let dropped = {
             let mut state = self.state.with(Mutex::lock);
@@ -1212,7 +1212,7 @@ impl Window {
             let mut mapped_runs: Vec<Range<u64>> = Vec::new();
             let mut anew: Vec<Range<u64>> = Vec::new();
             let mut dropped = Vec::new();
-            for &Piece { offset, source, source_offset, len } in pieces {
+            for Piece { offset, source, source_offset, len } in pieces {
                 let (removed, forgotten) =
                     self.place(&mut state, offset, source, source_offset, len, Private::End);
                 dropped.extend(removed);
@@ -1973,16 +1973,15 @@ impl Dax {
     /// [`Dax::map_zeros`] would, where it names no source, in one change of the second stage
     /// (TASK-92.14).
     pub fn map_many(&mut self, mappings: &[DaxMapping]) {
-        let pieces: Vec<Piece<'_>> = (mappings.iter())
-            .map(|DaxMapping { offset, len, source }| {
-                let (source, source_offset) = match source {
-                    Some((source, from)) => (source, *from),
-                    None => (&self.zeros, 0),
-                };
-                Piece { offset: *offset, len: *len, source, source_offset }
-            })
-            .collect();
-        self.window.map_many(&pieces);
+        let zeros = &self.zeros;
+        let pieces = mappings.iter().map(|DaxMapping { offset, len, source }| {
+            let (source, source_offset) = match source {
+                Some((source, from)) => (source, *from),
+                None => (zeros, 0),
+            };
+            Piece { offset: *offset, len: *len, source, source_offset }
+        });
+        self.window.map_many(pieces);
     }
 
     /// Unmaps `len` bytes of the window at `offset`: the guest's `UNMAP`.
@@ -2060,10 +2059,14 @@ impl WindowChangeKind {
 
 impl WindowChanges {
     /// Recent changes kept for DAX refusal diagnostics (board 10549).
-    const MOST: usize = 256;
+    pub(crate) const MOST: usize = 256;
 
     /// The most refused pages awaiting a change ([`WindowChanges::refused`]): the oldest go first.
     const MOST_REFUSED: usize = 1024;
+
+    pub(crate) fn has_refused(&self) -> bool {
+        !self.refused.is_empty()
+    }
 
     pub(crate) fn record(&mut self, window_offset: u64, len: u64, change: WindowChangeKind) {
         if self.changes.len() == Self::MOST {

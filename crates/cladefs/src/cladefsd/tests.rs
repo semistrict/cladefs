@@ -8080,3 +8080,57 @@ fn concurrent_ephemeral_fork_version_of_uncached_version_succeeds() {
     let entries = eph.entries().unwrap();
     assert_eq!(entries.len(), CALLERS, "all {CALLERS} ephemeral cells must be noted in journal");
 }
+
+/// TASK-570 (board 2536): a VM process's 257th `VERSION` request on a connection, with 256
+/// (`MAX_VERSIONS`) versions already present, fails with `EMLINK` and leaves 256 versions named.
+#[test]
+fn version_requests_past_max_versions_fail_with_emlink() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let store = dir.path().join("store");
+    let client = CellClient::connect(&socket, &store, 1 << 24).unwrap();
+    let most = bucket_cell::layout::MAX_VERSIONS;
+    let mut ids = std::collections::BTreeSet::new();
+    for i in 0..most {
+        let made = client
+            .make_version()
+            .unwrap_or_else(|err| panic!("version {i} of {most} failed: {err}"));
+        assert!(ids.insert(made.version), "duplicate version id at {i}");
+    }
+    assert_eq!(client.make_version(), Err(Errno::EMLINK));
+    let listed = control(super::cells::versions(super::Daemon::process(), store)).unwrap();
+    assert_eq!(listed.len(), most);
+}
+
+/// TASK-603 (board 2602): unpacked framed parts in `local_cell::unpacked()` are counted in
+/// `memory::governed_bytes()` and evicted when `memory::govern()` runs with a small allowance.
+#[tokio::test(flavor = "multi_thread")]
+async fn unpacked_parts_are_counted_and_evicted_by_govern() {
+    let unpacked = local_cell::unpacked();
+    let parts = crate::Host::process().bucket_host().parts();
+    unpacked.evict_to(0);
+    let before_unpacked = unpacked.bytes();
+    let before_governed = super::memory::governed_bytes();
+    let len = 1 << 20;
+    let part_a = bucket_cell::fetch::PartBytes::from_owned(
+        std::sync::Arc::new(vec![0x33u8; len].into_boxed_slice()),
+        len as u64,
+    );
+    let part_b = bucket_cell::fetch::PartBytes::from_owned(
+        std::sync::Arc::new(vec![0x44u8; len].into_boxed_slice()),
+        len as u64,
+    );
+    parts.put_local(u64::MAX - 1, 0, part_a);
+    parts.put_local(u64::MAX - 1, 1, part_b);
+    let delta = 2 * len as u64;
+    assert_eq!(unpacked.bytes(), before_unpacked + delta);
+    assert!(
+        super::memory::governed_bytes() >= before_governed + delta,
+        "governed_bytes() must include local_cell::unpacked()"
+    );
+    super::memory::govern(0).await;
+    assert_eq!(unpacked.bytes(), 0, "govern(0) must evict unpacked parts");
+}

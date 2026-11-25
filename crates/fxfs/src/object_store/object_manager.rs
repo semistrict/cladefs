@@ -222,6 +222,58 @@ impl ObjectManager {
         total
     }
 
+    /// cladefs: total bytes currently held in persistent (and base) layer read chunk caches across
+    /// the allocator and every open object store (TASK-596).
+    pub fn cached_layer_bytes(&self) -> usize {
+        let inner = self.inner.read();
+        let mut total = 0;
+        if let Some(allocator) = &inner.allocator {
+            total += allocator.tree().cached_layer_bytes();
+        }
+        for store in inner.stores.values() {
+            total += store.tree().cached_layer_bytes();
+        }
+        total
+    }
+
+    /// cladefs: total number of persistent (and base) layer read chunks currently cached across
+    /// the allocator and every open object store (TASK-596).
+    pub fn cached_layer_chunks(&self) -> usize {
+        let inner = self.inner.read();
+        let mut total = 0;
+        if let Some(allocator) = &inner.allocator {
+            total += allocator.tree().cached_layer_chunks();
+        }
+        for store in inner.stores.values() {
+            total += store.tree().cached_layer_chunks();
+        }
+        total
+    }
+
+    /// cladefs: evicts up to `max_chunks` persistent (and base) layer read chunks across every
+    /// open object store and the allocator, returning how many were evicted (TASK-596).
+    pub fn evict_layer_chunks(&self, mut max_chunks: usize) -> usize {
+        let (allocator, stores): (Option<Arc<Allocator>>, Vec<Arc<ObjectStore>>) = {
+            let inner = self.inner.read();
+            (inner.allocator.clone(), inner.stores.values().cloned().collect())
+        };
+        let mut evicted = 0;
+        for store in stores {
+            if max_chunks == 0 {
+                return evicted;
+            }
+            let n = store.tree().evict_layer_chunks(max_chunks);
+            evicted += n;
+            max_chunks -= n;
+        }
+        if max_chunks > 0
+            && let Some(allocator) = allocator
+        {
+            evicted += allocator.tree().evict_layer_chunks(max_chunks);
+        }
+        evicted
+    }
+
     /// This is not thread-safe: it assumes that a store won't be forgotten whilst the loop is
     /// running.  This is to be used after replaying the journal.
     pub async fn on_replay_complete(&self) -> Result<(), Error> {
