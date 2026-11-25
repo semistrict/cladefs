@@ -36,6 +36,10 @@ use crate::client::Client;
 use crate::clock::Clock;
 use crate::layout::{self, Kind};
 pub use crate::routed::{Resolve, RoutedBucket};
+use extent_keys::Zeroizing;
+use extent_keys::kms::vars::{
+    AWS_CREDENTIAL_VARS, AZURE_CREDENTIAL_VARS, GCP_CREDENTIAL_VARS, unnumbered,
+};
 use futures::{StreamExt as _, TryStreamExt as _, stream};
 use object_store::list::{PaginatedListOptions, PaginatedListStore};
 use object_store::path::Path;
@@ -738,7 +742,10 @@ impl ObjectBucket {
     /// reads them; the emulator, Azurite, with `AZURE_STORAGE_USE_EMULATOR=true`. Blob Storage's
     /// conditional writes (If-None-Match: *, If-Match on ETags) are those doc-7 relies on.
     pub fn from_url(url: &str) -> Result<Self, String> {
-        Ok(Self::reached(reach(url, std::env::vars(), &Client::DEFAULT)?))
+        let options = resolve_option_values(
+            env_bucket_options().into_iter().filter(|(name, _)| unnumbered(name) == name.as_str()),
+        )?;
+        Ok(Self::reached(reach(url, options, &Client::DEFAULT)?))
     }
 
     /// cladefs: the bucket numbered `number` at `url`, as [`ObjectBucket::from_url`] reaches it,
@@ -746,7 +753,7 @@ impl ObjectBucket {
     /// ([`numbered_options`], TASK-633.3): its credentials, cloud region or endpoint, which the
     /// registry of buckets never holds.
     pub fn from_url_numbered(url: &str, number: u16) -> Result<Self, String> {
-        let options = numbered_options(std::env::vars(), number);
+        let options = resolve_option_values(numbered_option_values(env_bucket_options(), number))?;
         Ok(Self::reached(reach(url, options, &Client::DEFAULT)?))
     }
 
@@ -795,14 +802,17 @@ impl ObjectBucket {
 /// 25 ms away, which made Fxfs's commits wait (TASK-61, TASK-62), or one failing for a while
 /// (TASK-330.3).
 pub fn object_store_at(url: &str) -> Result<(Arc<dyn ObjectStore>, String), String> {
-    object_store_with(url, std::env::vars(), &Client::DEFAULT)
+    let options = resolve_option_values(
+        env_bucket_options().into_iter().filter(|(name, _)| unnumbered(name) == name.as_str()),
+    )?;
+    object_store_with(url, options, &Client::DEFAULT)
 }
 
 /// The object store at `url`, configured by `options` as `object_store::parse_url_opts` would
 /// configure it, but for its HTTP client: `client`'s, cladefs's own (TASK-205).
-pub(crate) fn object_store_with(
+pub(crate) fn object_store_with<V: AsRef<str>>(
     url: &str,
-    options: impl IntoIterator<Item = (String, String)>,
+    options: impl IntoIterator<Item = (String, V)>,
     client: &Client,
 ) -> Result<(Arc<dyn ObjectStore>, String), String> {
     let Reached { objects, prefix, .. } = reach(url, options, client)?;
@@ -832,24 +842,227 @@ pub(crate) struct Reached {
     pub appends: Appends,
 }
 
+/// Whether `name` (case-insensitive) is a configuration option recognized by one of the cloud
+/// `object_store` builders (S3, GCS, Azure): what [`Registered`] retains from the process
+/// environment (board 9684), excluding unrelated secrets (`CLADEFS_MASTER_KEY`, KMS tokens, etc.).
+fn is_bucket_option(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.parse::<object_store::aws::AmazonS3ConfigKey>().is_ok()
+        || lower.parse::<object_store::gcp::GoogleConfigKey>().is_ok()
+        || lower.parse::<object_store::azure::AzureConfigKey>().is_ok()
+}
+
+/// Additional `object_store`-specific S3/GCS/Azure credential option names beyond
+/// `extent_keys::kms::vars`'s cloud credential groups (board 9684, hotbed review 117): any
+/// variable in a cloud's group set by a numbered bucket replaces the host's variables in that
+/// group as a whole. Shared aliases (such as `TOKEN` and `SKIP_SIGNATURE`) appear in every cloud
+/// group that accepts them so overriding any cloud drops its shared host aliases too.
+const S3_EXTRA_CREDENTIAL_VARS: &[&str] = &[
+    "ACCESS_KEY_ID",
+    "SECRET_ACCESS_KEY",
+    "SESSION_TOKEN",
+    "AWS_TOKEN",
+    "TOKEN",
+    "AWS_SKIP_SIGNATURE",
+    "SKIP_SIGNATURE",
+    "AWS_DEFAULT_PROFILE",
+    "AWS_METADATA_ENDPOINT",
+    "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+    "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+    "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+    "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+];
+
+const GCS_EXTRA_CREDENTIAL_VARS: &[&str] = &[
+    "SERVICE_ACCOUNT",
+    "SERVICE_ACCOUNT_PATH",
+    "SERVICE_ACCOUNT_KEY",
+    "GOOGLE_SERVICE_ACCOUNT",
+    "GOOGLE_SERVICE_ACCOUNT_PATH",
+    "GOOGLE_SERVICE_ACCOUNT_KEY",
+    "APPLICATION_CREDENTIALS",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "GOOGLE_BEARER_TOKEN",
+    "GOOGLE_SKIP_SIGNATURE",
+    "SKIP_SIGNATURE",
+];
+
+const AZURE_EXTRA_CREDENTIAL_VARS: &[&str] = &[
+    "AZURE_STORAGE_ACCOUNT_KEY",
+    "AZURE_STORAGE_ACCESS_KEY",
+    "AZURE_STORAGE_MASTER_KEY",
+    "ACCOUNT_KEY",
+    "ACCESS_KEY",
+    "MASTER_KEY",
+    "AZURE_STORAGE_SAS_KEY",
+    "AZURE_STORAGE_SAS_TOKEN",
+    "SAS_KEY",
+    "SAS_TOKEN",
+    "AZURE_STORAGE_TOKEN",
+    "AZURE_STORAGE_BEARER_TOKEN",
+    "BEARER_TOKEN",
+    "TOKEN",
+    "AZURE_STORAGE_CLIENT_ID",
+    "AZURE_STORAGE_CLIENT_SECRET",
+    "AZURE_STORAGE_TENANT_ID",
+    "AZURE_STORAGE_AUTHORITY_HOST",
+    "AZURE_STORAGE_CONNECTION_STRING",
+    "CONNECTION_STRING",
+    "AZURE_USE_AZURE_CLI",
+    "AZURE_SKIP_SIGNATURE",
+    "SKIP_SIGNATURE",
+    "AZURE_MSI_ENDPOINT",
+    "AZURE_MSI_RESOURCE_ID",
+    "AZURE_OBJECT_ID",
+    "AZURE_FEDERATED_TOKEN_FILE",
+    "AZURE_USE_WORKLOAD_IDENTITY",
+];
+
+const AWS_GROUP: u8 = 1 << 0;
+const GCP_GROUP: u8 = 1 << 1;
+const AZURE_GROUP: u8 = 1 << 2;
+
+/// Bitmask of cloud credential groups (`AWS_GROUP`, `GCP_GROUP`, `AZURE_GROUP`) that recognize
+/// `name` (case-insensitive). A shared alias like `TOKEN` or `SKIP_SIGNATURE` sets every cloud's
+/// bit that accepts it (hotbed review 117).
+fn credential_groups(name: &str) -> u8 {
+    let contains = |list: &[&str]| list.iter().any(|var| var.eq_ignore_ascii_case(name));
+    let mut mask = 0;
+    if contains(AWS_CREDENTIAL_VARS) || contains(S3_EXTRA_CREDENTIAL_VARS) {
+        mask |= AWS_GROUP;
+    }
+    if contains(GCP_CREDENTIAL_VARS) || contains(GCS_EXTRA_CREDENTIAL_VARS) {
+        mask |= GCP_GROUP;
+    }
+    if contains(AZURE_CREDENTIAL_VARS) || contains(AZURE_EXTRA_CREDENTIAL_VARS) {
+        mask |= AZURE_GROUP;
+    }
+    mask
+}
+
+/// Whether a numbered bucket's own variable `ours` replaces the host's `theirs`: same name
+/// (case-insensitive) or overlapping cloud credential group (board 9684, hotbed review 117).
+fn replaces_host_option(ours: &str, theirs: &str) -> bool {
+    ours.eq_ignore_ascii_case(theirs) || (credential_groups(ours) & credential_groups(theirs)) != 0
+}
+
+/// A retained bucket-option value: valid UTF-8 wrapped in [`Zeroizing`], or `Invalid(env_name)`
+/// recording that a recognized variable held non-UTF-8 bytes so opening a bucket selecting it
+/// fails explicitly instead of silently falling back to host credentials (hotbed review 117).
+#[derive(Clone)]
+enum OptionValue {
+    Valid(Zeroizing<String>),
+    Invalid(String),
+}
+
+/// Filters `(OsString, OsString)` environment pairs down to recognized bucket-option variables
+/// (host and `CLADEFSD_BUCKET_<N>_*`), zeroizing secret bytes and marking non-UTF-8 values as
+/// [`OptionValue::Invalid`] so they are refused rather than silently dropped (board 9684,
+/// hotbed review 117).
+fn filter_os_bucket_options(
+    vars: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) -> Vec<(String, OptionValue)> {
+    let mut kept = Vec::new();
+    for (name, value) in vars {
+        let Some(name) = name.to_str().filter(|name| is_bucket_option(unnumbered(name))) else {
+            continue;
+        };
+        match value.into_string() {
+            Ok(text) => kept.push((name.to_owned(), OptionValue::Valid(Zeroizing::new(text)))),
+            Err(non_utf8) => {
+                // Scrub raw secret bytes, then retain a sentinel so opening a bucket that selects
+                // this variable refuses it instead of falling back to host credentials.
+                drop(Zeroizing::new(non_utf8.into_encoded_bytes()));
+                kept.push((name.to_owned(), OptionValue::Invalid(name.to_owned())));
+            }
+        }
+    }
+    kept
+}
+
+/// Reads only bucket-option variables (host and `CLADEFSD_BUCKET_<N>_*`) from the process
+/// environment, wrapping values in [`Zeroizing`] so secrets are scrubbed on drop (board 9684).
+fn env_bucket_options() -> Vec<(String, OptionValue)> {
+    filter_os_bucket_options(std::env::vars_os())
+}
+
+/// Resolves selected [`OptionValue`] entries to UTF-8 strings, failing if any selected option
+/// carried non-UTF-8 bytes (hotbed review 117).
+fn resolve_option_values(
+    vars: impl IntoIterator<Item = (String, OptionValue)>,
+) -> Result<Vec<(String, Zeroizing<String>)>, String> {
+    let mut resolved = Vec::new();
+    for (name, value) in vars {
+        match value {
+            OptionValue::Valid(text) => resolved.push((name, text)),
+            OptionValue::Invalid(env_name) => {
+                return Err(format!("{env_name}: value is not valid UTF-8"));
+            }
+        }
+    }
+    Ok(resolved)
+}
+
 /// cladefs: opens other buckets by the registry of buckets (TASK-633.3, TASK-633.4): the bucket
 /// numbered `number`, as the registry copy in the home bucket's root records it, or, for one that
 /// copy lacks, the root bucket's registry, the authority; at its URL, with the options `vars` give
 /// it ([`numbered_options`]), refused unless its identity is the one recorded
 /// ([`crate::Error::Mismatched`]); `NoBucket` for a number no registry records.
+///
+/// Retains only bucket-option variables in a shared zeroized snapshot (`Arc`), never unrelated
+/// process secrets (board 9684).
+#[derive(Clone)]
 pub struct Registered {
-    vars: Vec<(String, String)>,
+    vars: Arc<[(String, OptionValue)]>,
+}
+
+impl std::fmt::Debug for Registered {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.vars.iter().map(|(name, _)| name)).finish()
+    }
 }
 
 impl Registered {
     /// Buckets opened with `vars`' options: the environment's, for a host
-    /// ([`Registered::from_env`]).
+    /// ([`Registered::from_env`]). Retains only variables bucket options read, zeroized on drop.
     pub fn new(vars: impl IntoIterator<Item = (String, String)>) -> Self {
-        Self { vars: vars.into_iter().collect() }
+        let filtered: Vec<(String, OptionValue)> = vars
+            .into_iter()
+            .filter_map(|(name, value)| {
+                let value = Zeroizing::new(value);
+                is_bucket_option(unnumbered(&name)).then_some((name, OptionValue::Valid(value)))
+            })
+            .collect();
+        Self { vars: filtered.into() }
     }
 
     pub fn from_env() -> Self {
-        Self::new(std::env::vars())
+        Self { vars: env_bucket_options().into() }
+    }
+
+    #[cfg(test)]
+    fn from_os_vars(
+        vars: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+    ) -> Self {
+        Self { vars: filter_os_bucket_options(vars).into() }
+    }
+
+    /// Opens the bucket at `url` using the host's unnumbered options in this shared snapshot.
+    pub fn open_url(&self, url: &str) -> Result<ObjectBucket, String> {
+        let options = resolve_option_values(
+            self.vars
+                .iter()
+                .filter(|(name, _)| unnumbered(name) == name.as_str())
+                .map(|(name, value)| (name.clone(), value.clone())),
+        )?;
+        Ok(ObjectBucket::reached(reach(url, options, &Client::DEFAULT)?))
+    }
+
+    /// Opens the bucket numbered `number` at `url` using this shared snapshot.
+    pub fn open_url_numbered(&self, url: &str, number: u16) -> Result<ObjectBucket, String> {
+        let options =
+            resolve_option_values(numbered_option_values(self.vars.iter().cloned(), number))?;
+        Ok(ObjectBucket::reached(reach(url, options, &Client::DEFAULT)?))
     }
 
     /// The bucket `entry` records, checked to be it.
@@ -859,7 +1072,9 @@ impl Registered {
     ) -> Result<ObjectBucket, crate::Error> {
         let number = entry.number;
         let url = entry.details.url.as_deref().ok_or(crate::Error::NoBucket(number))?;
-        let options = numbered_options(self.vars.iter().cloned(), number);
+        let options =
+            resolve_option_values(numbered_option_values(self.vars.iter().cloned(), number))
+                .map_err(|err| crate::Error::Read(format!("bucket {number} at {url}: {err}")))?;
         let reached = reach(url, options, &Client::DEFAULT)
             .map_err(|err| crate::Error::Read(format!("bucket {number} at {url}: {err}")))?;
         let bucket = ObjectBucket::reached(reached);
@@ -898,17 +1113,43 @@ impl Registered {
 /// each `CLADEFSD_BUCKET_<number>_<NAME>` as `NAME`, over the variable `NAME` itself, so that a
 /// host reaches buckets of other clouds, regions or accounts than its own's, each with its own
 /// credentials (`CLADEFSD_BUCKET_2_AWS_REGION`, `CLADEFSD_BUCKET_3_GOOGLE_SERVICE_ACCOUNT`).
+///
+/// Replaces cloud credential groups as a whole (board 9684): a bucket supplying any credential
+/// variable of a cloud inherits none of the host's credentials for that cloud, and never sees
+/// another bucket's `CLADEFSD_BUCKET_<M>_*` variables.
 pub fn numbered_options(
     vars: impl IntoIterator<Item = (String, String)>,
     number: u16,
 ) -> Vec<(String, String)> {
+    numbered_generic_options(vars, number)
+}
+
+fn numbered_option_values(
+    vars: impl IntoIterator<Item = (String, OptionValue)>,
+    number: u16,
+) -> Vec<(String, OptionValue)> {
+    numbered_generic_options(vars, number)
+}
+
+fn numbered_generic_options<V: Clone>(
+    vars: impl IntoIterator<Item = (String, V)>,
+    number: u16,
+) -> Vec<(String, V)> {
     let prefix = format!("CLADEFSD_BUCKET_{number}_");
-    let (own, others): (Vec<_>, Vec<_>) =
-        vars.into_iter().partition(|(name, _)| name.starts_with(&prefix));
-    let own: Vec<(String, String)> =
-        own.into_iter().map(|(name, value)| (name[prefix.len()..].to_owned(), value)).collect();
-    let overridden = |name: &str| own.iter().any(|(theirs, _)| theirs.eq_ignore_ascii_case(name));
-    others.into_iter().filter(|(name, _)| !overridden(name)).chain(own.iter().cloned()).collect()
+    let mut own = Vec::new();
+    let mut host = Vec::new();
+    for (name, value) in vars {
+        if let Some(rest) = name.strip_prefix(&prefix) {
+            own.push((rest.to_owned(), value));
+        } else if unnumbered(&name) == name.as_str() {
+            host.push((name, value));
+        }
+    }
+    let replaced = |name: &str| own.iter().any(|(theirs, _)| replaces_host_option(theirs, name));
+    let mut result: Vec<(String, V)> =
+        host.into_iter().filter(|(name, _)| !replaced(name)).collect();
+    result.extend(own);
+    result
 }
 
 /// cladefs: the provider of the bucket at `url`, as the registry of buckets records it
@@ -930,9 +1171,9 @@ pub fn provider_of(url: &str) -> Result<&'static str, String> {
 
 /// cladefs: the object store at `url`, as [`object_store_with`] reaches it, and how it lists a
 /// level of keys a page at a time, if it does (TASK-395.5).
-pub(crate) fn reach(
+pub(crate) fn reach<V: AsRef<str>>(
     url: &str,
-    options: impl IntoIterator<Item = (String, String)>,
+    options: impl IntoIterator<Item = (String, V)>,
     client: &Client,
 ) -> Result<Reached, String> {
     let url = url::Url::parse(url).map_err(|error| format!("{url}: {error}"))?;
@@ -983,17 +1224,20 @@ type Cloud = (Arc<dyn ObjectStore>, Pages, Path, Clock, Appends);
 /// page a request, if it does, the path it names in it, as `object_store::parse_url_opts` makes
 /// them, but with `client`; its clock: a cloud's, as its responses date them, memory's the
 /// host's; and how it appends (doc-29).
-fn cloud(
+fn cloud<V: AsRef<str>>(
     url: &url::Url,
-    options: impl IntoIterator<Item = (String, String)>,
+    options: impl IntoIterator<Item = (String, V)>,
     client: &Client,
 ) -> object_store::Result<Cloud> {
     use object_store::ObjectStoreScheme as Scheme;
-    let options: Vec<(String, String)> = options.into_iter().collect();
+    let options: Vec<(String, V)> = options.into_iter().collect();
     let skip_signature = options.iter().any(|(key, value)| {
         (key.eq_ignore_ascii_case("aws_skip_signature")
             || key.eq_ignore_ascii_case("skip_signature"))
-            && matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "on" | "yes" | "y")
+            && matches!(
+                value.as_ref().to_ascii_lowercase().as_str(),
+                "1" | "true" | "on" | "yes" | "y"
+            )
     });
     let (scheme, path) = Scheme::parse(url)?;
     let path = Path::parse(path)?;
@@ -1022,9 +1266,9 @@ fn cloud(
                     clock: served.clone(),
                     bucket: bucket()?,
                 });
-            options.iter().cloned().fold(builder, |builder, (key, value)| {
+            options.iter().fold(builder, |builder, (key, value)| {
                 match key.to_ascii_lowercase().parse() {
-                    Ok(key) => builder.with_config(key, value),
+                    Ok(key) => builder.with_config(key, value.as_ref()),
                     // Not one of this backend's: the environment holds every cloud's, each builder
                     // taking its own.
                     Err(_) => builder,
@@ -1052,7 +1296,7 @@ fn cloud(
                 if k.eq_ignore_ascii_case("aws_s3_express") || k.eq_ignore_ascii_case("s3_express")
                 {
                     Some(matches!(
-                        v.to_ascii_lowercase().as_str(),
+                        v.as_ref().to_ascii_lowercase().as_str(),
                         "1" | "true" | "on" | "yes" | "y"
                     ))
                 } else {
@@ -1077,7 +1321,7 @@ fn cloud(
                 let lower = key.to_ascii_lowercase();
                 let trimmed = lower.strip_prefix("aws_").unwrap_or(&lower);
                 if let Ok(key) = trimmed.parse::<object_store::ClientConfigKey>() {
-                    client_opts = client_opts.with_config(key, value);
+                    client_opts = client_opts.with_config(key, value.as_ref());
                 }
             }
             let http_client = crate::client::reqwest_client(&client_opts)?;
@@ -3132,8 +3376,10 @@ pub(crate) mod tests {
         });
     }
 
-    /// TASK-633.3: a bucket's own variables, `CLADEFSD_BUCKET_<number>_<NAME>`, stand for `NAME`
-    /// over the variable itself; other buckets' stay as they are, which no builder reads.
+    /// TASK-633.3 & board 9684: a bucket's own variables, `CLADEFSD_BUCKET_<number>_<NAME>`, stand
+    /// for `NAME` over the variable itself; other buckets' variables are excluded; and cloud
+    /// credential groups replace the host's group as a whole so host session tokens / profiles
+    /// never leak into a numbered bucket with its own credentials.
     #[test]
     fn numbered_options_take_their_buckets_own_variables_first() {
         let vars = [
@@ -3145,16 +3391,117 @@ pub(crate) mod tests {
         .map(|(name, value)| (name.to_owned(), value.to_owned()));
         let mut two = numbered_options(vars.clone(), 2);
         two.sort();
-        let expected = [
-            ("AWS_ACCESS_KEY_ID", "shared"),
-            ("AWS_REGION", "eu-west-1"),
-            ("CLADEFSD_BUCKET_3_AWS_REGION", "ap-south-1"),
-        ]
-        .map(|(name, value)| (name.to_owned(), value.to_owned()));
+        let expected = [("AWS_ACCESS_KEY_ID", "shared"), ("AWS_REGION", "eu-west-1")]
+            .map(|(name, value)| (name.to_owned(), value.to_owned()));
         assert_eq!(two, expected);
         let mut seven = numbered_options(vars, 7);
         seven.sort();
         assert!(seven.contains(&("AWS_REGION".to_owned(), "us-east-1".to_owned())), "{seven:?}");
+        assert!(!seven.iter().any(|(name, _)| name.starts_with("CLADEFSD_BUCKET_")), "{seven:?}");
+    }
+
+    /// board 9684: `Registered` retains only bucket-option variables (never `CLADEFS_MASTER_KEY`,
+    /// KMS tokens, or unrelated secrets), shares its snapshot via `Arc` on clone, prints no secret
+    /// values in `Debug`, and `numbered_options` never mixes host and per-bucket credentials.
+    #[test]
+    fn registered_filters_unrelated_secrets_and_numbered_options_isolate_credential_groups() {
+        let env = [
+            ("CLADEFS_MASTER_KEY", "deadbeef"),
+            ("CLADEFS_KMS_OPENBAO_TOKEN", "s.vault-secret"),
+            ("UNRELATED_API_SECRET", "top-secret"),
+            ("AWS_REGION", "us-east-1"),
+            ("AWS_ACCESS_KEY_ID", "host-key"),
+            ("AWS_SECRET_ACCESS_KEY", "host-secret"),
+            ("AWS_SESSION_TOKEN", "host-session"),
+            ("AWS_PROFILE", "host-profile"),
+            ("AZURE_STORAGE_ACCOUNT_KEY", "host-az-key"),
+            ("AZURE_STORAGE_SAS_TOKEN", "host-az-sas"),
+            ("TOKEN", "host-shared-token"),
+            ("SKIP_SIGNATURE", "true"),
+            ("GOOGLE_SERVICE_ACCOUNT", "/host/sa.json"),
+            ("CLADEFSD_BUCKET_2_AWS_ACCESS_KEY_ID", "b2-key"),
+            ("CLADEFSD_BUCKET_2_AWS_SECRET_ACCESS_KEY", "b2-secret"),
+            ("CLADEFSD_BUCKET_2_CLADEFS_MASTER_KEY", "b2-master-secret"),
+            ("CLADEFSD_BUCKET_3_AZURE_STORAGE_ACCOUNT_KEY", "b3-az-key"),
+            ("CLADEFSD_BUCKET_4_GOOGLE_BEARER_TOKEN", "b4-gcp-token"),
+        ]
+        .map(|(name, value)| (name.to_owned(), value.to_owned()));
+
+        let reg = Registered::new(env.clone());
+        let cloned = reg.clone();
+        assert!(Arc::ptr_eq(&reg.vars, &cloned.vars), "Registered clones share one Arc snapshot");
+        let kept_names: Vec<&str> = reg.vars.iter().map(|(n, _)| n.as_str()).collect();
+        for secret in [
+            "CLADEFS_MASTER_KEY",
+            "CLADEFS_KMS_OPENBAO_TOKEN",
+            "UNRELATED_API_SECRET",
+            "CLADEFSD_BUCKET_2_CLADEFS_MASTER_KEY",
+        ] {
+            assert!(!kept_names.contains(&secret), "secret {secret} retained: {kept_names:?}");
+        }
+        assert!(kept_names.contains(&"AWS_REGION"), "{kept_names:?}");
+        assert!(kept_names.contains(&"CLADEFSD_BUCKET_2_AWS_ACCESS_KEY_ID"), "{kept_names:?}");
+        let dbg = format!("{reg:?}");
+        for secret_val in ["host-secret", "host-session", "b2-secret", "b3-az-key"] {
+            assert!(!dbg.contains(secret_val), "Debug leaked value {secret_val}: {dbg}");
+        }
+
+        // Bucket 2 sets its own AWS key + secret: must keep AWS_REGION and its own AWS creds,
+        // must NOT inherit host AWS_SESSION_TOKEN or AWS_PROFILE, and must not see bucket 3/4 vars.
+        let b2 = numbered_options(env.clone(), 2);
+        let has = |opts: &[(String, String)], k: &str, v: &str| {
+            opts.iter().any(|(name, val)| name == k && val == v)
+        };
+        let has_key = |opts: &[(String, String)], k: &str| opts.iter().any(|(name, _)| name == k);
+        assert!(has(&b2, "AWS_REGION", "us-east-1"), "{b2:?}");
+        assert!(has(&b2, "AWS_ACCESS_KEY_ID", "b2-key"), "{b2:?}");
+        assert!(has(&b2, "AWS_SECRET_ACCESS_KEY", "b2-secret"), "{b2:?}");
+        assert!(!has_key(&b2, "AWS_SESSION_TOKEN"), "leaked host AWS_SESSION_TOKEN: {b2:?}");
+        assert!(!has_key(&b2, "AWS_PROFILE"), "leaked host AWS_PROFILE: {b2:?}");
+        assert!(!has_key(&b2, "TOKEN"), "leaked shared host TOKEN to AWS bucket: {b2:?}");
+        assert!(!has_key(&b2, "SKIP_SIGNATURE"), "leaked SKIP_SIGNATURE to AWS bucket: {b2:?}");
+        assert!(!b2.iter().any(|(n, _)| n.starts_with("CLADEFSD_BUCKET_")), "{b2:?}");
+        // Unrelated clouds still inherit host creds when bucket 2 did not override them.
+        assert!(has(&b2, "AZURE_STORAGE_ACCOUNT_KEY", "host-az-key"), "{b2:?}");
+
+        // Bucket 3 overrides Azure storage account key -> drops host Azure SAS token AND shared
+        // aliases (`TOKEN`, `SKIP_SIGNATURE`) that Azure also accepts (hotbed review 117).
+        let b3 = numbered_options(env.clone(), 3);
+        assert!(has(&b3, "AZURE_STORAGE_ACCOUNT_KEY", "b3-az-key"), "{b3:?}");
+        assert!(!has_key(&b3, "AZURE_STORAGE_SAS_TOKEN"), "leaked host Azure SAS: {b3:?}");
+        assert!(!has_key(&b3, "TOKEN"), "leaked shared host TOKEN to Azure bucket: {b3:?}");
+        assert!(!has_key(&b3, "SKIP_SIGNATURE"), "leaked SKIP_SIGNATURE to Azure bucket: {b3:?}");
+
+        // Bucket 4 overrides Google bearer token -> drops host GOOGLE_SERVICE_ACCOUNT & shared.
+        let b4 = numbered_options(env, 4);
+        assert!(has(&b4, "GOOGLE_BEARER_TOKEN", "b4-gcp-token"), "{b4:?}");
+        assert!(!has_key(&b4, "GOOGLE_SERVICE_ACCOUNT"), "leaked host GCP SA: {b4:?}");
+        assert!(!has_key(&b4, "SKIP_SIGNATURE"), "leaked SKIP_SIGNATURE to GCP bucket: {b4:?}");
+
+        // Non-UTF-8 recognized numbered credential must refuse opening that bucket rather than
+        // silently dropping the override and falling back to host credentials (hotbed review 117).
+        #[cfg(unix)]
+        {
+            use std::ffi::OsString;
+            use std::os::unix::ffi::OsStringExt as _;
+            let malformed = Registered::from_os_vars([
+                (OsString::from("AZURE_STORAGE_ACCOUNT_NAME"), OsString::from("hostacct")),
+                (OsString::from("AZURE_STORAGE_ACCOUNT_KEY"), OsString::from("aG9zdGtleQ==")),
+                (
+                    OsString::from("CLADEFSD_BUCKET_2_AZURE_STORAGE_ACCOUNT_KEY"),
+                    OsString::from_vec(vec![0xff]),
+                ),
+            ]);
+            let refused = malformed
+                .open_url_numbered("az://container", 2)
+                .err()
+                .expect("malformed numbered credential must be refused");
+            assert!(
+                refused.contains("CLADEFSD_BUCKET_2_AZURE_STORAGE_ACCOUNT_KEY")
+                    && refused.contains("UTF-8"),
+                "expected refusal naming malformed numbered var, got: {refused}"
+            );
+        }
     }
 
     /// Requests that failed wait from 50 ms, doubling, to at most 5 s.

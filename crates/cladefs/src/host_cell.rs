@@ -142,19 +142,32 @@ pub(crate) struct State {
     /// The buckets this host keeps cells in, by their URLs: one each, which every cell naming it
     /// shares.
     buckets: Mutex<BTreeMap<String, Arc<RoutedBucket>>>,
+    /// Shared filtered bucket-option snapshot reused by every bucket opened on this host
+    /// (board 9684).
+    registered: std::sync::OnceLock<Arc<bucket_cell::object_bucket::Registered>>,
     /// cladefs: the cells this host made versions of, by the version (cell and ID).
     versions_made: Mutex<BTreeMap<(CellId, u64), PathBuf>>,
 }
 
 impl State {
     pub(crate) fn new() -> Self {
-        Self { buckets: Mutex::new(BTreeMap::new()), versions_made: Mutex::new(BTreeMap::new()) }
+        Self {
+            buckets: Mutex::new(BTreeMap::new()),
+            registered: std::sync::OnceLock::new(),
+            versions_made: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    fn registered(&self) -> Arc<bucket_cell::object_bucket::Registered> {
+        self.registered
+            .get_or_init(|| Arc::new(bucket_cell::object_bucket::Registered::from_env()))
+            .clone()
     }
 }
 
 /// The bucket at `url` in `state`.
 pub(crate) fn bucket_in(state: &State, url: &str) -> anyhow::Result<Arc<RoutedBucket>> {
-    bucket_opened_in(state, url, ObjectBucket::from_url)
+    bucket_opened_in(state, url, |resolve, url| resolve.open_url(url))
 }
 
 /// The bucket at `url` on `host` ([`ObjectBucket::from_url`]): `host`'s, made if it has none yet.
@@ -175,7 +188,7 @@ pub(crate) fn bucket_of_on(
     url: &str,
     number: u16,
 ) -> anyhow::Result<Arc<RoutedBucket>> {
-    bucket_opened_in(host.host_cells(), url, |url| ObjectBucket::from_url_numbered(url, number))
+    bucket_opened_in(host.host_cells(), url, |resolve, url| resolve.open_url_numbered(url, number))
 }
 
 /// cladefs: the bucket numbered `number` at `url`, as [`bucket`] has it: opened with that bucket's
@@ -191,15 +204,16 @@ pub(crate) fn bucket_of(url: &str, number: u16) -> anyhow::Result<Arc<RoutedBuck
 fn bucket_opened_in(
     state: &State,
     url: &str,
-    open: impl FnOnce(&str) -> Result<ObjectBucket, String>,
+    open: impl FnOnce(&bucket_cell::object_bucket::Registered, &str) -> Result<ObjectBucket, String>,
 ) -> anyhow::Result<Arc<RoutedBucket>> {
     let mut buckets = state.buckets.lock().unwrap();
     if let Some(bucket) = buckets.get(url) {
         return Ok(bucket.clone());
     }
     // Its requests of other buckets' cells go there, by the registry of buckets (TASK-633.4).
-    let resolve = Arc::new(bucket_cell::object_bucket::Registered::from_env());
-    let bucket = open(url).map_err(anyhow::Error::msg)?.routed(resolve);
+    // One filtered snapshot shared across every bucket opened on this host (board 9684).
+    let resolve = state.registered();
+    let bucket = open(&resolve, url).map_err(anyhow::Error::msg)?.routed(resolve);
     let bucket = Arc::new(bucket);
     buckets.insert(url.to_owned(), bucket.clone());
     Ok(bucket)
