@@ -8,6 +8,7 @@
 
 use super::background::Background;
 use super::http::{self, Unread};
+use super::retry::{self, Failed};
 use super::{Error, KeyNames, Kms, Origin, Vars};
 use crate::{KEY_LEN, Secret, Unauthentic, Wrapped};
 use base64::Engine as _;
@@ -48,13 +49,6 @@ const CIPHERTEXT_PREFIX: &str = "vault:v";
 
 /// The longest key name a header holds.
 const MAX_NAME_LEN: usize = 255;
-
-/// How many times a call is made in all, while it fails as the network or the server does
-/// ([`retried`]).
-const TRIES: u32 = 3;
-
-/// The wait before a failed call is made again, four times longer each time.
-const BACKOFF: Duration = Duration::from_millis(100);
 
 /// How long a connection to OpenBao may take to make.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -144,9 +138,10 @@ impl std::fmt::Debug for Token {
 /// (in the `default` policy); and not `create` on `MOUNT/encrypt/NAME`, which would make a key for
 /// each tenant wrapping without one.
 ///
-/// A call failing as the network does, or with a 412, 429 or 5xx, is made again, [`TRIES`] times
-/// in all, after [`BACKOFF`], then four times that; each connection may take [`CONNECT_TIMEOUT`],
-/// each request [`REQUEST_TIMEOUT`]. Its calls run on the shared KMS runtime, so that
+/// A call failing as the network does, or with a 412, 429 or 5xx, is tried again through
+/// [`super::retry`] (jittered exponential backoff, honouring `Retry-After` up to 30 s; board 9386);
+/// each connection may take [`CONNECT_TIMEOUT`], each request [`REQUEST_TIMEOUT`]. Its calls run on
+/// the shared KMS runtime, so that
 /// whatever polls its futures, of any executor or none, waits for them alone. It logs nothing, and
 /// no error says its token; the bytes of keys and of OpenBao's replies it holds are zeroed when
 /// dropped, as far as its HTTP client lets it (not that client's own buffers).
@@ -232,7 +227,8 @@ impl ParsedUrl {
             origin.file("ca=FILE").map_err(|why| at(&why))?;
         }
         let query_pairs = query.iter().map(|(n, v)| (n.as_str(), v.as_str()));
-        let names = KeyNames::of_query(query_pairs, origin, key_name).map_err(|why| at(&why))?;
+        let names =
+            KeyNames::of_query_in(query_pairs, origin, key_name, files).map_err(|why| at(&why))?;
         key_name(&names.of(0)).map_err(|why| at(&why))?;
         let namespace = (namespace.map(HeaderValue::from_str).transpose())
             .map_err(|_| at(&"the namespace is no HTTP header's value"))?;
@@ -249,10 +245,15 @@ impl OpenBao {
         Self::of(url, token, Origin::Host)
     }
 
-    fn of(url: &str, token: Token, origin: Origin) -> Result<Self, String> {
+    fn of(
+        url: &str,
+        token: Token,
+        origin: Origin,
+        files: Option<&OverrideFiles>,
+    ) -> Result<Self, String> {
         let at = |why: &dyn std::fmt::Display| format!("{url:?}: {why}");
         let ParsedUrl { tls, ca, origin, mount, namespace, names, shown } =
-            ParsedUrl::of(url, origin)?;
+            ParsedUrl::of(url, origin, files)?;
         let mut client = reqwest::Client::builder()
             .user_agent(concat!("cladefs/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(CONNECT_TIMEOUT)
@@ -504,7 +505,8 @@ impl Inner {
     }
 
     /// The call `path` names, after `/v1/`, with the current token; refused (403) with a token read
-    /// from a file, made once more if the file holds another since.
+    /// from a file, made once more if the file holds another since. Retried through [`retry`] on
+    /// network failures, 412, 429 and 5xx, honouring `Retry-After` (board 9386).
     async fn call(
         &self,
         tenant: u64,
@@ -515,9 +517,16 @@ impl Inner {
         let mut reread = false;
         loop {
             let token = self.token.current();
-            let reply = retried(|| self.send(&method, path, body.clone(), &token))
-                .await
-                .map_err(|why| io(tenant, &format!("{}: {why}", self.at(&path.join("/")))))?;
+            let mut tries = 0u32;
+            let reply = retry::retried(|| {
+                tries += 1;
+                self.send(&method, path, body.clone(), &token)
+            })
+            .await
+            .map_err(|why| {
+                let tried = if tries > 1 { format!(" ({tries} tries)") } else { String::new() };
+                io(tenant, &format!("{}: {why}{tried}", self.at(&path.join("/"))))
+            })?;
             if reply.status == StatusCode::FORBIDDEN && !reread && self.token.reread(&token) {
                 reread = true;
                 continue;
@@ -534,7 +543,7 @@ impl Inner {
         path: &[&str],
         body: Option<Bytes>,
         token: &HeaderValue,
-    ) -> Result<Received, Failure> {
+    ) -> Result<Received, Failed<String>> {
         let mut url = self.origin.clone();
         {
             let mut segments = url.path_segments_mut().expect("an http(s) URL has a path");
@@ -547,16 +556,21 @@ impl Inner {
         if let Some(body) = body {
             request = request.header("Content-Type", "application/json").body(body);
         }
-        let response = request.send().await.map_err(|err| Failure::Transport(http::chain(&err)))?;
+        let response =
+            request.send().await.map_err(|err| Failed::transient(http::chain(&err), None))?;
         let status = response.status();
-        let body = http::body(response, http::TOKEN_MAX).await.map_err(Failure::unread)?;
-        let reply = Received { status, body };
-        match status {
-            StatusCode::PRECONDITION_FAILED | StatusCode::TOO_MANY_REQUESTS => {
-                Err(Failure::Server(reply))
+        let after = retry::retry_after(response.headers());
+        let body = http::body(response, http::TOKEN_MAX).await.map_err(|unread: Unread| {
+            match unread.transient() {
+                true => Failed::transient(unread.why(), None),
+                false => Failed::refused(unread.why()),
             }
-            status if status.is_server_error() => Err(Failure::Server(reply)),
-            _ => Ok(reply),
+        })?;
+        let reply = Received { status, body };
+        if status == StatusCode::PRECONDITION_FAILED || retry::transient_status(status.as_u16()) {
+            Err(Failed::transient(format!("{}: {}", reply.status, reply.errors()), after))
+        } else {
+            Ok(reply)
         }
     }
 
@@ -572,48 +586,6 @@ impl Inner {
 
     fn what(&self, op: Op, name: &str) -> String {
         self.at(&format!("{} with key {name:?}", op.name()))
-    }
-}
-
-/// What a request had instead of a reply to keep.
-enum Failure {
-    /// The request was not made, or its reply not read: the network failed, or timed out.
-    Transport(String),
-    /// The server failed, or asked for the request again later.
-    Server(Received),
-    /// Its reply was refused, as no try again changes: longer than any OpenBao sends.
-    Refused(String),
-}
-
-impl Failure {
-    fn unread(unread: Unread) -> Self {
-        match unread.transient() {
-            true => Self::Transport(unread.why()),
-            false => Self::Refused(unread.why()),
-        }
-    }
-}
-
-/// `send`'s reply, made again, [`TRIES`] times in all, while it fails as the network or the server
-/// does: the last failure said, if every try failed.
-async fn retried<F: Future<Output = Result<Received, Failure>>>(
-    mut send: impl FnMut() -> F,
-) -> Result<Received, String> {
-    let mut wait = BACKOFF;
-    let mut tries = 1;
-    loop {
-        let why = match send().await {
-            Ok(reply) => return Ok(reply),
-            Err(Failure::Refused(why)) => return Err(why),
-            Err(Failure::Transport(why)) => why,
-            Err(Failure::Server(reply)) => format!("{}: {}", reply.status, reply.errors()),
-        };
-        if tries == TRIES {
-            return Err(format!("{why} ({tries} tries)"));
-        }
-        tokio::time::sleep(wait).await;
-        wait *= 4;
-        tries += 1;
     }
 }
 
@@ -1102,8 +1074,78 @@ mod tests {
             url::Url::parse(&url).unwrap().port().unwrap()
         );
         assert!(failed.starts_with(&start), "{failed}");
-        assert!(failed.ends_with("(3 tries)"), "{failed}");
+        assert!(failed.ends_with("(5 tries)"), "{failed}");
         assert!(!failed.contains("s.token"), "{failed}");
+    }
+
+    /// board 9386: OpenBao retries through `kms::retry` (4 retries / 5 tries, jittered backoff,
+    /// honouring `Retry-After`): a burst of wraps refused with 429 all succeed, a single call
+    /// surviving 3 consecutive 429s succeeds on try 4 (past the old 3-try limit), `Retry-After`
+    /// is waited, and 412 / 503 are retried as before.
+    #[test]
+    fn throttled_bursts_and_retry_after_use_shared_retry() {
+        use crate::kms::fake_http::{Response, Server};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // Part 1: burst of 8 concurrent wraps, first 12 calls return 429 with Retry-After: 0.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let served = calls.clone();
+        let server = Server::start(move |_, request| {
+            let n = served.fetch_add(1, Ordering::SeqCst) + 1;
+            if n <= 12 {
+                return Response::of(429, r#"{"errors":["rate limit quota exceeded"]}"#)
+                    .with("retry-after", "0");
+            }
+            let json: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            if request.route().contains("/encrypt/") {
+                let pt = json["plaintext"].as_str().unwrap();
+                Response::of(200, format!(r#"{{"data":{{"ciphertext":"vault:v1:{pt}"}}}}"#))
+            } else {
+                let ct = json["ciphertext"].as_str().unwrap();
+                let pt = ct.strip_prefix("vault:v1:").unwrap();
+                Response::of(200, format!(r#"{{"data":{{"plaintext":"{pt}"}}}}"#))
+            }
+        });
+        let port = url::Url::parse(server.base()).unwrap().port().unwrap();
+        let url = format!("openbao://127.0.0.1:{port}/{MOUNT}?{QUERY}");
+        let kms = OpenBao::new(&url, token("s.token")).unwrap();
+        let keys: Vec<Secret> = (0..8).map(|_| Secret::random()).collect();
+        let wraps = keys.iter().map(|key| kms.wrap(7, key));
+        let wrapped = block_on(futures::future::join_all(wraps));
+        assert_eq!(calls.load(Ordering::SeqCst), 8 + 12);
+        for (key, wrapped) in keys.iter().zip(wrapped) {
+            let unwrapped = unwrap(&kms, 7, &wrapped.unwrap()).unwrap();
+            assert_eq!(unwrapped.expose(), key.expose());
+        }
+
+        // Part 2: single call seeing 429 (Retry-After: 1), 412, 503 then 200 on try 4:
+        // verifies Retry-After is honoured and >3 tries succeed.
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let served = attempts.clone();
+        let server = Server::start(move |_, request| {
+            let n = served.fetch_add(1, Ordering::SeqCst) + 1;
+            match n {
+                1 => Response::of(429, r#"{"errors":["rate limit quota exceeded"]}"#)
+                    .with("retry-after", "1"),
+                2 => Response::of(412, r#"{"errors":["precondition failed"]}"#)
+                    .with("retry-after", "0"),
+                3 => {
+                    Response::of(503, r#"{"errors":["Vault is sealed"]}"#).with("retry-after", "0")
+                }
+                _ => {
+                    let json: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                    let pt = json["plaintext"].as_str().unwrap();
+                    Response::of(200, format!(r#"{{"data":{{"ciphertext":"vault:v1:{pt}"}}}}"#))
+                }
+            }
+        });
+        let port = url::Url::parse(server.base()).unwrap().port().unwrap();
+        let url = format!("openbao://127.0.0.1:{port}/{MOUNT}?{QUERY}");
+        let kms = OpenBao::new(&url, token("s.token")).unwrap();
+        let started = std::time::Instant::now();
+        wrap(&kms, 7, &Secret::random()).unwrap();
+        assert!(started.elapsed() >= Duration::from_secs(1), "{:?}", started.elapsed());
+        assert_eq!(attempts.load(Ordering::SeqCst), 4);
     }
 
     /// board 8527: a reply without end is refused, read no further than [`http::TOKEN_MAX`] bytes,
@@ -1352,7 +1394,7 @@ mod tests {
         assert_eq!(
             refusal(unwrap(&kms, 7, &wrapped)),
             format!(
-                "{}: 503 Service Unavailable: Vault is sealed (3 tries)",
+                "{}: 503 Service Unavailable: Vault is sealed (5 tries)",
                 bao.failed(7, "transit/decrypt/cladefs-tenant-7")
             )
         );
@@ -1403,7 +1445,7 @@ mod tests {
                 "tenant 7: the KMS failed: openbaos://127.0.0.1:{port}/{MOUNT}: \
                  transit/decrypt/cladefs-tenant-7: error sending request for url \
                  (https://127.0.0.1:{port}/v1/transit/decrypt/cladefs-tenant-7): client error \
-                 (Connect): invalid peer certificate: UnknownIssuer (3 tries)",
+                 (Connect): invalid peer certificate: UnknownIssuer (5 tries)",
                 port = bao.server.port()
             )
         );

@@ -2,12 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs's own: how the KMS backends over HTTP (Google Cloud KMS, Azure Key Vault and Azure's
-//! token endpoints) try a call again (board 8473, board 8475). What failed as the network does, or
-//! as the service throttling (429) or failing (5xx), is tried again, [`BACKOFF`]'s waits growing
-//! between tries, each drawn at random within its upper half, so that calls refused together, a
-//! pool's refill of a batch of wraps, do not all come back together; and none shorter than a
-//! `Retry-After` the service sent, honoured up to [`RETRY_AFTER_MAX`] a wait (hotbed question 458).
+//! cladefs's own: how the KMS backends over HTTP (Google Cloud KMS, Azure Key Vault, Azure's token
+//! endpoints, and OpenBao) try a call again (board 8473, board 8475, board 9386). What failed as
+//! the network does, or as the service throttling (429) or failing (5xx), is tried again,
+//! [`BACKOFF`]'s waits growing between tries, each drawn at random within its upper half, so that
+//! calls refused together, a pool's refill of a batch of wraps, do not all come back together; and
+//! none shorter than a `Retry-After` the service sent, honoured up to [`RETRY_AFTER_MAX`] a wait
+//! (hotbed question 458).
 
 use std::future::Future;
 use std::time::Duration;
