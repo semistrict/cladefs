@@ -1031,6 +1031,44 @@ impl<D: Dir> Uploader<D> {
         Ok(())
     }
 
+    /// cladefs: forks an uploaded version `version` of this writable cell directly in the bucket
+    /// without materializing a temporary version directory on disk (board 11701).
+    pub async fn fork_version(
+        &self,
+        version: u64,
+        child: Child,
+        inheriting: keys::Inheriting,
+    ) -> Result<(), Failure> {
+        failing!("upload::forked");
+        let cell = self.cell().description().cell;
+        let writer = self.shared.writer().ok_or_else(|| Failure::msg("no writer: no versions"))?;
+        let named = writer
+            .versions()
+            .await
+            .into_iter()
+            .find(|v| v.id == version)
+            .ok_or(Failure::VersionDropped)?;
+        let origin = Origin { parent: cell, at: named.at, epoch: named.epoch };
+        let sealing = self.cell().keys().clone();
+        let keys = keys::Parents::Held(&sealing);
+        let forking = lifecycle::fork_version_keyed(
+            &*self.bucket,
+            child.cell,
+            version,
+            origin,
+            (child.owner, Some(&inheriting)),
+            keys,
+        );
+        match forking.await {
+            Err(bucket_cell::Error::Deleted) => return Err(Failure::VersionDropped),
+            Err(err) => return Err(err.into()),
+            Ok(()) => {}
+        }
+        inheriting.made();
+        mirror_wanted(&self.shared.spawn, &self.bucket, child.cell, origin);
+        Ok(())
+    }
+
     /// cladefs: forks the version the cell is at to `child`, an ephemeral cell kept on the host of
     /// incarnation `incarnation` alone (doc-25, TASK-698.3): its reference written in the bucket
     /// before the cell's head is read, which must name the version still
@@ -1637,8 +1675,11 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                     return self.fail(&writer, Failure::msg("the uploader stopped"));
                 }
             }
-            let ack_due =
-                ack_urgent || urgent || stop || self.options.ack_coalesce.is_zero() || ack_wait.is_none();
+            let ack_due = ack_urgent
+                || urgent
+                || stop
+                || self.options.ack_coalesce.is_zero()
+                || ack_wait.is_none();
             if ack_wanted && head_work.is_none() && ack_due {
                 ack_wanted = false;
                 ack_wait = None;

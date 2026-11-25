@@ -55,6 +55,16 @@ pub(crate) struct Rules {
     pub writers_refuse_shared: bool,
     /// A writer waits for the cell a writer that went left open, closing, to close.
     pub writers_wait_for_closing: bool,
+    /// A shrink waits for the guest to agree.
+    pub guest_agrees: bool,
+    /// A connection's resizes of its cell run one at a time (TASK-79.41).
+    pub resizes_one_at_a_time: bool,
+    /// A resize goes through the cell's open writer or holds its path (TASK-79.34).
+    pub through_holder: bool,
+    /// A fork goes through the cell's open writer or holds its path (TASK-44.6).
+    pub fork_through_holder: bool,
+    /// A fork of a closed cell holds its path until the cell is closed (TASK-44.6).
+    pub forks_hold_their_paths: bool,
 }
 
 impl Rules {
@@ -64,6 +74,11 @@ impl Rules {
         open_outlives_holders: true,
         writers_refuse_shared: true,
         writers_wait_for_closing: true,
+        guest_agrees: true,
+        resizes_one_at_a_time: true,
+        through_holder: true,
+        fork_through_holder: true,
+        forks_hold_their_paths: true,
     };
 }
 
@@ -478,7 +493,7 @@ impl<C, S, P> CellTable<C, S, P> {
 
     /// cladefs: the cell at `key`, a writer's that went, closing, is closed: those waiting for it may
     /// claim it ([`Open::Closing`]). Called as its last reference goes, its writer's connection
-    /// having said so (`OpenCell::keep_until_closed`).
+    /// having said so (`OpenCell::on_close`).
     pub fn closed(&self, key: &Path) {
         let mut inner = self.inner.lock().unwrap();
         inner.entries.retain(|_, entry| !entry.is_stale());
@@ -589,6 +604,70 @@ impl<C: Writer, S, P> CellTable<C, S, P> {
     ) -> Result<Holding<C, S, P>, Errno> {
         let claimed = self.claim_async(key, Claim::DaemonOrWriter, wait).await?;
         Ok(self.holding(key, claimed))
+    }
+
+    /// Resizes the cell at `key` to `new_capacity` bytes: through its open writer if a connection
+    /// writes it, else holding its path while `open_closed` opens it (taking ownership of the
+    /// hold so cancellation still closes before releasing it), `capacity` checks that a closed
+    /// cell is not shrunk (`EBUSY`), `set` updates its capacity, and `close` closes it before
+    /// letting the hold go (TASK-44.6, TASK-79.34).
+    pub(crate) async fn resize_cell<H, FutW, FutO, FutC>(
+        &self,
+        key: &Path,
+        new_capacity: u64,
+        resize_writer: impl FnOnce(Arc<C>, u64) -> FutW,
+        open_closed: impl FnOnce(Option<Hold<C, S, P>>) -> FutO,
+        capacity: impl FnOnce(&H) -> Result<(u64, u64), Errno>,
+        set: impl AsyncFnOnce(&H, u64) -> Result<(), Errno>,
+        close: impl FnOnce(H) -> FutC,
+    ) -> Result<(), Errno>
+    where
+        C: Writer,
+        FutW: std::future::Future<Output = Result<(), Errno>>,
+        FutO: std::future::Future<Output = Result<H, Errno>>,
+        FutC: std::future::Future<Output = ()>,
+    {
+        let hold = match rules().through_holder {
+            true => match self.writer_or_hold(key)? {
+                Holding::Writer(writer) => return resize_writer(writer, new_capacity).await,
+                Holding::Held(hold) => Some(hold),
+            },
+            false => None,
+        };
+        let handle = open_closed(hold).await?;
+        let set_result = match capacity(&handle) {
+            Ok((current, _)) if new_capacity < current => Err(Errno::EBUSY),
+            Ok(_) => set(&handle, new_capacity).await,
+            Err(errno) => Err(errno),
+        };
+        close(handle).await;
+        set_result
+    }
+
+    /// Acquires a handle to fork the cell at `key`: through its open writer if a connection writes
+    /// it, else holding its path via [`Self::writer_or_hold_async`] and handing the hold to
+    /// `from_hold` so the handle (or kept entry) releases it only after close (TASK-44.6).
+    pub(crate) async fn fork_cell<H, FutW, FutH>(
+        &self,
+        key: &Path,
+        wait: Duration,
+        from_writer: impl FnOnce(Arc<C>) -> FutW,
+        from_hold: impl FnOnce(Option<Hold<C, S, P>>) -> FutH,
+    ) -> Result<H, Errno>
+    where
+        C: Writer,
+        FutW: std::future::Future<Output = Result<H, Errno>>,
+        FutH: std::future::Future<Output = Result<H, Errno>>,
+    {
+        let hold = match rules().fork_through_holder {
+            true => match self.writer_or_hold_async(key, wait).await? {
+                Holding::Writer(writer) => return from_writer(writer).await,
+                Holding::Held(hold) => Some(hold),
+            },
+            false => None,
+        };
+        let hold = if rules().forks_hold_their_paths { hold } else { None };
+        from_hold(hold).await
     }
 
     /// cladefs: holds the cell `key` names for the daemon's FUSE mount, to attach it (TASK-475.3),
@@ -780,6 +859,150 @@ impl<C, S, P> Drop for Hold<C, S, P> {
     }
 }
 
+/// The shrink a connection's guest was asked to take, and where its answer goes; and the resize of
+/// its cell under way, which the next waits for ([`Shrinking::resize`], TASK-79.41).
+pub(crate) struct Shrinking {
+    asked: Mutex<Option<(u64, futures::channel::oneshot::Sender<bool>)>>,
+    resizing: futures::lock::Mutex<()>,
+}
+
+impl Shrinking {
+    pub fn new() -> Self {
+        Self { asked: Mutex::new(None), resizing: futures::lock::Mutex::new(()) }
+    }
+
+    /// The guest's answer to the shrink to `capacity`: whether it took it. An answer to a shrink
+    /// no longer waited for goes nowhere.
+    pub fn answered(&self, capacity: u64, took: bool) {
+        let mut shrinking = self.asked.lock().unwrap();
+        if shrinking.as_ref().is_some_and(|(asked, _)| *asked == capacity) {
+            let (_, answer) = shrinking.take().unwrap();
+            // Its asker gone: nothing to tell.
+            let _ = answer.send(took);
+        }
+    }
+
+    /// Stops waiting for the guest's answer, its connection gone: the shrink fails as unanswered
+    /// (TASK-79.34).
+    pub fn stop(&self) {
+        let stopped = self.asked.lock().unwrap().take();
+        drop(stopped);
+    }
+
+    /// Whether a shrink waits for the guest's answer.
+    #[cfg(test)]
+    pub fn awaited(&self) -> bool {
+        self.asked.lock().unwrap().is_some()
+    }
+
+    /// Sets a held cell's capacity to `capacity` bytes: grows it and tells the guest via `tell`;
+    /// or asks the guest to shrink, waiting `wait` at most for its answer (`ETIMEDOUT`) or until
+    /// its call's caller gives up (`ECONNABORTED`, [`crate::caller::gone`]), holding no thread
+    /// meanwhile. Never below what the cell holds (`ENOSPC`). Serialized per connection so a grow
+    /// cannot race between a shrink's answer and its commit (TASK-79.41).
+    pub(crate) async fn resize<F>(
+        &self,
+        capacity: u64,
+        wait: Duration,
+        current: impl FnOnce() -> Result<(u64, u64), Errno>,
+        set: impl FnOnce(u64) -> F,
+        tell: impl Fn(u64, bool) -> Result<(), Errno>,
+    ) -> Result<(), Errno>
+    where
+        F: std::future::Future<Output = Result<(), Errno>>,
+    {
+        let _resizing = match rules().resizes_one_at_a_time {
+            true => Some(self.resizing.lock().await),
+            false => None,
+        };
+        let (now, held) = current()?;
+        if capacity < held {
+            return Err(Errno::ENOSPC);
+        }
+        if capacity >= now || !rules().guest_agrees {
+            set(capacity).await?;
+            return tell(capacity, false);
+        }
+        let mut asked = Asked { tell: &tell, kept: now, settled: false };
+        let mut waiting = Waiting::new(self, capacity);
+        tell(capacity, true)?;
+        // cladefs: a wait that changes nothing, which ends with its call's caller, whose call runs
+        // to its end otherwise (board 5599): a shrink its caller gave up on stops waiting
+        // (TASK-43.6), the guest told the capacity kept as `asked` goes.
+        let took = {
+            let answered = std::pin::pin!(within(wait, &mut waiting.answered));
+            match futures::future::select(answered, std::pin::pin!(crate::caller::gone())).await {
+                futures::future::Either::Left((took, _)) => Some(took),
+                futures::future::Either::Right(((), _)) => None,
+            }
+        };
+        drop(waiting);
+        let Some(took) = took else {
+            return Err(Errno::ECONNABORTED);
+        };
+        match took {
+            Some(Ok(true)) => {
+                set(capacity).await?;
+                asked.settled = true;
+                Ok(())
+            }
+            Some(Ok(false)) => {
+                asked.settled = true;
+                Err(Errno::ENOSPC)
+            }
+            // No answer in time, or its VM process gone without one.
+            Some(Err(_)) | None => {
+                log::warn!("cladefsd: no answer from the guest to a shrink to {capacity} bytes");
+                Err(Errno::ETIMEDOUT)
+            }
+        }
+    }
+}
+
+/// A shrink waiting for the guest's answer, in its connection's [`Shrinking`] until it stops
+/// waiting, however it stops: answered, timed out, or its call dropped (TASK-43.6).
+struct Waiting<'a> {
+    shrinking: &'a Shrinking,
+    answered: futures::channel::oneshot::Receiver<bool>,
+}
+
+impl<'a> Waiting<'a> {
+    fn new(shrinking: &'a Shrinking, capacity: u64) -> Self {
+        let (answer, answered) = futures::channel::oneshot::channel();
+        *shrinking.asked.lock().unwrap() = Some((capacity, answer));
+        Self { shrinking, answered }
+    }
+}
+
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        let mut shrinking = self.shrinking.asked.lock().unwrap();
+        // Unless a later shrink took its place.
+        if shrinking.as_ref().is_some_and(|(_, answer)| answer.is_connected_to(&self.answered)) {
+            shrinking.take();
+        }
+    }
+}
+
+/// A shrink the guest was asked to take, which, unless the cell took it or the guest refused it,
+/// tells the guest the capacity the cell keeps as it is dropped, however it ends: unanswered in
+/// time, its call dropped, or the cell's new capacity failing; so that the guest, having taken it
+/// late, grows back (TASK-79.41).
+struct Asked<'a, T: Fn(u64, bool) -> Result<(), Errno>> {
+    tell: &'a T,
+    kept: u64,
+    settled: bool,
+}
+
+impl<T: Fn(u64, bool) -> Result<(), Errno>> Drop for Asked<'_, T> {
+    fn drop(&mut self) {
+        if !self.settled {
+            // Which fails, logged, once the guest is gone.
+            let _ = (self.tell)(self.kept, false);
+        }
+    }
+}
+
 /// The table under Shuttle: a VM's connection writing a cell, whose VM process goes; as it goes,
 /// the VM restored from its snapshot opening the cell to write it; a cell attaching the cell as a
 /// base, sharing what is open of it, before and after its writer went; and a fork of the cell at any
@@ -825,7 +1048,7 @@ mod shuttle_tests {
         fn drop(&mut self) {
             let writing = self.writing.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner);
             let Some(Writing { cell, hold }) = writing.take() else { return };
-            // Closing, as its connection's is (`OpenCell::keep_until_closed`): those waiting for
+            // Closing, as its connection's is (`OpenCell::on_close`): those waiting for
             // it told once its last reference goes, a base's that shares it perhaps.
             let table = hold.hold().table.clone();
             *cell.on_close.lock().unwrap() = Some(Box::new(move || table.closed(Path::new(KEY))));
@@ -1203,6 +1426,463 @@ mod shuttle_tests {
         let rules = Rules { writers_wait_for_closing: false, ..Rules::ALL };
         fails_without(rules, "a writer wrote a cell others have open");
     }
+
+    /// Resize and fork request interleavings migrated from `cell_requests.rs` (TASK-44.6,
+    /// TASK-79.34, TASK-79.41, board 11701), exercising `CellTable::resize_cell`,
+    /// `CellTable::fork_cell`, and `Shrinking::resize` directly without wrapper traits.
+    mod requests {
+        use super::super::*;
+        use crate::shuttle_testing::{config, fails_with, runs};
+        use shuttle::future::block_on;
+        use shuttle::scheduler::{PctScheduler, RandomScheduler};
+        use shuttle::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+        use shuttle::sync::mpsc;
+        use shuttle::{Runner, thread};
+        use std::sync::Arc;
+
+        const KEY: &str = "/cell";
+        const CAPACITY: u64 = 8;
+        const GUEST_HOLDS: u64 = 4;
+
+        struct Model {
+            capacity: AtomicU64,
+            ordered: AtomicU64,
+            durable: AtomicU64,
+            open: AtomicUsize,
+            most_open: AtomicUsize,
+        }
+
+        impl Model {
+            fn new() -> Arc<Self> {
+                Arc::new(Model {
+                    capacity: CAPACITY.into(),
+                    ordered: 0.into(),
+                    durable: 0.into(),
+                    open: 0.into(),
+                    most_open: 0.into(),
+                })
+            }
+
+            fn open(&self) {
+                let others = self.open.fetch_add(1, Ordering::SeqCst);
+                self.most_open.fetch_max(others + 1, Ordering::SeqCst);
+            }
+
+            fn opened_once_at_a_time(&self) {
+                let most = self.most_open.load(Ordering::SeqCst);
+                assert!(most <= 1, "the cell is open twice at once: {most} at most");
+            }
+
+            fn close(&self) {
+                self.open.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+
+        type Table = CellTable<Conn, (), ()>;
+        type ModelHold = Hold<Conn, (), ()>;
+
+        enum View {
+            Live(Arc<Model>),
+            Here(Arc<Model>, Option<ModelHold>),
+        }
+
+        impl View {
+            fn forked(&self) -> u64 {
+                match self {
+                    View::Live(model) => model.ordered.load(Ordering::SeqCst),
+                    View::Here(model, _) => model.durable.load(Ordering::SeqCst),
+                }
+            }
+
+            fn close(self) {
+                if let View::Here(model, held) = self {
+                    model.close();
+                    drop(held);
+                }
+            }
+        }
+
+        struct ModelGuest {
+            view: AtomicU64,
+            asks: std::sync::Mutex<Option<mpsc::Sender<u64>>>,
+        }
+
+        impl ModelGuest {
+            fn tell(&self, capacity: u64, ask: bool) -> Result<(), Errno> {
+                if ask {
+                    let asks = self.asks.lock().unwrap();
+                    asks.as_ref().ok_or(Errno::EIO)?.send(capacity).map_err(|_| Errno::EIO)?;
+                    return Ok(());
+                }
+                assert!(capacity >= GUEST_HOLDS, "the guest was shrunk without agreeing");
+                self.view.store(capacity, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        struct Conn {
+            model: Arc<Model>,
+            guest: ModelGuest,
+            shrinking: Shrinking,
+            going: AtomicBool,
+        }
+
+        impl Conn {
+            fn new(model: Arc<Model>, asks: Option<mpsc::Sender<u64>>) -> Arc<Self> {
+                Arc::new(Conn {
+                    model,
+                    guest: ModelGuest { view: CAPACITY.into(), asks: asks.into() },
+                    shrinking: Shrinking::new(),
+                    going: false.into(),
+                })
+            }
+
+            async fn resize(&self, capacity: u64) -> Result<(), Errno> {
+                let model = &self.model;
+                self.shrinking
+                    .resize(
+                        capacity,
+                        Duration::MAX,
+                        || Ok((model.capacity.load(Ordering::SeqCst), 1)),
+                        |cap| async move {
+                            thread::yield_now();
+                            model.capacity.store(cap, Ordering::SeqCst);
+                            Ok(())
+                        },
+                        |cap, ask| self.guest.tell(cap, ask),
+                    )
+                    .await
+            }
+        }
+
+        impl Writer for Conn {
+            fn going(&self) -> bool {
+                self.going.load(Ordering::SeqCst)
+            }
+        }
+
+        fn write(table: &Table, conn: &Arc<Conn>) -> ModelHold {
+            let held = table.hold_to_write(Path::new(KEY), Arc::downgrade(conn), Duration::MAX);
+            block_on(held).unwrap().0
+        }
+
+        fn answer(conn: Arc<Conn>, asks: mpsc::Receiver<u64>) {
+            while let Ok(capacity) = asks.recv() {
+                let took = capacity >= GUEST_HOLDS;
+                if took {
+                    conn.guest.view.store(capacity, Ordering::SeqCst);
+                }
+                conn.shrinking.answered(capacity, took);
+            }
+        }
+
+        async fn resize_through_table(
+            table: &Table,
+            key: &Path,
+            capacity: u64,
+            model: &Arc<Model>,
+        ) -> Result<(), Errno> {
+            table
+                .resize_cell(
+                    key,
+                    capacity,
+                    |writer, cap| async move { writer.resize(cap).await },
+                    |hold| {
+                        let model = Arc::clone(model);
+                        async move {
+                            model.open();
+                            Ok((model, hold))
+                        }
+                    },
+                    |(model, _)| Ok((model.capacity.load(Ordering::SeqCst), 1)),
+                    async |(model, _), cap| {
+                        thread::yield_now();
+                        model.capacity.store(cap, Ordering::SeqCst);
+                        Ok(())
+                    },
+                    |(model, hold)| async move {
+                        model.close();
+                        drop(hold);
+                    },
+                )
+                .await
+        }
+
+        async fn fork_through_table(
+            table: &Table,
+            key: &Path,
+            model: &Arc<Model>,
+        ) -> Result<View, Errno> {
+            table
+                .fork_cell(
+                    key,
+                    Duration::MAX,
+                    |writer| async move { Ok(View::Live(writer.model.clone())) },
+                    |hold| {
+                        let model = Arc::clone(model);
+                        async move {
+                            model.open();
+                            Ok(View::Here(model, hold))
+                        }
+                    },
+                )
+                .await
+        }
+
+        fn run_with() {
+            let key = Path::new(KEY);
+            let table: &'static Table = Box::leak(Box::new(CellTable::new()));
+            let model = Model::new();
+            let committed = Arc::new(AtomicU64::new(0));
+            let (opened_tx, opened) = mpsc::channel::<()>();
+            let (resized_tx, resized) = mpsc::channel::<()>();
+            let (going_tx, going) = mpsc::channel::<()>();
+
+            let first = {
+                let (model, committed) = (model.clone(), committed.clone());
+                thread::spawn(move || {
+                    let (asks_tx, asks) = mpsc::channel();
+                    let conn = Conn::new(model.clone(), Some(asks_tx));
+                    let held = write(table, &conn);
+                    model.open();
+                    let guest = {
+                        let conn = conn.clone();
+                        thread::spawn(move || answer(conn, asks))
+                    };
+                    opened_tx.send(()).unwrap();
+                    for _ in 0..2 {
+                        let epoch = model.ordered.fetch_add(1, Ordering::SeqCst) + 1;
+                        committed.store(epoch, Ordering::SeqCst);
+                        thread::yield_now();
+                    }
+                    resized.recv().unwrap();
+                    model.opened_once_at_a_time();
+                    let capacity = model.capacity.load(Ordering::SeqCst);
+                    let view = conn.guest.view.load(Ordering::SeqCst);
+                    assert_eq!(capacity, view, "the cell's capacity and its guest's view differ");
+                    conn.going.store(true, Ordering::SeqCst);
+                    going_tx.send(()).unwrap();
+                    model.durable.store(model.ordered.load(Ordering::SeqCst), Ordering::SeqCst);
+                    conn.guest.asks.lock().unwrap().take();
+                    guest.join().unwrap();
+                    model.close();
+                    drop(held);
+                })
+            };
+
+            let resizer = {
+                let model = model.clone();
+                thread::spawn(move || {
+                    opened.recv().unwrap();
+                    for (capacity, expected) in [(12, Ok(())), (6, Ok(())), (3, Err(Errno::ENOSPC))]
+                    {
+                        let resized = block_on(resize_through_table(table, key, capacity, &model));
+                        model.opened_once_at_a_time();
+                        assert_eq!(resized, expected, "resizing to {capacity}");
+                    }
+                    resized_tx.send(()).unwrap();
+                })
+            };
+
+            let fork = {
+                let (model, committed) = (model.clone(), committed.clone());
+                thread::spawn(move || {
+                    let before = committed.load(Ordering::SeqCst);
+                    let forking = block_on(fork_through_table(table, key, &model)).unwrap();
+                    let forked = forking.forked();
+                    forking.close();
+                    model.opened_once_at_a_time();
+                    assert!(forked >= before, "the fork misses a commit made before it");
+                })
+            };
+
+            let second = {
+                let model = model.clone();
+                thread::spawn(move || {
+                    going.recv().unwrap();
+                    let conn = Conn::new(model.clone(), None);
+                    let held = write(table, &conn);
+                    model.open();
+                    model.close();
+                    drop(held);
+                })
+            };
+            for thread in [first, resizer, fork, second] {
+                thread.join().unwrap();
+            }
+            model.opened_once_at_a_time();
+            assert!(table.is_empty(), "the cell is held once all let it go");
+        }
+
+        struct ClosedBehind(Option<(Arc<Model>, Option<ModelHold>)>);
+
+        impl Drop for ClosedBehind {
+            fn drop(&mut self) {
+                if let Some((model, held)) = self.0.take() {
+                    thread::spawn(move || {
+                        model.close();
+                        drop(held);
+                    });
+                }
+            }
+        }
+
+        fn cancelled_fork() {
+            let key = Path::new(KEY);
+            let table: &'static Table = Box::leak(Box::new(CellTable::new()));
+            let model = Model::new();
+            let (forked_tx, forked) = mpsc::channel::<()>();
+            let fork = {
+                let model = model.clone();
+                thread::spawn(move || {
+                    let forking = block_on(table.fork_cell(
+                        key,
+                        Duration::MAX,
+                        |_| async { unreachable!() },
+                        |hold| {
+                            let model = Arc::clone(&model);
+                            async move {
+                                model.open();
+                                Ok(ClosedBehind(Some((model, hold))))
+                            }
+                        },
+                    ))
+                    .unwrap();
+                    forked_tx.send(()).unwrap();
+                    drop(forking);
+                })
+            };
+            let opening = {
+                let model = model.clone();
+                thread::spawn(move || {
+                    forked.recv().unwrap();
+                    let conn = Conn::new(model.clone(), None);
+                    let held = write(table, &conn);
+                    model.open();
+                    model.close();
+                    drop(held);
+                })
+            };
+            fork.join().unwrap();
+            opening.join().unwrap();
+            model.opened_once_at_a_time();
+        }
+
+        #[test]
+        fn cancelled_forks_let_their_paths_go_once_closed_randomly() {
+            *RULES.lock().unwrap() = Rules::ALL;
+            Runner::new(RandomScheduler::new(runs(2000)), config()).run(cancelled_fork);
+        }
+
+        #[test]
+        fn cancelled_forks_let_their_paths_go_once_closed_by_pct() {
+            *RULES.lock().unwrap() = Rules::ALL;
+            Runner::new(PctScheduler::new(3, runs(2000)), config()).run(cancelled_fork);
+        }
+
+        #[test]
+        fn needs_forks_to_hold_their_paths() {
+            *RULES.lock().unwrap() = Rules { forks_hold_their_paths: false, ..Rules::ALL };
+            fails_with("open twice at once", || {
+                Runner::new(RandomScheduler::new(runs(2000)), config()).run(cancelled_fork);
+            });
+        }
+
+        fn resizes_at_once() {
+            let key = Path::new(KEY);
+            let table: &'static Table = Box::leak(Box::new(CellTable::new()));
+            let model = Model::new();
+            let (asks_tx, asks) = mpsc::channel();
+            let conn = Conn::new(model.clone(), Some(asks_tx));
+            let held = write(table, &conn);
+            let guest = {
+                let conn = conn.clone();
+                thread::spawn(move || answer(conn, asks))
+            };
+            let resizers: Vec<_> = [12, 6]
+                .into_iter()
+                .map(|capacity| {
+                    let model = model.clone();
+                    thread::spawn(move || {
+                        block_on(resize_through_table(table, key, capacity, &model))
+                    })
+                })
+                .collect();
+            for resizer in resizers {
+                assert_eq!(resizer.join().unwrap(), Ok(()));
+            }
+            conn.guest.asks.lock().unwrap().take();
+            guest.join().unwrap();
+            let capacity = model.capacity.load(Ordering::SeqCst);
+            let view = conn.guest.view.load(Ordering::SeqCst);
+            assert_eq!(capacity, view, "the cell's capacity and its guest's view differ");
+            drop(held);
+        }
+
+        #[test]
+        fn resizes_at_once_agree_randomly() {
+            *RULES.lock().unwrap() = Rules::ALL;
+            Runner::new(RandomScheduler::new(runs(2000)), config()).run(resizes_at_once);
+        }
+
+        #[test]
+        fn resizes_at_once_agree_by_pct() {
+            *RULES.lock().unwrap() = Rules::ALL;
+            Runner::new(PctScheduler::new(3, runs(2000)), config()).run(resizes_at_once);
+        }
+
+        #[test]
+        fn needs_resizes_one_at_a_time() {
+            *RULES.lock().unwrap() = Rules { resizes_one_at_a_time: false, ..Rules::ALL };
+            fails_with("the cell's capacity and its guest's view differ", || {
+                Runner::new(RandomScheduler::new(runs(2000)), config()).run(resizes_at_once);
+            });
+        }
+
+        #[test]
+        fn requests_race_opens_and_closes_randomly() {
+            *RULES.lock().unwrap() = Rules::ALL;
+            Runner::new(RandomScheduler::new(runs(2000)), config()).run(run_with);
+        }
+
+        #[test]
+        fn requests_race_opens_and_closes_by_pct() {
+            *RULES.lock().unwrap() = Rules::ALL;
+            Runner::new(PctScheduler::new(3, runs(2000)), config()).run(run_with);
+        }
+
+        #[test]
+        fn needs_resizes_through_the_holder() {
+            *RULES.lock().unwrap() = Rules { through_holder: false, ..Rules::ALL };
+            fails_with("open twice at once", || {
+                Runner::new(RandomScheduler::new(runs(2000)), config()).run(run_with);
+            });
+        }
+
+        #[test]
+        fn needs_the_guest_to_agree() {
+            *RULES.lock().unwrap() = Rules { guest_agrees: false, ..Rules::ALL };
+            fails_with("shrunk without agreeing", || {
+                Runner::new(RandomScheduler::new(runs(2000)), config()).run(run_with);
+            });
+        }
+
+        #[test]
+        fn needs_forks_through_the_holder() {
+            *RULES.lock().unwrap() = Rules { fork_through_holder: false, ..Rules::ALL };
+            fails_with("open twice at once", || {
+                Runner::new(RandomScheduler::new(runs(2000)), config()).run(run_with);
+            });
+        }
+
+        #[test]
+        fn needs_one_holder() {
+            *RULES.lock().unwrap() = Rules { one_holder: false, ..Rules::ALL };
+            fails_with("open twice at once", || {
+                Runner::new(RandomScheduler::new(runs(2000)), config()).run(run_with);
+            });
+        }
+    }
 }
 
 #[cfg(all(test, not(feature = "shuttle")))]
@@ -1494,5 +2174,27 @@ mod tests {
         let (_mounted, kept) = block_on(table.hold_mounted(other, Duration::ZERO)).unwrap();
         assert_eq!(kept, Some("kept"));
         assert!(block_on(table.hold_mounted(key, Duration::ZERO)).is_ok());
+    }
+
+    /// TASK-79.41: a shrink its guest leaves unanswered tells the guest the cell's capacity as it
+    /// stays, as an answer coming after, the guest having taken the shrink, shrinks nothing.
+    #[test]
+    fn shrinks_unanswered_tell_the_guest_the_capacity_kept() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+        let told = std::sync::Mutex::new(Vec::new());
+        let shrinking = Shrinking::new();
+        let wait = Duration::from_millis(10);
+        let resized = runtime.block_on(shrinking.resize(
+            6,
+            wait,
+            || Ok((8, 1)),
+            |_| async { panic!("the guest never took the shrink") },
+            |capacity, ask| {
+                told.lock().unwrap().push((capacity, ask));
+                Ok(())
+            },
+        ));
+        assert_eq!(resized, Err(Errno::ETIMEDOUT));
+        assert_eq!(*told.lock().unwrap(), [(6, true), (8, false)]);
     }
 }

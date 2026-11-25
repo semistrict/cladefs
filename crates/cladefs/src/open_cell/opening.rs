@@ -372,7 +372,7 @@ impl OpenCell {
             halt,
             fetcher,
             closed: false,
-            kept_until_closed: Default::default(),
+            on_close: Default::default(),
         })
     }
 

@@ -168,9 +168,6 @@ pub mod stacks;
 mod caller;
 // The extent daemon's (Linux), and its tests' everywhere.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-mod cell_requests;
-// The extent daemon's (Linux), and its tests' everywhere.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod cell_table;
 #[cfg(test)]
 mod test_checkpoints;

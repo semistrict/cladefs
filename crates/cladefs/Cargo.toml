@@ -12,7 +12,7 @@ publish = false
 # here and in sqlite_cladefs', look for on the host's disk beside cells (`testing`); and the
 # tests' KMS, which tests' processes and benches encrypt under (`remote::testing`, TASK-411.28).
 testing = ["extent_keys/testing"]
-# The extent daemon's registry of open cells and its requests on them (cell_requests,
+# The extent daemon's registry of open cells and its resize/fork coordination (cell_table,
 # TASK-44.6), and the kernel and its DAX windows, with their userfaultfd stage (dax,
 # TASK-44.3), on Shuttle's locks, whose scheduler then chooses every interleaving of their tests'
 # threads. Only for those tests: `cargo nextest run -p cladefs --features shuttle --lib

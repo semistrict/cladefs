@@ -4663,20 +4663,15 @@ fn inspections_close_the_last_cell_reference_away_from_the_reader() {
     use futures::FutureExt as _;
     use std::sync::Arc;
 
-    struct Closed(std::sync::mpsc::Sender<std::thread::ThreadId>);
-    impl Drop for Closed {
-        fn drop(&mut self) {
-            self.0.send(std::thread::current().id()).unwrap();
-        }
-    }
-
     host();
     let dir = tempfile::tempdir().unwrap();
     let cell =
         Arc::new(control(crate::OpenCell::create(dir.path().join("store"), 1 << 24)).unwrap());
     let id = cell.cell();
     let (closed, observed) = std::sync::mpsc::channel();
-    cell.keep_until_closed(Box::new(Closed(closed)));
+    cell.on_close(move || {
+        closed.send(std::thread::current().id()).unwrap();
+    });
     let reader = std::thread::current().id();
     let read = control(async {
         super::cells::inspect(super::Daemon::process(), cell.clone(), |open| {

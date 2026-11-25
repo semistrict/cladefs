@@ -14,8 +14,7 @@ use super::codec::{
 use super::reads::Kind;
 use super::stats;
 use super::wire::*;
-use crate::cell_requests::{self, Guest, Resizes, Shrinking};
-use crate::cell_table::Writer;
+use crate::cell_table::{Shrinking, Writer};
 use crate::{Commit, MappingContents, VolatileSlice, VolatileSliceMut, WindowMapping};
 use crate::{DaxWindow, Errno, OpenCell, SecondStage};
 use bucket_cell::trace;
@@ -1354,16 +1353,13 @@ impl Drop for Connection {
         let phase = std::mem::replace(phase, Phase::Unopened);
         let alive = self.alive.take();
         let closed = match &phase {
-            Phase::Writing(hold) => Some(cells::Closed {
-                table: self.tenant.daemon.table.clone(),
-                key: hold.key().to_owned(),
-            }),
+            Phase::Writing(hold) => Some((self.tenant.daemon.table.clone(), hold.key().to_owned())),
             Phase::Unopened | Phase::Opening => None,
         };
         drop(self.tenant.daemon.spawn(async move {
             if let Some(open_cell) = open_cell {
-                if let Some(closed) = closed {
-                    open_cell.keep_until_closed(Box::new(closed));
+                if let Some((table, key)) = closed {
+                    open_cell.on_close(move || table.closed(&key));
                 }
                 crate::open_cell::release(open_cell).await;
             }
@@ -2093,23 +2089,30 @@ impl Connection {
     pub(super) fn queued(&self) -> u64 {
         self.peer.sender.queued()
     }
-}
 
-impl Resizes for Connection {
     /// Sets its cell's capacity to `capacity` bytes (the control API's `ResizeCell`): grows it,
     /// and tells the guest; or asks the guest to shrink, and shrinks it if the guest does, holding
     /// no thread while it waits for the guest's answer (TASK-43.6). The cell's I/O runs on a
     /// blocking thread.
-    async fn resize(&self, capacity: u64) -> Result<(), Errno> {
-        let open_cell = cells::Live(self.cell().ok_or(Errno::EBADF)?.clone());
-        cell_requests::resize_held(&open_cell, self, &self.shrinking, capacity, SHRINK_WAIT).await
+    pub(super) async fn resize(&self, capacity: u64) -> Result<(), Errno> {
+        let open_cell = self.cell().ok_or(Errno::EBADF)?.clone();
+        let resized = self
+            .shrinking
+            .resize(
+                capacity,
+                SHRINK_WAIT,
+                || cells::capacity(&open_cell),
+                |cap| open_cell.set_capacity(cap),
+                |cap, ask| self.tell_capacity(cap, ask),
+            )
+            .await;
+        crate::open_cell::release(open_cell).await;
+        resized
     }
-}
 
-impl Guest for Connection {
     /// Tells the VM process the cell's capacity is `capacity` bytes, or, if `ask`, asks its guest
     /// to shrink to it ([`CAPACITY`]).
-    fn tell(&self, capacity: u64, ask: bool) -> Result<(), Errno> {
+    fn tell_capacity(&self, capacity: u64, ask: bool) -> Result<(), Errno> {
         let told = Told::Capacity { capacity, ask }.encode();
         self.peer.sender.send(told, Vec::new(), &[]).map_err(|err| {
             log::warn!("cladefsd: telling a VM process its capacity: {err}");
