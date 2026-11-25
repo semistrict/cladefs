@@ -15,15 +15,15 @@
 //!   `HooksHandle` holds a `Weak<HooksInner>`.
 //!
 //! - **Cleanup & Synchronization**: When `Hooks<'a>` drops, it drops its `Arc<HooksInner>` and
-//!   waits for a message on an `mpsc` channel. Active readers (`on_*` methods) temporarily upgrade
+//!   waits on a `Mutex`/`Condvar` latch. Active readers (`on_*` methods) temporarily upgrade
 //!   the `Weak` reference to an `Arc`, ensuring `HooksInner` remains valid during callback
-//!   execution. When all readers finish and `HooksInner` drops, `SendOnDrop` (the last field of
-//!   `HooksInner`) drops after `HooksTable`, sending the completion signal to `detach()`.
+//!   execution. When all readers finish and `HooksInner` drops, `SignalOnDrop` (the last field of
+//!   `HooksInner`) drops after `HooksTable`, signaling `detach()`.
 
 use crate::object_store::transaction::Transaction;
 use anyhow::Error;
 use fuchsia_sync::Mutex;
-use std::sync::{Arc, Weak, mpsc};
+use std::sync::{Arc, Condvar, Mutex as StdMutex, Weak};
 
 type PreCommitHookFn<'a> = dyn Fn(&Transaction<'_>) -> Result<(), Error> + Send + Sync + 'a;
 type SyncHookFn<'a> = dyn Fn() + Send + Sync + 'a;
@@ -35,39 +35,43 @@ struct HooksTable {
     waiting_for_journal_space: Option<Arc<SyncHookFn<'static>>>,
 }
 
-struct SendOnDrop(mpsc::Sender<()>);
+// cladefs: `Mutex<bool>` + `Condvar` instead of `std::sync::mpsc` so `guest/rust/std` needs no
+// `mpsc` implementation (board 11687).
+struct SignalOnDrop(Arc<(StdMutex<bool>, Condvar)>);
 
-impl Drop for SendOnDrop {
+impl Drop for SignalOnDrop {
     fn drop(&mut self) {
-        let _ = self.0.send(());
+        let (done, cvar) = &*self.0;
+        *done.lock().unwrap() = true;
+        cvar.notify_all();
     }
 }
 
 struct HooksInner {
     table: Mutex<HooksTable>,
-    // `_send_on_drop` MUST be the last field in `HooksInner` so that Rust's struct field drop
-    // order drops `table` (and all registered closures) BEFORE `_send_on_drop` sends the
-    // completion signal.
-    _send_on_drop: SendOnDrop,
+    // `_signal_on_drop` MUST be the last field in `HooksInner` so that Rust's struct field drop
+    // order drops `table` (and all registered closures) BEFORE `_signal_on_drop` signals the
+    // completion latch.
+    _signal_on_drop: SignalOnDrop,
 }
 
 /// Used to register test hooks for an `FxFilesystem`.
 pub struct Hooks<'a> {
     inner: Option<Arc<HooksInner>>,
-    receiver: mpsc::Receiver<()>,
+    done: Arc<(StdMutex<bool>, Condvar)>,
     _phantom: std::marker::PhantomData<&'a ()>,
 }
 
 impl<'a> Hooks<'a> {
     /// Creates a new `Hooks` instance and an associated `HooksHandle`.
     pub fn new() -> (Self, Arc<HooksHandle>) {
-        let (sender, receiver) = mpsc::channel();
+        let done = Arc::new((StdMutex::new(false), Condvar::new()));
         let inner = Arc::new(HooksInner {
             table: Mutex::new(HooksTable::default()),
-            _send_on_drop: SendOnDrop(sender),
+            _signal_on_drop: SignalOnDrop(Arc::clone(&done)),
         });
         let handle = Arc::new(HooksHandle { inner: Arc::downgrade(&inner) });
-        (Self { inner: Some(inner), receiver, _phantom: std::marker::PhantomData }, handle)
+        (Self { inner: Some(inner), done, _phantom: std::marker::PhantomData }, handle)
     }
 
     /// Sets the hook executed before committing a transaction.  This hook is called before
@@ -119,7 +123,11 @@ impl<'a> Hooks<'a> {
     fn detach(&mut self) {
         if let Some(inner) = self.inner.take() {
             drop(inner);
-            let _ = self.receiver.recv();
+            let (done, cvar) = &*self.done;
+            let mut guard = done.lock().unwrap();
+            while !*guard {
+                guard = cvar.wait(guard).unwrap();
+            }
         }
     }
 }

@@ -3,7 +3,6 @@
 # of the algorithm's own, which no other place shares: its killer holds it. A new mutant goes under
 # a rule, or here.
 patch-0010-reads-replace-their-entries: the kernel's fs/dax.c, as guest/linux/patches change it: the rules run on the guest's own C
-patch-0012-invalidate-unmaps-after: the kernel's fs/dax.c, as guest/linux/patches change it: the rules run on the guest's own C
 task-147-growing: how far a write past the end grows the file left unpublished (file->growing): one field's protocol, no shape another shares
 task-149.14.2-growth-keeps-tail: guest/sim's model of Fxfs, not the guest's C: its drifts are crates/fxfs-sim-diff's to find
 task-149.14.2-partial-write-keeps-past-end: guest/sim's model of Fxfs, not the guest's C: its drifts are crates/fxfs-sim-diff's to find

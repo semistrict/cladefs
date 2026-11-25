@@ -279,13 +279,6 @@ impl Filesystem {
         Ok(())
     }
 
-    /// cladefs: seals what is open, as the host asks: syncs the journal, which commits the device,
-    /// ordered, not uploaded, sealing every extent open. Another guest's writable MAP was refused
-    /// for want of the memory they hold, which only their seal lets go of (TASK-153.15).
-    pub async fn seal(&self) -> Result<(), Error> {
-        self.filesystem.sync(SyncOptions { flush_device: true, ..Default::default() }).await
-    }
-
     /// cladefs: freezes the filesystem, each of whose volumes the VFS has synced and stopped the
     /// writers of (fsfreeze): holds its journal's compactions, syncs, holds its commits, journals
     /// what committed meanwhile, and closes the device to writes, frees and commits, sealing what
