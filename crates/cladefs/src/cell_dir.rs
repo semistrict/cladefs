@@ -290,6 +290,7 @@ pub(crate) fn inherit_attached_on(
     from: &Path,
     to: &Path,
 ) -> Result<()> {
+    fail::fail_point!("cell_dir::inherit_attached", |_| Err(Errno::EIO));
     let attached = attached(from)?;
     if !attached.is_empty() {
         write_attached_on(local, to, &attached)?;
@@ -412,6 +413,51 @@ mod tests {
         assert_eq!(public_cells(to.path()), Ok(BTreeSet::from([5])));
         let parent = host_fs::canonicalize(&from.path()).unwrap();
         assert_eq!(ancestry(to.path()), Ok(vec![(4, parent), (3, "/cells/grandparent".into())]));
+    }
+
+    /// board 5388: if copying attached bases / public markers into a version directory fails,
+    /// `OpenCell::create_at_version_with_on` discards the unmade directory rather than leaving it
+    /// marked made; retrying succeeds with the attached bases and public markers intact.
+    #[test]
+    fn failed_attached_inheritance_discards_version_dir_and_retry_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("from");
+        let to = dir.path().join("version");
+        host_fs::create_dir(&from).unwrap();
+        let host = crate::Host::process();
+        let bases = vec![(vec![0x1a, 0x2b], PathBuf::from("/cells/base"))];
+        write_attached_on(host.local(), &from, &bases).unwrap();
+        mark_public(&from, &[7]).unwrap();
+
+        let cell = local_cell::CellId { tenant: 1, id: 9 };
+        let desc = local_cell::Description { block_size: 4096, capacity: 1 << 20, cell };
+
+        // Fail inheritance once: the version directory must be discarded, not left marked made.
+        fail::cfg("cell_dir::inherit_attached", "1*return->off").unwrap();
+        let first = crate::OpenCell::create_at_version_with_on(
+            host,
+            &to,
+            ("memory:///cells", bucket_cell::cell::Kind::Fxfs),
+            desc,
+            1,
+            || inherit_attached_on(host.local(), &from, &to).map_err(crate::Error::new),
+        );
+        assert!(first.is_err(), "expected injected inheritance failure");
+        assert!(!host_fs::exists(&to), "failed version dir must be discarded, not marked made");
+
+        // Retrying succeeds and preserves both attached bases and public markers.
+        crate::OpenCell::create_at_version_with_on(
+            host,
+            &to,
+            ("memory:///cells", bucket_cell::cell::Kind::Fxfs),
+            desc,
+            1,
+            || inherit_attached_on(host.local(), &from, &to).map_err(crate::Error::new),
+        )
+        .unwrap();
+        assert!(!local_cell::unmade_host_on(host.local(), &to));
+        assert_eq!(attached(&to), Ok(bases));
+        assert_eq!(public_cells(&to), Ok(BTreeSet::from([7])));
     }
 
     #[test]

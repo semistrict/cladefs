@@ -1709,6 +1709,34 @@ impl OpenCell {
         Self::create_at_version(path, (url, kind), self.local.description(), id)
     }
 
+    /// cladefs: makes a cell directory at `path` on `host`, of the version `id` of `description`,
+    /// running `extra` before removing the `unmade` marker so a failure in `extra` (such as copying
+    /// attached bases or public markers, board 5388) discards the directory rather than leaving it
+    /// marked made.
+    pub(crate) fn create_at_version_with_on(
+        host: &crate::Host,
+        path: &Path,
+        (url, kind): (&str, Kind),
+        description: local_cell::Description,
+        id: u64,
+        extra: impl FnOnce() -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        host_fs::create_dir(path).map_err(|err| match err.kind() {
+            std::io::ErrorKind::AlreadyExists => Error::new(Errno::EEXIST),
+            _ => Error::new(anyhow::Error::new(err).context(format!("making {}", path.display()))),
+        })?;
+        let made =
+            local_cell::create_host_at_version_on(host.local(), path, description, url, kind, id)
+                .map_err(Error::new)
+                .and_then(|()| extra())
+                .and_then(|()| local_cell::made_host_on(host.local(), path).map_err(Error::new));
+        if let Err(err) = made {
+            crate::host_cell::discard_on(host, path);
+            return Err(err);
+        }
+        Ok(())
+    }
+
     /// cladefs: makes a cell directory at `path` on `host`, of the version `id` of `description`.
     pub(crate) fn create_at_version_on(
         host: &crate::Host,
@@ -1717,18 +1745,7 @@ impl OpenCell {
         description: local_cell::Description,
         id: u64,
     ) -> Result<(), Error> {
-        host_fs::create_dir(path).map_err(|err| match err.kind() {
-            std::io::ErrorKind::AlreadyExists => Error::new(Errno::EEXIST),
-            _ => Error::new(anyhow::Error::new(err).context(format!("making {}", path.display()))),
-        })?;
-        let made =
-            local_cell::create_host_at_version_on(host.local(), path, description, url, kind, id)
-                .and_then(|()| local_cell::made_host_on(host.local(), path));
-        if let Err(err) = made {
-            crate::host_cell::discard_on(host, path);
-            return Err(Error::new(err));
-        }
-        Ok(())
+        Self::create_at_version_with_on(host, path, (url, kind), description, id, || Ok(()))
     }
 
     /// cladefs: makes a cell directory at `path`, which must not exist, of the version `id` of the

@@ -941,22 +941,22 @@ async fn opened_version(
         let url = crate::host_cell::bucket_for(&made).map_err(|_| Errno::EIO)?;
         let description =
             local_cell::Description { block_size: OpenCell::BLOCK_SIZE, capacity, cell };
-        OpenCell::create_at_version_on(&host, &made, (&url, kind), description, version).map_err(
-            |err| errno_of(format_args!("opening version {version} of {cell} here"), err),
-        )?;
-        // What is attached to the cell the version was made of, if made here, is attached to
-        // the version's forks, a restored VM's too.
-        match crate::host_cell::version_made_of_on(&host, cell, version) {
-            Some(of) => {
-                crate::cell_dir::inherit_attached_on(host.local(), &of, &made).map_err(|err| {
-                    errno_of(
-                        format_args!("inheriting what is attached to {}", of.display()),
-                        err.into(),
-                    )
-                })
-            }
-            None => Ok(()),
-        }
+        // What is attached to the cell the version was made of, if made here, is inherited before
+        // the version directory is marked made (board 5388), so a failed copy discards the
+        // directory rather than leaving later restores/forks missing attached bases.
+        OpenCell::create_at_version_with_on(
+            &host,
+            &made,
+            (&url, kind),
+            description,
+            version,
+            || match crate::host_cell::version_made_of_on(&host, cell, version) {
+                Some(of) => crate::cell_dir::inherit_attached_on(host.local(), &of, &made)
+                    .map_err(crate::Error::new),
+                None => Ok(()),
+            },
+        )
+        .map_err(|err| errno_of(format_args!("opening version {version} of {cell} here"), err))
     })
     .await?;
     Ok(dir)
