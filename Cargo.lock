@@ -902,6 +902,7 @@ dependencies = [
  "formats",
  "fprint",
  "futures",
+ "getrandom 0.2.17",
  "host_fs",
  "http-body-util",
  "humantime",
@@ -1544,6 +1545,7 @@ dependencies = [
  "extent_keys",
  "formats",
  "fprint",
+ "ruzstd",
  "serde",
  "storage_device",
  "thiserror",
@@ -1965,6 +1967,21 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "gc_wasm"
+version = "0.1.0"
+dependencies = [
+ "base32_id",
+ "bucket_cell",
+ "bytes",
+ "futures",
+ "js-sys",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
 ]
 
 [[package]]
@@ -4072,6 +4089,12 @@ dependencies = [
  "tempfile",
  "wait-timeout",
 ]
+
+[[package]]
+name = "ruzstd"
+version = "0.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7c1c839d570d835527c9a5e4db7cb2198683a988cb9d7293fc8674e6bd58fc8"
 
 [[package]]
 name = "ryu"

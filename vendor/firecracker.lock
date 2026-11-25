@@ -935,6 +935,7 @@ dependencies = [
  "formats",
  "fprint",
  "futures",
+ "getrandom 0.2.17",
  "host_fs",
  "humantime",
  "hyper",

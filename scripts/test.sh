@@ -57,7 +57,7 @@ if part clippy; then
     cladefs_crates=(
         -p base32_id -p block_device -p bucket_cell -p cladefs -p cladefs-examples
         -p extent_frame -p extent_keys -p formats -p fxfs-automount -p fxfs-posix
-        -p fxfs-sim-diff -p host_fs -p local_cell -p node_local -p sqlite_cladefs
+        -p fxfs-sim-diff -p gc_wasm -p host_fs -p local_cell -p node_local -p sqlite_cladefs
         -p virtio_extent
     )
     cladefs_lints=(
@@ -68,6 +68,8 @@ if part clippy; then
         "${cladefs_crates[@]}" --tests --examples -- "${cladefs_lints[@]}"
     cargo clippy --locked --manifest-path "$root/Cargo.toml" --no-deps \
         "${cladefs_crates[@]}" --lib --bins -- "${cladefs_lints[@]}"
+    cargo clippy --locked --manifest-path "$root/Cargo.toml" --no-deps \
+        -p gc_wasm --target wasm32-unknown-unknown -- "${cladefs_lints[@]}"
     cargo clippy --locked --manifest-path "$root/Cargo.toml" --no-deps -p local_cell -p cladefs \
         --features shuttle --tests -- "${cladefs_lints[@]}"
     cargo clippy --locked --manifest-path "$root/Cargo.toml" --no-deps -p cladefs -p virtio_extent \
