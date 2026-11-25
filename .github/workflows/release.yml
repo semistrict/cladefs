@@ -22,6 +22,10 @@ on:
         description: Mark the GitHub release as Latest
         type: boolean
         default: true
+      binaries-only:
+        description: Build and publish cladefsd + firecracker only (skip guest kernels)
+        type: boolean
+        default: false
 
 # cladefs: the token reads the repository and nothing more by default (board 8603); only the
 # publish job grants contents: write to upload release assets.
@@ -47,14 +51,21 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: true
-      - name: Install build tools
+      - name: Install build tools (amd64)
+        if: matrix.goarch == 'amd64'
         uses: ./.github/actions/apt-install
         with:
           packages: clang libclang-dev musl-tools binutils libseccomp-dev
+      - name: Install build tools (arm64)
+        if: matrix.goarch == 'arm64'
+        run: |
+          sudo apt-get update -o APT::Update::Error-Mode=any
+          sudo apt-get install -y clang libclang-dev musl-tools binutils libseccomp-dev
       - name: Rust, as rust-toolchain.toml pins it
         run: |
           rustup toolchain install
           rustup target add "${{ matrix.musl }}"
+          (cd vendor/firecracker && rustup target add "${{ matrix.musl }}")
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -74,7 +85,8 @@ jobs:
           musl_cflags="CFLAGS_${musl//-/_}=-idirafter /usr/include -idirafter /usr/include/$(uname -m)-linux-gnu"
           env "$musl_cflags" scripts/firecracker-cargo.sh build --release -p firecracker \
             --features cladefs --target "$musl"
-          fc_bin="target/firecracker/$musl/release/firecracker"
+          fc_bin="target/firecracker/build/cargo_target/$musl/release/firecracker"
+          [[ -x $fc_bin ]] || fc_bin="target/firecracker/$musl/release/firecracker"
           out="$(ldd "$fc_bin" 2>&1 || true)"
           echo "firecracker: $out"
           grep -qE 'not a dynamic executable|statically linked' <<< "$out"
@@ -88,6 +100,7 @@ jobs:
 
   guest-kernel:
     name: guest kernel (${{ matrix.goarch }})
+    if: ${{ inputs.binaries-only != true }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     strategy:
@@ -104,10 +117,16 @@ jobs:
             runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install guest kernel build tools
+      - name: Install guest kernel build tools (amd64)
+        if: matrix.goarch == 'amd64'
         uses: ./.github/actions/apt-install
         with:
           packages: flex bison bc cpio libelf-dev libssl-dev dwarves binutils
+      - name: Install guest kernel build tools (arm64)
+        if: matrix.goarch == 'arm64'
+        run: |
+          sudo apt-get update -o APT::Update::Error-Mode=any
+          sudo apt-get install -y flex bison bc cpio libelf-dev libssl-dev dwarves binutils
       - name: Rust, as rust-toolchain.toml pins it
         run: rustup toolchain install
       - name: Build guest kernel
@@ -128,6 +147,7 @@ jobs:
   publish:
     name: publish GitHub release
     needs: [binaries, guest-kernel]
+    if: ${{ !cancelled() && needs.binaries.result == 'success' && (inputs.binaries-only == true || needs.guest-kernel.result == 'success') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     # Needs contents: write solely to create/update the GitHub Release and upload its assets.
@@ -144,16 +164,20 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           INPUT_TAG: ${{ inputs.tag }}
           MARK_LATEST: ${{ inputs.mark-latest }}
+          BINARIES_ONLY: ${{ inputs.binaries-only }}
         run: |
           set -euo pipefail
           cd release-assets
-          sha256sum \
-            cladefsd-linux-amd64 \
-            cladefsd-linux-arm64 \
-            firecracker-linux-amd64 \
-            firecracker-linux-arm64 \
-            vmlinux-linux-amd64 \
-            Image-linux-arm64 > SHA256SUMS
+          assets=(
+            cladefsd-linux-amd64
+            cladefsd-linux-arm64
+            firecracker-linux-amd64
+            firecracker-linux-arm64
+          )
+          if [[ ${BINARIES_ONLY:-false} != "true" ]]; then
+            assets+=(vmlinux-linux-amd64 Image-linux-arm64)
+          fi
+          sha256sum "${assets[@]}" > SHA256SUMS
           cat SHA256SUMS
 
           short_sha="${GITHUB_SHA:0:8}"
@@ -170,19 +194,18 @@ jobs:
             latest_flag="--latest=false"
           fi
 
-          notes="Static musl release binaries (cladefsd, firecracker with cladefs feature + seccomp) and Firecracker guest kernels (x86_64 vmlinux and arm64 Image with BTF, dynamic ftrace, kprobes, syscall tracepoints, BPF JIT, schedstats, and nested KVM) built from ${GITHUB_REPOSITORY}@${GITHUB_SHA}."
+          if [[ ${BINARIES_ONLY:-false} == "true" ]]; then
+            notes="Static musl release binaries (cladefsd, firecracker with cladefs feature + seccomp) built from ${GITHUB_REPOSITORY}@${GITHUB_SHA}."
+          else
+            notes="Static musl release binaries (cladefsd, firecracker with cladefs feature + seccomp) and Firecracker guest kernels (x86_64 vmlinux and arm64 Image with BTF, dynamic ftrace, kprobes, syscall tracepoints, BPF JIT, schedstats, and nested KVM) built from ${GITHUB_REPOSITORY}@${GITHUB_SHA}."
+          fi
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" --clobber \
-              cladefsd-linux-amd64 cladefsd-linux-arm64 \
-              firecracker-linux-amd64 firecracker-linux-arm64 \
-              vmlinux-linux-amd64 Image-linux-arm64 SHA256SUMS
+            gh release upload "$tag" --clobber "${assets[@]}" SHA256SUMS
           else
             gh release create "$tag" \
               --target "$GITHUB_SHA" \
               "$latest_flag" \
               --title "cladefs $short_sha" \
               --notes "$notes" \
-              cladefsd-linux-amd64 cladefsd-linux-arm64 \
-              firecracker-linux-amd64 firecracker-linux-arm64 \
-              vmlinux-linux-amd64 Image-linux-arm64 SHA256SUMS
+              "${assets[@]}" SHA256SUMS
           fi
