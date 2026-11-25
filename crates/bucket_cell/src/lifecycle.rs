@@ -247,6 +247,20 @@ async fn retire_one(bucket: &impl Bucket, key: &str) -> Result<(), bucket::Refus
     bucket::delete(bucket, key).await
 }
 
+/// cladefs: whether the host of incarnation `incarnation` was decommissioned, as the bucket of
+/// `parent`, where its ephemeral cells forked from `parent` have their references, says: its
+/// tombstone there ([`layout::decommissioned`], board 8519). Its decommissioning writes one in
+/// every bucket before it retires anything, and buckets added later copy the root's tombstones
+/// before their identity is written (board 9966, hotbed question 543).
+pub async fn decommissioned(
+    bucket: &impl Bucket,
+    incarnation: u64,
+    parent: CellId,
+) -> Result<bool, bucket::Refused> {
+    let tombstone = layout::decommissioned(layout::ephemeral_bucket(parent), incarnation);
+    Ok(bucket::head(bucket, &tombstone).await?.is_some())
+}
+
 #[cfg(feature = "full")]
 mod full_ops {
     use super::*;
@@ -340,19 +354,6 @@ mod full_ops {
             return Err(Error::Decommissioned(incarnation));
         }
         Ok(())
-    }
-
-    /// cladefs: whether the host of incarnation `incarnation` was decommissioned, as the bucket of
-    /// `parent`, where its ephemeral cells forked from `parent` have their references, says: its
-    /// tombstone there ([`layout::decommissioned`], board 8519). Its decommissioning writes one in
-    /// every bucket before it retires anything.
-    pub async fn decommissioned(
-        bucket: &impl Bucket,
-        incarnation: u64,
-        parent: CellId,
-    ) -> Result<bool, bucket::Refused> {
-        let tombstone = layout::decommissioned(layout::ephemeral_bucket(parent), incarnation);
-        Ok(bucket::head(bucket, &tombstone).await?.is_some())
     }
 
     /// cladefs: deletes the reference of `child`, an ephemeral cell of the host of incarnation
@@ -473,29 +474,65 @@ mod full_ops {
         pub left: usize,
     }
 
+    /// cladefs: re-reads the authoritative set of buckets recorded in the registry: through
+    /// `Bucket::ephemeral_buckets` when routed (which reads the root bucket's registry directly),
+    /// else [`ephemeral_buckets`].
+    async fn reread_ephemeral_buckets(bucket: &impl Bucket) -> Result<BTreeSet<u16>, Error> {
+        match bucket.ephemeral_buckets() {
+            Some(fut) => fut.await,
+            None => ephemeral_buckets(bucket).await,
+        }
+    }
+
     /// cladefs: decommissions the host of incarnation `incarnation`, gone for good, its disk lost
     /// (doc-25, TASK-698.3; specs/ephemeral), in the buckets numbered `buckets`, every bucket a
     /// reference of its may be in ([`ephemeral_buckets`], board 8517): its tombstone written in each
     /// first ([`layout::decommissioned`], board 8519), so that no host of it refers to anything there
-    /// from then on; then the references of its ephemeral cells, which no host holds any more, `most`
-    /// of them at most, deleted in batches ([`bucket::delete_all`], board 8523), then their index
-    /// entries: stopped between, the entries left find the references a call again deletes, as
-    /// deleting what is gone is no error. Returns how many it retired, and left. Its operator's to
-    /// call, for an incarnation no host has: a host of it still holding its cells would read what it
-    /// no longer keeps, and refuses to start, or fork, once it reads the tombstone. A bucket added
-    /// after it holds no tombstone of it (board 9966); a reference whose write lands after its entry
-    /// was deleted here stands unfound (board 9968).
+    /// from then on; then the root registry re-read so any bucket added concurrently (whose
+    /// `identity::add` listed root tombstones before our root write) gets its tombstone and is
+    /// listed too (board 9966, hotbed question 543); then the references of its ephemeral cells,
+    /// which no host holds any more, `most` of them at most, deleted in batches
+    /// ([`bucket::delete_all`], board 8523), then their index entries: stopped between, the entries
+    /// left find the references a call again deletes, as deleting what is gone is no error. Any
+    /// in-flight reference PUT from the lost host that lands after its index entry is deleted here
+    /// is retired by the collector by this tombstone (board 9968, hotbed question 544). Returns how
+    /// many it retired, and left. Its operator's to call, for an incarnation no host has: a host of
+    /// it still holding its cells would read what it no longer keeps, and refuses to start, or fork,
+    /// once it reads the tombstone.
     pub async fn decommission(
         bucket: &impl Bucket,
         buckets: &BTreeSet<u16>,
         incarnation: u64,
         most: usize,
     ) -> Result<Decommissioned, Error> {
-        for &number in buckets {
+        let mut all = buckets.clone();
+        for &number in &all {
             bucket::create(bucket, &layout::decommissioned(number, incarnation), Vec::new())
                 .await?;
         }
-        let references = ephemeral_references(bucket, buckets, incarnation).await?;
+        // cladefs: Dekker barrier with `identity::add` on the root bucket (board 9966, hotbed
+        // question 543): `identity::add` writes `root/buckets` then lists `root`'s tombstones,
+        // while we write `root`'s tombstone then re-read `root/buckets`. If `ROOT` was absent from
+        // the caller's initial set and appears now, write `ROOT`'s tombstone and re-read once more
+        // so the barrier holds for every concurrent addition.
+        let mut reread = reread_ephemeral_buckets(bucket).await?;
+        if !all.contains(&crate::identity::ROOT) && reread.contains(&crate::identity::ROOT) {
+            bucket::create(
+                bucket,
+                &layout::decommissioned(crate::identity::ROOT, incarnation),
+                Vec::new(),
+            )
+            .await?;
+            all.insert(crate::identity::ROOT);
+            reread = reread_ephemeral_buckets(bucket).await?;
+        }
+        for number in reread.into_iter().filter(|&number| crate::identity::given(number)) {
+            if all.insert(number) {
+                bucket::create(bucket, &layout::decommissioned(number, incarnation), Vec::new())
+                    .await?;
+            }
+        }
+        let references = ephemeral_references(bucket, &all, incarnation).await?;
         let (retiring, left) = references.split_at(most.min(references.len()));
         let referred: Vec<String> = (retiring.iter())
             .map(|(origin, child)| {
@@ -704,9 +741,9 @@ mod full_ops {
 
 #[cfg(feature = "full")]
 pub use full_ops::{
-    Decommissioned, EphemeralHost, decommission, decommissioned, ephemeral_buckets,
-    ephemeral_hosts, ephemeral_references, fork_ephemeral, fork_version, fork_version_keyed,
-    refer_ephemeral, referenced_at, unrefer_ephemeral,
+    Decommissioned, EphemeralHost, decommission, ephemeral_buckets, ephemeral_hosts,
+    ephemeral_references, fork_ephemeral, fork_version, fork_version_keyed, refer_ephemeral,
+    referenced_at, unrefer_ephemeral,
 };
 
 /// Gives up on `child`, a fork being made of a version that was deleted ([`Made::Forking`]), so

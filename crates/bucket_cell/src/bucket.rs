@@ -377,6 +377,17 @@ pub trait Bucket: BucketSend + BucketSync + 'static {
     fn mirrors(&self) -> Option<&dyn crate::mirror::Here> {
         None
     }
+
+    /// cladefs: the numbers of every bucket an ephemeral cell's reference may live in, including
+    /// any newly recorded in the root bucket's authoritative registry (board 9966, hotbed question
+    /// 543). `None` for an unrouted bucket, whose caller reads its own root directly
+    /// ([`crate::lifecycle::ephemeral_buckets`]).
+    #[cfg(feature = "full")]
+    fn ephemeral_buckets(
+        &self,
+    ) -> Option<BucketFuture<'_, Result<std::collections::BTreeSet<u16>, crate::Error>>> {
+        None
+    }
 }
 
 /// The object at `key`, if any, its reads retried while they fail; refused, [`Refused`].
