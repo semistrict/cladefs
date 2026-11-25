@@ -1738,6 +1738,7 @@ impl OpenCell {
     }
 
     /// cladefs: makes a cell directory at `path` on `host`, of the version `id` of `description`.
+    #[cfg(not(madsim))]
     pub(crate) fn create_at_version_on(
         host: &crate::Host,
         path: &Path,
