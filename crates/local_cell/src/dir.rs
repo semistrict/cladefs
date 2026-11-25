@@ -222,10 +222,36 @@ pub trait Dir: Send + Sync + 'static {
     }
 }
 
-/// The whole of `file`, read as it is: a cell's file that holds no extents' data, whose reads
-/// need not be aligned.
-pub(crate) fn read_file<F: File>(file: &F) -> io::Result<Vec<u8>> {
-    let mut bytes = vec![0; file.size()? as usize];
+/// Maximum size of a cell's description (`store`) or small metadata file (board 9316).
+pub const MAX_DESCRIPTION_BYTES: u64 = 64 << 10;
+
+/// Maximum size of a WAL `start` (metadata + optional root) or replica `incarnation` file
+/// (board 9316).
+pub const MAX_START_BYTES: u64 = 1 << 20;
+
+/// Maximum size of an ephemeral cell's `local-checkpoint` file (board 9316).
+pub const MAX_LOCAL_CHECKPOINT_BYTES: u64 = 64 << 20;
+
+/// Maximum size of a WAL or replica log file (board 9316).
+pub const MAX_LOG_BYTES: u64 = 128 << 20;
+
+/// Maximum size of a raw open-segment file read whole during recovery (board 9316).
+pub const MAX_RAW_SEGMENT_BYTES: u64 = 1 << 30;
+
+/// The whole of `file`, read as it is, refusing any file longer than `max` before allocating
+/// (board 9316): a cell's file that holds no extents' data, whose reads need not be aligned.
+pub(crate) fn read_file<F: File>(file: &F, max: u64) -> io::Result<Vec<u8>> {
+    let size = file.size()?;
+    if size > max {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("file length {size} exceeds limit {max}"),
+        ));
+    }
+    let len = usize::try_from(size).map_err(|_| {
+        io::Error::new(io::ErrorKind::InvalidData, format!("file length {size} overflows usize"))
+    })?;
+    let mut bytes = vec![0; len];
     file.read_at(&mut bytes, 0)?;
     Ok(bytes)
 }

@@ -381,3 +381,96 @@ async fn second_kill_after_reaping_checkpointed_segment_reopens() {
         assert_eq!(byte_of(&cell3, seq), Some(seq as u8 + 1));
     }
 }
+
+/// board 5428: if an ephemeral reopen fails after local recovery (which removed an empty open
+/// segment), retrying must still pick a next segment number past `checkpoint.through` and every
+/// covered segment, so new commits are never overwritten or unlinked by `settle` on a later crash.
+#[tokio::test(flavor = "multi_thread")]
+async fn reopen_after_failed_open_keeps_next_segment_past_checkpoint_through() {
+    let dir = MemDir::new();
+    make(&dir);
+    let cell = open(&dir);
+    for seq in 0..8u64 {
+        commit(&cell, seq, seq as u8 + 1).await;
+    }
+    // Clean close writes the local checkpoint covering segments 0..=7 (`through = Some(7)`).
+    cell.close().await.unwrap();
+    drop(cell);
+
+    // First reopen runs `settle` + `wal::recover` (which removes any empty open segment) and then
+    // fails before `open_ephemeral` completes (dropping `Recovering`).
+    let failed = LocalCell::recover_unmade(dir.clone()).unwrap();
+    drop(failed);
+
+    // Second reopen must still open past `through` (segment >= 8), not segment 0.
+    let cell2 = open(&dir);
+    commit(&cell2, 8, 0x99).await;
+    cell2.wait_framed().await.unwrap();
+    cell2.flush().await.unwrap();
+
+    // Simulate a crash (so `settle` runs on the next reopen before WAL replay).
+    let crashed = dir.crash(0);
+    std::mem::forget(cell2);
+    let cell3 = open(&crashed);
+    for seq in 0..8u64 {
+        assert_eq!(byte_of(&cell3, seq), Some(seq as u8 + 1), "kept extent {seq}");
+    }
+    assert_eq!(byte_of(&cell3, 8), Some(0x99), "post-retry commit must survive settle on crash");
+}
+
+/// board 9316: `LocalCheckpoint::read` refuses a sparse oversized checkpoint file before
+/// allocating memory for its declared size.
+#[test]
+fn oversized_local_checkpoint_is_refused_before_allocating() {
+    struct SparseDir;
+    struct SparseFile;
+    impl crate::File for SparseFile {
+        fn read_at(&self, _buf: &mut [u8], _offset: u64) -> io::Result<()> {
+            panic!("read_at must not be called on an oversized file")
+        }
+        fn write_at(&self, _buf: &[u8], _offset: u64) -> io::Result<()> {
+            unreachable!()
+        }
+        fn sync(&self) -> io::Result<()> {
+            Ok(())
+        }
+        fn size(&self) -> io::Result<u64> {
+            Ok(1u64 << 40) // 1 TiB sparse
+        }
+    }
+    impl crate::Dir for SparseDir {
+        type File = SparseFile;
+        fn create(&self, _path: &str, _data: bool) -> io::Result<Self::File> {
+            unreachable!()
+        }
+        fn open(&self, _path: &str, _data: bool) -> io::Result<Self::File> {
+            Ok(SparseFile)
+        }
+        fn create_dir(&self, _path: &str) -> io::Result<()> {
+            unreachable!()
+        }
+        fn remove(&self, _path: &str) -> io::Result<()> {
+            unreachable!()
+        }
+        fn rename(&self, _from: &str, _to: &str) -> io::Result<()> {
+            unreachable!()
+        }
+        fn link(&self, _from: &str, _to: &str) -> io::Result<()> {
+            unreachable!()
+        }
+        fn list(&self, _path: &str) -> io::Result<Vec<String>> {
+            unreachable!()
+        }
+        fn replace(&self, _path: &str, _bytes: &[u8]) -> io::Result<()> {
+            unreachable!()
+        }
+        fn sync_dir(&self, _path: &str) -> io::Result<()> {
+            Ok(())
+        }
+        fn barrier(&self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let err = LocalCheckpoint::read(&SparseDir).unwrap_err();
+    assert!(err.to_string().contains("exceeds limit"), "expected size limit error, got: {err:#}");
+}

@@ -53,7 +53,10 @@ pub struct ClearFile {
 /// is a log too short to have its header yet; a framed file whose trailer doesn't parse is an
 /// error, naming it.
 pub fn on_disk(dir: &impl Dir) -> io::Result<Option<OnDisk>> {
-    let description = match dir.open(DESCRIPTION, false).and_then(|file| read_file(&file)) {
+    let description = match dir
+        .open(DESCRIPTION, false)
+        .and_then(|file| read_file(&file, crate::MAX_DESCRIPTION_BYTES))
+    {
         Ok(description) => description,
         Err(err) if not_found(&err) => return Ok(None),
         Err(err) => return Err(err),

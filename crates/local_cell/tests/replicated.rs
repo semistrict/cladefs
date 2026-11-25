@@ -1741,3 +1741,186 @@ impl local_cell::upload::Members for Counting {
         self.peers.drop_before(cell, configuration, member)
     }
 }
+
+/// A `MemberLink` wrapper that lets only the first segment log past `base` reach the member and
+/// fails every later log, leaving the member holding only a `continued`-only partial commit.
+struct OnlyFirstLog {
+    inner: Arc<dyn MemberLink>,
+    allowed: Arc<Mutex<Option<u64>>>,
+}
+
+impl MemberLink for OnlyFirstLog {
+    fn append<'a>(
+        &'a self,
+        log: u64,
+        offset: u64,
+        bytes: Vec<u8>,
+    ) -> futures::future::BoxFuture<'a, Result<u64, LinkError>> {
+        Box::pin(async move {
+            let allow = {
+                let mut guard = self.allowed.lock().unwrap();
+                *guard.get_or_insert(log)
+            };
+            if log != allow {
+                return Err(LinkError::Down(format!("blocking log {log} (only {allow} allowed)")));
+            }
+            self.inner.append(log, offset, bytes).await
+        })
+    }
+
+    fn drop_through<'a>(
+        &'a self,
+        through: u64,
+    ) -> futures::future::BoxFuture<'a, Result<(), LinkError>> {
+        self.inner.drop_through(through)
+    }
+}
+
+struct OnlyFirstLogPeers {
+    peers: Peers,
+    allowed: Arc<Mutex<Option<u64>>>,
+}
+
+impl local_cell::upload::Members for OnlyFirstLogPeers {
+    fn me(&self) -> Result<bucket_cell::layout::Member, String> {
+        self.peers.me()
+    }
+
+    fn pick<'a>(
+        &'a self,
+        cell: bucket_cell::layout::CellId,
+        number: u64,
+        f: u8,
+        avoid: &'a [String],
+    ) -> futures::future::BoxFuture<'a, Result<Vec<bucket_cell::layout::Member>, String>> {
+        self.peers.pick(cell, number, f, avoid)
+    }
+
+    fn link(
+        &self,
+        cell: bucket_cell::layout::CellId,
+        configuration: &bucket_cell::layout::Configuration,
+        member: &bucket_cell::layout::Member,
+    ) -> Arc<dyn MemberLink> {
+        Arc::new(OnlyFirstLog {
+            inner: self.peers.link(cell, configuration, member),
+            allowed: self.allowed.clone(),
+        })
+    }
+
+    fn fence<'a>(
+        &'a self,
+        cell: bucket_cell::layout::CellId,
+        configuration: &'a bucket_cell::layout::Configuration,
+        member: &'a bucket_cell::layout::Member,
+        epoch: u64,
+    ) -> futures::future::BoxFuture<'a, Result<Vec<(u64, u64)>, String>> {
+        self.peers.fence(cell, configuration, member, epoch)
+    }
+
+    fn read<'a>(
+        &'a self,
+        cell: bucket_cell::layout::CellId,
+        configuration: &'a bucket_cell::layout::Configuration,
+        member: &'a bucket_cell::layout::Member,
+        log: u64,
+        end: u64,
+    ) -> futures::future::BoxFuture<'a, Result<Vec<u8>, String>> {
+        self.peers.read(cell, configuration, member, log, end)
+    }
+
+    fn drop_before<'a>(
+        &'a self,
+        cell: bucket_cell::layout::CellId,
+        configuration: &'a bucket_cell::layout::Configuration,
+        member: &'a bucket_cell::layout::Member,
+    ) -> futures::future::BoxFuture<'a, Result<(), String>> {
+        self.peers.drop_before(cell, configuration, member)
+    }
+}
+
+/// board 5398: a takeover whose fenced members hold only a `continued`-only partial segment of an
+/// incomplete multi-segment commit must neither spool that incomplete seed onto the new
+/// configuration nor let the new writer reuse a seeded log number and lose acknowledged commits.
+#[tokio::test(flavor = "multi_thread")]
+async fn takeover_seeded_with_continued_only_segment_preserves_new_commits() {
+    let host = replicated_host().await;
+    let all = directories(&["a", "b", "c", "d", "e"]);
+    let lost = Lost::default();
+    let peers = |me: &str| Peers { me: me.into(), all: all.clone(), lost: lost.clone() };
+
+    let writer = Host { runtime: host_runtime::HostRuntime::new(), bucket: host.bucket.clone() };
+    let dir = MemDir::new();
+    LocalCell::make(&dir, DESCRIPTION, Some(URL), None).unwrap();
+    let recovering = LocalCell::recover_unmade(dir).unwrap();
+    let allowed = Arc::new(Mutex::new(None));
+    let runtime = Runtime {
+        handle: writer.runtime.handle().clone(),
+        uploads: Budget::new(Limits::UNBOUNDED),
+        keys: bucket_cell::keys::testing::host(),
+    };
+    let options = upload::Options {
+        interval: Duration::from_secs(3600),
+        replication: bucket_cell::layout::Wish::new(1, bucket_cell::layout::Fsync::Replicated),
+        members: Some(upload::MembersOf(Arc::new(OnlyFirstLogPeers {
+            peers: peers("a"),
+            allowed: allowed.clone(),
+        }))),
+        replace_after: Duration::from_secs(60),
+        ..upload::Options::default()
+    };
+    let (cell, uploader) =
+        upload::open(recovering, OPTIONS, writer.bucket.clone(), (1, options), &runtime)
+            .await
+            .unwrap();
+    cell.made().unwrap();
+    cell.close_segment().unwrap();
+    uploader.uploaded(cell.last_commit().unwrap()).await.unwrap();
+
+    // Write two inline extents (< large_extent = 24 KiB, total > segment_size = 16 KiB) in one
+    // commit so its first segment holds only a `continued` partial record and no complete commit.
+    let seq = cell.info().unwrap().next_sequence;
+    let e1 = ExtentId { cell: DESCRIPTION.cell.id, sequence: seq };
+    let e2 = ExtentId { cell: DESCRIPTION.cell.id, sequence: seq + 1 };
+    cell.write(e1, 0, &common::noise(1, 12 << 10)).await.unwrap();
+    cell.write(e2, 0, &common::noise(2, 12 << 10)).await.unwrap();
+    cell.commit_ordered(Some(b"split")).await.unwrap();
+    cell.flush().await.unwrap();
+
+    // Wait until member `b` has received the `continued`-only first segment log.
+    let cfg = configuration_named(&host).await;
+    let b_key = (DESCRIPTION.cell, key(&cfg), cfg.members[1].incarnation);
+    until("member b holds continued-only segment", async || {
+        let Some(log) = *allowed.lock().unwrap() else { return false };
+        all["b"].read(b_key, log, 0, 1).is_ok_and(|bytes| !bytes.is_empty())
+    })
+    .await;
+
+    // Lose writer `a`; members hold only the `continued`-only segment (no complete commit).
+    let replicator = cell.replicator().unwrap();
+    lose(writer, (uploader, cell), replicator);
+    lost.lock().unwrap().insert("a".into());
+
+    // First takeover on a fresh store (`d`): commit across multiple segments (covering both log 0
+    // and the previously-replicated log number) and wait for replication without uploading.
+    let writer2 = Host { runtime: host_runtime::HostRuntime::new(), bucket: host.bucket.clone() };
+    let (taken, uploader) = taken_through(&writer2, Arc::new(peers("d"))).await.unwrap();
+    taken.made().unwrap();
+    let new_last = commit(&taken, 10, 3).await;
+    uploader.replicated(new_last).await.unwrap();
+    assert!(uploader.last_uploaded() < new_last, "replicated via members, not bucket");
+    let expected = writer2.contents(&taken).await;
+    let replicator2 = taken.replicator().unwrap();
+    lose(writer2, (uploader, taken), replicator2);
+    lost.lock().unwrap().insert("d".into());
+
+    // Second takeover (`e`): every commit acknowledged by `d` must survive intact.
+    let elsewhere = MemDir::new();
+    LocalCell::make(&elsewhere, DESCRIPTION, Some(URL), None).unwrap();
+    let recovering = LocalCell::recover_unmade(elsewhere).unwrap();
+    let (taken2, uploader2) = host.open_replicated(recovering, 3, None, peers("e")).await.unwrap();
+    taken2.made().unwrap();
+    assert!(taken2.last_commit().unwrap() >= new_last);
+    assert_eq!(host.contents(&taken2).await, expected);
+    drop(uploader2);
+}

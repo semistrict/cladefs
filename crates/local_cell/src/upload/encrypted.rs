@@ -1303,7 +1303,7 @@ async fn encrypted_logs_changed_are_refused() {
     };
     let segment = SegmentId { cell: cell.id, number: 0 };
     let path = crate::layout::log_path(segment);
-    let log = read_file(&crashed.open(&path, false).unwrap()).unwrap();
+    let log = read_file(&crashed.open(&path, false).unwrap(), crate::MAX_LOG_BYTES).unwrap();
     let header = crate::wal::LogHeader::of(&log, segment).unwrap();
     // A record's payload changed, its MAC kept, its hash made anew: the last byte of the run it
     // holds (`wal::Runs::Held`), which recovery writes into the raw data as it is.

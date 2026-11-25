@@ -233,7 +233,7 @@ impl LocalCheckpoint {
         let file = dir
             .open(LOCAL_CHECKPOINT, false)
             .context("opening an ephemeral cell's local checkpoint")?;
-        Self::decode(&read_file(&file)?, keys)
+        Self::decode(&read_file(&file, crate::MAX_LOCAL_CHECKPOINT_BYTES)?, keys)
     }
 
     /// Writes it in `dir`, whole, durably, authenticated under `encrypting`, over the one there.
@@ -510,8 +510,16 @@ impl<D: Dir> Recovering<D> {
                 Data::Bucket(_) => {}
             }
         }
-        let chain = Chain::new(cell, 0, recovered.next, 0);
-        let opened = (epoch, recovered.next, chain);
+        // cladefs: never reuse a segment number covered by the local checkpoint or still tracked
+        // (board 5428): `wal::recover` removes empty open segments, so a reopen after a failed open
+        // (or after a covered segment was reaped) could otherwise pick a number `<= through` that
+        // `settle` would unlink on the next crash before WAL replay.
+        let next = recovered
+            .next
+            .max(checkpoint.through.map_or(0, |through| through + 1))
+            .max(tracked.keys().map(|id| id.number + 1).max().unwrap_or(0));
+        let chain = Chain::new(cell, 0, next, 0);
+        let opened = (epoch, next, chain);
         let files = (options.open_files, keys.clone());
         let mut segments = Segments::open(&*dir, (cell.id, tracked), opened, files, true)?;
         for (extent, entry) in extents.own() {

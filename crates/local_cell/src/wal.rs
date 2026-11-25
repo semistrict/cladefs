@@ -116,7 +116,7 @@ impl StartFile {
             Err(err) if not_found(&err) => return Ok((Self { made: false, serial: 0 }, None)),
             Err(err) => return Err(Error::new(err).context("opening the WAL's start")),
         };
-        let bytes = read_file(&file).context("reading the WAL's start")?;
+        let bytes = read_file(&file, crate::MAX_START_BYTES).context("reading the WAL's start")?;
         let slots = slots(&bytes).context("reading the WAL's start")?;
         let latest = slots.into_iter().max_by_key(|slot| slot.serial);
         let (serial, start) = latest.map_or((0, None), |slot| (slot.serial, slot.start));
@@ -200,7 +200,8 @@ pub(crate) mod golden {
         let (mut file, _) = StartFile::read(&dir).expect("no start yet");
         file.write(&dir, Some(5)).expect("writing a start");
         file.write(&dir, Some(9)).expect("writing a start");
-        read_file(&dir.open(START, false).expect("the start file")).expect("reading it")
+        read_file(&dir.open(START, false).expect("the start file"), crate::MAX_START_BYTES)
+            .expect("reading it")
     }
 
     /// `bytes`, a start file, as this build reads its slots, as their `{:#?}`.
@@ -1241,7 +1242,7 @@ fn log_records<D: Dir>(
     keys: Option<&bucket_cell::keys::Ring>,
 ) -> Result<Logged, Error> {
     let bytes = match dir.open(&log_path(segment), false) {
-        Ok(log) => read_file(&log)?,
+        Ok(log) => read_file(&log, crate::MAX_LOG_BYTES)?,
         Err(err) if not_found(&err) => {
             let (records, data) = (Vec::new(), Vec::new());
             return Ok(Logged { records, data, refused: false, encryption: None });
@@ -1255,8 +1256,7 @@ fn log_records<D: Dir>(
     };
     let records = LogRecord::decode(&bytes, segment, encryption.as_deref())?;
     let raw = dir.open(&open_segment_path(segment), true)?;
-    let mut data = vec![0; raw.size()? as usize];
-    raw.read_at(&mut data, 0)?;
+    let mut data = read_file(&raw, crate::MAX_RAW_SEGMENT_BYTES)?;
     let whole = records.iter().take_while(|record| record.restore(&mut data)).count();
     let refused = whole < records.len();
     let records = records.into_iter().take(whole).map(|record| record.contents).collect();
@@ -1461,7 +1461,9 @@ mod tests {
 
     /// cladefs: the encryption segment `number`'s log's header names, read under the tests' keys.
     fn sealer_of(dir: &MemDir, number: u64) -> Arc<RawEncryption> {
-        let log = read_file(&dir.open(&log_path(segment(number)), false).unwrap()).unwrap();
+        let log =
+            read_file(&dir.open(&log_path(segment(number)), false).unwrap(), crate::MAX_LOG_BYTES)
+                .unwrap();
         let header = LogHeader::of(&log, segment(number)).unwrap();
         header.encryption(segment(number), &bucket_cell::testing::ring([CELL])).unwrap()
     }

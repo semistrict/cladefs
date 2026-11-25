@@ -2365,7 +2365,7 @@ mod tests {
 
     fn data(segments: &mut Segments<MemFile>, dir: &MemDir, number: SegmentId) -> Vec<u8> {
         match segments.source(dir, number).unwrap() {
-            Source::Raw(file) => read_file(&*file).unwrap(),
+            Source::Raw(file) => read_file(&*file, crate::MAX_RAW_SEGMENT_BYTES).unwrap(),
             Source::Framed(framed) => extent_frame::data(
                 &read_whole(&*framed.file).unwrap(),
                 &bucket_cell::testing::ring([CELL]).of(CELL.id),

@@ -359,6 +359,8 @@ impl Held {
 struct Log {
     /// Its valid end in bytes.
     end: u64,
+    /// Whether the directory entry for this log file is known to be synced on disk (board 5418).
+    dir_synced: bool,
 }
 
 impl Log {
@@ -367,7 +369,8 @@ impl Log {
     /// never read as holding nothing: its member acked what it holds. One whose header is torn, a
     /// crash's, holds nothing, as nothing of it was acked.
     fn read(cell: CellId, log: u64, file: &impl File, path: &str) -> Result<Self, Error> {
-        let bytes = crate::dir::read_file(file).with_context(|| format!("reading {path}"))?;
+        let bytes = crate::dir::read_file(file, crate::MAX_LOG_BYTES)
+            .with_context(|| format!("reading {path}"))?;
         let end = match log & 1 {
             0 => {
                 if let Some(found) = crate::wal::unsupported_log_magic(&bytes) {
@@ -379,7 +382,7 @@ impl Log {
             _ => crate::replicate::own_frames_end(&bytes)
                 .with_context(|| format!("reading {path}"))? as u64,
         };
-        Ok(Self { end })
+        Ok(Self { end, dir_synced: true })
     }
 }
 
@@ -546,24 +549,28 @@ impl<D: Dir> Replicas<D> {
         let mut created_file = None;
         if !held.logs.contains_key(&(key, log)) {
             // Its file made, it is held at once, empty, however its first append ends: a failure
-            // after leaves a file the next append opens, and drops and sweeps remove.
+            // after leaves a file the next append opens, and drops and sweeps remove. Its
+            // `dir_synced` flag stays false until `sync_dir("")` succeeds (board 5418).
             match self.dir.create(&path, false) {
                 Ok(file) => {
                     let file = Arc::new(file);
                     self.cache_file((cell, key, log), file.clone());
                     created_file = Some(file);
-                    held.logs.insert((key, log), Log { end: 0 });
-                    self.dir.sync_dir("").context("syncing the replica directory")?;
+                    held.logs.insert((key, log), Log { end: 0, dir_synced: false });
                 }
                 Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
-                    // Made by an append that failed before it was held: what it holds, if any of
-                    // it was written, read as a reopening would.
+                    // Made by an append that failed before it was held (or before its dir sync):
+                    // what it holds, if any of it was written, read as a reopening would, and the
+                    // directory synced before acknowledging anything (board 5418).
                     let file =
                         self.dir.open(&path, false).with_context(|| format!("opening {path}"))?;
-                    let found = Log::read(cell, log, &file, &path)?;
+                    let mut found = Log::read(cell, log, &file, &path)?;
+                    found.dir_synced = false;
                     let found_end = found.end;
                     held.logs.insert((key, log), found);
                     if found_end != 0 {
+                        self.dir.sync_dir("").context("syncing the replica directory")?;
+                        held.logs.get_mut(&(key, log)).unwrap().dir_synced = true;
                         drop(file);
                         drop(held);
                         drop(holding);
@@ -577,6 +584,12 @@ impl<D: Dir> Replicas<D> {
                     return Err(anyhow::Error::from(err).context(format!("making {path}")).into());
                 }
             }
+        }
+        // Ensure the new log's directory entry is durable before writing or acknowledging any
+        // append, including retries after an earlier `sync_dir` failure (board 5418).
+        if !held.logs.get(&(key, log)).unwrap().dir_synced {
+            self.dir.sync_dir("").context("syncing the replica directory")?;
+            held.logs.get_mut(&(key, log)).unwrap().dir_synced = true;
         }
         let state = held.logs.get_mut(&(key, log)).unwrap();
         let new = &bytes[(end - offset) as usize..];
@@ -981,8 +994,8 @@ fn last_number(name: &str) -> Option<u64> {
 
 fn read_text<D: Dir>(dir: &D, path: &str) -> Result<String, Error> {
     let file = dir.open(path, false).with_context(|| format!("opening {path}"))?;
-    let mut bytes = vec![0; file.size().with_context(|| format!("sizing {path}"))? as usize];
-    file.read_at(&mut bytes, 0).with_context(|| format!("reading {path}"))?;
+    let bytes = crate::dir::read_file(&file, crate::MAX_START_BYTES)
+        .with_context(|| format!("reading {path}"))?;
     Ok(String::from_utf8(bytes).with_context(|| format!("{path}: not text"))?)
 }
 

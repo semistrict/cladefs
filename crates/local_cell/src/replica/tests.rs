@@ -793,6 +793,79 @@ fn streams_trim_the_configurations_they_leave_behind() {
     assert_eq!(replicas.append(held, 1, end, &frame).unwrap(), 2 * end);
 }
 
+/// board 5418: if `sync_dir("")` fails while creating a new log file on a replica member, a
+/// retried append must still sync the directory before acknowledging, so a crash afterward keeps
+/// the log file intact.
+#[test]
+fn retried_first_append_after_sync_dir_failure_keeps_log_across_crash() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[derive(Clone)]
+    struct FailSyncDir {
+        inner: MemDir,
+        fail_sync_dir: Arc<AtomicBool>,
+    }
+
+    impl crate::Dir for FailSyncDir {
+        type File = crate::MemFile;
+        fn create(&self, path: &str, data: bool) -> io::Result<Self::File> {
+            self.inner.create(path, data)
+        }
+        fn open(&self, path: &str, data: bool) -> io::Result<Self::File> {
+            self.inner.open(path, data)
+        }
+        fn create_dir(&self, path: &str) -> io::Result<()> {
+            self.inner.create_dir(path)
+        }
+        fn remove(&self, path: &str) -> io::Result<()> {
+            self.inner.remove(path)
+        }
+        fn rename(&self, from: &str, to: &str) -> io::Result<()> {
+            self.inner.rename(from, to)
+        }
+        fn link(&self, from: &str, to: &str) -> io::Result<()> {
+            self.inner.link(from, to)
+        }
+        fn list(&self, path: &str) -> io::Result<Vec<String>> {
+            self.inner.list(path)
+        }
+        fn replace(&self, path: &str, bytes: &[u8]) -> io::Result<()> {
+            self.inner.replace(path, bytes)
+        }
+        fn sync_dir(&self, path: &str) -> io::Result<()> {
+            if self.fail_sync_dir.swap(false, Ordering::SeqCst) {
+                return Err(io::Error::other("injected sync_dir failure"));
+            }
+            self.inner.sync_dir(path)
+        }
+        fn barrier(&self) -> io::Result<()> {
+            self.inner.barrier()
+        }
+    }
+
+    let inner = MemDir::new();
+    let fail_sync_dir = Arc::new(AtomicBool::new(false));
+    let dir = FailSyncDir { inner: inner.clone(), fail_sync_dir: fail_sync_dir.clone() };
+    let replicas = Replicas::open(dir, MOST).unwrap();
+    let ours = replicas.incarnation();
+    let target = (CELL, key(1, 1), ours);
+    let frame = own_frame(1, b"durable");
+
+    // Fail `sync_dir("")` on the first append after `dir.create` created the file.
+    fail_sync_dir.store(true, Ordering::SeqCst);
+    assert!(replicas.append(target, own_of(0), 0, &frame).is_err());
+
+    // Retry succeeds and MUST sync the directory before acknowledging.
+    assert_eq!(replicas.append(target, own_of(0), 0, &frame).unwrap(), frame.len() as u64);
+
+    // Crash drops any file whose directory entry was never synced; the log must survive.
+    let crashed = inner.crash(0);
+    let reopened = Replicas::open(crashed, MOST).unwrap();
+    let again = (CELL, key(1, 1), reopened.incarnation());
+    assert_eq!(reopened.fence(again, 1).unwrap(), vec![(own_of(0), frame.len() as u64)]);
+    assert_eq!(reopened.read(again, own_of(0), 0, frame.len() as u64).unwrap(), frame);
+}
+
 #[test]
 fn every_frozen_version_is_read() {
     formats::golden::check::<Files>(env!("CARGO_MANIFEST_DIR"));

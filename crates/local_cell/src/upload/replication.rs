@@ -305,21 +305,25 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                 let own = recovering.last_commit_held();
                 let members = crate::replicate::last_commit(cell, &seed);
                 let ahead = crate::replicate::members_ahead(own, members);
-                // Its own kept, the members' logs are given the new configuration only if they are
-                // of its history: else an earlier writer's, past what a later one, this cell's
-                // own, went on from, none of it told replicated (TASK-678's review: a retake whose
-                // take before deferred, the head naming the configuration before still).
-                let seed = match ahead || members.is_none() || recovering.holds_commits(members) {
+                // Its own kept, the members' logs are given the new configuration only if they
+                // hold at least one complete commit of its history (board 5398: a seed holding
+                // only an incomplete `continued` start of a multi-segment commit has `members ==
+                // None` and must not be spooled onto a fresh store's segment 0; and any seed that
+                // IS kept advances `recovering`'s next segment number past it below).
+                let seed = match ahead || (members.is_some() && recovering.holds_commits(members)) {
                     true => seed,
                     false => {
-                        log::info!(
-                            "cladefs: {cell:?}: its members' logs, through {members:?}, are an \
-                             earlier writer's than its own, through {own:?}: given up"
-                        );
+                        if members.is_some() {
+                            log::info!(
+                                "cladefs: {cell:?}: its members' logs, through {members:?}, are \
+                                 an earlier writer's than its own, through {own:?}: given up"
+                            );
+                        }
+                        seeding.hold_only(0);
                         Vec::new()
                     }
                 };
-                let recovering = match ahead {
+                let mut recovering = match ahead {
                     false => recovering,
                     true => blocking(|| -> Result<_, Failure> {
                         #[cfg(test)]
@@ -337,6 +341,8 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                         Ok(recovering.restored(&seed, last)?)
                     })?,
                 };
+                // Never open a segment whose log number a seed we spool holds (board 5398).
+                recovering.advance_next_past(&seed);
                 (seed, seeding, recovering, short, ahead)
             }
             _ => (Vec::new(), crate::replicate::Holding::none(), recovering, None, false),

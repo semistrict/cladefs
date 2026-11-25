@@ -288,7 +288,7 @@ impl<D: Dir> crate::replicate::LogSource for CellLogSource<D> {
             Err(err) if not_found(&err) => return Ok(Vec::new()),
             Err(err) => return Err(err),
         };
-        let bytes = read_file(&log_file)?;
+        let bytes = read_file(&log_file, crate::MAX_LOG_BYTES)?;
         if bytes.len() < crate::wal::LOG_RECORDS as usize {
             return Ok(Vec::new());
         }
@@ -998,6 +998,15 @@ impl<D: Dir> Recovering<D> {
         let Recovering { dir, taken, claim, file, .. } = self;
         let wal = crate::wal::recover(&*dir, file.cell, None)?;
         Ok(Recovering { dir, taken, claim, file, wal })
+    }
+
+    /// cladefs: ensures the cell opens its next segment past every segment number present in
+    /// `logs`, so a takeover never opens a segment whose log number a seed it spools holds
+    /// (board 5398).
+    pub fn advance_next_past(&mut self, logs: &[(u64, Vec<u8>)]) {
+        if let Some(past) = logs.iter().map(|&(log, _)| (log >> 1).saturating_add(1)).max() {
+            self.wal.next = self.wal.next.max(past);
+        }
     }
 
     /// The URL of the bucket its cell is kept in, if its description names one.
@@ -1729,7 +1738,8 @@ impl<D: Dir> LocalCell<D> {
         let claim = Claim(dir.clone());
         let file = {
             let file = dir.open(DESCRIPTION, false).context("opening the cell's description")?;
-            let text = String::from_utf8(read_file(&file)?).context("reading the description")?;
+            let text = String::from_utf8(read_file(&file, crate::MAX_DESCRIPTION_BYTES)?)
+                .context("reading the description")?;
             CellFile::parse(&text)?
         };
         // cladefs: an ephemeral cell's checkpoint cut short finished first (TASK-698.2, board 6905).
@@ -1985,7 +1995,16 @@ impl<D: Dir> LocalCell<D> {
                 }
             };
             crate::upload::blocking(|| self.remove_raw(raw));
-            drop(self.opened.with(Mutex::lock).take());
+            // cladefs: clear open reserve while still holding the directory claim so a closed
+            // LocalCell kept alive by a reader never wipes a reopened store's reserve on drop
+            // (board 5442).
+            let mut opened = self.opened.with(Mutex::lock);
+            if opened.is_some() {
+                if let Some(footprint) = self.dir.footprint() {
+                    footprint.set_open(0);
+                }
+                drop(opened.take());
+            }
         }
         flushed
     }
@@ -4254,8 +4273,13 @@ impl<D: Dir> Drop for LocalCell<D> {
         if let Err(err) = closed {
             log::error!("extent store: making the last commits durable: {err:#}");
         }
-        // cladefs: what it had open, uncommitted, no commit will seal (doc-22).
-        if let Some(footprint) = self.dir.footprint() {
+        // cladefs: what it had open, uncommitted, no commit will seal (doc-22); clear only if
+        // this cell still holds its directory claim so a closed cell dropped after reopen never
+        // zeroes the reopened cell's open reserve (board 5442).
+        let opened = self.opened.with(Mutex::lock);
+        if opened.is_some()
+            && let Some(footprint) = self.dir.footprint()
+        {
             footprint.set_open(0);
         }
     }

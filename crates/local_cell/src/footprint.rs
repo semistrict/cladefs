@@ -174,11 +174,24 @@ impl Footprint {
     }
 
     /// cladefs: its cell's extents open take `open` bytes, each as far as it goes: what the commit
-    /// sealing them may copy, which its reserve covers ([`host_disk::RESERVE_FACTOR`]).
+    /// sealing them may copy, which its reserve covers ([`host_disk::RESERVE_FACTOR`]). Reads and
+    /// updates the tally under the allotment lock so concurrent updates never race and underflow
+    /// (board 5442).
     pub(crate) fn set_open(&self, open: u64) {
+        let allotment = self.allotment.lock().unwrap();
         let was = self.tally.open();
-        if open != was {
-            self.counting(|tally| tally.opened(open.abs_diff(was), open > was));
+        if open == was {
+            return;
+        }
+        let delta = open.abs_diff(was);
+        let more = open > was;
+        self.tally.opened(delta, more);
+        if let Some(allotment) = &*allotment {
+            allotment.tally.opened(delta, more);
+            allotment.total.tally.opened(delta, more);
+        }
+        if let Some(disk) = &self.disk {
+            disk.cells.opened(delta, more);
         }
     }
 
@@ -1134,5 +1147,73 @@ mod tests {
         drop(dir);
         crate::remove_cell_dir(&path).unwrap();
         assert_eq!((footprint.bytes(), disk.cells.bytes()), (0, before));
+    }
+
+    /// board 5442: a closed `LocalCell` kept alive by a reader must not clear a reopened store's
+    /// open-extent reserve on drop, and concurrent `set_open` updates must not underflow the
+    /// footprint, allotment, or disk tallies.
+    #[test]
+    fn closed_cell_drop_keeps_reopened_open_reserve_and_concurrent_set_open_matches() {
+        use crate::{Description, LocalCell, Options};
+        use bucket_cell::layout::test_cell;
+        use storage_device::ExtentId;
+
+        let temp = tempfile::tempdir().unwrap();
+        let allotment = allotment(temp.path()).unwrap();
+        let path = temp.path().join("store");
+        host_fs::create_dir(&path).unwrap();
+        let desc = Description { block_size: 4096, capacity: 16 << 20, cell: test_cell(42) };
+        let dir1 = HostDir::new(&path).unwrap();
+        let cell1 = Arc::new(LocalCell::create(dir1, desc, Options::default()).unwrap());
+        let footprint = cell1.dir().footprint().clone();
+        let disk = footprint.disk().unwrap().clone();
+
+        let ext1 = ExtentId { cell: desc.cell.id, sequence: cell1.info().unwrap().next_sequence };
+        futures::executor::block_on(cell1.write(ext1, 0, &vec![1u8; 8192])).unwrap();
+        assert!(footprint.open() > 0, "uncommitted write must reserve open bytes");
+
+        // Keep an extra Arc alive (like a reader holding the closed LocalCell) across close+reopen.
+        let stale_reader = Arc::clone(&cell1);
+        futures::executor::block_on(cell1.close()).unwrap();
+        assert_eq!(footprint.open(), 0, "close must release open reserve before reopen");
+
+        let dir2 = HostDir::new(&path).unwrap();
+        let cell2 = LocalCell::open(dir2, Options::default()).unwrap();
+        let ext2 = ExtentId { cell: desc.cell.id, sequence: cell2.info().unwrap().next_sequence };
+        futures::executor::block_on(cell2.write(ext2, 0, &vec![2u8; 8192])).unwrap();
+        let reopened_open = footprint.open();
+        assert!(reopened_open > 0, "reopened cell must reserve open bytes");
+
+        // Dropping the stale closed LocalCell must leave cell2's open reserve intact.
+        drop(cell1);
+        drop(stale_reader);
+        assert_eq!(footprint.open(), reopened_open, "stale drop must not zero reopened reserve");
+        assert!(allotment.tally.open() >= reopened_open);
+
+        futures::executor::block_on(cell2.close()).unwrap();
+        assert_eq!(footprint.open(), 0);
+        drop(cell2);
+
+        // Concurrent `set_open` on a shared footprint in an allotment must not underflow.
+        let disk_open_before = disk.cells.open();
+        let a = Arc::clone(&footprint);
+        let b = Arc::clone(&footprint);
+        let t1 = std::thread::spawn(move || {
+            for i in 0..2_000u64 {
+                a.set_open(if i % 2 == 0 { 64 << 10 } else { 0 });
+            }
+        });
+        let t2 = std::thread::spawn(move || {
+            for i in 0..2_000u64 {
+                b.set_open(if i % 3 == 0 { 128 << 10 } else { 16 << 10 });
+            }
+        });
+        t1.join().unwrap();
+        t2.join().unwrap();
+        footprint.set_open(0);
+        assert_eq!(footprint.open(), 0);
+        assert_eq!(allotment.tally.open(), 0);
+        assert_eq!(disk.cells.open(), disk_open_before);
+        crate::remove_cell_dir(&path).unwrap();
     }
 }

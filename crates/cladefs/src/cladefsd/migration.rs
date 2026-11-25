@@ -2634,10 +2634,42 @@ pub(super) mod target {
         false
     }
 
+    /// Maximum length of a single data file (segment or extent) accepted during migration
+    /// (board 9316).
+    const MAX_DATA_FILE_BYTES: u64 = 1 << 30;
+
+    /// Maximum length of a metadata file (`store`, `start`, markers) accepted by `target::write`
+    /// (board 9316; `hand_over` and `local_cell` further enforce `DESCRIPTION_MOST` = 64 KiB).
+    const MAX_METADATA_FILE_BYTES: u64 = 1 << 20;
+
+    /// Maximum total bytes staged by a single migration (board 9316).
+    const MAX_MIGRATION_BYTES: u64 = 64 << 30;
+
+    /// Per-file length limit for `path` in a migration staging directory, by its format role
+    /// (board 9316).
+    fn max_file_len(path: &str) -> u64 {
+        if path == "local-checkpoint" {
+            local_cell::MAX_LOCAL_CHECKPOINT_BYTES
+        } else if path.starts_with("logs/") {
+            local_cell::MAX_LOG_BYTES
+        } else if path == local_cell::DESCRIPTION
+            || path == "start"
+            || path == "unmade"
+            || path == "attached-bases"
+            || path == "ancestry"
+            || path.starts_with("public-")
+        {
+            MAX_METADATA_FILE_BYTES
+        } else {
+            MAX_DATA_FILE_BYTES
+        }
+    }
+
     /// Writes the piece of a file `request` carries into `staging`, its migration's staging
     /// directory: what it adds to the disk admitted by the disk governor first (board 8451),
     /// `RESOURCE_EXHAUSTED` if it has no room, and counted in the directory's footprint as it is
-    /// written: its bytes, and the length it gives the file, holes and all.
+    /// written: its bytes, and the length it gives the file, holes and all. Refuses per-file and
+    /// total lengths past their protocol bounds where they enter (board 9316).
     #[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
     fn write(staging: &local_cell::HostDir, request: MigrateFileRequest) -> Result<(), Status> {
         use local_cell::{Dir as _, File as _};
@@ -2663,14 +2695,16 @@ pub(super) mod target {
             return made_dirs(staging, dir).map_err(|err| status(&path, err));
         }
         within(staged, &path).ok_or_else(left)?;
+        let limit = max_file_len(&path);
         // Direct writes, including the last byte of a sparse file, round up to DIRECT_BLOCK.
         let end = offset.checked_add(bytes.len() as u64);
-        let valid_len = len
-            .checked_next_multiple_of(bucket_cell::direct::DIRECT_BLOCK)
-            .is_some_and(|end| end <= i64::MAX as u64);
+        let valid_len = len <= limit
+            && len
+                .checked_next_multiple_of(bucket_cell::direct::DIRECT_BLOCK)
+                .is_some_and(|end| end <= i64::MAX as u64);
         if !valid_len || bytes.len() > PIECE || end.is_none_or(|end| end > len) {
             return Err(Status::invalid_argument(format!(
-                "{path:?}: offset {offset} or len {len} out of range"
+                "{path:?}: offset {offset} or len {len} out of range (limit {limit})"
             )));
         }
         if holes.len() > HOLES_MOST {
@@ -2710,6 +2744,16 @@ pub(super) mod target {
             }
         };
         let grows = len.saturating_sub(size);
+        if staging
+            .footprint()
+            .bytes()
+            .checked_add(grows)
+            .is_none_or(|total| total > MAX_MIGRATION_BYTES)
+        {
+            return Err(Status::invalid_argument(format!(
+                "{path:?}: total staged bytes past limit {MAX_MIGRATION_BYTES}"
+            )));
+        }
         let admitted = staging.footprint().admit(bytes.len() as u64, grows);
         let _pledge = admitted.map_err(|full| {
             Status::resource_exhausted(format!(
@@ -3674,7 +3718,7 @@ pub(super) mod target {
             assert_eq!(footprint.bytes(), (FILES + 1) * GRANULE);
             assert_eq!(disk.cells.bytes() - before, (FILES + 1) * GRANULE);
             disk.govern(disk.cells.bytes() + (64 << 20), 0, false);
-            let refused = write(&staging, piece("huge".into(), 1 << 40)).unwrap_err();
+            let refused = write(&staging, piece("huge".into(), 128 << 20)).unwrap_err();
             assert_eq!(refused.code(), Code::ResourceExhausted, "{refused:?}");
             assert!(!staged.join("huge").exists(), "a file refused made");
             write(&staging, piece("small".into(), 1 << 20)).unwrap();
@@ -4398,6 +4442,38 @@ pub(super) mod target {
             assert!(!seg_dir.join("1").exists(), "stale pre-copied segment must be pruned");
             assert!(!dir.path().join(MARKER).exists());
             assert!(!dir.path().join("store.deleted").exists());
+        }
+
+        /// board 9316: `target::write` refuses oversized sparse files (such as a 1 TiB sparse
+        /// `local-checkpoint`) with `InvalidArgument` before touching disk.
+        #[test]
+        fn target_write_refuses_oversized_migration_files() {
+            let dir = tempfile::tempdir().unwrap();
+            let host = local_cell::Host::new();
+            let staging = local_cell::HostDir::new_on(&host, dir.path()).unwrap();
+            let cases = [
+                ("local-checkpoint", 1u64 << 40),
+                ("local-checkpoint", local_cell::MAX_LOCAL_CHECKPOINT_BYTES + 4096),
+                ("store", MAX_METADATA_FILE_BYTES + 4096),
+                ("logs/1/0", local_cell::MAX_LOG_BYTES + 4096),
+                ("segments/1/0", MAX_DATA_FILE_BYTES + 4096),
+            ];
+            for (path, len) in cases {
+                let status = write(
+                    &staging,
+                    MigrateFileRequest {
+                        migration: 1,
+                        path: path.to_owned(),
+                        offset: 0,
+                        bytes: Vec::new(),
+                        len,
+                        holes: Vec::new(),
+                    },
+                )
+                .unwrap_err();
+                assert_eq!(status.code(), tonic::Code::InvalidArgument, "{path} len={len}");
+                assert!(!dir.path().join(path).exists(), "{path} must not be created");
+            }
         }
     }
 }
