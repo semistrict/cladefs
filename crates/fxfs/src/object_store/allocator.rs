@@ -176,8 +176,7 @@ use crate::object_store::{
 };
 use crate::range::RangeExt;
 use crate::serialized_types::{
-    DEFAULT_MAX_SERIALIZED_RECORD_SIZE, EARLIEST_SUPPORTED_VERSION, LATEST_VERSION, Version,
-    Versioned, VersionedLatest,
+    EARLIEST_SUPPORTED_VERSION, LATEST_VERSION, Version, Versioned, VersionedLatest,
 };
 use anyhow::{Context, Error, anyhow, bail, ensure};
 use async_trait::async_trait;
@@ -630,12 +629,13 @@ impl Versioned for AllocatorInfoV66 {
 pub(crate) const TEST_EXTENT: ExtentId = ExtentId::new(0, 100);
 
 /// Computes the target maximum extent size based on the block size of the allocator.
+///
+/// cladefs: `ExtentMode::Cow` writes emit empty checksums (`Checksums::fletcher(Vec::new())`,
+/// board 10535), so extent records no longer grow with extent length and are no longer capped at
+/// 448 blocks by `DEFAULT_MAX_SERIALIZED_RECORD_SIZE`. Cap at the extent store's maximum extent
+/// size (`storage_device::MAX_EXTENT`), aligned down to `block_size`.
 pub fn max_extent_size_for_block_size(block_size: BlockSize) -> u64 {
-    // Each block in an extent contains an 8-byte checksum (which due to varint encoding is 9
-    // bytes), and a given extent record must be no larger DEFAULT_MAX_SERIALIZED_RECORD_SIZE.  We
-    // also need to leave a bit of room (arbitrarily, 64 bytes) for the rest of the extent's
-    // metadata.
-    block_size * ((DEFAULT_MAX_SERIALIZED_RECORD_SIZE - 64) / 9)
+    block_size.align_down(storage_device::MAX_EXTENT).max(block_size.get())
 }
 
 pub struct Allocator {
@@ -939,7 +939,9 @@ impl Allocator {
         if device_size != filesystem.device().size() {
             warn!("Device size is not block aligned. Rounding down.");
         }
-        let max_extent_size_bytes = max_extent_size_for_block_size(block_size);
+        let max_extent_size_bytes = max_extent_size_for_block_size(block_size)
+            .min(block_size.align_down(filesystem.device().max_extent()))
+            .max(block_size.get());
         Allocator {
             filesystem: Arc::downgrade(&filesystem),
             block_size,
@@ -3032,7 +3034,12 @@ mod tests {
     #[fuchsia_async::run_singlethreaded(test)]
     async fn test_allocate_more_than_max_size() {
         const STORE_OBJECT_ID: u64 = 99;
-        let (fs, allocator) = test_fs().await;
+        // Device capacity (128 MiB) must exceed `max_extent_size_bytes` (64 MiB) so the allocation
+        // is capped by the extent size limit rather than device capacity.
+        let device = DeviceHolder::new(FakeDevice::new(32768, 4096));
+        let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
+        let allocator = fs.allocator();
+        assert_eq!(allocator.max_extent_size_bytes, storage_device::MAX_EXTENT);
         let mut transaction = fs
             .root_store()
             .new_transaction(lock_keys![], Options::default())
@@ -4613,9 +4620,11 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    /// cladefs: how many extents `tiered_fs`'s file has: their records make a layer larger than
-    /// `journal::DEFAULT_RECLAIM_SIZE`.
+    /// cladefs: how many extents `tiered_fs`'s file has, and each extent's size: their records
+    /// make a layer larger than `journal::DEFAULT_RECLAIM_SIZE` while fitting comfortably in the
+    /// 2 GiB test device.
     const TIERED_EXTENTS: u64 = 96;
+    const TIERED_EXTENT_SIZE: u64 = 448 * 4096;
 
     /// cladefs: a file `name` of `extents` extents, in `store`'s root directory, each deallocated
     /// every other block, which leaves a record per block in the allocator's tree. A transaction
@@ -4639,7 +4648,7 @@ mod tests {
         let file =
             directory.create_child_file(&mut transaction, name).await.expect("create failed");
         transaction.commit().await.expect("commit failed");
-        let extent_size = fs.allocator().max_extent_size_bytes;
+        let extent_size = TIERED_EXTENT_SIZE;
         {
             let buf = file.allocate_buffer(extent_size as usize).await;
             for i in 0..extents {
@@ -4717,9 +4726,7 @@ mod tests {
         file: &DataObjectHandle<ObjectStore>,
     ) -> ExtentId {
         let alive = allocator.extents();
-        file.truncate(file.get_size() - allocator.max_extent_size_bytes)
-            .await
-            .expect("truncate failed");
+        file.truncate(file.get_size() - TIERED_EXTENT_SIZE).await.expect("truncate failed");
         let left = allocator.extents();
         let died: Vec<ExtentId> =
             alive.keys().copied().filter(|extent| !left.contains_key(extent)).collect();

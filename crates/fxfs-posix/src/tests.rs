@@ -894,11 +894,11 @@ async fn a_removed_fill_gives_back_all_its_data() {
         let reserved = objects.metadata_reservation().amount() as i64;
         [held(data) + usage.pending as i64, held(metadata), reserved]
     };
-    // Metadata, until the reservation for the journal is 13 MiB: ~3 MiB of the journal's 8 plus
+    // Metadata, until the reservation for the journal is 15 MiB: ~3.5 MiB of the journal's 8 plus
     // RESERVED_SPACE, so the fill crosses reclaim_size / 2 (4 MiB) even without journal-extent
-    // allocation records.
+    // allocation records or per-block ExtentMode::Cow checksums (board 10535).
     let mut n = 0;
-    while objects.metadata_reservation().amount() < 13 << 20 {
+    while objects.metadata_reservation().amount() < 15 << 20 {
         let ino = fs.new_file(root, format!("before-{n}").as_bytes()).await;
         fs.set_xattr(ino, b"user.x", &[1; 200], SetExtendedAttributeMode::Set).await.unwrap();
         n += 1;
@@ -906,6 +906,7 @@ async fn a_removed_fill_gives_back_all_its_data() {
     fs.sync().await.unwrap();
     let free = || (fs.usage().free_blocks * 4096) as i64;
     let (before, usage_before) = (free(), usage());
+    let layers_before = fs.volume.store_info().layers.len();
     let filler = fs.new_file(root, b"filler").await;
     let mut at = 0;
     for len in [1 << 20, 4096] {
@@ -922,14 +923,20 @@ async fn a_removed_fill_gives_back_all_its_data() {
     fs.evict(filler, true);
     fs.sync().await.unwrap();
     let (after, usage_after) = (free(), usage());
+    let layers_after = fs.volume.store_info().layers.len();
     let short = before - after;
     let [data, metadata, reserved] = [0, 1, 2].map(|i| usage_after[i] - usage_before[i]);
     let said = format!(
         "{at} filled, {before} free before, {after} after, {short} short; data, metadata held and \
-         reserved {usage_before:?}, then {usage_after:?}"
+         reserved {usage_before:?}, then {usage_after:?}; layers {layers_before} -> {layers_after}"
     );
-    assert!(reserved < 0 && metadata > 0, "no flush during the fill: {said}");
-    assert!(short - reserved > 1 << 20, "the reservation alone accounts for it: {said}");
+    // Without per-block `ExtentMode::Cow` checksums (board 10535), the flushed volume layer is
+    // ~500 KiB smaller so freeing old journal spans can net slightly negative `metadata` while a
+    // compaction flush still shrinks `reserved` by > 1 MiB and writes a persistent volume layer.
+    assert!(
+        reserved < -(1 << 20) && layers_after > layers_before,
+        "no flush during the fill: {said}"
+    );
     assert!(data <= STAGING_SIZE as i64, "{said}");
     // To the block statfs rounds the used bytes up to.
     assert!((short - data - metadata - reserved).abs() < 4096, "{said}");

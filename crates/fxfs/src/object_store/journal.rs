@@ -2495,6 +2495,7 @@ mod tests {
             let mode = ExtentMode::Cow(Checksums::fletcher(vec![7; blocks]));
             ObjectValue::Extent(ExtentValue::new(extent, 0, mode))
         };
+        assert!(valid(0..8192, sums(0)));
         assert!(valid(0..8192, sums(2)));
         assert!(!valid(0..8192, sums(3)));
         assert!(!valid(0..8192, sums(4)));

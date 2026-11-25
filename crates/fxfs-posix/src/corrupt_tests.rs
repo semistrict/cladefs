@@ -38,7 +38,7 @@
 use super::model_tests::{checked, watch_sequences};
 use super::tests::Tested;
 use super::*;
-use fxfs::checksum::fletcher64;
+use fxfs::checksum::{Checksums, fletcher64};
 use fxfs::filesystem::{FxFilesystemBuilder, OpenFxFilesystem};
 use fxfs::lsm_tree::persistent_layer::PersistentLayerWriter;
 use fxfs::lsm_tree::types::{Item, ItemRef, Key, LayerIterator as _, LayerValue, LayerWriter as _};
@@ -801,15 +801,14 @@ impl Record {
                 *extent_offset = u64::MAX - (PAGE - 1);
             }
             Record::SumsOverKey => {
+                let (_, _, range) = extent_of(&items[at].key)?;
+                let blocks = (range.end - range.start) / PAGE;
                 let ObjectValue::Extent(ExtentValue::Some { mode: ExtentMode::Cow(sums), .. }) =
-                    &items[at].value
+                    &mut items[at].value
                 else {
                     return None;
                 };
-                if sums.len() < 2 {
-                    return None;
-                }
-                extent_range(&mut items[at].key)?.end -= PAGE;
+                *sums = Checksums::fletcher(vec![7; blocks as usize + 1]);
             }
             Record::OutOfOrder => {
                 if items.get(at + 1)?.key.object_id != items[at].key.object_id {

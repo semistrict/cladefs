@@ -43,6 +43,10 @@ pub mod fake_device;
 /// (TASK-551).
 pub const MAX_ROOT: usize = 4096;
 
+/// cladefs: the most bytes one extent holds by default (doc-4's `max_extent`, matching
+/// `OpenCell::MAX_EXTENT` and `virtio_extent::MAX_EXTENT`, board 10535).
+pub const MAX_EXTENT: u64 = 64 << 20;
+
 bitflags! {
     /// Options that may be used for writes.
     #[repr(transparent)]
@@ -84,6 +88,13 @@ pub trait Device: Send + Sync {
     /// Returns the size in bytes of the device.
     fn size(&self) -> u64 {
         self.block_size() as u64 * self.block_count()
+    }
+
+    /// cladefs: the most bytes one extent on this device holds (doc-4's `max_extent`, board
+    /// 10535). Defaults to [`MAX_EXTENT`]; extent-store devices whose config reports a smaller
+    /// limit override this.
+    fn max_extent(&self) -> u64 {
+        MAX_EXTENT
     }
 
     /// Fills `buffer` with blocks read from `offset` in `extent`. Reading an extent the device

@@ -962,6 +962,10 @@ impl Device for ExtentDevice {
         self.capacity() / self.info.block_size as u64
     }
 
+    fn max_extent(&self) -> u64 {
+        self.info.max_extent
+    }
+
     async fn read(
         &self,
         extent: ExtentId,
