@@ -747,7 +747,8 @@ fn a_daemon_mounting_no_cells_serves_no_mount_calls() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "listed");
     assert!(
-        stderr.contains("listing the cells: code: 'Operation is not implemented or not supported'"),
+        stderr.contains("listing the cells")
+            && stderr.contains("code: 'Operation is not implemented or not supported'"),
         "{stderr}"
     );
 }
