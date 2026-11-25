@@ -99,6 +99,9 @@ pub struct Daemon {
     /// FUSE mount state (outside `madsim`).
     #[cfg(not(madsim))]
     pub(super) mount: super::mount::State,
+    /// Number of times `kept_or_open` opened a version/kept cell store (TASK-549, board 2494).
+    #[cfg(test)]
+    pub(super) kept_opens: AtomicU64,
 }
 
 impl Daemon {
@@ -143,6 +146,8 @@ impl Daemon {
             stats_written: AtomicU64::new(0),
             #[cfg(not(madsim))]
             mount: super::mount::State::default(),
+            #[cfg(test)]
+            kept_opens: AtomicU64::new(0),
         });
         server::register_daemon(&daemon);
         daemon

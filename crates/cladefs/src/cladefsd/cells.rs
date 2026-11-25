@@ -136,7 +136,17 @@ async fn hold_within(
 /// cladefs: holds the cell at `path` for `daemon`, as [`hold`] does, but for the cell kept open
 /// of it, which it leaves open: to fork it, or open it to ([`kept_or_open`]).
 async fn hold_to_fork(daemon: &Daemon, path: &Path) -> Result<Hold, Errno> {
-    daemon.table.hold_async(&cell_dir_key(path), CLOSING_WAIT).await
+    hold_to_fork_within(daemon, path, CLOSING_WAIT).await
+}
+
+/// cladefs: holds the cell at `path` for `daemon` for at most `wait`, leaving any cell kept open
+/// of it open (TASK-549, board 2494).
+async fn hold_to_fork_within(
+    daemon: &Daemon,
+    path: &Path,
+    wait: std::time::Duration,
+) -> Result<Hold, Errno> {
+    daemon.table.hold_async(&cell_dir_key(path), wait).await
 }
 
 /// cladefs: holds the cell at `path` on `daemon`, which nothing has open (`EBUSY` otherwise), as
@@ -901,12 +911,18 @@ async fn opened_version(
 ) -> Result<PathBuf, Errno> {
     let capacity = capacity.max(OpenCell::BLOCK_SIZE as u64);
     let dir = version_dir(daemon, cell, version)?;
-    let held = hold_within(daemon, &dir, VERSION_WAIT).await?;
+    // Fast path: if the version store is already kept open, its directory exists and is made
+    // whole; return without taking a hold or closing it (TASK-549, board 2494).
+    if kept(daemon, &cell_dir_key(&dir)).is_some() {
+        return Ok(dir);
+    }
+    let held = hold_to_fork_within(daemon, &dir, VERSION_WAIT).await?;
     if local_cell::upload::blocking(|| {
         host_fs::exists(&dir) && !crate::host_cell::unmade_on(&daemon.host, &dir)
     }) {
         return Ok(dir);
     }
+    close_kept(daemon, held.take_kept()).await;
     // Their paths alone: a reference to a cell kept across its sync would keep it from closing
     // (TASK-648).
     let writers: Vec<PathBuf> = (daemon.table.instances().into_iter())
@@ -1108,6 +1124,8 @@ async fn kept_or_open(
         return Ok((Arc::new(HeldCell::new(open_cell, Some(hold))), Opened::Now));
     }
     // cladefs: awaited, holding no worker of the control runtime's (TASK-688).
+    #[cfg(test)]
+    daemon.kept_opens.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     Ok((keep(daemon, &hold, take_cell(daemon, from, None, capacity).await?), Opened::Now))
 }
 

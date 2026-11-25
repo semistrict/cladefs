@@ -7955,3 +7955,128 @@ fn refused_write_open_of_public_base_releases_cleanly_with_erofs() {
     let again = CellClient::connect(&socket, &store, 1 << 24).map(drop).unwrap_err();
     assert_eq!(again.errno(), Some(Errno::EPERM), "expected EPERM again, got {again:#}");
 }
+
+/// TASK-549 (board 2494): sequential and staggered VM restores of the same version within `LINGER`
+/// reuse the kept version store opened by the first restore instead of closing and reopening it
+/// on every restore.
+#[test]
+fn staggered_zygote_restores_reuse_kept_version_store_without_reopening() {
+    use std::sync::atomic::Ordering;
+
+    host();
+    // SAFETY: nextest runs each test in its own process, before bucket traffic starts.
+    unsafe { std::env::set_var("CLADEFS_BUCKET_LATENCY_MS", "50") };
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+
+    let client = CellClient::connect(&socket, dir.path().join("store"), 1 << 24).unwrap();
+    let extent = ExtentId { cell: client.cell(), sequence: 1 };
+    write(&client, extent, 0, &pattern(9, BLOCK)).unwrap();
+    client.commit(Some(b"zygote-staggered")).unwrap();
+    let version = client.make_version().unwrap();
+    drop(client);
+
+    let daemon = super::Daemon::process();
+    let opens_before = daemon.kept_opens.load(Ordering::Relaxed);
+
+    // First restore opens and keeps the version store.
+    let first =
+        CellClient::connect_forked(&socket, dir.path().join("restore-0"), version.clone(), 0)
+            .unwrap();
+    assert_eq!(read(&first, extent, 0, BLOCK), Ok(pattern(9, BLOCK)));
+    assert_eq!(first.root(), Ok(b"zygote-staggered".to_vec()));
+    drop(first);
+    assert_eq!(
+        daemon.kept_opens.load(Ordering::Relaxed) - opens_before,
+        1,
+        "first restore should open the version store once"
+    );
+
+    // Sequential restore within LINGER must reuse the kept store without reopening it.
+    let second =
+        CellClient::connect_forked(&socket, dir.path().join("restore-1"), version.clone(), 0)
+            .unwrap();
+    assert_eq!(read(&second, extent, 0, BLOCK), Ok(pattern(9, BLOCK)));
+    assert_eq!(second.root(), Ok(b"zygote-staggered".to_vec()));
+    drop(second);
+    assert_eq!(
+        daemon.kept_opens.load(Ordering::Relaxed) - opens_before,
+        1,
+        "second restore within LINGER reopened the kept version store"
+    );
+
+    // Staggered restores spaced 200 ms apart must still reuse the single kept opening with no EBUSY.
+    let mut threads = Vec::new();
+    for n in 2..6usize {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let (socket, version) = (socket.clone(), version.clone());
+        let to = dir.path().join(format!("restore-{n}"));
+        threads.push(std::thread::spawn(move || {
+            let client = CellClient::connect_forked(&socket, to, version, 0).unwrap();
+            assert_eq!(read(&client, extent, 0, BLOCK), Ok(pattern(9, BLOCK)));
+            assert_eq!(client.root(), Ok(b"zygote-staggered".to_vec()));
+        }));
+    }
+    for t in threads {
+        t.join().unwrap();
+    }
+    assert_eq!(
+        daemon.kept_opens.load(Ordering::Relaxed) - opens_before,
+        1,
+        "staggered restores reopened the kept version store"
+    );
+}
+
+/// board 11556: concurrent ephemeral `ForkVersion` calls for the exact same freshly-published
+/// uncached version must all succeed without racing on `ephemeral_host`'s staged journal files.
+#[test]
+fn concurrent_ephemeral_fork_version_of_uncached_version_succeeds() {
+    const CALLERS: usize = 8;
+
+    host();
+    let ps = page_size() as usize;
+    let dir = tempfile::tempdir().unwrap();
+    let eph = crate::ephemeral_host::open(&dir.path().join("ephemeral")).unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+
+    let parent = CellClient::connect(&socket, dir.path().join("parent"), 1 << 24).unwrap();
+    let inherited = ExtentId { cell: parent.cell(), sequence: 1 };
+    write(&parent, inherited, 0, &pattern(7, ps)).unwrap();
+    parent.commit(Some(b"fresh-version")).unwrap();
+    let version = parent.make_version().unwrap();
+    drop(parent);
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(CALLERS));
+    let mut threads = Vec::new();
+    for i in 0..CALLERS {
+        let barrier = std::sync::Arc::clone(&barrier);
+        let at = dir.path().join(format!("ws-{i}"));
+        let cell = version_cell(version);
+        let ver = version.version;
+        let socket = socket.clone();
+        threads.push(std::thread::spawn(move || {
+            barrier.wait();
+            let child = control(super::cells::fork_ephemeral_of_version(
+                super::Daemon::process(),
+                cell,
+                ver,
+                at.clone(),
+                None,
+            ))
+            .unwrap_or_else(|errno| panic!("caller {i} fork_ephemeral_of_version failed: {errno}"));
+            let client = CellClient::connect(&socket, &at, 1 << 24).unwrap();
+            assert_eq!(read(&client, inherited, 0, ps), Ok(pattern(7, ps)));
+            assert_eq!(client.root(), Ok(b"fresh-version".to_vec()));
+            child
+        }));
+    }
+    let children: std::collections::BTreeSet<_> =
+        threads.into_iter().map(|t| t.join().unwrap()).collect();
+    assert_eq!(children.len(), CALLERS);
+    let entries = eph.entries().unwrap();
+    assert_eq!(entries.len(), CALLERS, "all {CALLERS} ephemeral cells must be noted in journal");
+}

@@ -55,6 +55,9 @@ pub(crate) struct Host {
     incarnation: u64,
     local: Arc<local_cell::Host>,
     host_cells: Arc<crate::host_cell::State>,
+    /// Temp filenames currently being staged by concurrent `write_durably` calls, so live
+    /// `entries()` scans skip them rather than unlinking in-flight staged notes (board 11556).
+    staging: Mutex<std::collections::HashSet<std::ffi::OsString>>,
 }
 
 /// Per-host state holding the opened ephemeral cells' directory (board 10962).
@@ -153,6 +156,7 @@ pub(crate) fn open_on(host_ctx: &crate::Host, dir: &Path) -> Result<Arc<Host>, E
         incarnation,
         local: host_ctx.local().clone(),
         host_cells: host_ctx.host_cells().clone(),
+        staging: Mutex::new(std::collections::HashSet::new()),
     });
     *host_ctx.ephemeral.0.lock().unwrap() = Some(host.clone());
     log::info!("{}", opened(dir, incarnation));
@@ -206,7 +210,7 @@ impl Host {
 
     /// Notes, durably, that it may hold `entry`'s ephemeral cell: before its reference is written.
     pub fn note(&self, entry: &Entry) -> Result<(), Error> {
-        write_durably(&self.entry_path(entry.child), &encode(entry)?)
+        self.write_durably(&self.entry_path(entry.child), &encode(entry)?)
     }
 
     /// Forgets `child`, its reference gone: durably, so that no crash brings its entry back
@@ -227,7 +231,7 @@ impl Host {
     /// Remembers, durably, that it accepted migration `migration`, of the cell `child`, until its
     /// source releases it.
     pub fn accept(&self, migration: u64, child: CellId) -> Result<(), Error> {
-        write_durably(&self.accepted_path(migration), &encode(&child)?)
+        self.write_durably(&self.accepted_path(migration), &encode(&child)?)
     }
 
     /// The cell migration `migration` took, if this host accepted it. Failing if its acceptance is
@@ -281,14 +285,54 @@ impl Host {
         let mut entries = Vec::new();
         for found in host_fs::read_dir(self.dir.join(CELLS))? {
             let path = found?.path();
-            if path.extension().is_some_and(|extension| extension == "new") {
-                host_fs::remove_file(&path)?;
+            if is_staged(&path) {
+                let in_flight = path
+                    .file_name()
+                    .is_some_and(|name| self.staging.lock().unwrap().contains(name));
+                if !in_flight
+                    && let Err(err) = host_fs::remove_file(&path)
+                    && err.kind() != std::io::ErrorKind::NotFound
+                {
+                    return Err(err.into());
+                }
                 continue;
             }
             // Listed, then gone: forgotten meanwhile, no entry.
             entries.extend(read(&path)?);
         }
         Ok(entries)
+    }
+
+    /// Writes `bytes` to a file at `path`, whole, durably, over any there, using a unique sibling
+    /// temp name registered in `self.staging` so concurrent writers for the same tenant (or live
+    /// `entries()` scans) never collide on or unlink each other's temp file (board 11556).
+    fn write_durably(&self, path: &Path, bytes: &[u8]) -> Result<(), Error> {
+        struct StagingGuard<'a> {
+            staging: &'a Mutex<std::collections::HashSet<std::ffi::OsString>>,
+            name: std::ffi::OsString,
+            path: PathBuf,
+            armed: bool,
+        }
+        impl Drop for StagingGuard<'_> {
+            fn drop(&mut self) {
+                if self.armed {
+                    // Best-effort cleanup of an uncommitted temp file on error.
+                    let _ = host_fs::remove_file(&self.path);
+                }
+                self.staging.lock().unwrap().remove(&self.name);
+            }
+        }
+        let staged = staged_path(path)?;
+        let name = staged
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("{} has no filename", staged.display()))?
+            .to_os_string();
+        self.staging.lock().unwrap().insert(name.clone());
+        let mut guard =
+            StagingGuard { staging: &self.staging, name, path: staged.clone(), armed: true };
+        write_staged_durably(&staged, path, bytes)?;
+        guard.armed = false;
+        Ok(())
     }
 
     /// Retires the references of the ephemeral cells its journal names that it holds no more: its
@@ -523,16 +567,46 @@ fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, Error> {
     Ok(serde_json::from_slice(json)?)
 }
 
+/// Whether `path` is a staged temp file written by [`write_durably`] (legacy `*.new` or
+/// per-call `<name>.new.<hex>`, board 11556).
+fn is_staged(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".new") || name.contains(".new."))
+}
+
+/// Builds a unique sibling staging path for `path` by appending `.new.<rand>` to the full
+/// filename instead of calling `Path::with_extension` (which stripped `.<cell_id>` from
+/// `<tenant>.<cell_id>` and collided every concurrent writer of the same tenant on `<tenant>.new`,
+/// board 11556).
+fn staged_path(path: &Path) -> Result<PathBuf, Error> {
+    let mut name = path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("{} has no filename", path.display()))?
+        .to_os_string();
+    name.push(format!(".new.{:016x}", rand::random::<u64>()));
+    Ok(path.with_file_name(name))
+}
+
+/// Writes `bytes` to `staged`, syncs it, renames it over `path`, and syncs the parent directory.
+fn write_staged_durably(staged: &Path, path: &Path, bytes: &[u8]) -> Result<(), Error> {
+    let mut file = host_fs::File::create(staged)
+        .with_context(|| format!("creating staged file {}", staged.display()))?;
+    file.write_all(bytes).with_context(|| format!("writing staged file {}", staged.display()))?;
+    file.sync_all().with_context(|| format!("syncing staged file {}", staged.display()))?;
+    host_fs::rename(staged, path)
+        .with_context(|| format!("renaming {} to {}", staged.display(), path.display()))?;
+    let Some(parent) = path.parent() else { bail!("{} has no directory", path.display()) };
+    host_fs::File::open(parent)
+        .and_then(|dir| dir.sync_all())
+        .with_context(|| format!("syncing directory {}", parent.display()))?;
+    Ok(())
+}
+
 /// Writes `bytes` to a file at `path`, whole, durably, over any there.
 fn write_durably(path: &Path, bytes: &[u8]) -> Result<(), Error> {
-    let staged = path.with_extension("new");
-    let mut file = host_fs::File::create(&staged)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    host_fs::rename(&staged, path)?;
-    let Some(parent) = path.parent() else { bail!("{} has no directory", path.display()) };
-    host_fs::File::open(parent)?.sync_all()?;
-    Ok(())
+    let staged = staged_path(path)?;
+    write_staged_durably(&staged, path, bytes)
 }
 
 #[cfg(test)]
@@ -750,5 +824,39 @@ mod tests {
                 _ => Err(format!("no file {case}")),
             }
         }
+    }
+
+    /// board 11556: concurrent `host.note` calls for distinct cells of the same tenant (alongside
+    /// concurrent `host.entries()` scans) must never collide on a shared `<tenant>.new` temp file.
+    #[test]
+    fn concurrent_notes_for_same_tenant_never_collide() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = open(dir.path()).unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(9));
+        let mut threads = Vec::new();
+        for id in 1..=8u64 {
+            let host = Arc::clone(&host);
+            let barrier = Arc::clone(&barrier);
+            let root = dir.path().to_owned();
+            threads.push(std::thread::spawn(move || {
+                barrier.wait();
+                for round in 0..20u64 {
+                    let child = CellId { tenant: 0, id: id * 100 + round };
+                    host.note(&entry(&root, child)).unwrap();
+                }
+            }));
+        }
+        let reader_host = Arc::clone(&host);
+        let reader_barrier = Arc::clone(&barrier);
+        threads.push(std::thread::spawn(move || {
+            reader_barrier.wait();
+            for _ in 0..40 {
+                reader_host.entries().unwrap();
+            }
+        }));
+        for t in threads {
+            t.join().unwrap();
+        }
+        assert_eq!(host.entries().unwrap().len(), 8 * 20);
     }
 }
