@@ -102,15 +102,15 @@
 //! `import` and `fork` taking minutes, others as long as their cells or VMs take. It bounds the
 //! control API's calls alone: not `mount`'s, nor what cladefsctl does without the daemon.
 //!
-//! With `CLADEFSD_GRPC` naming the control socket of the extent daemon (TASK-43.5), every
-//! command goes through its control API (`cladefs::cladefsd::control`), and acts on cells as the
-//! daemon serves them: on a cell a VM has open, live, or not at all (`EBUSY`). Without, cladefsctl
-//! acts on cells itself, on cells nothing has open, as their lock says, which an extent daemon
-//! serving them holds (it waits a while for it, then refuses). `create`, `take` and `import`, which
-//! make new cells, work so anywhere, as when building base images where no daemon runs. The others
-//! change existing cells, which are in the bucket each cell's description names: they need
-//! this host's (`CLADEFSD_BUCKET`) and its placement's fencing token (`CLADEFSD_TOKEN`),
-//! and refuse otherwise (`cladefs::bucket::Host`, TASK-45).
+//! With `CLADEFSD_GRPC` naming the control socket of the extent daemon (TASK-43.5), commands go
+//! through its control API (`cladefs::cladefsd::control`) and act on cells as the daemon serves
+//! them: on a cell a VM has open, live, or not at all (`EBUSY`). Without `CLADEFSD_GRPC` (board
+//! 11705, hotbed question 542), only offline workflows run locally: bucket administration
+//! (`format-bucket`, `add-bucket`, `buckets`, and keyless `shred-tenant`/`shred-cell`/`set-peers`),
+//! offline base-image bootstrap (`import`, `import-memory`), and read-only `stat`. All live-cell
+//! lifecycle commands (`create`, `take`, `place`, `sync`, `fork`, `version`, `versions`,
+//! `drop-versions`, `share`, `unshare`, `fork-version`, `delete`, `drop`, `resize`, `public`,
+//! `public-attach-only`, `attach`) require `CLADEFSD_GRPC`.
 //!
 //! Below, "the cell at DIR" is the cell a command names: by its directory without the daemon, by
 //! TENANT/CELL through it, which places a new cell's directory itself, of the default tenant's
@@ -417,6 +417,7 @@ mod cli {
     }
 
     /// Prints `versions`, one a line: its ID, in hexadecimal, and whether it is uploaded and shared.
+    #[cfg(target_os = "linux")]
     fn print_versions(versions: &[cladefs::VersionInfo]) {
         for cladefs::VersionInfo { id, uploaded, shared } in versions {
             let uploaded = if *uploaded { "uploaded" } else { "local" };
@@ -1884,8 +1885,9 @@ mod cli {
             Ok(())
         }
 
-        /// Does it here, on cells nothing has open: new ones anywhere; existing ones with the bucket
-        /// and a placement token.
+        /// Offline commands when `CLADEFSD_GRPC` is unset (board 11705, hotbed question 542):
+        /// bucket administration, offline bootstrap (`import`, `import-memory`), and read-only
+        /// `stat`. Every live-cell lifecycle and daemon-control command requires `CLADEFSD_GRPC`.
         fn locally(self) -> anyhow::Result<()> {
             if self.is_on_buckets() {
                 return self.on_buckets();
@@ -1902,265 +1904,107 @@ mod cli {
                     _ => {}
                 }
             }
-            let daemons = match self {
-                Self::Stats { .. } => Some("stats are"),
-                Self::Grant { .. } | Self::Revoke { .. } => Some("tenants' grants are"),
-                Self::ShredCell { .. }
-                | Self::ForgetTenantKeys { .. }
-                | Self::ShredTenant { .. } => Some("shredding and forgetting keys are"),
-                Self::KmsReload => Some("reloading the KMS is"),
-                Self::DecommissionHost { .. } | Self::EphemeralHosts => {
-                    Some("decommissioning hosts, and listing them, are")
-                }
-                Self::Mount(_) => Some("its FUSE mount of cells is"),
-                Self::Cells { .. } => Some("the cells VM processes have open are"),
-                Self::Counters { .. } => Some("its counters are"),
-                Self::SetPeers { .. } => Some("its peers are"),
-                Self::Migrate { .. }
-                | Self::HandOver { .. }
-                | Self::WaitHandOver { .. }
-                | Self::AbortMigration { .. } => Some("migrations are"),
-                Self::MemoryLimit { .. }
-                | Self::MemoryWeight { .. }
-                | Self::InFlight { .. }
-                | Self::ShrinkMemory { .. } => Some("its memory is"),
-                Self::DiskLimit { .. }
-                | Self::DiskWeight { .. }
-                | Self::TenantDisk { .. }
-                | Self::Disks { .. }
-                | Self::SetDisk { .. } => Some("its disks are"),
-                _ => None,
-            };
-            if let Some(what) = daemons {
-                bail!(
-                    "{what} the extent daemon's: name its control socket (CLADEFSD_GRPC), or pass --config"
-                );
-            }
-            // cladefs: every cell it opens here, or deletes the cell of, is encrypted under the host's
-            // KMS: none chosen, it refuses before it touches any (TASK-411.28).
-            cladefs::bucket::require_kms().map_err(anyhow::Error::msg)?;
-            // What stat reads needs no cell changed, nor does a copy dropped, its cell left be.
-            let existing = !matches!(
-                self,
-                Self::Create { .. }
-                    | Self::Take { .. }
-                    | Self::Import { .. }
-                    | Self::ImportMemory { .. }
-                    | Self::Stat { .. }
-                    | Self::Drop { .. }
-            );
-            if let Some(Err(why)) = existing.then(cladefs::bucket::Host::from_env) {
-                bail!(
-                    "without the extent daemon (CLADEFSD_GRPC), cladefsctl changes no existing \
-                 cell here: {why}"
-                );
-            }
-            // cladefs: outside the daemon, cladefsctl blocks on what the cells do, at its one entry
-            // here; each cell it opens it closes, its uploads done (TASK-685.3).
-            // An import's walk of its image makes its cell through FUSE storage, which blocks on the
-            // bucket runtime itself: on no runtime's thread, as it always did.
-            if let Self::Import { dir, capacity, image, reference, .. } = self {
-                let dir = dir.context("offline import requires DIR")?;
-                let made = cladefs::import::make_base(&dir, capacity, &image, reference.as_deref());
-                return futures::executor::block_on(made)
-                    .with_context(|| format!("importing {}", image.display()));
-            }
-            if let Self::ImportMemory { dir, file, make_version, .. } = self {
-                let dir = dir.context("offline import-memory requires DIR")?;
-                let made = cladefs::import::import_memory(&dir, &file, make_version);
-                let (cell, version) = futures::executor::block_on(made)
-                    .with_context(|| format!("importing memory {}", file.display()))?;
-                if let Some(version) = version {
-                    println!("{cell} {version:x}");
-                } else {
-                    println!("{cell}");
-                }
-                return Ok(());
-            }
-            local_cell::upload::wait_on(self.locally_async())
-        }
-
-        /// cladefs: what [`Command::locally`] does, once its checks pass.
-        async fn locally_async(self) -> anyhow::Result<()> {
             match self {
-                Self::Create { dir, capacity, .. } => {
-                    let dir = dir.context("offline create requires DIR")?;
-                    let cell = OpenCell::create(&dir, capacity).await?;
-                    println!("{}", cell.cell());
-                    cell.close().await;
+                Self::Import { dir, capacity, image, reference, .. } => {
+                    let dir = dir.context("offline import requires DIR")?;
+                    cladefs::bucket::require_kms().map_err(anyhow::Error::msg)?;
+                    let made =
+                        cladefs::import::make_base(&dir, capacity, &image, reference.as_deref());
+                    futures::executor::block_on(made)
+                        .with_context(|| format!("importing {}", image.display()))
                 }
-                Self::Take { dir, capacity, cell, token, force } => {
-                    let dir = dir.context("offline take requires DIR")?;
-                    cladefs::Opening::here()?
-                        .force(force)
-                        .take(&dir, capacity, cell, token)
-                        .await?
-                        .close()
-                        .await;
+                Self::ImportMemory { dir, file, make_version, .. } => {
+                    let dir = dir.context("offline import-memory requires DIR")?;
+                    cladefs::bucket::require_kms().map_err(anyhow::Error::msg)?;
+                    let made = cladefs::import::import_memory(&dir, &file, make_version);
+                    let (cell, version) = futures::executor::block_on(made)
+                        .with_context(|| format!("importing memory {}", file.display()))?;
+                    if let Some(version) = version {
+                        println!("{cell} {version:x}");
+                    } else {
+                        println!("{cell}");
+                    }
+                    Ok(())
                 }
-                Self::Place { target, token, force: false } => {
-                    let dir = target.dir()?;
-                    local_cell::upload::blocking(|| OpenCell::place(&dir, token))?
-                }
-                Self::Place { target, token, force: true } => {
-                    let dir = target.dir()?;
-                    local_cell::upload::blocking(|| OpenCell::place_forced(&dir, token))?
-                }
-                Self::Sync { target } => {
-                    let dir = target.dir()?;
-                    let cell = OpenCell::open(&dir).await?;
-                    let synced = cell.wait_uploaded().await;
-                    cell.close().await;
-                    synced?;
-                }
-                Self::Import { .. } | Self::ImportMemory { .. } => {
-                    unreachable!("imported above, on no runtime's thread")
-                }
-                Self::Fork { src, dst, .. } => {
-                    let src = src.dir()?;
-                    let dst = dst.context("offline fork requires DST")?;
-                    let cell = OpenCell::open(&src).await?;
-                    // A new cell of the cell's tenant's (TASK-364).
-                    let tenant = cell.cell().tenant;
-                    let forked = cell.fork(&dst, tenant).await;
-                    cell.close().await;
-                    println!("{}", forked?);
-                }
-                Self::Version { target } => {
-                    let dir = target.dir()?;
-                    let cell = OpenCell::open(&dir).await?;
-                    let made = cell.make_version(None).await;
-                    cell.close().await;
-                    println!("{:x}", made?);
-                }
-                Self::Versions { target } => {
-                    let dir = target.dir()?;
-                    let cell = OpenCell::open(&dir).await?;
-                    print_versions(&cell.versions().await);
-                    cell.close().await;
-                }
-                Self::DropVersions { target, versions } => {
-                    let dir = target.dir()?;
-                    let cell = OpenCell::open(&dir).await?;
-                    let dropped = cell.drop_versions(&versions.into_iter().collect()).await;
-                    cell.close().await;
-                    dropped?;
-                }
-                Self::Share { target, version, shared } => {
-                    let dir = target.dir()?;
-                    let cell = OpenCell::open(&dir).await?;
-                    let shared = cell.share_version(version, shared).await;
-                    cell.close().await;
-                    shared?;
-                }
-                Self::ForkVersion { from, .. } => bail!(
-                    "forking version {:x} of cell {:x} needs the extent daemon (CLADEFSD_GRPC or --config)",
-                    from.version,
-                    from.cell,
-                ),
-                Self::Delete { target } => {
-                    let dir = target.dir()?;
-                    let bucket = local_cell::upload::blocking(|| OpenCell::bucket_at(&dir))?;
-                    OpenCell::delete(&dir, bucket.as_deref()).await?
-                }
-                Self::Drop { target } => {
-                    let dir = target.dir()?;
-                    OpenCell::delete(&dir, None).await?
-                }
-                Self::Resize { target, capacity } => {
-                    let dir = target.dir()?;
-                    let cell = OpenCell::open(&dir).await?;
-                    // Opened, it says whether it is a version, whose capacity changes nowhere
-                    // (TASK-160.10).
-                    let resized = match cell.info() {
-                        Ok(info) if capacity < info.capacity => Err(anyhow::anyhow!(
-                            "shrinking a store needs its guest to agree: resize it through the \
-                         extent daemon serving its VM (CLADEFSD_GRPC)"
-                        )),
-                        Ok(_) => cell.set_capacity(capacity).await.map_err(anyhow::Error::from),
-                        Err(err) => Err(err.into()),
-                    };
-                    cell.close().await;
-                    resized?;
-                }
-                Self::Public { target } => {
-                    let dir = target.dir()?;
-                    let cell = OpenCell::open(&dir).await?;
-                    let made = local_cell::upload::blocking(|| cell.make_public());
-                    cell.close().await;
-                    made?;
-                }
-                Self::PublicAttachOnly { target } => {
-                    let dir = target.dir()?;
-                    let cell = OpenCell::open(&dir).await?;
-                    let made = local_cell::upload::blocking(|| cell.make_public_attach_only());
-                    cell.close().await;
-                    made?;
-                }
-                Self::Attach { target, base } => {
-                    let dir = target.dir()?;
-                    let base = base.dir()?;
-                    let based = OpenCell::open(&base).await?;
-                    let ancestry = based.ancestry();
-                    based.close().await;
-                    let cell = OpenCell::open(&dir).await?;
-                    let attached = local_cell::upload::blocking(|| match base.canonicalize() {
-                        Ok(base) => cell.attach_base(&base, &ancestry).map_err(anyhow::Error::from),
-                        Err(err) => Err(err.into()),
-                    });
-                    cell.close().await;
-                    attached?;
-                }
-                Self::Stats { .. }
-                | Self::Cells { .. }
-                | Self::Counters { .. }
-                | Self::Disks { .. }
-                | Self::SetDisk { .. }
-                | Self::SetPeers { .. }
-                | Self::Migrate { .. }
-                | Self::HandOver { .. }
-                | Self::WaitHandOver { .. }
-                | Self::AbortMigration { .. }
-                | Self::MemoryLimit { .. }
-                | Self::MemoryWeight { .. }
-                | Self::InFlight { .. }
-                | Self::ShrinkMemory { .. }
-                | Self::DiskLimit { .. }
-                | Self::DiskWeight { .. }
-                | Self::TenantDisk { .. }
-                | Self::Grant { .. }
-                | Self::Revoke { .. }
-                | Self::ShredCell { .. }
-                | Self::ForgetTenantKeys { .. }
-                | Self::ShredTenant { .. }
-                | Self::KmsReload
-                | Self::DecommissionHost { .. }
-                | Self::EphemeralHosts
-                | Self::Mount(_)
-                | Self::FormatBucket { .. }
-                | Self::AddBucket { .. }
-                | Self::Buckets { .. } => unreachable!("refused above"),
                 Self::Stat { target } => {
                     let dir = target.dir()?;
-                    let cell = OpenCell::open(&dir).await?;
-                    let stat = || -> anyhow::Result<Stat> {
-                        let info = cell.info()?;
-                        Ok(Stat {
-                            cell: cell.cell(),
-                            capacity: info.capacity,
-                            used: info.used,
-                            available: info.available,
-                            holding: cell.holding()?,
-                            public: cell.is_public(),
-                            open: None,
-                        })
+                    cladefs::bucket::require_kms().map_err(anyhow::Error::msg)?;
+                    local_cell::upload::wait_on(async move {
+                        let cell = OpenCell::open(&dir).await?;
+                        let stat = || -> anyhow::Result<Stat> {
+                            let info = cell.info()?;
+                            Ok(Stat {
+                                cell: cell.cell(),
+                                capacity: info.capacity,
+                                used: info.used,
+                                available: info.available,
+                                holding: cell.holding()?,
+                                public: cell.is_public(),
+                                open: None,
+                            })
+                        };
+                        let stat = stat();
+                        cell.close().await;
+                        print!("{}", stat?);
+                        Ok(())
+                    })
+                }
+                other => {
+                    let what = match other {
+                        Self::Stats { .. } => "stats are",
+                        Self::Grant { .. } | Self::Revoke { .. } => "tenants' grants are",
+                        Self::ShredCell { .. }
+                        | Self::ForgetTenantKeys { .. }
+                        | Self::ShredTenant { .. } => "shredding and forgetting keys are",
+                        Self::KmsReload => "reloading the KMS is",
+                        Self::DecommissionHost { .. } | Self::EphemeralHosts => {
+                            "decommissioning hosts, and listing them, are"
+                        }
+                        Self::Mount(_) => "its FUSE mount of cells is",
+                        Self::Cells { .. } => "the cells VM processes have open are",
+                        Self::Counters { .. } => "its counters are",
+                        Self::SetPeers { .. } => "its peers are",
+                        Self::Migrate { .. }
+                        | Self::HandOver { .. }
+                        | Self::WaitHandOver { .. }
+                        | Self::AbortMigration { .. } => "migrations are",
+                        Self::MemoryLimit { .. }
+                        | Self::MemoryWeight { .. }
+                        | Self::InFlight { .. }
+                        | Self::ShrinkMemory { .. } => "its memory is",
+                        Self::DiskLimit { .. }
+                        | Self::DiskWeight { .. }
+                        | Self::TenantDisk { .. }
+                        | Self::Disks { .. }
+                        | Self::SetDisk { .. } => "its disks are",
+                        Self::Create { .. }
+                        | Self::Take { .. }
+                        | Self::Place { .. }
+                        | Self::Sync { .. }
+                        | Self::Fork { .. }
+                        | Self::Version { .. }
+                        | Self::Versions { .. }
+                        | Self::DropVersions { .. }
+                        | Self::Share { .. }
+                        | Self::ForkVersion { .. }
+                        | Self::Delete { .. }
+                        | Self::Drop { .. }
+                        | Self::Resize { .. }
+                        | Self::Public { .. }
+                        | Self::PublicAttachOnly { .. }
+                        | Self::Attach { .. } => "live cell commands are",
+                        Self::Import { .. }
+                        | Self::ImportMemory { .. }
+                        | Self::Stat { .. }
+                        | Self::FormatBucket { .. }
+                        | Self::AddBucket { .. }
+                        | Self::Buckets { .. } => unreachable!("handled above"),
                     };
-                    let stat = stat();
-                    cell.close().await;
-                    print!("{}", stat?);
+                    bail!(
+                        "{what} the extent daemon's: name its control socket (CLADEFSD_GRPC), or pass --config"
+                    );
                 }
             }
-            Ok(())
         }
     }
 

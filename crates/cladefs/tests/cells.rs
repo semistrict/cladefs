@@ -8,40 +8,99 @@
 //! that alone until TASK-149.20, which found `cladefsctl take` of a new copy at a later placement
 //! refused (`ESTALE`): nothing ran them.
 
+#![cfg(target_os = "linux")]
+
 use bucket_cell::object_bucket::ObjectBucket;
-use cladefs::{ExtentId, OpenCell, VolatileSlice, VolatileSliceMut};
-use std::path::Path;
+use cladefs::{CellClient, CellId, ExtentId, VolatileSlice, VolatileSliceMut};
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 fn pattern(seed: u8, len: usize) -> Vec<u8> {
     (0..len).map(|i| seed ^ (i % 251) as u8).collect()
 }
 
-/// Runs cladefsctl with `args`, the bucket at `url` the cells', as a host whose placement's
-/// token is 1: what it prints.
-fn cell(url: &str, args: &[&str]) -> String {
-    let output = Command::new(env!("CARGO_BIN_EXE_cladefsctl"))
-        .args(args)
-        .env("CLADEFSD_BUCKET", url)
-        .env("CLADEFSD_TOKEN", "1")
-        .env_remove("CLADEFSD_GRPC")
-        .output()
-        .unwrap();
+struct Daemon {
+    vms: PathBuf,
+    control: PathBuf,
+    child: std::process::Child,
+    _dir: tempfile::TempDir,
+}
+
+impl Daemon {
+    /// Starts `cladefsd` against the bucket at `url` with a managed disk root so `cladefsctl`'s
+    /// live-cell commands run through its control API (board 11705).
+    fn start(url: &str, token: u64) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = dir.path().join("disk0");
+        std::fs::create_dir_all(&disk).unwrap();
+        let vms = dir.path().join("vms.sock");
+        let control = dir.path().join("control.sock");
+        let child = Command::new(env!("CARGO_BIN_EXE_cladefsd"))
+            .arg(&vms)
+            .env("CLADEFSD_GRPC", &control)
+            .env("CLADEFSD_ROOTS", &disk)
+            .env("CLADEFSD_BUCKET", url)
+            .env("CLADEFSD_TOKEN", token.to_string())
+            .env("CLADEFSD_DISK_HEADROOM", "0")
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while std::os::unix::net::UnixStream::connect(&control).is_err() {
+            assert!(Instant::now() < deadline, "cladefsd never served {}", control.display());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        Self { vms, control, child, _dir: dir }
+    }
+
+    fn run(&self, args: &[&str]) -> std::process::Output {
+        Command::new(env!("CARGO_BIN_EXE_cladefsctl"))
+            .args(args)
+            .env("CLADEFSD_GRPC", &self.control)
+            .env_remove("CLADEFSD_BUCKET")
+            .env_remove("CLADEFSD_TOKEN")
+            .env_remove("CLADEFS_CONFIG")
+            .output()
+            .unwrap()
+    }
+}
+
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Runs cladefsctl with `args` through `daemon`: what it prints.
+fn cell(daemon: &Daemon, args: &[&str]) -> String {
+    let output = daemon.run(args);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "cladefsctl {args:?}: {stderr}");
     String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
-/// The cell at `path`, which keeps its cell in the bucket its description names, opened as a
-/// copy never placed here takes it, as the first placement (TASK-165.9).
-async fn attached(path: &Path) -> OpenCell {
-    OpenCell::open(path).await.unwrap()
+/// Runs cladefsctl with `args` through `daemon`, retrying briefly if the daemon is still finishing
+/// a VM disconnect (`EBUSY`).
+fn cell_once_closed(daemon: &Daemon, args: &[&str]) -> String {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let output = daemon.run(args);
+        if output.status.success() {
+            return String::from_utf8(output.stdout).unwrap().trim().to_owned();
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stderr.contains("EBUSY") || Instant::now() >= deadline {
+            panic!("cladefsctl {args:?}: {stderr}");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
-async fn read(open: &OpenCell, extent: ExtentId, len: usize) -> Vec<u8> {
+fn read(client: &CellClient, extent: ExtentId, len: usize) -> Vec<u8> {
     let mut data = vec![0; len];
-    open.read(extent, 0, &mut [VolatileSliceMut::from(&mut data[..])]).await.unwrap();
+    client.read(extent, 0, &mut [VolatileSliceMut::from(&mut data[..])]).unwrap();
     data
 }
 
@@ -68,59 +127,48 @@ async fn rustfs_forks_and_takes_cells() {
 }
 
 /// A cell forked with cladefsctl is a fork of its cell in the bucket at `url`, and a cell taken
-/// with it onto another host's empty cell directory is read there from the bucket; deleted with it,
-/// the fork goes, and then its parent.
+/// with it onto another host's empty disk is read there from the bucket; deleted with it, the fork
+/// goes, and then its parent.
 async fn forks_and_takes_cells_in(url: &str) {
     let url = url.to_owned();
     let bucket = Arc::new(ObjectBucket::from_url(&url).unwrap());
-    let dir = tempfile::tempdir().unwrap();
-    let path = |name: &str| dir.path().join(name);
+    let daemon = Daemon::start(&url, 1);
+    let capacity = (1u64 << 30).to_string();
 
-    // Made by cladefsctl, naming the bucket at `url`.
-    cell(&url, &["create", path("parent").to_str().unwrap(), &(1u64 << 30).to_string()]);
-    let parent = attached(&path("parent")).await;
+    let parent_str = cell(&daemon, &["create", &capacity]);
+    let parent_cell: CellId = parent_str.parse().unwrap();
+    let parent = CellClient::connect_cell(&daemon.vms, parent_cell).unwrap();
     let data = pattern(7, 5 << 20);
-    let extent = ExtentId { cell: parent.cell().id, sequence: 1 };
-    parent.write(extent, 0, &[VolatileSlice::from(&data[..])]).await.unwrap();
-    parent.commit(Some(b"root")).await.unwrap();
-    let parent_cell = parent.cell();
+    let extent = ExtentId { cell: parent_cell.id, sequence: 1 };
+    parent.write(extent, 0, &[VolatileSlice::from(&data[..])]).unwrap();
+    parent.commit(Some(b"root")).unwrap();
     drop(parent);
 
-    let child =
-        cell(&url, &["fork", path("parent").to_str().unwrap(), path("child").to_str().unwrap()]);
-    let child_cell: cladefs::CellId = child.trim().parse().unwrap();
+    let child = cell_once_closed(&daemon, &["fork", &parent_str]);
+    let child_cell: CellId = child.parse().unwrap();
     let record = bucket_cell::head::get(&*bucket, child_cell).await;
     assert_eq!(record.unwrap().unwrap().origin().map(|origin| origin.parent), Some(parent_cell));
-    let forked = attached(&path("child")).await;
-    assert_eq!(forked.cell(), child_cell);
-    assert_eq!(read(&forked, extent, data.len()).await, data);
+    let forked = CellClient::connect_cell(&daemon.vms, child_cell).unwrap();
+    assert_eq!(forked.cell(), child_cell.id);
+    assert_eq!(read(&forked, extent, data.len()), data);
     drop(forked);
+    cell_once_closed(&daemon, &["sync", &child]);
 
-    cell(
-        &url,
-        &["take", path("elsewhere").to_str().unwrap(), &(1u64 << 30).to_string(), child.trim()],
-    );
-    let elsewhere = attached(&path("elsewhere")).await;
+    let elsewhere_daemon = Daemon::start(&url, 2);
+    cell(&elsewhere_daemon, &["take", &capacity, &child, "2"]);
+    let elsewhere = CellClient::connect_cell(&elsewhere_daemon.vms, child_cell).unwrap();
     assert_eq!(elsewhere.root().unwrap(), b"root");
-    assert_eq!(read(&elsewhere, extent, data.len()).await, data);
+    assert_eq!(read(&elsewhere, extent, data.len()), data);
+    drop(elsewhere);
 
     // The fork deleted, then its parent.
-    cell(&url, &["delete", path("child").to_str().unwrap()]);
-    assert!(!path("child").exists());
-    cell(&url, &["delete", path("parent").to_str().unwrap()]);
-    assert!(!path("parent").exists());
+    cell_once_closed(&elsewhere_daemon, &["delete", &child]);
+    cell_once_closed(&daemon, &["delete", &parent_str]);
 }
 
-/// Runs cladefsctl with `args`, the bucket at `url` the cells', expecting it to fail: what it
-/// says.
-fn cell_fails(url: &str, args: &[&str]) -> String {
-    let output = Command::new(env!("CARGO_BIN_EXE_cladefsctl"))
-        .args(args)
-        .env("CLADEFSD_BUCKET", url)
-        .env("CLADEFSD_TOKEN", "1")
-        .env_remove("CLADEFSD_GRPC")
-        .output()
-        .unwrap();
+/// Runs cladefsctl with `args` through `daemon`, expecting it to fail: what it says.
+fn cell_fails(daemon: &Daemon, args: &[&str]) -> String {
+    let output = daemon.run(args);
     assert!(!output.status.success(), "cladefsctl {args:?} succeeded");
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
@@ -143,34 +191,30 @@ async fn rustfs_places_and_syncs_cells() {
 async fn places_and_syncs_cells_in(url: &str) {
     let url = url.to_owned();
     let bucket = Arc::new(ObjectBucket::from_url(&url).unwrap());
-    let dir = tempfile::tempdir().unwrap();
-    let path = |name: &str| dir.path().join(name).to_str().unwrap().to_owned();
+    let daemon = Daemon::start(&url, 1);
+    let capacity = (1u64 << 30).to_string();
 
-    // Made by cladefsctl, naming the bucket at `url`, its cell the bucket's to name (TASK-364).
-    let made = cell(&url, &["create", &path("first"), &(1u64 << 30).to_string()]);
-    let open = OpenCell::open(path("first")).await.unwrap();
-    let cell_id = open.cell();
-    assert_eq!(made.parse::<cladefs::CellId>(), Ok(cell_id));
+    let made = cell(&daemon, &["create", &capacity]);
+    let cell_id: CellId = made.parse().unwrap();
+    let open = CellClient::connect_cell(&daemon.vms, cell_id).unwrap();
     let extent = ExtentId { cell: cell_id.id, sequence: 1 };
-    open.write(extent, 0, &[VolatileSlice::from(&pattern(3, 1 << 20)[..])]).await.unwrap();
-    open.commit(Some(b"synced")).await.unwrap();
+    open.write(extent, 0, &[VolatileSlice::from(&pattern(3, 1 << 20)[..])]).unwrap();
+    open.commit(Some(b"synced")).unwrap();
     drop(open);
-    cell(&url, &["place", &path("first"), "5"]);
-    cell(&url, &["sync", &path("first")]);
+    cell_once_closed(&daemon, &["place", &made, "5"]);
+    cell(&daemon, &["sync", &made]);
     let state = bucket_cell::recover(&*bucket, cell_id, None).await.unwrap().state;
     assert_eq!(state.root, Some(b"synced".to_vec()));
 
-    let capacity = (1u64 << 30).to_string();
-    let hex = cell_id.to_string();
+    let second = Daemon::start(&url, 1);
     // Refused as it takes the cell's head, which a later placement holds, leaving nothing
     // (TASK-165.9: before, it took the cell and its sync was refused); taken placed later, its
     // head taken with that placement's token as it is made (TASK-149.20).
-    let stale = cell_fails(&url, &["take", &path("earlier"), &capacity, &hex, "3"]);
-    assert!(stale.contains("a later placement holds the cell"), "{stale}");
-    assert!(!Path::new(&path("earlier")).exists());
-    cell(&url, &["take", &path("earlier"), &capacity, &hex, "6"]);
-    cell(&url, &["sync", &path("earlier")]);
-    let later = attached(Path::new(&path("earlier"))).await;
+    let stale = cell_fails(&second, &["take", &capacity, &made, "3"]);
+    assert!(stale.contains("ESTALE"), "{stale}");
+    cell(&second, &["take", &capacity, &made, "6"]);
+    cell(&second, &["sync", &made]);
+    let later = CellClient::connect_cell(&second.vms, cell_id).unwrap();
     assert_eq!(later.root().unwrap(), b"synced");
-    assert_eq!(read(&later, extent, 1 << 20).await, pattern(3, 1 << 20));
+    assert_eq!(read(&later, extent, 1 << 20), pattern(3, 1 << 20));
 }

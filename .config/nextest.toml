@@ -50,9 +50,7 @@ not (
         | test(=storage::tests::images_dropped_as_their_pass_runs_leave_their_bucket_whole)
         | test(=storage::tests::passes_run_among_an_image_and_its_forks_commits)))
     | (binary_id(cladefs::cells) & test(=forks_and_takes_cells))
-    | (binary_id(cladefs::cladefsctl) & (
-        test(=cells_open_elsewhere_are_left_alone_locally)
-        | test(=cells_open_elsewhere_are_left_alone_through_the_daemon)))
+    | (binary_id(cladefs::cladefsctl) & test(=cells_open_elsewhere_are_left_alone_through_the_daemon))
     | (package(cladefs) & (
         test(=cladefsd::tests::whatever_a_vm_process_says_harms_no_other)
         | test(=cladefsd::tests::serves_hundreds_of_forks_of_a_base)

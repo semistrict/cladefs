@@ -2,10 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Tests of cladefsctl, cladefs's tool for VMs' disks: each acting on cells itself, as where no
-//! extent daemon runs, and, on Linux, through an extent daemon's control API (TASK-43.5).
+//! Tests of cladefsctl, cladefs's tool for VMs' disks: offline commands (bucket administration,
+//! `import`, `import-memory`, read-only `stat`) without a daemon, and live-cell / control commands
+//! through an extent daemon's control API on Linux (TASK-43.5, board 11705, hotbed question 542).
 
-use cladefs::{ExtentId, OpenCell, VolatileSlice, VolatileSliceMut};
+#[cfg(target_os = "linux")]
+use cladefs::{ExtentId, VolatileSliceMut};
+use cladefs::{OpenCell, VolatileSlice};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -24,14 +27,13 @@ struct Cladefsctl {
 }
 
 impl Cladefsctl {
-    /// cladefsctl acting on cells itself, as a host whose bucket is in its process's memory, of
+    /// cladefsctl acting offline, as a host whose bucket is in its process's memory, of
     /// placement 1.
     fn local() -> Self {
         Self::with_env(&HOST)
     }
 
-    /// cladefsctl acting on cells itself, with `env`, and nothing else of its kind, in its
-    /// environment.
+    /// cladefsctl acting offline, with `env`, and nothing else of its kind, in its environment.
     fn with_env(env: &[(&'static str, &str)]) -> Self {
         let env = env.iter().map(|&(name, value)| (name, value.to_owned())).collect();
         Self { daemon: None, env }
@@ -97,66 +99,8 @@ impl Drop for KillOnDrop {
     }
 }
 
-async fn read(open: &OpenCell, extent: ExtentId) -> Vec<u8> {
-    let mut data = vec![0; BLOCK];
-    open.read(extent, 0, &mut [VolatileSliceMut::from(&mut data[..])]).await.unwrap();
-    data
-}
-
-/// TASK-39.4: `cladefsctl delete` deletes a cell whose fork lives: it in its bucket and its
-/// directory, the fork living on, a cell of its own, reading what it inherited in the bucket
-/// (TASK-165.7). Before, the cell directory stayed, holding what the fork shared of it.
-async fn cells_are_deleted_while_their_forks_live_local(cladefsctl: Cladefsctl, dir: &Path) {
-    let (path, fork) = (dir.join("store"), dir.join("fork"));
-    let open = OpenCell::create(&path, 1 << 24).await.unwrap();
-    let extent = ExtentId { cell: open.cell().id, sequence: 1 };
-    open.write(extent, 0, &[VolatileSlice::from(&[7; BLOCK][..])]).await.unwrap();
-    open.commit(None).await.unwrap();
-    drop(open);
-    let printed = cladefsctl.run(&[Path::new("fork"), &path, &fork]).unwrap();
-    let cell: cladefs::CellId = printed.trim().parse().unwrap();
-
-    cladefsctl.run(&[Path::new("delete"), &path]).unwrap();
-    assert!(!path.exists(), "the cell directory stayed");
-    let forked = OpenCell::open(&fork).await.unwrap();
-    assert_eq!(forked.cell(), cell);
-    assert_eq!(read(&forked, extent).await, [7; BLOCK]);
-    let own = ExtentId { cell: cell.id, sequence: 1 };
-    forked.write(own, 0, &[VolatileSlice::from(&[9; BLOCK][..])]).await.unwrap();
-    forked.commit(None).await.unwrap();
-    drop(forked);
-    // TASK-49: what the fork wrote, and what it inherited, which it shares.
-    let stat = cladefsctl.run(&[Path::new("stat"), &fork]).unwrap();
-    assert!(stat.contains(&format!("used {}\n", 2 * BLOCK)), "{stat}");
-    assert!(stat.contains(&format!("own {BLOCK}\ninherited {BLOCK}\n")), "{stat}");
-    // Deleted again: nothing is there.
-    assert!(cladefsctl.run(&[Path::new("delete"), &path]).is_err(), "deleted nothing again");
-    let forked = OpenCell::open(&fork).await.unwrap();
-    assert_eq!(read(&forked, extent).await, [7; BLOCK]);
-    drop(forked);
-
-    cladefsctl.run(&[Path::new("delete"), &fork]).unwrap();
-    assert!(!fork.exists());
-}
-
-#[test]
-fn copies_are_dropped_locally() {
-    let dir = tempfile::tempdir().unwrap();
-    // A host's bucket, which the copy takes the cell from.
-    let bucket = format!("file://{}", dir.path().join("bucket").display());
-    std::fs::create_dir(dir.path().join("bucket")).unwrap();
-    let cladefsctl = Cladefsctl::with_env(&[("CLADEFSD_BUCKET", &bucket)]);
-    let (made, path) = (dir.path().join("made"), dir.path().join("taken"));
-    let capacity = Path::new("16777216");
-    let cell = cladefsctl.run(&[Path::new("create"), &made, capacity]).unwrap();
-    let cell = Path::new(cell.trim());
-    cladefsctl.run(&[Path::new("take"), &path, capacity, cell]).unwrap();
-    assert!(path.exists(), "nothing was taken");
-    cladefsctl.run(&[Path::new("drop"), &path]).unwrap();
-    assert!(!path.exists(), "the copy stayed");
-    assert!(cladefsctl.run(&[Path::new("drop"), &path]).is_err(), "a second drop found a cell");
-}
-
+/// TASK-154: `cladefsctl drop` deletes what `take` made, a copy of a cell this host holds nothing
+/// of, and a second finds nothing there.
 #[cfg(target_os = "linux")]
 #[test]
 fn copies_are_dropped_through_the_daemon() {
@@ -172,35 +116,34 @@ fn copies_are_dropped_through_the_daemon() {
     assert!(cladefsctl.run(&[Path::new("drop"), cell]).is_err(), "a second drop found a cell");
 }
 
-/// TASK-395.7: `cladefsctl version --shared` makes a version shared, as its record in its bucket
-/// says, which `unshare` and `share` change; a cell of no version is refused.
+/// TASK-395.7: `cladefsctl share` / `unshare` / `drop-versions` manage a cell's versions through
+/// the daemon.
+#[cfg(target_os = "linux")]
 #[test]
-fn versions_are_shared_and_unshared_locally() {
+fn versions_are_shared_and_unshared_through_the_daemon() {
     let dir = tempfile::tempdir().unwrap();
     let bucket = format!("file://{}", dir.path().join("bucket").display());
     std::fs::create_dir(dir.path().join("bucket")).unwrap();
-    let cladefsctl = Cladefsctl::with_env(&[("CLADEFSD_BUCKET", &bucket), ("CLADEFSD_TOKEN", "1")]);
-    let base = dir.path().join("base");
-    cladefsctl.run(&[Path::new("create"), &base, Path::new("16777216")]).unwrap();
-    let printed = cladefsctl.run(&[Path::new("version"), &base]).unwrap();
+    let cladefsctl =
+        Cladefsctl::through_daemon(dir.path(), &[("CLADEFSD_BUCKET", bucket.as_str())]);
+    let base = cladefsctl.run(&[Path::new("create"), Path::new("16777216")]).unwrap();
+    let base = Path::new(base.trim());
+    let printed = cladefsctl.run(&[Path::new("version"), base]).unwrap();
     let version = printed.trim().to_owned();
-    let listed = || cladefsctl.run(&[Path::new("versions"), &base]).unwrap();
+    let listed = || cladefsctl.run(&[Path::new("versions"), base]).unwrap();
     assert_eq!(listed(), format!("{version} uploaded\n"));
     let id = Path::new(&version);
-    cladefsctl.run(&[Path::new("share"), &base, id]).unwrap();
+    cladefsctl.run(&[Path::new("share"), base, id]).unwrap();
     assert_eq!(listed(), format!("{version} uploaded shared\n"));
-    cladefsctl.run(&[Path::new("unshare"), &base, id]).unwrap();
+    cladefsctl.run(&[Path::new("unshare"), base, id]).unwrap();
     assert_eq!(listed(), format!("{version} uploaded\n"));
-    cladefsctl.run(&[Path::new("drop-versions"), &base, id]).unwrap();
+    cladefsctl.run(&[Path::new("drop-versions"), base, id]).unwrap();
     assert_eq!(listed(), "");
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn cells_are_deleted_while_their_forks_live_locally() {
-    let dir = tempfile::tempdir().unwrap();
-    cells_are_deleted_while_their_forks_live_local(Cladefsctl::local(), dir.path()).await;
-}
-
+/// TASK-39.4: `cladefsctl delete` deletes a cell whose fork lives: it in its bucket and its
+/// directory, the fork living on, a cell of its own, reading what it inherited in the bucket
+/// (TASK-165.7). Before, the cell directory stayed, holding what the fork shared of it.
 #[cfg(target_os = "linux")]
 #[test]
 fn cells_are_deleted_while_their_forks_live_through_the_daemon() {
@@ -252,58 +195,6 @@ fn cells_are_deleted_while_their_forks_live_through_the_daemon() {
 /// bytes: of a new cell, none; of one written, its own, an extent written again or grown counted
 /// once; of its fork, all inherited; of the fork written and freed in, what it wrote and kept and
 /// what it kept of what it inherited; the cell forked from as before.
-async fn stat_counts_extents_local(cladefsctl: Cladefsctl, dir: &Path) {
-    let (path, fork) = (dir.join("store"), dir.join("fork"));
-    let held = |path: &Path| {
-        let stat = cladefsctl.run(&[Path::new("stat"), path]).unwrap();
-        let named = ["own", "inherited", "own_extents", "inherited_extents"];
-        let value = |name: &str| -> u64 {
-            let line = stat.lines().find_map(|line| line.strip_prefix(&format!("{name} ")));
-            line.unwrap_or_else(|| panic!("no {name} in {stat}")).parse().unwrap()
-        };
-        named.map(value)
-    };
-    let block = BLOCK as u64;
-    let open = OpenCell::create(&path, 1 << 24).await.unwrap();
-    let base = open.cell().id;
-    let extent = |open: &OpenCell, sequence| ExtentId { cell: open.cell().id, sequence };
-    let write = async |open: &OpenCell, extent, offset, byte| {
-        open.write(extent, offset, &[VolatileSlice::from(&[byte; BLOCK][..])]).await.unwrap();
-    };
-    drop(open);
-    assert_eq!(held(&path), [0, 0, 0, 0]);
-    let open = OpenCell::open(&path).await.unwrap();
-    for sequence in 1..=3 {
-        write(&open, extent(&open, sequence), 0, sequence as u8).await;
-    }
-    // Written again, and grown: still three.
-    write(&open, extent(&open, 1), 0, 9).await;
-    write(&open, extent(&open, 2), block, 9).await;
-    open.commit(None).await.unwrap();
-    drop(open);
-    assert_eq!(held(&path), [4 * block, 0, 3, 0]);
-
-    cladefsctl.run(&[Path::new("fork"), &path, &fork]).unwrap();
-    assert_eq!(held(&fork), [0, 4 * block, 0, 3]);
-    let forked = OpenCell::open(&fork).await.unwrap();
-    let inherited = |sequence| ExtentId { cell: base, sequence };
-    for sequence in 1..=2 {
-        write(&forked, extent(&forked, sequence), 0, 7).await;
-    }
-    forked.free(inherited(2)).unwrap();
-    forked.free(extent(&forked, 2)).unwrap();
-    forked.commit(None).await.unwrap();
-    drop(forked);
-    assert_eq!(held(&fork), [block, 2 * block, 1, 2]);
-    assert_eq!(held(&path), [4 * block, 0, 3, 0]);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn stat_counts_extents_locally() {
-    let dir = tempfile::tempdir().unwrap();
-    stat_counts_extents_local(Cladefsctl::local(), dir.path()).await;
-}
-
 #[cfg(target_os = "linux")]
 #[test]
 fn stat_counts_extents_through_the_daemon() {
@@ -362,20 +253,23 @@ fn stat_counts_extents_through_the_daemon() {
     drop(vm);
 }
 
+/// Offline `cladefsctl stat` inspects a closed cell without a running daemon (board 11705, hotbed
+/// question 542).
 #[tokio::test(flavor = "multi_thread")]
-async fn cells_open_elsewhere_are_left_alone_locally() {
+async fn stat_reads_cells_offline() {
     let dir = tempfile::tempdir().unwrap();
-    let cladefsctl = Cladefsctl::local();
     let path = dir.path().join("store");
     let open = OpenCell::create(&path, 1 << 24).await.unwrap();
-    let error = cladefsctl.run(&[Path::new("delete"), &path]).expect_err("deleted an open cell");
-    assert!(error.contains("another process has the store's cells open"), "{error}");
-    assert!(OpenCell::open(dir.path().join("store")).await.is_err(), "opened twice");
+    let extent = cladefs::ExtentId { cell: open.cell().id, sequence: 1 };
+    open.write(extent, 0, &[VolatileSlice::from(&[5; BLOCK][..])]).await.unwrap();
+    open.commit(None).await.unwrap();
     drop(open);
-    cladefsctl.run(&[Path::new("delete"), &path]).unwrap();
-    assert!(!path.exists());
+    let stat = Cladefsctl::with_env(&[]).run(&[Path::new("stat"), &path]).unwrap();
+    assert!(stat.contains(&format!("own {BLOCK}\ninherited 0\n")), "{stat}");
+    assert!(stat.contains("own_extents 1\ninherited_extents 0\n"), "{stat}");
 }
 
+/// cladefsctl changes no cell another process has open: through the daemon, it refuses (`EBUSY`).
 #[cfg(target_os = "linux")]
 #[test]
 fn cells_open_elsewhere_are_left_alone_through_the_daemon() {
@@ -401,6 +295,7 @@ fn cells_open_elsewhere_are_left_alone_through_the_daemon() {
 /// bucket to add (`EEXIST`), and a bucket not the root adds none (`EINVAL`).
 #[test]
 fn buckets_are_added_in_turn_and_recorded_in_every_root() {
+    use cladefs::import::testing::{Entry, Kind, layer};
     let dir = tempfile::tempdir().unwrap();
     let url = |name: &str| {
         std::fs::create_dir(dir.path().join(name)).unwrap();
@@ -445,19 +340,21 @@ fn buckets_are_added_in_turn_and_recorded_in_every_root() {
     let socket = dir.path().join("unused-control.sock");
     let with_socket = Cladefsctl::with_env(&[("CLADEFSD_GRPC", socket.to_str().unwrap())]);
     assert_eq!(with_socket.run(&[Path::new("buckets"), Path::new(&root)]), Ok(expected));
-    let made = run(&["create", dir.path().join("store").to_str().unwrap(), "16777216"]);
-    let cell: cladefs::CellId = made.unwrap().trim().parse().unwrap();
+    // A cell imported offline into `east` carries bucket 2 in its ID's high bits.
+    let image = dir.path().join("layer.tar");
+    std::fs::write(&image, layer(&[Entry::new("hello", Kind::File(b"hi\n"))]).unwrap()).unwrap();
+    let store = dir.path().join("store");
+    run(&["import", store.to_str().unwrap(), "67108864", image.to_str().unwrap()]).unwrap();
+    let stat = run(&["stat", store.to_str().unwrap()]).unwrap();
+    let cell_line = stat.lines().find_map(|line| line.strip_prefix("cell ")).unwrap();
+    let cell: cladefs::CellId = cell_line.parse().unwrap();
     assert_eq!(cell.id >> 48, 2, "{cell}");
 }
 
-/// cladefsctl imports an image where no daemon is, into a cell directory keeping its cell in the
-/// host's bucket, and forks it there too, as fxfs-guest-import forks the base it imports for its
-/// guest: the fork is the bucket's (TASK-165.7), made by the uploader the cell, opened there, keeps
-/// its cell with. The fork holds the image's file, read from the bucket; the base is as it was. The
-/// host's bucket is a file bucket: what the import uploaded has left the cell directory, which a
-/// bucket in the import's memory would have taken with it (TASK-165.8).
+/// Offline `cladefsctl import` builds a base image into a cell directory backed by the host's
+/// bucket without a daemon; its filesystem mounts and reads back cleanly.
 #[tokio::test(flavor = "multi_thread")]
-async fn images_imported_where_no_daemon_is_fork_there() {
+async fn images_imported_offline_mount_and_read_back() {
     use cladefs::import::testing::{Entry, Kind, layer};
     use cladefs::{Filesystem, Storage};
     use futures::executor::block_on;
@@ -466,30 +363,25 @@ async fn images_imported_where_no_daemon_is_fork_there() {
     let cladefsctl = Cladefsctl::with_env(&[("CLADEFSD_BUCKET", &bucket), ("CLADEFSD_TOKEN", "1")]);
     let image = dir.path().join("layer.tar");
     std::fs::write(&image, layer(&[Entry::new("hello", Kind::File(b"hello\n"))]).unwrap()).unwrap();
-    let (base, fork) = (dir.path().join("base"), dir.path().join("fork"));
+    let base = dir.path().join("base");
     let run = |args: &[&dyn AsRef<Path>]| {
         let args: Vec<&Path> = args.iter().map(|arg| arg.as_ref()).collect();
         cladefsctl.run(&args)
     };
     run(&[&"import", &base, &"67108864", &image]).unwrap();
-    let printed = run(&[&"fork", &base, &fork]).unwrap();
-    let cell: cladefs::CellId = printed.trim().parse().unwrap();
-    assert_eq!(OpenCell::open(&fork).await.unwrap().cell(), cell);
-    // The file `hello` of the cell at `path`, as its filesystem has it.
-    let hello = |path: &Path| {
-        block_on(async {
-            let fs = Filesystem::mount(Storage::open(path).await.unwrap()).await.unwrap();
-            let (file, _) = fs.root().lookup(b"hello").await.unwrap();
-            let mut read = vec![0; 16];
-            let len = file.read(0, &mut read).await.unwrap();
-            read.truncate(len);
-            drop(file);
-            fs.close().await.unwrap();
-            read
-        })
-    };
-    assert_eq!(hello(&fork), b"hello\n");
-    assert_eq!(hello(&base), b"hello\n");
+    let stat = run(&[&"stat", &base]).unwrap();
+    assert!(stat.contains("capacity 67108864\n"), "{stat}");
+    let read = block_on(async {
+        let fs = Filesystem::mount(Storage::open(&base).await.unwrap()).await.unwrap();
+        let (file, _) = fs.root().lookup(b"hello").await.unwrap();
+        let mut read = vec![0; 16];
+        let len = file.read(0, &mut read).await.unwrap();
+        read.truncate(len);
+        drop(file);
+        fs.close().await.unwrap();
+        read
+    });
+    assert_eq!(read, b"hello\n");
 }
 
 /// Every command through the daemon: a cell imported, made a public base, grown, forked, synced
@@ -775,39 +667,48 @@ fn the_daemon_stops_on_sigterm() {
     }
 }
 
-/// TASK-45: without a daemon, cladefsctl changes no existing cell unless it has the bucket
-/// and this host's placement token; it makes new cells anywhere.
+/// board 11705, hotbed question 542: without `CLADEFSD_GRPC`, offline bootstrap (`import`) and
+/// read-only `stat` succeed, while live-cell lifecycle commands refuse naming `CLADEFSD_GRPC`.
 #[tokio::test(flavor = "multi_thread")]
-async fn existing_cells_change_only_with_a_bucket_and_a_token() {
+async fn offline_commands_work_and_live_cell_commands_need_the_daemon() {
     use cladefs::import::testing::{Entry, Kind, layer};
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store");
-    drop(OpenCell::create(&path, 1 << 24).await.unwrap());
-    let delete = [Path::new("delete"), &path];
-
-    let error = Cladefsctl::with_env(&[]).run(&delete).expect_err("deleted with no bucket");
-    assert!(error.contains("CLADEFSD_BUCKET names no bucket"), "{error}");
-    let bucket = [("CLADEFSD_BUCKET", "memory:///cells")];
-    let error = Cladefsctl::with_env(&bucket).run(&delete).expect_err("deleted with no token");
-    assert!(error.contains("CLADEFSD_TOKEN names no placement token"), "{error}");
-    let zero = [("CLADEFSD_BUCKET", "memory:///cells"), ("CLADEFSD_TOKEN", "0")];
-    let error = Cladefsctl::with_env(&zero).run(&delete).expect_err("deleted with token 0");
-    assert!(error.contains("CLADEFSD_TOKEN names no placement token"), "{error}");
-    assert!(path.exists());
-
-    // New cells, made where no bucket is.
     let image = dir.path().join("layer.tar");
     std::fs::write(&image, layer(&[Entry::new("hello", Kind::File(b"hello\n"))]).unwrap()).unwrap();
     let imported = dir.path().join("imported");
     let import = [Path::new("import"), &imported, Path::new("67108864"), &image];
     Cladefsctl::with_env(&[]).run(&import).unwrap();
-    let created = dir.path().join("created");
-    Cladefsctl::with_env(&[]).run(&[Path::new("create"), &created, Path::new("67108864")]).unwrap();
-    assert!(OpenCell::open(&imported).await.is_ok() && created.exists());
+    assert!(OpenCell::open(&imported).await.is_ok());
 
-    // With both.
-    Cladefsctl::local().run(&delete).unwrap();
-    assert!(!path.exists());
+    // Live-cell lifecycle commands require CLADEFSD_GRPC.
+    let cladefsctl = Cladefsctl::local();
+    for args in [
+        ["create", "d", "16777216"].as_slice(),
+        &["take", "d", "16777216", "0/1"],
+        &["place", "d", "2"],
+        &["sync", "d"],
+        &["fork", "d", "e"],
+        &["version", "d"],
+        &["versions", "d"],
+        &["drop-versions", "d", "1"],
+        &["share", "d", "1"],
+        &["unshare", "d", "1"],
+        &["fork-version", "0/1", "1"],
+        &["delete", "d"],
+        &["drop", "d"],
+        &["resize", "d", "33554432"],
+        &["public", "d"],
+        &["public-attach-only", "d"],
+        &["attach", "d", "e"],
+    ] {
+        let paths: Vec<&Path> = args.iter().map(Path::new).collect();
+        let error = cladefsctl.run(&paths).expect_err("ran live-cell command without daemon");
+        assert!(
+            error.contains("live cell commands are the extent daemon's")
+                && error.contains("CLADEFSD_GRPC"),
+            "{args:?}: {error}"
+        );
+    }
 }
 
 /// Commands with more arguments than they take are refused, with the usage.
@@ -837,28 +738,6 @@ fn commands_with_more_arguments_print_the_usage() {
 fn the_version_is_the_build_commit() {
     let printed = Cladefsctl::with_env(&[]).run(&[Path::new("--version")]).unwrap();
     assert_eq!(printed, format!("cladefsctl {}\n", cladefs::BUILD_COMMIT));
-}
-
-/// Without a daemon, a cell grows, or keeps its capacity, here; it shrinks only through the
-/// daemon serving its VM, whose guest must agree.
-#[tokio::test(flavor = "multi_thread")]
-async fn cells_grow_here_and_shrink_only_through_the_daemon() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store");
-    drop(OpenCell::create(&path, 1 << 24).await.unwrap());
-    let cladefsctl = Cladefsctl::local();
-    let resize = |capacity: u64| {
-        let capacity = capacity.to_string();
-        cladefsctl.run(&[Path::new("resize"), &path, Path::new(&capacity)])
-    };
-    let capacity = async || OpenCell::open(&path).await.unwrap().info().unwrap().capacity;
-    resize(1 << 24).unwrap();
-    assert_eq!(capacity().await, 1 << 24);
-    resize(1 << 25).unwrap();
-    assert_eq!(capacity().await, 1 << 25);
-    let error = resize(1 << 24).expect_err("shrank a cell here");
-    assert!(error.contains("shrinking a store needs its guest to agree"), "{error}");
-    assert_eq!(capacity().await, 1 << 25);
 }
 
 /// board 8585: `cells` lists the cells VM processes have open, each with what StatCell says of it,

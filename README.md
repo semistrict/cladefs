@@ -232,19 +232,18 @@ cargo build
 scripts/test.sh
 ```
 
-Make a base from a container image's files and fork it. This needs no VM and no daemon:
+Make a base from a container image's files and inspect it offline (no VM and no daemon needed):
 
 ```sh
 export CLADEFSD_BUCKET=file:///tmp/cladefs/bucket CLADEFSD_TOKEN=1
 export CLADEFS_MASTER_KEY=$(openssl rand -hex 32)   # cells are always encrypted
 docker export "$(docker create alpine)" > /tmp/alpine.tar
-# /tmp/cladefs/base and /tmp/cladefs/vm1 are local cell directories backed by CLADEFSD_BUCKET
+# /tmp/cladefs/base is a local cell directory backed by CLADEFSD_BUCKET
 cargo run --bin cladefsctl -- import /tmp/cladefs/base 1073741824 /tmp/alpine.tar
-cargo run --bin cladefsctl -- fork /tmp/cladefs/base /tmp/cladefs/vm1
-cargo run --bin cladefsctl -- stat /tmp/cladefs/vm1
+cargo run --bin cladefsctl -- stat /tmp/cladefs/base
 ```
 
-`stat` shows the fork's bytes as `inherited`: it holds the base's extents and wrote none.
+On Linux, start `cladefsd` with `CLADEFSD_GRPC` to fork and manage live cells through the daemon (`cladefsctl fork /tmp/cladefs/base /tmp/cladefs/vm1`); `stat` on the fork then shows its bytes as `inherited`, holding the base's extents without copying them.
 
 Boot guests, on Linux with KVM. This builds the guest kernel and Firecracker, starts a daemon and
 runs the guest tests, each of which boots VMs that mount Fxfs from an extent store device:
