@@ -403,6 +403,13 @@ impl<B: Bucket> Bucket for RoutedBucket<B> {
         }
     }
 
+    async fn append(&self, key: &str, offset: u64, bytes: crate::Bytes) -> Result<u64, Error> {
+        match self.member(key).await? {
+            Some(member) => member.append(key, offset, bytes).await,
+            None => self.home.append(key, offset, bytes).await,
+        }
+    }
+
     async fn rewritable(&self, key: &str) {
         match self.member(key).await {
             Ok(Some(member)) => member.rewritable(key).await,

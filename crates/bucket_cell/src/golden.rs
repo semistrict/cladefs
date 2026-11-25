@@ -13,8 +13,9 @@ use crate::evidence::{self, Unit};
 use crate::identity::{self, Details, Entry, Identity, Registry};
 use crate::keys::{Dek, InheritedDek, Kek};
 use crate::layout::{
-    self, CellId, Configuration, Contents, Continued, FORMAT, Footer, Fsync, Head, Kind, Location,
-    Member, Mirror, NewVersion, Origin, Reference, Replication, Retired, Version, Wish,
+    self, ActiveWal, CellId, Configuration, Contents, Continued, FORMAT, FastWal, Footer, Fsync,
+    Head, Kind, Location, Member, Mirror, NewVersion, Origin, Reference, Replication, Retired,
+    Version, Wish,
 };
 use crate::objectid::BlockTaker;
 use crate::passed::{CollectorLease, Passed, Sum, Usage};
@@ -78,6 +79,30 @@ fn v31_heads_convert_to_current_and_map_local_to_ordered() {
             decoded.replication,
             Some(Replication { wish: Wish { f: 1, fsync: expected }, configuration: None })
         );
+        assert_eq!(decoded.fast_wal, None);
+    }
+}
+
+/// Checks format 32, 33, and 34 heads decode into format 35 heads with `fast_wal: None` (doc-28,
+/// doc-29).
+#[test]
+fn v32_through_v34_heads_convert_to_current_with_no_fast_wal() {
+    for version in [32, 33, 34] {
+        let cases = formats::golden::cases(FORMAT, env!("CARGO_MANIFEST_DIR"), version);
+        for (name, bytes) in cases {
+            match name.as_str() {
+                "head-root" => {
+                    assert_eq!(Head::decode(CELL, &bytes).unwrap(), head_root());
+                }
+                "head-forking" => {
+                    assert_eq!(Head::decode(CELL, &bytes).unwrap(), head_forking());
+                }
+                "head-clone" => {
+                    assert_eq!(Head::decode(CELL, &bytes).unwrap(), head_clone());
+                }
+                _ => {}
+            }
+        }
     }
 }
 
@@ -105,14 +130,14 @@ fn every_object_kind_refuses_other_versions_and_trailing_bytes() {
         let mut trailing = bytes.clone();
         trailing.push(0);
         assert!(
-            BucketLayout::read_as(name, &trailing).is_err(),
+            BucketLayout::read_as(name, &trailing, None).is_err(),
             "{name}: trailing byte was accepted"
         );
         // Older and newer versions refused before decoding the rest.
         for wrong in [FORMAT.oldest - 1, FORMAT.current + 1] {
             let mut changed = bytes.clone();
             changed[..4].copy_from_slice(&wrong.to_le_bytes());
-            let err = BucketLayout::read_as(name, &changed)
+            let err = BucketLayout::read_as(name, &changed, None)
                 .expect_err(&format!("{name}: version {wrong} was accepted"));
             assert!(
                 err.contains(&format!("bucket layout version {wrong}")),
@@ -157,6 +182,27 @@ fn head_root() -> Head {
                 ],
             }),
         }),
+        fast_wal: None,
+    }
+}
+
+fn head_fast_wal() -> Head {
+    Head {
+        format: FORMAT.current,
+        owner: 0x7777,
+        made: Made::Root,
+        kind: Some(CellKind::Fxfs),
+        epoch: 3,
+        holder: 0x55,
+        token: 4,
+        end: 2,
+        swaps: 5,
+        runs: vec![(0, 1), (1, 3)],
+        fast_wal: Some(FastWal {
+            fsync: Fsync::FastWal,
+            active: Some(ActiveWal { epoch: 3, bucket: "s3://cladefs-wal--use1-az4--x-s3".into() }),
+        }),
+        ..Head::default()
     }
 }
 
@@ -332,6 +378,7 @@ fn grammar_keys() -> Vec<String> {
         layout::ephemeral_index(0x2a, CELL, 7, CHILD),
         layout::decommissioned(0x1234, 0x2a),
         evidence_key(),
+        layout::wal(CELL, 2, 7),
         "unknown/key".to_owned(),
     ]
 }
@@ -344,6 +391,7 @@ impl formats::golden::Family for BucketLayout {
             ("head-root", layout::encode(&head_root())),
             ("head-forking", layout::encode(&head_forking())),
             ("head-clone", layout::encode(&head_clone())),
+            ("head-fast-wal", layout::encode(&head_fast_wal())),
             ("collector-lease", layout::encode(&collector_lease())),
             ("identity", layout::encode(&identity_obj())),
             ("registry", layout::encode(&registry_obj())),
@@ -381,9 +429,17 @@ impl formats::golden::Family for BucketLayout {
                     }
                     Ok(format!("{mirror:#?}"))
                 }
-                _ => Self::read_as(case, bytes),
+                _ => Self::read_as(case, bytes, Some(31)),
             },
             32 | 33 => match case {
+                "head-root" | "head-forking" | "head-clone" => {
+                    let head: layout::v32::Head =
+                        layout::decode(bytes).map_err(|err| err.to_string())?;
+                    if head.format != version {
+                        return Err(format!("expected format {version} head, got {}", head.format));
+                    }
+                    Ok(format!("{head:#?}"))
+                }
                 "mirror" => {
                     let mirror: layout::v33::Mirror =
                         layout::decode(bytes).map_err(|err| err.to_string())?;
@@ -395,26 +451,38 @@ impl formats::golden::Family for BucketLayout {
                     }
                     Ok(format!("{mirror:#?}"))
                 }
-                _ => Self::read_as(case, bytes),
+                _ => Self::read_as(case, bytes, Some(version)),
             },
-            34 => Self::read_as(case, bytes),
+            34 => match case {
+                "head-root" | "head-forking" | "head-clone" => {
+                    let head: layout::v32::Head =
+                        layout::decode(bytes).map_err(|err| err.to_string())?;
+                    if head.format != 34 {
+                        return Err(format!("expected format 34 head, got {}", head.format));
+                    }
+                    Ok(format!("{head:#?}"))
+                }
+                _ => Self::read_as(case, bytes, Some(34)),
+            },
+            35 => Self::read_as(case, bytes, Some(35)),
             _ => Err(format!("no decoder of version {version}")),
         }
     }
 
     fn read(case: &str, bytes: &[u8]) -> Result<(), String> {
-        Self::read_as(case, bytes).map(drop)
+        Self::read_as(case, bytes, None).map(drop)
     }
 
     fn fingerprint(version: u32) -> Option<String> {
         let head = match version {
             31 => layout::v31::Head::fingerprint(),
-            32..=34 => Head::fingerprint(),
+            32..=34 => layout::v32::Head::fingerprint(),
+            35 => Head::fingerprint(),
             _ => return None,
         };
         let mirror = match version {
             31..=33 => layout::v33::Mirror::fingerprint(),
-            34 => Mirror::fingerprint(),
+            34 | 35 => Mirror::fingerprint(),
             _ => return None,
         };
         Some(
@@ -441,10 +509,10 @@ impl formats::golden::Family for BucketLayout {
 }
 
 impl BucketLayout {
-    fn read_as(case: &str, bytes: &[u8]) -> Result<String, String> {
+    fn read_as(case: &str, bytes: &[u8], version: Option<u32>) -> Result<String, String> {
         let fmt = |res: Result<String, crate::Error>| res.map_err(|err| err.to_string());
         match case {
-            "head-root" | "head-forking" | "head-clone" => {
+            "head-root" | "head-forking" | "head-clone" | "head-fast-wal" => {
                 fmt(Head::decode(CELL, bytes).map(|head| format!("{head:#?}")))
             }
             "collector-lease" => {
@@ -511,6 +579,12 @@ impl BucketLayout {
                 ] {
                     if !seen.contains(&required) {
                         return Err(format!("missing key kind {required:?}"));
+                    }
+                }
+                if version.is_some_and(|v| v >= 35) {
+                    let wal = Kind::Wal { cell: CELL, epoch: 0, segment: 0 }.name();
+                    if !seen.contains(&wal) {
+                        return Err(format!("missing key kind {wal:?}"));
                     }
                 }
                 Ok(lines.join("\n") + "\n")

@@ -122,7 +122,10 @@ pub struct Child {
 /// mirror claims `mirrors/<at>` in `Copying` before copying and transitions it conditionally
 /// (`PutMode::Update`) to `Marked`, preventing a late marker write from marking a collected or
 /// taken-over copy; v31..=v33 markers decode as [`MirrorState::Marked`].
-pub const FORMAT: formats::Format = formats::Format::new("bucket layout", 31, 34);
+/// 35: Fast WAL commit mode (doc-29): [`Fsync::FastWal`], [`Head::fast_wal`] ([`FastWal`],
+/// [`ActiveWal`]), and per-epoch fast WAL keys ([`wal`], [`Kind::Wal`]); version 32, 33, and 34
+/// heads decode with `fast_wal: None`.
+pub const FORMAT: formats::Format = formats::Format::new("bucket layout", 31, 35);
 
 /// cladefs: the prefix of every tenant's cells' objects: all the bucket's cells (TASK-364).
 pub const TENANTS: &str = "tenants/";
@@ -154,6 +157,9 @@ const EPHEMERAL: &str = "ephemeral";
 const DECOMMISSIONED: &str = "decommissioned";
 /// cladefs: under a cell's prefix, the read evidence of its versions ([`evidence`], TASK-702.2).
 const READS: &str = "reads/";
+/// cladefs: under a cell's prefix, fast WAL segments in an appendable zonal bucket ([`wal`],
+/// doc-29).
+const WAL: &str = "wal/";
 /// cladefs: the prefix of the blocks of object IDs taken ([`objectid_block`]).
 const OBJECTIDS: &str = "objectid/";
 /// cladefs: the bucket's identity object: its format and its number, written once by its formatting
@@ -211,6 +217,23 @@ pub fn checkpoint(cell: CellId, segment: u64, epoch: u64) -> String {
 /// (TASK-407, TASK-515, doc-27).
 pub fn head(cell: CellId) -> String {
     format!("{}head", cell.prefix())
+}
+
+/// cladefs: the prefix of `cell`'s fast WAL objects in its appendable zonal bucket (doc-29).
+pub fn wal_prefix(cell: CellId) -> String {
+    format!("{}{WAL}", cell.prefix())
+}
+
+/// cladefs: the prefix of `cell`'s fast WAL segments for writer epoch `epoch` (doc-29).
+pub fn wal_epoch_prefix(cell: CellId, epoch: u64) -> String {
+    format!("{}{}/", wal_prefix(cell), Padded(epoch))
+}
+
+/// cladefs: fast WAL segment `segment` of `cell` for writer epoch `epoch` (doc-29):
+/// `tenants/<T>/cells/<C>/wal/<epoch>/<segment>`, created at byte offset 0 and appended to via
+/// offset-checked appends until rolled or fenced.
+pub fn wal(cell: CellId, epoch: u64, segment: u64) -> String {
+    format!("{}{}", wal_epoch_prefix(cell, epoch), Padded(segment))
 }
 
 /// cladefs: the block of object IDs `block` taken, by one allocator of one process's
@@ -629,6 +652,14 @@ pub enum Kind {
         at: u64,
         tenant: u64,
     },
+    /// cladefs: a fast WAL segment in an appendable zonal bucket ([`wal`], doc-29): never deleted
+    /// by the cold-bucket collector (managed by fast-WAL rollover and epoch sweep using 36-byte
+    /// authenticated tombstones).
+    Wal {
+        cell: CellId,
+        epoch: u64,
+        segment: u64,
+    },
     Unknown,
 }
 
@@ -655,6 +686,7 @@ impl Kind {
             Self::EphemeralIndex { .. } => "ephemeral-index",
             Self::Decommissioned { .. } => "decommissioned",
             Self::Evidence { .. } => "evidence",
+            Self::Wal { .. } => "wal",
             Self::Unknown => "unknown",
         }
     }
@@ -669,6 +701,7 @@ pub fn owner(key: &str) -> Option<CellId> {
         | Kind::Extent { cell, .. }
         | Kind::Checkpoint { cell, .. }
         | Kind::Head { cell, .. }
+        | Kind::Wal { cell, .. }
         | Kind::Reference { parent: cell, .. }
         | Kind::Retired { parent: cell, .. }
         | Kind::Pin { parent: cell, .. }
@@ -801,6 +834,10 @@ pub fn kind(key: &str) -> Kind {
             let (epoch, segment, sequence) = (number(epoch)?, number(segment)?, number(sequence)?);
             return Some(Kind::Extent { cell, epoch, segment, sequence });
         }
+        if let Some(rest) = rest.strip_prefix(WAL) {
+            let (epoch, segment) = rest.split_once('/')?;
+            return Some(Kind::Wal { cell, epoch: number(epoch)?, segment: number(segment)? });
+        }
         None
     };
     parsed().unwrap_or(Kind::Unknown)
@@ -919,11 +956,37 @@ pub struct Head {
     /// commits are durable off their host once uploaded alone. Given by a taking
     /// ([`crate::head::Taking::replication`]); its configuration swapped by its writer.
     pub replication: Option<Replication>,
+    /// cladefs: whether the cell commits to an appendable fast WAL bucket (doc-29): S3 Express One
+    /// Zone or GCS Rapid Storage, keeping compute nodes stateless cache-only. Mutually exclusive
+    /// with active peer replication (`f >= 1`). `active` stays pointing to the previous epoch's
+    /// fast WAL across a takeover until the taker fences, recovers, flushes recovered commits to
+    /// cold segments, and switches `active` in the same head CAS.
+    pub fast_wal: Option<FastWal>,
 }
 
-/// cladefs: what a guest's fsync waits for in a cell (doc-12, doc-21): its commit's level. The
-/// sync family (sync, syncfs, unmount) waits for [`Fsync::Replicated`] in a replicated cell, and
-/// for its upload in any other.
+/// cladefs: the currently active fast WAL epoch and bucket URL recorded in [`Head::fast_wal`]
+/// (doc-29). Keeping `bucket` in the head lets a taker in another availability zone fence and
+/// recover the previous writer's zonal fast WAL before switching to its own local zonal bucket.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
+pub struct ActiveWal {
+    pub epoch: u64,
+    pub bucket: String,
+}
+
+/// cladefs: a cell's fast WAL configuration in [`Head::fast_wal`] (doc-29).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
+pub struct FastWal {
+    /// What a guest's `fsync` waits for on this cell: [`Fsync::Ordered`] or [`Fsync::FastWal`].
+    pub fsync: Fsync,
+    /// The active fast WAL epoch and bucket URL that may contain commits not yet acknowledged in
+    /// the cold bucket head. None until the writer activates its WAL (or after recovery completes
+    /// when disabling fast WAL).
+    pub active: Option<ActiveWal>,
+}
+
+/// cladefs: what a guest's fsync waits for in a cell (doc-12, doc-21, doc-29): its commit's level.
+/// The sync family (sync, syncfs, unmount) waits for [`Fsync::Replicated`] in a replicated cell,
+/// [`Fsync::FastWal`] in a fast-WAL cell, and for its upload in any other.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
 pub enum Fsync {
     /// In the daemon's memory, in order: survives what leaves the daemon alive.
@@ -931,6 +994,9 @@ pub enum Fsync {
     Ordered,
     /// On f+1 members' disks (or uploaded): survives the writer's host.
     Replicated,
+    /// Appended to the cell's fast WAL in appendable zonal object storage (or uploaded): survives
+    /// the writer's host with stateless cache-only nodes (doc-29).
+    FastWal,
 }
 
 /// Frozen format 31 head types, kept for decoding existing version 31 heads (doc-28).
@@ -1019,6 +1085,91 @@ pub(crate) mod v31 {
                 checkpoint: self.checkpoint,
                 versions: self.versions,
                 replication,
+                fast_wal: None,
+            }
+        }
+    }
+}
+
+/// Frozen format 32 head types, kept for decoding existing version 32 heads (doc-28, doc-29).
+pub(crate) mod v32 {
+    use super::{Configuration, Version};
+    use fprint::TypeFingerprint;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(
+        Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint,
+    )]
+    pub(crate) enum Fsync {
+        #[default]
+        Ordered,
+        Replicated,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
+    pub(crate) struct Wish {
+        pub(crate) f: u8,
+        pub(crate) fsync: Fsync,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
+    pub(crate) struct Replication {
+        pub(crate) wish: Wish,
+        pub(crate) configuration: Option<Configuration>,
+    }
+
+    #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
+    pub(crate) struct Head {
+        pub(crate) format: u32,
+        pub(crate) owner: u64,
+        pub(crate) made: crate::record::Made,
+        pub(crate) kind: Option<crate::cell::Kind>,
+        pub(crate) keks: Vec<crate::keys::Kek>,
+        pub(crate) shredded: bool,
+        pub(crate) deks: Vec<crate::keys::Dek>,
+        pub(crate) inherited: Vec<crate::keys::InheritedDek>,
+        pub(crate) epoch: u64,
+        pub(crate) holder: u64,
+        pub(crate) token: u64,
+        pub(crate) end: u64,
+        pub(crate) swaps: u64,
+        pub(crate) runs: Vec<(u64, u64)>,
+        pub(crate) checkpoint: Option<(u64, u64)>,
+        pub(crate) versions: Vec<Version>,
+        pub(crate) replication: Option<Replication>,
+    }
+
+    impl Head {
+        pub(crate) fn into_current(self) -> super::Head {
+            let replication = self.replication.map(|replication| {
+                let fsync = match replication.wish.fsync {
+                    Fsync::Ordered => super::Fsync::Ordered,
+                    Fsync::Replicated => super::Fsync::Replicated,
+                };
+                super::Replication {
+                    wish: super::Wish { f: replication.wish.f, fsync },
+                    configuration: replication.configuration,
+                }
+            });
+            super::Head {
+                format: super::FORMAT.current,
+                owner: self.owner,
+                made: self.made,
+                kind: self.kind,
+                keks: self.keks,
+                shredded: self.shredded,
+                deks: self.deks,
+                inherited: self.inherited,
+                epoch: self.epoch,
+                holder: self.holder,
+                token: self.token,
+                end: self.end,
+                swaps: self.swaps,
+                runs: self.runs,
+                checkpoint: self.checkpoint,
+                versions: self.versions,
+                replication,
+                fast_wal: None,
             }
         }
     }
@@ -1036,10 +1187,12 @@ pub struct Wish {
 }
 
 impl Wish {
-    /// A wish of `f` and `fsync`, unless `f` is past [`MAX_F`], or `fsync` waits for copies an
-    /// f of 0 never makes.
+    /// A wish of `f` and `fsync`, unless `f` is past [`MAX_F`], `fsync` is [`Fsync::FastWal`]
+    /// (which belongs on [`Head::fast_wal`], not replication), or `fsync` waits for copies an f of
+    /// 0 never makes.
     pub fn new(f: u8, fsync: Fsync) -> Option<Self> {
-        (f <= MAX_F && !(f == 0 && fsync == Fsync::Replicated)).then_some(Self { f, fsync })
+        (f <= MAX_F && fsync != Fsync::FastWal && !(f == 0 && fsync == Fsync::Replicated))
+            .then_some(Self { f, fsync })
     }
 }
 
@@ -1112,7 +1265,8 @@ impl Head {
         let format = FORMAT.check(format).map_err(|_| crate::Error::Format { cell, format })?;
         let head: Self = match format {
             31 => decode::<v31::Head>(bytes)?.into_current(cell),
-            32.. => decode(bytes)?,
+            32..=34 => decode::<v32::Head>(bytes)?.into_current(),
+            35.. => decode(bytes)?,
             _ => unreachable!("FORMAT.check enforces oldest..=current"),
         };
         // Runs name every segment: the first from 0, each after the one before, within 0..end.
@@ -1638,6 +1792,13 @@ mod tests {
         assert_eq!(owner(&evidence), Some(cell));
         assert_eq!(kind(&evidence_of(cell, 7, 3)), Kind::Unknown);
         assert_eq!(kind(&format!("{}x", evidence_of(cell, 7, 3))), Kind::Unknown);
+        // cladefs: fast WAL segments under a cell's prefix (doc-29).
+        let wal_key = wal(cell, 2, 7);
+        assert!(wal_key.starts_with(&wal_epoch_prefix(cell, 2)));
+        assert!(wal_epoch_prefix(cell, 2).starts_with(&wal_prefix(cell)));
+        assert_eq!(kind(&wal_key), Kind::Wal { cell, epoch: 2, segment: 7 });
+        assert_eq!(owner(&wal_key), Some(cell));
+        assert_eq!(kind(&format!("{}x", wal_prefix(cell))), Kind::Unknown);
         // The layout before cells, and keys of cells' prefixes malformed, are no objects of a
         // cell; nor the collector's lease, marks and moves at the bucket's root, as format 8 had
         // them (TASK-395.2).
@@ -1670,6 +1831,7 @@ mod tests {
             extent(cell, 2, 4, ExtentId::new(3, 9)),
             checkpoint(cell, 7, 2),
             head(cell),
+            wal(cell, 2, 7),
             format!("{}head/0000000000003", cell.prefix()),
             collector_lease(cell),
             reference(cell, 7, child),

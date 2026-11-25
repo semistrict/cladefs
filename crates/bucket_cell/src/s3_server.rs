@@ -68,14 +68,18 @@ impl Clock {
     }
 }
 
+/// Default S3 Express One Zone append-part limit per object (doc-29).
+pub const MAX_PARTS: u32 = 10_000;
+
 #[derive(Clone)]
 struct Stored {
     bytes: Bytes,
     e_tag: String,
     modified: SystemTime,
+    /// Number of appends/writes that produced this object (for S3 Express `MaxParts`, doc-29).
+    appends: u32,
 }
 
-#[derive(Default)]
 struct Objects {
     objects: BTreeMap<String, Stored>,
     /// The number of the last version stored, whose ETag it is.
@@ -84,6 +88,20 @@ struct Objects {
     requests: BTreeMap<&'static str, u64>,
     /// What it answers every request, if it is told to answer them all so (board 5861).
     answer: Option<StatusCode>,
+    /// Maximum appends per object before rejecting with 412 (`MaxParts`, doc-29).
+    max_appends: u32,
+}
+
+impl Default for Objects {
+    fn default() -> Self {
+        Self {
+            objects: BTreeMap::new(),
+            versions: 0,
+            requests: BTreeMap::new(),
+            answer: None,
+            max_appends: MAX_PARTS,
+        }
+    }
 }
 
 impl Objects {
@@ -177,6 +195,12 @@ impl S3Server {
         objects.lock().unwrap().answer = answer;
     }
 
+    /// cladefs: sets the maximum number of appends per object before returning 412 (`MaxParts`,
+    /// doc-29).
+    pub fn set_max_appends(&self, max_appends: u32) {
+        let objects = self.objects.as_ref().expect("a server of its own");
+        objects.lock().unwrap().max_appends = max_appends;
+    }
     /// Its bucket's objects, through cladefs's client, as a host reaches S3: for other crates'
     /// tests (TASK-449).
     pub fn objects(&self) -> Arc<dyn object_store::ObjectStore> {
@@ -419,6 +443,44 @@ async fn serve(
             Response::new(Full::new(Bytes::from(xml)))
         }
         (&Method::PUT, key) => {
+            if let Some(offset_header) = header("x-amz-write-offset-bytes") {
+                objects.count("append");
+                let Ok(offset) = offset_header.parse::<u64>() else {
+                    return status(StatusCode::BAD_REQUEST);
+                };
+                let (new_bytes, appends) = if offset == 0 {
+                    if objects.objects.contains_key(key) {
+                        return status(StatusCode::PRECONDITION_FAILED);
+                    }
+                    (body, 1)
+                } else {
+                    let Some(there) = objects.objects.get(key) else {
+                        return status(StatusCode::PRECONDITION_FAILED);
+                    };
+                    if there.bytes.len() as u64 != offset || there.appends >= objects.max_appends {
+                        return status(StatusCode::PRECONDITION_FAILED);
+                    }
+                    let mut combined = Vec::with_capacity(there.bytes.len() + body.len());
+                    combined.extend_from_slice(&there.bytes);
+                    combined.extend_from_slice(&body);
+                    (Bytes::from(combined), there.appends + 1)
+                };
+                objects.versions += 1;
+                let e_tag = format!("\"{}\"", objects.versions);
+                let size = new_bytes.len();
+                let stored = Stored {
+                    bytes: new_bytes,
+                    e_tag: e_tag.clone(),
+                    modified: clock.now(),
+                    appends,
+                };
+                objects.objects.insert(key.to_owned(), stored);
+                return Response::builder()
+                    .header("etag", e_tag)
+                    .header("x-amz-object-size", size)
+                    .body(Full::default())
+                    .unwrap();
+            }
             objects.count("put");
             let there = objects.objects.get(key);
             let refused = match (header("if-none-match"), header("if-match")) {
@@ -434,7 +496,8 @@ async fn serve(
             }
             objects.versions += 1;
             let e_tag = format!("\"{}\"", objects.versions);
-            let stored = Stored { bytes: body, e_tag: e_tag.clone(), modified: clock.now() };
+            let stored =
+                Stored { bytes: body, e_tag: e_tag.clone(), modified: clock.now(), appends: 1 };
             objects.objects.insert(key.to_owned(), stored);
             Response::builder().header("etag", e_tag).body(Full::default()).unwrap()
         }

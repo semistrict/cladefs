@@ -780,6 +780,7 @@ fn ended(head: Head, holder: u64) -> Head {
         versions: Vec::new(),
         deks,
         inherited,
+        fast_wal: None,
         ..head
     }
 }

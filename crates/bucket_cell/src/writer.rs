@@ -125,15 +125,27 @@ struct Inner {
     /// cladefs: a replicated cell's configuration its next acknowledgement naming the commit of
     /// this epoch or a later one names in the same swap ([`Writer::configure_past`], TASK-537.3.6).
     switch: Option<(u64, layout::Configuration)>,
+    /// cladefs: a fast WAL head update (`head.fast_wal`) applied atomically in the same head swap
+    /// that acknowledges `through >= through_segment` ([`Writer::activate_fast_wal_past`], doc-29).
+    fast_wal_switch: Option<(u64, Option<layout::FastWal>)>,
+    /// cladefs: own-extent keys already uploaded directly to the cold bucket by the fast WAL
+    /// large-write optimization (doc-29); skipped by [`Writer::upload_segment`] for zero double
+    /// upload.
+    preuploaded_own: BTreeSet<String>,
+    /// cladefs: own-extent keys currently being pre-uploaded by [`Writer::put_large_extent`]
+    /// (doc-29); [`Writer::upload_segment`] awaits any matching entry so the fast WAL writer and
+    /// cold uploader never race to PUT the same large extent concurrently.
+    preuploading_own: BTreeMap<String, Arc<tokio::sync::Notify>>,
 }
 
 /// What an acknowledgement names ([`Writer::naming`]): the last segment, the versions cut at the
-/// ends of those it names, each with its segment, and the configuration a switch names, if it
-/// names that switch's commit.
+/// ends of those it names, each with its segment, and the configuration / fast-WAL switch if this
+/// acknowledgement crosses their targets.
 struct Naming {
     through: u64,
     cuts: Vec<(u64, layout::NewVersion)>,
     switch: Option<layout::Configuration>,
+    fast_wal_switch: Option<Option<layout::FastWal>>,
 }
 
 struct Pending {
@@ -215,6 +227,9 @@ impl<B: Bucket> Writer<B> {
                 stopped: None,
                 dropped: BTreeSet::new(),
                 switch: None,
+                fast_wal_switch: None,
+                preuploaded_own: BTreeSet::new(),
+                preuploading_own: BTreeMap::new(),
             }),
             keys,
             layer,
@@ -227,6 +242,11 @@ impl<B: Bucket> Writer<B> {
     /// bounded only by how many at once it is asked for.
     pub fn uploading_within(self, budget: Arc<Budget>) -> Self {
         Self { budget, ..self }
+    }
+
+    /// The upload memory budget shared by this writer and its fast WAL path (doc-29).
+    pub fn budget(&self) -> &Arc<Budget> {
+        &self.budget
     }
 
     fn inner(&self) -> MutexGuard<'_, Inner> {
@@ -342,18 +362,13 @@ impl<B: Bucket> Writer<B> {
         }) else {
             return Ok(());
         };
+        // Upload own-extents via `create_own_once`, which coordinates with concurrent Fast WAL
+        // pre-uploads in either order (fast-WAL-first or cold-first) so each key is created once.
         span.set_count(trace::EXTENTS, own.len() as u64);
         let bytes = framed.len + own.iter().map(|(_, body)| body.len).sum::<u64>();
         span.set_count(trace::BYTES, bytes);
-        // Its extents of their own, a few at once, then it.
-        let creates = futures::stream::iter(own).map(|(key, body)| async move {
-            // One uploaded before, by this writer, whose key names its epoch, is created: its
-            // bytes.
-            match self.create(&key, &body, |_| Ok(())).await? {
-                Created::Created(_) => Ok(()),
-                Created::Exists(_) => Err(Error::Corrupt(format!("{key} holds another extent"))),
-            }
-        });
+        let creates = futures::stream::iter(own)
+            .map(|(key, body)| async move { self.create_own_once(&key, body).await });
         // cladefs: in a simulation, one at a time, as a host short of connections would (doc-24).
         let at_once = if crate::buggify!(0.5) { 1 } else { OWN_AT_ONCE };
         if let Err(error) = creates.buffer_unordered(at_once).try_collect::<()>().await {
@@ -372,8 +387,11 @@ impl<B: Bucket> Writer<B> {
             Err(error) => Err(self.stop(error)),
             Ok(Created::Created(_)) => {
                 failpoint!("writer::uploaded");
-                // Its objects, uploaded, go.
-                if let Some(pending) = self.inner().pending.get_mut(&segment) {
+                // Its objects, uploaded, go. `preuploaded_own` entries stay until `acknowledge`
+                // retires the segment so a late Fast WAL pre-upload for the same segment never
+                // repeats a completed PUT.
+                let mut inner = self.inner();
+                if let Some(pending) = inner.pending.get_mut(&segment) {
                     pending.objects = None;
                 }
                 Ok(())
@@ -383,6 +401,94 @@ impl<B: Bucket> Writer<B> {
                 Err(self.stop(Error::Corrupt(format!("{key} holds another segment"))))
             }
         }
+    }
+
+    /// Creates own-extent `key` at most once across concurrent cold segment uploads and Fast WAL
+    /// large-extent pre-uploads (doc-29): reserves `key` in `preuploading_own` with a drop guard so
+    /// neither cold-first nor fast-WAL-first uploads can race on the same key.
+    async fn create_own_once(&self, key: &str, body: Body) -> Result<(), Error> {
+        struct InFlightGuard<'a, B: Bucket> {
+            writer: &'a Writer<B>,
+            key: String,
+            notify: Arc<tokio::sync::Notify>,
+        }
+        impl<B: Bucket> Drop for InFlightGuard<'_, B> {
+            fn drop(&mut self) {
+                self.writer.inner().preuploading_own.remove(&self.key);
+                self.notify.notify_waiters();
+            }
+        }
+        let notify = loop {
+            let wait = {
+                let mut inner = self.inner();
+                if let Some(error) = &inner.stopped {
+                    return Err(error.clone());
+                }
+                if inner.preuploaded_own.contains(key) {
+                    return Ok(());
+                }
+                if let Some(notify) = inner.preuploading_own.get(key) {
+                    Some(notify.clone())
+                } else {
+                    let notify = Arc::new(tokio::sync::Notify::new());
+                    inner.preuploading_own.insert(key.to_owned(), notify.clone());
+                    break notify;
+                }
+            };
+            if let Some(notify) = wait {
+                let notified = notify.notified();
+                if self.inner().preuploading_own.contains_key(key) {
+                    notified.await;
+                }
+            }
+        };
+        let _guard = InFlightGuard { writer: self, key: key.to_owned(), notify };
+        // Always validate the framed own-extent's part CRCs and structure before uploading so
+        // neither cold upload nor Fast WAL pre-upload can ever publish damaged data (board 12295).
+        let check = |bytes: &[u8]| {
+            extent_frame::check(bytes).map_err(|err| Error::Corrupt(format!("{key}: {err}")))
+        };
+        match self.create(key, &body, check).await? {
+            Created::Created(_) => {
+                self.inner().preuploaded_own.insert(key.to_owned());
+                Ok(())
+            }
+            Created::Exists(_) => Err(Error::Corrupt(format!("{key} holds another extent"))),
+        }
+    }
+
+    /// cladefs: uploads a large own-extent directly to the cold bucket before referencing it
+    /// metadata-only in the fast WAL (doc-29, `largeBeforeWal`), and records `key` so the later
+    /// cold segment upload skips re-uploading it (zero double upload).
+    pub async fn put_large_extent(&self, key: &str, bytes: Vec<u8>) -> Result<(), Error> {
+        self.create_own_once(key, Body::from(bytes)).await.map_err(|err| self.stop(err))
+    }
+
+    /// cladefs: swaps `head.fast_wal` immediately to `fast_wal` (doc-29), used when a writer
+    /// activates its fast WAL without needing to flush recovered segments first.
+    pub async fn activate_fast_wal(&self, fast_wal: Option<layout::FastWal>) -> Result<(), Error> {
+        if let Some(error) = &self.inner().stopped {
+            return Err(error.clone());
+        }
+        let mut held = self.held.lock().await;
+        if held.head.fast_wal == fast_wal {
+            return Ok(());
+        }
+        let mut next = held.head.clone();
+        next.fast_wal = fast_wal;
+        match head::swap(&*self.bucket, self.cell, &held, next).await {
+            Ok(swapped) => {
+                *held = swapped;
+                Ok(())
+            }
+            Err(error) => Err(self.stop(error)),
+        }
+    }
+
+    /// cladefs: schedules `head.fast_wal = fast_wal` to land atomically in the same head CAS that
+    /// acknowledges `through >= through_segment` (doc-29, `activateAfterFlush`).
+    pub fn activate_fast_wal_past(&self, through_segment: u64, fast_wal: Option<layout::FastWal>) {
+        self.inner().fast_wal_switch = Some((through_segment, fast_wal));
     }
 
     /// Creates the object at `key` of `body`'s bytes, unless an object is there
@@ -469,7 +575,7 @@ impl<B: Bucket> Writer<B> {
         self.bucket.rewritable(&layout::head(self.cell)).await;
         let through = {
             let mut held = self.held.lock().await;
-            let Some(Naming { through, cuts, switch }) = self.naming()? else {
+            let Some(Naming { through, cuts, switch, fast_wal_switch }) = self.naming()? else {
                 return Ok(self.inner().state.through);
             };
             if held.head.end <= through {
@@ -489,12 +595,18 @@ impl<B: Bucket> Writer<B> {
                 {
                     replication.configuration = Some(configuration.clone());
                 }
+                if let Some(fast_wal) = &fast_wal_switch {
+                    next.fast_wal = fast_wal.clone();
+                }
                 match head::swap(&*self.bucket, self.cell, &held, next).await {
                     Ok(swapped) => *held = swapped,
                     Err(error) => return Err(self.stop(error)),
                 }
                 if switch.is_some() {
                     self.inner().switch = None;
+                }
+                if fast_wal_switch.is_some() {
+                    self.inner().fast_wal_switch = None;
                 }
             }
             through
@@ -507,6 +619,9 @@ impl<B: Bucket> Writer<B> {
                     break;
                 }
                 let Pending { footer, data_len, .. } = entry.remove();
+                for (_, location) in footer.own() {
+                    inner.preuploaded_own.remove(&location.key);
+                }
                 inner.state.apply(&footer, data_len);
             }
         }
@@ -547,7 +662,10 @@ impl<B: Bucket> Writer<B> {
         let switch = (inner.switch.as_ref())
             .filter(|(epoch, _)| last.is_some_and(|last| last >= *epoch))
             .map(|(_, configuration)| configuration.clone());
-        Ok(Some(Naming { through, cuts, switch }))
+        let fast_wal_switch = (inner.fast_wal_switch.as_ref())
+            .filter(|(target_seg, _)| through >= *target_seg)
+            .map(|(_, fast_wal)| fast_wal.clone());
+        Ok(Some(Naming { through, cuts, switch, fast_wal_switch }))
     }
 
     /// cladefs: the checkpoint this writer landed that `head` names not, its newest, if any: one

@@ -103,7 +103,7 @@ pub async fn live(bucket: &impl Bucket, cell: CellId) -> Result<Option<Head>, Er
 
 /// What a taking of a cell writes beside its epoch, holder and token: what the cell lacks, given
 /// in the same write.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct Taking {
     /// Who takes it: unique to each taking, so that a write of it is recognised.
     pub holder: u64,
@@ -119,6 +119,30 @@ pub struct Taking {
     /// kept: given whatever the head said, as the VM manager may change a cell's f or its fsync's
     /// level at any taking. None keeps what the head says.
     pub replication: Option<Wish>,
+    /// cladefs: what the cell's fast WAL commit mode is to be (doc-29): `None` keeps what the head
+    /// says, `Some(Some(fsync))` enables fast WAL with `fsync` (`Ordered` or `FastWal`) while
+    /// preserving any `active` WAL epoch/bucket so the taker fences and flushes it first
+    /// (`keepOldWalInHead`), and `Some(None)` disables fast WAL (preserving `active` if set until
+    /// recovery flushes and clears it).
+    pub fast_wal: Option<Option<layout::Fsync>>,
+    /// cladefs: allowlist check applied to any persisted `head.fast_wal.active.bucket` URL on
+    /// every CAS attempt (including `Unwritten::Changed` retries) before writing the taken head
+    /// (doc-29, Hotbed review 118).
+    pub fast_wal_allowed: Option<std::sync::Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>>,
+}
+
+impl std::fmt::Debug for Taking {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Taking")
+            .field("holder", &self.holder)
+            .field("token", &self.token)
+            .field("kind", &self.kind)
+            .field("keys", &self.keys)
+            .field("replication", &self.replication)
+            .field("fast_wal", &self.fast_wal)
+            .field("fast_wal_allowed", &self.fast_wal_allowed.is_some())
+            .finish()
+    }
 }
 
 /// cladefs: keys a taking gives the head it takes, made for the head as found then
@@ -176,6 +200,36 @@ pub async fn take(
         if let Some(wish) = taking.replication {
             let configuration = next.replication.take().and_then(|had| had.configuration);
             next.replication = Some(Replication { wish, configuration });
+        }
+        if let Some(fast_wal) = taking.fast_wal {
+            let active = next.fast_wal.take().and_then(|had| had.active);
+            next.fast_wal = match fast_wal {
+                Some(fsync) => Some(layout::FastWal { fsync, active }),
+                // Preserve any active fast WAL until recovery flushes it and clears fast_wal.
+                None => active.map(|active| layout::FastWal {
+                    fsync: layout::Fsync::Ordered,
+                    active: Some(active),
+                }),
+            };
+        }
+        if next.fast_wal.is_some() {
+            if next.replication.as_ref().is_some_and(|r| {
+                r.wish.f > 0
+                    || r.wish.fsync == layout::Fsync::Replicated
+                    || r.configuration.as_ref().is_some_and(|c| c.f > 0)
+            }) {
+                return Err(Error::Corrupt(format!(
+                    "{cell}: fast WAL cannot be combined with peer replication or an active peer \
+                     configuration (disable replication with replicas=0 and sync first)"
+                )));
+            }
+            // Clear any drained f=0 peer replication record when switching cleanly to Fast WAL.
+            next.replication = None;
+            if let Some(check) = &taking.fast_wal_allowed
+                && let Some(active) = next.fast_wal.as_ref().and_then(|fw| fw.active.as_ref())
+            {
+                check(&active.bucket).map_err(|msg| Error::Corrupt(format!("{cell}: {msg}")))?;
+            }
         }
         if let Some(given) = &taking.keys {
             if !given.fits(&next) {

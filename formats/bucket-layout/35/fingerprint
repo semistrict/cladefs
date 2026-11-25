@@ -1,0 +1,14 @@
+Head = struct {format:u32,owner:u64,made:enum {Root,Own,Forking(origin:struct {parent:struct {tenant:u64,id:u64},at:u64,epoch:u64},version:u64),Clone(struct {parent:struct {tenant:u64,id:u64},at:u64,epoch:u64})},kind:Option<enum {Fxfs,Sqlite,Memory}>,keks:Vec<struct {generation:u32,wrapped:struct {Vec<u8>}}>,shredded:bool,deks:Vec<struct {generation:u32,kek:u32,wrapped:struct {Vec<u8>}}>,inherited:Vec<struct {cell:struct {tenant:u64,id:u64},dek:struct {generation:u32,kek:u32,wrapped:struct {Vec<u8>}}}>,epoch:u64,holder:u64,token:u64,end:u64,swaps:u64,runs:Vec<(u64,u64,)>,checkpoint:Option<(u64,u64,)>,versions:Vec<struct {id:u64,at:u64,epoch:u64,shared:bool}>,replication:Option<struct {wish:struct {f:u8,fsync:enum {Ordered,Replicated,FastWal}},configuration:Option<struct {number:u64,epoch:u64,f:u8,members:Vec<struct {address:String,incarnation:u64}>}>}>,fast_wal:Option<struct {fsync:enum {Ordered,Replicated,FastWal},active:Option<struct {epoch:u64,bucket:String}>}>}
+CollectorLease = struct {format:u32,epoch:u64,holder:u64,until:u64,ended:u64,passed:Option<struct {listing:Option<[u8;32]>,usage:struct {measured:u64,kinds:BTreeMap<String,struct {objects:u64,bytes:u64}>}}>}
+Identity = struct {format:u32,number:u16,id:u64}
+Registry = struct {format:u32,version:u64,buckets:Vec<struct {number:u16,id:u64,details:struct {provider:Option<String>,region:Option<String>,url:Option<String>,endpoint:Option<String>,kms:Option<String>,master_key_id:Option<String>}}>}
+Reference = struct {format:u32,owner:u64}
+Retired = struct {format:u32}
+Mirror = struct {format:u32,state:enum {Copying(owner:u64),Marked}}
+BlockTaker = struct {format:u32,taker:u64}
+Footer = struct {cell:struct {tenant:u64,id:u64},segment:u64,epoch:u64,contents:struct {commits:Vec<u64>,extents:Vec<(struct {cell:u64,sequence:u64},u64,u64,)>,own:Vec<(u64,u64,)>,frees:Vec<struct {cell:u64,sequence:u64}>,root:Option<Vec<u8>>,next_sequence:u64,capacity:Option<u64>,continued:Option<struct {commit:u64,extents:Vec<(struct {cell:u64,sequence:u64},u64,u64,)>}>,versions:Vec<struct {id:u64,keep_last:Option<u32>}>}}
+OwnExtent = struct {cell:u64,sequence:u64}
+TableFooter = struct {rest:Vec<u8>,keys:front_coded<Vec<(u32,String)>>,blocks:Vec<struct {first:struct {cell:u64,sequence:u64},offset:u64,len:u32,crc:u32}>,appendix:struct {offset:u64,len:u64,crc:u32}}
+State = struct {cell:struct {tenant:u64,id:u64},extents:OrdMap<struct {cell:u64,sequence:u64},struct {key:String,offset:u64,len:u64}>,next_sequence:u64,root:Option<Vec<u8>>,last_commit:Option<u64>,through:Option<u64>,spent:struct {runs:BTreeMap<u64,u64>},capacity:Option<u64>,begun:Option<struct {commit:u64,runs:Vec<(struct {cell:u64,sequence:u64},struct {key:String,offset:u64,len:u64},)>}>}
+EvidenceFooter = struct {format:u32,key:String}
+EvidenceUnit = struct {extent:struct {cell:u64,sequence:u64},mib:u64,first:u32}

@@ -66,6 +66,33 @@ pub struct ObjectBucket {
     rewrites: Rewrites,
     /// cladefs: its backend's clock, as it dates objects ([`Bucket::now`], board 8467).
     clock: Clock,
+    /// cladefs: how it appends bytes at an exact write offset ([`Bucket::append`], doc-29), and
+    /// whether [`ObjectBucket::probed_append`] already verified offset enforcement.
+    appends: Appends,
+    appends_honoured: std::sync::atomic::AtomicBool,
+}
+
+/// cladefs: how a bucket performs offset-checked appends ([`Bucket::append`], doc-29).
+#[derive(Clone, Debug)]
+pub(crate) enum Appends {
+    /// S3 Express One Zone (or S3-compatible server supporting `x-amz-write-offset-bytes`):
+    /// unsigned endpoints inject the header through [`crate::client::appending`]; signed endpoints
+    /// sign the PUT directly via [`object_store::aws::AwsAuthorizer`] using service `s3express`
+    /// for directory buckets (`*--x-s3`) and `s3` otherwise.
+    HttpS3 {
+        objects: Arc<dyn ObjectStore>,
+        s3: Arc<object_store::aws::AmazonS3>,
+        client: reqwest::Client,
+        region: String,
+        s3_express: bool,
+        skip_signature: bool,
+    },
+    /// Local file bucket, under the directory flock ([`crate::local::Local::append`]).
+    Local(crate::local::Local),
+    /// In-memory store in this process, serialized by `lock`.
+    InProcess(Arc<tokio::sync::Mutex<()>>),
+    /// Backend cannot perform offset-checked appends (with an explicit reason).
+    Refused(&'static str),
 }
 
 /// cladefs: how long after GCS takes a write of an object it takes another: about one a second,
@@ -149,10 +176,12 @@ pub enum Request {
     /// (S3's DeleteObjects, of up to 1,000; Azure's, of 256 each), one an object behind it
     /// where it does not (GCS, files, memory), which `object_store` does not say.
     DeleteBatch,
+    /// cladefs: an offset-checked append to a fast WAL object (doc-29).
+    Append,
 }
 
 impl Request {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Get,
         Self::GetRange,
         Self::Head,
@@ -163,6 +192,7 @@ impl Request {
         Self::Delete,
         Self::ListDelimited,
         Self::DeleteBatch,
+        Self::Append,
     ];
 
     /// cladefs: the name of its span ([`crate::trace`], TASK-258).
@@ -178,15 +208,17 @@ impl Request {
             Self::Delete => "bucket.delete",
             Self::ListDelimited => "bucket.list_delimited",
             Self::DeleteBatch => "bucket.delete_batch",
+            Self::Append => "bucket.append",
         }
     }
 
     /// cladefs: whether its writes take turns once one failed ([`Turns`], TASK-382): all but an
     /// update, of a key of its own, a cell's head, which says nothing of the backend by failing as
     /// GCS refuses a write of a key within about a second of the last, while it takes others'; it
-    /// backs off alone, as its retries do (TASK-690).
+    /// backs off alone, as its retries do (TASK-690); and fast WAL appends, which handle
+    /// degradation directly (doc-29).
     fn takes_turns(self) -> bool {
-        self != Self::Update
+        !matches!(self, Self::Update | Self::Append)
     }
 
     /// Its name in [`Stats::line`].
@@ -202,6 +234,7 @@ impl Request {
             Self::Delete => "delete",
             Self::ListDelimited => "list-delimited",
             Self::DeleteBatch => "delete-batch",
+            Self::Append => "append",
         }
     }
 }
@@ -213,18 +246,22 @@ pub enum Upload {
     /// Extents stored on their own.
     Extents,
     Checkpoints,
+    /// Fast WAL segments (doc-29).
+    Wal,
     /// Cells' records and heads, and whatever else.
     Other,
 }
 
 impl Upload {
-    pub const ALL: [Self; 4] = [Self::Segments, Self::Extents, Self::Checkpoints, Self::Other];
+    pub const ALL: [Self; 5] =
+        [Self::Segments, Self::Extents, Self::Checkpoints, Self::Wal, Self::Other];
 
     fn of(key: &str) -> Self {
         match layout::kind(key) {
             Kind::Segment { .. } => Self::Segments,
             Kind::Extent { .. } => Self::Extents,
             Kind::Checkpoint { .. } => Self::Checkpoints,
+            Kind::Wal { .. } => Self::Wal,
             _ => Self::Other,
         }
     }
@@ -235,6 +272,7 @@ impl Upload {
             Self::Segments => "segments",
             Self::Extents => "extents",
             Self::Checkpoints => "checkpoints",
+            Self::Wal => "wal",
             Self::Other => "other",
         }
     }
@@ -611,6 +649,7 @@ impl ObjectBucket {
         let (counts, honoured, decoded) = Default::default();
         let objectids = crate::objectid::Allocator::new();
         let rewrites = Default::default();
+        let appends = Appends::InProcess(Arc::new(tokio::sync::Mutex::new(())));
         Self {
             backend,
             pages,
@@ -621,15 +660,17 @@ impl ObjectBucket {
             objectids,
             rewrites,
             clock: Clock::Host,
+            appends,
+            appends_honoured: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
     /// cladefs: the bucket `reached` reaches ([`reach`]), spacing its writes of a key as its
     /// backend needs.
     fn reached(reached: Reached) -> Self {
-        let Reached { objects, pages, prefix, rewrite_every, clock } = reached;
+        let Reached { objects, pages, prefix, rewrite_every, clock, appends } = reached;
         let bucket = Self::paged(objects, pages, &prefix).rewriting_every(rewrite_every);
-        Self { clock, ..bucket }
+        Self { clock, appends, ..bucket }
     }
 
     /// cladefs: the same bucket, each write of a key at least `every` after the last of it was
@@ -662,6 +703,17 @@ impl ObjectBucket {
         if !self.honoured.load(Ordering::Relaxed) {
             probe(self, nonce).await?;
             self.honoured.store(true, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
+    /// cladefs: verifies that this bucket honours offset-checked appends
+    /// ([`crate::bucket::probe_append`], doc-29), once per bucket instance. Fails hard if the
+    /// backend rejects appends or ignores write offsets.
+    pub async fn probed_append(&self, nonce: u64) -> Result<(), String> {
+        if !self.appends_honoured.load(Ordering::Relaxed) {
+            crate::bucket::probe_append(self, nonce).await?;
+            self.appends_honoured.store(true, Ordering::Relaxed);
         }
         Ok(())
     }
@@ -776,6 +828,8 @@ pub(crate) struct Reached {
     /// cladefs: its clock, as it dates objects (board 8467): the host's, of files and memory; of a
     /// cloud's, as its responses date them.
     pub clock: Clock,
+    /// cladefs: how it performs offset-checked appends (doc-29).
+    pub appends: Appends,
 }
 
 /// cladefs: opens other buckets by the registry of buckets (TASK-633.3, TASK-633.4): the bucket
@@ -882,48 +936,65 @@ pub(crate) fn reach(
     client: &Client,
 ) -> Result<Reached, String> {
     let url = url::Url::parse(url).map_err(|error| format!("{url}: {error}"))?;
-    let (backend, pages, path, clock): (Arc<dyn ObjectStore>, _, Path, _) = match url.scheme() {
-        // cladefs: `object_store`'s own refuses conditional updates (TASK-165.1).
-        "file" => {
-            let dir = url.to_file_path().map_err(|()| format!("{url}: no directory"))?;
-            let local =
-                crate::local::Local::new(&dir).map_err(|error| format!("{url}: {error}"))?;
-            (Arc::new(local), None, Path::default(), Clock::Host)
-        }
-        _ => cloud(&url, options, client).map_err(|error| format!("{url}: {error}"))?,
-    };
+    let (backend, pages, path, clock, appends): (Arc<dyn ObjectStore>, _, Path, _, _) =
+        match url.scheme() {
+            // cladefs: `object_store`'s own refuses conditional updates (TASK-165.1).
+            "file" => {
+                let dir = url.to_file_path().map_err(|()| format!("{url}: no directory"))?;
+                let local =
+                    crate::local::Local::new(&dir).map_err(|error| format!("{url}: {error}"))?;
+                let appends = Appends::Local(local.clone());
+                (Arc::new(local), None, Path::default(), Clock::Host, appends)
+            }
+            _ => cloud(&url, options, client).map_err(|error| format!("{url}: {error}"))?,
+        };
     let mut rewrite_every = match provider_of(url.as_str())? {
         "gcs" => GCS_REWRITE_EVERY,
         _ => std::time::Duration::ZERO,
     };
-    // cladefs: degraded as the environment says, its pages too (board 5740).
-    let (objects, pages): (Arc<dyn ObjectStore>, _) = match crate::faults::Faults::from_env()? {
-        Some(faults) => {
-            rewrite_every = rewrite_every.max(faults.now().rewrite_every);
-            let pages = pages.map(|pages| -> Arc<dyn PaginatedListStore> {
-                Arc::new(crate::faults::FaultyPages::new(pages, faults.clone()))
-            });
-            (Arc::new(crate::faults::Faulty::new(backend, faults)), pages)
-        }
-        None => (backend, pages),
-    };
+    // cladefs: degraded as the environment says, its pages too (board 5740), and its appends over
+    // HTTP; a file bucket's, under its lock, not.
+    let (objects, pages, appends): (Arc<dyn ObjectStore>, _, _) =
+        match crate::faults::Faults::from_env()? {
+            Some(faults) => {
+                rewrite_every = rewrite_every.max(faults.now().rewrite_every);
+                let pages = pages.map(|pages| -> Arc<dyn PaginatedListStore> {
+                    Arc::new(crate::faults::FaultyPages::new(pages, faults.clone()))
+                });
+                let appends = match appends {
+                    Appends::HttpS3 { objects, s3, client, region, s3_express, skip_signature } => {
+                        let objects = Arc::new(crate::faults::Faulty::new(objects, faults.clone()));
+                        Appends::HttpS3 { objects, s3, client, region, s3_express, skip_signature }
+                    }
+                    appends => appends,
+                };
+                (Arc::new(crate::faults::Faulty::new(backend, faults)), pages, appends)
+            }
+            None => (backend, pages, appends),
+        };
     let prefix = path.as_ref().to_owned();
-    Ok(Reached { objects, pages, prefix, rewrite_every, clock })
+    Ok(Reached { objects, pages, prefix, rewrite_every, clock, appends })
 }
 
 /// cladefs: what [`cloud`] reaches.
-type Cloud = (Arc<dyn ObjectStore>, Pages, Path, Clock);
+type Cloud = (Arc<dyn ObjectStore>, Pages, Path, Clock, Appends);
 
 /// The backend of a URL of a cloud's, or of memory, the same backend as it lists a level of keys a
 /// page a request, if it does, the path it names in it, as `object_store::parse_url_opts` makes
-/// them, but with `client`; and its clock: a cloud's, as its responses date them, memory's the
-/// host's.
+/// them, but with `client`; its clock: a cloud's, as its responses date them, memory's the
+/// host's; and how it appends (doc-29).
 fn cloud(
     url: &url::Url,
     options: impl IntoIterator<Item = (String, String)>,
     client: &Client,
 ) -> object_store::Result<Cloud> {
     use object_store::ObjectStoreScheme as Scheme;
+    let options: Vec<(String, String)> = options.into_iter().collect();
+    let skip_signature = options.iter().any(|(key, value)| {
+        (key.eq_ignore_ascii_case("aws_skip_signature")
+            || key.eq_ignore_ascii_case("skip_signature"))
+            && matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "on" | "yes" | "y")
+    });
     let (scheme, path) = Scheme::parse(url)?;
     let path = Path::parse(path)?;
     let served = Arc::new(crate::clock::Served::default());
@@ -951,7 +1022,7 @@ fn cloud(
                     clock: served.clone(),
                     bucket: bucket()?,
                 });
-            options.into_iter().fold(builder, |builder, (key, value)| {
+            options.iter().cloned().fold(builder, |builder, (key, value)| {
                 match key.to_ascii_lowercase().parse() {
                     Ok(key) => builder.with_config(key, value),
                     // Not one of this backend's: the environment holds every cloud's, each builder
@@ -968,32 +1039,80 @@ fn cloud(
         let built = Arc::new(built);
         (built.clone() as Arc<dyn ObjectStore>, Some(built as Arc<dyn PaginatedListStore>))
     }
-    let (backend, pages, clock) = match scheme {
+    let (backend, pages, clock, appends) = match scheme {
         Scheme::Memory => {
             let memory: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
-            (memory, None, Clock::Host)
+            let appends = Appends::InProcess(Arc::new(tokio::sync::Mutex::new(())));
+            (memory, None, Clock::Host, appends)
         }
         Scheme::AmazonS3 => {
-            let builder = configured!(object_store::aws::AmazonS3Builder);
-            let (backend, pages) = paged(builder.build()?);
-            (backend, pages, Clock::Served(served))
+            let mut builder = configured!(object_store::aws::AmazonS3Builder);
+            let bucket_name = url.host_str().unwrap_or("");
+            let explicit_express = options.iter().rev().find_map(|(k, v)| {
+                if k.eq_ignore_ascii_case("aws_s3_express") || k.eq_ignore_ascii_case("s3_express")
+                {
+                    Some(matches!(
+                        v.to_ascii_lowercase().as_str(),
+                        "1" | "true" | "on" | "yes" | "y"
+                    ))
+                } else {
+                    None
+                }
+            });
+            let has_custom_endpoint = options.iter().any(|(k, _)| {
+                k.eq_ignore_ascii_case("aws_endpoint") || k.eq_ignore_ascii_case("endpoint")
+            });
+            let s3_express = explicit_express.unwrap_or_else(|| bucket_name.ends_with("--x-s3"));
+            if s3_express && explicit_express.is_none() && !has_custom_endpoint {
+                builder = builder.with_s3_express(true);
+            }
+            let region = builder
+                .get_config_value(&object_store::aws::AmazonS3ConfigKey::Region)
+                .unwrap_or_else(|| "us-east-1".to_owned());
+            let s3 = Arc::new(builder.build()?);
+            let backend: Arc<dyn ObjectStore> = s3.clone();
+            let pages: Pages = Some(s3.clone() as Arc<dyn PaginatedListStore>);
+            let mut client_opts = client.options();
+            for (key, value) in &options {
+                let lower = key.to_ascii_lowercase();
+                let trimmed = lower.strip_prefix("aws_").unwrap_or(&lower);
+                if let Ok(key) = trimmed.parse::<object_store::ClientConfigKey>() {
+                    client_opts = client_opts.with_config(key, value);
+                }
+            }
+            let http_client = crate::client::reqwest_client(&client_opts)?;
+            let appends = Appends::HttpS3 {
+                objects: backend.clone(),
+                s3,
+                client: http_client,
+                region,
+                s3_express,
+                skip_signature,
+            };
+            (backend, pages, Clock::Served(served), appends)
         }
         Scheme::GoogleCloudStorage => {
             let builder = configured!(object_store::gcp::GoogleCloudStorageBuilder);
             let (backend, pages) = paged(builder.build()?);
-            (backend, pages, Clock::Served(served))
+            let appends = Appends::Refused(
+                "GCS Rapid Storage requires gRPC BidiWriteObject appendable writes, which are not \
+                 yet implemented",
+            );
+            (backend, pages, Clock::Served(served), appends)
         }
         Scheme::MicrosoftAzure => {
             let builder = configured!(object_store::azure::MicrosoftAzureBuilder);
             let (backend, pages) = paged(builder.build()?);
-            (backend, pages, Clock::Served(served))
+            let appends =
+                Appends::Refused("Azure Blob Storage does not support cladefs fast WAL appends");
+            (backend, pages, Clock::Served(served), appends)
         }
         other => {
             let source = format!("no buckets of {other:?}").into();
             return Err(object_store::Error::Generic { store: "cladefs", source });
         }
     };
-    Ok((backend, pages, path, clock))
+    Ok((backend, pages, path, clock, appends))
 }
 
 /// What a request's failure means to cells. Failures other than the ones the protocol answers
@@ -1323,6 +1442,209 @@ impl ObjectBucket {
             timed.answered(deleted, |_| 0)
         }
     }
+    /// cladefs: appends `bytes` to `key` at exact byte `offset` ([`Bucket::append`], doc-29).
+    fn object_append(
+        &self,
+        key: &str,
+        offset: u64,
+        bytes: bytes::Bytes,
+    ) -> impl Future<Output = Result<u64, Error>> + Send {
+        let path = self.path(key);
+        let upload = Upload::of(key);
+        async move {
+            let timed = self.counts.request(Request::Append, Some(&path));
+            let len = bytes.len() as u64;
+            let result = self.appended(&path, offset, bytes).await;
+            let result = timed.answered(result, |_| len as usize)?;
+            self.counts.uploaded[upload as usize].fetch_add(len, Ordering::Relaxed);
+            Ok(result)
+        }
+    }
+
+    async fn appended(
+        &self,
+        path: &Path,
+        offset: u64,
+        bytes: bytes::Bytes,
+    ) -> object_store::Result<u64> {
+        let len = bytes.len() as u64;
+        let new_len = offset.checked_add(len).ok_or_else(|| object_store::Error::InvalidPath {
+            source: object_store::path::Error::EmptySegment { path: path.to_string() },
+        })?;
+        match &self.appends {
+            Appends::Local(local) => local.append(path, offset, bytes).await,
+            Appends::InProcess(lock) => {
+                let _alone = lock.lock().await;
+                if offset == 0 {
+                    let create =
+                        PutOptions { mode: object_store::PutMode::Create, ..PutOptions::default() };
+                    return match self.backend.put_opts(path, PutPayload::from(bytes), create).await
+                    {
+                        Ok(_) => Ok(len),
+                        Err(object_store::Error::AlreadyExists { path, source }) => {
+                            Err(object_store::Error::Precondition { path, source })
+                        }
+                        Err(other) => Err(other),
+                    };
+                }
+                let existing = match self.backend.get_opts(path, GetOptions::default()).await {
+                    Ok(got) => got.bytes().await?,
+                    Err(object_store::Error::NotFound { .. }) => {
+                        return Err(object_store::Error::Precondition {
+                            path: path.to_string(),
+                            source: format!("missing object for append at offset {offset}").into(),
+                        });
+                    }
+                    Err(other) => return Err(other),
+                };
+                if existing.len() as u64 != offset {
+                    return Err(object_store::Error::Precondition {
+                        path: path.to_string(),
+                        source: format!("length {} != offset {offset}", existing.len()).into(),
+                    });
+                }
+                let mut combined = Vec::with_capacity(existing.len() + bytes.len());
+                combined.extend_from_slice(&existing);
+                combined.extend_from_slice(&bytes);
+                let opts =
+                    PutOptions { mode: object_store::PutMode::Overwrite, ..PutOptions::default() };
+                self.backend.put_opts(path, PutPayload::from(combined), opts).await?;
+                Ok(new_len)
+            }
+            Appends::HttpS3 { objects, s3, client, region, s3_express, skip_signature } => {
+                if offset == 0 {
+                    let create =
+                        PutOptions { mode: object_store::PutMode::Create, ..PutOptions::default() };
+                    return match objects.put_opts(path, PutPayload::from(bytes), create).await {
+                        Ok(_) => Ok(len),
+                        Err(object_store::Error::AlreadyExists { path, source }) => {
+                            Err(object_store::Error::Precondition { path, source })
+                        }
+                        Err(other) => Err(other),
+                    };
+                }
+                let name = reqwest::header::HeaderName::from_static("x-amz-write-offset-bytes");
+                let value =
+                    reqwest::header::HeaderValue::from_str(&offset.to_string()).map_err(|err| {
+                        object_store::Error::Generic { store: "cladefs", source: Box::new(err) }
+                    })?;
+                if *skip_signature {
+                    let opts = PutOptions {
+                        mode: object_store::PutMode::Overwrite,
+                        ..PutOptions::default()
+                    };
+                    let (res, sent) = crate::client::appending(
+                        (name, value),
+                        path.to_string(),
+                        objects.put_opts(path, PutPayload::from(bytes), opts),
+                    )
+                    .await;
+                    assert!(sent || res.is_err(), "{path}: appended without write-offset header");
+                    res?;
+                    return Ok(new_len);
+                }
+                // Sign the PUT directly via `AwsAuthorizer` (rather than `signed_url_opts`, which
+                // rejects `x-amz-*` headers and hardcodes service `"s3"`): S3 Express directory
+                // buckets (`*--x-s3`) require SigV4 credential scope `s3express` with
+                // `x-amz-write-offset-bytes` included in `SignedHeaders`.
+                use object_store::signer::Signer as _;
+                let mut base = s3
+                    .signed_url(hyper::Method::PUT, path, std::time::Duration::from_secs(60))
+                    .await?;
+                base.set_query(None);
+                let cred = s3.credentials().get_credential().await?;
+                let mut http_req = hyper::Request::builder()
+                    .method(hyper::Method::PUT)
+                    .uri(base.as_str())
+                    .header(&name, &value)
+                    .body(object_store::client::HttpRequestBody::from(bytes.clone()))
+                    .map_err(|err| object_store::Error::Generic {
+                        store: "cladefs",
+                        source: Box::new(err),
+                    })?;
+                let service = if *s3_express { "s3express" } else { "s3" };
+                object_store::aws::AwsAuthorizer::new(&cred, service, region)
+                    .try_authorize(&mut http_req, None)?;
+                let (parts, _) = http_req.into_parts();
+                let mut req = client.put(base).body(bytes);
+                for (header_name, header_value) in parts.headers {
+                    if let Some(header_name) = header_name {
+                        req = req.header(header_name, header_value);
+                    }
+                }
+                let response = req.send().await.map_err(|err| object_store::Error::Generic {
+                    store: "cladefs",
+                    source: Box::new(err.without_url()),
+                })?;
+                let status = response.status();
+                if status.is_success() {
+                    if let Some(raw) = response.headers().get("x-amz-object-size") {
+                        let reported: u64 = raw
+                            .to_str()
+                            .map_err(|err| object_store::Error::Generic {
+                                store: "cladefs",
+                                source: format!("{path}: invalid x-amz-object-size header: {err}")
+                                    .into(),
+                            })?
+                            .parse()
+                            .map_err(|err| object_store::Error::Generic {
+                                store: "cladefs",
+                                source: format!("{path}: unparseable x-amz-object-size: {err}")
+                                    .into(),
+                            })?;
+                        if reported != new_len {
+                            return Err(object_store::Error::Generic {
+                                store: "cladefs",
+                                source: format!(
+                                    "{path}: x-amz-object-size {reported} != expected {new_len}"
+                                )
+                                .into(),
+                            });
+                        }
+                        return Ok(reported);
+                    }
+                    if *s3_express {
+                        return Err(object_store::Error::Generic {
+                            store: "cladefs",
+                            source: format!(
+                                "{path}: S3 Express append response missing x-amz-object-size"
+                            )
+                            .into(),
+                        });
+                    }
+                    return Ok(new_len);
+                }
+                // Error body text is best-effort diagnostics; an unreadable body leaves text empty
+                // so HTTP 400 falls through to a retryable generic error.
+                let text = response.text().await.unwrap_or_default();
+                let is_offset_precondition = matches!(status.as_u16(), 404 | 409 | 412)
+                    || (status.as_u16() == 400
+                        && (text.contains("InvalidWriteOffset")
+                            || text.contains("MaxPartsExceeded")
+                            || text.contains("PreconditionFailed")
+                            || text.contains("ConditionalRequestConflict")));
+                if is_offset_precondition {
+                    return Err(object_store::Error::Precondition {
+                        path: path.to_string(),
+                        source: format!("HTTP {status}: {text}").into(),
+                    });
+                }
+                if matches!(status.as_u16(), 401 | 403) {
+                    return Err(object_store::Error::PermissionDenied {
+                        path: path.to_string(),
+                        source: format!("HTTP {status}: {text}").into(),
+                    });
+                }
+                Err(object_store::Error::Generic {
+                    store: "cladefs",
+                    source: format!("Server returned non-2xx status code: {status}: {text}").into(),
+                })
+            }
+            Appends::Refused(reason) => Err(object_store::Error::NotSupported {
+                source: format!("offset-checked append of {path}: {reason}").into(),
+            }),
+        }
+    }
 }
 
 impl Bucket for ObjectBucket {
@@ -1373,6 +1695,15 @@ impl Bucket for ObjectBucket {
         mode: PutMode,
     ) -> impl Future<Output = Result<Version, Error>> + Send {
         self.object_put(key, bytes, mode)
+    }
+
+    fn append(
+        &self,
+        key: &str,
+        offset: u64,
+        bytes: crate::Bytes,
+    ) -> impl Future<Output = Result<u64, Error>> + Send {
+        self.object_append(key, offset, bytes)
     }
 
     async fn rewritable(&self, key: &str) {
@@ -2998,7 +3329,7 @@ pub(crate) mod tests {
         assert!(stats.line().ends_with(
             " failed-get=0 failed-get-range=0 failed-head=0 failed-list=0 failed-create=25 \
              failed-update=0 failed-overwrite=0 failed-delete=0 failed-list-delimited=0 \
-             failed-delete-batch=0"
+             failed-delete-batch=0 failed-append=0"
         ));
         let object = format!("object={key}");
         let enospc = "error=Generic Faulty error: No space left on device (os error 28)";
@@ -3120,27 +3451,29 @@ pub(crate) mod tests {
                 ("delete", 1),
                 ("list-delimited", 1),
                 ("delete-batch", 1),
+                ("append", 0),
             ]
         );
-        assert_eq!(stats.uploaded, [150, 11, 30, 9]);
+        assert_eq!(stats.uploaded, [150, 11, 30, 0, 9]);
         assert_eq!(stats.downloaded, 70);
         // cladefs: what the protocol answers fails no request (TASK-314): the create where an
         // object was, the get of none.
         assert_eq!(stats.failures, [0; Request::ALL.len()]);
         // Its line, each kind of request's time after the rest, then its failures: as of times
         // and failures set here, as each request's time is its own.
-        let failures = [0, 1, 0, 0, 3, 0, 0, 2, 0, 4];
-        let request_ns = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100];
+        let failures = [0, 1, 0, 0, 3, 0, 0, 2, 0, 4, 5];
+        let request_ns = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110];
         let stats = Stats { request_ns, failures, ..stats };
         assert_eq!(
             stats.line(),
             "object-store: get=2 get-range=1 head=1 list=1 create=4 update=1 overwrite=1 delete=1 \
-             list-delimited=1 delete-batch=1 \
-             up-segments=150 up-extents=11 up-checkpoints=30 up-other=9 down=70 \
+             list-delimited=1 delete-batch=1 append=0 \
+             up-segments=150 up-extents=11 up-checkpoints=30 up-wal=0 up-other=9 down=70 \
              get-ns=10 get-range-ns=20 head-ns=30 list-ns=40 create-ns=50 update-ns=60 \
-             overwrite-ns=70 delete-ns=80 list-delimited-ns=90 delete-batch-ns=100 failed-get=0 \
-             failed-get-range=1 failed-head=0 failed-list=0 failed-create=3 failed-update=0 \
-             failed-overwrite=0 failed-delete=2 failed-list-delimited=0 failed-delete-batch=4"
+             overwrite-ns=70 delete-ns=80 list-delimited-ns=90 delete-batch-ns=100 append-ns=110 \
+             failed-get=0 failed-get-range=1 failed-head=0 failed-list=0 failed-create=3 \
+             failed-update=0 failed-overwrite=0 failed-delete=2 failed-list-delimited=0 \
+             failed-delete-batch=4 failed-append=5"
         );
     }
 
@@ -4138,5 +4471,133 @@ pub(crate) mod tests {
         let url =
             std::env::var("CLADEFS_AZURE_URL").expect("CLADEFS_AZURE_URL names the container");
         over_a_real_bucket(&url);
+    }
+
+    /// doc-29: offset-checked append conformance and `probed_append` over S3 HTTP
+    /// (`x-amz-write-offset-bytes` + `MaxParts`), local `file://`, and in-memory `memory://`.
+    #[test]
+    fn append_probe_and_max_parts_over_s3_local_and_memory() {
+        runtime().block_on(async {
+            // In-memory bucket
+            let mem = ObjectBucket::new(Arc::new(object_store::memory::InMemory::new()), "mem");
+            mem.probed_append(1).await.unwrap();
+
+            // Local file:// bucket
+            let dir = tempfile::tempdir().unwrap();
+            let file_url = format!("file://{}", dir.path().display());
+            let local = ObjectBucket::from_url(&file_url).unwrap();
+            local.probed_append(2).await.unwrap();
+
+            // S3Server over real HTTP with x-amz-write-offset-bytes and MaxParts = 3
+            let server = S3Server::start(None);
+            let bucket = s3(&server, "fastwal", &Client::DEFAULT);
+            bucket.probed_append(3).await.unwrap();
+
+            server.set_max_appends(3);
+            let key = "wal/seg0";
+            assert_eq!(bucket.append(key, 0, crate::Bytes::from_static(b"aaa")).await.unwrap(), 3);
+            assert_eq!(bucket.append(key, 3, crate::Bytes::from_static(b"bb")).await.unwrap(), 5);
+            assert_eq!(bucket.append(key, 5, crate::Bytes::from_static(b"c")).await.unwrap(), 6);
+            // 4th append exceeds max_appends (3) -> Precondition!
+            assert_eq!(
+                bucket.append(key, 6, crate::Bytes::from_static(b"d")).await,
+                Err(crate::bucket::Error::Precondition)
+            );
+            assert_eq!(bucket.get(key).await.unwrap().bytes.as_slice(), b"aaabbc");
+        });
+    }
+
+    /// doc-29: signed S3 Express directory-bucket appends sign with service `s3express`, bind
+    /// `x-amz-write-offset-bytes` in `SignedHeaders`, and require `x-amz-object-size`.
+    #[test]
+    fn signed_s3_express_append_uses_s3express_scope_and_signs_write_offset() {
+        use crate::Bytes;
+        use http_body_util::{BodyExt as _, Full};
+        use hyper::body::Incoming;
+        use hyper::service::service_fn;
+        use hyper_util::rt::TokioIo;
+        use std::sync::Mutex;
+
+        runtime().block_on(async {
+            let captured: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+            let return_size = Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+
+            let captured_srv = captured.clone();
+            let return_size_srv = return_size.clone();
+            let server = tokio::spawn(async move {
+                loop {
+                    let Ok((stream, _)) = listener.accept().await else { break };
+                    let captured = captured_srv.clone();
+                    let return_size = return_size_srv.clone();
+                    tokio::spawn(async move {
+                        let svc = service_fn(move |req: hyper::Request<Incoming>| {
+                            let captured = captured.clone();
+                            let return_size = return_size.clone();
+                            async move {
+                                let auth = req
+                                    .headers()
+                                    .get("authorization")
+                                    .and_then(|v| v.to_str().ok())
+                                    .unwrap_or("")
+                                    .to_owned();
+                                let offset = req
+                                    .headers()
+                                    .get("x-amz-write-offset-bytes")
+                                    .and_then(|v| v.to_str().ok())
+                                    .unwrap_or("")
+                                    .to_owned();
+                                // Drain the PUT body before replying so HTTP/1.1 keep-alive stays clean.
+                                drop(req.into_body().collect().await);
+                                captured.lock().unwrap().push((auth, offset));
+                                let mut resp = hyper::Response::builder().status(200);
+                                if return_size.load(Ordering::Relaxed) {
+                                    resp = resp.header("x-amz-object-size", "9");
+                                }
+                                Ok::<_, hyper::Error>(resp.body(Full::new(Bytes::new())).unwrap())
+                            }
+                        });
+                        let _ = hyper::server::conn::http1::Builder::new()
+                            .serve_connection(TokioIo::new(stream), svc)
+                            .await;
+                    });
+                }
+            });
+
+            let url = "s3://fastwal--use1-az4--x-s3/prefix";
+            let options = [
+                ("aws_endpoint".to_owned(), format!("http://{addr}")),
+                ("aws_region".to_owned(), "us-east-1".to_owned()),
+                ("aws_access_key_id".to_owned(), "AKIAIOSFODNN7EXAMPLE".to_owned()),
+                (
+                    "aws_secret_access_key".to_owned(),
+                    "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_owned(),
+                ),
+                ("aws_allow_http".to_owned(), "true".to_owned()),
+            ];
+            let bucket = ObjectBucket::reached(reach(url, options, &Client::DEFAULT).unwrap());
+            let new_len = bucket.append("wal/0", 5, Bytes::from_static(b"abcd")).await.unwrap();
+            assert_eq!(new_len, 9);
+
+            let seen = captured.lock().unwrap().clone();
+            assert_eq!(seen.len(), 1);
+            let (auth, offset) = &seen[0];
+            assert_eq!(offset, "5");
+            assert!(
+                auth.contains("/us-east-1/s3express/aws4_request"),
+                "expected s3express credential scope, got {auth}"
+            );
+            assert!(
+                auth.contains("x-amz-write-offset-bytes"),
+                "expected x-amz-write-offset-bytes in SignedHeaders, got {auth}"
+            );
+
+            // Missing x-amz-object-size on S3 Express must fail rather than silently succeed.
+            return_size.store(false, Ordering::Relaxed);
+            assert!(bucket.append("wal/0", 5, Bytes::from_static(b"abcd")).await.is_err());
+
+            server.abort();
+        });
     }
 }

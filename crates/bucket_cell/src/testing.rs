@@ -27,6 +27,8 @@ enum Op {
     /// how many it holds at most.
     ListDelimited(String, Option<String>, usize),
     Put(String, Vec<u8>, PutMode),
+    /// cladefs: offset-checked append (doc-29).
+    Append(String, u64, Vec<u8>),
     Delete(String),
 }
 
@@ -37,6 +39,7 @@ enum Reply {
     List(Vec<Meta>),
     Listing(Listing),
     Version(Version),
+    Offset(u64),
     Done,
 }
 
@@ -44,6 +47,7 @@ struct Stored {
     bytes: Vec<u8>,
     version: u64,
     modified: u64,
+    appends: u32,
 }
 
 struct Request {
@@ -71,6 +75,8 @@ struct Inner {
     /// cladefs: the regions' buckets down, whose requests fail without taking effect
     /// ([`SimBucket::down`], TASK-633.10).
     down: BTreeSet<u16>,
+    /// cladefs: optional per-object append-part limit (S3 Express `MaxParts`, doc-29).
+    max_appends: Option<u32>,
 }
 
 /// How a request the simulation completes fails.
@@ -129,6 +135,12 @@ impl SimBucket {
             true => inner.down.insert(region),
             false => inner.down.remove(&region),
         };
+    }
+
+    /// cladefs: sets the maximum number of appends per object before returning `Precondition`
+    /// (`MaxParts`, doc-29).
+    pub fn set_max_appends(&self, max_appends: Option<u32>) {
+        self.inner.lock().unwrap().max_appends = max_appends;
     }
 
     /// cladefs: the bucket a request of `key` goes to: its cell's, else the host's; for a
@@ -363,6 +375,7 @@ impl Op {
             | Op::List(key)
             | Op::ListDelimited(key, ..)
             | Op::Put(key, ..)
+            | Op::Append(key, ..)
             | Op::Delete(key) => key,
         }
     }
@@ -380,6 +393,7 @@ impl Op {
                 format!("list-delimited {prefix} after {after}")
             }
             Op::Put(key, ..) => format!("put {key}"),
+            Op::Append(key, offset, _) => format!("append {key} @{offset}"),
             Op::Delete(key) => format!("delete {key}"),
         }
     }
@@ -391,6 +405,7 @@ impl Op {
     fn describe(&self) -> String {
         match self {
             Op::Put(key, bytes, mode) => format!("put {key} {}B {mode:?}", bytes.len()),
+            Op::Append(key, offset, bytes) => format!("append {key} @{offset} {}B", bytes.len()),
             op => op.describe_key(),
         }
     }
@@ -497,12 +512,43 @@ impl Inner {
                     _ => {}
                 }
                 self.versions += 1;
-                let stored = Stored { bytes, version: self.versions, modified: self.clock };
+                let stored =
+                    Stored { bytes, version: self.versions, modified: self.clock, appends: 1 };
                 self.objects.insert(at(&key), stored);
                 Ok(Reply::Version(Version {
                     e_tag: Some(self.versions.to_string()),
                     version: None,
                 }))
+            }
+            Op::Append(key, offset, bytes) => {
+                let target = at(&key);
+                if offset == 0 {
+                    if self.objects.contains_key(&target) {
+                        return Err(Error::Precondition);
+                    }
+                    let new_len = bytes.len() as u64;
+                    self.versions += 1;
+                    self.objects.insert(
+                        target,
+                        Stored { bytes, version: self.versions, modified: self.clock, appends: 1 },
+                    );
+                    return Ok(Reply::Offset(new_len));
+                }
+                let Some(existing) = self.objects.get_mut(&target) else {
+                    return Err(Error::Precondition);
+                };
+                if existing.bytes.len() as u64 != offset {
+                    return Err(Error::Precondition);
+                }
+                if self.max_appends.is_some_and(|max| existing.appends >= max) {
+                    return Err(Error::Precondition);
+                }
+                existing.bytes.extend_from_slice(&bytes);
+                existing.appends += 1;
+                self.versions += 1;
+                existing.version = self.versions;
+                existing.modified = self.clock;
+                Ok(Reply::Offset(existing.bytes.len() as u64))
             }
             Op::Delete(key) => {
                 // The creates held at its key wait again once an object there is deleted.
@@ -570,6 +616,15 @@ impl Bucket for SimBucket {
         mode: PutMode,
     ) -> impl Future<Output = Result<Version, Error>> + Send {
         reply!(self.request(Op::Put(key.to_owned(), bytes.into(), mode)), Version)
+    }
+
+    fn append(
+        &self,
+        key: &str,
+        offset: u64,
+        bytes: bytes::Bytes,
+    ) -> impl Future<Output = Result<u64, Error>> + Send {
+        reply!(self.request(Op::Append(key.to_owned(), offset, bytes.into())), Offset)
     }
 
     fn delete(&self, key: &str) -> impl Future<Output = Result<(), Error>> + Send {
@@ -938,6 +993,12 @@ pub async fn uncollected(bucket: &impl Bucket) -> Vec<String> {
             continue;
         };
         let (epoch, end, checkpoint) = (recovered.epoch(), recovered.end(), recovered.checkpoint());
+        let wal_epoch = recovered
+            .head
+            .as_ref()
+            .and_then(|head| head.fast_wal.as_ref())
+            .and_then(|fast_wal| fast_wal.active.as_ref())
+            .map(|active| active.epoch);
         // cladefs: its versions, each its state at the segment its head names it at, kept whole as
         // an origin is (TASK-476).
         for version in recovered.head.iter().flat_map(|head| &head.versions) {
@@ -945,13 +1006,16 @@ pub async fn uncollected(bucket: &impl Bucket) -> Vec<String> {
         }
         needed.extend(recovered.touched);
         // What its head may yet name: of its epoch, or a later one, its segments and extents of
-        // their own at or past its end, and its checkpoints newer than its own (TASK-407).
+        // their own at or past its end, and its checkpoints newer than its own (TASK-407); plus
+        // large own-extents of its active fast WAL epoch at or past its end (doc-29).
         needed.extend(
             keys.iter()
                 .filter(|key| match layout::kind(key) {
-                    layout::Kind::Segment { cell: of, segment, epoch: by }
-                    | layout::Kind::Extent { cell: of, segment, epoch: by, .. } => {
+                    layout::Kind::Segment { cell: of, segment, epoch: by } => {
                         of == cell && by >= epoch && segment >= end
+                    }
+                    layout::Kind::Extent { cell: of, segment, epoch: by, .. } => {
+                        of == cell && (by >= epoch || Some(by) == wal_epoch) && segment >= end
                     }
                     layout::Kind::Checkpoint { cell: of, segment, epoch: by } => {
                         of == cell && by >= epoch && checkpoint.is_none_or(|ck| (segment, by) > ck)
@@ -1014,6 +1078,8 @@ pub async fn uncollected(bucket: &impl Bucket) -> Vec<String> {
             Kind::Decommissioned { .. } => true,
             // cladefs: as its mirror's copy says ([`uncollected_copies`]).
             Kind::Hold { .. } => true,
+            // cladefs: fast WAL objects are managed by fast-WAL tombstones, never cold GC (doc-29).
+            Kind::Wal { .. } => true,
             Kind::Reference { .. } => !retirable.contains(key) && !unnamed.contains(key),
             Kind::Unknown => key == layout::EVENTS,
             _ => false,

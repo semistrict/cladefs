@@ -1,0 +1,41 @@
+Head {
+    format: 35,
+    owner: 30583,
+    made: Root,
+    kind: Some(
+        Fxfs,
+    ),
+    keks: [],
+    shredded: false,
+    deks: [],
+    inherited: [],
+    epoch: 3,
+    holder: 85,
+    token: 4,
+    end: 2,
+    swaps: 5,
+    runs: [
+        (
+            0,
+            1,
+        ),
+        (
+            1,
+            3,
+        ),
+    ],
+    checkpoint: None,
+    versions: [],
+    replication: None,
+    fast_wal: Some(
+        FastWal {
+            fsync: FastWal,
+            active: Some(
+                ActiveWal {
+                    epoch: 3,
+                    bucket: "s3://cladefs-wal--use1-az4--x-s3",
+                },
+            ),
+        },
+    ),
+}

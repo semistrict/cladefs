@@ -1467,6 +1467,7 @@ cladefs_gc_sweep_requests{request=\"overwrite\"} 0
 cladefs_gc_sweep_requests{request=\"delete\"} 0
 cladefs_gc_sweep_requests{request=\"list-delimited\"} 0
 cladefs_gc_sweep_requests{request=\"delete-batch\"} 0
+cladefs_gc_sweep_requests{request=\"append\"} 0
 # HELP cladefs_gc_pass_seconds How long its last sweep's passes took.
 # TYPE cladefs_gc_pass_seconds histogram
 cladefs_gc_pass_seconds_bucket{le=\"0.001\"} 0

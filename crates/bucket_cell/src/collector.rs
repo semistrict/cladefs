@@ -1645,18 +1645,26 @@ struct Ended {
     epoch: u64,
     /// Its newest checkpoint, by its number and its writer's epoch.
     checkpoint: Option<(u64, u64)>,
+    /// cladefs: the active fast WAL epoch named in `head.fast_wal.active` (doc-29): large own
+    /// extents of this epoch at or past `end` stay protected until the taker flushes the fast WAL
+    /// and switches `active` (rule `protect_wal_epoch`).
+    wal_epoch: Option<u64>,
 }
 
 impl Ended {
     /// Whether the head may yet name the object of `kind`, which it names not (rule
     /// `collector_epochs`): of its epoch, or a later one, a segment or an extent of its own at or
     /// past its end, or a checkpoint newer than its own. An object of an earlier epoch, its
-    /// writer's swaps all fail: no head ever names it.
+    /// writer's swaps all fail: no head ever names it, except large own extents of the active
+    /// fast WAL epoch (`protect_wal_epoch`, doc-29).
     fn ahead(&self, kind: Kind) -> bool {
         rules().collector_epochs
             && match kind {
-                Kind::Segment { segment, epoch, .. } | Kind::Extent { segment, epoch, .. } => {
-                    epoch >= self.epoch && segment >= self.end
+                Kind::Segment { segment, epoch, .. } => epoch >= self.epoch && segment >= self.end,
+                Kind::Extent { segment, epoch, .. } => {
+                    (epoch >= self.epoch
+                        || (rules().protect_wal_epoch && Some(epoch) == self.wal_epoch))
+                        && segment >= self.end
                 }
                 Kind::Checkpoint { segment, epoch, .. } => {
                     epoch >= self.epoch && self.checkpoint.is_none_or(|at| (segment, epoch) > at)
@@ -1667,6 +1675,12 @@ impl Ended {
 }
 
 impl Live {
+    fn active_wal_epoch(head: Option<&Head>) -> Option<u64> {
+        head.and_then(|head| head.fast_wal.as_ref())
+            .and_then(|fast_wal| fast_wal.active.as_ref())
+            .map(|active| active.epoch)
+    }
+
     /// Folds in `recovered`, a live cell's: its own layer, and what it inherited but the extents
     /// it holds no longer where it inherited them.
     fn add(&mut self, recovered: Recovered<Layers>) {
@@ -1674,6 +1688,7 @@ impl Live {
             end: recovered.end(),
             epoch: recovered.epoch(),
             checkpoint: recovered.checkpoint(),
+            wal_epoch: Self::active_wal_epoch(recovered.head.as_ref()),
         };
         let Recovered { state, touched, .. } = recovered;
         let State { cell, extents, .. } = state;
@@ -1696,6 +1711,7 @@ impl Live {
             end: recovered.end(),
             epoch: recovered.epoch(),
             checkpoint: recovered.checkpoint(),
+            wal_epoch: Self::active_wal_epoch(recovered.head.as_ref()),
         };
         self.touched.extend(recovered.touched);
         for key in recovered.named {
@@ -1902,6 +1918,7 @@ impl Pass {
                 | Kind::Identity
                 | Kind::Buckets
                 | Kind::Kek { .. }
+                | Kind::Wal { .. }
                 | Kind::Unknown => Fate::Stays,
                 Kind::Evidence { .. } => goes(evidence.contains(key)),
             };
