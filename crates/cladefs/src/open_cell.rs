@@ -1290,10 +1290,12 @@ impl OpenCell {
         root: Option<&[u8]>,
         request: CommitRequest,
     ) -> Result<()> {
-        /// What a commit waits for: a level of [`Commit`]'s, or replicated (doc-21).
+        /// What a commit waits for: a level of [`Commit`]'s, replicated (doc-21), or fast WAL
+        /// (doc-29).
         enum Waiting {
             Commit(Commit),
             Replicated,
+            FastWal,
         }
         let committing = std::time::Instant::now();
         admitted.local().commit_ordered(root).await.map_err(errno)?;
@@ -1301,23 +1303,39 @@ impl OpenCell {
         let waiting = std::time::Instant::now();
         // cladefs: in a replicated cell (doc-21, TASK-537.3.3), the guest's fsync waits for the
         // level its head asks for, and its sync family for its commits replicated, rather than
-        // uploaded: on f+1 hosts' disks, or in the bucket. An ordering-only pre-barrier
-        // (`WRITE_BARRIER`, board 7409) orders prior writes ahead of the write it precedes and
-        // never upgrades to `replicated.fsync`.
+        // uploaded: on f+1 hosts' disks, or in the bucket. In a fast-WAL cell (doc-29), the
+        // guest's fsync waits for its configured fast-WAL fsync level, and its sync family waits
+        // for fast-WAL durability (appendable zonal store or cold regional bucket). An
+        // ordering-only pre-barrier (`WRITE_BARRIER`, board 7409) orders prior writes ahead of the
+        // write it precedes and never upgrades to `replicated.fsync` or `fast_wal`.
         let replication = self.uploader.as_ref().and_then(|uploader| uploader.replication());
-        let commit = match (request, replication) {
-            (CommitRequest::Barrier, _) => Waiting::Commit(Commit::Ordered),
-            (CommitRequest::Commit(Commit::Uploaded), Some(replicated)) if replicated.f >= 1 => {
-                Waiting::Replicated
-            }
-            (CommitRequest::Commit(Commit::Ordered), Some(replicated)) => match replicated.fsync {
+        let fast_wal = self.uploader.as_ref().and_then(|uploader| uploader.fast_wal_fsync());
+        let commit = match (request, fast_wal, replication) {
+            (CommitRequest::Barrier, _, _) => Waiting::Commit(Commit::Ordered),
+            (CommitRequest::Commit(Commit::Uploaded), Some(_), _) => Waiting::FastWal,
+            (CommitRequest::Commit(Commit::Ordered), Some(fsync), _) => match fsync {
                 bucket_cell::layout::Fsync::Ordered => Waiting::Commit(Commit::Ordered),
+                bucket_cell::layout::Fsync::FastWal => Waiting::FastWal,
                 bucket_cell::layout::Fsync::Replicated => Waiting::Replicated,
             },
-            (CommitRequest::Commit(commit), _) => Waiting::Commit(commit),
+            (CommitRequest::Commit(Commit::Local), Some(_), _) => Waiting::FastWal,
+            (CommitRequest::Commit(Commit::Uploaded), None, Some(replicated))
+                if replicated.f >= 1 =>
+            {
+                Waiting::Replicated
+            }
+            (CommitRequest::Commit(Commit::Ordered), None, Some(replicated)) => {
+                match replicated.fsync {
+                    bucket_cell::layout::Fsync::Ordered => Waiting::Commit(Commit::Ordered),
+                    bucket_cell::layout::Fsync::Replicated => Waiting::Replicated,
+                    bucket_cell::layout::Fsync::FastWal => Waiting::FastWal,
+                }
+            }
+            (CommitRequest::Commit(commit), _, _) => Waiting::Commit(commit),
         };
         let waited = match commit {
             Waiting::Replicated => self.make_replicated().await,
+            Waiting::FastWal => self.make_fast_wal().await,
             // cladefs: each level including the one before (doc-12): local, as ordered, within the
             // lag; uploaded, past it.
             Waiting::Commit(Commit::Uploaded) => self.make_uploaded().await,
@@ -1339,6 +1357,21 @@ impl OpenCell {
         let Some(uploader) = self.uploader.as_ref() else { return Ok(()) };
         let epoch = self.local.last_commit().map_err(errno)?;
         upload_wait(epoch).run_async(uploader.lag(epoch)).await.map_err(upload_errno)
+    }
+
+    /// cladefs: makes the open cell's commits so far durable in its fast WAL (doc-29): staged in
+    /// memory/cache with zero local disk `fsync`s, appended to the appendable zonal bucket (or
+    /// uploaded to the cold regional bucket if degraded), and within the lag the uploader allows.
+    /// Returns immediately whenever the cold head acknowledges `epoch`, even if acknowledgement
+    /// arrives after lag waiting begins (Hotbed review 121, board 12179).
+    async fn make_fast_wal(&self) -> Result<()> {
+        let epoch = self.make_local().await?;
+        let Some(uploader) = self.uploader.as_ref() else { return Ok(()) };
+        let waited = async {
+            uploader.fast_wal(epoch).await?;
+            uploader.fast_wal_lag(epoch).await
+        };
+        upload_wait(epoch).run_async(waited).await.map_err(upload_errno)
     }
 
     /// cladefs: makes the open cell's commits so far replicated (doc-21): local, then on f members

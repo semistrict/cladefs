@@ -664,6 +664,10 @@ fn keeping(daemon: &Daemon) -> Result<local_cell::upload::Options, Errno> {
         log::error!("cladefsd: {err}");
         Errno::EINVAL
     })?;
+    let (fast_wal_config, fast_wal_large_extent) = match super::storage::fast_wal_config(daemon)? {
+        Some((config, large_extent)) => (Some(config), large_extent),
+        None => (None, local_cell::fast_wal::DEFAULT_LARGE_EXTENT),
+    };
     Ok(local_cell::upload::Options {
         cache,
         held,
@@ -672,6 +676,8 @@ fn keeping(daemon: &Daemon) -> Result<local_cell::upload::Options, Errno> {
         interval,
         members,
         replace_after,
+        fast_wal_config,
+        fast_wal_large_extent,
         ..Default::default()
     })
 }
@@ -728,10 +734,11 @@ pub(super) async fn create(
     path: PathBuf,
     capacity: u64,
     cell: CellId,
-    (token, kind, replication, force, upload_interval): (
+    (token, kind, replication, fast_wal, force, upload_interval): (
         Option<u64>,
         Kind,
         Option<bucket_cell::layout::Wish>,
+        Option<Option<bucket_cell::layout::Fsync>>,
         bool,
         Option<std::time::Duration>,
     ),
@@ -756,12 +763,13 @@ pub(super) async fn create(
         (_, 0) | (0, _) => return Err(Errno::EINVAL),
         (_, _) => CellOf::Taken(cell),
     };
-    // cladefs: the replication its call asked for, which its taking gives the cell's head
-    // (doc-21, TASK-537.3.1); its taking forced, if asked (TASK-681); and any per-cell uploader
-    // interval override (hotbed question 534).
+    // cladefs: the replication or Fast WAL mode its call asked for, which its taking gives the
+    // cell's head (doc-21, doc-29, TASK-537.3.1); its taking forced, if asked (TASK-681); and any
+    // per-cell uploader interval override (hotbed question 534).
     let made = attached(daemon, &path, async |keeping| {
         let interval = upload_interval.unwrap_or(keeping.interval);
-        let keeping = local_cell::upload::Options { replication, force, interval, ..keeping };
+        let keeping =
+            local_cell::upload::Options { replication, fast_wal, force, interval, ..keeping };
         OpenCell::create_placed_on(&daemon.host, &path, (capacity, of, token), kind, keeping).await
     })
     .await?;
@@ -1461,7 +1469,7 @@ pub(super) async fn make_public(
 }
 
 /// What the cell at `path` is, and holds.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct CellState {
     pub cell: CellId,
     pub info: ExtentInfo,

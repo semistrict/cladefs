@@ -452,7 +452,8 @@ impl World {
             .filter(|key| match layout::kind(key) {
                 Kind::Segment { cell, .. }
                 | Kind::Checkpoint { cell, .. }
-                | Kind::Extent { cell, .. } => !kept(cell),
+                | Kind::Extent { cell, .. }
+                | Kind::Wal { cell, .. } => !kept(cell),
                 // cladefs: no reference stays: the cell that took the fork's child's ID holds
                 // none, the fork's writers having taken back the one they wrote (TASK-395.10).
                 Kind::Reference { .. } => true,

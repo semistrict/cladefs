@@ -1918,6 +1918,9 @@ mod cli {
             members_up,
             active_replicas,
             forced_after,
+            fast_wal,
+            fast_wal_bucket,
+            fast_wal_degraded,
         } = stat;
         serde_json::json!({
             "tenant": base32_id::Short(*tenant).to_string(),
@@ -1946,6 +1949,9 @@ mod cli {
             "members_up": members_up,
             "active_replicas": active_replicas,
             "forced_after": forced_after,
+            "fast_wal": fast_wal,
+            "fast_wal_bucket": fast_wal_bucket,
+            "fast_wal_degraded": fast_wal_degraded,
         })
     }
 

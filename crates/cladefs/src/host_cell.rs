@@ -558,10 +558,42 @@ pub(crate) async fn open_on(
 ) -> Result<Opened, Failure> {
     // cladefs: a close of it on this host waited for first, holding no thread (doc-24).
     closed_on(host, path).await?;
-    let recovering = upload::blocking(|| -> Result<_, Failure> {
+    let recovered = upload::blocking(|| -> Result<_, Failure> {
         Ok(LocalCell::recover(host_dir_on(host, path)?)?)
-    })?;
-    opened_on(host, recovering, keeping).await
+    });
+    match recovered {
+        Ok(recovering) => opened_on(host, recovering, keeping).await,
+        Err(recover_err) => {
+            // cladefs: for an active Fast WAL cell, local disk is cache-only (doc-29, Hotbed
+            // review 118): if local WAL recovery fails (e.g. damaged cache files), peek the cell's
+            // description and check the cold bucket head. Only if the head confirms an active Fast
+            // WAL do we drop the damaged local WAL and recover from the remote buckets; non-Fast-WAL
+            // cells still fail hard with the original local error.
+            let peeked = upload::blocking(|| {
+                let dir = host_dir_on(host, path)?;
+                Ok::<_, Failure>(LocalCell::peek_bucket(&dir)?)
+            });
+            if let Ok((cell, Some(url))) = peeked
+                && let Ok(bucket) = bucket_on(host, &url)
+                && let Ok(read) = bucket_cell::head::read(&*bucket, cell).await
+                && matches!(
+                    read.head(),
+                    Ok(Some(h)) if h.fast_wal.as_ref().and_then(|fw| fw.active.as_ref()).is_some()
+                )
+            {
+                log::warn!(
+                    "cladefs: local cache WAL of active fast-WAL cell {cell} at {} is damaged \
+                     ({recover_err}); dropping local cache and recovering from remote buckets",
+                    path.display()
+                );
+                let recovering = upload::blocking(|| -> Result<_, Failure> {
+                    Ok(LocalCell::recover_dropping_wal(host_dir_on(host, path)?)?)
+                })?;
+                return opened_with_head_on(host, recovering, keeping, Some(read)).await;
+            }
+            Err(recover_err)
+        }
+    }
 }
 
 #[cfg(all(test, not(madsim)))]

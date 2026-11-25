@@ -3324,6 +3324,7 @@ mod tests {
                 ("delete", 0),
                 ("list-delimited", 0),
                 ("delete-batch", 0),
+                ("append", 0),
             ]
         );
     }
@@ -3391,6 +3392,7 @@ mod tests {
                     ("delete", 0),
                     ("list-delimited", 0),
                     ("delete-batch", 0),
+                    ("append", 0),
                 ],
                 tails + head
             )
