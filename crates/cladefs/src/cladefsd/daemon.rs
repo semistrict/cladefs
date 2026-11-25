@@ -56,6 +56,9 @@ pub struct Daemon {
     runtime: OnceLock<tokio::runtime::Runtime>,
     /// Open cell registry and holds (`CellTable`).
     pub(super) table: cells::Table,
+    /// Per-cell uploader interval overrides configured via `CreateCellRequest` (hotbed question
+    /// 534), keyed by canonical cell directory path and cleared when the cell is deleted/dropped.
+    pub(super) upload_intervals: Mutex<std::collections::HashMap<PathBuf, std::time::Duration>>,
     /// The daemon's bucket handle, initialized on first use or injected in tests.
     pub(super) bucket: OnceLock<Arc<RoutedBucket>>,
     /// The daemon's part cache, opened once from `CLADEFSD_PART_CACHE`.
@@ -124,6 +127,7 @@ impl Daemon {
             #[cfg(not(madsim))]
             runtime: OnceLock::new(),
             table: cells::Table::new(),
+            upload_intervals: Mutex::new(std::collections::HashMap::new()),
             bucket: OnceLock::new(),
             part_cache: Mutex::new(None),
             accepting: Mutex::new(Vec::new()),

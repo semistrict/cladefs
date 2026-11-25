@@ -153,6 +153,7 @@ async fn mount_cell(
     url: &str,
     (of, capacity): (CellOf, u64),
     token: Option<u64>,
+    upload_interval: Option<std::time::Duration>,
 ) -> Result<Filesystem, Error> {
     let new = matches!(of, CellOf::New(_) | CellOf::Named(_));
     // Its tenant's directory, made once for all its cells.
@@ -160,7 +161,10 @@ async fn mount_cell(
         local_cell::upload::blocking(|| std::fs::create_dir_all(tenant))
             .map_err(|err| Error::new(err).context(format!("making {}", tenant.display())))?;
     }
-    let keeping = crate::cladefsd::cells::mount_keeping(daemon).map_err(Error::from)?;
+    let mut keeping = crate::cladefsd::cells::mount_keeping(daemon).map_err(Error::from)?;
+    if let Some(interval) = upload_interval {
+        keeping.interval = interval;
+    }
     let storage =
         Storage::take_on_keeping(&daemon.host, path, (of, capacity), url, token, keeping).await?;
     let mounting = async {
@@ -196,6 +200,7 @@ impl Control {
         kind: Option<Kind>,
         (new, capacity): (bool, u64),
         token: Option<u64>,
+        upload_interval: Option<std::time::Duration>,
     ) -> Result<(bool, PathBuf), Error> {
         let Some(server) = self.server.upgrade() else {
             return Err(Errno::ENOTCONN.into());
@@ -207,7 +212,8 @@ impl Control {
             (false, Some(Kind::Fxfs)) => (CellOf::Taken(cell), TAKEN_CAPACITY),
             (false, _) => return Ok((false, path)),
         };
-        let mounting = mount_cell(&self.daemon, &path, &self.source.bucket, of, token);
+        let mounting =
+            mount_cell(&self.daemon, &path, &self.source.bucket, of, token, upload_interval);
         let open = held_open(Arc::clone(&self.daemon), self.holds.clone(), path.clone(), mounting);
         if let Err(err) = server.attach(&shown, open).await {
             self.holds.lock().unwrap().remove(&path);
@@ -247,7 +253,10 @@ impl proto::mount_server::Mount for Control {
         &self,
         request: Request<AttachRequest>,
     ) -> Result<Response<AttachResponse>, Status> {
-        let AttachRequest { tenant, cell, token, capacity } = request.into_inner();
+        let AttachRequest { tenant, cell, token, capacity, upload_interval_ms } =
+            request.into_inner();
+        let upload_interval = crate::cladefsd::cells::parse_upload_interval_ms(upload_interval_ms)
+            .map_err(|errno| failed(errno.into()))?;
         // A cell of 0 is a new one, made as it is held, its filesystem with it; any other is an
         // ephemeral cell on this host, or a bucket cell, or none.
         let make = cell == 0;
@@ -286,7 +295,7 @@ impl proto::mount_server::Mount for Control {
                     true => None,
                     false => cell_kind(&control.source.bucket, cell).await?,
                 };
-                control.attach_cell(cell, kind, (make, capacity), token).await
+                control.attach_cell(cell, kind, (make, capacity), token, upload_interval).await
             }
             .await;
             let mut cells = control.cells.lock().unwrap();

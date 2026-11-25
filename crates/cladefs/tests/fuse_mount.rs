@@ -991,14 +991,17 @@ fn mounted_cells_read_through_the_daemons_part_cache() {
     );
 
     // Detach and wipe the local cell dir while keeping CLADEFSD_PART_CACHE: re-attaching and
-    // reading the blob again must hit the local part cache with zero additional get-range calls.
+    // reading the blob again must hit the local part cache with zero additional get-range calls
+    // during the read (re-attach itself may read an uncheckpointed tail segment's trailer when
+    // clean close skipped checkpointing a small delta, hotbed question 535).
     cladefsctl_mount(sock_s, &["detach", "1", &cell]);
     std::fs::remove_dir_all(cells_dir.join("0000000000001").join(&cell)).unwrap();
     cladefsctl_mount(sock_s, &["attach", "1", &cell]);
+    let after_reattach = get_range_count();
     assert_eq!(std::fs::read(&blob_path).unwrap(), payload);
     assert_eq!(
         get_range_count(),
-        after_first,
+        after_reattach,
         "second FUSE read must serve cached parts from CLADEFSD_PART_CACHE without get-range"
     );
     terminate(child, &m);
@@ -1114,6 +1117,43 @@ fn ephemeral_cells_attach_to_fuse_without_uploading_to_the_bucket() {
         .unwrap();
     assert!(!eph_path.exists());
     assert!(!bucket_eph_prefix.exists());
+
+    // 6. Verify per-cell upload_interval_ms validation at the CreateCell trust boundary
+    // (hotbed question 534).
+    use cladefs::cladefsd::control::proto::CreateCellRequest;
+    let invalid_create = control.call(async |client| {
+        client
+            .create_cell(CreateCellRequest {
+                path: control_path(&ws_dir.join("bad-interval")),
+                capacity: 64 << 20,
+                tenant: 1,
+                upload_interval_ms: Some(0),
+                ..Default::default()
+            })
+            .await
+    });
+    assert_eq!(invalid_create.err().and_then(|err| err.errno()), Some(cladefs::Errno::EINVAL));
+    let ok_create = control
+        .call(async |client| {
+            client
+                .create_cell(CreateCellRequest {
+                    path: control_path(&ws_dir.join("custom-interval")),
+                    capacity: 64 << 20,
+                    tenant: 1,
+                    upload_interval_ms: Some(15_000),
+                    ..Default::default()
+                })
+                .await
+        })
+        .unwrap();
+    assert_ne!(ok_create.cell, 0);
+    control
+        .call(async |client| {
+            client
+                .delete_cell(DeleteCellRequest { path: control_path(&ws_dir.join("custom-interval")) })
+                .await
+        })
+        .unwrap();
 
     terminate(child, &m);
 }

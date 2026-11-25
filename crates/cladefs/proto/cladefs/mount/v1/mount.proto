@@ -69,6 +69,9 @@ message AttachRequest {
   optional uint64 token = 3;
   // A new cell's: the most bytes it holds, as VMs' disks hold. Ignored for a cell named.
   uint64 capacity = 4;
+  // Optional per-cell uploader interval in milliseconds (hotbed question 534). Unset keeps the
+  // daemon default; 0 or values past 24 hours are refused (INVALID_ARGUMENT).
+  optional uint64 upload_interval_ms = 5;
 }
 
 // What was attached.

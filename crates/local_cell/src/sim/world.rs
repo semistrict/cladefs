@@ -1545,6 +1545,9 @@ impl World {
             held: Some(self.hosts[host].held.clone()),
             token,
             checkpoint_every: upload::CHECKPOINT_EVERY,
+            checkpoint_min_on_close: upload::CHECKPOINT_MIN_ON_CLOSE,
+            // The simulation's clock advances on demand, as for `filling_wait`.
+            ack_coalesce: Duration::ZERO,
             replication: self.cells.get(&cell).and_then(|found| found.replicated),
             members,
             replace_after,

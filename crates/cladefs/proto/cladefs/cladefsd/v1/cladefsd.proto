@@ -411,6 +411,9 @@ message CreateCellRequest {
   // that only the others held are lost, and StatCell's forced_after says past which commit. With
   // `token`, the placement it is placed at is forced from then on.
   bool force = 11;
+  // Optional per-cell uploader interval in milliseconds (hotbed question 534). Unset keeps the
+  // daemon default; 0 or values past 24 hours are refused (INVALID_ARGUMENT).
+  optional uint64 upload_interval_ms = 12;
 }
 
 // What a guest's fsync, fdatasync, msync and O_SYNC wait for in a cell (doc-12, doc-21). Its sync,

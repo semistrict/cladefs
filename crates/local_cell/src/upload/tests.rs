@@ -710,3 +710,133 @@ async fn gathers_take_what_may_upload_at_once() {
     let sequences: Vec<u64> = state.extents.keys().map(|extent| extent.sequence).collect();
     assert_eq!(sequences, (1..=closed as u64).collect::<Vec<_>>());
 }
+
+/// Hotbed question 535: when no waiter is blocked on durability, segment uploads coalesce their
+/// conditional head swaps over `Options::ack_coalesce`; an urgent durability waiter (`uploaded`)
+/// still flushes immediately without waiting for the coalescing window.
+#[tokio::test(flavor = "multi_thread")]
+async fn head_swaps_coalesce_uploads_when_no_waiter_is_waiting() {
+    use bucket_cell::object_bucket::Request;
+    let options = Options {
+        interval: Duration::from_millis(20),
+        ack_coalesce: Duration::from_millis(300),
+        relocate: false,
+        ..Options::default()
+    };
+    let doc = Doc27::open(options).await;
+    let updates_before = doc.bucket.stats().requests(Request::Update);
+    // Close 4 segments back-to-back without calling uploaded(): all 4 upload quickly and should
+    // coalesce into far fewer than 4 conditional head updates.
+    for sequence in 1..=4u64 {
+        doc.cell.write(Doc27::extent(sequence), 0, &[sequence as u8; BLOCK]).await.unwrap();
+        doc.cell.close_segment().unwrap();
+        doc.cell.commit(None).await.unwrap();
+    }
+    let last = doc.cell.last_commit().unwrap();
+    doc.until("coalesced ack", |d| d.uploader.last_uploaded() >= last).await;
+    let coalesced_updates = doc.bucket.stats().requests(Request::Update) - updates_before;
+    assert!(
+        coalesced_updates <= 2,
+        "expected 4 back-to-back segments to coalesce head swaps, got {coalesced_updates} updates"
+    );
+
+    // Urgent waiter must bypass a long coalescing window immediately.
+    let doc = doc
+        .reopen(Options {
+            interval: Duration::from_secs(3600),
+            ack_coalesce: Duration::from_secs(30),
+            relocate: false,
+            ..Options::default()
+        })
+        .await;
+    let start = std::time::Instant::now();
+    doc.segment(10..11, &[]).await;
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "urgent uploaded() waited on ack_coalesce: {:?}",
+        start.elapsed()
+    );
+    doc.uploader.close().await;
+}
+
+/// Hotbed question 535: a fresh cell writes its initial checkpoint on clean close so readers do
+/// not replay trailers forever, while subsequent clean closes skip checkpointing when fewer than
+/// `checkpoint_min_on_close` append-only segments were uploaded; freeing an extent or reaching
+/// the threshold still checkpoints cleanly.
+#[tokio::test(flavor = "multi_thread")]
+async fn clean_close_checkpoint_threshold_and_frees() {
+    let base = Options {
+        interval: Duration::from_secs(3600),
+        ack_coalesce: Duration::ZERO,
+        checkpoint_min_on_close: 4,
+        relocate: false,
+        ..Options::default()
+    };
+
+    // 1. Fresh cell with no checkpoint yet -> clean close writes initial checkpoint.
+    let doc = Doc27::open(base.clone()).await;
+    doc.segment(1..2, &[]).await;
+    let bucket = doc.bucket.clone();
+    let dir = doc.dir.clone();
+    let host = doc.host.clone();
+    doc.uploader.close().await;
+    doc.cell.close().await.unwrap();
+    drop(doc.cell);
+    let initial = bucket_cell::head::get(&*bucket, CELL).await.unwrap().unwrap().checkpoint;
+    assert!(initial.is_some(), "fresh cell with no checkpoint must write initial checkpoint");
+
+    // 2. Reopen and add 2 append-only segments (< 4) -> clean close skips advancing checkpoint.
+    let reopen = |holder: u64, token: u64| {
+        let dir = dir.clone();
+        let bucket = bucket.clone();
+        let host = host.clone();
+        let opts = Options { token, ..base.clone() };
+        async move {
+            let recovering = LocalCell::recover(dir).unwrap();
+            open(recovering, crate::Options::default(), bucket, (holder, opts), &host)
+                .await
+                .unwrap()
+        }
+    };
+    let (cell, uploader) = reopen(2, 6).await;
+    for seq in 2..4u64 {
+        cell.write(Doc27::extent(seq), 0, &[seq as u8; BLOCK]).await.unwrap();
+        cell.commit(None).await.unwrap();
+        uploader.uploaded(cell.last_commit().unwrap()).await.unwrap();
+    }
+    uploader.close().await;
+    cell.close().await.unwrap();
+    drop(cell);
+    let after_small = bucket_cell::head::get(&*bucket, CELL).await.unwrap().unwrap().checkpoint;
+    assert_eq!(after_small, initial, "small append-only delta should skip clean-close checkpoint");
+    let recovered = bucket_cell::recover(&*bucket, CELL, None).await.unwrap().state;
+    assert_eq!(recovered.extents.len(), 3);
+
+    // 3. Reopen and free an extent (1 segment < 4) -> clean close checkpoints so GC can reclaim.
+    let (cell, uploader) = reopen(3, 7).await;
+    cell.free(Doc27::extent(1)).unwrap();
+    cell.commit(None).await.unwrap();
+    uploader.uploaded(cell.last_commit().unwrap()).await.unwrap();
+    uploader.close().await;
+    cell.close().await.unwrap();
+    drop(cell);
+    let after_free = bucket_cell::head::get(&*bucket, CELL).await.unwrap().unwrap().checkpoint;
+    assert_ne!(after_free, initial, "clean close after freeing extents must advance checkpoint");
+
+    // 4. Reopen and add 4 append-only segments (>= 4) -> clean close advances checkpoint.
+    let (cell, uploader) = reopen(4, 8).await;
+    for seq in 10..14u64 {
+        cell.write(Doc27::extent(seq), 0, &[seq as u8; BLOCK]).await.unwrap();
+        cell.commit(None).await.unwrap();
+        uploader.uploaded(cell.last_commit().unwrap()).await.unwrap();
+    }
+    uploader.close().await;
+    cell.close().await.unwrap();
+    drop(cell);
+    let after_threshold =
+        bucket_cell::head::get(&*bucket, CELL).await.unwrap().unwrap().checkpoint;
+    assert_ne!(
+        after_threshold, after_free,
+        "clean close at checkpoint_min_on_close must advance checkpoint"
+    );
+}

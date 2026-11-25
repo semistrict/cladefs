@@ -651,14 +651,39 @@ pub(super) async fn attach(
     .await
 }
 
-/// The cell at `path`, as `open` opens it with `daemon`'s uploader's options ([`keeping`]).
+/// Maximum per-cell uploader interval accepted by control APIs (24 hours, hotbed question 534).
+const MAX_UPLOAD_INTERVAL_MS: u64 = 24 * 60 * 60 * 1000;
+
+/// Validates an optional `upload_interval_ms` from a control RPC at the trust boundary.
+pub(crate) fn parse_upload_interval_ms(
+    ms: Option<u64>,
+) -> Result<Option<std::time::Duration>, Errno> {
+    match ms {
+        None => Ok(None),
+        Some(0) => Err(Errno::EINVAL),
+        Some(ms) if ms > MAX_UPLOAD_INTERVAL_MS => Err(Errno::EINVAL),
+        Some(ms) => Ok(Some(std::time::Duration::from_millis(ms))),
+    }
+}
+
+/// The cell at `path`, as `open` opens it with `daemon`'s uploader's options ([`keeping`]),
+/// applying any per-cell `upload_interval` configured on `daemon` for `path`.
 async fn attached<T>(
     daemon: &Arc<Daemon>,
     path: &Path,
     open: impl AsyncFnOnce(local_cell::upload::Options) -> Result<T, crate::Error>,
 ) -> Result<T, Errno> {
     // The daemon's own first, which the cells naming it share (`host_cell::bucket`).
-    let keeping = mount_keeping(daemon)?;
+    let mut keeping = mount_keeping(daemon)?;
+    if let Some(interval) = daemon
+        .upload_intervals
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&cell_dir_key(path))
+        .copied()
+    {
+        keeping.interval = interval;
+    }
     open(keeping).await.map_err(|err| errno_of(format_args!("opening {}", path.display()), err))
 }
 
@@ -748,7 +773,13 @@ pub(super) async fn create(
     path: PathBuf,
     capacity: u64,
     cell: CellId,
-    (token, kind, replication, force): (Option<u64>, Kind, Option<bucket_cell::layout::Wish>, bool),
+    (token, kind, replication, force, upload_interval): (
+        Option<u64>,
+        Kind,
+        Option<bucket_cell::layout::Wish>,
+        bool,
+        Option<std::time::Duration>,
+    ),
 ) -> Result<CellId, Errno> {
     // Let go of once the work is done.
     let _held = hold(daemon, &path).await?;
@@ -771,12 +802,22 @@ pub(super) async fn create(
         (_, _) => CellOf::Taken(cell),
     };
     // cladefs: the replication its call asked for, which its taking gives the cell's head
-    // (doc-21, TASK-537.3.1); and its taking forced, if asked (TASK-681).
-    attached(daemon, &path, async |keeping| {
-        let keeping = local_cell::upload::Options { replication, force, ..keeping };
+    // (doc-21, TASK-537.3.1); its taking forced, if asked (TASK-681); and any per-cell uploader
+    // interval override (hotbed question 534).
+    let made = attached(daemon, &path, async |keeping| {
+        let interval = upload_interval.unwrap_or(keeping.interval);
+        let keeping = local_cell::upload::Options { replication, force, interval, ..keeping };
         OpenCell::create_placed_on(&daemon.host, &path, (capacity, of, token), kind, keeping).await
     })
-    .await
+    .await?;
+    if let Some(interval) = upload_interval {
+        daemon
+            .upload_intervals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(cell_dir_key(&path), interval);
+    }
+    Ok(made)
 }
 
 /// Makes a cell at `path` on `daemon`, which must not exist (`EEXIST`), of `capacity` bytes,
@@ -1358,6 +1399,13 @@ async fn delete_alone(
         return Err(Errno::EBUSY);
     }
     let deleted = OpenCell::delete_on(&daemon.host, &path, bucket.as_deref()).await;
+    if deleted.is_ok() {
+        daemon
+            .upload_intervals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&cell_dir_key(&path));
+    }
     deleted.map_err(|err| errno_of(format_args!("deleting {}", path.display()), err))
 }
 

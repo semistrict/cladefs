@@ -599,8 +599,11 @@ impl Cladefsd for Control {
             replicas,
             fsync,
             force,
+            upload_interval_ms,
         } = request.into_inner();
         let cell_dir = path(cell_dir)?;
+        let upload_interval =
+            cells::parse_upload_interval_ms(upload_interval_ms).map_err(status)?;
         room_for_a_cell(&self.daemon)?;
         let replication = wish(replicas, fsync)?;
         // cladefs: a replicated cell's members are the daemon's peers, in their replica
@@ -631,7 +634,7 @@ impl Cladefsd for Control {
             cell_dir,
             capacity,
             cell,
-            (token, kind, replication, force),
+            (token, kind, replication, force, upload_interval),
         )
         .await;
         reply(made.map(|made| CreateCellResponse { tenant: made.tenant, cell: made.id }))

@@ -30,7 +30,7 @@ use extent_frame::{Keys as _, PART};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use storage_device::ExtentId;
 
 /// cladefs: the bytes of a sector of an open segment, whose raw file an encrypted cell encrypts a
@@ -234,6 +234,8 @@ pub(crate) struct Segments<F> {
     full: Vec<SegmentId>,
     /// When it opened.
     opened: Instant,
+    /// When data was last written to the open segment (hotbed question 534).
+    last_written: Option<Instant>,
     /// Whether the next commit closes it, whatever it holds.
     close_wanted: bool,
     /// cladefs: the versions the next commit cuts at its end, which close the open segment
@@ -378,6 +380,7 @@ impl<F: File> Segments<F> {
             committed_len: 0,
             full: Vec::new(),
             opened: Instant::now(),
+            last_written: None,
             close_wanted: false,
             cutting: Vec::new(),
             window: Window::starting(cell, epoch + 1),
@@ -434,6 +437,9 @@ impl<F: File> Segments<F> {
     pub fn reserve(&mut self, len: u64) -> Result<(SegmentId, Arc<RawFile<F>>, u64), Unsectored> {
         let open = self.open;
         Unsectored::check(self.tracked[&open].len, len)?;
+        if len > 0 {
+            self.last_written = Some(Instant::now());
+        }
         Ok(self.change(open, |segment| {
             let Phase::Open { raw: file, .. } = &segment.phase else {
                 unreachable!("the open segment is open")
@@ -496,6 +502,9 @@ impl<F: File> Segments<F> {
     pub fn append(&mut self, len: u64) -> Result<(Arc<RawFile<F>>, u64), Unsectored> {
         Unsectored::check(self.tracked[&self.open].len, len)?;
         self.written = true;
+        if len > 0 {
+            self.last_written = Some(Instant::now());
+        }
         Ok(self.change(self.open, |segment| {
             let Phase::Open { raw: file, .. } = &segment.phase else {
                 unreachable!("the open segment is open")
@@ -626,13 +635,18 @@ impl<F: File> Segments<F> {
     }
 
     /// cladefs: whether the guest is filling the segment a closing between commits would close
-    /// (TASK-92.41): one filled since the last commit, or the open one, past [`FILLING`] written
-    /// since. Its next commit seals in place what is one run in it; closed first, the commit
-    /// copies out all of it, up to a segment and an extent (the shared-disk case's VMs copied a
-    /// segment's worth each, closed so mid-burst by the uploader's interval).
+    /// (TASK-92.41, hotbed question 534): one filled since the last commit, the open one past
+    /// [`FILLING`] written since the last commit, or the open one past [`FILLING_BURST`] total
+    /// bytes with writes arriving within [`FILLING_ACTIVE`] across frequent commits. Its next
+    /// commit seals in place what is one run in it; closed first, the commit copies out all of it,
+    /// up to a segment and an extent, and closing mid-burst slices commit-heavy streams into tiny
+    /// segments.
     pub fn filling(&self) -> bool {
-        let written = self.tracked[&self.open].len.saturating_sub(self.committed_len);
-        self.has_full() || written >= FILLING
+        let open_len = self.tracked[&self.open].len;
+        let written = open_len.saturating_sub(self.committed_len);
+        let active_burst = open_len >= FILLING_BURST
+            && self.last_written.is_some_and(|at| at.elapsed() < FILLING_ACTIVE);
+        self.has_full() || written >= FILLING || active_burst
     }
 
     /// Has the next commit close the open segment, whatever it holds.
@@ -842,6 +856,7 @@ impl<F: File> Segments<F> {
         self.open = next;
         self.committed_len = 0;
         self.opened = Instant::now();
+        self.last_written = None;
         self.close_wanted = false;
         Ok(unframed)
     }
@@ -958,6 +973,7 @@ impl<F: File> Segments<F> {
         self.open = next;
         self.committed_len = 0;
         self.opened = Instant::now();
+        self.last_written = None;
         // What is in it, the commit closing it syncs (`seal_off`); the next's entry with those of
         // segments closed.
         self.written = false;
@@ -1587,6 +1603,16 @@ fn write_back_by_pieces<F: File>(file: &F) -> io::Result<()> {
 /// filling it ([`Segments::filling`]): more than the flush of a daemon's turn writes at once
 /// ([`WRITTEN_BEHIND_MOST`]), a bulk write's, not a journal's or a database's between its commits.
 pub(crate) const FILLING: u64 = 8 << 20;
+
+/// cladefs: total bytes already in the open segment from which active writes across frequent
+/// commits count as filling ([`Segments::filling`], hotbed question 534): well above a journal's
+/// or database's tiny commits so those still close on the uploader's interval, while keeping
+/// commit-heavy bulk writes (e.g. git clones, builds, FUSE provisioning) open to fill a segment.
+pub(crate) const FILLING_BURST: u64 = 1 << 20;
+
+/// cladefs: how recently the open segment must have received a write for an active burst
+/// ([`FILLING_BURST`]) to hold off an interval close ([`Segments::filling`]).
+pub(crate) const FILLING_ACTIVE: Duration = Duration::from_secs(2);
 
 /// cladefs: the bytes of the open segment's raw file whose writing back begins at once, written
 /// ([`Segments::write_behind`], TASK-221).

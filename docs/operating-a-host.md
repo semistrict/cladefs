@@ -418,6 +418,7 @@ version coupling:
 ```sh
 git submodule update --init
 scripts/build-musl.sh                  # native $(uname -m)-unknown-linux-musl (or: make build-musl)
+scripts/install-musl.sh --restart      # lockstep-installs cladefsd, cladefsctl, cladefs-mount, cladefs-gc
 # or for a specific target / output directory:
 scripts/build-musl.sh --target x86_64-unknown-linux-musl --out dist/x86_64
 scripts/build-musl.sh --target aarch64-unknown-linux-musl --out dist/aarch64

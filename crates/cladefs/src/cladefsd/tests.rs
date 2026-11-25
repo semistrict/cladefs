@@ -2643,7 +2643,7 @@ async fn control_takes_cells_at_the_placements_given() {
         path("first"),
         1 << 24,
         new,
-        (Some(5), Kind::Fxfs, None, false),
+        (Some(5), Kind::Fxfs, None, false, None),
     );
     let cell = control(made).unwrap();
     let extent = ExtentId { cell: cell.id, sequence: 1 };
@@ -2664,7 +2664,7 @@ async fn control_takes_cells_at_the_placements_given() {
         path("third"),
         1 << 24,
         cell,
-        (Some(7), Kind::Fxfs, None, false),
+        (Some(7), Kind::Fxfs, None, false, None),
     );
     assert_eq!(control(taken), Ok(cell));
     let third = CellClient::connect(&socket, path("third"), 1 << 24).unwrap();

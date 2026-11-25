@@ -90,6 +90,15 @@ const SEGMENT: u64 = 32 << 20;
 /// How many segments go between checkpoints, by default ([`Options::checkpoint_every`]).
 pub const CHECKPOINT_EVERY: u64 = 64;
 
+/// Minimum uncheckpointed segments uploaded before a clean shutdown writes a checkpoint when no
+/// extents were freed since the last checkpoint ([`Options::checkpoint_min_on_close`], hotbed
+/// question 535).
+pub const CHECKPOINT_MIN_ON_CLOSE: u64 = 8;
+
+/// Default window for coalescing S3/R2 head-swap acknowledgements when no waiter is blocked on
+/// durability ([`Options::ack_coalesce`], hotbed question 535).
+pub const ACK_COALESCE: Duration = Duration::from_millis(1500);
+
 /// cladefs: the mirror in `bucket` of the version `origin` names, begun in the background on the
 /// bucket runtime, its fork to `child` made (doc-23: the first fork of a version into a bucket
 /// starts its mirror there; TASK-633.8): nothing unless `child` is of `bucket` and the version of
@@ -379,6 +388,15 @@ pub struct Options {
     /// a checkpoint covers are no longer read by them, and the writer's relocation rounds run at
     /// checkpoints (doc-27).
     pub checkpoint_every: u64,
+    /// cladefs: minimum uncheckpointed segments uploaded before a clean shutdown writes a
+    /// checkpoint when no extents were freed since the last checkpoint (hotbed question 535).
+    /// Freed extents still trigger a clean-close checkpoint so `cladefs-gc` can reclaim them.
+    pub checkpoint_min_on_close: u64,
+    /// cladefs: how long to coalesce bucket head-swap acknowledgements after a segment upload
+    /// completes when no waiter (`SyncCell`, `COMMIT_UPLOADED`, fork, lag stall, disk pressure,
+    /// or clean shutdown) is blocked on durability (hotbed question 535). Zero acknowledges
+    /// immediately.
+    pub ack_coalesce: Duration,
     /// cladefs: how long the commits in a segment the guest is filling wait past the interval for
     /// its next commit, which seals what it writes in it in place, before the interval closes it
     /// anyway (`LocalCell::close_now_unless_filling`, TASK-92.41): a commit waiting for its upload
@@ -439,6 +457,8 @@ impl Default for Options {
             held: None,
             token: 0,
             checkpoint_every: CHECKPOINT_EVERY,
+            checkpoint_min_on_close: CHECKPOINT_MIN_ON_CLOSE,
+            ack_coalesce: ACK_COALESCE,
             filling_wait: Duration::from_secs(30),
             relocate: true,
             fetching: None,
@@ -1521,16 +1541,20 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         };
         // cladefs: a replicated cell's configuration kept whole beside (TASK-537.3.5).
         self.spawn_keeper(&writer);
-        // The segments uploaded, and as many as were when the last checkpoint was begun.
-        let (mut segments, mut checkpointed) = (0, 0);
+        // The segments uploaded, and as many as were when the last checkpoint was begun; and
+        // whether any segment since the last checkpoint freed extents (hotbed question 535).
+        let (mut segments, mut checkpointed, mut freed_since_checkpoint) = (0u64, 0u64, false);
         let mut in_flight = InFlight::default();
         // cladefs: the work with the cell's head under way, an acknowledgement or a checkpoint, one
         // at a time, beside the uploads, which go on meanwhile as it waits for the bucket's object
         // store to take the head's next write: an acknowledgement then names all they uploaded
         // (`Writer::acknowledge`, TASK-690). And whether an upload since it began wants an
-        // acknowledgement.
+        // acknowledgement, plus an optional coalescing timer when no waiter is blocked (hotbed
+        // question 535).
         let mut head_work: Option<BoxFuture<'static, Result<HeadWork, bucket_cell::Error>>> = None;
         let mut ack_wanted = false;
+        let mut ack_wait: Option<BoxFuture<'static, ()>> = None;
+        let mut ack_urgent = false;
         // cladefs: the relocation round under way, if one is, with what it was allowed; what the
         // next may copy; and the keys the states the cell keeps read (doc-27, board 6214).
         let mut relocating: Option<(u64, Round)> = None;
@@ -1558,7 +1582,9 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             }
             let (stop, cut, failed) = {
                 let mut progress = self.progress.lock().unwrap();
-                urgent |= std::mem::take(&mut progress.wanted);
+                let wanted = std::mem::take(&mut progress.wanted);
+                urgent |= wanted;
+                ack_urgent |= wanted;
                 close |= urgent;
                 (progress.stop, progress.cut, progress.failed.is_some())
             };
@@ -1589,6 +1615,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                 close &= !gathered.closed;
                 urgent &= !gathered.closed;
                 more = gathered.took;
+                freed_since_checkpoint |= gathered.freed;
                 credit.uploaded(gathered.data);
                 if more {
                     continue;
@@ -1599,15 +1626,29 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                     && !ack_wanted
                     && relocating.is_none()
                 {
-                    // A checkpoint on clean shutdown (doc-7, Checkpoints).
-                    if let Err(err) = writer.checkpoint().await {
+                    // A checkpoint on clean shutdown (doc-7, Checkpoints), skipped below
+                    // `checkpoint_min_on_close` once the cell already has a checkpoint and no
+                    // extents were freed since the last checkpoint (hotbed question 535).
+                    let uncheckpointed = segments.saturating_sub(checkpointed);
+                    let no_checkpoint_yet =
+                        writer.taken().head.checkpoint.is_none() && checkpointed == 0;
+                    if (uncheckpointed >= self.options.checkpoint_min_on_close
+                        || (uncheckpointed > 0 && (freed_since_checkpoint || no_checkpoint_yet)))
+                        && let Err(err) = writer.checkpoint().await
+                    {
                         log::warn!("cladefs: checkpointing cell {}: {err}", writer.cell());
                     }
                     return self.fail(&writer, Failure::msg("the uploader stopped"));
                 }
             }
-            if ack_wanted && head_work.is_none() {
+            let ack_due =
+                ack_urgent || urgent || stop || self.options.ack_coalesce.is_zero() || ack_wait.is_none();
+            if ack_wanted && head_work.is_none() && ack_due {
                 ack_wanted = false;
+                ack_wait = None;
+                if in_flight.is_empty() {
+                    ack_urgent = false;
+                }
                 let writer = writer.clone();
                 let acknowledging = async move { writer.acknowledge().await };
                 head_work = Some(acknowledging.map_ok(HeadWork::Acknowledged).boxed());
@@ -1635,6 +1676,11 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                 if let Poll::Ready(Some(uploaded)) = in_flight.next().poll_unpin(cx) {
                     return Poll::Ready(Happened::Uploaded(uploaded));
                 }
+                if let Some(wait) = ack_wait.as_mut()
+                    && let Poll::Ready(()) = wait.poll_unpin(cx)
+                {
+                    return Poll::Ready(Happened::AckDue);
+                }
                 if let Some((allowance, round)) = relocating.as_mut()
                     && let Poll::Ready(ended) = round.poll_unpin(cx)
                 {
@@ -1649,9 +1695,21 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                     close |= !woken;
                     Ok(())
                 }
+                Happened::AckDue => {
+                    ack_wait = None;
+                    Ok(())
+                }
                 Happened::Uploaded(uploaded) => uploaded.map_err(Failure::from).map(|()| {
                     segments += 1;
                     ack_wanted = true;
+                    if ack_wait.is_none()
+                        && !self.options.ack_coalesce.is_zero()
+                        && !ack_urgent
+                        && !urgent
+                        && !stop
+                    {
+                        ack_wait = Some((self.clock)(self.options.ack_coalesce));
+                    }
                 }),
                 Happened::Headed(done) => {
                     head_work = None;
@@ -1662,6 +1720,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                             // returned.
                             if segments - checkpointed >= self.options.checkpoint_every {
                                 checkpointed = segments;
+                                freed_since_checkpoint = false;
                                 head_work = Some(Self::checkpointing(writer.clone()));
                             }
                             acked.await
@@ -1952,6 +2011,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         }
         let mut segments = Vec::with_capacity(closed.len());
         let data = closed.iter().map(|closed| closed.data_len).sum();
+        let freed = closed.iter().any(|closed| !closed.footer.contents.frees.is_empty());
         for closed in closed {
             let (number, tag) = (closed.number, closed.tag());
             // cladefs: what reads its files, on a blocking thread, as `blocking` gives (board
@@ -1970,7 +2030,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         }
         let took = !segments.is_empty();
         in_flight.upload(writer, segments);
-        Ok(Gathered { took, data, closed: closing })
+        Ok(Gathered { took, data, closed: closing, freed })
     }
 
     /// Acknowledges what the writer has uploaded: the commits of the segments it acknowledges are
@@ -2063,6 +2123,8 @@ struct Gathered {
     /// Whether it closed the cell's open segment, as asked: what was committed before is in the
     /// segments the cell closed, taken, or to be taken next.
     closed: bool,
+    /// Whether any segment taken freed extents (hotbed question 535).
+    freed: bool,
 }
 
 /// A segment uploading: its number in the cell, and in the open cell; and the tag of the open
@@ -2102,6 +2164,8 @@ enum Happened {
     Relocated(u64, anyhow::Result<crate::Relocated>),
     /// The work with the cell's head under way is done.
     Headed(Result<HeadWork, bucket_cell::Error>),
+    /// The head-swap coalescing window elapsed (hotbed question 535).
+    AckDue,
     /// It was woken, or its interval ran out: whether it was woken.
     Woken(bool),
 }

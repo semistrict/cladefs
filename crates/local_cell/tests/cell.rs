@@ -2746,6 +2746,19 @@ async fn interval_closings_leave_segments_being_filled() {
     cell.write(extent(1), 0, &vec![1; 9 << 20]).await.unwrap();
     assert!(!cell.close_now_unless_filling().await.unwrap(), "a segment being filled, closed");
     assert!(cell.close_now().await.unwrap(), "a segment being filled, holding a commit, left open");
+    // Commit-heavy burst: past 1 MiB across frequent commits stays open against interval closes
+    // (hotbed question 534), while urgent close_now still closes it.
+    let burst_options = Options { segment_size: 32 << 20, ..options };
+    let cell = LocalCell::create(MemDir::new(), description, burst_options).unwrap();
+    for sequence in 0..4u64 {
+        cell.write(extent(sequence), 0, &vec![sequence as u8; 512 << 10]).await.unwrap();
+        cell.commit(None).await.unwrap();
+    }
+    assert!(
+        !cell.close_now_unless_filling().await.unwrap(),
+        "an actively filling segment across commits was closed by interval"
+    );
+    assert!(cell.close_now().await.unwrap(), "urgent close must still close an active burst");
 }
 
 /// The open segment takes writes until it holds a segment and an extent, `Options::segment_size`

@@ -715,8 +715,13 @@ mod cli {
             let mut mount = MountClient::new(channel);
             match self {
                 Self::Attach { cell, capacity, token } => {
-                    let request =
-                        AttachRequest { tenant: cell.tenant, cell: cell.id, token, capacity };
+                    let request = AttachRequest {
+                        tenant: cell.tenant,
+                        cell: cell.id,
+                        token,
+                        capacity,
+                        upload_interval_ms: None,
+                    };
                     let attached =
                         rpc(timeout, format!("attaching cell {cell}"), mount.attach(request))
                             .await?;
