@@ -847,6 +847,44 @@ impl Recovered {
     }
 }
 
+/// Drops every local WAL file of `cell` in `dir` without parsing or syncing them and returns an
+/// empty [`Recovered`] (doc-29, Hotbed review 118, board 12181): used only after verifying the
+/// cold bucket head has an active Fast WAL so local disk sync/removal failures never prevent
+/// reopening when both remote buckets are healthy.
+pub(crate) fn drop_all<D: Dir>(dir: &D, cell: CellId) -> Result<Recovered, Error> {
+    for kind in [SEGMENTS, OPEN_SEGMENTS, LOGS, crate::layout::EXTENTS] {
+        let sub = cell_dir(kind, cell.id);
+        let listed = match dir.list(&sub) {
+            Ok(names) => names,
+            Err(err) if not_found(&err) => continue,
+            Err(err) => {
+                log::warn!(
+                    "cladefs: listing damaged cache dir {sub} during fast WAL reopen: {err}"
+                );
+                continue;
+            }
+        };
+        for name in listed {
+            let path = format!("{sub}/{name}");
+            if let Err(err) = remove(dir, &path) {
+                log::warn!(
+                    "cladefs: removing damaged cache file {path} during fast WAL reopen: {err}"
+                );
+            }
+        }
+    }
+    if let Err(err) = remove(dir, START) {
+        log::warn!("cladefs: removing damaged WAL start file during fast WAL reopen: {err}");
+    }
+    Ok(Recovered {
+        start: None,
+        start_file: StartFile { made: false, serial: 0 },
+        segments: Vec::new(),
+        next: 0,
+        closing: BTreeMap::new(),
+    })
+}
+
 /// Recovers the WAL of `cell` in `dir` (see the module's docs): each segment whose framed file
 /// is whole, in order, and each whose framed file is not that its log closes again, holding
 /// commits, to the last durable commit; and nothing else of segments: raw data, logs and framed

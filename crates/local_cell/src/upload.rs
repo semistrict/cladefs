@@ -52,6 +52,7 @@ mod shuttle_tests;
 #[cfg(test)]
 mod tests;
 
+pub use crate::fast_wal::{FastWalConfig, FastWalOpener, FastWalStatus};
 pub use replication::{Members, MembersOf, Replicated, ReplicationStatus};
 
 use crate::{
@@ -431,6 +432,16 @@ pub struct Options {
     /// forced is (TASK-681, `CreateCell`'s `force`): it goes on with the members of the
     /// configuration the cell's head names that answer, however few.
     pub force: bool,
+    /// cladefs: the Fast WAL commit mode a taking of the cell gives it (doc-29): `None` keeps
+    /// what the cell's head says, `Some(Some(fsync))` enables Fast WAL with that guest fsync
+    /// level, and `Some(None)` disables Fast WAL (flushing any active WAL on take).
+    pub fast_wal: Option<Option<bucket_cell::layout::Fsync>>,
+    /// cladefs: this host's appendable zonal fast WAL bucket and cross-AZ opener (doc-29).
+    pub fast_wal_config: Option<FastWalConfig>,
+    /// cladefs: large-write threshold in bytes for fast WAL cells (defaults to 256 KiB; extents at
+    /// or above this size upload directly to the cold regional bucket before referencing them
+    /// metadata-only in the fast WAL).
+    pub fast_wal_large_extent: u64,
 }
 
 /// cladefs: the budget of a host's fetchers' GETs and the memory they keep tails and parts in
@@ -466,6 +477,9 @@ impl Default for Options {
             members: None,
             replace_after: Duration::from_secs(30),
             force: false,
+            fast_wal: None,
+            fast_wal_config: None,
+            fast_wal_large_extent: crate::fast_wal::DEFAULT_LARGE_EXTENT,
         }
     }
 }
@@ -750,6 +764,10 @@ pub(crate) struct Shared<D: Dir, B: bucket_cell::Bucket = RoutedBucket> {
     /// history of the commits of (TASK-680).
     #[cfg(test)]
     recovered_from: Mutex<Option<bucket_cell::layout::Configuration>>,
+    /// cladefs: active Fast WAL sink for a fast-WAL cell (doc-29).
+    fast_wal_sink: Mutex<Option<Arc<crate::fast_wal::FastWalSink>>>,
+    /// cladefs: completion signal for the background Fast WAL writer task, awaited in `wind_up`.
+    fast_wal_done: Mutex<Option<futures::channel::oneshot::Receiver<()>>>,
 }
 
 /// The holders an uploader's takings of its cell's head after the first take, and the owners of
@@ -845,6 +863,12 @@ enum Waiting {
     For(Awaited, u64),
     /// The commits up to an epoch told replicated by a replicator, or uploaded.
     Told(Arc<crate::replicate::Replicator>, u64),
+    /// The commits up to an epoch appended to the fast WAL, or uploaded to the cold bucket.
+    FastWal(Arc<crate::fast_wal::FastWalSink>, u64),
+    /// Fast WAL lag backpressure for `commit_epoch` (waits until `lag_epoch` is within lag OR
+    /// `sink.head_acked() >= commit_epoch` so cold-head acknowledgement wakes immediately without
+    /// waiting on local WAL release, board 12179).
+    FastWalLag(Arc<crate::fast_wal::FastWalSink>, u64, u64),
 }
 
 #[derive(Default)]
@@ -893,10 +917,13 @@ pub struct Taking {
     /// cladefs: its cell's replication as the head it took says (doc-21, TASK-537.3.1): none for
     /// a cell durable off its host once uploaded alone.
     pub replication: Option<Replicated>,
+    /// cladefs: its cell's Fast WAL fsync level as the head it took says (doc-29): none unless
+    /// the cell uses Fast WAL.
+    pub fast_wal: Option<bucket_cell::layout::Fsync>,
 }
 
 /// What a cell's uploader has done, and has left to do (TASK-50.5).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UploadStatus {
     /// Its writer's taking of its cell's head, once taken.
     pub taking: Option<Taking>,
@@ -911,6 +938,8 @@ pub struct UploadStatus {
     pub stalls: u64,
     /// cladefs: of a replicated cell, its replication now (TASK-537.3.5).
     pub replication: Option<ReplicationStatus>,
+    /// cladefs: of a Fast WAL cell, its live fast WAL status (doc-29).
+    pub fast_wal: Option<FastWalStatus>,
 }
 
 impl Progress {
@@ -972,6 +1001,7 @@ impl<D: Dir> Uploader<D> {
         shared.observe()?;
         let pending_bytes = self.cell().wal_bytes()?;
         let replication = self.replication_status();
+        let fast_wal = shared.fast_wal_sink.lock().unwrap().as_ref().map(|sink| sink.status());
         let progress = shared.progress.lock().unwrap();
         Ok(UploadStatus {
             taking: progress.taking,
@@ -980,7 +1010,67 @@ impl<D: Dir> Uploader<D> {
             oldest_pending: progress.seen.front().map(|(_, seen)| *seen),
             stalls: progress.stalls,
             replication,
+            fast_wal,
         })
+    }
+
+    /// cladefs: the Fast WAL fsync level of the cell, as its writer's taking found its head
+    /// (doc-29): none unless the cell uses Fast WAL.
+    pub fn fast_wal_fsync(&self) -> Option<bucket_cell::layout::Fsync> {
+        self.shared.progress.lock().unwrap().taking.and_then(|taking| taking.fast_wal)
+    }
+
+    /// cladefs: waits until local cache lag for `epoch` is within bounds, OR returns immediately
+    /// as soon as the cold bucket head itself acknowledges `epoch` (`sink.head_acked() >= epoch`),
+    /// even if cold acknowledgement arrives after waiting began (board 12179).
+    pub fn fast_wal_lag(
+        &self,
+        epoch: u64,
+    ) -> impl std::future::Future<Output = Result<(), Failure>> + Send + use<D> {
+        let waiting = (|| -> Result<Option<Waiting>, Failure> {
+            let sink = self.shared.fast_wal_sink.lock().unwrap().clone();
+            let Some(sink) = sink else {
+                return self.waiting_lag(epoch);
+            };
+            if sink.head_acked() >= epoch {
+                return Ok(None);
+            }
+            let lag_epoch = epoch.saturating_sub(self.shared.options.max_lag);
+            if self.shared.ask(lag_epoch, Awaited::Lag)? {
+                return Ok(None);
+            }
+            Ok(Some(Waiting::FastWalLag(sink, epoch, lag_epoch)))
+        })();
+        self.awaiting(waiting)
+    }
+
+    /// cladefs: returns once the commits up to `epoch` are durable in the cell's fast WAL or
+    /// acknowledged in the cold regional bucket (doc-29).
+    pub fn fast_wal(
+        &self,
+        epoch: u64,
+    ) -> impl std::future::Future<Output = Result<(), Failure>> + Send + use<D> {
+        let waiting = (|| -> Result<Option<Waiting>, Failure> {
+            self.shared.observe()?;
+            let sink = self.shared.fast_wal_sink.lock().unwrap().clone();
+            let Some(sink) = sink else {
+                return self.waiting_uploaded(epoch);
+            };
+            let progress = self.shared.progress.lock().unwrap();
+            if sink.durable().max(sink.head_acked()).max(progress.uploaded) >= epoch {
+                return Ok(None);
+            }
+            if let Some(err) = progress.failed.clone().or_else(|| sink.failed()) {
+                return Err(err);
+            }
+            drop(progress);
+            if sink.degraded() {
+                self.shared.progress.lock().unwrap().wanted = true;
+                self.shared.wake.notify_one();
+            }
+            Ok(Some(Waiting::FastWal(sink, epoch)))
+        })();
+        self.awaiting(waiting)
     }
 
     /// cladefs: returns once the lag is within its bounds, as [`Uploader::lag`] does: a future,
@@ -1331,6 +1421,8 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             relocation: Mutex::default(),
             #[cfg(test)]
             recovered_from: Mutex::default(),
+            fast_wal_sink: Mutex::default(),
+            fast_wal_done: Mutex::default(),
         })
     }
 
@@ -1357,7 +1449,12 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
 
     /// Why uploading stopped, if it did.
     pub(crate) fn failed(&self) -> Option<Failure> {
-        self.progress.lock().unwrap().failed.clone()
+        self.progress
+            .lock()
+            .unwrap()
+            .failed
+            .clone()
+            .or_else(|| self.fast_wal_sink.lock().unwrap().as_ref().and_then(|sink| sink.failed()))
     }
 
     /// The cell's writer, once one took it.
@@ -1369,6 +1466,11 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     /// commits too, unless cut short ([`Uploader::cut_short`]).
     pub(crate) fn stop(&self) {
         self.progress.lock().unwrap().stop = true;
+        if let Some(sink) =
+            self.fast_wal_sink.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref()
+        {
+            sink.stop();
+        }
         self.changed.notify(usize::MAX);
         self.wake.notify_one();
     }
@@ -1450,7 +1552,13 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     /// is durable.
     fn within_lag(&self, uploaded: u64, epoch: u64) -> Result<bool, Failure> {
         let max_bytes = self.options.max_lag_bytes;
-        Ok(uploaded >= epoch && self.cell().wal_bytes()? <= max_bytes)
+        let effective_uploaded = self
+            .fast_wal_sink
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map_or(uploaded, |sink| uploaded.max(sink.head_acked()));
+        Ok(effective_uploaded >= epoch && self.cell().wal_bytes()? <= max_bytes)
     }
 
     /// cladefs: what `waiting` finds in `progress`: done, or failed, or, if nothing yet, `None`
@@ -1462,20 +1570,33 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                 Some(Ok(()))
             }
             Waiting::Told(..) => progress.failed.clone().map(Err),
+            Waiting::FastWal(sink, epoch)
+                if sink.durable().max(sink.head_acked()).max(progress.uploaded) >= *epoch =>
+            {
+                Some(Ok(()))
+            }
+            Waiting::FastWal(sink, _) => progress.failed.clone().or_else(|| sink.failed()).map(Err),
+            Waiting::FastWalLag(sink, commit_epoch, _) if sink.head_acked() >= *commit_epoch => {
+                Some(Ok(()))
+            }
+            Waiting::FastWalLag(_, _, lag_epoch) => {
+                self.reached(progress, *lag_epoch, Awaited::Lag)
+            }
         }
     }
 
     /// cladefs: returns once the progress has what `waiting` waits for, done or failed, holding no
-    /// thread while it waits (TASK-685.3).
+    /// thread while it waits (TASK-685.3). Listener is registered before checking state so
+    /// lock-free fast-WAL / replicator durability updates can never lose a wakeup.
     async fn wait(&self, waiting: &Waiting) -> Result<(), Failure> {
         loop {
-            let changed = {
+            let changed = self.changed.listen();
+            {
                 let progress = self.progress.lock().unwrap();
                 if let Some(found) = self.found(&progress, waiting) {
                     return found;
                 }
-                self.changed.listen()
-            };
+            }
             changed.await;
         }
     }
@@ -1501,6 +1622,17 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     /// its keeper (TASK-701). Its locks taken as a panic holding one left them, poisoned or not:
     /// what it takes of them is all it changes.
     async fn wind_up(&self) {
+        if let Some(sink) =
+            self.fast_wal_sink.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref()
+        {
+            sink.stop();
+        }
+        let fast_wal_done =
+            self.fast_wal_done.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+        if let Some(done) = fast_wal_done {
+            // Said as the fast WAL writer task exits, or goes with its sender.
+            let _ = done.await;
+        }
         let relocation = self.relocation.lock();
         let round = relocation.unwrap_or_else(std::sync::PoisonError::into_inner).take();
         if let Some((abort, gone)) = round {
@@ -1852,6 +1984,11 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
 
     /// Stops uploading, for `err`: commits waiting for uploads, and forks, fail with it.
     fn fail(&self, writer: &Writer<B>, err: Failure) {
+        if let Some(sink) =
+            self.fast_wal_sink.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref()
+        {
+            sink.stop();
+        }
         let mut progress = self.progress.lock().unwrap();
         if !progress.stop {
             log::error!("cladefs: uploading cell {}: {err}", writer.cell());
@@ -1866,9 +2003,9 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     /// then, the head taken, the writer recovers it on from there (TASK-92.6) and the cell opens
     /// as the writer found its end, which another writer may have moved on meanwhile.
     async fn start(
-        &self,
+        self: &Arc<Self>,
         recovering: Recovering<D>,
-        options: crate::Options,
+        mut options: crate::Options,
         bucket: &Arc<B>,
         holder: u64,
         initial_head: Option<head::Read>,
@@ -1901,6 +2038,36 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         if found.deleted() {
             return Err(bucket_cell::Error::Deleted.into());
         }
+        // cladefs: fail hard before taking the head if this cell will run in Fast WAL mode or has
+        // an active Fast WAL to fence and recover, and this host cannot satisfy it (doc-29):
+        // - no configured Fast WAL bucket,
+        // - persisted cross-AZ active bucket URL not in the host's allowlist, or
+        // - enabling Fast WAL on a cell with unuploaded local WAL commits (must sync first so no
+        //   earlier local-only commit can be orphaned behind a newly activated Fast WAL).
+        let want_fast_wal_pre = match self.options.fast_wal {
+            Some(Some(_)) => true,
+            Some(None) => false,
+            None => found.fast_wal.is_some(),
+        };
+        let old_active_pre = found.fast_wal.as_ref().and_then(|fw| fw.active.as_ref());
+        if want_fast_wal_pre || old_active_pre.is_some() {
+            let cfg = self.options.fast_wal_config.as_ref().ok_or_else(|| {
+                Failure::msg(
+                    "cell requires fast WAL, but CLADEFSD_FAST_WAL_BUCKET is not configured",
+                )
+            })?;
+            if let Some(active) = old_active_pre
+                && cfg.bucket_url != active.bucket
+            {
+                cfg.opener.is_allowed(&active.bucket).map_err(Failure::msg)?;
+            }
+        }
+        if want_fast_wal_pre && old_active_pre.is_none() && recovering.has_wal() {
+            return Err(Failure::msg(
+                "cell has unuploaded local commits; sync to the cold bucket before enabling fast \
+                 WAL",
+            ));
+        }
         // cladefs: recovered before the taking under its keys, as the taking will hold them,
         // unwrapped once for it (TASK-411.3); a head with none yet, a fork's child's or a new
         // cell's, which its taking gives them, recovered once it is taken.
@@ -1917,10 +2084,14 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                 )
                 .await?;
                 // Where the writer's chain would go: the log's restamping, not looked at here.
-                let chain = Chain::new(cell, 0, recovered.end(), 0);
-                let head = recovered.head.clone().unwrap_or_default();
-                if !recovering.follows(&TakenCell::of(head, &recovered.state, chain)) {
-                    return Err(bucket_cell::Error::Diverged.into());
+                // Cells with an active fast WAL treat local disk WAL as cache-only and drop it
+                // after fencing & recovering the fast WAL.
+                if old_active_pre.is_none() {
+                    let chain = Chain::new(cell, 0, recovered.end(), 0);
+                    let head = recovered.head.clone().unwrap_or_default();
+                    if !recovering.follows(&TakenCell::of(head, &recovered.state, chain)) {
+                        return Err(bucket_cell::Error::Diverged.into());
+                    }
                 }
                 (Some(recovered), Some(ring))
             }
@@ -1932,12 +2103,25 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         // it is of another (`OtherKind`, doc-20). Not a version's, which no writer
         // takes, and any number of hosts open at once. A cell with no head is no cell: its maker
         // makes it, before its cell opens (`lifecycle::create`), and no taking does.
+        let fast_wal_allowed: Option<Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>> = {
+            let cfg = self.options.fast_wal_config.clone();
+            Some(Arc::new(move |url: &str| match &cfg {
+                Some(cfg) if cfg.bucket_url == url => Ok(()),
+                Some(cfg) => cfg.opener.is_allowed(url),
+                None => Err(
+                    "cell has an active fast WAL, but CLADEFSD_FAST_WAL_BUCKET is not configured"
+                        .into(),
+                ),
+            }))
+        };
         let taking = head::Taking {
             holder,
             token: placement,
             kind: recovering.kind(),
             keys: None,
             replication: self.options.replication,
+            fast_wal: self.options.fast_wal,
+            fast_wal_allowed,
         };
         let (held, cell_keys) = keys::taking(&**bucket, kms, cell, read, taking).await?;
         let fenced_take = self.fence_for_take(cell, &recovering, &held.head).await?;
@@ -1948,26 +2132,158 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         let writer = Writer::holding(bucket.clone(), cell, held, before, keys).await?;
         let writer = Arc::new(writer.uploading_within(self.uploads.clone()));
         let keys = writer.keys().clone();
-        let (recovering, replicated_take) =
+        let (mut recovering, replicated_take) =
             self.recover_replicated(cell, &writer, recovering, placement, fenced_take).await?;
-        let (state, layer, taken) = (writer.state(), writer.layer(), Some(writer.taken().clone()));
+
+        // cladefs: Fast WAL takeover fencing, recovery, and activation (doc-29).
+        let taken_head = writer.head().await;
+        let old_active = taken_head.fast_wal.as_ref().and_then(|fw| fw.active.clone());
+        let want_fast_wal = match self.options.fast_wal {
+            Some(Some(fsync)) => Some(fsync),
+            Some(None) => None,
+            None => taken_head.fast_wal.as_ref().map(|fw| fw.fsync),
+        };
+        let target_fast_wal = match want_fast_wal {
+            Some(fsync) => {
+                let cfg = self.options.fast_wal_config.as_ref().ok_or_else(|| {
+                    Failure::msg(
+                        "cell requires fast WAL, but CLADEFSD_FAST_WAL_BUCKET is not configured",
+                    )
+                })?;
+                Some(bucket_cell::layout::FastWal {
+                    fsync,
+                    active: Some(bucket_cell::layout::ActiveWal {
+                        epoch: writer.epoch(),
+                        bucket: cfg.bucket_url.clone(),
+                    }),
+                })
+            }
+            None => None,
+        };
+        if let Some(active) = old_active.as_ref() {
+            let cfg = self.options.fast_wal_config.as_ref().ok_or_else(|| {
+                Failure::msg(
+                    "cell has an active fast WAL, but CLADEFSD_FAST_WAL_BUCKET is not configured",
+                )
+            })?;
+            let old_bucket = if cfg.bucket_url == active.bucket {
+                cfg.bucket.clone()
+            } else {
+                (cfg.opener.open(&active.bucket)).await.map_err(Failure::msg)?
+            };
+            crate::fast_wal::fence_and_recover(
+                &writer,
+                bucket,
+                &old_bucket,
+                active,
+                target_fast_wal.clone(),
+            )
+            .await?;
+            let sweep_bucket = old_bucket.clone();
+            let sweep_keys = writer.keys().clone();
+            let head_epoch = writer.epoch();
+            let active_wal_epoch =
+                target_fast_wal.as_ref().and_then(|fw| fw.active.as_ref()).map(|a| a.epoch);
+            (self.spawn)(
+                async move {
+                    if let Err(err) = crate::fast_wal::sweep_superseded(
+                        &sweep_bucket,
+                        cell,
+                        head_epoch,
+                        active_wal_epoch,
+                        &sweep_keys,
+                    )
+                    .await
+                    {
+                        log::warn!("cladefs: sweeping superseded fast WAL for {cell}: {err}");
+                    }
+                }
+                .boxed(),
+            );
+        } else if taken_head.fast_wal != target_fast_wal {
+            if target_fast_wal.is_some() && recovering.has_wal() {
+                return Err(Failure::msg(
+                    "cell has unuploaded local commits; sync to the cold bucket before enabling \
+                     fast WAL",
+                ));
+            }
+            writer.activate_fast_wal(target_fast_wal.clone()).await?;
+        }
+        // Only drop local WAL when the cell already had an active fast WAL (local disk was
+        // cache-only); never drop local or peer-recovered WAL when newly enabling Fast WAL.
+        if old_active.is_some() {
+            blocking(|| recovering.drop_wal())?;
+        }
+        if target_fast_wal.is_some() {
+            options.large_extent = options.large_extent.min(self.options.fast_wal_large_extent);
+        }
+
+        let head_now = writer.head().await;
+        let state = writer.state();
+        let layer = writer.layer();
+        let taken = Some(TakenCell::of(head_now.clone(), &state, writer.chain()));
         let opening = Opening { state, layer, taken, cache, keys: keys.clone(), held: parts };
         let open_cell = blocking(|| recovering.open(options, opening))?;
         assert!(self.cell.set(Arc::new(open_cell)).is_ok(), "an uploader opens its cell once");
         self.hold_ring(&keys);
         self.token.set(placement).expect("an uploader's writers take one placement's token");
-        self.took(&writer, placement);
+        self.took(&writer, placement, &head_now);
         self.start_replication(cell, &writer, replicated_take).await?;
+        if target_fast_wal.is_some() {
+            let cfg =
+                self.options.fast_wal_config.as_ref().expect("fast WAL config checked before take");
+            let initial_epoch = writer.state().last_commit.map_or(0, epoch_of);
+            let shared_weak = Arc::downgrade(self);
+            let urge_cold: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+                if let Some(shared) = shared_weak.upgrade() {
+                    shared.progress.lock().unwrap().wanted = true;
+                    shared.wake.notify_one();
+                }
+            });
+            let hot_budget = self.host.as_ref().map(|h| Arc::clone(&h.hot_budget));
+            let sink = crate::fast_wal::FastWalSink::new(
+                cfg.bucket_url.clone(),
+                initial_epoch,
+                self.changed.clone(),
+                urge_cold,
+                hot_budget,
+            );
+            self.cell().fast_wal_to(sink.clone());
+            *self.fast_wal_sink.lock().unwrap() = Some(sink.clone());
+            let fw_writer = crate::fast_wal::FastWalWriter::new(
+                writer.clone(),
+                cfg.bucket.clone(),
+                sink,
+                cfg.max_writer_appends,
+                cfg.max_segment_bytes,
+            );
+            let (done_tx, done_rx) = futures::channel::oneshot::channel();
+            *self.fast_wal_done.lock().unwrap() = Some(done_rx);
+            (self.spawn)(
+                async move {
+                    fw_writer.run().await;
+                    drop(done_tx);
+                }
+                .boxed(),
+            );
+        }
         Ok(Some(writer))
     }
 
     /// `writer` took the cell, with the fencing token `token`: the cell's commits are uploaded,
     /// its forks made, and what the cell's write-ahead log holds after them is the uploader's to
     /// upload.
-    fn took(&self, writer: &Arc<Writer<B>>, token: u64) {
+    fn took(&self, writer: &Arc<Writer<B>>, token: u64, head: &Head) {
         *self.writer.lock().unwrap() = Some(writer.clone());
-        let replication = writer.taken().head.replication.as_ref().map(Replicated::of);
-        let taking = Taking { token, epoch: writer.epoch(), taken: SystemTime::now(), replication };
+        let replication = head.replication.as_ref().map(Replicated::of);
+        let fast_wal = head.fast_wal.as_ref().map(|fw| fw.fsync);
+        let taking = Taking {
+            token,
+            epoch: writer.epoch(),
+            taken: SystemTime::now(),
+            replication,
+            fast_wal,
+        };
         let mut progress = self.progress.lock().unwrap();
         (progress.next_sequence, progress.taking) = (writer.chain().next_sequence(), Some(taking));
         if let Some(last) = writer.state().last_commit {
@@ -2081,6 +2397,13 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     ) -> Result<(), Failure> {
         failing!("upload::acknowledged");
         let acked = in_flight.acknowledged(through);
+        // Notify Fast WAL immediately once the cold head CAS succeeds, without blocking degraded
+        // fallback or oversized-batch spill waiters on local WAL start-file sync.
+        if let Some(last_epoch) = acked.last().map(|segment| segment.epoch())
+            && let Some(sink) = self.fast_wal_sink.lock().unwrap().as_ref()
+        {
+            sink.head_acknowledged(last_epoch);
+        }
         in_flight.acknowledging.extend(acked);
         self.acknowledge_pending(in_flight).await
     }
@@ -2117,6 +2440,9 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         }
         let Some(epoch) = epoch else { return Ok(()) };
         failing!("upload::released");
+        if let Some(sink) = self.fast_wal_sink.lock().unwrap().as_ref() {
+            sink.head_acknowledged(epoch);
+        }
         self.progress.lock().unwrap().uploaded_through(epoch);
         self.changed.notify(usize::MAX);
         Ok(())

@@ -263,6 +263,12 @@ pub struct LocalCell<D: Dir> {
     /// cladefs: of a replicated cell's writer, what sends each flush's commits to the members of
     /// its configuration (doc-21, TASK-537.3.3), once it started.
     replicator: std::sync::Mutex<Option<Arc<Replicator>>>,
+    /// cladefs: of a fast WAL cell's writer, what stages each flush's commits for appendable zonal
+    /// object storage with zero local disk fsyncs (doc-29).
+    fast_wal: std::sync::Mutex<Option<Arc<crate::fast_wal::FastWalSink>>>,
+    /// cladefs: true when local disk files are cache-only (fast WAL mode, doc-29) so `Framer`
+    /// skips local disk `fsync`s/barriers in `segments::make_durable`.
+    cache_only: Arc<std::sync::atomic::AtomicBool>,
     /// cladefs: logs of framed segments retained until bucket acknowledgement while replicating so
     /// [`CellLogSource`] can reconstruct evicted replica logs from existing cell files (board 6902).
     kept_logs: std::sync::Mutex<BTreeSet<SegmentId>>,
@@ -447,14 +453,14 @@ pub struct DirHold<D: Dir> {
 
 /// What a commit ordered but not yet durable leaves for the flush that makes it durable.
 struct Pending<F> {
+    /// Commit epoch of this pending commit.
+    epoch: u64,
     /// The files whose data it refers to, and the directories whose entries changed, to sync.
     syncs: Syncs<F>,
-    /// cladefs: its contents, and the segment whose log its record is to be appended to, the one it
-    /// was made in, open, or closed since (TASK-165.9): recorded by its flush, with the runs it
-    /// sealed checksummed ([`LogRecord`], TASK-301). cladefs: one for each segment it spans, in
-    /// their order: what it goes on with past each filled since the last commit, in that one's
-    /// log, then the rest, in the open segment's, where it ends (TASK-92.41).
-    records: Vec<(SegmentId, Contents)>,
+    /// cladefs: its contents, the local segment whose log its record is to be appended to, and
+    /// that segment's bucket segment number on the writer's chain (for fast WAL large-write
+    /// pre-upload, doc-29).
+    records: Vec<(SegmentId, u64, Contents)>,
     /// The files of the cell's alone it made unreferenced ([`Unreferenced::doomed`]): they go
     /// once it is durable.
     doomed: Vec<String>,
@@ -623,12 +629,20 @@ struct Framer<D: Dir> {
     state: Arc<SharedLock<Mutex<State<D::File>>>>,
     idle: Arc<Event>,
     held: Arc<HeldParts>,
+    cache_only: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl<D: Dir> Clone for Framer<D> {
     fn clone(&self) -> Self {
         let (dir, state, idle) = (self.dir.clone(), self.state.clone(), self.idle.clone());
-        Self { dir, cell: self.cell, state, idle, held: self.held.clone() }
+        Self {
+            dir,
+            cell: self.cell,
+            state,
+            idle,
+            held: self.held.clone(),
+            cache_only: self.cache_only.clone(),
+        }
     }
 }
 
@@ -847,7 +861,8 @@ impl<D: Dir> Framer<D> {
         since: Instant,
     ) -> Result<(), Error> {
         let entries = !entries.is_empty();
-        segments::make_durable(&*self.dir, self.cell, (written, entries), since)
+        let cache_only = self.cache_only.load(std::sync::atomic::Ordering::Acquire);
+        segments::make_durable(&*self.dir, self.cell, (written, entries), since, cache_only)
     }
 
     /// `written`, segments framed, were made durable together, and the entries of `entries`, or
@@ -1488,6 +1503,8 @@ impl<D: Dir> LocalCell<D> {
             idle: Arc::new(Event::new()),
             keys,
             replicator: std::sync::Mutex::new(None),
+            fast_wal: std::sync::Mutex::new(None),
+            cache_only: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             kept_logs: std::sync::Mutex::new(BTreeSet::new()),
             ephemeral: ephemeral.map(std::sync::Mutex::new),
         }
@@ -1728,6 +1745,36 @@ impl<D: Dir> LocalCell<D> {
     }
 
     /// Recovers the cell in `dir` as [`LocalCell::recover`] does, unmade or not: its maker's
+    /// Reads only the cell's description file without claiming the directory or parsing its local
+    /// WAL, returning its `(CellId, bucket_url)` (doc-29, Hotbed review 118).
+    pub fn peek_bucket(dir: &D) -> Result<(CellId, Option<String>), Error> {
+        let file = dir.open(DESCRIPTION, false).context("opening the cell's description")?;
+        let text = String::from_utf8(read_file(&file, crate::MAX_DESCRIPTION_BYTES)?)
+            .context("reading the description")?;
+        let parsed = CellFile::parse(&text)?;
+        Ok((parsed.cell, parsed.bucket))
+    }
+
+    /// Takes and claims `dir`, reads its description, and drops all local WAL files without
+    /// parsing them (doc-29, Hotbed review 118): used only after verifying the cold bucket head
+    /// has an active Fast WAL so a damaged local cache never blocks remote recovery.
+    pub fn recover_dropping_wal(dir: D) -> Result<Recovering<D>, Error> {
+        dir.take().context("taking the cell directory")?;
+        let dir = Arc::new(dir);
+        let taken = Arc::new(TakenDir(dir.clone()));
+        dir.claim().context("taking the cell directory")?;
+        let claim = Claim(dir.clone());
+        let file = {
+            let file = dir.open(DESCRIPTION, false).context("opening the cell's description")?;
+            let text = String::from_utf8(read_file(&file, crate::MAX_DESCRIPTION_BYTES)?)
+                .context("reading the description")?;
+            CellFile::parse(&text)?
+        };
+        ensure!(!file.ephemeral, "ephemeral cells do not use fast WAL remote recovery");
+        let wal = crate::wal::drop_all(&*dir, file.cell)?;
+        Ok(Recovering { dir, taken, claim, file, wal })
+    }
+
     /// opening.
     pub fn recover_unmade(dir: D) -> Result<Recovering<D>, Error> {
         dir.take().context("taking the cell directory")?;
@@ -2227,7 +2274,14 @@ impl<D: Dir> LocalCell<D> {
     /// commits ([`Framer`]).
     fn framer(&self) -> Framer<D> {
         let (dir, state, idle) = (self.dir.clone(), self.state.clone(), self.idle.clone());
-        Framer { dir, cell: self.cell.id, state, idle, held: self.held.clone() }
+        Framer {
+            dir,
+            cell: self.cell.id,
+            state,
+            idle,
+            held: self.held.clone(),
+            cache_only: self.cache_only.clone(),
+        }
     }
 
     /// cladefs: prepares the log of the segment after the open one, off the state lock, on a thread
@@ -2729,6 +2783,9 @@ impl<D: Dir> LocalCell<D> {
             next_sequence,
             relocated,
         )?;
+        let bucket_seg = state.segments.next_bucket_segment();
+        let records =
+            records.into_iter().map(|(seg, contents)| (seg, bucket_seg, contents)).collect();
         self.queue_flush(state, epoch, records, Vec::new());
         Ok((Relocated { bytes: relocated, commit: Some(epoch) }, failed))
     }
@@ -2829,9 +2886,11 @@ impl<D: Dir> LocalCell<D> {
         // cladefs: with the rule off, the segments the last commit closed are framed only now, by a
         // commit that may never come (TASK-150.2).
         let mut closed = std::mem::take(&mut state.deferred);
+        let mut closed_bucket_segs: Vec<(SegmentId, u64)> = Vec::new();
         // cladefs: those filled since the last commit, in the order they filled, before the open
         // one, as the chain stamps them (TASK-92.41).
         for unframed in state.segments.close_full(epoch, state.next_sequence) {
+            closed_bucket_segs.push((unframed.number(), unframed.footer.segment));
             self.enqueue(state, &unframed);
             match rules().framings_end_themselves {
                 true => closed.push(unframed),
@@ -2840,7 +2899,23 @@ impl<D: Dir> LocalCell<D> {
         }
         // cladefs: framed together, made durable together once framed (TASK-310), whether or not
         // the open segment's closing fails.
-        let due = self.close_if_due(state, epoch).map(|due| closed.extend(due));
+        let due = self.close_if_due(state, epoch).map(|due| {
+            if let Some(unframed) = due {
+                closed_bucket_segs.push((unframed.number(), unframed.footer.segment));
+                closed.push(unframed);
+            }
+        });
+        let open_bucket_seg = state.segments.next_bucket_segment();
+        let records: Vec<(SegmentId, u64, Contents)> = records
+            .into_iter()
+            .map(|(seg, contents)| {
+                let bucket_seg = closed_bucket_segs
+                    .iter()
+                    .find(|&&(id, _)| id == seg)
+                    .map_or(open_bucket_seg, |&(_, bs)| bs);
+                (seg, bucket_seg, contents)
+            })
+            .collect();
         self.frame_behind(state, closed);
         due?;
         let Unreferenced { doomed } = state.unreferenced.take();
@@ -2855,7 +2930,7 @@ impl<D: Dir> LocalCell<D> {
         &self,
         state: &mut State<D::File>,
         epoch: u64,
-        records: Vec<(SegmentId, Contents)>,
+        records: Vec<(SegmentId, u64, Contents)>,
         doomed: Vec<String>,
     ) {
         // What its flush syncs, after the closing, whose directories its flush must sync: the
@@ -2870,7 +2945,7 @@ impl<D: Dir> LocalCell<D> {
             .collect();
         state.epoch = epoch;
         // Queued while the state is locked, so that commits queue in their order.
-        let pending = Pending { syncs, records, doomed, leaving, entries };
+        let pending = Pending { epoch, syncs, records, doomed, leaving, entries };
         self.durability.with(Mutex::lock).push(epoch, pending);
     }
 
@@ -3530,7 +3605,11 @@ impl<D: Dir> LocalCell<D> {
             };
             // cladefs: failing, it leaves the record before it whole, which the cell goes on with:
             // the uploader tries again (TASK-539.12). Before, a full disk failed the cell here.
-            start.write(&*self.dir, after).context("recording an acknowledgement")?;
+            // Fast WAL cells treat local disk as cache-only (doc-29, Hotbed review 118): skip
+            // writing and syncing the local WAL start file altogether.
+            if self.fast_wal().is_none() {
+                start.write(&*self.dir, after).context("recording an acknowledgement")?;
+            }
             let (leaving, raw) = {
                 let mut state = self.state()?;
                 let state = &mut *state;
@@ -3615,6 +3694,42 @@ impl<D: Dir> LocalCell<D> {
     fn flush_locked(&self, logs: &mut Logs<D::File>, timed: &mut Flush) -> Result<(), Error> {
         // A cell that failed makes nothing more durable.
         drop(self.state()?);
+        // cladefs: fast WAL cells treat local disk as cache-only (doc-29): skip all local disk
+        // fsyncs/barriers and stage commits straight to the fast WAL sink in commit order.
+        if let Some(sink) = self.fast_wal() {
+            let batch = self.durability.with(Mutex::lock).take();
+            let durable = match batch {
+                None => self.durability.with(Mutex::lock).local(),
+                Some(Due { last, commits }) => {
+                    timed.commits = commits.len();
+                    let staged = match self.stage_fast_wal(&commits) {
+                        Ok(staged) => staged,
+                        Err(error) => {
+                            let error = error.context("staging commits for fast WAL");
+                            self.lock().fail(&error);
+                            return Err(error);
+                        }
+                    };
+                    sink.push(staged, last);
+                    self.durability
+                        .with(Mutex::lock)
+                        .finish(last, self.dir.host().map(Arc::as_ref));
+                    let entries =
+                        commits.iter().flat_map(|pending| &pending.entries).copied().collect();
+                    self.lock().segments.entries_synced(&entries);
+                    let mut leaving = Vec::new();
+                    for pending in commits {
+                        self.remove(pending.doomed);
+                        leaving.extend(pending.leaving);
+                    }
+                    leave(&*self.dir, self.cache.as_deref(), leaving);
+                    last
+                }
+            };
+            let raw = self.state()?.segments.raw(durable);
+            self.remove_raw(raw);
+            return Ok(());
+        }
         // cladefs: its durability deferred, all of it made durable first, before anything of the
         // flush: no commit is durable before its cell is (board 7420). Failing, the cell fails, as
         // any flush's failure fails it.
@@ -3816,6 +3931,119 @@ impl<D: Dir> LocalCell<D> {
         self.replicator.lock().unwrap().clone()
     }
 
+    /// cladefs: attaches `sink` so commits are staged for the fast WAL with zero local disk
+    /// fsyncs (doc-29).
+    pub fn fast_wal_to(&self, sink: Arc<crate::fast_wal::FastWalSink>) {
+        self.cache_only.store(true, std::sync::atomic::Ordering::Release);
+        *self.fast_wal.lock().unwrap() = Some(sink);
+    }
+
+    /// cladefs: its fast WAL sink, if the cell uses fast WAL commit mode (doc-29).
+    pub fn fast_wal(&self) -> Option<Arc<crate::fast_wal::FastWalSink>> {
+        self.fast_wal.lock().unwrap().clone()
+    }
+
+    /// cladefs: reads plaintext bytes of a sealed run at `(offset, len)` in `segment` (whether
+    /// still open/raw or already closed/framed) for staging into the fast WAL (doc-29).
+    fn read_run_plaintext(
+        &self,
+        segment: SegmentId,
+        offset: u64,
+        len: u64,
+    ) -> Result<Vec<u8>, Error> {
+        let source = self.lock().segments.source(&*self.dir, segment)?;
+        match source {
+            Source::Raw(raw) => {
+                let mut buf = vec![0u8; len as usize];
+                raw.read_at(&mut buf, offset)?;
+                Ok(buf)
+            }
+            Source::Framed(framed) => {
+                let bytes = framed.parts.read(offset..offset + len, |range| {
+                    crate::framed::read_aligned(
+                        &*framed.file,
+                        range.start,
+                        (range.end - range.start) as usize,
+                    )
+                    .map(|aligned| aligned.as_slice().to_vec())
+                    .map_err(|err| {
+                        extent_frame::Error::Corrupt(extent_frame::Corrupt(err.to_string()))
+                    })
+                })?;
+                Ok(bytes)
+            }
+        }
+    }
+
+    /// cladefs: extracts plaintext inline extents and pre-framed large own-extents for a batch of
+    /// pending commits to hand to [`crate::fast_wal::FastWalSink`] (doc-29).
+    fn stage_fast_wal(
+        &self,
+        commits: &[Pending<D::File>],
+    ) -> Result<Vec<crate::fast_wal::StagedCommit>, Error> {
+        let mut staged = Vec::with_capacity(commits.len());
+        for pending in commits {
+            let mut inline_extents = Vec::new();
+            let mut large_extents = Vec::new();
+            let mut frees = Vec::new();
+            let mut root = None;
+            let mut capacity = None;
+            let mut next_sequence = 0u64;
+            let mut versions = Vec::new();
+            let mut tag = None;
+
+            for (segment, bucket_segment, contents) in &pending.records {
+                if let Some(&commit_tag) = contents.commits.last() {
+                    tag = Some(commit_tag);
+                }
+                for &(extent, offset, len) in contents.runs() {
+                    let bytes = self.read_run_plaintext(*segment, offset, len)?;
+                    inline_extents.push((extent, bytes));
+                }
+                for &(sequence, logical_len) in &contents.own {
+                    let extent = ExtentId { cell: self.cell.id, sequence };
+                    let path = extent_path(extent);
+                    let file =
+                        self.dir.open(&path, true).with_context(|| format!("opening {path}"))?;
+                    // Validate frame structure and every part's stored CRC before staging for
+                    // Fast WAL pre-upload so damaged own-extent data can never be acknowledged
+                    // (board 12295).
+                    let framed_bytes = crate::framed::read_object(&file)
+                        .with_context(|| format!("reading {path}"))?;
+                    large_extents.push(crate::fast_wal::StagedLargeExtent {
+                        sequence,
+                        logical_len,
+                        bucket_segment: *bucket_segment,
+                        framed_bytes,
+                    });
+                }
+                frees.extend_from_slice(&contents.frees);
+                if contents.root.is_some() {
+                    root = contents.root.clone();
+                }
+                if contents.capacity.is_some() {
+                    capacity = contents.capacity;
+                }
+                next_sequence = next_sequence.max(contents.next_sequence);
+                versions.extend_from_slice(&contents.versions);
+            }
+
+            let tag = tag.unwrap_or_else(|| extent_frame::segment::tag(0, pending.epoch));
+            staged.push(crate::fast_wal::StagedCommit {
+                epoch: pending.epoch,
+                tag,
+                inline_extents,
+                large_extents,
+                frees,
+                root,
+                capacity,
+                next_sequence,
+                versions,
+            });
+        }
+        Ok(staged)
+    }
+
     /// cladefs: removes the raw files and logs of `raw`, segments framed, whose framed files, and
     /// their entries, an opening reads their commits from now: their framings made them durable
     /// before they ended (`segments::make_durable`), so that it syncs nothing, a flush's syncs
@@ -3882,7 +4110,7 @@ impl<D: Dir> LocalCell<D> {
         let sealed: u64 = commits
             .iter()
             .flat_map(|pending| &pending.records)
-            .map(|(_, contents)| LogRecord::run_bytes(contents))
+            .map(|(_, _, contents)| LogRecord::run_bytes(contents))
             .sum();
         let records = if syncs.holds_own() || sealed > CHECKED_MOST.max(self.options.held_most) {
             syncs.extend(std::mem::take(&mut logs.unsynced));
@@ -3972,7 +4200,7 @@ impl<D: Dir> LocalCell<D> {
         let mut raw: Option<(SegmentId, Arc<D::File>)> = None;
         let mut records = Vec::with_capacity(commits.len());
         let spanned = commits.iter().flat_map(|pending| &pending.records);
-        for (segment, contents) in spanned {
+        for (segment, _, contents) in spanned {
             let record = match runs {
                 Runs::Synced => LogRecord { contents: contents.clone(), runs: Runs::Synced },
                 Runs::Checked(_) | Runs::Held(_) => {

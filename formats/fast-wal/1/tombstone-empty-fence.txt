@@ -1,0 +1,3 @@
+EmptyFence {
+    by_epoch: 3,
+}
