@@ -132,24 +132,28 @@ mTLS, avoiding any bucket upload wait during the VM pause:
    those roots. `CLADEFSD_EPHEMERAL` is not required for bucket-backed migrations.
 2. **Pre-copy while the VM runs:** call `MigrateCell(path, peer, to)` on the source daemon. The
    source's uploader keeps uploading finalized segments to the bucket in parallel, while migration
-   rounds stream only unacknowledged finalized `segments/` and `extents/` over peer mTLS (skipping
-   any that finish uploading before being sent).
+   rounds stream only unacknowledged finalized `segments/` over peer mTLS (skipping any that finish
+   uploading before being sent).
 3. **Pause and hand over:** pause/stop the source VM so its connection to `cladefsd` closes, then
    call `HandOverCell(path, token=<new_fencing_token>)` on the source daemon:
-   - The source cuts its uploader short immediately without draining pending bucket uploads, writes
-     the durable `migrating` marker, and sends only the remaining unuploaded tail (open segment,
-     WAL, logs, store metadata, and any unsent finalized segments/extents).
+   - The source cuts its uploader short immediately without draining pending bucket uploads, waits
+     for its local close to finish flushing dirty pages, writes the durable `migrating` marker, and
+     sends only the remaining unuploaded tail (open segment, standalone extents, WAL, logs, store
+     metadata, and any unsent finalized segments).
    - The target prunes any pre-copied segments already uploaded on the source, places the cell at
-     `token` (if provided), renames it into place, and takes its head in the bucket with a single
-     CAS (fencing the source) before immediately closing with `cut_short` so no bucket data uploads
-     block the pause.
+     `token` (if provided), renames it into place, and takes its head in the bucket (one head CAS
+     for `f = 0` cells; replicated `f >= 1` cells also fence and re-seed their replica
+     configuration) before immediately closing with `cut_short` so no bucket data uploads block the
+     pause.
    - Once accepted, the source deletes its local cell directory (leaving the cell intact in the
      bucket) and returns `OK`. Start/resume the VM on the target against `to`; the target's
      uploader uploads the transferred tail to the bucket in the background.
 4. **Abort / recovery:** call `AbortMigration(path)` to cancel before hand-over (the source's
    uploader resumes normal drain-on-stop) or to resolve an uncertain hand-over. If the target
-   refuses (`EAGAIN`, e.g. a stale fencing `token`), the source removes its `migrating` marker and
-   resumes serving locally.
+   refuses (`EAGAIN`, e.g. a stale fencing `token`) or restarts before taking the bucket head, the
+   source removes its `migrating` marker and resumes serving locally; if the target restarted after
+   taking the bucket head at `token`, retrying `HandOverCell` / `AbortMigration` reconciles against
+   the bucket head and cleans up the source directory.
 
 ### 3. When the snapshot is finished with, everywhere
 

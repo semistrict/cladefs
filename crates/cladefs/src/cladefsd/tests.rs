@@ -7693,6 +7693,7 @@ fn targets_take_a_cells_migrations_by_its_epoch() {
         token,
         files: vec![FileDigest { path: "description".into(), len: 1, crc: None }],
         placement_token: None,
+        bucket_backed: false,
     };
     let unknown =
         control(target::hand_over(daemon, hand_over(incarnation ^ 2, newer))).unwrap_err();

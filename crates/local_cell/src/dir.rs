@@ -673,6 +673,33 @@ pub async fn closed_on(host: &crate::Host, path: &Path) -> io::Result<()> {
     })
 }
 
+/// cladefs: returns once no cell of the directory at `path` is claimed on `host` (neither open nor
+/// closing), waiting up to [`CLOSING_WAIT`] for any in-flight close to release its directory claim
+/// (board 11530): closes the window between `Arc::into_inner` dropping the handle and
+/// `LocalCell::close` calling `closing()`. Nothing at `path`, nothing claimed there.
+pub async fn unclaimed_on(host: &crate::Host, path: &Path) -> io::Result<()> {
+    use host_fs::MetadataExt as _;
+    let metadata = match crate::upload::blocking(|| host_fs::metadata(path)) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err),
+    };
+    let id = (metadata.dev(), metadata.ino());
+    let unclaimed = async {
+        loop {
+            let notified = host.dirs.unclaimed_event.listen();
+            if !host.dirs.claimed.lock().unwrap().contains_key(&id) {
+                return;
+            }
+            fail::fail_point!("dir::claim_waits");
+            notified.await;
+        }
+    };
+    tokio::time::timeout(CLOSING_WAIT, unclaimed)
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::WouldBlock, "this process still holds the cell"))
+}
+
 /// cladefs: [`closed_on`] on the process's default host outside `madsim`.
 #[cfg(not(madsim))]
 pub async fn closed(path: &Path) -> io::Result<()> {

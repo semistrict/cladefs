@@ -159,6 +159,16 @@ pub(super) async fn hold_cell_alone_hurry(
         inspect(daemon, cell, |_| ());
         return Err(Errno::EBUSY);
     }
+    // Wait until any in-flight asynchronous `OpenCell::close()` -> `LocalCell::close()` and
+    // `CachedDir` write-back finish releasing the directory claim before scanning files on disk
+    // (board 11530).
+    local_cell::unclaimed_on(daemon.host.local(), path).await.map_err(|err| match err.kind() {
+        std::io::ErrorKind::WouldBlock => Errno::EBUSY,
+        _ => {
+            log::warn!("cladefsd: waiting for {} to close: {err}", path.display());
+            Errno::EIO
+        }
+    })?;
     Ok(hold)
 }
 
@@ -622,6 +632,9 @@ pub(super) async fn attach(
         // 7420).
         if !host_fs::exists(&path) || crate::host_cell::unmade_on(&host, &path) {
             return Err(Errno::ENOENT);
+        }
+        if host_fs::exists(path.join(super::migration::MARKER)) {
+            return Err(Errno::EBUSY);
         }
         crate::cell_dir::attach_on(host.local(), &path, &base, &ancestry)
     })
@@ -1320,6 +1333,12 @@ async fn delete_alone(
     bucket: Option<Arc<bucket_cell::object_bucket::RoutedBucket>>,
 ) -> Result<(), Errno> {
     let _held = hold_alone(daemon, &path).await?;
+    // Refuse deleting a cell given up to a live migration so a bucket cell is never deleted mid
+    // hand-over (board 11530).
+    let check = path.clone();
+    if blocking(move || Ok(host_fs::exists(check.join(super::migration::MARKER)))).await? {
+        return Err(Errno::EBUSY);
+    }
     let deleted = OpenCell::delete_on(&daemon.host, &path, bucket.as_deref()).await;
     deleted.map_err(|err| errno_of(format_args!("deleting {}", path.display()), err))
 }
@@ -1361,6 +1380,9 @@ pub(super) async fn place(
     let host = daemon.host.clone();
     blocking(move || {
         let _held = held;
+        if host_fs::exists(path.join(super::migration::MARKER)) {
+            return Err(Errno::EBUSY);
+        }
         let placed = match force {
             true => OpenCell::place_forced_on(&host, &path, token),
             false => OpenCell::place_on(&host, &path, token),

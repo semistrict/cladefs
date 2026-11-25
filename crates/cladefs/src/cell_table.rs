@@ -183,8 +183,10 @@ enum Open<S, P> {
     /// doc-10), which no writer holds meanwhile (`EBUSY`).
     Shared(Weak<S>),
     /// A writer's cell its connection let go of, which the daemon's work through it, a fork's or
-    /// a sync's, has still: closing, which writers wait for to close ([`CellTable::closed`]).
-    Closing(Weak<S>),
+    /// a sync's, has still: closing, which writers wait for to close ([`CellTable::closed`]), with
+    /// the writer's hurry callback (`wanted`, board 11530) preserved so a hurrying claim can still
+    /// cut its uploader short.
+    Closing(Weak<S>, Option<Wanted>),
     /// A cell kept open for forks (TASK-92.5).
     Kept(P),
 }
@@ -255,7 +257,9 @@ impl<S, P> Open<S, P> {
     /// As it is, but a cell none has open any more, which is nothing.
     fn live(self) -> Self {
         match self {
-            Open::Shared(cell) | Open::Closing(cell) if cell.strong_count() == 0 => Open::Nothing,
+            Open::Shared(cell) | Open::Closing(cell, _) if cell.strong_count() == 0 => {
+                Open::Nothing
+            }
             open => open,
         }
     }
@@ -268,7 +272,7 @@ impl<S, P> Open<S, P> {
     fn is_closed(&self) -> bool {
         match self {
             Open::Nothing => true,
-            Open::Shared(cell) | Open::Closing(cell) => cell.strong_count() == 0,
+            Open::Shared(cell) | Open::Closing(cell, _) => cell.strong_count() == 0,
             Open::Kept(_) => false,
         }
     }
@@ -276,7 +280,7 @@ impl<S, P> Open<S, P> {
     /// The cell open, others' or closing, if one is or was.
     fn cell(&self) -> Option<&Weak<S>> {
         match self {
-            Open::Shared(cell) | Open::Closing(cell) => Some(cell),
+            Open::Shared(cell) | Open::Closing(cell, _) => Some(cell),
             Open::Nothing | Open::Kept(_) => None,
         }
     }
@@ -302,7 +306,7 @@ impl<C, S, P> Entry<C, S, P> {
     /// What is open of the cell, its holder gone: the cell a writer had open, closing now.
     fn into_open(self) -> Open<S, P> {
         match self {
-            Entry::Writer { cell, .. } => Open::Closing(cell).live(),
+            Entry::Writer { cell, wanted, .. } => Open::Closing(cell, wanted).live(),
             Entry::Daemon(open) | Entry::Unheld(open) => open.live(),
             Entry::Mounted => Open::Nothing,
         }
@@ -351,7 +355,7 @@ impl<C: Writer, S, P> Inner<C, S, P> {
         let (refuses_shared, waits_for_closing) = match claim {
             Claim::Writer(_) => (rules().writers_refuse_shared, rules().writers_wait_for_closing),
             Claim::Mount => (true, true),
-            Claim::DaemonHurry => (false, true),
+            Claim::DaemonHurry => (false, rules().writers_wait_for_closing),
             Claim::Daemon | Claim::DaemonOrWriter => (false, false),
         };
         let open = match self.entries.get(key) {
@@ -360,7 +364,9 @@ impl<C: Writer, S, P> Inner<C, S, P> {
         };
         match open {
             Some(Open::Shared(_)) if refuses_shared => return Err(Refused::Now),
-            Some(Open::Closing(_)) if waits_for_closing => return Err(Refused::Wait(None, None)),
+            Some(Open::Closing(_, wanted)) if waits_for_closing => {
+                return Err(Refused::Wait(None, wanted.clone()));
+            }
             _ => {}
         }
         let open = self.entries.remove(key).map_or(Open::Nothing, Entry::into_open);
@@ -368,7 +374,7 @@ impl<C: Writer, S, P> Inner<C, S, P> {
             Claim::Writer(connection) => {
                 let (cell, evicted) = match open {
                     // Past the rules alone: a cell others have open, or closing.
-                    Open::Shared(cell) | Open::Closing(cell) => (cell, None),
+                    Open::Shared(cell) | Open::Closing(cell, _) => (cell, None),
                     Open::Kept(kept) => (Weak::new(), Some(kept)),
                     Open::Nothing => (Weak::new(), None),
                 };
@@ -379,7 +385,7 @@ impl<C: Writer, S, P> Inner<C, S, P> {
             }
             Claim::Mount => match open {
                 Open::Kept(kept) => (Entry::Mounted, Some(kept)),
-                Open::Nothing | Open::Shared(_) | Open::Closing(_) => (Entry::Mounted, None),
+                Open::Nothing | Open::Shared(_) | Open::Closing(_, _) => (Entry::Mounted, None),
             },
         };
         self.entries.insert(key.to_owned(), entry);

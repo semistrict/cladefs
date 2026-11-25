@@ -11,8 +11,8 @@
 #![cfg(target_os = "linux")]
 
 use cladefs::cladefsd::control::proto::{
-    AbortMigrationRequest, ForkCellRequest, HandOverCellRequest, MakeVersionRequest,
-    MigrateCellRequest, StatCellRequest, SyncCellRequest,
+    AbortMigrationRequest, DeleteCellRequest, ForkCellRequest, HandOverCellRequest,
+    MakeVersionRequest, MigrateCellRequest, PlaceCellRequest, StatCellRequest, SyncCellRequest,
 };
 use cladefs::testing::Control;
 use cladefs::testing::control_path;
@@ -997,6 +997,129 @@ fn bucket_backed_stale_token_refusal_and_abort_resume_source() {
 
     let target_client = CellClient::connect(&target.vms, &there, CAPACITY).unwrap();
     for sequence in 1..=7 {
+        assert!(read(&target_client, own(sequence)) == data(sequence), "extent {sequence}");
+    }
+}
+
+/// Board 11530: covers target restart recovery (pre-CAS and post-CAS), boot-time orphaned staging
+/// cleanup, `DeleteCell`/`PlaceCell`/`ForkCell` refusal (`EBUSY`) while a `migrating` marker is
+/// present, and `MigrateCell` returning `EEXIST` when the destination already exists.
+#[test]
+fn bucket_backed_target_restart_reconciles_and_migrating_guards_control_ops() {
+    let dir = tempfile::tempdir().unwrap();
+    let bucket = dir.path().join("bucket");
+    let hosts = [dir.path().join("source"), dir.path().join("target")];
+    for path in [&bucket, &hosts[0], &hosts[1]] {
+        std::fs::create_dir(path).unwrap();
+    }
+    let [source_at, target_at] = addresses();
+    let source = daemon_bucket_only(
+        &hosts[0],
+        &bucket,
+        &[source_at.clone(), target_at.clone()],
+        &[("CLADEFSD_TOKEN", "1"), ("CLADEFSD_UPLOAD_INTERVAL", "3600")],
+    );
+    let target = daemon_bucket_only(
+        &hosts[1],
+        &bucket,
+        &[target_at.clone(), source_at.clone()],
+        &[("CLADEFSD_TOKEN", "1")],
+    );
+
+    let here = hosts[0].join("vm-cell");
+    let there = hosts[1].join("vm-cell");
+    let occupied = hosts[1].join("already-there");
+    std::fs::create_dir(&occupied).unwrap();
+
+    let client = CellClient::connect(&source.vms, &here, CAPACITY).unwrap();
+    let cell = client.cell();
+    let own = |sequence| ExtentId { cell, sequence };
+    for sequence in 1..=4 {
+        write(&client, own(sequence));
+    }
+
+    // Preparing into an existing destination returns EEXIST (not ENOTCONN).
+    let exists = source.migrate(&here, &target_at, &occupied).unwrap_err();
+    assert_eq!(exists.errno(), Some(cladefs::Errno::EEXIST), "{exists}");
+
+    // Start migration, then kill target before hand-over so the source writes `migrating` and
+    // gets ENOTCONN.
+    let mig_id = source.migrate(&here, &target_at, &there).unwrap();
+    let staged = hosts[1].join(format!(".vm-cell.migrating-{mig_id:x}"));
+    assert!(staged.is_dir(), "staging directory created on target");
+    drop(client);
+    drop(target);
+
+    let unanswered = source.hand_over_with_token(&here, Some(2)).unwrap_err();
+    assert_eq!(unanswered.errno(), Some(cladefs::Errno::ENOTCONN), "{unanswered}");
+    assert!(here.join("migrating").exists(), "source wrote migrating marker");
+
+    // While `migrating` is present, destructive/mutating control ops and forks must refuse EBUSY.
+    let del_busy = source
+        .control
+        .call(async |c| c.delete_cell(DeleteCellRequest { path: control_path(&here) }).await)
+        .unwrap_err();
+    assert_eq!(del_busy.errno(), Some(cladefs::Errno::EBUSY), "DeleteCell: {del_busy}");
+    let place_busy = source
+        .control
+        .call(async |c| {
+            c.place_cell(PlaceCellRequest { path: control_path(&here), token: 9, force: false })
+                .await
+        })
+        .unwrap_err();
+    assert_eq!(place_busy.errno(), Some(cladefs::Errno::EBUSY), "PlaceCell: {place_busy}");
+    let fork_path = hosts[0].join("fork-blocked");
+    let fork_busy = source
+        .control
+        .call(async |c| {
+            c.fork_cell(ForkCellRequest {
+                from: control_path(&here),
+                to: control_path(&fork_path),
+                ..Default::default()
+            })
+            .await
+        })
+        .unwrap_err();
+    assert_eq!(fork_busy.errno(), Some(cladefs::Errno::EBUSY), "ForkCell: {fork_busy}");
+
+    // Restart target with a post-CAS crashpoint for the next migration: boot must sweep the
+    // orphaned staging directory from the pre-CAS crash.
+    let target = daemon_bucket_only(
+        &hosts[1],
+        &bucket,
+        &[target_at.clone(), source_at.clone()],
+        &[("CLADEFSD_TOKEN", "1"), ("FAILPOINTS", "migration::after_bucket_open=return")],
+    );
+    assert!(!staged.exists(), "boot must reap orphaned bucket-backed staging directory");
+
+    // Retrying HandOverCell against the restarted target reconciles against the bucket head
+    // (still at token 1), removes `migrating`, and returns EAGAIN so source resumes serving.
+    let refused = source.hand_over_with_token(&here, Some(2)).unwrap_err();
+    assert_eq!(refused.errno(), Some(cladefs::Errno::EAGAIN), "{refused}");
+    assert!(!here.join("migrating").exists(), "migrating marker cleared on pre-CAS reconcile");
+    assert!(!there.exists());
+
+    // Source resumes serving, writes extent 5, and migrates again; target crashes right AFTER
+    // `open_here` CAS + close (`migration::after_bucket_open`) before replying.
+    let resumed = CellClient::connect(&source.vms, &here, CAPACITY).unwrap();
+    write(&resumed, own(5));
+    source.migrate(&here, &target_at, &there).unwrap();
+    drop(resumed);
+    let crashed = source.hand_over_with_token(&here, Some(2)).unwrap_err();
+    assert_eq!(crashed.errno(), Some(cladefs::Errno::ENOTCONN), "{crashed}");
+    assert!(here.join("migrating").exists(), "source kept migrating marker after target crash");
+    assert!(there.is_dir(), "target durably renamed cell before CAS");
+
+    // Restart target cleanly (new incarnation) and retry HandOverCell: target answers
+    // FAILED_PRECONDITION, source reconciles against bucket head (now token 2), deletes local
+    // source copy, and succeeds; target serves all 5 extents immediately.
+    drop(target);
+    let target =
+        daemon_bucket_only(&hosts[1], &bucket, &[target_at, source_at], &[("CLADEFSD_TOKEN", "1")]);
+    source.hand_over_with_token(&here, Some(2)).unwrap();
+    assert!(!here.exists(), "source cell removed after post-CAS target-restart reconcile");
+    let target_client = CellClient::connect(&target.vms, &there, CAPACITY).unwrap();
+    for sequence in 1..=5 {
         assert!(read(&target_client, own(sequence)) == data(sequence), "extent {sequence}");
     }
 }

@@ -203,6 +203,10 @@ impl Opening {
             if !host_fs::exists(&path) {
                 return Ok(None);
             }
+            // cladefs: given up to a live migration, it opens or takes here no more (board 11530).
+            if host_fs::exists(&path.join("migrating")) {
+                return Err(Errno::EBUSY.into());
+            }
             Ok(Some(local_cell::host_cell(path).map_err(Error::new)?))
         })?;
         let opened = if existing.is_none() {

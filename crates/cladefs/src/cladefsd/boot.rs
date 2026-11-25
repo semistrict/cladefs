@@ -67,6 +67,14 @@ pub(super) async fn boot_daemon(
     // 11369): validated whether or not CLADEFSD_EPHEMERAL is set, as bucket-backed cells migrate
     // too.
     super::migration::idle().map_err(anyhow::Error::msg)?;
+    // cladefs: where ephemeral cells migrated to it go (board 8447), also used as fallback root
+    // for bucket-backed migrations when CLADEFSD_ROOTS is unset (board 11530): validate at boot
+    // whether or not CLADEFSD_EPHEMERAL is set.
+    if set_os("CLADEFSD_EPHEMERAL_CELLS").is_some() {
+        let root = local_cell::upload::blocking(super::migration::target::cells_root)
+            .map_err(anyhow::Error::msg)?;
+        log::info!("cladefsd: migrated cells root {}", root.display());
+    }
     // cladefs: its ephemeral cells' directory, if it keeps any (doc-25, TASK-698.3): those it
     // handed over let go of (board 5730), and the references of those it holds no more retired,
     // before it serves.
@@ -76,15 +84,15 @@ pub(super) async fn boot_daemon(
         })?;
         let let_go = super::migration::let_go_handed_over_on(daemon, &ephemeral).await?;
         log::info!("cladefsd: let go of {let_go} ephemeral cells handed over");
-        // cladefs: where ephemeral cells migrated to it go (board 8447): none named, it takes no
-        // migrations; one named but not there, it refuses to start.
-        if set_os("CLADEFSD_EPHEMERAL_CELLS").is_some() {
-            let root = local_cell::upload::blocking(super::migration::target::cells_root)
-                .map_err(anyhow::Error::msg)?;
-            log::info!("cladefsd: ephemeral cells migrated here go in {}", root.display());
-        }
         let retired = ephemeral.retire_stale().await?;
         log::info!("cladefsd: retired {retired} references of ephemeral cells held no more");
+    }
+    // cladefs: drop any orphaned bucket-backed migration staging directories left by a prior crash
+    // before serving (board 11530).
+    let reaped_staging =
+        local_cell::upload::blocking(|| super::migration::target::reap_orphaned_staging_on(daemon));
+    if reaped_staging > 0 {
+        log::info!("cladefsd: removed {reaped_staging} orphaned migration staging directories");
     }
     // cladefs: the hosts sharing its bucket, which it serves parts and asks for theirs
     // (TASK-406.2).

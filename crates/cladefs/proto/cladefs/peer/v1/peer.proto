@@ -253,6 +253,8 @@ message MigrateHandOverRequest {
   // before taking its head in the bucket. Unset keeps the cell's existing placement token (or the
   // target's CLADEFSD_TOKEN). Refused (INVALID_ARGUMENT) if 0.
   optional uint64 placement_token = 5;
+  // True for a bucket-backed cell migration (board 11530): routes explicitly on dual-mode hosts.
+  bool bucket_backed = 6;
 }
 
 // A hand-over's answer.

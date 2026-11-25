@@ -222,7 +222,7 @@ pub use cell::{
 };
 #[cfg(not(madsim))]
 pub use dir::closed;
-pub use dir::{Dir, DirFile, DiskDir, DiskFile, File, HostDir, HostFile, closed_on};
+pub use dir::{Dir, DirFile, DiskDir, DiskFile, File, HostDir, HostFile, closed_on, unclaimed_on};
 /// cladefs: where a cell is: its tenant's cell, and its ID there (TASK-364).
 pub use extent_frame::segment::CellId;
 #[cfg(not(madsim))]
