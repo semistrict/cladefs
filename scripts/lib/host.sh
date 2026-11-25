@@ -125,8 +125,25 @@ host_session_ensure() {
         return 0
     fi
     current=$(cd "$repo" && hotbed session start --json) || return
-    host_session=$(python3 -c 'import json, sys; print(json.load(sys.stdin)["data"]["id"])' \
-        <<< "$current") || return
+    host_session=$(python3 -c '
+import json, sys
+data = json.load(sys.stdin)["data"]
+m = data.get("memories") or {}
+always = m.get("always") or []
+on_demand = m.get("onDemand") or []
+if always or on_demand:
+    err = sys.stderr
+    err.write(f"hotbed memories ({len(always)} always-on, {len(on_demand)} on-demand — `hotbed memory get SLUG`):\n")
+    for e in always:
+        scope = e.get("project") or "global"
+        slug, summary = e["slug"], e["summary"]
+        err.write(f"  [{scope}] {slug}: {summary}\n")
+    for e in on_demand:
+        scope = e.get("project") or "global"
+        slug, summary = e["slug"], e["summary"]
+        err.write(f"  [{scope}] {slug} — {summary}\n")
+print(data["id"])
+' <<< "$current") || return
     host_session_ours=1
 }
 

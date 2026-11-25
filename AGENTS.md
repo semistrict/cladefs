@@ -174,6 +174,18 @@ A decision doesn't wait for the user. Make your best guess, act on it, and recor
 
 Only what you can't do yourself is an open question: an action only the user can take (signing in, anything the user's own instructions reserve to them, such as deleting a test), or a fact only they know with no reasonable guess. Ask open questions in hotbed with `hotbed question add` (AskUserQuestion JSON on stdin or `--file`, under project `cladefs`), then carry on with whatever doesn't depend on them. Check `hotbed question ls` before asking (another session may have asked already) and `hotbed question outbox` before starting work; once you act on an answer or dismissal, acknowledge it with `hotbed question ack ID`. Edit (`hotbed question edit ID`) or delete (`hotbed question rm ID --reason ...`) any open question that becomes wrong or moot.
 
+## Memories: save reusable lessons to hotbed memory
+
+Whenever you resolve a non-obvious bug or test-host/build quirk, learn a standing preference from the user, or the user says "remember this" / "add to memory" / `/learn`, save it to hotbed memory (not just a local markdown file) so every future session and harness receives it automatically:
+
+```sh
+hotbed memory add --slug SHORT-SLUG --summary "Concise rule (<= 240 chars)"          # cladefs always-on rule
+hotbed memory add --global --slug SHORT-SLUG --summary "Cross-project rule"          # global always-on rule
+hotbed memory add --slug SHORT-SLUG --summary "1-line trigger" --body-file - <<'EOF' # on-demand playbook
+```
+
+Omitting `--mode` defaults to `always` when `--body` is empty and `on_demand` when `--body` is given. Use `--supersede ID` or `hotbed memory edit ID` to update existing memories. Run plain `hotbed session start` without piping to `jq` so active memories stay visible.
+
 ## Frozen formats: every later build reads every frozen version
 
 The user's rule (2026-11-23, updated 2026-11-24; doc-28, board 10033): **the on-disk format is now
