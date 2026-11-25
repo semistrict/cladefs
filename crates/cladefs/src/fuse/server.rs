@@ -1494,15 +1494,31 @@ impl Server {
 
     /// Lists the open directory's entries from the offset asked, as many as fit in the size asked,
     /// each with its offset, the offset to list the next from: `.`, `..`, then those the
-    /// directory held as it was opened. With `plus`, each has its node's entry, and a lookup of
-    /// it, but `.` and `..`, which the kernel takes no lookups of, and entries removed since the
-    /// directory was opened are left out.
+    /// directory holds. At offset 0 the listing is refreshed from the current directory so an
+    /// older handle or a rewound handle (`rewinddir`) never serves stale entries into the kernel's
+    /// `FOPEN_CACHE_DIR` cache (TASK-554, board 2504). With `plus`, each has its node's entry, and
+    /// a lookup of it, but `.` and `..`, which the kernel takes no lookups of, and entries removed
+    /// since the listing was taken are left out.
     async fn readdir(&self, body: &mut Body<'_>, plus: bool) -> Result<Vec<u8>> {
         let ReadIn { fh, offset, size, .. } = body.read()?;
         if size > MAX_WRITE {
             return Err(Errno::EINVAL);
         }
         let open = self.dirs.lock().unwrap().open.get(&fh).cloned().ok_or(Errno::EBADF)?;
+        let open = if offset == 0 {
+            let fresh = match &open.dir {
+                Target::Cells(dir) => self.open_cells(*dir)?,
+                Target::Node(slot, dir) => self.open_dir(open.nodeid, *slot, dir.clone()).await?,
+            };
+            let fresh = Arc::new(fresh);
+            let mut dirs = self.dirs.lock().unwrap();
+            if let Some(slot) = dirs.open.get_mut(&fh) {
+                *slot = Arc::clone(&fresh);
+            }
+            fresh
+        } else {
+            open
+        };
         let dots = [(&b"."[..], open.inode), (b"..", open.parent)].map(|(name, inode)| DirEntry {
             inode: Inode(inode),
             file_type: FileType::Directory,

@@ -665,6 +665,43 @@ fn readdirplus_skips_removed_entries() {
     })
 }
 
+/// TASK-554 (board 2504): READDIR and READDIRPLUS at offset 0 refresh the open directory handle so
+/// an older handle or rewound handle sees entries created after OPENDIR and never poisons the
+/// kernel's FOPEN_CACHE_DIR cache with a stale snapshot.
+#[test]
+fn readdir_at_offset_zero_refreshes_entries_created_after_opendir() {
+    block_on(async {
+        let mut client = Client::init_new().await;
+        let (dir, _) = client.mkdir(ROOT, b"dir", 0o755).await;
+        client.create(dir, b"a", 0o644).await;
+
+        let handle = client.opendir(dir).await;
+        let (b, _) = client.create(dir, b"b", 0o644).await;
+
+        // First READDIR at offset 0 on the pre-CREATE handle must include `b`.
+        let names: Vec<Vec<u8>> =
+            client.readdir(dir, handle, 0, 4096).await.into_iter().map(|d| d.name).collect();
+        assert_eq!(names, vec![b".".to_vec(), b"..".to_vec(), b"a".to_vec(), b"b".to_vec()]);
+
+        // Rewinding to offset 0 after a second CREATE must include `c` in both READDIR and
+        // READDIRPLUS.
+        let (c, _) = client.create(dir, b"c", 0o644).await;
+        let payload = client.call(READDIRPLUS, dir, read_in(handle, 0, 4096)).await.ok();
+        let plus_names: Vec<(Vec<u8>, Option<u64>)> = dirents(&payload, true)
+            .into_iter()
+            .map(|(dirent, nodeid)| (dirent.name, nodeid))
+            .collect();
+        assert!(plus_names.iter().any(|(name, id)| name == b"b" && *id == Some(b)));
+        assert!(plus_names.iter().any(|(name, id)| name == b"c" && *id == Some(c)));
+        let rewound: Vec<Vec<u8>> =
+            client.readdir(dir, handle, 0, 4096).await.into_iter().map(|d| d.name).collect();
+        assert_eq!(
+            rewound,
+            vec![b".".to_vec(), b"..".to_vec(), b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]
+        );
+    })
+}
+
 /// Names of directory entries must be names: not empty, `.` or `..`, without `/`, in UTF-8, as
 /// Fxfs keeps them, and at most 255 bytes; and a request's body ends with its last name.
 #[test]
