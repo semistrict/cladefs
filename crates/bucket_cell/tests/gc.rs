@@ -764,6 +764,10 @@ fn cells_listing_runs_against_a_read_only_bucket() {
 /// 2. `--delete-cell P` on B refuses (naming P's bucket and B) and leaves P live in A.
 /// 3. `cladefs-gc B --cell P` collects P's copy in B via `collect_copy`, leaving P's head and
 ///    objects in A untouched, while a B-owned child of P still routes to A to retire its reference.
+///
+/// Requires `testing` feature for `bucket_cell::s3_server` so standalone `cargo test -p bucket_cell`
+/// (e.g. `scripts/test-azurite.sh`) compiles without `--features testing` (board 11589).
+#[cfg(feature = "testing")]
 #[test]
 fn bucket_b_commands_stay_on_b_and_collect_copies_locally() {
     use bucket_cell::Bucket as _;
