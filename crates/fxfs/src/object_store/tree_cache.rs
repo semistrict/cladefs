@@ -8,7 +8,7 @@ use fuchsia_sync::{Mutex, MutexGuard, RwLock};
 use linked_hash_map::{Entry, LinkedHashMap};
 use std::hash::{BuildHasher, BuildHasherDefault};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 fn filter(key: &ObjectKey) -> bool {
     match key.data {
@@ -47,6 +47,9 @@ type Shard = LinkedHashMap<ObjectKey, CacheValue, BuildHasherDefault<rustc_hash:
 struct Shards {
     shards: Box<[Mutex<Shard>]>,
     len: AtomicUsize,
+    /// cladefs: whether this cache is currently registered in `TreeCacheBudget::active`
+    /// (TASK-555, board 2506).
+    in_active: AtomicBool,
 }
 
 impl std::ops::Deref for Shards {
@@ -58,50 +61,121 @@ impl std::ops::Deref for Shards {
 }
 
 /// cladefs: what the caches of a filesystem's stores share: they hold at most `limit` items, all
-/// told, whatever their number. Over it, a cache adding an item takes one from each of them in
-/// turn, its shards among them, each's least recently used: one little used empties as those used
-/// fill it up, which a store mounted and idle does (backlog doc-10).
+/// told, whatever their number. Over it, a cache adding an item takes one from each non-empty
+/// cache in turn, its shards among them, each's least recently used: one little used empties as
+/// those used fill it up, which a store mounted and idle does (backlog doc-10).
+///
+/// Tracks only non-empty (`active`) caches with direct O(1) shard indexing and lazy pruning of
+/// drained caches so evictions do not walk thousands of empty shards when hundreds of volumes are
+/// mounted (TASK-555, board 2506).
 pub struct TreeCacheBudget {
     limit: usize,
+    per_cache: usize,
     used: AtomicUsize,
-    /// The caches sharing it, by their shards.
-    caches: RwLock<Vec<Arc<Shards>>>,
+    /// Non-empty caches sharing this budget.
+    active: RwLock<Vec<Arc<Shards>>>,
     /// Whose turn it is.
     turn: AtomicUsize,
+    #[cfg(test)]
+    shards_visited: AtomicUsize,
 }
 
 impl TreeCacheBudget {
     pub fn new(limit: usize) -> Arc<Self> {
+        let per_cache = if limit > SHARD_ABOVE { SHARDS } else { 1 };
         Arc::new(Self {
             limit,
+            per_cache,
             used: AtomicUsize::new(0),
-            caches: RwLock::new(Vec::new()),
+            active: RwLock::new(Vec::new()),
             turn: AtomicUsize::new(0),
+            #[cfg(test)]
+            shards_visited: AtomicUsize::new(0),
         })
     }
 
-    /// Takes items from the caches, in turn, until they hold no more than the limit. With no
-    /// shard's lock held, as it takes them.
+    /// Registers `shards` in `active` once it becomes non-empty. Must be called with no shard
+    /// lock held so lock order is always `active` -> shard.
+    fn activate(&self, shards: &Arc<Shards>) {
+        // SeqCst pairs with the SeqCst store of `in_active = false` and `len == 0` check in
+        // `prune_empty`, preventing a concurrent insert from being missed.
+        if shards.in_active.load(Ordering::SeqCst) {
+            return;
+        }
+        let mut active = self.active.write();
+        if !shards.in_active.load(Ordering::SeqCst) && shards.len.load(Ordering::SeqCst) > 0 {
+            shards.in_active.store(true, Ordering::SeqCst);
+            active.push(shards.clone());
+        }
+    }
+
+    /// Removes drained (`len == 0`) caches from `active`.
+    fn prune_empty(&self) {
+        let mut active = self.active.write();
+        active.retain(|cache| {
+            if cache.len.load(Ordering::SeqCst) == 0 {
+                cache.in_active.store(false, Ordering::SeqCst);
+                // Re-check after clearing `in_active` in case an insert raced with us.
+                if cache.len.load(Ordering::SeqCst) > 0 {
+                    cache.in_active.store(true, Ordering::SeqCst);
+                    true
+                } else {
+                    false
+                }
+            } else {
+                true
+            }
+        });
+    }
+
+    /// Takes items from the non-empty caches, in turn, until they hold no more than the limit.
+    /// With no shard's lock held, as it takes them.
     fn enforce(&self) {
         while self.used.load(Ordering::Relaxed) > self.limit {
-            let caches = self.caches.read();
-            let shards = caches.iter().map(|cache| cache.len()).sum::<usize>();
-            let first = self.turn.fetch_add(1, Ordering::Relaxed);
-            let found = (0..shards).any(|turn| {
-                let mut at = first.wrapping_add(turn) % shards;
-                let shard = caches.iter().find_map(|cache| {
-                    let shard = cache.get(at).map(|shard| (cache, shard));
-                    at -= cache.len().min(at);
-                    shard
-                });
-                let (cache, shard) = shard.unwrap();
-                let mut shard = shard.lock();
-                let found = shard.pop_front().is_some();
-                if found {
-                    cache.len.fetch_sub(1, Ordering::Relaxed);
+            let mut saw_empty = false;
+            let found = {
+                let caches = self.active.read();
+                let n_caches = caches.len();
+                let total_shards = n_caches * self.per_cache;
+                if total_shards == 0 {
+                    return;
                 }
-                found
-            });
+                let first = self.turn.fetch_add(1, Ordering::Relaxed);
+                let mut step = 0;
+                let mut evicted = false;
+                while step < total_shards {
+                    let at = first.wrapping_add(step) % total_shards;
+                    let cache_idx = at / self.per_cache;
+                    let shard_idx = at % self.per_cache;
+                    let cache = &caches[cache_idx];
+                    // Relaxed: advisory hint to skip drained caches; `prune_empty` re-checks
+                    // with SeqCst under the `active` write lock before removing a cache.
+                    if cache.len.load(Ordering::Relaxed) == 0 {
+                        saw_empty = true;
+                        // Skip the rest of this empty cache's shards in one jump.
+                        step += self.per_cache - shard_idx;
+                        continue;
+                    }
+                    #[cfg(test)]
+                    self.shards_visited.fetch_add(1, Ordering::Relaxed);
+                    let mut shard = cache[shard_idx].lock();
+                    if shard.pop_front().is_some() {
+                        if cache.len.fetch_sub(1, Ordering::SeqCst) == 1 {
+                            saw_empty = true;
+                        }
+                        if step > 0 {
+                            self.turn.fetch_add(step, Ordering::Relaxed);
+                        }
+                        evicted = true;
+                        break;
+                    }
+                    step += 1;
+                }
+                evicted
+            };
+            if saw_empty {
+                self.prune_empty();
+            }
             if !found {
                 return;
             }
@@ -187,12 +261,11 @@ impl TreeCache {
 
     /// cladefs: a cache sharing `budget` with the others on it, which grows as it fills.
     pub fn sharing(budget: &Arc<TreeCacheBudget>) -> Self {
-        let shards = if budget.limit > SHARD_ABOVE { SHARDS } else { 1 };
         let shards = Arc::new(Shards {
-            shards: (0..shards).map(|_| Mutex::new(LinkedHashMap::default())).collect(),
+            shards: (0..budget.per_cache).map(|_| Mutex::new(LinkedHashMap::default())).collect(),
             len: AtomicUsize::new(0),
+            in_active: AtomicBool::new(false),
         });
-        budget.caches.write().push(shards.clone());
         Self { shards, placeholder_counter: AtomicU64::new(0), budget: budget.clone() }
     }
 
@@ -206,14 +279,14 @@ impl TreeCache {
     /// shard's lock, as `removed`, so that no count of its removal comes first (TASK-292).
     fn added(&self, replaced: bool) {
         if !replaced {
-            self.shards.len.fetch_add(1, Ordering::Relaxed);
+            self.shards.len.fetch_add(1, Ordering::SeqCst);
             self.budget.used.fetch_add(1, Ordering::Relaxed);
         }
     }
 
     /// Counts `count` items removed from its shards.
     fn removed(&self, count: usize) {
-        self.shards.len.fetch_sub(count, Ordering::Relaxed);
+        self.shards.len.fetch_sub(count, Ordering::SeqCst);
         self.budget.used.fetch_sub(count, Ordering::Relaxed);
     }
 }
@@ -221,7 +294,9 @@ impl TreeCache {
 impl Drop for TreeCache {
     fn drop(&mut self) {
         self.removed(self.len());
-        self.budget.caches.write().retain(|cache| !Arc::ptr_eq(cache, &self.shards));
+        if self.shards.in_active.swap(false, Ordering::SeqCst) {
+            self.budget.active.write().retain(|cache| !Arc::ptr_eq(cache, &self.shards));
+        }
     }
 }
 
@@ -246,6 +321,7 @@ impl ObjectCache<ObjectKey, ObjectValue> for TreeCache {
                 let replaced = inner.insert(key.clone(), CacheValue::Placeholder(placeholder_id));
                 self.added(replaced.is_some());
                 drop(inner);
+                self.budget.activate(&self.shards);
                 self.budget.enforce();
                 ObjectCacheResult::Placeholder(Box::new(Placeholder {
                     cache: self,
@@ -286,6 +362,7 @@ impl ObjectCache<ObjectKey, ObjectValue> for TreeCache {
                 inner.insert(key.clone(), CacheValue::Value(replacement));
                 self.added(false);
                 drop(inner);
+                self.budget.activate(&self.shards);
                 self.budget.enforce();
             }
         } else if inner.remove(key).is_some() {
@@ -303,6 +380,7 @@ impl ObjectCache<ObjectKey, ObjectValue> for TreeCache {
 
     /// cladefs: counted, taking no shard's lock (`Shards`, TASK-292).
     fn len(&self) -> usize {
+        // Relaxed: advisory size snapshot with no synchronization dependency on entry contents.
         self.shards.len.load(Ordering::Relaxed)
     }
 
@@ -727,5 +805,48 @@ mod tests {
         assert_matches!(cache.lookup_or_reserve(&key), ObjectCacheResult::Value(_));
         cache.clear();
         assert_matches!(cache.lookup_or_reserve(&key), ObjectCacheResult::Placeholder(_));
+    }
+
+    /// cladefs: TASK-555 (board 2506): with one shared budget (2 * SHARD_ABOVE) across 256
+    /// caches, filling one cache past the limit and issuing 10,000 more inserts visits at most
+    /// 2 * SHARDS (32) shards per eviction instead of walking thousands of empty shards.
+    #[fuchsia_async::run_singlethreaded(test)]
+    async fn test_shared_budget_skips_idle_caches_with_many_volumes() {
+        use std::sync::atomic::Ordering;
+        let limit = 2 * super::SHARD_ABOVE;
+        let budget = super::TreeCacheBudget::new(limit);
+        let caches: Vec<TreeCache> = (0..256).map(|_| TreeCache::sharing(&budget)).collect();
+        let now = Timestamp::now();
+        let value = ObjectValue::file(1, 0, now, now, now, now, None);
+
+        // Give every idle cache a couple of entries so they enter `active`, then get drained and
+        // pruned as the active cache fills past the shared limit.
+        for (i, cache) in caches.iter().skip(1).enumerate() {
+            cache.invalidate(&ObjectKey::object(i as u64 + 1), Some(value.clone()));
+        }
+        let active = &caches[0];
+        for i in 0..(limit + 1000) as u64 {
+            active.invalidate(&ObjectKey::object(i), Some(value.clone()));
+        }
+        assert!(active.len() <= limit);
+
+        // Measure 10,000 more inserts into the single active cache while 255 idle caches share
+        // the budget.
+        const EXTRA: usize = 10_000;
+        budget.shards_visited.store(0, Ordering::Relaxed);
+        for i in 0..EXTRA as u64 {
+            let id = (limit + 1000) as u64 + i;
+            active.invalidate(&ObjectKey::object(id), Some(value.clone()));
+        }
+        let visited = budget.shards_visited.load(Ordering::Relaxed);
+        let max_allowed = EXTRA * 2 * super::SHARDS;
+        assert!(
+            visited <= max_allowed,
+            "visited {visited} shards across {EXTRA} evictions (avg {:.1}/eviction, limit {})",
+            visited as f64 / EXTRA as f64,
+            2 * super::SHARDS
+        );
+        assert!(active.len() <= limit);
+        assert!(caches.iter().skip(1).all(|c| c.len() == 0));
     }
 }
