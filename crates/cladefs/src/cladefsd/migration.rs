@@ -1409,19 +1409,27 @@ async fn ask(
 }
 
 /// Reconciles an uncertain bucket-backed hand-over after the target daemon restarted or evicted its
-/// in-memory acceptance set (returning `FAILED_PRECONDITION`, board 11530).
+/// in-memory acceptance set (returning `FAILED_PRECONDITION`, board 11530, board 11657).
 ///
 /// Because the target durably renames `staged -> into` before taking the bucket head:
-/// - `head.token > source_token` (or `>= target_token`) proves the target took ownership and holds
-///   `into` on disk (`Ok(true)`).
-/// - A strictly higher `target_token > source_token` with `head.token <= source_token` proves the
-///   target's CAS never landed (`Ok(false)`).
-/// - For same-token hand-overs, `source_epoch` (captured after `hold_cell_alone_hurry`) separates
-///   pre-CAS (`head.epoch == epoch` -> `Ok(false)`) from post-CAS (`head.epoch > epoch` ->
-///   `Ok(true)`).
-/// - If both source and target restarted on a same-token hand-over (`source_epoch` is `None` and no
-///   strictly higher `target_token` was supplied), ownership cannot be proved either way, so this
-///   fails closed (`Err(ENOTCONN)`) rather than risking split-brain or data loss.
+/// - Deleted cells (`head.deleted()`, whose `token` is `u64::MAX`) fail closed (`Err(ESTALE)`).
+/// - When a strictly higher `target_token > source_token` is known:
+///   - `head.token == target_token` proves this target took ownership and holds `into` on disk
+///     (`Ok(true)`).
+///   - `head.token < target_token` proves this target's CAS never landed (`Ok(false)`), even if a
+///     3rd host took over at an intermediate token (`source_token < head.token < target_token`).
+///   - `head.token > target_token` means a 3rd host took over past `target_token`; whether the
+///     target accepted first or died pre-rename cannot be proved, so fail closed (`Err(ESTALE)`)
+///     without deleting the source's tail or reporting `HandOverCell` succeeded.
+/// - Without a strictly higher `target_token`:
+///   - `head.token > source_token` indicates a 3rd-host takeover (not a same-token target CAS);
+///     fail closed (`Err(ESTALE)`) without deleting the source's tail.
+///   - For same-token hand-overs (`head.token <= source_token`), `source_epoch` (captured after
+///     `hold_cell_alone_hurry`) separates pre-CAS (`head.epoch == epoch` -> `Ok(false)`) from
+///     post-CAS (`head.epoch > epoch` -> `Ok(true)`).
+///   - If both source and target restarted on a same-token hand-over (`source_epoch` is `None` and
+///     no strictly higher `target_token` was supplied), ownership cannot be proved either way, so
+///     this fails closed (`Err(ENOTCONN)`) rather than risking split-brain or data loss.
 async fn reconcile_restarted_target(
     daemon: &Daemon,
     path: &Path,
@@ -1460,18 +1468,45 @@ async fn reconcile_restarted_target(
     let Some(head) = head else {
         return Ok(false);
     };
+    if head.deleted() {
+        log::warn!(
+            "cladefsd: reconciling {} after target restart: cell {cell} is deleted in bucket; \
+             refusing to treat as target acceptance",
+            path.display(),
+        );
+        return Err(Errno::ESTALE);
+    }
     let target_token = placement_token.or_else(|| *outgoing.attempted_token.lock().unwrap());
     let source_epoch = *outgoing.source_epoch.lock().unwrap();
-    if target_token.is_some_and(|t| t > source_token && head.token >= t)
-        || head.token > source_token
-    {
-        return Ok(true);
+    if let Some(target) = target_token.filter(|&t| t > source_token) {
+        if head.token == target {
+            return Ok(true);
+        }
+        if head.token < target {
+            return Ok(false);
+        }
+        log::warn!(
+            "cladefsd: reconciling {} after target restart: head token {} > target token {} \
+             (third-host takeover); refusing to treat as target acceptance",
+            path.display(),
+            head.token,
+            target
+        );
+        return Err(Errno::ESTALE);
+    }
+    if head.token > source_token {
+        log::warn!(
+            "cladefsd: reconciling {} after target restart: head token {} > source token {} \
+             without a matching placement_token (third-host takeover); refusing to treat as \
+             target acceptance",
+            path.display(),
+            head.token,
+            source_token
+        );
+        return Err(Errno::ESTALE);
     }
     if let Some(epoch) = source_epoch {
         return Ok(head.epoch > epoch);
-    }
-    if target_token.is_some_and(|t| t > source_token) {
-        return Ok(false);
     }
     log::warn!(
         "cladefsd: reconciling {} after target restart: head token {} <= source token {} without \
@@ -1598,7 +1633,12 @@ pub(super) async fn abort_on(daemon: &Arc<Daemon>, path: PathBuf) -> Result<(), 
         log::warn!("cladefsd: aborting migration {:x}: {err}", outgoing.migration);
         return Err(Errno::ENOTCONN);
     }
-    match ask(daemon, ephemeral_host.as_ref(), &path, &outgoing, None).await {
+    // Pass any recorded placement_token from the prior HandOverCell attempt so bucket-backed
+    // aborts reconcile higher-token migrations cleanly without touching frozen `cell-records` v1
+    // (board 11657).
+    let placement_token =
+        if outgoing.bucket_backed { *outgoing.attempted_token.lock().unwrap() } else { None };
+    match ask(daemon, ephemeral_host.as_ref(), &path, &outgoing, placement_token).await {
         // Accepted before the abort: handed over, the cell the target's, which an abort answering
         // Ok would hide (hotbed question 519).
         Ok(()) => Err(Errno::EEXIST),
