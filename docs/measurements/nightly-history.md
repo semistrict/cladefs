@@ -2,10 +2,11 @@
 
 Each night on the nightly host (scripts/nightly-host.sh, TASK-441), main's head measured against the commit the night before measured, in interleaved rounds of the same night, with the control case and exact counts (scripts/ab-rounds.py). A night main did not move ran nothing and is not here. A metric that moved is a task on the board, labelled tag.nightly. Written by scripts/nightly.py; do not edit.
 
-**The last 6 nights measured nothing** (a task is filed).
+**The last 7 nights measured nothing** (a task is filed).
 
 | Night (UTC) | Base | Head | Outcome | Moved | Tasks | Results |
 |---|---|---|---|---|---|---|
+| 2026-11-25 07:03 | b8b99760 | 3fe634d5 | could not run: no round ran (the A/B ended 1; see remote.log and driver.log) | - | board 11029 (noted) | [ubu1-nightly-2026-11-25T070003Z-3fe634d5](ubu1-nightly-2026-11-25T070003Z-3fe634d5/nightly.md) |
 | 2026-11-24 07:00 | b8b99760 | 6cce1108 | could not run: no round ran (the A/B ended 2; see remote.log and driver.log) | - | board 11029 (filed) | [ubu1-nightly-2026-11-24T070003Z-6cce1108](ubu1-nightly-2026-11-24T070003Z-6cce1108/nightly.md) |
 | 2026-11-22 07:00 | b8b99760 | 35932073 | could not run: no round ran (the A/B ended 1; see remote.log and driver.log) | - | - | [ubu1-nightly-2026-11-22T070003Z-35932073](ubu1-nightly-2026-11-22T070003Z-35932073/nightly.md) |
 | 2026-11-20 07:03 | b8b99760 | deae90d9 | could not run: head failed to build (see build-b.log and guest-kernel-b.log) | - | - | [ubu1-nightly-2026-11-20T070002Z-deae90d9](ubu1-nightly-2026-11-20T070002Z-deae90d9/nightly.md) |
