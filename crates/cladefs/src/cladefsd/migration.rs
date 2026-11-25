@@ -222,6 +222,8 @@ enum Underway {
     /// Its hand-over begun ([`hand_over`]): its rounds stopped, its cell given up or about to be,
     /// its end its target's answer.
     Handing(Arc<Outgoing>),
+    /// Being deleted or dropped ([`DeleteGuard`], board 5376): no migration may start until done.
+    Deleting,
 }
 
 /// A bucket-backed cell migration being received on this host (board 11369): kept in memory until
@@ -368,7 +370,11 @@ fn count(count: &AtomicU64, n: u64) {
 pub(super) fn under_way_on(daemon: &Daemon) -> (usize, usize, usize) {
     let outgoing = daemon.migrations.outgoing.lock().unwrap();
     let preparing = outgoing.values().filter(|under| matches!(under, Underway::Preparing)).count();
-    (preparing, outgoing.len() - preparing, target::being_taken(daemon))
+    let moving = outgoing
+        .values()
+        .filter(|under| matches!(under, Underway::Moving(_) | Underway::Handing(_)))
+        .count();
+    (preparing, moving, target::being_taken(daemon))
 }
 
 /// The path of a cell whose migration is being prepared, held in `daemon.migrations.outgoing` from
@@ -405,6 +411,32 @@ impl Drop for Reserved {
     fn drop(&mut self) {
         let mut outgoing = self.daemon.migrations.outgoing.lock().unwrap();
         if let Some(Underway::Preparing) = outgoing.get(&self.path) {
+            outgoing.remove(&self.path);
+        }
+    }
+}
+
+/// Holds a cell's canonical path in `daemon.migrations.outgoing` while `DeleteCell` or `DropCell`
+/// removes it (board 5376): refuses deletion with `EBUSY` if any migration of the cell is
+/// preparing, moving, or handing over, and blocks any new `MigrateCell` until deletion finishes.
+pub(super) struct DeleteGuard {
+    daemon: Arc<Daemon>,
+    path: PathBuf,
+}
+
+pub(super) fn guard_delete(daemon: &Arc<Daemon>, path: &Path) -> Result<DeleteGuard, Errno> {
+    let mut outgoing = daemon.migrations.outgoing.lock().unwrap();
+    if outgoing.contains_key(path) {
+        return Err(Errno::EBUSY);
+    }
+    outgoing.insert(path.to_owned(), Underway::Deleting);
+    Ok(DeleteGuard { daemon: Arc::clone(daemon), path: path.to_owned() })
+}
+
+impl Drop for DeleteGuard {
+    fn drop(&mut self) {
+        let mut outgoing = self.daemon.migrations.outgoing.lock().unwrap();
+        if let Some(Underway::Deleting) = outgoing.get(&self.path) {
             outgoing.remove(&self.path);
         }
     }
@@ -1172,8 +1204,8 @@ fn handing(
 ) -> Result<Handing, Errno> {
     let mut outgoing = daemon.migrations.outgoing.lock().unwrap();
     let under_way = match outgoing.get(path) {
-        // Its prepare not answered yet: nothing to hand over.
-        Some(Underway::Preparing) => return Err(Errno::EBUSY),
+        // Its prepare not answered yet, or being deleted: nothing to hand over.
+        Some(Underway::Preparing | Underway::Deleting) => return Err(Errno::EBUSY),
         Some(Underway::Moving(under_way) | Underway::Handing(under_way)) => Some(under_way.clone()),
         None => None,
     };
@@ -1579,7 +1611,7 @@ fn take_moving(
 ) -> Result<Option<Arc<Outgoing>>, Errno> {
     let mut outgoing = daemon.migrations.outgoing.lock().unwrap();
     let taken = match outgoing.get(path) {
-        Some(Underway::Preparing) => return Err(Errno::EBUSY),
+        Some(Underway::Preparing | Underway::Deleting) => return Err(Errno::EBUSY),
         Some(Underway::Moving(moving)) => moving.clone(),
         Some(Underway::Handing(begun)) if handing => begun.clone(),
         Some(Underway::Handing(_)) | None => return Ok(None),
@@ -2886,10 +2918,10 @@ pub(super) mod target {
                             .unwrap_or_else(|err| Some(format!("it does not open: {err:#}"))),
                     },
                 };
-                Ok((moved_before, lacking))
+                Ok((moved_before, lacking, files))
             })
         };
-        let (moved_before, lacking) = checked.await?;
+        let (moved_before, lacking, files) = checked.await?;
         if let Some(lacking) = lacking {
             log::warn!("cladefsd: refusing migration {migration:x}: {lacking}");
             refuse(&daemon, &host, &entry).await?;
@@ -2900,6 +2932,9 @@ pub(super) mod target {
         daemon.migrations.staging.lock().unwrap().remove(&migration);
         let moved = move || -> std::io::Result<()> {
             if !moved_before {
+                // Remove any staged segments reaped on the source after an earlier round (board
+                // 5376), plus any unlisted control files, before syncing and renaming into place.
+                prune_extra_files(&staged, &files)?;
                 sync_tree(&staged)?;
                 host_fs::rename(&staged, &into)?;
             }
@@ -4474,6 +4509,90 @@ pub(super) mod target {
                 assert_eq!(status.code(), tonic::Code::InvalidArgument, "{path} len={len}");
                 assert!(!dir.path().join(path).exists(), "{path} must not be created");
             }
+        }
+
+        /// board 5370: a prepare that fails after `host.note` rolls back its journal entry and
+        /// leaves nothing a replay mistakes for a finished prepare; even an un-prepared `Receiving`
+        /// entry left in the journal is refused by hand-over and replayed cleanly against the same
+        /// running target.
+        #[test]
+        fn failed_prepare_after_note_is_refused_by_hand_over_and_replays_cleanly() {
+            let daemon = Daemon::new();
+            let dir = tempfile::tempdir().unwrap();
+            let (host, root) = target_host(&daemon, dir.path());
+            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build();
+            let runtime = runtime.unwrap();
+
+            let migration = 0x5370;
+            let cell = root.join("vm");
+            let staged = staging(&cell, migration);
+            // A regular file at `staged` causes `create_dir(&staged)` to fail after `host.note`
+            // and `refer_ephemeral`.
+            std::fs::write(&staged, b"blocker").unwrap();
+
+            let failed = runtime.block_on(prepare(&daemon, prepare_of(migration, &cell)));
+            assert!(failed.is_err(), "prepare must fail when staging directory cannot be created");
+            assert_eq!(host.entries().unwrap(), vec![], "failed prepare rolled back journal entry");
+            assert!(
+                !daemon.migrations.prepared.lock().unwrap().contains(&migration),
+                "failed prepare must not be marked prepared"
+            );
+
+            // Hand-over of a migration that never finished prepare is refused.
+            let refused = runtime.block_on(hand_over(
+                &daemon,
+                MigrateHandOverRequest {
+                    migration,
+                    incarnation: host.incarnation(),
+                    files: vec![FileDigest {
+                        path: local_cell::DESCRIPTION.into(),
+                        len: 1,
+                        crc: None,
+                    }],
+                    token: 1,
+                    placement_token: None,
+                    bucket_backed: false,
+                },
+            ));
+            assert_eq!(refused.map_err(|s| s.code()), Ok(false));
+
+            // Even if a Receiving entry remained in the journal without `prepared` (e.g. rollback
+            // failed before `prepared.insert`), hand-over refuses it and replaying prepare against
+            // the same running target succeeds once the blocker is cleared.
+            let orphan = Entry {
+                child: CellId { tenant: 1, id: 7 },
+                origin: Origin { parent: CellId { tenant: 1, id: 2 }, at: 3, epoch: 1 },
+                path: cell.clone(),
+                bucket: "memory:///cells".into(),
+                epoch: 1,
+                migrating: Some(Migrating::Receiving { id: migration, token: 0x99 }),
+            };
+            host.note(&orphan).unwrap();
+            let refused_orphan = runtime.block_on(hand_over(
+                &daemon,
+                MigrateHandOverRequest {
+                    migration,
+                    incarnation: host.incarnation(),
+                    files: vec![FileDigest {
+                        path: local_cell::DESCRIPTION.into(),
+                        len: 1,
+                        crc: None,
+                    }],
+                    token: 0x99,
+                    placement_token: None,
+                    bucket_backed: false,
+                },
+            ));
+            assert_eq!(refused_orphan.map_err(|s| s.code()), Ok(false));
+
+            host.note(&orphan).unwrap();
+            std::fs::remove_file(&staged).unwrap();
+            let (incarnation, token) =
+                runtime.block_on(prepare(&daemon, prepare_of(migration, &cell))).unwrap();
+            assert_eq!(incarnation, host.incarnation());
+            assert_ne!(token, 0x99, "replay of un-prepared entry must prepare afresh");
+            assert!(staged.is_dir(), "replayed prepare created staging directory");
+            assert!(daemon.migrations.prepared.lock().unwrap().contains(&migration));
         }
     }
 }

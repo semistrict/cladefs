@@ -11,8 +11,9 @@
 #![cfg(target_os = "linux")]
 
 use cladefs::cladefsd::control::proto::{
-    AbortMigrationRequest, DeleteCellRequest, ForkCellRequest, HandOverCellRequest,
-    MakeVersionRequest, MigrateCellRequest, PlaceCellRequest, StatCellRequest, SyncCellRequest,
+    AbortMigrationRequest, DeleteCellRequest, DropCellRequest, ForkCellRequest,
+    HandOverCellRequest, MakeVersionRequest, MigrateCellRequest, PlaceCellRequest, StatCellRequest,
+    SyncCellRequest,
 };
 use cladefs::testing::Control;
 use cladefs::testing::control_path;
@@ -1125,4 +1126,62 @@ fn bucket_backed_target_restart_reconciles_and_migrating_guards_control_ops() {
     for sequence in 1..=5 {
         assert!(read(&target_client, own(sequence)) == data(sequence), "extent {sequence}");
     }
+}
+
+/// board 5376: `MigrateCell` canonicalizes paths via `cell_dir_key`, enforces at most one outgoing
+/// migration per cell, refuses `DeleteCell`/`DropCell` with `EBUSY` while a migration is active
+/// pre-hand-over, and ephemeral `HandOverCell` prunes staged files not named in the final manifest.
+#[test]
+fn migrating_cell_refuses_concurrent_migrate_and_delete_canonicalizes_path_and_prunes_reaped_segments()
+ {
+    let forked = forked(4);
+    let there = forked.host(1).join("ephemeral-cell");
+    let alias = forked.host(0).join("ephemeral-alias");
+    std::os::unix::fs::symlink(&forked.here, &alias).unwrap();
+
+    // AC #3: MigrateCell via symlink canonicalizes to the same key as the real path.
+    let migration = forked.source.migrate(&alias, forked.target_at(), &there).unwrap();
+
+    // AC #1: A second MigrateCell via the real path is refused with EBUSY.
+    let dup = forked.source.migrate(&forked.here, forked.target_at(), &there).unwrap_err();
+    assert_eq!(dup.errno(), Some(cladefs::Errno::EBUSY), "duplicate MigrateCell: {dup}");
+
+    // AC #2: DeleteCell and DropCell are refused with EBUSY while the migration is moving
+    // (before any `migrating` marker is written).
+    let del_busy = forked
+        .source
+        .control
+        .call(async |c| c.delete_cell(DeleteCellRequest { path: control_path(&forked.here) }).await)
+        .unwrap_err();
+    assert_eq!(
+        del_busy.errno(),
+        Some(cladefs::Errno::EBUSY),
+        "DeleteCell mid-migration: {del_busy}"
+    );
+    let drop_busy = forked
+        .source
+        .control
+        .call(async |c| c.drop_cell(DropCellRequest { path: control_path(&forked.here) }).await)
+        .unwrap_err();
+    assert_eq!(
+        drop_busy.errno(),
+        Some(cladefs::Errno::EBUSY),
+        "DropCell mid-migration: {drop_busy}"
+    );
+
+    // AC #4: Simulate a kept segment pre-copied in an earlier round and later reaped on the source
+    // by planting an extra file in the target's staging directory.
+    let staged = staging(&forked.host(1), migration);
+    let extra_dir = staged.join("segments");
+    std::fs::create_dir_all(&extra_dir).unwrap();
+    let reaped = extra_dir.join("reaped-kept-segment");
+    std::fs::write(&reaped, b"stale-segment-data").unwrap();
+
+    // HandOverCell via the real path finds the symlink-started migration and prunes unlisted files.
+    forked.source.hand_over(&forked.here).unwrap();
+    assert!(
+        !there.join("segments").join("reaped-kept-segment").exists(),
+        "ephemeral hand-over must prune staged files absent from the final manifest"
+    );
+    forked.assert_handed_over(&there, 4);
 }

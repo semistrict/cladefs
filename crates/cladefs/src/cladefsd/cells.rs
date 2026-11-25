@@ -1392,6 +1392,10 @@ async fn delete_alone(
     bucket: Option<Arc<bucket_cell::object_bucket::RoutedBucket>>,
 ) -> Result<(), Errno> {
     let _held = hold_alone(daemon, &path).await?;
+    let key = cell_dir_key(&path);
+    // Refuse deleting a cell with an active outgoing migration (preparing, moving, or handing
+    // over) and prevent any new MigrateCell from starting until removal completes (board 5376).
+    let _deleting = super::migration::guard_delete(daemon, &key)?;
     // Refuse deleting a cell given up to a live migration so a bucket cell is never deleted mid
     // hand-over (board 11530).
     let check = path.clone();
@@ -1404,7 +1408,7 @@ async fn delete_alone(
             .upload_intervals
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&cell_dir_key(&path));
+            .remove(&key);
     }
     deleted.map_err(|err| errno_of(format_args!("deleting {}", path.display()), err))
 }
