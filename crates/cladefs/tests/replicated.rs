@@ -229,6 +229,35 @@ fn until(what: &str, done: impl Fn() -> bool) {
     }
 }
 
+/// Waits until `writer` is serving `cell` non-degraded with `f == 1` and every member in
+/// `members` has persisted at least one replica log for the active configuration (caching the
+/// active head before the bucket is cut off so a slow member does not trigger a replacement
+/// during a bucket outage; board 9398).
+fn wait_members_ready(writer: &Daemon, members: &[&Daemon], bucket: &Path, cell: CellId) {
+    until("all members ready with replicated logs", || {
+        let stat = writer.stat(cell);
+        let (number, f, _) = configuration(bucket, cell);
+        let prefix = format!(
+            "{}.{}.{}.",
+            base32_id::Padded(cell.tenant),
+            base32_id::Padded(cell.id),
+            base32_id::Padded(number),
+        );
+        !stat.degraded
+            && stat.active_replicas == 1
+            && stat.members_up as usize == members.len()
+            && f == 1
+            && members.iter().all(|member| {
+                std::fs::read_dir(member.dir.join("replicas"))
+                    .ok()
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .any(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+            })
+    });
+}
+
 /// doc-12's Replicated rows, TASK-537.3.6's AC 1: a replicated cell's commits, told durable while
 /// the bucket was out of reach, on its writer and one member; the writer's daemon killed and its
 /// directory gone, its disk and its replica directory with it; another host takes the cell,
@@ -245,26 +274,35 @@ fn replicated_commits_survive_their_writer_and_its_disk() {
 
     let client = connect(&daemons[0], cell);
     write(&client, 1..=2);
+    wait_members_ready(&daemons[0], &[&daemons[1], &daemons[2]], &bucket, cell);
     // The bucket out of reach: what is told durable from now on is on the members alone.
     let before = head(&bucket, cell).end;
     reachable(&bucket, false);
     // A guest committing all the while: the last extent each commit told durable.
     let acked = Arc::new(std::sync::atomic::AtomicU64::new(2));
+    let failed: Arc<std::sync::Mutex<Option<String>>> = Arc::default();
     let committing = {
         let acked = acked.clone();
+        let failed = failed.clone();
         std::thread::spawn(move || {
             for sequence in 3.. {
                 let extent = ExtentId { cell: client.cell(), sequence };
                 let written = client.write(extent, 0, &[VolatileSlice::from(&data(sequence)[..])]);
                 let root = format!("root {sequence}");
-                if written.and_then(|()| client.commit(Some(root.as_bytes()))).is_err() {
+                if let Err(err) = written.and_then(|()| client.commit(Some(root.as_bytes()))) {
+                    *failed.lock().unwrap() = Some(format!("commit {sequence}: {err}"));
                     return;
                 }
                 acked.store(sequence, std::sync::atomic::Ordering::SeqCst);
             }
         })
     };
-    until("commits told durable", || acked.load(std::sync::atomic::Ordering::SeqCst) >= 10);
+    until("commits told durable", || {
+        if let Some(err) = failed.lock().unwrap().clone() {
+            panic!("committing failed before kill: {err}");
+        }
+        acked.load(std::sync::atomic::Ordering::SeqCst) >= 10
+    });
 
     // The writer's host lost mid-workload, its disk with it.
     daemons[0].kill();
@@ -338,25 +376,34 @@ fn replicated_commits_survive_their_daemon_killed_and_reopened() {
     let cell = create_replicated(&daemons[0]);
     let client = connect(&daemons[0], cell);
     write(&client, 1..=2);
+    wait_members_ready(&daemons[0], &[&daemons[1], &daemons[2]], &bucket, cell);
     let before = head(&bucket, cell).end;
     let (first, _, _) = configuration(&bucket, cell);
     reachable(&bucket, false);
     let acked = Arc::new(std::sync::atomic::AtomicU64::new(2));
+    let failed: Arc<std::sync::Mutex<Option<String>>> = Arc::default();
     let committing = {
         let acked = acked.clone();
+        let failed = failed.clone();
         std::thread::spawn(move || {
             for sequence in 3.. {
                 let extent = ExtentId { cell: client.cell(), sequence };
                 let written = client.write(extent, 0, &[VolatileSlice::from(&data(sequence)[..])]);
                 let root = format!("root {sequence}");
-                if written.and_then(|()| client.commit(Some(root.as_bytes()))).is_err() {
+                if let Err(err) = written.and_then(|()| client.commit(Some(root.as_bytes()))) {
+                    *failed.lock().unwrap() = Some(format!("commit {sequence}: {err}"));
                     return;
                 }
                 acked.store(sequence, std::sync::atomic::Ordering::SeqCst);
             }
         })
     };
-    until("commits told durable", || acked.load(std::sync::atomic::Ordering::SeqCst) >= 10);
+    until("commits told durable", || {
+        if let Some(err) = failed.lock().unwrap().clone() {
+            panic!("committing failed before kill: {err}");
+        }
+        acked.load(std::sync::atomic::Ordering::SeqCst) >= 10
+    });
 
     // The writer's daemon killed mid-workload, its disk kept, and started again on it.
     daemons[0].kill();

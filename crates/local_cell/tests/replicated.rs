@@ -1596,14 +1596,34 @@ async fn written_then_lost(
     cell.made().unwrap();
     cell.close_segment().unwrap();
     uploader.uploaded(cell.last_commit().unwrap()).await.unwrap();
-    assert_eq!(addresses(&configuration_named(host).await), ["a", "b", "c"]);
+    let config = configuration_named(host).await;
+    assert_eq!(addresses(&config), ["a", "b", "c"]);
+    let peers_a = peers("a");
+    let b = peers_a.reach("b").unwrap().clone();
+    let c = peers_a.reach("c").unwrap().clone();
     let both = commit(&cell, 0, 2).await;
     uploader.replicated(both).await.unwrap();
+    until("both b and c hold the first commits", async || {
+        let eb = ends(&b, &config);
+        eb > 0 && eb == ends(&c, &config)
+    })
+    .await;
+    let before_last = ends(&b, &config);
     if c_behind {
         lost.lock().unwrap().insert("c".into());
     }
     let last = commit(&cell, 2, 3).await;
     uploader.replicated(last).await.unwrap();
+    // board 9545: `replicated(last)` returns as soon as f = 1 member acks; when `!c_behind`,
+    // callers expect both `b` and `c` to hold `last` before `a` is lost so stalling either member
+    // still finds another copy as long.
+    if !c_behind {
+        until("both b and c hold the last commit", async || {
+            let eb = ends(&b, &config);
+            eb > before_last && eb == ends(&c, &config)
+        })
+        .await;
+    }
     assert!(uploader.last_uploaded() < last, "told replicated by members, not the bucket");
     let expected = writer.contents(&cell).await;
     let replicator = cell.replicator().unwrap();
