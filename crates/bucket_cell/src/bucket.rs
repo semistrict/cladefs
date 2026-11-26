@@ -397,6 +397,8 @@ pub trait Bucket: BucketSend + BucketSync + 'static {
 
     /// cladefs: draws a 64-bit random value (board 12982): production buckets use the process
     /// RNG; `SimBucket` overrides this deterministically so simulation seeds replay identically.
+    /// The keyless build (`gc_wasm`) draws none, and has no `rand` (board 13575).
+    #[cfg(feature = "full")]
     fn random_u64(&self) -> u64 {
         // Outside the simulation: `SimBucket` overrides this with a deterministic PRNG.
         rand::random()
