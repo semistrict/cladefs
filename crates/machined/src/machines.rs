@@ -214,6 +214,10 @@ pub(crate) struct Machines {
     images: PathBuf,
     /// The helper binary each machine's VM runs in (`crate::helper`).
     helper: PathBuf,
+    /// cladefs's daemon, this process's, which machines' roots are cells of.
+    cladefs: libcladefs::Daemon,
+    /// Where the daemon serves helpers, as VM processes (its VM-process wire).
+    cladefs_socket: PathBuf,
     vsock_dir: PathBuf,
     #[cfg(target_os = "linux")]
     snapshot_dir: PathBuf,
@@ -239,7 +243,12 @@ fn fresh(dir: &Path) -> io::Result<()> {
 impl Machines {
     /// machined's machines, none yet, booting kernels from `images`, keeping what it makes in
     /// `state` (made mode 0700, what an earlier machined left in it removed).
-    pub(crate) fn new(images: &Path, helper: &Path, state: &Path) -> io::Result<Self> {
+    pub(crate) fn new(
+        images: &Path,
+        helper: &Path,
+        state: &Path,
+        cladefs: libcladefs::Daemon,
+    ) -> io::Result<Self> {
         use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _};
         if !images.is_dir() {
             return Err(io::Error::new(
@@ -281,6 +290,11 @@ impl Machines {
             ));
         }
         fresh(&vsock_dir)?;
+        // Beside the vsock sockets, in a directory only machined's user may enter, made afresh.
+        let cladefs_socket = vsock_dir.join("cladefs");
+        cladefs.serve_vm_processes(&cladefs_socket).map_err(|e| {
+            io::Error::other(format!("serving helpers at {}: {e:#}", cladefs_socket.display()))
+        })?;
         #[cfg(target_os = "linux")]
         let (snapshot_dir, suspend_dir) = (state.join("snapshots"), state.join("suspensions"));
         #[cfg(target_os = "linux")]
@@ -291,6 +305,8 @@ impl Machines {
         Ok(Self {
             images: images.to_owned(),
             helper: helper.to_owned(),
+            cladefs,
+            cladefs_socket,
             vsock_dir,
             #[cfg(target_os = "linux")]
             snapshot_dir,
@@ -301,6 +317,24 @@ impl Machines {
             snapshots: Mutex::default(),
             next_socket: AtomicU32::new(1),
         })
+    }
+
+    /// A new cell forked from the version `from`, of `capacity` bytes, on a disk of the
+    /// daemon's: a machine's root, its own.
+    pub(crate) async fn fork_cell(
+        &self,
+        from: libcladefs::CellVersion,
+        capacity: u64,
+    ) -> Result<proto::Cell, Status> {
+        let daemon = self.cladefs.clone();
+        // A cell's client's calls block its thread; the client goes as it is made, closing it.
+        let forked = tokio::task::spawn_blocking(move || {
+            let client = daemon.fork(from.tenant, from, capacity)?;
+            Ok::<_, libcladefs::Error>(proto::Cell { tenant: client.tenant(), cell: client.cell() })
+        })
+        .await
+        .map_err(|e| Status::internal(format!("forking a cell: {e}")))?;
+        forked.map_err(|e| Status::unavailable(format!("forking {from:?}: {e:#}")))
     }
 
     /// The machine named `name`.
@@ -384,9 +418,16 @@ impl Machines {
         let socket =
             self.vsock_dir.join(self.next_socket.fetch_add(1, Ordering::Relaxed).to_string());
         let console = entry.console.writer();
-        let started =
-            Vm::start(&self.helper, entry.spec.clone(), &self.images, source, socket, console)
-                .await;
+        let started = Vm::start(
+            &self.helper,
+            entry.spec.clone(),
+            &self.images,
+            &self.cladefs_socket,
+            source,
+            socket,
+            console,
+        )
+        .await;
         let vm = match started {
             Ok(vm) => vm,
             Err(status) => {

@@ -240,8 +240,11 @@ struct State {
 pub(crate) struct Workspaces {
     machines: Arc<Machines>,
     node_id: String,
-    /// What each workspace's machine is.
+    /// What each workspace's machine is, but its root.
     template: m::MachineSpec,
+    /// What each workspace's root is forked from, and how large.
+    root: libcladefs::CellVersion,
+    root_capacity: u64,
     state: Mutex<State>,
     next: AtomicU64,
     /// Where commands' output threads, apart from tokio, start what ends their workspaces.
@@ -250,11 +253,19 @@ pub(crate) struct Workspaces {
 
 impl Workspaces {
     /// The node's workspaces, none yet; on the current tokio runtime.
-    pub(crate) fn new(machines: Arc<Machines>, node_id: String, template: m::MachineSpec) -> Self {
+    pub(crate) fn new(
+        machines: Arc<Machines>,
+        node_id: String,
+        template: m::MachineSpec,
+        root: libcladefs::CellVersion,
+        root_capacity: u64,
+    ) -> Self {
         Self {
             machines,
             node_id,
             template,
+            root,
+            root_capacity,
             state: Mutex::default(),
             next: AtomicU64::new(1),
             runtime: tokio::runtime::Handle::current(),
@@ -345,6 +356,8 @@ impl Workspaces {
         if !req.session_id.is_empty() {
             spec.labels.insert("hotbed.session".into(), req.session_id.clone());
         }
+        // Its root its own, a fork of the node's base.
+        spec.root = Some(self.machines.fork_cell(self.root, self.root_capacity).await?);
         let name = format!("hotbed-{}", self.next.fetch_add(1, Ordering::Relaxed));
         let entry = self.machines.create(name, spec).await?;
         let booting = Instant::now();

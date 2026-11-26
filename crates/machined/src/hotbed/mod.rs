@@ -28,6 +28,8 @@ mod tunnel;
 mod workspaces;
 
 pub use error::Error;
+/// A cell's version, which workspaces' roots are forked from ([`Hotbed::root`]).
+pub use libcladefs::CellVersion;
 pub(crate) use node::{Joining, Node, join};
 
 /// hotbed's messages, from its proto.
@@ -50,8 +52,12 @@ pub struct Hotbed {
     /// set.
     pub node_id: String,
     /// What each workspace's machine is: its vCPUs, memory and boot (the guest must run
-    /// libmachine's agent: `libmachine_action=agent`).
+    /// libmachine's agent: `libmachine_action=agent`). Its `root` is each workspace's own.
     pub workspace: crate::proto::MachineSpec,
+    /// The version each workspace's root is forked from, a cell of its own of `root_capacity`
+    /// bytes: the workspaces' base.
+    pub root: libcladefs::CellVersion,
+    pub root_capacity: u64,
     /// How often the node heartbeats (hotbed's report interval).
     pub report_interval: Duration,
     /// How often the tunnel pings, and how long it waits for a frame before it reconnects.
@@ -67,6 +73,7 @@ impl Hotbed {
         token_file: impl Into<PathBuf>,
         node: impl Into<String>,
         workspace: crate::proto::MachineSpec,
+        root: libcladefs::CellVersion,
     ) -> Self {
         let node = node.into();
         Self {
@@ -75,6 +82,8 @@ impl Hotbed {
             node_id: format!("machined:{node}"),
             node,
             workspace,
+            root,
+            root_capacity: 64 << 30,
             report_interval: Duration::from_secs(5),
             ping_interval: tunnel::PING_INTERVAL,
             read_timeout: tunnel::READ_TIMEOUT,

@@ -52,7 +52,13 @@ mod run {
         helper: Option<PathBuf>,
         /// Be a node of the hotbed controller at this URL (https://...): its machines then
         /// hotbed's workspaces, as the --hotbed flags say.
-        #[arg(long, requires_all = ["hotbed_token_file", "hotbed_node", "hotbed_kernel"])]
+        #[arg(
+            long,
+            requires_all = [
+                "hotbed_token_file", "hotbed_node", "hotbed_kernel", "hotbed_root_cell",
+                "hotbed_root_version",
+            ]
+        )]
         hotbed_controller: Option<String>,
         /// A file holding the token the node joins with: hotbed's join token (hbj_...), or a
         /// node's worker token (hbw_...). Read until machined has joined.
@@ -76,6 +82,19 @@ mod run {
         /// Its memory, in MiB.
         #[arg(long, default_value_t = 1024)]
         hotbed_memory_mib: u64,
+        /// The cell version each workspace's root is forked from: its tenant,
+        #[arg(long, default_value_t = 0)]
+        hotbed_root_tenant: u64,
+        /// its cell,
+        #[arg(long)]
+        hotbed_root_cell: Option<u64>,
+        /// and its version.
+        #[arg(long)]
+        hotbed_root_version: Option<u64>,
+        /// cladefs's daemon's configuration, cladefsd's TOML (`cladefsd --config`): unless given,
+        /// one local disk in <state>/cladefs, under a master key of its own there.
+        #[arg(long)]
+        cladefs_config: Option<PathBuf>,
     }
 
     /// A logger writing to standard error: what machined says, at `RUST_LOG`'s level (`info`
@@ -122,7 +141,12 @@ mod run {
                     }),
                     ..Default::default()
                 };
-                Some(Hotbed::new(controller, token_file, node, workspace))
+                let root = machined::hotbed::CellVersion {
+                    tenant: flags.hotbed_root_tenant,
+                    cell: flags.hotbed_root_cell.unwrap_or_default(),
+                    version: flags.hotbed_root_version.unwrap_or_default(),
+                };
+                Some(Hotbed::new(controller, token_file, node, workspace, root))
             }
             _ => None,
         };
@@ -130,7 +154,14 @@ mod run {
             Some(helper) => helper,
             None => Config::default_helper()?,
         };
+        let cladefs = match flags.cladefs_config {
+            Some(file) => {
+                machined::CladefsConfig::from_file(file).map_err(std::io::Error::other)?
+            }
+            None => Config::default_cladefs(&flags.state)?,
+        };
         let config = Config {
+            cladefs,
             socket: flags.socket,
             tcp,
             images: flags.images,

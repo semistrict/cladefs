@@ -277,9 +277,12 @@ type MachineSpec struct {
 	Boot *Boot `protobuf:"bytes,3,opt,name=boot,proto3" json:"boot,omitempty"`
 	// Its network: none (no network card at all) if absent.
 	Network *Network `protobuf:"bytes,4,opt,name=network,proto3" json:"network,omitempty"`
-	// The cell its root filesystem is on, served by machined's embedded daemon: none (the guest's
-	// root is its initramfs) if absent. UNIMPLEMENTED until board 13067 connects machines' extent
-	// devices to the embedded daemon.
+	// The cell its root filesystem, Fxfs, is on, a cell of machined's embedded cladefs daemon
+	// (whose Cladefsd service machined serves on its endpoint: CreateCell, ImportImage and ForkCell
+	// make one), on the machine's extent store device tagged "root": its kernel mounts it as its
+	// root (`root=root rootfstype=cladefs rw`, put before `boot.command_line`). Required: every
+	// machine boots from a cell. One machine at a time has a cell open: a second start of one on
+	// it fails.
 	Root *Cell `protobuf:"bytes,5,opt,name=root,proto3" json:"root,omitempty"`
 	// Guest ports whose connections from the guest machined passes to the Unix socket
 	// "<vsock_socket>_<port>" (Firecracker's convention), each at most 2^32 - 1, at most 16 of
@@ -287,9 +290,13 @@ type MachineSpec struct {
 	VsockListenPorts []uint32 `protobuf:"varint,6,rep,packed,name=vsock_listen_ports,json=vsockListenPorts,proto3" json:"vsock_listen_ports,omitempty"`
 	// The caller's own labels, kept and returned as they are: at most 32, each key 1 to 63 bytes
 	// and value at most 256 bytes.
-	Labels        map[string]string `protobuf:"bytes,7,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Labels map[string]string `protobuf:"bytes,7,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// The size of its root's DAX window, a multiple of 2 MiB, through which the guest maps its
+	// files' data from the daemon's extent cache, shared by every machine on the host: 0 for none,
+	// every read and write then a request to the daemon.
+	RootDaxWindowBytes uint64 `protobuf:"varint,8,opt,name=root_dax_window_bytes,json=rootDaxWindowBytes,proto3" json:"root_dax_window_bytes,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *MachineSpec) Reset() {
@@ -369,6 +376,13 @@ func (x *MachineSpec) GetLabels() map[string]string {
 		return x.Labels
 	}
 	return nil
+}
+
+func (x *MachineSpec) GetRootDaxWindowBytes() uint64 {
+	if x != nil {
+		return x.RootDaxWindowBytes
+	}
+	return 0
 }
 
 // A Linux kernel and how it boots.
@@ -2835,7 +2849,7 @@ var File_machined_v1_machined_proto protoreflect.FileDescriptor
 
 const file_machined_v1_machined_proto_rawDesc = "" +
 	"\n" +
-	"\x1amachined/v1/machined.proto\x12\vmachined.v1\"\xeb\x02\n" +
+	"\x1amachined/v1/machined.proto\x12\vmachined.v1\"\x9e\x03\n" +
 	"\vMachineSpec\x12\x14\n" +
 	"\x05vcpus\x18\x01 \x01(\rR\x05vcpus\x12!\n" +
 	"\fmemory_bytes\x18\x02 \x01(\x04R\vmemoryBytes\x12%\n" +
@@ -2843,7 +2857,8 @@ const file_machined_v1_machined_proto_rawDesc = "" +
 	"\anetwork\x18\x04 \x01(\v2\x14.machined.v1.NetworkR\anetwork\x12%\n" +
 	"\x04root\x18\x05 \x01(\v2\x11.machined.v1.CellR\x04root\x12,\n" +
 	"\x12vsock_listen_ports\x18\x06 \x03(\rR\x10vsockListenPorts\x12<\n" +
-	"\x06labels\x18\a \x03(\v2$.machined.v1.MachineSpec.LabelsEntryR\x06labels\x1a9\n" +
+	"\x06labels\x18\a \x03(\v2$.machined.v1.MachineSpec.LabelsEntryR\x06labels\x121\n" +
+	"\x15root_dax_window_bytes\x18\b \x01(\x04R\x12rootDaxWindowBytes\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"_\n" +

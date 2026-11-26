@@ -32,7 +32,7 @@ use hyper::body::{Bytes, Incoming};
 use hyper::header::HeaderMap;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use machined::hotbed::{Hotbed, proto as pb};
+use machined::hotbed::{CellVersion, Hotbed, proto as pb};
 use prost::Message as _;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
@@ -308,20 +308,29 @@ struct Daemon {
     dir: PathBuf,
 }
 
-fn config(dir: &Path, controller: &str, tune: impl FnOnce(&mut Hotbed)) -> machined::Config {
-    let workspace = machined::proto::MachineSpec {
+/// The base a test's node forks its workspaces' roots from, where a test boots none.
+const NO_BASE: CellVersion = CellVersion { tenant: 0, cell: 1, version: 1 };
+
+/// A node's workspaces: the guest's kernel, booted from a root forked from `base`, the test
+/// initramfs's init on it.
+fn workspace() -> machined::proto::MachineSpec {
+    machined::proto::MachineSpec {
         vcpus: 2,
         memory_bytes: WORKSPACE_MEMORY,
         boot: Some(machined::proto::Boot {
             kernel: "kernel".into(),
-            initramfs: "initramfs.cpio".into(),
-            command_line: "libmachine_action=agent".into(),
+            command_line: "init=/init libmachine_action=agent".into(),
+            ..Default::default()
         }),
         ..Default::default()
-    };
-    let mut hotbed = Hotbed::new(controller, dir.join("token"), NODE, workspace);
+    }
+}
+
+fn config(dir: &Path, controller: &str, tune: impl FnOnce(&mut Hotbed)) -> machined::Config {
+    let mut hotbed = Hotbed::new(controller, dir.join("token"), NODE, workspace(), NO_BASE);
     tune(&mut hotbed);
     machined::Config {
+        cladefs: common::cladefs(&dir.join("state")),
         socket: Some(dir.join("machined.sock")),
         tcp: None,
         images: dir.join("images"),
@@ -343,10 +352,7 @@ fn prepare(images: Option<(&Path, &Path)>) -> tempfile::TempDir {
             std::fs::copy(kernel, image_dir.join("kernel")).unwrap();
             std::fs::copy(initramfs, image_dir.join("initramfs.cpio")).unwrap();
         }
-        None => {
-            std::fs::write(image_dir.join("kernel"), b"not booted").unwrap();
-            std::fs::write(image_dir.join("initramfs.cpio"), b"not booted").unwrap();
-        }
+        None => std::fs::write(image_dir.join("kernel"), b"not booted").unwrap(),
     }
     std::fs::write(dir.path().join("token"), format!("{JOIN_TOKEN}\n")).unwrap();
     dir
@@ -371,7 +377,25 @@ impl Daemon {
 async fn joins_beats_and_serves_its_tunnel() {
     let mut fake = Fake::start().await;
     let dir = prepare(None);
-    let daemon = Daemon::start(dir.path(), &fake.url, |_| {}).await;
+    // machined's binary, as a process of its own: started twice, and a process embeds one
+    // cladefs daemon, which holds its disk for the process's life.
+    let (token, url) = (dir.path().join("token"), fake.url.clone());
+    let args = [
+        "--hotbed-controller",
+        &url,
+        "--hotbed-token-file",
+        token.to_str().unwrap(),
+        "--hotbed-node",
+        NODE,
+        "--hotbed-kernel",
+        "kernel",
+        "--hotbed-root-cell",
+        "1",
+        "--hotbed-root-version",
+        "1",
+    ];
+    let (images, state) = (dir.path().join("images"), dir.path().join("state"));
+    let daemon = common::Process::start(&images, &state, &args).await;
 
     let join = fake.join().await;
     assert_eq!(header(&join, "authorization"), format!("Bearer {JOIN_TOKEN}"));
@@ -510,11 +534,12 @@ async fn joins_beats_and_serves_its_tunnel() {
              projects, matches or limits"
         )
     );
-    daemon.shutdown().await;
+    daemon.stop();
+    assert!(!dir.path().join("machined-process.sock").exists());
 
     // Started again, with no token to join with: it joined, and takes that up.
-    std::fs::remove_file(dir.path().join("token")).unwrap();
-    let daemon = Daemon::start(dir.path(), &fake.url, |_| {}).await;
+    std::fs::remove_file(&token).unwrap();
+    let again = common::Process::start(&images, &state, &args).await;
     let (headers, beat) = fake.beat().await;
     assert_eq!(header(&headers, "authorization"), format!("Bearer {WORKER_TOKEN}"));
     assert_eq!(beat.cluster_id, CLUSTER);
@@ -523,7 +548,7 @@ async fn joins_beats_and_serves_its_tunnel() {
         tunnel.unary("ListWorkspaces", &pb::ListWorkspacesRequest::default()).await.unwrap();
     assert_eq!(listed, pb::ListWorkspacesResponse::default());
     assert!(fake.joins.try_recv().is_err(), "a node joined joins no more");
-    daemon.shutdown().await;
+    again.stop();
 }
 
 /// A join the controller refuses fails machined's start, saying why in hotbed's words, and leaves
@@ -584,8 +609,19 @@ async fn workspaces_are_machines() {
     let Some((kernel, initramfs)) = common::guest() else { return };
     let mut fake = Fake::start().await;
     let dir = prepare(Some((&kernel, &initramfs)));
+    // The workspaces' base, made by a machined of its own first: a process embeds one cladefs
+    // daemon, whose cells stay on its disk.
+    let (images, state) = (dir.path().join("images"), dir.path().join("state"));
+    let first = common::Process::start(&images, &state, &[]).await;
+    let base_cell = common::import_root(&first.socket, &initramfs, dir.path()).await;
+    let version = common::make_version(&first.socket, &base_cell).await;
+    // Killed, not stopped: a daemon that served an import never drains (board 14083). What it
+    // committed is on its disk all the same.
+    first.kill();
+    let base = CellVersion { tenant: base_cell.tenant, cell: base_cell.cell, version };
     let daemon = Daemon::start(dir.path(), &fake.url, |hotbed| {
         hotbed.report_interval = Duration::from_millis(200);
+        hotbed.root = base;
     })
     .await;
     let (_, mut tunnel) = fake.tunnel().await;

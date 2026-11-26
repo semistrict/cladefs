@@ -30,12 +30,41 @@ pub struct Config {
     pub state: PathBuf,
     /// A node of hotbed to be too, if any: its machines then hotbed's workspaces.
     pub hotbed: Option<crate::hotbed::Hotbed>,
+    /// cladefs's extent daemon, which machined embeds (libcladefs, one a process): what its
+    /// machines' roots are cells of, and whose control API (cladefsd's Cladefsd service) machined
+    /// serves on its endpoint beside its own. [`Config::default_cladefs`] is a developer's.
+    pub cladefs: CladefsConfig,
 }
+
+/// cladefs's daemon's configuration: cladefsd's TOML (`cladefsd --config`), or built.
+pub use libcladefs::Config as CladefsConfig;
 
 impl Config {
     /// The helper binary beside this process's own: `machined-vm`.
     pub fn default_helper() -> std::io::Result<PathBuf> {
         crate::vmm::default_helper()
+    }
+
+    /// A daemon of one local disk in `<state>/cladefs`, with a bucket of files there, its keys
+    /// under a master key of its own in `<state>/cladefs/master.key`, made (32 random bytes, mode
+    /// 0600) if it isn't there: a developer's machine's, whose cells no other host shares.
+    pub fn default_cladefs(state: &std::path::Path) -> std::io::Result<CladefsConfig> {
+        use std::io::{Read as _, Write as _};
+        use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
+        let dir = state.join("cladefs");
+        std::fs::DirBuilder::new().mode(0o700).recursive(true).create(&dir)?;
+        let key = dir.join("master.key");
+        match std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&key) {
+            Ok(mut file) => {
+                let mut bytes = [0u8; 32];
+                std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+                file.write_all(&bytes)?;
+                file.sync_all()?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+        Ok(CladefsConfig::local(dir).master_key_file(key))
     }
 }
 

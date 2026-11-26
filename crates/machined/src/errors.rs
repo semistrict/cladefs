@@ -21,6 +21,8 @@ pub(crate) fn status(e: Error) -> Status {
         Error::TimedOut(_) => Code::DeadlineExceeded,
         Error::ConnectionReset(_) => Code::Aborted,
         Error::Agent(_) => Code::Unavailable,
+        // Its cell couldn't be opened or served: held by another machine, or the daemon gone.
+        Error::ExtentStore(_) => Code::FailedPrecondition,
         Error::Guest { source, .. } => guest(source.raw_os_error()),
         _ => Code::Internal,
     };

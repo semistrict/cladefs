@@ -93,6 +93,7 @@ impl Vm {
         helper: &Path,
         spec: crate::proto::MachineSpec,
         images: &Path,
+        cladefs_socket: &Path,
         source: Source,
         vsock_socket: PathBuf,
         console: impl Write + Send + 'static,
@@ -125,6 +126,7 @@ impl Vm {
             images: images.to_string_lossy().into_owned(),
             snapshot,
             vsock_socket: vsock_socket.to_string_lossy().into_owned(),
+            cladefs_socket: cladefs_socket.to_string_lossy().into_owned(),
         };
         let shared =
             Arc::new(Shared { to: tokio::sync::Mutex::new(Some(to)), answers: Mutex::default() });

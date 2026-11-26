@@ -131,8 +131,11 @@ pub(crate) async fn join(
     if config.node.is_empty() || config.node_id.is_empty() {
         return Err(invalid("a node has a name and an ID"));
     }
+    // Checked as its workspaces' are, each with a root of its own, forked from the base.
+    let root = crate::proto::Cell { tenant: config.root.tenant, cell: config.root.cell };
+    let workspace = crate::proto::MachineSpec { root: Some(root), ..config.workspace.clone() };
     machines
-        .check(&config.workspace)
+        .check(&workspace)
         .map_err(|s| invalid(format!("the workspace machine: {}", s.message())))?;
     let controller = Controller::new(base.clone()).map_err(io::Error::other)?;
     let joined = match joined(state, &base, &config.node_id)? {
@@ -172,8 +175,13 @@ pub(crate) async fn join(
         node_id: config.node_id.clone(),
         host: config.node.clone(),
     };
-    let workspaces =
-        Arc::new(Workspaces::new(machines, config.node_id.clone(), config.workspace.clone()));
+    let workspaces = Arc::new(Workspaces::new(
+        machines,
+        config.node_id.clone(),
+        config.workspace.clone(),
+        config.root,
+        config.root_capacity,
+    ));
     let tunnel = Tunnel {
         url: tunnel::url(&base).map_err(io::Error::other)?,
         identity: who.clone(),

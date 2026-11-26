@@ -40,6 +40,10 @@ pub(crate) struct Start {
     /// Where the helper serves the machine's vsock socket.
     #[prost(string, tag = "5")]
     pub(crate) vsock_socket: String,
+    /// Where machined's cladefs daemon serves VM processes, which the machine's extent store
+    /// devices (its root's) connect to.
+    #[prost(string, tag = "6")]
+    pub(crate) cladefs_socket: String,
 }
 
 /// What machined asks of a running machine.

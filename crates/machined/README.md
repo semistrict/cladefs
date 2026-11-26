@@ -3,9 +3,12 @@
 The server libmachine is for (board 13467): one process running many machines, each a Linux
 guest on libmachine (`crates/libmachine`, doc-30), managed over a gRPC API of its own,
 `machined.v1.Machined` ([`proto/machined/v1/machined.proto`](proto/machined/v1/machined.proto)).
-It is to embed cladefs's extent daemon too, one per process, shared by its machines (libcladefs,
-board 13471), and serve that daemon's `cladefs.cladefsd.v1.Cladefsd` on the same endpoint, so
-that one endpoint manages both cells and machines: both wait on boards 13067 and 13471.
+It embeds cladefs's extent daemon, one per process, shared by its machines (libcladefs, board
+13471), and serves that daemon's `cladefs.cladefsd.v1.Cladefsd` (and its health service) on the
+same endpoint, so that one endpoint manages both cells and machines. Every machine boots from a
+cell (board 13992): its `root`, Fxfs on its extent store device, which its kernel mounts as `/`
+(`root=root rootfstype=cladefs rw`); `CreateCell`, `ImportImage` (a container image) and
+`ForkCell` of the Cladefsd service make one, and a cell is one machine's at a time.
 
 ## Running it
 
@@ -21,6 +24,10 @@ machined --images /var/lib/machined/images --state /var/lib/machined/state \
   snapshots and its suspensions' files. On a disk (suspensions refuse tmpfs), and short: the vsock
   sockets' paths under it must fit a Unix socket's (about 100 bytes); machined refuses to start
   otherwise. What an earlier machined left there goes as it starts.
+- `--cladefs-config FILE`: the daemon's configuration, cladefsd's TOML (`cladefsd --config`):
+  its disks, bucket, KMS and memory budget. Unless given, one local disk in `<state>/cladefs`
+  with a bucket of files there and a master key of its own (`<state>/cladefs/master.key`, made
+  once): a developer's machine's. `<state>/cladefs` outlives machined's restarts, as cells do.
 - `--socket PATH`: serve on a Unix socket, and/or
 - `--tcp ADDR --tls-cert PEM --tls-key PEM --tls-client-ca PEM`: serve on TCP with mutual TLS.
 
@@ -122,7 +129,7 @@ hotbed places on machined's runtime.
 ## What a hotbed node on a Mac still needs
 
 hotbed's worker runs each workspace as a Firecracker VM today (`internal/vm` in hotbed); machined
-is to run them on a Mac. Beyond what machined offers: roots on cells (boards 13067, 13471), a
+is to run them on a Mac. Beyond what machined offers: a
 network on Hypervisor.framework (board 13399), port forwards into the guest (board 13486), a
 balloon (board 13490), and machines that
 outlive a machined restart (board 13492). hotbed's guestd boots from a read-only tools disk under

@@ -46,5 +46,5 @@ mod service;
 mod vmm;
 mod vsock;
 
-pub use config::{Config, Tcp};
+pub use config::{CladefsConfig, Config, Tcp};
 pub use listen::{Server, start};

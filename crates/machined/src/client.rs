@@ -9,13 +9,14 @@ use std::path::Path;
 
 pub use crate::proto::machined_client::MachinedClient;
 
-/// A client of the machined serving on the Unix socket `socket`.
-pub async fn connect_unix(
+/// A channel to the machined serving on the Unix socket `socket`: for its Machined service
+/// ([`MachinedClient::new`]) and the Cladefsd service of its cladefs daemon alike.
+pub async fn channel_unix(
     socket: impl AsRef<Path>,
-) -> Result<MachinedClient<tonic::transport::Channel>, tonic::transport::Error> {
+) -> Result<tonic::transport::Channel, tonic::transport::Error> {
     let socket = socket.as_ref().to_owned();
     // The URI names no host: the connector connects to the socket, whatever it asks for.
-    let channel = tonic::transport::Endpoint::from_static("http://machined")
+    tonic::transport::Endpoint::from_static("http://machined")
         .connect_with_connector(tower::service_fn(move |_: tonic::transport::Uri| {
             let socket = socket.clone();
             async move {
@@ -23,6 +24,12 @@ pub async fn connect_unix(
                 Ok::<_, std::io::Error>(hyper_util::rt::TokioIo::new(stream))
             }
         }))
-        .await?;
-    Ok(MachinedClient::new(channel))
+        .await
+}
+
+/// A client of the machined serving on the Unix socket `socket`.
+pub async fn connect_unix(
+    socket: impl AsRef<Path>,
+) -> Result<MachinedClient<tonic::transport::Channel>, tonic::transport::Error> {
+    Ok(MachinedClient::new(channel_unix(socket).await?))
 }

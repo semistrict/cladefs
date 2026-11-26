@@ -247,7 +247,9 @@ fn make(
 ) -> Result<(Machine, vsock::Server), Status> {
     let spec =
         start.spec.clone().ok_or_else(|| Status::invalid_argument("a start names its machine"))?;
-    let plan = checks::plan(std::path::Path::new(&start.images), &spec)?;
+    let mut plan = checks::plan(std::path::Path::new(&start.images), &spec)?;
+    plan.config.extent_daemon =
+        Some(Arc::new(libmachine::ExtentDaemon::at_socket(&start.cladefs_socket)));
     let mut machine = if start.snapshot.is_empty() {
         Machine::boot_linux(plan.config, &plan.boot).map_err(errors::status)?
     } else {

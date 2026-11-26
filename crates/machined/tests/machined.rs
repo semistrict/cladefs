@@ -25,7 +25,7 @@ use std::time::Duration;
 
 mod common;
 
-use common::{guest, hypervisor};
+use common::{fork, guest, hypervisor, import_root};
 use machined::client::{MachinedClient, connect_unix};
 use machined::proto::{self, exec_request, exec_response};
 use tokio_stream::StreamExt as _;
@@ -41,10 +41,39 @@ const STATE_WAIT: Duration = Duration::from_secs(60);
 struct Daemon {
     server: Option<machined::Server>,
     client: MachinedClient<Channel>,
+    /// The cell its machines' roots are forked from, if it boots the guest.
+    base: Option<proto::Cell>,
+    socket: PathBuf,
     _dir: tempfile::TempDir,
 }
 
 impl Daemon {
+    /// A machined booting `kernel`, its machines' roots forked from a cell of the test
+    /// initramfs's files.
+    async fn start_guest(kernel: &Path, initramfs: &Path) -> Self {
+        let mut daemon = Self::start(&[("kernel", kernel)]).await;
+        daemon.base = Some(import_root(&daemon.socket, initramfs, daemon._dir.path()).await);
+        daemon
+    }
+
+    /// A machine booting the guest's kernel from a root of its own, forked from the base, its
+    /// init the test initramfs's, `command_line` after.
+    async fn spec(&self, command_line: &str) -> proto::MachineSpec {
+        let root =
+            fork(&self.socket, self.base.as_ref().expect("a daemon booting the guest")).await;
+        proto::MachineSpec {
+            vcpus: 2,
+            memory_bytes: 512 << 20,
+            boot: Some(proto::Boot {
+                kernel: "kernel".into(),
+                command_line: format!("init=/init {command_line}"),
+                ..Default::default()
+            }),
+            root: Some(root),
+            ..Default::default()
+        }
+    }
+
     async fn start(images: &[(&str, &Path)]) -> Self {
         Self::start_with(images, |_| {}).await
     }
@@ -66,6 +95,7 @@ impl Daemon {
             std::fs::copy(from, image_dir.join(name)).unwrap();
         }
         let mut config = machined::Config {
+            cladefs: common::cladefs(&dir.path().join("state")),
             socket: Some(dir.path().join("machined.sock")),
             tcp: None,
             images: image_dir,
@@ -75,25 +105,13 @@ impl Daemon {
         };
         configure(&mut config);
         let server = machined::start(config).await.unwrap();
-        let client = connect_unix(server.socket().unwrap()).await.unwrap();
-        Self { server: Some(server), client, _dir: dir }
+        let socket = server.socket().unwrap().to_owned();
+        let client = connect_unix(&socket).await.unwrap();
+        Self { server: Some(server), client, base: None, socket, _dir: dir }
     }
 
     async fn shutdown(mut self) {
         self.server.take().unwrap().shutdown().await.unwrap();
-    }
-}
-
-fn spec(command_line: &str) -> proto::MachineSpec {
-    proto::MachineSpec {
-        vcpus: 2,
-        memory_bytes: 512 << 20,
-        boot: Some(proto::Boot {
-            kernel: "kernel".into(),
-            initramfs: "initramfs.cpio".into(),
-            command_line: command_line.into(),
-        }),
-        ..Default::default()
     }
 }
 
@@ -186,17 +204,59 @@ async fn console(client: &mut MachinedClient<Channel>, name: &str) -> String {
     String::from_utf8_lossy(&text).replace("\r\n", "\n")
 }
 
+/// A machine boots from a cell (board 13992): its root is Fxfs on its extent store device, from
+/// a cell of machined's embedded daemon, its own (forked from a base the daemon imported); what
+/// its guest writes there is the cell's, there again when it starts again, and no other machine's.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_machine_boots_from_its_cell() {
+    let Some((kernel, initramfs)) = guest() else { return };
+    let daemon = Daemon::start_guest(&kernel, &initramfs).await;
+    let mut client = daemon.client.clone();
+    for name in ["one", "two"] {
+        create(&mut client, name, daemon.spec("quiet libmachine_action=agent").await).await;
+        client.start_machine(proto::StartMachineRequest { name: name.into() }).await.unwrap();
+    }
+    let (mounts, _, _) = exec(&mut client, "one", &["cat", "/proc/mounts"], None).await.unwrap();
+    let mounts = String::from_utf8(mounts).unwrap();
+    assert!(mounts.lines().any(|l| l.starts_with("root / cladefs rw")), "{mounts}");
+    let write = ["sh", "-c", "echo kept > /kept && sync"];
+    let (_, _, exit) = exec(&mut client, "one", &write, None).await.unwrap();
+    assert_eq!(exit, proto::exec_exit::Status::Code(0));
+    let (_, _, exit) = exec(&mut client, "two", &["test", "-e", "/kept"], None).await.unwrap();
+    assert_eq!(exit, proto::exec_exit::Status::Code(1), "the other machine's root is its own");
+
+    let stop = proto::StopMachineRequest {
+        name: "one".into(),
+        sync_filesystems: true,
+        ..Default::default()
+    };
+    client.stop_machine(stop).await.unwrap();
+    client.start_machine(proto::StartMachineRequest { name: "one".into() }).await.unwrap();
+    let (kept, _, exit) = exec(&mut client, "one", &["cat", "/kept"], None).await.unwrap();
+    assert_eq!((kept, exit), (b"kept\n".to_vec(), proto::exec_exit::Status::Code(0)));
+
+    // A cell one machine has open, another can't boot from.
+    let one = client.get_machine(proto::GetMachineRequest { name: "one".into() }).await;
+    let root = one.unwrap().into_inner().machine.unwrap().spec.unwrap().root;
+    let twin = proto::MachineSpec { root, ..daemon.spec("quiet libmachine_action=agent").await };
+    create(&mut client, "twin", twin).await;
+    let started = client.start_machine(proto::StartMachineRequest { name: "twin".into() }).await;
+    let refused = started.unwrap_err();
+    assert_eq!(refused.code(), Code::FailedPrecondition, "{refused:?}");
+    daemon.shutdown().await;
+}
+
 /// Each machine runs in a helper process of its own (board 13460): several at once, on
 /// Hypervisor.framework too; one whose helper dies ends with that said, while machined and the
 /// others run on.
 #[tokio::test(flavor = "multi_thread")]
 async fn machines_run_in_helpers_of_their_own() {
     let Some((kernel, initramfs)) = guest() else { return };
-    let daemon = Daemon::start(&[("kernel", &kernel), ("initramfs.cpio", &initramfs)]).await;
+    let daemon = Daemon::start_guest(&kernel, &initramfs).await;
     let mut client = daemon.client.clone();
     let mut pids = Vec::new();
     for name in ["a", "b", "c"] {
-        create(&mut client, name, spec("quiet libmachine_action=agent")).await;
+        create(&mut client, name, daemon.spec("quiet libmachine_action=agent").await).await;
         let started = client.start_machine(proto::StartMachineRequest { name: name.into() }).await;
         let started = started.unwrap().into_inner().machine.unwrap();
         assert_eq!(state_of(&started), proto::MachineState::Running);
@@ -252,10 +312,10 @@ async fn machines_run_in_helpers_of_their_own() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_machine_boots_runs_a_command_and_stops() {
     let Some((kernel, initramfs)) = guest() else { return };
-    let daemon = Daemon::start(&[("kernel", &kernel), ("initramfs.cpio", &initramfs)]).await;
+    let daemon = Daemon::start_guest(&kernel, &initramfs).await;
     let mut client = daemon.client.clone();
 
-    let made = create(&mut client, "m1", spec("quiet libmachine_action=agent")).await;
+    let made = create(&mut client, "m1", daemon.spec("quiet libmachine_action=agent").await).await;
     assert_eq!(state_of(&made), proto::MachineState::Created);
     assert_eq!(made.vsock_socket, "", "no vsock socket before it runs");
     let watch = proto::WatchMachineRequest { name: "m1".into() };
@@ -358,9 +418,9 @@ async fn a_machine_boots_runs_a_command_and_stops() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_guest_that_powers_off_stops_its_machine() {
     let Some((kernel, initramfs)) = guest() else { return };
-    let daemon = Daemon::start(&[("kernel", &kernel), ("initramfs.cpio", &initramfs)]).await;
+    let daemon = Daemon::start_guest(&kernel, &initramfs).await;
     let mut client = daemon.client.clone();
-    create(&mut client, "off", spec("quiet")).await;
+    create(&mut client, "off", daemon.spec("quiet").await).await;
     let watch = proto::WatchMachineRequest { name: "off".into() };
     let mut watch = client.watch_machine(watch).await.unwrap().into_inner();
     for boot in 1..=2 {
@@ -371,7 +431,7 @@ async fn a_guest_that_powers_off_stops_its_machine() {
         assert_eq!(markers, boot, "the console is kept across starts");
     }
 
-    create(&mut client, "left", spec("quiet libmachine_action=agent")).await;
+    create(&mut client, "left", daemon.spec("quiet libmachine_action=agent").await).await;
     client.start_machine(proto::StartMachineRequest { name: "left".into() }).await.unwrap();
     daemon.shutdown().await;
 }
@@ -382,9 +442,9 @@ async fn a_guest_that_powers_off_stops_its_machine() {
 #[tokio::test(flavor = "multi_thread")]
 async fn callers_that_go_leave_nothing_half_done() {
     let Some((kernel, initramfs)) = guest() else { return };
-    let daemon = Daemon::start(&[("kernel", &kernel), ("initramfs.cpio", &initramfs)]).await;
+    let daemon = Daemon::start_guest(&kernel, &initramfs).await;
     let mut client = daemon.client.clone();
-    create(&mut client, "c", spec("quiet libmachine_action=agent")).await;
+    create(&mut client, "c", daemon.spec("quiet libmachine_action=agent").await).await;
     let watch = proto::WatchMachineRequest { name: "c".into() };
     let mut watch = client.watch_machine(watch).await.unwrap().into_inner();
     let mut start = tonic::Request::new(proto::StartMachineRequest { name: "c".into() });
@@ -443,9 +503,9 @@ async fn callers_that_go_leave_nothing_half_done() {
 #[tokio::test(flavor = "multi_thread")]
 async fn snapshots_restores_and_suspensions() {
     let Some((kernel, initramfs)) = guest() else { return };
-    let daemon = Daemon::start(&[("kernel", &kernel), ("initramfs.cpio", &initramfs)]).await;
+    let daemon = Daemon::start_guest(&kernel, &initramfs).await;
     let mut client = daemon.client.clone();
-    create(&mut client, "tmpl", spec("quiet libmachine_action=agent")).await;
+    create(&mut client, "tmpl", daemon.spec("quiet libmachine_action=agent").await).await;
     client.start_machine(proto::StartMachineRequest { name: "tmpl".into() }).await.unwrap();
     let write = proto::WriteFileRequest {
         name: "tmpl".into(),
@@ -522,6 +582,7 @@ async fn requests_that_mean_nothing_are_refused() {
     };
     let boot = |kernel: &str| proto::MachineSpec {
         boot: Some(proto::Boot { kernel: kernel.into(), ..Default::default() }),
+        root: Some(proto::Cell { tenant: 0, cell: 1 }),
         ..Default::default()
     };
     refused.push(("a bad name", create("Bad", boot("kernel")).await, Code::InvalidArgument));
@@ -550,9 +611,13 @@ async fn requests_that_mean_nothing_are_refused() {
     refused.push(("RAM not of pages", create("a", memory).await, Code::InvalidArgument));
     let vcpus = proto::MachineSpec { vcpus: u32::MAX, ..boot("kernel") };
     refused.push(("too many vCPUs", create("a", vcpus).await, Code::InvalidArgument));
-    let root =
-        proto::MachineSpec { root: Some(proto::Cell { tenant: 0, cell: 1 }), ..boot("kernel") };
-    refused.push(("a root on a cell", create("a", root).await, Code::Unimplemented));
+    let rootless = proto::MachineSpec { root: None, ..boot("kernel") };
+    refused.push(("no root", create("a", rootless).await, Code::InvalidArgument));
+    let cell0 =
+        proto::MachineSpec { root: Some(proto::Cell { tenant: 0, cell: 0 }), ..boot("kernel") };
+    refused.push(("a root of cell 0", create("a", cell0).await, Code::InvalidArgument));
+    let dax = proto::MachineSpec { root_dax_window_bytes: 4096, ..boot("kernel") };
+    refused.push(("a DAX window not of 2 MiB", create("a", dax).await, Code::InvalidArgument));
     let ports = proto::MachineSpec { vsock_listen_ports: vec![5, 5], ..boot("kernel") };
     refused.push(("a vsock port twice", create("a", ports).await, Code::InvalidArgument));
     let forward = proto::MachineSpec {

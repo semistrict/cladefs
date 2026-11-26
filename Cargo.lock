@@ -3098,12 +3098,15 @@ name = "machined"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "cladefs_core",
+ "cladefsd",
  "clap",
  "futures",
  "http-body-util",
  "hyper",
  "hyper-util",
  "libc",
+ "libcladefs",
  "libmachine",
  "libmachine-agent",
  "log",
@@ -3118,11 +3121,11 @@ dependencies = [
  "rustls-platform-verifier",
  "serde",
  "serde_json",
+ "tar",
  "tempfile",
  "tokio-rustls",
  "tokio-stream",
  "tokio-tungstenite",
- "tonic-health",
  "tonic-prost",
  "tower",
 ]

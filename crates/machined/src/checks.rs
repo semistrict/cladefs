@@ -12,7 +12,7 @@ use std::path::{Component, Path, PathBuf};
 
 use libmachine::agent::Command;
 use libmachine::net::{EgressPolicy, HostPattern, NetworkConfig, Ports, Rule};
-use libmachine::{LinuxBoot, MachineConfig};
+use libmachine::{CellId, ExtentCell, ExtentStore, LinuxBoot, MachineConfig};
 use tonic::Status;
 
 use crate::proto;
@@ -171,12 +171,7 @@ pub(crate) fn plan(images: &Path, spec: &proto::MachineSpec) -> Result<Plan, Sta
         initramfs => Some(image(images, "initramfs", initramfs)?),
     };
     let network = spec.network.as_ref().map(network).transpose()?;
-    if spec.root.is_some() {
-        return Err(Status::unimplemented(
-            "machines' roots on cells wait on board 13067 (the extent device on machined's \
-             embedded daemon, board 13471)",
-        ));
-    }
+    let root = root(spec)?;
     vsock_ports(&spec.vsock_listen_ports)?;
     labels(&spec.labels)?;
     Ok(Plan {
@@ -186,10 +181,43 @@ pub(crate) fn plan(images: &Path, spec: &proto::MachineSpec) -> Result<Plan, Sta
             network,
             // machined keeps the console itself (src/console.rs).
             serial_capture_limit: 0,
+            // The daemon its helper connects to is the helper's to name (`crate::helper`).
+            extent_stores: vec![root],
             ..MachineConfig::default()
         },
-        boot: LinuxBoot { kernel, initrd, cmdline: boot.command_line.clone() },
+        boot: LinuxBoot {
+            kernel,
+            initrd,
+            cmdline: format!("root={ROOT_TAG} rootfstype=cladefs rw {}", boot.command_line),
+        },
     })
+}
+
+/// The extent store device's tag a machine's root is mounted from (`root=`).
+const ROOT_TAG: &str = "root";
+/// A DAX window's size is a multiple of this.
+const DAX_ALIGN: u64 = 2 << 20;
+
+/// A machine's root: the cell its spec names, on an extent store device, which its kernel mounts
+/// its Fxfs root from. Every machine boots from a cell: there is no machine without one.
+fn root(spec: &proto::MachineSpec) -> Result<ExtentStore, Status> {
+    let root = spec.root.as_ref().ok_or_else(|| {
+        invalid("a machine boots from a cell: its spec names its root (CreateCell, ImportImage or ForkCell of the Cladefsd service make one)")
+    })?;
+    if root.cell == 0 {
+        return Err(invalid("root: cell 0 names no cell"));
+    }
+    let dax_window_size = match spec.root_dax_window_bytes {
+        0 => None,
+        n if n.is_multiple_of(DAX_ALIGN) => Some(n),
+        n => {
+            return Err(invalid(format!(
+                "root_dax_window_bytes {n}: a multiple of {DAX_ALIGN}, or 0 for none"
+            )));
+        }
+    };
+    let cell = ExtentCell::Existing(CellId { tenant: root.tenant, id: root.cell });
+    Ok(ExtentStore { dax_window_size, ..ExtentStore::new(ROOT_TAG, cell, 0) })
 }
 
 /// A machine's network: its egress rules, as libmachine's policy.
