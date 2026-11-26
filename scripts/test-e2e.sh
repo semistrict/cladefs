@@ -465,6 +465,26 @@ cladefsd_stop() {
     [[ -n $cladefsd_scope ]] || return 0
     systemctl stop "$cladefsd_scope" 2> /dev/null || true
 }
+# cladefs: on hosts without Linux MGLRU/governor support (e.g. hotbed VMs with
+# /sys/kernel/mm/lru_gen/enabled=0 or insufficient swap), pass an explicit test memory budget so
+# non-governor e2e tests run while production cladefsd keeps failing hard in governed mode
+# (board 13373, board 13393).
+cladefsd_memory=${CLADEFSD_MEMORY:-}
+if [[ -z $cladefsd_memory ]]; then
+    mglru_enabled=0
+    if [[ -r /sys/kernel/mm/lru_gen/enabled ]]; then
+        mglru_raw=$(tr -d '[:space:]' < /sys/kernel/mm/lru_gen/enabled 2> /dev/null || echo 0)
+        if [[ $mglru_raw =~ ^0[xX][0-9a-fA-F]+$ ]]; then
+            (( 16#${mglru_raw#0[xX]} != 0 )) && mglru_enabled=1
+        elif [[ $mglru_raw =~ ^[0-9]+$ ]]; then
+            (( 10#$mglru_raw != 0 )) && mglru_enabled=1
+        fi
+    fi
+    swap_kb=$(awk '/^SwapTotal:/ { print $2; exit }' /proc/meminfo 2> /dev/null || echo 0)
+    if (( mglru_enabled == 0 || swap_kb == 0 )); then
+        cladefsd_memory=$((1 << 30))
+    fi
+fi
 ${cladefsd_run[@]+"${cladefsd_run[@]}"} \
 env CLADEFSD_BUCKET="${CLADEFSD_BUCKET:-file://$bucket_dir}" \
     CLADEFSD_ROOTS="$disk_dir" \
@@ -472,7 +492,7 @@ env CLADEFSD_BUCKET="${CLADEFSD_BUCKET:-file://$bucket_dir}" \
     CLADEFSD_TOKEN="${CLADEFSD_TOKEN:-1}" \
     CLADEFSD_VM_CGROUP_DELEGATED="${CLADEFSD_VM_CGROUP_DELEGATED:-1}" \
     CLADEFSD_STATS="$results/$daemon_file-stats.txt" CLADEFSD_GRPC="$control" \
-    FAILPOINTS="${CLADEFS_FAILPOINTS:-}" ${cladefsd_wrap[@]+"${cladefsd_wrap[@]}"} "$cladefsd_bin" "$socket" ${CLADEFSD_MEMORY:+"$CLADEFSD_MEMORY"} \
+    FAILPOINTS="${CLADEFS_FAILPOINTS:-}" ${cladefsd_wrap[@]+"${cladefsd_wrap[@]}"} "$cladefsd_bin" "$socket" ${cladefsd_memory:+"$cladefsd_memory"} \
     > "$results/$daemon_file.log" 2>&1 &
 daemon=$!
 trap 'cladefsd_peak; kill "$daemon" 2> /dev/null; cladefsd_stop; rm -r "$sockets"; [[ -z $bucket_dir ]] || rm -r "$bucket_dir"; [[ -z $cache_dir ]] || rm -r "$cache_dir"; rm -r "$disk_dir"' EXIT

@@ -801,7 +801,8 @@ mod host {
             let metrics_at = metrics.to_string();
             let env = [("CLADEFSD_METRICS", OsStr::new(&metrics_at))];
             // Governed, as production's: its memory what is free (TASK-358).
-            let daemon = crate::common::spawn_daemon(test_setup, &socket, "cladefsd", &env, None)?;
+            let daemon =
+                crate::common::spawn_governed_daemon(test_setup, &socket, "cladefsd", &env)?;
             let imported = Instant::now();
             let base = control(&socket)?
                 .call(async |client| {

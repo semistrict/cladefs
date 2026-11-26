@@ -337,12 +337,43 @@ fn window_bytes(window: Window, given: Option<&str>, meminfo: &str) -> anyhow::R
 /// `<name>-stats.txt` beside its log, unless `env` names a file (`CLADEFSD_STATS`): what it
 /// downloaded against what it read, which the run's summary says (scripts/guest_results.py,
 /// TASK-165.12).
+/// Default explicit memory budget (1 GiB) passed to test daemons launched via [`spawn_daemon`]
+/// when the host does not support Linux governed mode (e.g. hotbed VMs with MGLRU disabled,
+/// board 13373 / board 13393). Production `cladefsd` still fails hard in governed mode; tests
+/// exercising governed mode itself use [`spawn_governed_daemon`].
+const DEFAULT_TEST_DAEMON_MEMORY: u64 = 1 << 30;
+
+/// Spawns `cladefsd` in governed mode (no fixed memory budget argument) so tests that specifically
+/// exercise the memory governor fail hard if the host lacks governor support (board 13373).
+pub fn spawn_governed_daemon(
+    test_setup: &TestSetup,
+    socket: &Path,
+    name: &str,
+    env: &[(&str, &std::ffi::OsStr)],
+) -> anyhow::Result<std::process::Child> {
+    spawn_daemon_inner(test_setup, socket, name, env, None, true)
+}
+
+/// Spawns `cladefsd` for a test case. When `memory` is `None`, honors `CLADEFSD_MEMORY` if set;
+/// otherwise runs governed when the host supports it, or falls back to
+/// [`DEFAULT_TEST_DAEMON_MEMORY`] on hosts without MGLRU/governor support (board 13373).
 pub fn spawn_daemon(
     test_setup: &TestSetup,
     socket: &Path,
     name: &str,
     env: &[(&str, &std::ffi::OsStr)],
     memory: Option<u64>,
+) -> anyhow::Result<std::process::Child> {
+    spawn_daemon_inner(test_setup, socket, name, env, memory, false)
+}
+
+fn spawn_daemon_inner(
+    test_setup: &TestSetup,
+    socket: &Path,
+    name: &str,
+    env: &[(&str, &std::ffi::OsStr)],
+    memory: Option<u64>,
+    require_governed: bool,
 ) -> anyhow::Result<std::process::Child> {
     use std::time::{Duration, Instant};
 
@@ -361,6 +392,18 @@ pub fn spawn_daemon(
     command.arg(socket).env("CLADEFSD_GRPC", socket.with_extension("control"));
     if let Some(memory) = memory {
         command.arg(memory.to_string());
+    } else if !require_governed {
+        let env_memory = env
+            .iter()
+            .find(|(var, _)| *var == "CLADEFSD_MEMORY")
+            .map(|(_, value)| value.to_os_string())
+            .or_else(|| std::env::var_os("CLADEFSD_MEMORY"))
+            .filter(|value| !value.is_empty());
+        if let Some(memory) = env_memory {
+            command.arg(memory);
+        } else if !cladefs::cladefsd::governor::host_supported() {
+            command.arg(DEFAULT_TEST_DAEMON_MEMORY.to_string());
+        }
     }
     if !named("CLADEFSD_BUCKET") {
         let bucket = test_setup.tmp_dir.join(format!("{name}.bucket"));
