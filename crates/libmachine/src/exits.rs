@@ -275,6 +275,9 @@ mod tests {
             ("halt", counts.halt),
             ("interrupted", counts.interrupted),
             ("startup", counts.startup),
+            ("hypercall", counts.hypercall),
+            ("wait", counts.wait),
+            ("system_register", counts.system_register),
             ("other", counts.other),
         ]
         .to_vec();

@@ -28,9 +28,9 @@ mod pipe_event {
     /// The one flag libmachine passes, as on Linux: reads never block. Every event here is so.
     pub(crate) const EFD_NONBLOCK: i32 = 1;
 
-    /// An eventfd's subset libmachine uses, over a pipe: a write makes the read end readable, a
-    /// read drains it. The count an eventfd keeps is not: every read returns 1, which is all a
-    /// reader here ever needs (it takes everything available each time it wakes).
+    /// An eventfd's subset libmachine uses, over a pipe: each write a byte, a read drains them and
+    /// returns how many there were, as an eventfd's count (up to the pipe's room: a write to a
+    /// full pipe adds nothing, its reader having signals waiting anyway).
     #[derive(Debug)]
     pub(crate) struct EventFd {
         ends: Arc<(OwnedFd, OwnedFd)>,
@@ -55,41 +55,45 @@ mod pipe_event {
             Ok(Self { ends: Arc::new((read, write)) })
         }
 
-        /// Signals the event. `value` is ignored but for 0, which signals nothing, as an
-        /// eventfd's count would not change.
+        /// Adds `value` to the event's count, as an eventfd's write: `value` bytes, as many as
+        /// the pipe has room for (a full pipe's reader has signals waiting anyway).
         pub(crate) fn write(&self, value: u64) -> io::Result<()> {
-            if value == 0 {
-                return Ok(());
+            const ONES: [u8; 64] = [1; 64];
+            let mut left = value;
+            while left > 0 {
+                let n = left.min(ONES.len() as u64) as usize;
+                // SAFETY: writes at most `n` bytes from a static array of 64 to an open
+                // descriptor.
+                let wrote =
+                    unsafe { libc::write(self.ends.1.as_raw_fd(), ONES.as_ptr().cast(), n) };
+                match wrote {
+                    w if w > 0 => left -= w as u64,
+                    _ => match io::Error::last_os_error() {
+                        e if e.kind() == io::ErrorKind::WouldBlock => return Ok(()),
+                        e if e.kind() == io::ErrorKind::Interrupted => {}
+                        e => return Err(e),
+                    },
+                }
             }
-            let byte = 1u8;
-            // SAFETY: writes one byte from a live local to an open descriptor.
-            let n = unsafe { libc::write(self.ends.1.as_raw_fd(), (&raw const byte).cast(), 1) };
-            match n {
-                1 => Ok(()),
-                _ => match io::Error::last_os_error() {
-                    // Full: the reader has a signal waiting already.
-                    e if e.kind() == io::ErrorKind::WouldBlock => Ok(()),
-                    e => Err(e),
-                },
-            }
+            Ok(())
         }
 
-        /// Takes every signal waiting: 1 if there was any, `WouldBlock` if there was none, as a
+        /// Takes every signal waiting: how many, or `WouldBlock` if there was none, as a
         /// non-blocking eventfd's read.
         pub(crate) fn read(&self) -> io::Result<u64> {
             let mut buf = [0u8; 64];
-            let mut got = false;
+            let mut got = 0u64;
             loop {
                 // SAFETY: reads into a live local buffer of its length.
                 let n = unsafe {
                     libc::read(self.ends.0.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len())
                 };
                 match n {
-                    n if n > 0 => got = true,
+                    n if n > 0 => got += n as u64,
                     // The write end is this event's own, open as long as it is.
                     0 => unreachable!("an event's pipe has its write end"),
                     _ => match io::Error::last_os_error() {
-                        e if e.kind() == io::ErrorKind::WouldBlock && got => return Ok(1),
+                        e if e.kind() == io::ErrorKind::WouldBlock && got > 0 => return Ok(got),
                         e if e.kind() == io::ErrorKind::Interrupted => {}
                         e => return Err(e),
                     },

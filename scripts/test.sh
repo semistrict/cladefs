@@ -223,8 +223,11 @@ fi
 if part libmachine; then
     libmachine_guest=${LIBMACHINE_GUEST_DIR:-${CARGO_TARGET_DIR:-$root/target}/guest}
     LIBMACHINE_GUEST_DIR=$libmachine_guest "$root/crates/libmachine/scripts/build-test-guest.sh"
-    libmachine_env=(env LIBMACHINE_GUEST_DIR="$libmachine_guest"
-        CLADEFS_GUEST_KERNEL="$("$root/scripts/guest-kernel.sh")")
+    # The kernel's build log in a file: a detached hotbed command can't open /dev/stderr.
+    kernel_log=${CARGO_TARGET_DIR:-$root/target}/libmachine-guest-kernel.log
+    kernel=$(CLADEFS_GUEST_KERNEL_LOG=$kernel_log "$root/scripts/guest-kernel.sh") ||
+        { cat "$kernel_log" >&2; exit 1; }
+    libmachine_env=(env LIBMACHINE_GUEST_DIR="$libmachine_guest" CLADEFS_GUEST_KERNEL="$kernel")
     libmachine_log=$(mktemp)
     "${libmachine_env[@]}" cargo nextest run --locked --manifest-path "$root/Cargo.toml" \
         -p libmachine -p libmachine-agent --success-output final "$@" 2>&1 | tee "$libmachine_log"

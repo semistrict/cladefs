@@ -11,10 +11,10 @@
 //! 0x00_0802_0000  UART: a 16550, its registers a byte apart
 //! 0x00_0900_0000  GIC redistributors, 128 KiB a vCPU: 32 MiB, for the 256 vCPUs the framework
 //!                 places them for whatever a VM has
-//! 0x00_1000_0000  PCI ECAM, bus 0 alone (1 MiB)
-//! 0x00_2000_0000  32-bit BAR window, 512 MiB
+//! 0x00_1000_0000  PCI ECAM: room for buses 0-255 (256 MiB), bus 0 alone described
+//! 0x00_4000_0000  32-bit BAR window, 512 MiB
 //! 0x00_8000_0000  RAM (2 GiB up)
-//! 0x80_0000_0000  64-bit BAR window (512 GiB up), 64 GiB: the extent device's DAX window
+//! 0x80_0000_0000  64-bit BAR window (512 GiB up), 512 GiB: the extent device's DAX window
 //! ```
 //!
 //! The map fits a 40-bit IPA space, which Apple's hosts give with 4 KiB stage 2 pages
@@ -56,18 +56,19 @@ pub(crate) const TIMER_PPI_PHYS: u32 = 30;
 pub(crate) const TIMER_PPI_VIRT: u32 = 27;
 pub(crate) const TIMER_PPI_HYP: u32 = 26;
 
-/// PCI Express enhanced configuration access (ECAM) for segment 0: bus 0 alone, 32 devices of 8
-/// functions, 4 KiB each.
+/// PCI Express enhanced configuration access (ECAM) for segment 0: 1 MiB per bus, 4 KiB per
+/// function. The window has room for buses 0-255 and is reserved whole, as the PC's is, but the
+/// board has bus 0 only, and its device tree says so (`bus-range`, and `reg` its 1 MiB).
 pub(crate) const PCI_ECAM_ADDR: u64 = 0x1000_0000;
-pub(crate) const PCI_ECAM_SIZE: u64 = 0x10_0000;
+pub(crate) const PCI_ECAM_SIZE: u64 = 0x1000_0000;
 pub(crate) const PCI_ECAM_LAST_BUS: u8 = 0;
 /// The window 32-bit memory BARs are allocated from.
-pub(crate) const PCI_MMIO32_ADDR: u64 = 0x2000_0000;
+pub(crate) const PCI_MMIO32_ADDR: u64 = 0x4000_0000;
 pub(crate) const PCI_MMIO32_SIZE: u64 = 0x2000_0000;
 /// The window 64-bit memory BARs (shared memory regions, such as cladefs's DAX window) are
 /// allocated from.
 pub(crate) const PCI_MMIO64_ADDR: u64 = 0x80_0000_0000;
-pub(crate) const PCI_MMIO64_SIZE: u64 = 0x10_0000_0000;
+pub(crate) const PCI_MMIO64_SIZE: u64 = 0x80_0000_0000;
 /// The first GSI given to MSI-X vectors: a GSI here is only the key of an MSI route, which the
 /// HVF backend keeps itself.
 pub(crate) const PCI_MSI_GSI_BASE: u32 = 0;
@@ -82,10 +83,11 @@ const _: () = {
     assert!(UART_ADDR >= GIC_MSI_ADDR + 0x1_0000);
     assert!(GIC_REDIST_ADDR >= UART_ADDR + 0x1_0000);
     assert!(GIC_REDIST_ADDR + GIC_REDIST_REGION_SIZE <= PCI_ECAM_ADDR);
-    assert!(PCI_ECAM_ADDR + PCI_ECAM_SIZE <= PCI_MMIO32_ADDR);
+    // A gap between them: an address past the ECAM is nobody's.
+    assert!(PCI_ECAM_ADDR + PCI_ECAM_SIZE < PCI_MMIO32_ADDR);
     assert!(PCI_MMIO32_ADDR + PCI_MMIO32_SIZE <= RAM_ADDR);
     assert!(PCI_MMIO64_ADDR + PCI_MMIO64_SIZE <= 1 << IPA_BITS);
-    assert!(PCI_ECAM_SIZE == (PCI_ECAM_LAST_BUS as u64 + 1) << 20);
+    assert!(PCI_ECAM_SIZE >= (PCI_ECAM_LAST_BUS as u64 + 1) << 20);
 };
 
 /// Guest RAM of `mem_size` bytes (at most [`MAX_RAM`]) as (start, size) regions: one, from

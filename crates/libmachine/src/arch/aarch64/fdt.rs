@@ -12,9 +12,9 @@ use vm_fdt::FdtWriter;
 
 use super::layout::{
     GIC_DIST_ADDR, GIC_MSI_ADDR, GIC_REDIST_ADDR, GIC_REDIST_SIZE, MSI_SPI_BASE, MSI_SPI_COUNT,
-    PCI_ECAM_ADDR, PCI_ECAM_LAST_BUS, PCI_ECAM_SIZE, PCI_MMIO32_ADDR, PCI_MMIO32_SIZE,
-    PCI_MMIO64_ADDR, PCI_MMIO64_SIZE, RAM_ADDR, SPI_BASE, TIMER_PPI_HYP, TIMER_PPI_PHYS,
-    TIMER_PPI_SECURE_PHYS, TIMER_PPI_VIRT, UART_ADDR, UART_SIZE, UART_SPI,
+    PCI_ECAM_ADDR, PCI_ECAM_LAST_BUS, PCI_MMIO32_ADDR, PCI_MMIO32_SIZE, PCI_MMIO64_ADDR,
+    PCI_MMIO64_SIZE, RAM_ADDR, SPI_BASE, TIMER_PPI_HYP, TIMER_PPI_PHYS, TIMER_PPI_SECURE_PHYS,
+    TIMER_PPI_VIRT, UART_ADDR, UART_SIZE, UART_SPI,
 };
 use crate::error::{Error, Result};
 
@@ -141,7 +141,9 @@ fn build(b: &Board<'_>) -> std::result::Result<Vec<u8>, vm_fdt::Error> {
     let pci = fdt.begin_node(&format!("pcie@{PCI_ECAM_ADDR:x}"))?;
     fdt.property_string("compatible", "pci-host-ecam-generic")?;
     fdt.property_string("device_type", "pci")?;
-    fdt.property_array_u64("reg", &[PCI_ECAM_ADDR, PCI_ECAM_SIZE])?;
+    // The buses described: bus 0's 1 MiB of the reserved window.
+    let described = (u64::from(PCI_ECAM_LAST_BUS) + 1) << 20;
+    fdt.property_array_u64("reg", &[PCI_ECAM_ADDR, described])?;
     fdt.property_array_u32("bus-range", &[0, u32::from(PCI_ECAM_LAST_BUS)])?;
     fdt.property_u32("linux,pci-domain", 0)?;
     fdt.property_u32("#address-cells", 3)?;
