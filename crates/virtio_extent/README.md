@@ -19,8 +19,9 @@ adapter) and libmachine (`crates/libmachine`, board 13067).
   reads
   its configuration space, hears the daemon's notices (capacity, asks for
   the guest's stats) and has the VMM raise a configuration change interrupt for them, makes and
-  creates the DAX window (Linux's: macOS refuses one until the VMM maps its pages, board 13069),
-  and takes snapshots of the store and restores from them.
+  creates the DAX window (on macOS the VMM maps its pages into the guest as cladefs's stage says,
+  `cladefs::HvfSecondStage`, and hands it the guest's faults through `window_fault`, board
+  13069), and takes snapshots of the store and restores from them.
 - **Requests** (`Buffers`, `handle`, `Requests`, `Workers`): a request's buffers, built from its
   descriptors' guest memory in their order, served over any `Backend` (cladefs's
   `CellClient` on Linux, a fake in tests), what doc-4 calls out of range refused first,

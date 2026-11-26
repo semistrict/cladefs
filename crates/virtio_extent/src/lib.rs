@@ -17,9 +17,9 @@
 //! - [`protocol`]: the requests, flags, features and configuration space, and the version a
 //!   driver and a snapshot are checked against.
 //! - [`Config`]: a device's configuration, as a VMM's user gives it.
-//! - [`Device`]: a device's cell, configuration space, notices, DAX window (Linux's; on macOS
-//!   none yet, board 13069) and snapshots, which a VMM's adapter holds beside its transport's
-//!   state.
+//! - [`Device`]: a device's cell, configuration space, notices, DAX window (on macOS mapped by
+//!   the VMM as cladefs's stage says, [`window_fault`] taking the guest's faults, board 13069) and
+//!   snapshots, which a VMM's adapter holds beside its transport's state.
 //! - [`Buffers`], [`handle`] and [`Requests`]: serving a request whose buffers the
 //!   adapter took off a queue, over any [`Backend`]; [`Workers`], a thread each queue, taking
 //!   requests off a [`RequestQueue`] of the VMM's transport as its event (an eventfd, or a pipe on
@@ -59,7 +59,11 @@ pub use device::{ActivateError, Device, Error, OnLost, ReleaseError, ShmRegion};
 pub use notices::{ConfigInterrupt, Notices, Resizing, StatsAsks};
 pub use persist::SnapshotMode;
 pub use requests::{Requests, Served, handle};
-pub use window::{DaxWindowError, PrefaultGuestMemory, WindowVm, dax_window_at};
+#[cfg(target_os = "linux")]
+pub use window::dax_window_at;
+#[cfg(not(target_os = "linux"))]
+pub use window::window_fault;
+pub use window::{DaxWindowError, PrefaultGuestMemory, WindowVm};
 pub use workers::{Popped, QueueInterrupt, RequestQueue, WorkerQueue, Workers};
 
 /// An error of the VMM's, which the device passes on.

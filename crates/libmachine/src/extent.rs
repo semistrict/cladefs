@@ -17,9 +17,9 @@
 //! to it in memory; or one listening at a socket ([`ExtentDaemon::at_socket`]), as a host's
 //! `cladefsd` is.
 //!
-//! The devices are virtio-PCI devices of type 0x4658 with a request queue per vCPU and, on KVM
-//! (x86-64 Linux), given a size, a DAX window. On Hypervisor.framework (arm64 macOS) they have
-//! no window yet: every read and write is a request (board 13069).
+//! The devices are virtio-PCI devices of type 0x4658 with a request queue per vCPU and, given a
+//! size, a DAX window: on KVM (x86-64 Linux) host memory cladefs maps with userfaultfd; on
+//! Hypervisor.framework (arm64 macOS) guest memory libmachine maps as cladefs says (board 13069).
 
 use std::path::PathBuf;
 
@@ -164,8 +164,7 @@ pub struct ExtentStore {
     pub capacity: u64,
     /// The DAX window's size, a nonzero multiple of 2 MiB, through which the guest maps its files'
     /// data from the daemon's extent cache: none without one, every read and write then a
-    /// request. Its guest physical addresses are a 64-bit BAR of the device's. KVM's alone yet
-    /// (board 13069).
+    /// request. Its guest physical addresses are a 64-bit BAR of the device's.
     pub dax_window_size: Option<u64>,
     /// The most bytes of private pages the window holds, as it copies on write (doc-13): pages
     /// the guest wrote and has not written back yet, this process's memory. A multiple of the

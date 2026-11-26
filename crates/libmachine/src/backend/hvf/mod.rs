@@ -100,9 +100,54 @@ pub(crate) struct Shared {
     /// Device memory mapped into the guest, by slot: (guest address, size).
     slots: Mutex<BTreeMap<u32, (u64, u64)>>,
     next_slot: AtomicU32,
+    /// Whether the VM exists, for the DAX windows' maps, which their cells' connections make, and
+    /// may make as the machine goes, after its VM: none once it is gone, which mapped nothing
+    /// more ([`Shared::map_window`]).
+    live: RwLock<bool>,
 }
 
 impl Shared {
+    /// Maps the `len` bytes of host memory at `host` into the VM at `guest_addr`, readable and
+    /// executable, and writable if `write`: a page of an extent store device's DAX window, as
+    /// cladefs's stage maps it (board 13069); nothing once the VM is gone. The VM's guest memory
+    /// no longer matches the window if the framework refuses: a panic.
+    ///
+    /// # Safety
+    ///
+    /// The memory stays mapped in this process until [`Shared::unmap_window`] takes it out of the
+    /// VM.
+    pub(crate) unsafe fn map_window(
+        &self,
+        guest_addr: u64,
+        host: std::ptr::NonNull<u8>,
+        len: u64,
+        write: bool,
+    ) {
+        let live = self.live.read().unwrap_or_else(|e| e.into_inner());
+        if !*live {
+            return;
+        }
+        let flags = HV_MEMORY_READ | HV_MEMORY_EXEC | if write { HV_MEMORY_WRITE } else { 0 };
+        // SAFETY: As the caller promises; the VM exists while `live` is held.
+        let ret = unsafe { hv_vm_map(host.as_ptr().cast(), guest_addr, len as usize, flags) };
+        if let Err(err) = check("map a DAX window's page", ret) {
+            panic!("{len:#x} bytes at {guest_addr:#x}: {err}");
+        }
+    }
+
+    /// Unmaps the `len` bytes at `guest_addr` that [`Shared::map_window`] mapped; nothing once the
+    /// VM is gone, which took them with it.
+    pub(crate) fn unmap_window(&self, guest_addr: u64, len: u64) {
+        let live = self.live.read().unwrap_or_else(|e| e.into_inner());
+        if !*live {
+            return;
+        }
+        // SAFETY: Unmaps what `map_window` mapped; the VM exists while `live` is held.
+        let ret = unsafe { hv_vm_unmap(guest_addr, len as usize) };
+        if let Err(err) = check("unmap a DAX window's page", ret) {
+            panic!("{len:#x} bytes at {guest_addr:#x}: {err}");
+        }
+    }
     /// Wakes every vCPU waiting for an interrupt: one was just sent to the GIC.
     pub(crate) fn interrupt_sent(&self) {
         for cpu in &self.cpus {
@@ -220,6 +265,7 @@ impl Vm {
             ioeventfds: RwLock::default(),
             slots: Mutex::default(),
             next_slot: AtomicU32::new(0),
+            live: RwLock::new(true),
         });
         let irqfds = irqfd::Forwarder::spawn(shared.clone())?;
         let vcpus = (0..vcpu_count)
@@ -275,6 +321,8 @@ impl Vm {
 impl Drop for Vm {
     fn drop(&mut self) {
         self.irqfds.stop();
+        // No DAX window maps anything after: the VM goes with what they mapped.
+        *self.shared.live.write().unwrap_or_else(|e| e.into_inner()) = false;
         for (_, (addr, size)) in std::mem::take(&mut *lock(&self.shared.slots)) {
             // SAFETY: unmaps what map_memory mapped.
             unsafe { hv_vm_unmap(addr, size as usize) };
@@ -631,7 +679,29 @@ impl Vcpu {
         let syndrome = e.syndrome;
         let class = (syndrome >> 26) & 0x3f;
         match class {
-            EC_DATA_ABORT_LOWER => self.data_abort(id, syndrome, e.physical_address),
+            EC_DATA_ABORT_LOWER | EC_INSTRUCTION_ABORT_LOWER => {
+                // A cache maintenance instruction's abort (CM) says it writes (WnR), which it
+                // doesn't: a load's, as far as the window goes.
+                let write = class == EC_DATA_ABORT_LOWER
+                    && syndrome & ESR_WNR != 0
+                    && syndrome & ESR_CM == 0;
+                match virtio_extent::window_fault(e.physical_address, write) {
+                    // The page mapped, the access is retried.
+                    Some(Ok(())) => Ok(Exit::Handled(ExitKind::AccessRetried)),
+                    Some(Err(errno)) => Err(Error::ExtentStore(format!(
+                        "a guest access to its DAX window at {:#x} ({}) failed: {errno}",
+                        e.physical_address,
+                        if write { "write" } else { "read" }
+                    ))),
+                    None if class == EC_DATA_ABORT_LOWER => {
+                        self.data_abort(id, syndrome, e.physical_address)
+                    }
+                    None => Ok(Exit::Done(ExitReason::Other(format!(
+                        "an instruction fetch from {:#x}, which no memory backs (ESR {syndrome:#x})",
+                        e.physical_address
+                    )))),
+                }
+            }
             EC_HVC64 => {
                 let x = |i: u32| get_reg(id, HV_REG_X0 + i);
                 let call = psci::Call { function: x(0)? as u32, args: [x(1)?, x(2)?, x(3)?] };
@@ -685,7 +755,7 @@ impl Vcpu {
         }
         let size = 1usize << ((syndrome >> 22) & 0x3);
         let reg = ((syndrome >> 16) & 0x1f) as u32;
-        let write = syndrome & (1 << 6) != 0;
+        let write = syndrome & ESR_WNR != 0;
         if write {
             let value = if reg == 31 { 0 } else { get_reg(id, HV_REG_X0 + reg)? };
             self.data[..size].copy_from_slice(&value.to_le_bytes()[..size]);
@@ -726,6 +796,10 @@ const EC_WFX: u64 = 0x01;
 const EC_HVC64: u64 = 0x16;
 const EC_SYSREG: u64 = 0x18;
 const EC_DATA_ABORT_LOWER: u64 = 0x24;
+const EC_INSTRUCTION_ABORT_LOWER: u64 = 0x20;
+/// A data abort's syndrome: its access a write (WnR), a cache maintenance instruction's (CM).
+const ESR_WNR: u64 = 1 << 6;
+const ESR_CM: u64 = 1 << 8;
 
 /// PSTATE at a kernel's entry: EL1 with SP_EL1 (EL1h), debug, SError, IRQ and FIQ masked.
 const PSTATE_EL1H_MASKED: u64 = 0x3c5;

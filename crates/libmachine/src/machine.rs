@@ -550,26 +550,20 @@ fn extent_daemon(config: &MachineConfig) -> Result<Option<&Arc<crate::ExtentDaem
 }
 
 /// The extent store devices of `config`'s ([`MachineConfig::extent_stores`]), with a request
-/// queue per vCPU, stopping the machine through `stop` as one can't go on: on
-/// Hypervisor.framework, without DAX windows yet (board 13069).
+/// queue per vCPU, their DAX windows' BARs from `bars`, stopping the machine through `stop` as one
+/// can't go on: on Hypervisor.framework, the windows' pages mapped by libmachine (board 13069).
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn extent_devices(
     config: &MachineConfig,
+    vm: &backend::Vm,
     bars: &mut crate::devices::pci::BarAllocator,
     stop: &Arc<StopShared>,
 ) -> Result<Vec<Box<dyn crate::devices::virtio::VirtioDevice>>> {
-    use crate::devices::virtio::extent::{ExtentDevice, Failing, NoWindow};
+    use crate::devices::virtio::extent::{ExtentDevice, ExtentVm, Failing};
 
     let Some(daemon) = extent_daemon(config)? else {
         return Ok(Vec::new());
     };
-    if let Some(store) = config.extent_stores.iter().find(|store| store.dax_window_size.is_some()) {
-        return Err(Error::InvalidConfig(format!(
-            "extent store device {}: machines on Hypervisor.framework have no DAX window yet \
-             (board 13069); dax_window_size must be None",
-            store.id
-        )));
-    }
     let queues = u16::try_from(config.vcpus).expect("check_vcpus bounds them");
     config
         .extent_stores
@@ -580,7 +574,7 @@ fn extent_devices(
                 daemon,
                 queues,
                 bars,
-                |_| Arc::new(NoWindow),
+                |at| Arc::new(ExtentVm { vm: vm.shared().clone(), at }),
                 None,
                 Failing::new(stop),
             )?;
@@ -916,7 +910,7 @@ impl Machine {
         let stop = Arc::new(StopShared::with_doorbell(doorbell.clone()));
         // The extent store devices first, as on the PC.
         let mut bars = crate::devices::pci::BarAllocator::new();
-        let mut devices = extent_devices(&config, &mut bars, &stop)?;
+        let mut devices = extent_devices(&config, &vm, &mut bars, &stop)?;
         let (vsock_device, vsock) = VsockDevice::new(GUEST_CID)?;
         devices.extend([Box::new(Rng) as Box<dyn VirtioDevice>, Box::new(vsock_device)]);
         let pci =

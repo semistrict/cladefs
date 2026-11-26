@@ -14,9 +14,10 @@
 //! [`PrefaultGuestMemory`] (KVM's `KVM_PRE_FAULT_MEMORY`), the window has the hypervisor map the
 //! pages as the daemon maps them.
 //!
-//! The window's memory is the same everywhere; cladefs's second stage of it, which serves its
-//! faults (userfaultfd), is Linux's: on macOS the window waits on the VMM mapping its pages
-//! itself (board 13069), and a device there has none.
+//! On macOS (Hypervisor.framework, board 13069) the window has no host memory of its own: the VMM
+//! maps the daemon's pages into the guest at the window's addresses itself, as cladefs's stage there
+//! says (`cladefs::HvfSecondStage`), and hands the guest's faults on the window to it
+//! ([`window_fault`]).
 
 use std::io;
 use std::ptr::NonNull;
@@ -40,11 +41,27 @@ pub trait WindowVm: Send + Sync {
 
     /// Maps the `len` bytes of host memory at `host` into the guest at `guest_addr`, as a memory
     /// slot added while the VM runs (KVM's `KVM_SET_USER_MEMORY_REGION`): the slot.
+    #[cfg(target_os = "linux")]
     fn add_slot(&self, guest_addr: u64, len: u64, host: NonNull<u8>) -> Result<u32, BoxError>;
 
     /// Removes the memory slot [`WindowVm::add_slot`] added: the hypervisor lets go of its host
     /// memory.
+    #[cfg(target_os = "linux")]
     fn remove_slot(&self, slot: u32);
+
+    /// Maps the `len` bytes of host memory at `host` into the guest at `guest_addr`, readable and
+    /// executable, and writable if `write` (Hypervisor.framework's `hv_vm_map`). A failure leaves
+    /// the guest's memory unlike the window's: the VMM panics.
+    ///
+    /// # Safety
+    ///
+    /// The memory stays mapped in this process until [`WindowVm::unmap`] takes it out of the guest.
+    #[cfg(not(target_os = "linux"))]
+    unsafe fn map(&self, guest_addr: u64, host: NonNull<u8>, len: u64, write: bool);
+
+    /// Unmaps the `len` bytes at `guest_addr` from the guest, which [`WindowVm::map`] mapped.
+    #[cfg(not(target_os = "linux"))]
+    fn unmap(&self, guest_addr: u64, len: u64);
 }
 
 /// Maps guest memory for the guest ahead of its accesses, as KVM's `KVM_PRE_FAULT_MEMORY` does,
@@ -64,6 +81,7 @@ pub enum DaxWindowError {
     GuestAddresses(BoxError),
     #[error("Cannot map host memory for the DAX window: {0}")]
     HostMemory(#[from] io::Error),
+    #[cfg(target_os = "linux")]
     #[error("Cannot map the DAX window into the guest: {0}")]
     MemorySlot(BoxError),
 }
@@ -83,11 +101,13 @@ impl Drop for Reservation {
 }
 
 /// The memory slot mapping the window's host memory into the guest. Removed on drop.
+#[cfg(target_os = "linux")]
 struct Slot {
     vm: Arc<dyn WindowVm>,
     slot: u32,
 }
 
+#[cfg(target_os = "linux")]
 impl Drop for Slot {
     fn drop(&mut self) {
         self.vm.remove_slot(self.slot);
@@ -100,14 +120,17 @@ impl Drop for Slot {
 /// guest's accesses meanwhile, as before it sets DRIVER_OK, fault, rather than growing its VMM's
 /// memory by the window's size.
 #[derive(Debug)]
+#[cfg(target_os = "linux")]
 struct HostMemory {
     base: NonNull<u8>,
     len: usize,
 }
 
 // SAFETY: The mapping is only an address range, which the cell's connection maps pages into.
+#[cfg(target_os = "linux")]
 unsafe impl Send for HostMemory {}
 
+#[cfg(target_os = "linux")]
 impl HostMemory {
     fn map(len: usize) -> io::Result<Self> {
         let align = DAX_WINDOW_ALIGNMENT as usize;
@@ -144,6 +167,7 @@ impl HostMemory {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Drop for HostMemory {
     fn drop(&mut self) {
         // SAFETY: The mapping is this one's, which nothing uses once it is dropped.
@@ -158,8 +182,13 @@ impl Drop for HostMemory {
 pub(crate) struct WindowMemory {
     // In the order they are dropped in: the hypervisor lets go of the host memory before it is
     // unmapped, and the guest addresses are released last.
+    #[cfg(target_os = "linux")]
     _slot: Slot,
+    #[cfg(target_os = "linux")]
     host: HostMemory,
+    /// The VM, which maps the window's pages into the guest as cladefs's stage says.
+    #[cfg(not(target_os = "linux"))]
+    vm: Arc<dyn WindowVm>,
     guest: Reservation,
 }
 
@@ -185,14 +214,19 @@ impl WindowMemory {
         }
         let start = vm.reserve(len, at).map_err(DaxWindowError::GuestAddresses)?;
         let guest = Reservation { vm: vm.clone(), start, len };
-        let host = HostMemory::map(usize::try_from(len).expect("a window fits in memory"))?;
-        let slot = vm.add_slot(start, len, host.base).map_err(DaxWindowError::MemorySlot)?;
-        WINDOWS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((
-            start,
-            len,
-            host.base.as_ptr() as usize,
-        ));
-        Ok(Self { _slot: Slot { vm, slot }, host, guest })
+        #[cfg(target_os = "linux")]
+        {
+            let host = HostMemory::map(usize::try_from(len).expect("a window fits in memory"))?;
+            let slot = vm.add_slot(start, len, host.base).map_err(DaxWindowError::MemorySlot)?;
+            WINDOWS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((
+                start,
+                len,
+                host.base.as_ptr() as usize,
+            ));
+            Ok(Self { _slot: Slot { vm, slot }, host, guest })
+        }
+        #[cfg(not(target_os = "linux"))]
+        Ok(Self { vm, guest })
     }
 
     /// The guest physical address the window starts at.
@@ -231,6 +265,28 @@ impl WindowMemory {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
+impl WindowMemory {
+    /// Creates `cell`'s DAX window in the guest's memory at the window's addresses, which the VM
+    /// maps the daemon's pages into as cladefs's stage says, and whose faults it hands to the stage
+    /// ([`window_fault`]): it copies on write, of `private_max` pages at most (backlog doc-13).
+    pub(crate) fn create(
+        &self,
+        cell: &cladefs::CellClient,
+        private_max: u64,
+    ) -> Result<(), cladefs::Error> {
+        let guest = Arc::new(GuestAt { vm: self.vm.clone(), start: self.guest.start });
+        let stage = cell.create_dax_window_in_guest(self.len(), guest, private_max)?;
+        STAGES.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((
+            self.guest.start,
+            self.guest.len,
+            Arc::downgrade(&stage),
+        ));
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
 impl Drop for WindowMemory {
     fn drop(&mut self) {
         let mut windows = WINDOWS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -239,9 +295,65 @@ impl Drop for WindowMemory {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
+impl Drop for WindowMemory {
+    fn drop(&mut self) {
+        let mut stages = STAGES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        stages.retain(|(start, _, _)| *start != self.guest.start);
+    }
+}
+
+/// The guest's memory at a window's addresses, from `start`, as cladefs's stage maps it there.
+#[cfg(not(target_os = "linux"))]
+struct GuestAt {
+    vm: Arc<dyn WindowVm>,
+    start: u64,
+}
+
+#[cfg(not(target_os = "linux"))]
+impl cladefs::GuestMemory for GuestAt {
+    unsafe fn map(&self, offset: u64, host: NonNull<u8>, len: u64, write: bool) {
+        // SAFETY: As the stage promises: the memory stays mapped until it unmaps it.
+        unsafe { self.vm.map(self.start + offset, host, len, write) }
+    }
+
+    fn unmap(&self, offset: u64, len: u64) {
+        self.vm.unmap(self.start + offset, len);
+    }
+}
+
+/// cladefs: the DAX windows of this process's guest, by their guest physical addresses and
+/// lengths, and their stages: where a vCPU's fault on a window goes ([`window_fault`]). A process
+/// has one VM on Hypervisor.framework.
+#[cfg(not(target_os = "linux"))]
+#[allow(clippy::type_complexity, reason = "a list of windows")]
+static STAGES: Mutex<Vec<(u64, u64, std::sync::Weak<cladefs::HvfSecondStage>)>> =
+    Mutex::new(Vec::new());
+
+/// cladefs: resolves the guest's fault at guest physical address `gpa`, for writing if `write`,
+/// if a DAX window of this process's is there, blocking the vCPU until it may retry its access
+/// (`HvfSecondStage::fault`): `None` if no window is, the access the VMM's own to emulate; the
+/// errno of a fault the guest can't go on from.
+#[cfg(not(target_os = "linux"))]
+pub fn window_fault(gpa: u64, write: bool) -> Option<Result<(), cladefs::Errno>> {
+    let stage = {
+        let stages = STAGES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let within = |(start, len, _): &&(u64, u64, _)| (*start..*start + *len).contains(&gpa);
+        let (start, _, stage) = stages.iter().find(within)?;
+        (*start, stage.upgrade())
+    };
+    let access = if write { cladefs::Access::Write } else { cladefs::Access::Read };
+    Some(match stage {
+        (start, Some(stage)) => stage.fault(gpa - start, access),
+        // The window's cell let go of it: nothing is there for the guest any more.
+        (_, None) => Err(cladefs::Errno::ENOTCONN),
+    })
+}
+
 /// cladefs: the DAX windows of this process's guests, as their guest physical addresses, lengths
 /// and host memory: where a vCPU whose access keeps failing finds what it failed at
 /// ([`dax_window_at`]).
+#[cfg(target_os = "linux")]
 static WINDOWS: Mutex<Vec<(u64, u64, usize)>> = Mutex::new(Vec::new());
 
 /// cladefs: the DAX window guest physical address `gpa` is in, if any: its offset there, and the
@@ -249,6 +361,7 @@ static WINDOWS: Mutex<Vec<(u64, u64, usize)>> = Mutex::new(Vec::new());
 /// (`cladefs::describe_windows`). For a vCPU to say where an access that kept failing failed: of
 /// a process's one VM, as Firecracker's are; with several, a guest address may be in each one's
 /// window, and this names the first made.
+#[cfg(target_os = "linux")]
 pub fn dax_window_at(gpa: u64) -> Option<(u64, usize)> {
     let windows = WINDOWS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let within = |&&(start, len, _): &&(u64, u64, usize)| (start..start + len).contains(&gpa);
@@ -271,7 +384,7 @@ impl cladefs::Prefault for WindowPrefault {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 pub(crate) mod tests {
     use std::sync::Mutex;
 

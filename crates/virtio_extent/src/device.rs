@@ -52,8 +52,6 @@ pub enum Error {
     ReopenWindow(String, cladefs::Error),
     #[error("Extent device {0}: remapping its DAX window after reopen: {1}")]
     ReopenMappings(String, cladefs::Errno),
-    #[error("Extent device {0}: no DAX window on this host yet (board 13069)")]
-    NoDaxWindow(String),
 }
 
 /// Errors releasing a paused device's cell ([`Device::release_cell`]).
@@ -242,14 +240,10 @@ impl Device {
         // cladefs: a window's faults come through /dev/userfaultfd, which the device opens as the
         // driver activates it: a host that denies it fails the VM now, saying what it lacks, not
         // the guest's activation, after which the VM has no disk (TASK-308).
+        #[cfg(target_os = "linux")]
         if config.dax_window_size.is_some() {
-            #[cfg(target_os = "linux")]
             cladefs::userfaultfd_accessible()
                 .map_err(|err| Error::Userfaultfd(config.id.clone(), err))?;
-            // cladefs: macOS has no userfaultfd; its window waits on the VMM mapping the
-            // window's pages itself (board 13069).
-            #[cfg(not(target_os = "linux"))]
-            return Err(Error::NoDaxWindow(config.id.clone()));
         }
         let daemon = match daemon {
             Daemon::Socket => DaemonConnection::connect(&config.cladefsd_socket),
@@ -455,16 +449,14 @@ impl Device {
         }
         // cladefs: it copies on write, of `private_max` pages at most (backlog doc-13).
         let private_max = u64::from_le(self.config_space.private_max);
+        // SAFETY: The cell is dropped before the window, as the fields are in that order.
         #[cfg(target_os = "linux")]
-        {
-            // SAFETY: The cell is dropped before the window, as the fields are in that order.
-            unsafe { window.create(self.cell(), self.prefault.clone(), private_max) }?;
-            self.window_created = true;
-            Ok(())
-        }
-        // A device off Linux has no window (`Error::NoDaxWindow`).
+        unsafe { window.create(self.cell(), self.prefault.clone(), private_max) }?;
+        // The VM maps the window's pages itself, as the cell's stage says (board 13069).
         #[cfg(not(target_os = "linux"))]
-        unreachable!("a window of {window:?}, {private_max} private pages, off Linux")
+        window.create(self.cell(), private_max)?;
+        self.window_created = true;
+        Ok(())
     }
 
     /// Maps the window's mappings of the snapshot the device was restored from again. cladefs: all

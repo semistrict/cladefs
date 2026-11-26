@@ -14,11 +14,13 @@
 //!   driver set up as it activates the device, with their notification events and the eventfds of
 //!   their vectors, which the workers signal from the threads completing requests (hotbed
 //!   question 572).
-//! - **The DAX window** (KVM's; Hypervisor.framework's is board 13069): a 64-bit BAR of the
-//!   device's own, allocated before the transports' BARs and placed by the device (`PlacedShm`):
-//!   virtio_extent reserves it ([`ExtentVm`]) and adds its KVM memory slot (`MemorySlots`), into
-//!   which cladefs maps the window's pages from the extent daemon's memory, and prefaults them
-//!   with `KVM_PRE_FAULT_MEMORY` on a vCPU of its own (`virtio_extent::kvm`). The BAR never moves
+//! - **The DAX window:** a 64-bit BAR of the device's own, allocated before the transports' BARs
+//!   and placed by the device (`PlacedShm`), which virtio_extent reserves ([`ExtentVm`]). On KVM
+//!   it adds its memory slot (`MemorySlots`), into which cladefs maps the window's pages from the
+//!   extent daemon's memory, and prefaults them with `KVM_PRE_FAULT_MEMORY` on a vCPU of its own
+//!   (`virtio_extent::kvm`). On Hypervisor.framework libmachine maps the pages into the guest at
+//!   the BAR itself (`hv_vm_map`) as cladefs's stage says, and the vCPUs hand it the guest's
+//!   aborts on the window (`virtio_extent::window_fault`, board 13069). The BAR never moves
 //!   (hotbed question 571).
 //! - **Stopping the machine:** as the extent daemon goes, or the device can't be activated, the
 //!   machine stops for good with `Error::ExtentStore` (`StopShared::fail`); the vCPUs stop it so
@@ -401,31 +403,38 @@ impl virtio_extent::WindowVm for ExtentVm {
     }
 }
 
-/// A machine whose devices have no DAX window (Hypervisor.framework's, board 13069): virtio_extent
-/// refuses a device with one before it would ask for this.
+/// What only libmachine can do for the device's DAX window on Hypervisor.framework
+/// (`virtio_extent::WindowVm`): its guest physical addresses, the 64-bit BAR allocated for it
+/// ([`ExtentDevice::new`]), into which the window's pages are mapped as cladefs's stage says
+/// (`hv_vm_map`, board 13069).
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-pub(crate) struct NoWindow;
+pub(crate) struct ExtentVm {
+    /// The VM, which maps the window's pages.
+    pub(crate) vm: Arc<crate::backend::hvf::Shared>,
+    /// The window's BAR's address.
+    pub(crate) at: Option<u64>,
+}
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-impl virtio_extent::WindowVm for NoWindow {
-    fn reserve(&self, _len: u64, _at: Option<u64>) -> std::result::Result<u64, BoxError> {
-        Err("no DAX window on Hypervisor.framework yet (board 13069)".into())
+impl virtio_extent::WindowVm for ExtentVm {
+    fn reserve(&self, _len: u64, at: Option<u64>) -> std::result::Result<u64, BoxError> {
+        match (at, self.at) {
+            // A snapshot's window: libmachine restores none (board 13139).
+            (Some(at), _) => Err(format!("no window restored at {at:#x}: board 13139").into()),
+            (None, Some(bar)) => Ok(bar),
+            (None, None) => Err("a window the device's configuration has none of".into()),
+        }
     }
 
-    fn release(&self, _start: u64, _len: u64) {
-        unreachable!("no window reserved");
+    // The BAR is the machine's for its life, as every BAR is: nothing to release.
+    fn release(&self, _start: u64, _len: u64) {}
+
+    unsafe fn map(&self, guest_addr: u64, host: std::ptr::NonNull<u8>, len: u64, write: bool) {
+        // SAFETY: As the stage promises: the memory stays mapped until it unmaps it.
+        unsafe { self.vm.map_window(guest_addr, host, len, write) };
     }
 
-    fn add_slot(
-        &self,
-        _guest_addr: u64,
-        _len: u64,
-        _host: std::ptr::NonNull<u8>,
-    ) -> std::result::Result<u32, BoxError> {
-        unreachable!("no window reserved");
-    }
-
-    fn remove_slot(&self, _slot: u32) {
-        unreachable!("no window reserved");
+    fn unmap(&self, guest_addr: u64, len: u64) {
+        self.vm.unmap_window(guest_addr, len);
     }
 }
