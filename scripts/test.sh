@@ -219,6 +219,7 @@ if part firecracker; then
     tests+=' | test(/block::vhost_user::device::tests::/)'
     tests+=' | test(/transport::mmio::tests::test_ack_features_by_page$/)'
     tests+=' | test(/vsock::device::tests::(test_virtio_device|test_prepare_save_|test_kick_signals_)/)'
+    tests+=' | test(/vsock::csm::connection::tests::/) | test(/vsock::unix::muxer::tests::/)'
     tests+=' | test(/signal_handler::/)'
     tests+=' | test(/transport::pci::device::tests::test_(shm_bar|pci_device_ids)$/)'
     CLADEFSD_BUCKET=memory:///vmm CLADEFSD_TOKEN=1 \
