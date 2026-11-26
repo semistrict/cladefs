@@ -129,13 +129,13 @@ cladefs_rust_library(
     crate_name = "cladefs",
     proc_macro_deps = _COMMON_PROC_MACRO_DEPS,
     deps = _BASE_INTERNAL_DEPS + [
-        "//crates/bucket_cell:bucket_cell_testing",
+        "//crates/bucket_cell:bucket_cell_keys_testing",
         "//crates/cladefs_core:cladefs_core_testing",
         "//crates/cladefs_fs:cladefs_fs_testing",
         "//crates/cladefs_wire:cladefs_wire_testing",
         "//crates/extent_frame:extent_frame_testing",
         "//crates/extent_keys:extent_keys_testing",
-        "//crates/local_cell:local_cell_testing",
+        "//crates/local_cell:local_cell_keys_testing",
     ] + _TESTING_DAEMON_DEP + all_crate_deps(normal = True),
 )
 

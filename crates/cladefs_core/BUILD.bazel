@@ -59,6 +59,13 @@ _PROD_DEPS = _BASE_DEPS + [
     "//crates/local_cell",
 ]
 
+_TESTING_DEPS = _BASE_DEPS + [
+    "//crates/bucket_cell:bucket_cell_keys_testing",
+    "//crates/extent_frame:extent_frame_testing",
+    "//crates/extent_keys:extent_keys_testing",
+    "//crates/local_cell:local_cell_keys_testing",
+]
+
 _TEST_DEPS = _BASE_DEPS + [
     "//crates/bucket_cell:bucket_cell_testing",
     "//crates/extent_frame:extent_frame_testing",
@@ -83,7 +90,7 @@ cladefs_rust_library(
     crate_features = ["testing"],
     crate_name = "cladefs_core",
     proc_macro_deps = _PROC_MACROS,
-    deps = _TEST_DEPS + all_crate_deps(normal = True),
+    deps = _TESTING_DEPS + all_crate_deps(normal = True),
 )
 
 cladefs_rust_library(
@@ -145,8 +152,11 @@ cladefs_rust_test(
     args = ["shuttle_tests::"],
     crate = ":cladefs_core_shuttle",
     crate_features = ["failpoints", "shuttle", "testing", "tests-kms"],
+    isolated = True,
     proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    shard_count = 4,
     tags = ["shuttle"],
+    timeout = "long",
     deps = all_crate_deps(normal_dev = True),
 )
 

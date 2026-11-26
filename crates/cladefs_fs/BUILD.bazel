@@ -59,10 +59,10 @@ cladefs_rust_library(
     crate_name = "cladefs_fs",
     proc_macro_deps = _PROC_MACROS,
     deps = _BASE_DEPS + [
-        "//crates/bucket_cell:bucket_cell_testing",
+        "//crates/bucket_cell:bucket_cell_keys_testing",
         "//crates/cladefs_core:cladefs_core_testing",
         "//crates/extent_frame:extent_frame_testing",
-        "//crates/local_cell:local_cell_testing",
+        "//crates/local_cell:local_cell_keys_testing",
     ] + all_crate_deps(normal = True),
 )
 

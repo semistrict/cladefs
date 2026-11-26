@@ -76,13 +76,13 @@ cladefs_rust_library(
     proc_macro_deps = _PROC_MACROS,
     target_compatible_with = _COMPAT,
     deps = _BASE_DEPS + [
-        "//crates/bucket_cell:bucket_cell_testing",
+        "//crates/bucket_cell:bucket_cell_keys_testing",
         "//crates/cladefs_core:cladefs_core_testing",
         "//crates/cladefs_fs:cladefs_fs_testing",
         "//crates/cladefs_wire:cladefs_wire_testing",
         "//crates/extent_frame:extent_frame_testing",
         "//crates/extent_keys:extent_keys_testing",
-        "//crates/local_cell:local_cell_testing",
+        "//crates/local_cell:local_cell_keys_testing",
     ] + all_crate_deps(normal = True),
 )
 

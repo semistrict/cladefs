@@ -25,7 +25,7 @@ cladefs_rust_library(
 _EXAMPLE_DEPS = [
     ":cladefs_examples",
     "//crates/base32_id",
-    "//crates/bucket_cell:bucket_cell_testing",
+    "//crates/bucket_cell:bucket_cell_keys_testing",
     "//crates/cladefs:cladefs_testing",
     "//crates/extent_frame:extent_frame_testing",
     "//crates/extent_keys:extent_keys_testing",

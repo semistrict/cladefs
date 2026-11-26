@@ -7,11 +7,11 @@ license.workspace = true
 publish = false
 
 [features]
-testing = ["bucket_cell/testing", "extent_keys/testing", "local_cell/testing"]
+testing = ["extent_keys/testing"]
 shuttle = ["dep:shuttle"]
 failpoints = ["fail/failpoints"]
 loom = ["dep:loom"]
-tests-kms = ["testing"]
+tests-kms = ["testing", "bucket_cell/testing", "local_cell/testing"]
 
 [dependencies]
 anyhow.workspace = true

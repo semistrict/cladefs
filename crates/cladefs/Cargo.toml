@@ -10,9 +10,9 @@ publish = false
 [features]
 testing = ["cladefs_core/testing", "cladefs_fs/testing", "cladefs_wire/testing", "cladefsd/testing", "extent_keys/testing"]
 shuttle = ["cladefs_core/shuttle"]
-failpoints = ["fail/failpoints", "cladefs_core/failpoints", "cladefs_fs/failpoints", "cladefs_wire/failpoints"]
+failpoints = ["fail/failpoints", "cladefs_core/failpoints", "cladefs_fs/failpoints", "cladefs_wire/failpoints", "cladefsd/failpoints"]
 loom = ["cladefs_core/loom"]
-tests-kms = ["testing", "cladefs_core/tests-kms", "cladefs_fs/tests-kms", "cladefs_wire/tests-kms"]
+tests-kms = ["testing", "cladefs_core/tests-kms", "cladefs_fs/tests-kms", "cladefs_wire/tests-kms", "cladefsd/tests-kms"]
 
 [dependencies]
 anyhow.workspace = true

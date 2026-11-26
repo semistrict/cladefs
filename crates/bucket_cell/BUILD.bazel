@@ -78,6 +78,19 @@ cladefs_rust_library(
 )
 
 cladefs_rust_library(
+    name = "bucket_cell_keys_testing",
+    srcs = glob(
+        ["src/**/*.rs"],
+        exclude = ["src/bin/**/*.rs"],
+    ),
+    aliases = MADSIM_TOKIO_ALIAS,
+    crate_features = ["full"],
+    crate_name = "bucket_cell",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    deps = _TEST_DEPS + all_crate_deps(normal = True),
+)
+
+cladefs_rust_library(
     name = "bucket_cell_testing",
     srcs = glob(
         ["src/**/*.rs"],

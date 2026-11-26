@@ -208,7 +208,7 @@ impl Collecting {
     /// ([`bucket_cell::testing::uncollected`]): the space freed comes back (TASK-390). Two, as a
     /// pass over a dead cell retires the references that kept what its parents' cells reclaim at
     /// their next (TASK-395.4); and a pass retiring them again deletes nothing.
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(any(test, feature = "tests-kms"))]
     pub fn collected_alone(&self) -> Vec<String> {
         const PASSES: usize = 12;
         let mut quiet = 0;

@@ -29,6 +29,12 @@ _PROD_DEPS = _BASE_DEPS + [
     "//crates/extent_keys",
 ]
 
+_KEYS_TESTING_DEPS = _BASE_DEPS + [
+    "//crates/bucket_cell:bucket_cell_keys_testing",
+    "//crates/extent_frame:extent_frame_testing",
+    "//crates/extent_keys:extent_keys_testing",
+]
+
 _TEST_DEPS = _BASE_DEPS + [
     "//crates/bucket_cell:bucket_cell_testing",
     "//crates/extent_frame:extent_frame_testing",
@@ -44,13 +50,22 @@ cladefs_rust_library(
 )
 
 cladefs_rust_library(
+    name = "local_cell_keys_testing",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = MADSIM_TOKIO_ALIAS,
+    crate_name = "local_cell",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    deps = _KEYS_TESTING_DEPS + all_crate_deps(normal = True),
+)
+
+cladefs_rust_library(
     name = "local_cell_unkept",
     srcs = glob(["src/**/*.rs"]),
     aliases = MADSIM_TOKIO_ALIAS,
     crate_features = ["unkept"],
     crate_name = "local_cell",
     proc_macro_deps = all_crate_deps(proc_macro = True),
-    deps = _TEST_DEPS + all_crate_deps(normal = True),
+    deps = _KEYS_TESTING_DEPS + all_crate_deps(normal = True),
 )
 
 cladefs_rust_library(
@@ -119,8 +134,10 @@ cladefs_rust_test(
         "shuttle",
         "audit",
     ],
+    isolated = True,
     proc_macro_deps = all_crate_deps(proc_macro_dev = True),
     tags = ["shuttle"],
+    timeout = "long",
     deps = all_crate_deps(normal_dev = True),
 )
 
@@ -129,8 +146,11 @@ cladefs_rust_test(
     srcs = glob(["tests/shuttle/**/*.rs"]),
     aliases = MADSIM_TOKIO_ALIAS,
     crate_root = "tests/shuttle/main.rs",
+    isolated = True,
     proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+    shard_count = 4,
     tags = ["shuttle"],
+    timeout = "long",
     deps = [
         ":local_cell_shuttle",
         "@crates//:shuttle",
@@ -146,6 +166,7 @@ cladefs_rust_test(
     aliases = MADSIM_TOKIO_ALIAS,
     crate_root = "tests/crash/main.rs",
     proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+    timeout = "long",
     deps = [
         ":local_cell_for_test",
     ] + _TEST_DEPS + all_crate_deps(normal = True, normal_dev = True),
@@ -173,7 +194,9 @@ cladefs_rust_test(
         srcs = ["tests/" + test_name + ".rs"] + glob(["tests/common/**/*.rs"]),
         aliases = MADSIM_TOKIO_ALIAS,
         crate_root = "tests/" + test_name + ".rs",
+        isolated = test_name in ["cell", "replicated"],
         proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+        shard_count = 4 if test_name == "cell" else None,
         deps = [
             ":local_cell_for_test",
         ] + _TEST_DEPS + all_crate_deps(normal = True, normal_dev = True),
