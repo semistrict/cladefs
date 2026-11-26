@@ -7,8 +7,9 @@
 //! the API of FUSE mounts of many cells (`proto/cladefs/mount/v1/mount.proto`), with protox, which
 //! compiles protobuf in Rust: no protoc needed; for tonic, and for madsim's tonic. cladefs: and
 //! stamps the build with the commit it is of (`CLADEFS_BUILD_COMMIT`, [`crate::BUILD_COMMIT`]), as
-//! scripts/build-commit.sh says, which every build of the tree reports (TASK-111.7), and refuses a
-//! release build without frame pointers (`build/stamp.rs`).
+//! scripts/build-commit.sh says, which every build of the tree reports (TASK-111.7), refuses a
+//! release build without frame pointers (`build/stamp.rs`), and has a release build's binaries
+//! link with their debug sections compressed (board 10269).
 
 use std::path::PathBuf;
 
@@ -18,6 +19,7 @@ mod stamp;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     stamp::require_frame_pointers()?;
+    compress_debug_sections()?;
     let protos = [
         "proto/cladefs/cladefsd/v1/cladefsd.proto",
         "proto/cladefs/peer/v1/peer.proto",
@@ -53,6 +55,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .skip_protoc_run()
         .compile_protos(&protos, &["proto"])?;
     stamp::stamp_commit()
+}
+
+/// cladefs: has a release build's binaries (cladefsd, cladefsctl, cladefs-mount) on Linux link
+/// with their debug sections compressed (board 10269): the release profile's line tables, which
+/// `/z/pprof` names each frame's file and line by, took cladefsd from 61 MB to 281 MB, most of it
+/// the C dependencies' and std's debug info. zlib (`SHF_COMPRESSED`), which GNU ld and lld both
+/// write and the backtrace crate resolving `/z/pprof`'s frames reads; zstd only with its `ruzstd`
+/// feature, off here. Tests' and debug builds link as they were, sparing every test's link the
+/// compression. cladefsd 293 MB -> 105 MB, its frames still named by file and line (hotbed question
+/// 558).
+fn compress_debug_sections() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::var("PROFILE")? == "release" && std::env::var("CARGO_CFG_TARGET_OS")? == "linux" {
+        println!("cargo:rustc-link-arg-bins=-Wl,--compress-debug-sections=zlib");
+    }
+    Ok(())
 }
 
 /// cladefs: `services`, each by its full name, with its file and its methods' names, as Rust: a

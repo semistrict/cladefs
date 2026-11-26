@@ -605,8 +605,11 @@ on `target_env = "musl"` (hotbed question 533):
   `/z/pprof` unwind the daemon's stacks by, and the build refuses a release without them
   (`crates/cladefs/build/stamp.rs`, board 8597). A build that needs flags of its own adds that one.
 - The release profile (root `Cargo.toml`) keeps line tables, so that `/z/pprof`
-  name each frame's file and line (the binary ~280 MB, ~41 MB stripped), unwinds panics, as a
-  cell's halt needs, and checks arithmetic for overflow, as every test's build does.
+  name each frame's file and line, unwinds panics, as a cell's halt needs, and checks arithmetic
+  for overflow, as every test's build does. `cladefsd`, `cladefsctl` and `cladefs-mount` link with
+  those debug sections zlib-compressed (`crates/cladefs/build.rs`, board 10269), which `/z/pprof`
+  reads as it is: `cladefsd` 105 MB, 293 MB uncompressed, 61 MB stripped (aarch64, measured
+  2026-11-25).
 
 Telling it is right: `cladefsctl --version`, and `cladefsd_build_info{commit}` once it runs, name
 the commit it was built of, with no `-dirty` (the stamp follows every crate's files and the lock,
