@@ -24,26 +24,42 @@ of a batch.
 - Read the code a change touches, and its tests, before writing it, so that the batch compiles
   with few fixes.
 - Write the tests for each change with it, in the same batch.
-- Then, on `hotbed` (below): `cargo build` (or `cargo check`) once, `cargo clippy`, and one run
-  of the workspace and guest suites.
+- Then, on `hotbed` (below): build and test once with **Bazel** (preferred; both Bazel and Cargo
+  are kept working, see below) — `bazel build`, `bazel build --config=clippy-cladefs`, `bazel test`
+  — and one run of the workspace and guest suites.
 - While a batch's remote run goes, write the next batch rather than wait for it.
-- Between, the unit tests alone, about a minute: `cargo nextest run --workspace --profile unit`
-  (`CLADEFS_TEST_PARTS=unit scripts/test.sh`). They leave out the simulations, the fault
-  explorations and every test that takes 5 s or more (`.config/nextest.toml`), which the suite
-  runs.
+- Between, fast targeted tests: `bazel test //crates/<crate>:...` (cached across runs), or the
+  Cargo unit profile (~1 min): `cargo nextest run --workspace --profile unit`
+  (`CLADEFS_TEST_PARTS=unit scripts/test.sh`), which leaves out the simulations, the fault
+  explorations and every test that takes 5 s or more (`.config/nextest.toml`).
 - Measure a change on its own only when isolating it is the point of the measurement (an A/B on
   one test host).
+
+### Prefer Bazel; keep Cargo and Bazel in sync
+
+The user's rule (2026-11-26): **prefer Bazel** (`bazel build` / `bazel test` on `hotbed`) over
+Cargo, Go, Make, and Vitest for day-to-day builds, tests, clippy, and cross-language checks, while
+keeping both Bazel and Cargo working for now.
+
+- Common configs live in `.bazelrc` (`--config=clippy-cladefs`, `--config=madsim`, `--config=sim`,
+  `--config=release`, `--config=musl-x86_64`, `--config=musl-aarch64`) and top-level bundles in
+  `BUILD.bazel` (`//:release_bins`, `//:vmm_bins`, `//crates/...`, `//go/...`, `//guest/sim/...`,
+  `//guide/...`, `//scripts/...`, `//specs/...`).
+- Keep `Cargo.toml`/`Cargo.lock` and `BUILD.bazel`/`MODULE.bazel` in sync whenever adding or moving
+  a crate, binary, test, or dependency (`_MEMBER_MANIFESTS` in `MODULE.bazel` for new workspace
+  crates; Cargo/`cargo nextest`/`scripts/test.sh` remain supported).
 
 ### Every compile runs on hotbed; the workstation compiles nothing
 
 The user's rule (2026-11-22): every Rust compile runs on `hotbed` (`hotbed run -- ...`; read
 `hotbed skills get hotbed` before your first call), which runs it on the Linux cluster in a fork
 of a repo whose `main` is already built and syncs uncommitted changes automatically. That is
-`cargo build`, `cargo check` (one crate's included), `cargo clippy`, `cargo nextest`,
-`scripts/test.sh`, simulations, mutants, benches, `make check-tla`, guest kernel and Firecracker
-builds; long ones with `--detach`. The workstation (macOS) compiles no Rust at all, macOS-only
-code included: CI's `macos` job compiles and tests that, so push and read its result. Local
-commands stay cheap: editing, `git`, `rg`, `cargo fmt -p CRATE`, `vb`, and fast Python checks.
+`bazel build`, `bazel test`, `cargo build`, `cargo check` (one crate's included), `cargo clippy`,
+`cargo nextest`, `scripts/test.sh`, simulations, mutants, benches, `make check-tla`, guest kernel
+and Firecracker builds; long ones with `--detach`. The workstation (macOS) compiles no Rust at all,
+macOS-only code included: CI's `macos` job compiles and tests that, so push and read its result.
+Local commands stay cheap: editing, `git`, `rg`, `cargo fmt -p CRATE`, `vb`, and fast Python
+checks.
 
 ### Linux runs go to a test host, through hotbed
 
@@ -78,10 +94,10 @@ access — only guests and jailed VM processes are untrusted.)
 
 ## Commit in batches, only what compiled and passed its tests
 
-Commit a batch once it has compiled and its unit tests have run and passed (the workspace's
-`cargo nextest`, and the test host run for what only runs on Linux): never a change that has not been
-compiled and tested. A batch may still be several commits, one logical change each, made together
-after the batch's test run.
+Commit a batch once it has compiled and its unit tests have run and passed (`bazel test` or
+`cargo nextest`, and the test host run for what only runs on Linux): never a change that has not
+been compiled and tested. A batch may still be several commits, one logical change each, made
+together after the batch's test run.
 
 ## Work lands on main: no long-lived branches
 
