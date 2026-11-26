@@ -101,6 +101,16 @@ cladefs_rust_test(
     deps = _TEST_DEPS,
 )
 
+# Its own binary, a process of its own: its measurements are the process's (board 13862).
+cladefs_rust_test(
+    name = "density_test",
+    srcs = ["tests/density.rs"],
+    aliases = MADSIM_TOKIO_ALIAS,
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+    target_compatible_with = ["@platforms//os:linux"],
+    deps = _TEST_DEPS,
+)
+
 [
     cladefs_rust_binary(
         name = ex,

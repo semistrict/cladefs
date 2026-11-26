@@ -81,6 +81,7 @@ not (
         test(=framings_write_back_as_they_go)
         | test(=segments_framed_in_copies_take_their_parts_held)
         | test(=writes_are_written_back_as_they_go)))
+    | binary_id(sqlite_cladefs::density)
     | (binary_id(sqlite_cladefs::sqlite) & (
         test(=a_database_opens_as_it_was_closed_after_every_kind_of_transaction)
         | test(=mapped_reads_follow_commits)))

@@ -1,0 +1,384 @@
+// Copyright 2026 The cladefs Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+//! How many SQLite cells one extent daemon holds open at once, and what each costs (board 13862):
+//! a process embedding the daemon, as libcladefs's callers do, holding a SQLite cell per database
+//! with no VM, as a broker keeping a cell per partition would. The cells-per-host cases
+//! (guest/tests/test_cases/src/test_cells_per_host.rs) measure VMs; this measures cells alone.
+//!
+//! Cells open in steps of [`STEP`], each made, mapped (`daemon::over`) and filled with fake
+//! records in a few transactions. After each step a line says what the cells cost the process
+//! (anonymous memory, the daemon's shared memory it maps, threads, open files, each per cell, over
+//! the process before any cell), the daemon's gauges, and probes' p99: a point read and a
+//! one-record append, on cells spread over those open. What each cell after the first step cost is
+//! held to budgets ([`Budget`]). Once all are open, every cell is synced to the bucket, then left
+//! idle a while, which must cost no commit; then every database is checked, closed, and a sample
+//! opened again by ID and checked.
+//!
+//! `CLADEFS_SQLITE_DENSITY_CELLS` raises the cells for a measurement past the test's [`CELLS`]:
+//! the test fails at the first cell the daemon refuses, saying how many it held.
+//!
+//! Its own test binary, a process of its own: the measurements are the process's, and one daemon
+//! a process (`Daemon::process`).
+
+#![cfg(target_os = "linux")]
+
+use cladefs::CellClient;
+use cladefs::cladefsd::control::proto::{GetStatsRequest, GetStatsResponse, SyncCellRequest};
+use rusqlite::{Connection, OpenFlags, params};
+use sqlite_cladefs::{Database, Options, Registration, daemon, register};
+use std::os::unix::net::UnixListener;
+use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
+
+/// The cells the test opens, unless `CLADEFS_SQLITE_DENSITY_CELLS` says. Board 13871: the daemon
+/// serves `(files - files / 4) / 200` connections, a cell's worst case of open files, so 245 at
+/// 65,536 open files (hotbed's, CI's), each SQLite cell refused past it though it holds ~22: 512
+/// once that is fixed.
+const CELLS: usize = 192;
+
+/// The cells each step opens.
+const STEP: usize = 64;
+
+/// Each cell's capacity, and its window's size: sized to the data, as a window should be.
+const CAPACITY: u64 = 64 << 20;
+
+/// The records each cell is filled with, [`BATCH`] a transaction.
+const RECORDS: i64 = 256;
+const BATCH: i64 = 64;
+
+/// The cells each step's probes read and append to, spread over those open.
+const PROBES: usize = 32;
+
+/// How long the cells are left idle, the CPU and commits of the process measured over it.
+const IDLE: Duration = Duration::from_secs(5);
+
+/// The cells opened again by ID at the end, spread over all.
+const REOPENED: usize = 16;
+
+/// What each cell opened after the first step may cost the process at most, the daemon's side and
+/// its client's together (board 13862). Measured on ubu1 (hotbed, 2026-11-26), with a margin: 2.03
+/// threads (the client's receiving thread and its window's fault thread), 21.9 open files, 625 KiB
+/// of anonymous memory and 344 KiB of the daemon's shared memory a cell.
+struct Budget;
+
+impl Budget {
+    const THREADS: f64 = 2.25;
+    const FILES: f64 = 24.0;
+    const ANON_KIB: f64 = 1024.0;
+    const SHMEM_KIB: f64 = 512.0;
+}
+
+/// A SQLite cell open on the daemon, its database filled with records `0..records`, each as
+/// [`record`] makes it of the cell's `index`.
+struct Cell {
+    index: u64,
+    id: cladefs::CellId,
+    records: i64,
+    connection: Connection,
+    registration: Registration,
+    database: Arc<Database>,
+}
+
+impl Cell {
+    /// A new SQLite cell, the `index`th, filled.
+    fn create(socket: &Path, index: u64) -> Self {
+        let client = cladefs::DaemonConnection::connect(socket)
+            .and_then(|daemon| daemon.create_sqlite_cell(0, CAPACITY))
+            .unwrap_or_else(|error| panic!("cell {index}, after {index} held: {error}"));
+        let id = cladefs::CellId { tenant: 0, id: client.cell() };
+        let mut cell = Self::mount(Arc::new(client), id, index);
+        cell.connection
+            .execute_batch(
+                "CREATE TABLE records (offset INTEGER PRIMARY KEY, ts INTEGER NOT NULL, \
+                 key TEXT NOT NULL, value BLOB NOT NULL)",
+            )
+            .unwrap();
+        for _ in 0..RECORDS / BATCH {
+            cell.append(BATCH);
+        }
+        cell
+    }
+
+    /// The cell `id` opened again, the `index`th, holding `records`.
+    fn reopen(socket: &Path, id: cladefs::CellId, index: u64, records: i64) -> Self {
+        let client = cladefs::DaemonConnection::connect(socket)
+            .and_then(|daemon| daemon.open_cell(id))
+            .unwrap_or_else(|error| panic!("opening cell {index} ({id}) again: {error}"));
+        let mut cell = Self::mount(Arc::new(client), id, index);
+        cell.records = records;
+        cell
+    }
+
+    /// The database on `client`'s cell, mapped, registered as a VFS of its own, and connected to.
+    fn mount(client: Arc<CellClient>, id: cladefs::CellId, index: u64) -> Self {
+        static MOUNTS: AtomicU64 = AtomicU64::new(0);
+        let database = daemon::over(client, CAPACITY, Options::default()).unwrap();
+        let vfs = format!("density-{}", MOUNTS.fetch_add(1, Ordering::Relaxed));
+        let registration = register(&vfs, database.clone()).unwrap();
+        let connection =
+            Connection::open_with_flags_and_vfs("records.db", OpenFlags::default(), vfs.as_str())
+                .unwrap();
+        connection.execute_batch(&format!("PRAGMA mmap_size = {CAPACITY}")).unwrap();
+        Self { index, id, records: 0, connection, registration, database }
+    }
+
+    /// Appends `count` records, in one transaction.
+    fn append(&mut self, count: i64) {
+        let transaction = self.connection.unchecked_transaction().unwrap();
+        for offset in self.records..self.records + count {
+            let (ts, key, value) = record(self.index, offset);
+            transaction
+                .execute(
+                    "INSERT INTO records VALUES (?1, ?2, ?3, ?4)",
+                    params![offset, ts, key, value],
+                )
+                .unwrap();
+        }
+        transaction.commit().unwrap();
+        self.records += count;
+    }
+
+    /// Checks the record at `offset` reads back as written.
+    fn read(&self, offset: i64) {
+        let read: (i64, String, Vec<u8>) = self
+            .connection
+            .query_row("SELECT ts, key, value FROM records WHERE offset = ?1", [offset], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .unwrap();
+        assert!(read == record(self.index, offset), "cell {}'s record {offset}", self.index);
+    }
+
+    /// Checks the database is whole and holds its records, each as written, and no other.
+    fn check(&self) {
+        let integrity: String =
+            self.connection.query_row("PRAGMA integrity_check", [], |row| row.get(0)).unwrap();
+        assert_eq!(integrity, "ok", "cell {}", self.index);
+        let mut statement = self
+            .connection
+            .prepare("SELECT offset, ts, key, value FROM records ORDER BY offset")
+            .unwrap();
+        let mut rows = statement.query([]).unwrap();
+        let mut expected = 0;
+        while let Some(row) = rows.next().unwrap() {
+            let offset: i64 = row.get(0).unwrap();
+            assert_eq!(offset, expected, "cell {}'s records", self.index);
+            let read = (row.get(1).unwrap(), row.get(2).unwrap(), row.get(3).unwrap());
+            assert!(read == record(self.index, offset), "cell {}'s record {offset}", self.index);
+            expected += 1;
+        }
+        assert_eq!(expected, self.records, "cell {}'s records", self.index);
+    }
+
+    fn close(self) {
+        let Self { connection, registration, database, .. } = self;
+        drop(connection);
+        drop(registration);
+        database.close().unwrap();
+    }
+}
+
+/// The fake record at `offset` of the `index`th cell: a timestamp, a key of a thousand, and a
+/// value of 32 to 511 bytes, all of a seed of both.
+fn record(index: u64, offset: i64) -> (i64, String, Vec<u8>) {
+    let mut state = (index << 32) ^ offset as u64 ^ 0x9e37_79b9_7f4a_7c15;
+    let mut next = || {
+        // splitmix64.
+        state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    };
+    let ts = 1_767_225_600_000 + offset * 1000 + (next() % 1000) as i64;
+    let key = format!("user-{:03}", next() % 1000);
+    let len = 32 + (next() % 480) as usize;
+    let value = (0..len.div_ceil(8)).flat_map(|_| next().to_le_bytes()).take(len).collect();
+    (ts, key, value)
+}
+
+/// What the process holds, as Linux counts it.
+#[derive(Clone, Copy, Debug)]
+struct Process {
+    /// Its anonymous memory resident, in KiB (`RssAnon`).
+    anon_kib: u64,
+    /// The shared memory it maps resident, in KiB (`RssShmem`): the daemon's arenas' pages.
+    shmem_kib: u64,
+    threads: u64,
+    files: u64,
+}
+
+impl Process {
+    fn now() -> Self {
+        let status = std::fs::read_to_string("/proc/self/status").unwrap();
+        let field = |name: &str| -> u64 {
+            let line = status.lines().find(|line| line.starts_with(name)).unwrap();
+            line[name.len()..].trim().trim_end_matches(" kB").parse().unwrap()
+        };
+        let files = std::fs::read_dir("/proc/self/fd").unwrap().count() as u64;
+        Self {
+            anon_kib: field("RssAnon:"),
+            shmem_kib: field("RssShmem:"),
+            threads: field("Threads:"),
+            files,
+        }
+    }
+}
+
+/// The process's CPU time, user and system, in milliseconds.
+fn cpu_ms() -> u64 {
+    let stat = std::fs::read_to_string("/proc/self/stat").unwrap();
+    // After the command's name, in parentheses, which may hold spaces: utime and stime are the
+    // 12th and 13th fields.
+    let fields: Vec<&str> = stat[stat.rfind(')').unwrap() + 2..].split(' ').collect();
+    let ticks: u64 = fields[11].parse::<u64>().unwrap() + fields[12].parse::<u64>().unwrap();
+    // SAFETY: a plain query of a constant.
+    let per_second = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as u64;
+    ticks * 1000 / per_second
+}
+
+/// The p99 of `samples`, in milliseconds.
+fn p99_ms(mut samples: Vec<Duration>) -> f64 {
+    samples.sort();
+    let at = (samples.len() * 99).div_ceil(100).saturating_sub(1);
+    samples[at].as_secs_f64() * 1000.0
+}
+
+/// `of` per cell, over `cells`.
+fn per(of: u64, cells: usize) -> f64 {
+    of as f64 / cells as f64
+}
+
+#[test]
+fn sqlite_cells_held_open_at_once() {
+    let cells_wanted = std::env::var("CLADEFS_SQLITE_DENSITY_CELLS")
+        .map_or(CELLS, |cells| cells.parse().expect("CLADEFS_SQLITE_DENSITY_CELLS: a number"));
+    // As cladefsd does before it boots: what the daemon serves at once is of this limit.
+    cladefs::cladefsd::raise_open_files_limit().unwrap();
+    let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    cladefs::cladefsd::Daemon::process().configure_disks(&[dir.path().join("disk0")]).unwrap();
+    // SAFETY: before this process starts any other thread.
+    unsafe {
+        std::env::set_var("CLADEFSD_BUCKET", "memory:///sqlite-density");
+        std::env::set_var("CLADEFSD_TOKEN", "1");
+    }
+    let sockets = tempfile::tempdir().unwrap();
+    let socket = sockets.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || cladefs::cladefsd::serve(listener));
+    let control_socket = sockets.path().join("control.sock");
+    let listener = UnixListener::bind(&control_socket).unwrap();
+    let tenants = sockets.path().join("tenants");
+    std::fs::create_dir(&tenants).unwrap();
+    std::thread::spawn(move || cladefs::cladefsd::control::serve_control(listener, tenants));
+    let control = cladefs::testing::Control::connect(&control_socket).unwrap();
+    let stats = || -> GetStatsResponse {
+        let request = GetStatsRequest { leave_out_vms: true, ..Default::default() };
+        control.call(async |client| client.get_stats(request).await).unwrap()
+    };
+    let gauge = |stats: &GetStatsResponse, name: &str| stats.gauges[name];
+
+    assert!(cells_wanted > STEP, "{cells_wanted} cells: a step's and more, for a cell's cost");
+    let before = Process::now();
+    let mut first_step = None;
+    let mut cells: Vec<Cell> = Vec::with_capacity(cells_wanted);
+    let mut step = 0;
+    while cells.len() < cells_wanted {
+        step += 1;
+        let added = STEP.min(cells_wanted - cells.len());
+        let mut opens = Vec::with_capacity(added);
+        for _ in 0..added {
+            let started = Instant::now();
+            cells.push(Cell::create(&socket, cells.len() as u64));
+            opens.push(started.elapsed());
+        }
+        let (mut reads, mut appends) = (Vec::new(), Vec::new());
+        let (open, probes) = (cells.len(), PROBES.min(cells.len()));
+        for probe in 0..probes {
+            let cell = &mut cells[probe * open / probes];
+            let offset = (probe as i64 * 37) % cell.records;
+            let started = Instant::now();
+            cell.read(offset);
+            reads.push(started.elapsed());
+            let started = Instant::now();
+            cell.append(1);
+            appends.push(started.elapsed());
+        }
+        let (now, stats) = (Process::now(), stats());
+        let n = cells.len();
+        println!(
+            "sqlite-density: step={step} cells={n} added={added} open_p99_ms={:.1} \
+             anon_kib_per_cell={:.1} shmem_kib_per_cell={:.1} threads_per_cell={:.2} \
+             files_per_cell={:.2} daemon_memory_mib={} stores_open={} read_p99_ms={:.2} \
+             append_p99_ms={:.2}",
+            p99_ms(opens),
+            per(now.anon_kib.saturating_sub(before.anon_kib), n),
+            per(now.shmem_kib.saturating_sub(before.shmem_kib), n),
+            per(now.threads.saturating_sub(before.threads), n),
+            per(now.files.saturating_sub(before.files), n),
+            gauge(&stats, "memory_bytes") >> 20,
+            gauge(&stats, "stores_open"),
+            p99_ms(reads),
+            p99_ms(appends),
+        );
+        first_step.get_or_insert((n, now));
+    }
+    assert_eq!(stats().gauges["stores_open"], cells.len() as u64);
+
+    // What each cell after the first step cost: the process's fixed costs, its pools' threads and
+    // the like, the first step's.
+    let ((first, then), now) = (first_step.unwrap(), Process::now());
+    let added = cells.len() - first;
+    let cost = |now: u64, then: u64| per(now.saturating_sub(then), added);
+    let (threads, files) = (cost(now.threads, then.threads), cost(now.files, then.files));
+    let (anon_kib, shmem_kib) =
+        (cost(now.anon_kib, then.anon_kib), cost(now.shmem_kib, then.shmem_kib));
+    println!(
+        "sqlite-density: a cell costs threads={threads:.2} files={files:.2} \
+         anon_kib={anon_kib:.1} shmem_kib={shmem_kib:.1}"
+    );
+    assert!(threads <= Budget::THREADS, "{threads:.2} threads a cell");
+    assert!(files <= Budget::FILES, "{files:.2} open files a cell");
+    assert!(anon_kib <= Budget::ANON_KIB, "{anon_kib:.1} KiB of anonymous memory a cell");
+    assert!(shmem_kib <= Budget::SHMEM_KIB, "{shmem_kib:.1} KiB of shared memory a cell");
+
+    // Every cell in the bucket, so that the idle cells have nothing left to upload.
+    for cell in &cells {
+        let request = SyncCellRequest { tenant: cell.id.tenant, cell: cell.id.id };
+        control
+            .call(async |client| client.sync_cell(request).await)
+            .unwrap_or_else(|error| panic!("syncing cell {}: {error:#}", cell.index));
+    }
+    let (cpu_before, commits_before) = (cpu_ms(), stats().counters["commits"]);
+    let idle = Instant::now();
+    std::thread::sleep(IDLE);
+    let (cpu, commits) = (cpu_ms() - cpu_before, stats().counters["commits"] - commits_before);
+    let cpu_ms_per_s = cpu as f64 / idle.elapsed().as_secs_f64();
+    println!(
+        "sqlite-density: idle cells={} cpu_ms_per_s={cpu_ms_per_s:.1} commits={commits}",
+        cells.len()
+    );
+    assert_eq!(commits, 0, "idle cells committed");
+
+    for cell in &cells {
+        cell.check();
+    }
+    let sample: Vec<_> = (0..REOPENED.min(cells.len()))
+        .map(|at| at * cells.len() / REOPENED.min(cells.len()))
+        .map(|at| (cells[at].id, cells[at].index, cells[at].records))
+        .collect();
+    let held = cells.len();
+    for cell in cells {
+        cell.close();
+    }
+    for (id, index, records) in sample {
+        let cell = Cell::reopen(&socket, id, index, records);
+        cell.check();
+        cell.close();
+    }
+    println!("sqlite-density: held={held} limit=none");
+}
