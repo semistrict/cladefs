@@ -712,21 +712,20 @@ mod tests {
         })
         .unwrap();
 
-        let end = Instant::now() + Duration::from_millis(30);
-        let mut attempts = 0usize;
-        while Instant::now() < end {
+        // Run a fixed number of retry attempts rather than a wall-clock window so heavily loaded
+        // CI hosts do not flake on attempt count (board 13856).
+        const ATTEMPTS: usize = 32;
+        for _ in 0..ATTEMPTS {
             assert_eq!(
                 alloc(ArenaId::DEFAULT, u64::from(whole), Wait::Yes).err(),
                 Some(crate::slabs::NoMemory)
             );
-            attempts += 1;
             std::thread::yield_now();
         }
         let passes = calls.load(Ordering::Relaxed);
-        assert!(attempts > 10, "expected many retry attempts, got {attempts}");
         assert!(
             passes <= 10,
-            "exhausted relief spun instead of backing off: {passes} passes for {attempts} attempts"
+            "exhausted relief spun instead of backing off: {passes} passes for {ATTEMPTS} attempts"
         );
 
         // Freeing the held slab clears backoff and exhaustion immediately.

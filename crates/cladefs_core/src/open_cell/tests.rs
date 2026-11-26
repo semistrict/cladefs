@@ -2276,9 +2276,10 @@ async fn take_in_bucket(
     )
     .await
     .unwrap();
-    opened.made().unwrap();
+    local_cell::upload::blocking(|| opened.made()).unwrap();
     opened.close().await;
-    local_cell::place_host_on(host.local(), path, token, false).unwrap();
+    local_cell::upload::blocking(|| local_cell::place_host_on(host.local(), path, token, false))
+        .unwrap();
     Opening::keeping(keeping).for_host().open(path).await.unwrap()
 }
 
