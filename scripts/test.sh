@@ -285,7 +285,7 @@ if part firecracker; then
     tests+=' | test(/transport::mmio::tests::test_ack_features_by_page$/)'
     tests+=' | test(/vsock::device::tests::(test_virtio_device|test_prepare_save_|test_kick_signals_)/)'
     tests+=' | test(/vsock::csm::connection::tests::/) | test(/vsock::unix::muxer::tests::/)'
-    tests+=' | test(/signal_handler::/)'
+    tests+=' | test(/signal_handler::/) | test(/cladefs_memory::/)'
     tests+=' | test(/transport::pci::device::tests::test_(shm_bar|pci_device_ids)$/)'
     CLADEFSD_BUCKET=memory:///vmm CLADEFSD_TOKEN=1 \
         "$root/scripts/firecracker-cargo.sh" nextest run -p vmm --lib --features cladefs -E "$tests"

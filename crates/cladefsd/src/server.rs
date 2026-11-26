@@ -991,6 +991,16 @@ impl Connection {
     }
 }
 
+/// A new cell of `tenant`'s, its ID given by `daemon`'s bucket: `EIO` if the bucket fails, which
+/// the VM process's errno can't say, so logged.
+async fn new_cell(daemon: &Arc<Daemon>, tenant: u64) -> Result<cladefs_core::CellId, Errno> {
+    let bucket = crate::storage::daemon_bucket_on(daemon)?;
+    cladefs_core::host_cell::new_cell(&*bucket, tenant).await.map_err(|err| {
+        log::error!("cladefsd: allocating a new cell of tenant {tenant}: {err:#}");
+        Errno::EIO
+    })
+}
+
 /// Lets the cell of `connection`, whose VM process is gone and whose requests are done, go: once
 /// what it committed is durable, if it writes it.
 async fn finish_connection(connection: Arc<Connection>) {
@@ -1830,22 +1840,30 @@ impl Connection {
         }
     }
 
-    /// Whether it may name the cell at `path`: when a managed [`DiskPool`] is active, `path` must
-    /// be a `TENANT/CELL` cell ID (raw host paths are refused with `EINVAL`), and granted tenants
-    /// may only address cells of their own tenant (`EACCES`). Without a `DiskPool` (standalone unit
-    /// tests), falls back to directory containment (`self.tenant.holds`).
+    /// Whether it may name the cell at `path`: when a managed [`DiskPool`] is active, as
+    /// [`Connection::named`] has it; without one (standalone unit tests), by directory containment
+    /// (`self.tenant.holds`).
     fn authorize(&self, path: &Path) -> Result<(), Errno> {
-        if self.daemon().disk_pool().is_some() {
-            let cell_str = path.to_str().ok_or(Errno::EINVAL)?;
-            let cell = cell_str.parse::<cladefs_core::CellId>().map_err(|_| Errno::EINVAL)?;
-            if let Some(granted) = self.tenant.granted() {
-                if cell.tenant != granted {
-                    return Err(Errno::EACCES);
-                }
-            }
-            return Ok(());
+        match self.daemon().disk_pool() {
+            Some(_) => self.named(path).map(drop),
+            None => self.tenant.holds(path),
         }
-        self.tenant.holds(path)
+    }
+
+    /// The cell `path` names with a managed [`DiskPool`] active: a `TENANT/CELL` cell ID (`EINVAL`
+    /// for anything else, raw host paths included), `TENANT/0` a new cell of TENANT's. A granted
+    /// tenant names cells of its own alone (`EACCES`), and its new ones `0/0` too, as the
+    /// integrator guide has it: the cell named then is of the granted tenant (board 13876).
+    fn named(&self, path: &Path) -> Result<cladefs_core::CellId, Errno> {
+        let cell: cladefs_core::CellId =
+            path.to_str().ok_or(Errno::EINVAL)?.parse().map_err(|_| Errno::EINVAL)?;
+        match self.tenant.granted() {
+            Some(granted) if cell == (cladefs_core::CellId { tenant: 0, id: 0 }) => {
+                Ok(cladefs_core::CellId { tenant: granted, id: 0 })
+            }
+            Some(granted) if cell.tenant != granted => Err(Errno::EACCES),
+            _ => Ok(cell),
+        }
     }
 
     /// Serves `request`, and replies, as `answer` owes.
@@ -2198,9 +2216,7 @@ impl Connection {
     ) -> Result<(cladefs_core::CellId, bool), Errno> {
         let opening = self.opening()?;
         let (resolved, effective_how, named_cell) = if let Some(pool) = self.daemon().disk_pool() {
-            let req_str = path.to_str().ok_or(Errno::EINVAL)?;
-            let req_cell: cladefs_core::CellId = req_str.parse().map_err(|_| Errno::EINVAL)?;
-            let effective_tenant = self.tenant.granted().unwrap_or(req_cell.tenant);
+            let req_cell = self.named(path)?;
             if req_cell.id != 0 {
                 let pool = Arc::clone(pool);
                 let found =
@@ -2219,10 +2235,7 @@ impl Connection {
                         // Allocate the cell ID up front so `open_held` creates and takes the cell
                         // directly at its canonical `<disk>/cells/<TENANT>/<CELL>` path in a
                         // single taking (epoch = 1) with no staging rename.
-                        let bucket = crate::storage::daemon_bucket_on(daemon)?;
-                        let cell = cladefs_core::host_cell::new_cell(&*bucket, effective_tenant)
-                            .await
-                            .map_err(|_| Errno::EIO)?;
+                        let cell = new_cell(daemon, req_cell.tenant).await?;
                         let disk_prep = Arc::clone(&disk);
                         let final_path = cells::blocking(move || {
                             drop(crate::disks::DiskPool::ensure_tenant_dir(
@@ -2237,14 +2250,14 @@ impl Connection {
                     codec::Opening::CreateEphemeral(capacity, kind) => {
                         let disk_for_stage = Arc::clone(&disk);
                         let staging = cells::blocking(move || {
-                            crate::disks::DiskPool::staging_path(&disk_for_stage, effective_tenant)
+                            crate::disks::DiskPool::staging_path(&disk_for_stage, req_cell.tenant)
                         })
                         .await?;
                         let made = cells::create(
                             daemon,
                             staging.clone(),
                             capacity,
-                            cladefs_core::CellId { tenant: effective_tenant, id: 0 },
+                            cladefs_core::CellId { tenant: req_cell.tenant, id: 0 },
                             (None, kind, None, None, false, None, true),
                         )
                         .await;
@@ -2295,14 +2308,12 @@ impl Connection {
                         // Allocate the child cell ID up front so `open_held` forks and opens it
                         // directly at `<disk>/cells/<TENANT>/<CELL>` under `defer_durability_on`
                         // (board 7420), with no staging directory or eager syncs.
-                        let child_tenant = self
-                            .tenant
-                            .granted()
-                            .unwrap_or(if req_cell.tenant != 0 { req_cell.tenant } else { tenant });
-                        let bucket = crate::storage::daemon_bucket_on(daemon)?;
-                        let child = cladefs_core::host_cell::new_cell(&*bucket, child_tenant)
-                            .await
-                            .map_err(|_| Errno::EIO)?;
+                        // `0/0` on the default tenant's socket: of the version's tenant.
+                        let child_tenant = match req_cell.tenant {
+                            0 => tenant,
+                            named => named,
+                        };
+                        let child = new_cell(daemon, child_tenant).await?;
                         let disk_prep = Arc::clone(&disk);
                         let final_path = cells::blocking(move || {
                             drop(crate::disks::DiskPool::ensure_tenant_dir(

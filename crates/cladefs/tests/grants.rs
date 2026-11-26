@@ -34,7 +34,8 @@ fn tenants_name_cells_in_their_directory_alone() {
     let their_vm = CellClient::connect_new(&theirs, 2, CAPACITY).unwrap();
     let their_cell = CellId { tenant: 2, id: their_vm.cell() };
 
-    // Tenant 1's socket refuses tenant 2's cells, new cells for other tenants, and raw paths.
+    // Tenant 1's socket refuses tenant 2's cells, new cells for tenant 2, cells of the default
+    // tenant's, and raw paths.
     assert_eq!(
         CellClient::connect_cell(&ours, their_cell).err().and_then(|e| e.errno()),
         Some(Errno::EACCES)
@@ -43,8 +44,9 @@ fn tenants_name_cells_in_their_directory_alone() {
         CellClient::connect_new(&ours, 2, CAPACITY).err().and_then(|e| e.errno()),
         Some(Errno::EACCES)
     );
+    let default_cell = daemon.create(CellId { tenant: 0, id: 0 }, None).unwrap();
     assert_eq!(
-        CellClient::connect_new(&ours, 0, CAPACITY).err().and_then(|e| e.errno()),
+        CellClient::connect_cell(&ours, default_cell).err().and_then(|e| e.errno()),
         Some(Errno::EACCES)
     );
     assert_eq!(
@@ -62,6 +64,42 @@ fn tenants_name_cells_in_their_directory_alone() {
     // Re-granting tenant 1 is idempotent; tenant 0 is refused.
     assert_eq!(daemon.grant(1, None).unwrap(), ours);
     assert_eq!(failure(daemon.grant(0, None)), (Code::InvalidArgument, Errno::EINVAL));
+}
+
+/// Board 13876: on a granted tenant's socket, `0/0` names a new cell of that tenant's, as the
+/// integrator guide has it: every way a VM process makes a cell there (a disk's, a snapshot's memory
+/// cell, an ephemeral memory cell, a restore's fork) makes one of the granted tenant's.
+#[test]
+fn tenants_name_new_cells_of_their_own_as_0_0() {
+    use cladefs::memory_cell::MemoryCell;
+    let dir = tempfile::tempdir().unwrap();
+    let mut daemon = Daemon::new(dir.path());
+    let ours = daemon.grant(0xa, None).unwrap();
+    let new = Path::new("0/0");
+    let size = 64 * 4096;
+
+    let disk = CellClient::connect_new(&ours, 0, CAPACITY).unwrap();
+    assert_eq!(disk.tenant(), 0xa);
+    write(&disk, &pattern(1), b"acme");
+    let version = disk.make_version().unwrap();
+    assert_eq!(daemon.stat(CellId { tenant: 0xa, id: disk.cell() }).unwrap().tenant, 0xa);
+
+    let memory = MemoryCell::open(&ours, new, size).unwrap();
+    assert_eq!((memory.tenant(), memory.is_ephemeral()), (0xa, false));
+    memory.write(0, &[7; 4096]).unwrap();
+    memory.commit().unwrap();
+    let memory_cell = CellId { tenant: 0xa, id: memory.cell() };
+    memory.close().unwrap();
+    assert_eq!(daemon.stat(memory_cell).unwrap().tenant, 0xa);
+
+    let ephemeral = MemoryCell::open_ephemeral(&ours, new, size).unwrap();
+    assert_eq!((ephemeral.tenant(), ephemeral.is_ephemeral()), (0xa, true));
+    ephemeral.close().unwrap();
+
+    let restored = CellClient::connect_forked(&ours, new, version, CAPACITY).unwrap();
+    assert_eq!(restored.tenant(), 0xa);
+    assert_ne!(restored.cell(), disk.cell());
+    assert_eq!(restored.root().unwrap(), b"acme");
 }
 
 /// TASK-364: a granted tenant's ID is its tenant in the bucket. The cells its VM processes make,
