@@ -303,12 +303,38 @@ pub enum Error {
     NoKey(KeyId),
 }
 
+#[cfg(test)]
 fn u64_at(bytes: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap())
 }
 
 fn u32_at(bytes: &[u8], at: usize) -> u32 {
     u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
+}
+
+#[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
+fn slice_at<'a>(
+    bytes: &'a [u8],
+    at: usize,
+    len: usize,
+    what: &'static str,
+) -> Result<&'a [u8], Corrupt> {
+    let end = at.checked_add(len).ok_or_else(|| corrupt(what))?;
+    bytes.get(at..end).ok_or_else(|| corrupt(what))
+}
+
+#[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
+fn u64_at_checked(bytes: &[u8], at: usize, what: &'static str) -> Result<u64, Corrupt> {
+    let slice = slice_at(bytes, at, 8, what)?;
+    let arr: [u8; 8] = slice.try_into().map_err(|_| corrupt(what))?;
+    Ok(u64::from_le_bytes(arr))
+}
+
+#[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
+fn u32_at_checked(bytes: &[u8], at: usize, what: &'static str) -> Result<u32, Corrupt> {
+    let slice = slice_at(bytes, at, 4, what)?;
+    let arr: [u8; 4] = slice.try_into().map_err(|_| corrupt(what))?;
+    Ok(u32::from_le_bytes(arr))
 }
 
 /// cladefs: the keys a reader of objects holds: the DEK a [`KeyId`] names, if it holds it
@@ -1373,6 +1399,7 @@ pub struct Frame {
 
 impl Frame {
     /// The frame an object's last bytes, its [`TRAILER`] at their end, give.
+    #[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
     pub fn of_trailer(bytes: &[u8]) -> Result<Self, Corrupt> {
         // Its version first: a frame of another version, its trailer perhaps of another length,
         // is named.
@@ -1383,19 +1410,24 @@ impl Frame {
             return Err(corrupt("trailer, by its magic"));
         }
         let at = bytes.len().checked_sub(TRAILER as usize).ok_or_else(|| corrupt("trailer"))?;
-        let trailer = &bytes[at..];
-        let mac = |at: usize| -> [u8; MAC_LEN] { trailer[at..at + MAC_LEN].try_into().unwrap() };
+        let trailer = bytes.get(at..).ok_or_else(|| corrupt("trailer"))?;
+        let mac = |at: usize| -> Result<[u8; MAC_LEN], Corrupt> {
+            slice_at(trailer, at, MAC_LEN, "trailer")?.try_into().map_err(|_| corrupt("trailer"))
+        };
         let frame = Self {
-            data_len: u64_at(trailer, at::DATA_LEN),
-            stored_len: u64_at(trailer, at::STORED_LEN),
-            footer_len: u64_at(trailer, at::FOOTER_LEN),
-            footer_crc: u32_at(trailer, at::FOOTER_CRC),
-            encryption: Self::encryption_of(
-                &trailer[at::ENCRYPTION..at::ENCRYPTION + ENCRYPTION_LEN],
-            )?,
-            footer_mac: mac(at::FOOTER_MAC),
-            mac: mac(at::MAC),
-            table_crc: u32_at(trailer, at::TABLE_CRC),
+            data_len: u64_at_checked(trailer, at::DATA_LEN, "trailer")?,
+            stored_len: u64_at_checked(trailer, at::STORED_LEN, "trailer")?,
+            footer_len: u64_at_checked(trailer, at::FOOTER_LEN, "trailer")?,
+            footer_crc: u32_at_checked(trailer, at::FOOTER_CRC, "trailer")?,
+            encryption: Self::encryption_of(slice_at(
+                trailer,
+                at::ENCRYPTION,
+                ENCRYPTION_LEN,
+                "trailer",
+            )?)?,
+            footer_mac: mac(at::FOOTER_MAC)?,
+            mac: mac(at::MAC)?,
+            table_crc: u32_at_checked(trailer, at::TABLE_CRC, "trailer")?,
         };
         // Lengths so large that the object's would overflow are corrupt.
         (frame.data_len.checked_add(PART))
@@ -1407,13 +1439,24 @@ impl Frame {
     }
 
     /// The encryption a trailer's [`ENCRYPTION_LEN`] bytes say.
+    #[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
     fn encryption_of(encryption: &[u8]) -> Result<Encryption, Corrupt> {
-        match encryption[0] {
+        let Some(&kind) = encryption.first() else {
+            return Err(corrupt("trailer"));
+        };
+        match kind {
             // cladefs: no object is in the clear (TASK-411.28).
             0 => Err(corrupt("trailer: an encryption in the clear, which no object has")),
-            kind @ 1..=3 => {
-                let key = KeyId { cell: u64_at(encryption, 1), generation: u32_at(encryption, 9) };
-                let salt = Salt(encryption[13..].try_into().unwrap());
+            1..=3 => {
+                let key = KeyId {
+                    cell: u64_at_checked(encryption, 1, "trailer")?,
+                    generation: u32_at_checked(encryption, 9, "trailer")?,
+                };
+                let salt = Salt(
+                    slice_at(encryption, 13, SALT_LEN, "trailer")?
+                        .try_into()
+                        .map_err(|_| corrupt("trailer"))?,
+                );
                 Ok(match kind {
                     1 => Encryption::Encrypted { key, salt },
                     2 => Encryption::Authenticated { key, salt },
@@ -1498,32 +1541,62 @@ impl Frame {
     /// Where its parts are stored, and their tags, as the table in `suffix`, the object's last
     /// bytes, which must hold it, says, checked against its CRC; and where in `suffix` the table
     /// begins.
+    #[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
     fn stored_in(&self, suffix: &[u8]) -> Result<(Vec<Stored>, Vec<Tag>, usize), Corrupt> {
-        let at = (suffix.len() as u64 + self.table().start)
-            .checked_sub(self.size())
-            .ok_or_else(|| corrupt("table, cut short"))? as usize;
-        let trailer = suffix.len() - TRAILER as usize;
-        if crc(&suffix[at..trailer + at::TABLE_CRC]) != self.table_crc {
+        let table_and_trailer = self
+            .parts()
+            .checked_mul(ENTRY)
+            .and_then(|table_len| table_len.checked_add(TRAILER))
+            .ok_or_else(|| corrupt("table, cut short"))?;
+        let at = (suffix.len() as u64)
+            .checked_sub(table_and_trailer)
+            .ok_or_else(|| corrupt("table, cut short"))?;
+        let at = usize::try_from(at).map_err(|_| corrupt("table, cut short"))?;
+        let trailer =
+            suffix.len().checked_sub(TRAILER as usize).ok_or_else(|| corrupt("trailer"))?;
+        let crc_end = trailer.checked_add(at::TABLE_CRC).ok_or_else(|| corrupt("trailer"))?;
+        let crc_bytes = suffix.get(at..crc_end).ok_or_else(|| corrupt("table, cut short"))?;
+        if crc(crc_bytes) != self.table_crc {
             return Err(corrupt("table, by its CRC"));
         }
-        let table = &suffix[at..trailer];
-        let mut stored = Vec::with_capacity(self.parts() as usize);
-        let mut tags = Vec::with_capacity(self.parts() as usize);
-        let mut end = 0;
-        for (part, entry) in table.chunks(ENTRY as usize).enumerate() {
-            let encoding = match entry[16] {
+        let table = suffix.get(at..trailer).ok_or_else(|| corrupt("table, cut short"))?;
+        let count = usize::try_from(self.parts()).map_err(|_| corrupt("table, cut short"))?;
+        let mut stored = Vec::with_capacity(count);
+        let mut tags = Vec::with_capacity(count);
+        let mut end = 0u64;
+        let chunks = table.chunks_exact(ENTRY as usize);
+        if !chunks.remainder().is_empty() {
+            return Err(corrupt("table, cut short"));
+        }
+        for (part, entry) in chunks.enumerate() {
+            let &encoding_byte = entry.get(16).ok_or_else(|| corrupt("table, cut short"))?;
+            let encoding = match encoding_byte {
                 0 => Encoding::Raw,
                 1 => Encoding::Zstd,
                 other => return Err(corrupt(format_args!("part {part}'s encoding {other}"))),
             };
             let entry_stored = Stored {
-                offset: u64_at(entry, 0),
-                len: u32_at(entry, 8) as u64,
-                crc: u32_at(entry, 12),
+                offset: u64_at_checked(entry, 0, "table, cut short")?,
+                len: u64::from(u32_at_checked(entry, 8, "table, cut short")?),
+                crc: u32_at_checked(entry, 12, "table, cut short")?,
                 encoding,
             };
-            let tag: Tag = entry[17..].try_into().unwrap();
-            let len = self.part(part as u64).end - self.part(part as u64).start;
+            let tag: Tag = slice_at(entry, 17, TAG_LEN, "table, cut short")?
+                .try_into()
+                .map_err(|_| corrupt("table, cut short"))?;
+            let part_u64 = part as u64;
+            let part_start = part_u64
+                .checked_mul(PART)
+                .ok_or_else(|| corrupt(format_args!("part {part}'s place")))?
+                .min(self.data_len);
+            let part_end = part_u64
+                .checked_add(1)
+                .and_then(|next| next.checked_mul(PART))
+                .ok_or_else(|| corrupt(format_args!("part {part}'s place")))?
+                .min(self.data_len);
+            let len = part_end
+                .checked_sub(part_start)
+                .ok_or_else(|| corrupt(format_args!("part {part}'s place")))?;
             let fits = match encoding {
                 Encoding::Raw => entry_stored.len == len,
                 Encoding::Zstd => entry_stored.len > 0 && entry_stored.len < len,
@@ -1538,14 +1611,18 @@ impl Frame {
             if !sectors {
                 return Err(corrupt(format_args!("part {part}, not whole sectors of a raw file")));
             }
+            let entry_end = entry_stored
+                .offset
+                .checked_add(entry_stored.len)
+                .ok_or_else(|| corrupt(format_args!("part {part}'s place")))?;
             if !fits
                 || !entry_stored.offset.is_multiple_of(ALIGN)
                 || entry_stored.offset < end
-                || entry_stored.range().end > self.stored_len
+                || entry_end > self.stored_len
             {
                 return Err(corrupt(format_args!("part {part}'s place")));
             }
-            end = entry_stored.range().end;
+            end = entry_end;
             stored.push(entry_stored);
             tags.push(tag);
         }
@@ -1576,15 +1653,21 @@ impl Parts {
         Self::in_suffix(Frame::of(bytes)?, bytes, keys)
     }
 
+    #[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
     fn in_suffix(frame: Frame, suffix: &[u8], keys: &dyn Keys) -> Result<Self, Error> {
         #[allow(unused_variables)]
         let (stored, tags, table) = frame.stored_in(suffix)?;
         let opening = Opening::of(frame.encryption, keys)?;
         #[cfg(feature = "crypto")]
         if let Some(key) = opening.key() {
-            let trailer = suffix.len() - TRAILER as usize;
-            let authenticated =
-                [&suffix[table..trailer + at::MAC], &suffix[trailer + at::VERSION..][..4]];
+            let trailer =
+                suffix.len().checked_sub(TRAILER as usize).ok_or_else(|| corrupt("trailer"))?;
+            let mac_end = trailer.checked_add(at::MAC).ok_or_else(|| corrupt("trailer"))?;
+            let version_at = trailer.checked_add(at::VERSION).ok_or_else(|| corrupt("trailer"))?;
+            let authenticated = [
+                suffix.get(table..mac_end).ok_or_else(|| corrupt("table, cut short"))?,
+                slice_at(suffix, version_at, 4, "trailer")?,
+            ];
             let verified = key.mac.verify_of(&authenticated, &frame.mac);
             verified.map_err(|_| corrupt("table, by its MAC"))?;
         }
@@ -2777,6 +2860,82 @@ mod tests {
         assert_eq!(stored_in(vec![zstd(0, 40), zstd(4097, 100)]), place);
         assert_eq!(stored_in(vec![zstd(0, 40), zstd(0, 100)]), place);
         assert_eq!(stored_in(vec![zstd(0, 40), zstd(8192, 8192 - 1)]), place);
+    }
+
+    /// board 11647: untrusted trailers at `u64::MAX` / `u64::MAX - TRAILER` boundaries (and part
+    /// entries whose `offset + len` would overflow `u64`) must return `Err(Corrupt)` cleanly rather
+    /// than panicking on arithmetic overflow in `Frame::stored_in` or `Frame::of_trailer`.
+    #[test]
+    fn boundary_trailers_at_u64_max_do_not_overflow_or_panic() {
+        let make_suffix = |data_len: u64,
+                           stored_len: u64,
+                           footer_len: u64,
+                           prefix_len: usize,
+                           fix_crc: bool| {
+            let mut suffix = vec![0u8; prefix_len + TRAILER as usize];
+            let trailer = &mut suffix[prefix_len..];
+            trailer[at::DATA_LEN..at::DATA_LEN + 8].copy_from_slice(&data_len.to_le_bytes());
+            trailer[at::STORED_LEN..at::STORED_LEN + 8].copy_from_slice(&stored_len.to_le_bytes());
+            trailer[at::FOOTER_LEN..at::FOOTER_LEN + 8].copy_from_slice(&footer_len.to_le_bytes());
+            trailer[at::ENCRYPTION] = 1;
+            trailer[at::VERSION..at::VERSION + 4].copy_from_slice(&FORMAT.current.to_le_bytes());
+            trailer[at::MAGIC..].copy_from_slice(&MAGIC);
+            if fix_crc {
+                let table_crc = crc(&suffix[prefix_len..prefix_len + at::TABLE_CRC]);
+                suffix[prefix_len + at::TABLE_CRC..prefix_len + at::TABLE_CRC + 4]
+                    .copy_from_slice(&table_crc.to_le_bytes());
+            }
+            suffix
+        };
+
+        // Exact reproducer from board 11647: `size() == u64::MAX`, `table().start == u64::MAX - TRAILER`,
+        // `suffix.len() == TRAILER + 10` previously overflowed `suffix.len() as u64 + self.table().start`.
+        let bad_crc = make_suffix(0, u64::MAX - TRAILER - 10, 10, 10, false);
+        let frame = Frame::of_trailer(&bad_crc).expect("boundary trailer fits in u64");
+        assert_eq!(frame.size(), u64::MAX);
+        assert!(frame.stored_in(&bad_crc).is_err());
+
+        let valid_crc = make_suffix(0, u64::MAX - TRAILER - 10, 10, 10, true);
+        let frame = Frame::of_trailer(&valid_crc).expect("boundary trailer fits in u64");
+        let (stored, tags, at) = frame.stored_in(&valid_crc).expect("empty table at u64::MAX");
+        assert!(stored.is_empty() && tags.is_empty() && at == 10);
+
+        // Overflowing length combinations must be refused by `of_trailer`.
+        for (data_len, stored_len, footer_len) in [
+            (0, u64::MAX, 0),
+            (0, u64::MAX - TRAILER, 1),
+            (u64::MAX, 0, 0),
+            (u64::MAX - PART + 1, 0, 0),
+            (PART, u64::MAX - TRAILER - ENTRY + 1, 0),
+        ] {
+            let suffix = make_suffix(data_len, stored_len, footer_len, 0, false);
+            assert!(
+                Frame::of_trailer(&suffix).is_err(),
+                "expected refusal for data_len={data_len}, stored_len={stored_len}, footer_len={footer_len}"
+            );
+        }
+
+        // Part entry with `offset = u64::MAX - ALIGN + 1` (or aligned near `u64::MAX`) must not
+        // overflow `offset + len` in `stored_in`.
+        let mut suffix = vec![0u8; ENTRY as usize + TRAILER as usize];
+        let huge_offset = u64::MAX - (u64::MAX % ALIGN);
+        suffix[0..8].copy_from_slice(&huge_offset.to_le_bytes());
+        suffix[8..12].copy_from_slice(&(4096u32).to_le_bytes());
+        suffix[16] = 0; // Raw
+        let trailer_at = ENTRY as usize;
+        suffix[trailer_at + at::DATA_LEN..trailer_at + at::DATA_LEN + 8]
+            .copy_from_slice(&4096u64.to_le_bytes());
+        suffix[trailer_at + at::STORED_LEN..trailer_at + at::STORED_LEN + 8]
+            .copy_from_slice(&(u64::MAX - TRAILER - ENTRY).to_le_bytes());
+        suffix[trailer_at + at::ENCRYPTION] = 1;
+        suffix[trailer_at + at::VERSION..trailer_at + at::VERSION + 4]
+            .copy_from_slice(&FORMAT.current.to_le_bytes());
+        suffix[trailer_at + at::MAGIC..].copy_from_slice(&MAGIC);
+        let table_crc = crc(&suffix[..trailer_at + at::TABLE_CRC]);
+        suffix[trailer_at + at::TABLE_CRC..trailer_at + at::TABLE_CRC + 4]
+            .copy_from_slice(&table_crc.to_le_bytes());
+        let frame = Frame::of_trailer(&suffix).unwrap();
+        assert!(frame.stored_in(&suffix).is_err());
     }
 
     /// cladefs: the pure-Rust Castagnoli CRC32C used in keyless `wasm32` builds matches
