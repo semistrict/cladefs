@@ -503,7 +503,7 @@ impl PageCache {
     /// writes it back again.
     pub fn write_back_all(&self) -> io::Result<()> {
         let mut failed = Ok(());
-        for file in self.files() {
+        for file in self.files().iter().filter_map(Weak::upgrade) {
             if let Err(err) = file.write_back_all() {
                 failed = failed.and(Err(err));
             }
@@ -511,26 +511,37 @@ impl PageCache {
         failed
     }
 
-    /// The files it holds pages of, those gone dropped.
-    fn files(&self) -> Vec<Arc<dyn Paged>> {
+    /// The files it holds pages of, those gone dropped: held weakly, so that a pass through them
+    /// keeps open only the one it is at, each upgraded as the pass reaches it. One blocked on a
+    /// file's write-back, as a stalled disk's flusher is, keeps no other file open: a file closed
+    /// meanwhile, on any disk, goes with its last opening, its pages and its disk's share of the
+    /// budget with it (board 13570).
+    fn files(&self) -> Vec<Weak<dyn Paged>> {
         let mut files = self.files.lock().unwrap();
         files.retain(|file| file.strong_count() > 0);
-        files.iter().filter_map(Weak::upgrade).collect()
+        files.clone()
     }
 
-    /// The files it holds pages of, ordered by `key`, each file's taken once, before any is
-    /// compared: keys other threads change as it goes, its files' uses and writes, ordered as each
-    /// comparison finds them, are no order, which a sort panics on (TASK-493).
-    fn files_by<K: Ord>(&self, key: impl Fn(&dyn Paged) -> K) -> Vec<Arc<dyn Paged>> {
-        let mut keyed: Vec<(K, Arc<dyn Paged>)> =
-            self.files().into_iter().map(|file| (key(&*file), file)).collect();
+    /// The files it holds pages of ([`PageCache::files`]), ordered by `key`, each file's taken
+    /// once, before any is compared: keys other threads change as it goes, its files' uses and
+    /// writes, ordered as each comparison finds them, are no order, which a sort panics on
+    /// (TASK-493). Each is upgraded as the caller reaches it, those gone by then passed over.
+    fn files_by<K: Ord>(
+        &self,
+        key: impl Fn(&dyn Paged) -> K,
+    ) -> impl Iterator<Item = Arc<dyn Paged>> {
+        let mut keyed: Vec<(K, Weak<dyn Paged>)> = (self.files().into_iter())
+            .filter_map(|file| Some((key(&*file.upgrade()?), file)))
+            .collect();
         keyed.sort_by(|(one, _), (other, _)| one.cmp(other));
-        keyed.into_iter().map(|(_, file)| file).collect()
+        keyed.into_iter().filter_map(|(_, file)| file.upgrade())
     }
 
     /// cladefs: the files with dirty pages, the longest dirty first, each file's age taken once
     /// (TASK-493); those found clean, or gone, leave its dirty set ([`PageCache::dirty_files`]).
-    fn dirty_files_by_age(&self) -> Vec<Arc<dyn Paged>> {
+    /// Held weakly, each upgraded as the caller reaches it, as [`PageCache::files`] are: a pass
+    /// blocked on one file's write-back keeps no other open (board 13570).
+    fn dirty_files_by_age(&self) -> impl Iterator<Item = Arc<dyn Paged>> {
         let listed: Vec<(usize, Weak<dyn Paged>)> = (self.dirty_files.lock().unwrap().iter())
             .map(|(&at, file)| (at, file.clone()))
             .collect();
@@ -548,11 +559,11 @@ impl PageCache {
                 continue;
             };
             if let Some(dirtied) = file.dirtied_or_unlist(&unlist) {
-                dirty.push((dirtied, file));
+                dirty.push((dirtied, listed));
             }
         }
         dirty.sort_by_key(|(dirtied, _)| *dirtied);
-        dirty.into_iter().map(|(_, file)| file).collect()
+        dirty.into_iter().filter_map(|(_, file)| file.upgrade())
     }
 
     /// Tracks `file`, one more of its files: the files gone pruned once there are twice as many as
@@ -687,6 +698,25 @@ impl PageCache {
     #[cfg(test)]
     fn throttle(&self, failing: impl Fn() -> Option<io::Error>) -> io::Result<()> {
         self.throttle_for(None, failing)
+    }
+
+    /// Waits until `disks` disks have files open ([`PageCache::active_disks`]), as the drops of
+    /// files say it ([`PageCache::drained`]): a file's last opening dropped, a flusher's pass at
+    /// it may drop it a moment later, on the flusher's thread. Panics past a few seconds.
+    #[cfg(test)]
+    fn await_active_disks(&self, disks: u64) {
+        let holding = self.holding.lock().unwrap();
+        let (holding, waited) = (self.drained)
+            .wait_timeout_while(holding, Duration::from_secs(5), |_| {
+                self.active_disks.load(Ordering::Acquire) != disks
+            })
+            .unwrap();
+        drop(holding);
+        assert!(
+            !waited.timed_out(),
+            "active disks {}, awaiting {disks}",
+            self.active_disks.load(Ordering::Acquire)
+        );
     }
 
     /// Pages became clean, or went: writers held back may go on.
@@ -1889,14 +1919,14 @@ mod tests {
             file.write_at(&pattern(1, PAGE as usize), 0).unwrap();
             file.write_at(&pattern(2, PAGE as usize), PAGE).unwrap();
         }
-        assert_eq!((listed(), cache.dirty_files_by_age().len()), (10, 10));
+        assert_eq!((listed(), cache.dirty_files_by_age().count()), (10, 10));
         cache.flush_pass(Instant::now() + 2 * expire);
         assert_eq!(cache.usage().dirty, 0);
-        assert_eq!((cache.dirty_files_by_age().len(), listed()), (0, 0));
+        assert_eq!((cache.dirty_files_by_age().count(), listed()), (0, 0));
         files[500].write_at(&pattern(3, PAGE as usize), 0).unwrap();
         assert_eq!(listed(), 1);
         drop(files);
-        assert_eq!((cache.dirty_files_by_age().len(), listed()), (0, 0));
+        assert_eq!((cache.dirty_files_by_age().count(), listed()), (0, 0));
     }
 
     /// cladefs: a cache's list of files holds those gone no longer than until it doubles: a
@@ -2235,60 +2265,150 @@ mod tests {
         assert!(!said.contains("LIVED ON"), "{said}");
     }
 
+    /// A file whose first write blocks until released, saying when it begins: a stalled disk.
+    #[cfg(not(madsim))]
+    struct BlockingFile {
+        entered: Mutex<Option<std::sync::mpsc::SyncSender<()>>>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+        wrote: AtomicU64,
+    }
+
+    #[cfg(not(madsim))]
+    impl BlockingFile {
+        /// The file, what says its first write began, and what releases it: a [`ReleaseGuard`]'s.
+        fn new() -> (Self, std::sync::mpsc::Receiver<()>, std::sync::mpsc::SyncSender<()>) {
+            let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+            let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+            let file = Self {
+                entered: Mutex::new(Some(entered_tx)),
+                release: Mutex::new(release_rx),
+                wrote: AtomicU64::new(0),
+            };
+            (file, entered_rx, release_tx)
+        }
+    }
+
+    #[cfg(not(madsim))]
+    impl File for BlockingFile {
+        fn read_at(&self, buf: &mut [u8], _offset: u64) -> io::Result<()> {
+            buf.fill(0);
+            Ok(())
+        }
+        fn write_at(&self, buf: &[u8], _offset: u64) -> io::Result<()> {
+            if let Some(tx) = self.entered.lock().unwrap().take() {
+                tx.send(()).expect("the test waits for the write to begin");
+            }
+            // Released, or the test gone: either way the write goes on.
+            let _ = self.release.lock().unwrap().recv();
+            self.wrote.fetch_add(buf.len() as u64, Ordering::Relaxed);
+            Ok(())
+        }
+        fn size(&self) -> io::Result<u64> {
+            Ok(0)
+        }
+        fn sync(&self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Releases a [`BlockingFile`] once, when told or dropped: declared after the file's opening,
+    /// a panic releases the write before the opening's drop waits for it.
+    #[cfg(not(madsim))]
+    struct ReleaseGuard(Option<std::sync::mpsc::SyncSender<()>>);
+
+    #[cfg(not(madsim))]
+    impl ReleaseGuard {
+        fn release(&mut self) {
+            if let Some(tx) = self.0.take() {
+                // The write may have ended already, its receiver gone with its file.
+                let _ = tx.send(());
+            }
+        }
+    }
+
+    #[cfg(not(madsim))]
+    impl Drop for ReleaseGuard {
+        fn drop(&mut self) {
+            self.release();
+        }
+    }
+
+    /// A file that counts what is written to it.
+    #[cfg(not(madsim))]
+    struct CountingFile {
+        wrote: Arc<AtomicU64>,
+    }
+
+    #[cfg(not(madsim))]
+    impl File for CountingFile {
+        fn read_at(&self, buf: &mut [u8], _offset: u64) -> io::Result<()> {
+            buf.fill(0);
+            Ok(())
+        }
+        fn write_at(&self, buf: &[u8], _offset: u64) -> io::Result<()> {
+            self.wrote.fetch_add(buf.len() as u64, Ordering::Relaxed);
+            Ok(())
+        }
+        fn size(&self) -> io::Result<u64> {
+            Ok(0)
+        }
+        fn sync(&self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A flusher's pass blocked on its own disk's write-back keeps no other disk's file open: a
+    /// file closed meanwhile goes with its last opening, there and then, its pages and its disk's
+    /// share of the budget with it (board 13570). Before, the pass held every file it had yet to
+    /// reach until it ended, a stalled disk pinning other disks' closed files.
+    #[cfg(not(madsim))]
+    #[test]
+    fn stalled_pass_keeps_no_other_file_open() {
+        let disk_a =
+            bucket_cell::host_disk::HostDisk::in_memory(bucket_cell::host_disk::Sample::default);
+        let disk_b =
+            bucket_cell::host_disk::HostDisk::in_memory(bucket_cell::host_disk::Sample::default);
+        // Each of the two disks' background share is two pages.
+        let cache = cache(Options {
+            background: 4 * PAGE,
+            hard: 1 << 30,
+            expire: Duration::from_secs(3600),
+            ..Options::default()
+        });
+        let (blocking, entered, release) = BlockingFile::new();
+        let file_a = Cached::on_disk(blocking, &cache, Some(disk_a)).unwrap();
+        let mut release = ReleaseGuard(Some(release));
+        let file_b = Cached::on_disk(
+            CountingFile { wrote: Arc::new(AtomicU64::new(0)) },
+            &cache,
+            Some(disk_b),
+        )
+        .unwrap();
+        let b = Arc::downgrade(&file_b.shared);
+        assert_eq!(cache.active_disks.load(Ordering::Acquire), 2);
+        // Dirtied after `file_a`, `file_b` comes after it in a pass, which goes oldest first. Each
+        // under its disk's share: no flusher is woken, disk B's never.
+        file_a.write_at(&[1; PAGE as usize], 0).unwrap();
+        file_b.write_at(&[2; PAGE as usize], 0).unwrap();
+        // Past disk A's share: its flusher's pass goes through the cache's files, and blocks
+        // writing back `file_a`'s, `file_b` still to come.
+        file_a.write_at(&[1; 2 * PAGE as usize], PAGE).unwrap();
+        entered.recv_timeout(Duration::from_secs(5)).expect("disk A's flusher writes back");
+        // Written back as it closes, on this thread, disk A's stall no matter.
+        drop(file_b);
+        assert_eq!(b.strong_count(), 0, "disk A's stalled pass holds disk B's closed file");
+        assert_eq!(cache.active_disks.load(Ordering::Acquire), 1);
+        release.release();
+        drop(file_a);
+        cache.await_active_disks(0);
+    }
+
     /// Two distinct `HostDisk`s get independent flusher threads: a blocked write on disk A must not
     /// stall write-back on disk B.
     #[cfg(not(madsim))]
     #[test]
     fn two_disks_flush_concurrently() {
         use std::sync::mpsc;
-
-        struct BlockingFile {
-            entered: Mutex<Option<mpsc::SyncSender<()>>>,
-            release: Mutex<mpsc::Receiver<()>>,
-            wrote: AtomicU64,
-        }
-
-        impl File for BlockingFile {
-            fn read_at(&self, buf: &mut [u8], _offset: u64) -> io::Result<()> {
-                buf.fill(0);
-                Ok(())
-            }
-            fn write_at(&self, buf: &[u8], _offset: u64) -> io::Result<()> {
-                if let Some(tx) = self.entered.lock().unwrap().take() {
-                    let _ = tx.send(());
-                }
-                let _ = self.release.lock().unwrap().recv();
-                self.wrote.fetch_add(buf.len() as u64, Ordering::Relaxed);
-                Ok(())
-            }
-            fn size(&self) -> io::Result<u64> {
-                Ok(0)
-            }
-            fn sync(&self) -> io::Result<()> {
-                Ok(())
-            }
-        }
-
-        struct CountingFile {
-            wrote: Arc<AtomicU64>,
-        }
-
-        impl File for CountingFile {
-            fn read_at(&self, buf: &mut [u8], _offset: u64) -> io::Result<()> {
-                buf.fill(0);
-                Ok(())
-            }
-            fn write_at(&self, buf: &[u8], _offset: u64) -> io::Result<()> {
-                self.wrote.fetch_add(buf.len() as u64, Ordering::Relaxed);
-                Ok(())
-            }
-            fn size(&self) -> io::Result<u64> {
-                Ok(0)
-            }
-            fn sync(&self) -> io::Result<()> {
-                Ok(())
-            }
-        }
 
         let disk_a =
             bucket_cell::host_disk::HostDisk::in_memory(bucket_cell::host_disk::Sample::default);
@@ -2302,32 +2422,8 @@ mod tests {
             expire: Duration::from_secs(3600),
             ..Options::default()
         });
-        struct ReleaseGuard(Option<mpsc::SyncSender<()>>);
-        impl ReleaseGuard {
-            fn release(&mut self) {
-                if let Some(tx) = self.0.take() {
-                    let _ = tx.send(());
-                }
-            }
-        }
-        impl Drop for ReleaseGuard {
-            fn drop(&mut self) {
-                self.release();
-            }
-        }
-
-        let (entered_tx, entered_rx) = mpsc::sync_channel(1);
-        let (release_tx, release_rx) = mpsc::sync_channel(1);
-        let file_a = Cached::on_disk(
-            BlockingFile {
-                entered: Mutex::new(Some(entered_tx)),
-                release: Mutex::new(release_rx),
-                wrote: AtomicU64::new(0),
-            },
-            &cache,
-            Some(disk_a.clone()),
-        )
-        .unwrap();
+        let (blocking, entered_rx, release_tx) = BlockingFile::new();
+        let file_a = Cached::on_disk(blocking, &cache, Some(disk_a.clone())).unwrap();
         // Declared after `file_a` so any early panic releases disk A's gate before `file_a` drops.
         let mut release_guard = ReleaseGuard(Some(release_tx));
         let file_a2 = Cached::on_disk(
@@ -2407,20 +2503,22 @@ mod tests {
             "stalled disk A writer must record a stall of its own"
         );
 
-        // Dropping all files on disk B returns its budget share immediately, and opening a Default
-        // file alongside disk A counts both toward active_disks.
+        // Dropping all files on disk B returns its budget share, and opening a Default file
+        // alongside disk A counts both toward active_disks. A flusher's pass may hold a file it is
+        // at a moment past its last opening's drop, the file then going on the flusher's thread
+        // (board 13570): each count after a drop is awaited, as the file's drop says it.
         drop(file_b);
-        assert_eq!(cache.active_disks.load(Ordering::Acquire), 1);
+        cache.await_active_disks(1);
         let file_default =
             Cached::new(CountingFile { wrote: Arc::new(AtomicU64::new(0)) }, &cache).unwrap();
         assert_eq!(cache.active_disks.load(Ordering::Acquire), 2);
         assert_eq!(cache.disk_hard(), PAGE);
         drop(file_default);
-        assert_eq!(cache.active_disks.load(Ordering::Acquire), 1);
+        cache.await_active_disks(1);
         assert_eq!(cache.disk_hard(), 2 * PAGE);
         drop(file_a2);
         drop(file_a);
-        assert_eq!(cache.active_disks.load(Ordering::Acquire), 0);
+        cache.await_active_disks(0);
 
         // Inline caches without flushers must not register virtual disks in `flushers`.
         let inline = PageCache::without_flusher(Options::default());
@@ -2442,9 +2540,14 @@ mod tests {
         );
 
         // Repeated HostDisk creation/drop on the same filesystem reuses one Device flusher entry
-        // rather than leaking a new flusher thread each time.
+        // rather than leaking a new flusher thread each time. Device flushers alone: disk A's and
+        // B's virtual ones go on their own threads, now or later, as their disks went.
         let dir = tempfile::tempdir().unwrap();
-        let before = cache.flushers.lock().unwrap().len();
+        let devices = || {
+            let flushers = cache.flushers.lock().unwrap();
+            flushers.keys().filter(|key| matches!(key, DiskKey::Device(_))).count()
+        };
+        let before = devices();
         for _ in 0..8 {
             let host = bucket_cell::Host::new();
             let disk = bucket_cell::host_disk::HostDisk::of_on(&host, dir.path()).unwrap();
@@ -2457,7 +2560,7 @@ mod tests {
             drop(f);
         }
         assert_eq!(
-            cache.flushers.lock().unwrap().len(),
+            devices(),
             before + 1,
             "recreating HostDisk on the same st_dev must reuse one flusher"
         );
