@@ -276,12 +276,13 @@ const RESERVED_CONNECTIONS: usize = 64;
 /// what its open files leave, each connection's at their most, a quarter of its limit kept for the
 /// rest (its own, its part cache's, its control API's and the cells it opens for it, its peers').
 /// A connection's files are its cell's, which it opens one of at most, at their most
-/// (`super::cell_open_files`, board 9975): its segments' and extents', its sockets and its VM
-/// process's pidfd. Before, 4 a connection, as if its cell's were the rest's: one tenant's cells
-/// took every file the daemon had far below the cap, 18 connections of 56 at a limit of 300, and
-/// another tenant's VM processes, within their reserved share, failed to connect (`EMFILE`), as
-/// their cells would have to open. Past it, an accept that failed for files held every tenant's
-/// new VM processes, retried every [`ACCEPT_AGAIN`], whichever tenant had taken them.
+/// (`super::cell_open_files`, board 9975): its segments' and extents', its open extents' raw files
+/// (board 12555), its sockets and its VM process's pidfd. Before, 4 a connection, as if its cell's
+/// were the rest's: one tenant's cells took every file the daemon had far below the cap, 18
+/// connections of 56 at a limit of 300, and another tenant's VM processes, within their reserved
+/// share, failed to connect (`EMFILE`), as their cells would have to open. Past it, an accept that
+/// failed for files held every tenant's new VM processes, retried every [`ACCEPT_AGAIN`],
+/// whichever tenant had taken them.
 fn most_connections() -> usize {
     let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
     // SAFETY: Reads the process's limit into `limit`.

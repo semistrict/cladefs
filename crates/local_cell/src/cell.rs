@@ -130,7 +130,10 @@ pub struct Options {
     /// The size from which an extent is stored in a file of its own: one sealed at that length or
     /// more.
     pub large_extent: u64,
-    /// How many segments' files the cell keeps open between reads.
+    /// How many segments' files the cell keeps open between reads. cladefs: and as many of its
+    /// sealed extents' own files; and the most extents open in raw files of their own, each holding
+    /// one open until its commit, past which an extent written large goes to segments
+    /// (board 12555).
     pub open_files: usize,
     /// cladefs: the most bytes of runs a flush's commits seal for their records to hold them, and
     /// the flush to sync its logs alone (`wal::LogRecord`, TASK-301): what a guest's journal, or
@@ -2188,7 +2191,7 @@ impl<D: Dir> LocalCell<D> {
             let grows = end.saturating_sub(current.map_or(0, Entry::len));
             let to_segment = match state.uncommitted.packing(extent) {
                 Some(packing) => matches!(packing, Packing::Segment),
-                None => end < self.options.large_extent,
+                None => !self.opens_own(&state.uncommitted, end),
             };
             // cladefs: what it writes over, in a segment, takes room too (TASK-79.2), as the writes
             // that finished left the extent: not its holes (TASK-160.16).
@@ -2213,11 +2216,11 @@ impl<D: Dir> LocalCell<D> {
         let (packing, opening) = match state.uncommitted.opening(extent) {
             Some(opened) => opened,
             None => {
-                let packing = if end >= self.options.large_extent {
+                let packing = if to_segment {
+                    Packing::Segment
+                } else {
                     // Raw until it is sealed, when it is framed in its own file.
                     Packing::Own(Arc::new(self.create_raw(extent)?))
-                } else {
-                    Packing::Segment
                 };
                 let opening = state.uncommitted.open(extent, packing.clone());
                 (packing, opening)
@@ -2245,6 +2248,17 @@ impl<D: Dir> LocalCell<D> {
             finished: false,
             _pledge: pledge,
         })
+    }
+
+    /// Whether an extent opening, by a write ending at `end`, goes to a raw file of its own: if it
+    /// reaches `large_extent`. cladefs: and fewer than `open_files` of those open, `uncommitted`'s,
+    /// are, each holding a file open until its commit (board 12555, hotbed question 559): past
+    /// them, it goes to segments, as one written there and grown large does, which its commit
+    /// copies into its own file. Before, a VM process writing a block at the end of as many extents
+    /// as it liked, never committing, held a file open for each, unbounded by the cell's options,
+    /// and its daemon's limit of open files ran out under every other cell (`EMFILE`).
+    fn opens_own(&self, uncommitted: &Uncommitted<D::File>, end: u64) -> bool {
+        end >= self.options.large_extent && uncommitted.own() < self.options.open_files
     }
 
     /// The raw file of `extent`, not open, made for its writes until it is sealed. cladefs: one

@@ -45,7 +45,8 @@
 //!   faults) and `crate::bucket`'s bucket runtime (object storage uploads and fetches).
 //! - **Files.** A cell keeps its own segments' and extents' files open, the most
 //!   `local_cell::Options::open_files` of each (64) but for those reads use: a fork, which writes
-//!   little, few; and its open segment's, and its commit log. The files of the segments a fork
+//!   little, few; as many raw files of extents written large since its last commit at most, those
+//!   past them going to segments (board 12555); and its open segment's, and its commit log. The files of the segments a fork
 //!   inherited are its cell's, which every fork of it shares, the most 64 open but for those in
 //!   use (`local_cell::Lineage`). A VM process's connection is two sockets here.
 //! - **Memory.** A fork holds what it changed over its base, and the segments it tracks: its base's
@@ -290,18 +291,19 @@ const FLOOR_CELLS: u64 = 256;
 /// listeners, its log, its part cache's and its bucket's files and connections, its arenas' memfds.
 const OWN_OPEN_FILES: u64 = 1024;
 
-/// cladefs: the open files a cell keeps at most beside its segments' and its extents' (each
-/// `local_cell::Options::open_files`): its open segment's, its commit log, its lock, and its VM
-/// process's connection, two sockets, and that VM process's pidfd.
+/// cladefs: the open files a cell keeps at most beside its segments', its sealed extents' and its
+/// open extents' raw files (each `local_cell::Options::open_files`): its open segment's, its commit
+/// log, its lock, and its VM process's connection, two sockets, and that VM process's pidfd.
 const CELL_OPEN_FILES_BESIDE: u64 = 8;
 
 /// cladefs: the open files a cell keeps at most, as the daemon opens cells
-/// (`crate::host_cell::options`), its VM process's connection's among them: its segments' and its
-/// extents', and those beside ([`CELL_OPEN_FILES_BESIDE`]). What the daemon's limit of open files
-/// is shared out by: its floor ([`open_files_floor`]), and each connection's
-/// (`server::most_connections`, board 9975), which opens one cell at most.
+/// (`cladefs_core::host_cell::options`), its VM process's connection's among them: its segments',
+/// its sealed extents', its open extents' raw files (board 12555), and those beside
+/// ([`CELL_OPEN_FILES_BESIDE`]). What the daemon's limit of open files is shared out by: its floor
+/// ([`open_files_floor`]), and each connection's (`server::most_connections`, board 9975), which
+/// opens one cell at most.
 pub(crate) fn cell_open_files() -> u64 {
-    let segments_and_extents = 2 * cladefs_core::host_cell::options().open_files as u64;
+    let segments_and_extents = 3 * cladefs_core::host_cell::options().open_files as u64;
     segments_and_extents + CELL_OPEN_FILES_BESIDE
 }
 

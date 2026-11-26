@@ -876,6 +876,9 @@ impl<F> Clone for Packing<F> {
 /// extents written since, which are open, with where their data goes, until it seals them.
 pub(crate) struct Uncommitted<F> {
     open: HashMap<ExtentId, Open<F>>,
+    /// cladefs: how many of them are in raw files of their own ([`Packing::Own`]), each a file
+    /// open: what `LocalCell` bounds by `Options::open_files` (board 12555).
+    own: usize,
     /// The extents opened so far, which numbers each opening: an extent freed while open, and
     /// written again, is opened anew, and the writes to it before are another opening's.
     openings: u64,
@@ -906,7 +909,8 @@ struct Open<F> {
 impl<F> Default for Uncommitted<F> {
     fn default() -> Self {
         let (open, changes, overwritten, let_go) = (HashMap::new(), Vec::new(), 0, 0);
-        Self { open, openings: 0, changes, overwritten, let_go, capacity: None, open_bytes: 0 }
+        let (own, openings, capacity, open_bytes) = (0, 0, None, 0);
+        Self { open, own, openings, changes, overwritten, let_go, capacity, open_bytes }
     }
 }
 
@@ -926,6 +930,7 @@ impl<F> Uncommitted<F> {
     /// and what it leaves, do not (TASK-675).
     fn let_go_open(&mut self) {
         let mut open: Vec<Open<F>> = self.open.drain().map(|(_, open)| open).collect();
+        self.own = 0;
         open.sort_unstable_by_key(|open| open.opening);
         // A vector's elements drop in order, first to last.
         drop(open);
@@ -962,11 +967,19 @@ impl<F> Uncommitted<F> {
         self.open.is_empty() && self.changes.is_empty() && self.capacity.is_none()
     }
 
-    /// Opens `extent`, whose data goes as `packing` says: returns the opening's number.
+    /// cladefs: how many extents open are in raw files of their own, each holding one open
+    /// (board 12555).
+    pub fn own(&self) -> usize {
+        self.own
+    }
+
+    /// Opens `extent`, not open, whose data goes as `packing` says: returns the opening's number.
     pub fn open(&mut self, extent: ExtentId, packing: Packing<F>) -> u64 {
         self.openings += 1;
         let opening = self.openings;
-        self.open.insert(extent, Open { packing, opening, overwritten: 0 });
+        self.own += usize::from(matches!(packing, Packing::Own(_)));
+        let replaced = self.open.insert(extent, Open { packing, opening, overwritten: 0 });
+        debug_assert!(replaced.is_none(), "{extent:?} opened while open");
         opening
     }
 
@@ -999,6 +1012,7 @@ impl<F> Uncommitted<F> {
     pub fn remove(&mut self, extent: ExtentId) -> Option<Packing<F>> {
         let open = self.open.remove(&extent)?;
         self.overwritten -= open.overwritten;
+        self.own -= usize::from(matches!(open.packing, Packing::Own(_)));
         Some(open.packing)
     }
 
@@ -1066,6 +1080,8 @@ impl<F> Uncommitted<F> {
     fn audit(&self, extents: &Extents) {
         let overwritten: u64 = self.open.values().map(|open| open.overwritten).sum();
         assert_eq!(self.overwritten, overwritten, "written over");
+        let own = self.open.values().filter(|open| matches!(open.packing, Packing::Own(_)));
+        assert_eq!(self.own, own.count(), "the extents open in raw files of their own");
         for (extent, open) in &self.open {
             assert!(open.opening <= self.openings, "{extent:?} opened past the openings");
             let entry = extents.get(extent).map(Entry::into_cow);

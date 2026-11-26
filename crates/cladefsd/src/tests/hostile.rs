@@ -3270,6 +3270,66 @@ fn a_tenants_cells_files_leave_another_tenant_room() {
     assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
 }
 
+/// board 12555: a tenant's extents written large, uncommitted, leave another tenant room, under a
+/// low limit of open files: mallory's one VM process writes a block ending at `large_extent` in
+/// each of more extents than the process may open files, committing none; then alice's VM process
+/// connects, opens its cell and commits. Before, each such extent held a raw file of its own open
+/// until its commit, unbounded by the cell's options (`cell_open_files` counted none of them):
+/// mallory's writes failed for want of files (`EMFILE`), and so would every other cell's opening.
+/// Past the cell's bound they go to segments, which its commit copies into files of their own:
+/// mallory's commit, the limit raised again, reads them back as written. Not under the low limit:
+/// a commit holds the files of the extents it seals until its flush syncs them (board 12887).
+#[test]
+fn a_tenants_uncommitted_large_extents_leave_another_tenant_room() {
+    const KEPT: usize = 2;
+    // Alice's extents, a block each, committed in fours.
+    const ALICES: u64 = 8;
+    let limits = crate::server::CONNECTION_LIMITS_GIVEN.set((Some(4), KEPT));
+    assert!(limits.is_ok(), "the limits given");
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let (mallorys, mallory_socket, _) = served_tenant(dir.path(), "mallory", 10);
+    let (alices, alice_socket, _) = served_tenant(dir.path(), "alice", 11);
+    let open = || std::fs::read_dir("/proc/self/fd").unwrap().count() as u64;
+    // Room for two connections at their most, mallory's and alice's, beside what is open.
+    let files = open() + 2 * crate::cell_open_files();
+    let large = cladefs_core::host_cell::options().large_extent;
+    // As many extents as the process may open files, each as large as `large_extent` makes it.
+    let extents = files;
+    let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    // SAFETY: Reads the process's limit into `limit`.
+    assert_eq!(unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) }, 0);
+    let lowered = libc::rlimit { rlim_cur: files, ..limit };
+    // SAFETY: Lowers the process's own limit, a test's process's alone.
+    assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &lowered) }, 0);
+    let mallory = CellClient::connect(&mallory_socket, mallorys.join("store"), extents * large);
+    let mallory = mallory.unwrap();
+    let extent = |sequence| ExtentId { cell: mallory.cell(), sequence };
+    let block = |sequence: u64| [sequence as u8; BLOCK];
+    for sequence in 1..=extents {
+        let written = write(&mallory, extent(sequence), large - BLOCK as u64, &block(sequence));
+        assert_eq!(written, Ok(()), "mallory's extent {sequence} of {extents}, {} open", open());
+    }
+    let alice = CellClient::connect(&alice_socket, alices.join("store"), CELL_BYTES);
+    let alice = alice.unwrap_or_else(|err| panic!("alice's cell, {} files open: {err:#}", open()));
+    for sequence in 1..=ALICES {
+        let extent = ExtentId { cell: alice.cell(), sequence };
+        assert_eq!(write(&alice, extent, 0, &block(sequence)), Ok(()), "alice's {sequence}");
+        if sequence % 4 == 0 {
+            assert_eq!(alice.commit(None), Ok(()), "alice's commit at {sequence}");
+        }
+    }
+    assert!(open() < files, "{} files open of {files}", open());
+    drop(alice);
+    // SAFETY: As above, its limit as it was.
+    assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
+    assert_eq!(mallory.commit(None), Ok(()));
+    for sequence in [1, extents / 2, extents] {
+        let read = read(&mallory, extent(sequence), large - BLOCK as u64, BLOCK);
+        assert_eq!(read, Ok(block(sequence).to_vec()), "mallory's extent {sequence}, committed");
+    }
+}
+
 /// `len` bytes of `seed`'s that don't compress, as a closed segment's framing would otherwise
 /// shrink them.
 fn noise(seed: u64, len: usize) -> Vec<u8> {
