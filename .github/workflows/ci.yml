@@ -20,14 +20,15 @@ on:
         options: [auto, full, smoke]
         default: auto
 
-# cladefs: one run of a ref at a time. On main a run goes on to its end, and of the pushes made
-# meanwhile only the latest waits (GitHub keeps one pending run a group, the newer replacing the
-# older): main is tested at every point a run can reach, and a stream of pushes from many sessions no
-# longer cancels every run before its slow jobs end, as it did five in a row on 2026-11-15. A
-# branch's newer run still replaces its older one still going, whose result is moot.
+# cladefs: one run of a ref at a time, each going on to its end, and every push made meanwhile
+# waiting its turn (`queue: max`, up to 100 waiting): each push to main is tested, none replaced by
+# the next (the user, 2026-11-26), and a stream of pushes from many sessions cancels no run before
+# its slow jobs end, as five in a row were on 2026-11-15. Literal values: `queue: max` with
+# `cancel-in-progress: true` is refused, and GitHub's docs don't say `queue` takes an expression.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  cancel-in-progress: false
+  queue: max
 
 # cladefs: the token reads the repository and nothing more (board 8603), as no job writes to it (firecracker-forward's gh
 # reads a public fork's history);
