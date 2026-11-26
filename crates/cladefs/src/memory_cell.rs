@@ -1039,12 +1039,16 @@ mod tests {
         );
 
         // Deleting a standalone ephemeral memory cell succeeds without CLADEFSD_EPHEMERAL.
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(crate::OpenCell::delete_on(crate::Host::process(), &cell_dir, Some(&bucket)))
-            .unwrap();
+        // Wait for the daemon thread's asynchronous close of `reopened` to release the cell
+        // directory claim before deleting directly (board 12317).
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(
+            async {
+                local_cell::unclaimed_on(crate::Host::process().local(), &cell_dir).await.unwrap();
+                crate::OpenCell::delete_on(crate::Host::process(), &cell_dir, Some(&bucket))
+                    .await
+                    .unwrap();
+            },
+        );
         assert!(!cell_dir.exists());
         assert_eq!(
             uploaded_bytes(&bucket),
