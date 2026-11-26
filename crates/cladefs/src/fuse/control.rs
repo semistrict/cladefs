@@ -12,11 +12,12 @@
 //! a cell is attached or detached whole, or not at all.
 
 use super::server::Server;
-use crate::cladefsd::control::saying;
+use crate::cladefsd::control::{MAX_MESSAGE_BYTES, saying};
 use crate::error::{Errno, Error};
 use crate::{CellId, CellOf, Filesystem, SetAttr, Storage};
 use base32_id::Padded;
 use bucket_cell::cell::Kind;
+use proto::mount_client::MountClient;
 use proto::*;
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -84,13 +85,41 @@ pub(crate) fn service_on(
     source: CellSource,
 ) -> mount_server::MountServer<impl mount_server::Mount + use<>> {
     let (server, source) = (Arc::downgrade(server), Arc::new(source));
-    mount_server::MountServer::new(Control {
-        daemon,
-        server,
-        source,
-        cells: Arc::default(),
-        holds: Arc::default(),
-    })
+    served(Control { daemon, server, source, cells: Arc::default(), holds: Arc::default() })
+}
+
+/// The Mount service of `mount`, which encodes answers as large as the control API's at most
+/// ([`MAX_MESSAGE_BYTES`], board 10297): where tonic's default, 4 MiB, refused a `List` of some
+/// hundreds of thousands of cells attached, at the client.
+fn served<M: mount_server::Mount>(mount: M) -> mount_server::MountServer<M> {
+    mount_server::MountServer::new(mount).max_encoding_message_size(MAX_MESSAGE_BYTES)
+}
+
+/// A client of the Mount service over `channel`, the daemon's control socket's
+/// (`crate::cladefsd::control::channel`), which takes answers as large as the daemon sends
+/// ([`MAX_MESSAGE_BYTES`], board 10297), as the control API's client does.
+pub fn client(channel: tonic::transport::Channel) -> MountClient<tonic::transport::Channel> {
+    MountClient::new(channel).max_decoding_message_size(MAX_MESSAGE_BYTES)
+}
+
+/// `List`'s answer, of the cells `cells`, unless it is past [`MAX_MESSAGE_BYTES`] encoded: refused
+/// then, RESOURCE_EXHAUSTED (EMSGSIZE), saying its size, as the control API refuses an answer past
+/// it (board 8581, board 10297), rather than one its client fails to decode.
+fn listed(cells: Vec<AttachedCell>) -> Result<Response<ListResponse>, Status> {
+    let answer = ListResponse { cells };
+    let bytes = prost::Message::encoded_len(&answer);
+    if bytes <= MAX_MESSAGE_BYTES {
+        return Ok(Response::new(answer));
+    }
+    log::warn!("fuse: refusing List's answer of {bytes} bytes, past {MAX_MESSAGE_BYTES}");
+    Err(saying(
+        Errno::EMSGSIZE,
+        format!(
+            "List's answer would be {bytes} bytes, past the most the control API sends, \
+             {MAX_MESSAGE_BYTES}: {} cells attached",
+            answer.cells.len()
+        ),
+    ))
 }
 
 /// The path `cell`'s filesystem has in the mount, and in its directory of cells: `TENANT/CELL`,
@@ -421,7 +450,7 @@ impl proto::mount_server::Mount for Control {
                 }
             })
             .collect();
-        Ok(Response::new(ListResponse { cells }))
+        listed(cells)
     }
 }
 
@@ -487,4 +516,70 @@ fn failed(err: Error) -> Status {
         log::error!("fuse: {err:#}");
     }
     saying(errno, format!("{err:#}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A Mount service listing `cells` cells, each of the largest IDs, as [`Control::list`] answers
+    /// ([`listed`]): attaching and detaching nothing.
+    struct Listing {
+        cells: usize,
+    }
+
+    #[tonic::async_trait]
+    impl mount_server::Mount for Listing {
+        async fn attach(
+            &self,
+            _: Request<AttachRequest>,
+        ) -> Result<Response<AttachResponse>, Status> {
+            Err(Status::unimplemented("a listing"))
+        }
+
+        async fn detach(
+            &self,
+            _: Request<DetachRequest>,
+        ) -> Result<Response<DetachResponse>, Status> {
+            Err(Status::unimplemented("a listing"))
+        }
+
+        async fn list(&self, _: Request<ListRequest>) -> Result<Response<ListResponse>, Status> {
+            let cell =
+                AttachedCell { tenant: u64::MAX, cell: u64::MAX, shown: true, detaching: false };
+            listed(vec![cell; self.cells])
+        }
+    }
+
+    /// Board 10297: a listing past gRPC's default 4 MiB, of 200,000 cells, is served and taken
+    /// through [`client`], as the control API's answers are, up to [`MAX_MESSAGE_BYTES`]; past it,
+    /// of 2,600,000, refused by the service, RESOURCE_EXHAUSTED (EMSGSIZE), saying its size. Until
+    /// then the client failed the first ("decoded message length too large"), and the service
+    /// sent the second, which no client took.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn lists_past_grpcs_default_are_taken_up_to_the_control_apis_most() {
+        let dir = tempfile::tempdir().unwrap();
+        let list = async |cells: usize| {
+            let socket = dir.path().join(format!("{cells}.sock"));
+            let incoming = tokio_stream::wrappers::UnixListenerStream::new(
+                tokio::net::UnixListener::bind(&socket).unwrap(),
+            );
+            let serving = tonic::transport::Server::builder()
+                .add_service(served(Listing { cells }))
+                .serve_with_incoming(incoming);
+            let serving = tokio::spawn(serving);
+            let channel = crate::cladefsd::control::channel(&socket).await.unwrap();
+            let listed = client(channel).list(ListRequest {}).await;
+            serving.abort();
+            listed.map(|listed| listed.into_inner().cells.len()).map_err(|status| {
+                let failed = crate::cladefsd::control::failed("listing".to_owned(), status);
+                (failed.errno(), format!("{failed:#}"))
+            })
+        };
+        // Each cell 26 bytes: 5,200,000 bytes, then 67,600,000.
+        assert_eq!(list(200_000).await, Ok(200_000));
+        let (errno, said) = list(2_600_000).await.unwrap_err();
+        assert_eq!(errno, Some(Errno::EMSGSIZE), "{said}");
+        assert!(said.contains("List's answer would be 67600000 bytes, past the most"), "{said}");
+    }
 }

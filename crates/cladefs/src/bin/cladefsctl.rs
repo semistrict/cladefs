@@ -857,13 +857,12 @@ mod cli {
             socket: &Path,
             timeout: Option<std::time::Duration>,
         ) -> anyhow::Result<()> {
-            use cladefs::fuse::control::proto::{
-                AttachRequest, DetachRequest, ListRequest, mount_client::MountClient,
-            };
+            use cladefs::fuse::control::proto::{AttachRequest, DetachRequest, ListRequest};
             let channel =
                 connect_within(timeout, socket, cladefs::cladefsd::control::channel(socket))
                     .await?;
-            let mut mount = MountClient::new(channel);
+            // Taking answers as large as the daemon sends (board 10297).
+            let mut mount = cladefs::fuse::control::client(channel);
             match self {
                 Self::Attach { cell, capacity, token } => {
                     let request = AttachRequest {
