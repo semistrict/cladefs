@@ -6595,6 +6595,17 @@ fn window_mappings_are_answered_beside_the_stream_data_in_flight() {
         ..Default::default()
     });
     assert_eq!(call(&sender, &mut receiver, written, &extent).header.status, 0);
+    // Warm the extent in memory before the unread burst so the 4x64 MiB reads complete quickly
+    // without tripping the daemon's 5 s `STALL` watchdog under CI load (board 11076).
+    let warm = Header::new(READ, id + 1).with_body(&ReadBody {
+        cell,
+        sequence: 1,
+        offset: 0,
+        len: MAX_PAYLOAD,
+        transfer_at: 0,
+    });
+    assert_eq!(call(&sender, &mut receiver, warm, &[]).header.status, 0);
+    let id = id + 1;
     let reads = MAX_STREAM_BYTES / MAX_PAYLOAD;
     for n in 1..=reads {
         let read = Header::new(READ, id + n).with_body(&ReadBody {
@@ -6607,10 +6618,26 @@ fn window_mappings_are_answered_beside_the_stream_data_in_flight() {
         sender.send(read, &[], &[]).unwrap();
     }
     sender.send(Header::new(MAPPINGS, id + reads + 1), &[], &[]).unwrap();
-    let holder = crate::cells::table().writer(&crate::cells::cell_dir_key(&path)).unwrap();
-    // All of them queued, but what the socket holds, a mebibyte at most.
-    let replies = reads * MAX_PAYLOAD + count * MAPPING_BYTES - (1 << 20);
-    while holder.queued() < replies {
+    let key = crate::cells::cell_dir_key(&path);
+    let holder = crate::cells::table().writer(&key).unwrap();
+    // Wait until all 4 READs and MAPPINGS are answered and queued past `MAX_STREAM_BYTES +
+    // QUEUED_CREDIT` (tolerating up to 2 MiB of kernel Unix socket buffer and failing promptly if
+    // the connection is dropped rather than spinning forever; board 11076).
+    let replies = MAX_STREAM_BYTES + crate::server::QUEUED_CREDIT;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while holder.queued() < replies || holder.unanswered() > 0 {
+        assert!(
+            crate::cells::table().writer(&key).is_some(),
+            "connection closed before replies queued (queued={}, expected>={replies}, unanswered={})",
+            holder.queued(),
+            holder.unanswered()
+        );
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for replies to queue (queued={}, expected>={replies}, unanswered={})",
+            holder.queued(),
+            holder.unanswered()
+        );
         std::thread::yield_now();
     }
     sender.send(Header::new(INFO, id + reads + 2), &[], &[]).unwrap();
