@@ -149,3 +149,14 @@ was slower, by 31% on average: reporting free blocks of 512 KiB as the build fre
 faults each in again from the host as it reuses it. What the guest holds free below the order
 overstates what the host keeps: a block reported once and then partly reused costs the host only
 the pages touched since. Order 9 stays.
+
+## With hotbed guestd's self-reclaim (hotbed builds 286-287)
+
+hotbed 94e4e8f7 had guestd drop a guest's clean file cache, and compact, once it passes 1 GiB
+(polled every 10 s, 30 s apart at least), whatever the host's state. On ubu1, three builds of
+`cladefsd` as in the A/B above, order 9: 287.5, 223.9 and 200.3 s against 211, 228 and 214 s
+without it, the first right after the worker's upgrade; the guest's `Cached` peaked at 1.26, 1.61
+and 1.25 GiB, a median 0.14-0.24 GiB. An hour of scripts/sample-vm-memory.py, shmem apart (none was):
+a build VM's droppable file cache a median 0.37 GiB on ubu1 (19 samples, once over 1.5 GiB, 3.1 GiB)
+and 0.52 GiB on asahimbp (3), against peaks of 9.6 and 12.2 GiB before
+([fleet-samples-self-reclaim.jsonl](ubu1-guest-page-cache-2026-11-26/fleet-samples-self-reclaim.jsonl)).

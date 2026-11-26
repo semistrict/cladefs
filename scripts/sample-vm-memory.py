@@ -9,7 +9,8 @@ Each sample, for each HOST (over ssh): the host's available memory, swap in use 
 pressure; for each Firecracker VM, its workspace, the guest kernel it booted (by the kernel
 artifact's checksum, named with --kernel SHA16=NAME), its guest RAM, and the host RSS and swap it
 holds. For each running hotbed command on those hosts (`hotbed inspect cgroup`), its guest
-cgroup's file and anon memory, joined to its VM by workspace. Appends one JSON object a sample to
+cgroup's file memory (less shmem, which reclaim can't drop), shmem and anon, joined to its VM by
+workspace. Appends one JSON object a sample to
 OUT and prints a summary line a sample, VMs grouped by kernel.
 
 Usage: scripts/sample-vm-memory.py --out FILE [--interval S] [--count N]
@@ -74,7 +75,10 @@ def sample(hosts, kernels):
             st = hotbed_json("inspect", "cgroup", c["id"])["cgroupStats"]
         except (subprocess.CalledProcessError, KeyError, ValueError):
             continue  # Ended between the listing and the inspection: no guest numbers this sample.
-        guest[c["workspaceId"]] = {"cmd": c["id"], "guest_file_mib": int(st.get("memoryFileBytes", 0)) >> 20,
+        # File memory less shmem (tmpfs, /dev/shm): the page cache a reclaim can drop.
+        shmem = int(st.get("memoryShmemBytes", 0))
+        guest[c["workspaceId"]] = {"cmd": c["id"], "guest_file_mib": (int(st.get("memoryFileBytes", 0)) - shmem) >> 20,
+                                   "guest_shmem_mib": shmem >> 20,
                                    "guest_anon_mib": int(st.get("memoryAnonBytes", 0)) >> 20}
     record = {"t": int(time.time()), "hosts": {}}
     for host in hosts:
@@ -99,15 +103,16 @@ def summary(record):
             continue
         groups = {}
         for vm in h["vms"]:
-            g = groups.setdefault(vm["kernel"], {"n": 0, "held": 0, "file": 0, "anon": 0, "with_guest": 0})
+            g = groups.setdefault(vm["kernel"], {"n": 0, "held": 0, "file": 0, "shmem": 0, "anon": 0, "with_guest": 0})
             g["n"] += 1
             g["held"] += vm["rss_mib"] + vm["swap_mib"]
             if "guest_file_mib" in vm:
                 g["with_guest"] += 1
                 g["file"] += vm["guest_file_mib"]
+                g["shmem"] += vm.get("guest_shmem_mib", 0)
                 g["anon"] += vm["guest_anon_mib"]
         by = "; ".join(f"{k}: {g['n']} VMs hold {g['held'] / 1024:.1f} GiB, guest file {g['file'] / 1024:.1f}"
-                       f" anon {g['anon'] / 1024:.1f} GiB ({g['with_guest']} with a command)"
+                       f" shmem {g['shmem'] / 1024:.1f} anon {g['anon'] / 1024:.1f} GiB ({g['with_guest']} with a command)"
                        for k, g in sorted(groups.items()))
         parts.append(f"{host}: avail {h['avail_mib'] / 1024:.1f} GiB swap {h['swap_used_mib'] / 1024:.1f} GiB"
                      f" psi {h['psi_some_avg10']:.1f}% | {by or 'no VMs'}")
