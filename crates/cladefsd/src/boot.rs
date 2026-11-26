@@ -349,9 +349,12 @@ pub(super) async fn boot_embedded(
     #[cfg(not(madsim))]
     crate::http::start_on(daemon)?;
 
+    // cladefs: under madsim, which has no Unix sockets, its guests connect in memory.
+    #[cfg(madsim)]
+    let socket: Option<std::path::PathBuf> = socket.and(None);
     match socket {
-        // cladefs: under madsim, which has no Unix sockets, its guests connect in memory.
-        Some(socket) if !cfg!(madsim) => daemon.serve_vm_socket(&socket)?,
+        #[cfg(not(madsim))]
+        Some(socket) => daemon.serve_vm_socket(&socket)?,
         _ => {
             daemon.serving.send_replace(true);
         }
