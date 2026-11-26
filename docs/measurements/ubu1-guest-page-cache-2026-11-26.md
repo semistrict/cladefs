@@ -130,3 +130,22 @@ and 0.8 GiB on asahimbp (20), but up to 9.6 and 12.2 GiB during big builds, unti
 which runs only once the host is short (5% PSI, cladefsd pressure, 80% of its limit), dropped it.
 The kernel's fix makes a drop stick; when to drop, before the host is short, is still hotbed's
 guestd's to decide (doc-30 §2). Too few old-kernel VMs ran in the window to compare.
+
+## Free page reporting's order: 9 against 7 (doc-30 §3)
+
+scripts/measure-page-reporting.sh, six runs on ubu1 on the new kernel, interleaved 9, 7, 7, 9, 7, 9,
+each in a VM of its own (18.5 GiB guest, 8 vCPUs): set the order, build `cladefsd`, drop every
+cache, hold 60 s, compact, hold 60 s; every VM's host RSS sampled each 2 s
+([page-reporting-runs.log](ubu1-guest-page-cache-2026-11-26/page-reporting-runs.log),
+[page-reporting-host.tsv](ubu1-guest-page-cache-2026-11-26/page-reporting-host.tsv)).
+
+| order | builds | mean | host RSS + swap held at the end | free below the order, in the guest |
+| --- | --- | --- | --- | --- |
+| 9 (2 MiB, the default) | 211, 228, 214 s | 218 s | 4.81, 3.35, 2.11 GiB (mean 3.42) | 2724, 1485, 2343 MiB |
+| 7 (512 KiB) | 269, 267, 319 s | 285 s | 2.98, 2.89, 2.69 GiB (mean 2.85) | 961, 749, 680 MiB |
+
+Order 7 handed the host about 0.6 GiB more of a drained guest on average, and every build at it
+was slower, by 31% on average: reporting free blocks of 512 KiB as the build frees them, the guest
+faults each in again from the host as it reuses it. What the guest holds free below the order
+overstates what the host keeps: a block reported once and then partly reused costs the host only
+the pages touched since. Order 9 stays.

@@ -56,12 +56,13 @@ shrinks its slab too) drops its clean pages and evicts its unused inodes, so the
 read in again as DAX: a gentler trigger than `drop_caches 3`, which drops every dentry and Fxfs's
 cached records too.
 
-### 3. Free page reporting's order: measure first
+### 3. Free page reporting's order stays 9
 
-Order 9 left 2.2 GiB of a drained 18.5 GiB guest's free memory unreported. ubu1's host THP is
-`madvise`-only and hotbed's VMs ask for no huge pages, so a lower `page_reporting_order` splits no
-host THP there; on VMs restored from a memory cell each reported range is one `reclaim` call, so a
-lower order multiplies them. An A/B of order 9 against 7 on ubu1 decides it.
+Order 9 left about 2 GiB of a drained 18.5 GiB guest's free memory in smaller blocks. An A/B on
+ubu1 (docs/measurements/ubu1-guest-page-cache-2026-11-26.md: six interleaved runs) found order 7
+handing the host about 0.6 GiB more of a drained guest on average, and every build at it 31%
+slower, as the guest faults back in each 512 KiB block reported as the build freed it. Not worth
+it.
 
 ## Rejected
 
@@ -72,6 +73,7 @@ lower order multiplies them. An A/B of order 9 against 7 on ubu1 decides it.
 | Drop-behind at writeback | Re-reads of a live page-cache inode fill fresh folios that never pass writeback again. |
 | DAX for created files (undoing doc-13 Option 5) | Private pages and range doubling on every write, no temp-file elision, no staging-extent slices. |
 | Dirty thresholds in cladefs | hotbed's guestd sets them at boot (d0e78922); nothing in the cache was dirty. |
+| A lower `page_reporting_order` | Order 7: about 0.6 GiB more of a drained guest back to the host, every build 31% slower (§3). |
 
 ## Verification
 
