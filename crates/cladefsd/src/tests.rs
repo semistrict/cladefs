@@ -449,8 +449,51 @@ fn shrinks_dropped_by_their_callers_stop_waiting() {
     });
     client.resized(1 << 20, true).unwrap();
     assert_eq!(client.info().unwrap().capacity, 2 << 20);
+    assert_eq!(client.capacity(), 2 << 20);
 
     drop((client, connection));
+    served.join().unwrap();
+}
+
+/// board 11697 (hotbed review 165): `CellClient::capacity()` stays in sync with `INFO` across
+/// grows, accepted shrinks, and rejected shrinks.
+#[test]
+fn client_capacity_tracks_grow_and_accepted_shrink() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store");
+    let (client, served) = connect(&path, 2 << 20);
+    assert_eq!(client.capacity(), 2 << 20);
+    let (asks, asked) = std::sync::mpsc::channel();
+    client.on_capacity(move |capacity, ask| asks.send((capacity, ask)).unwrap());
+
+    // Grow: non-ask CAPACITY updates client.capacity().
+    resize(&path, 4 << 20).unwrap();
+    assert_eq!(asked.recv().unwrap(), (4 << 20, false));
+    assert_eq!(client.capacity(), 4 << 20);
+    assert_eq!(client.info().unwrap().capacity, 4 << 20);
+
+    // Accepted shrink: `Shrinking::resize` commits without sending another CAPACITY notification,
+    // and `client.capacity()` reflects the new capacity after `resized(..., true)`.
+    let shrink_path = path.clone();
+    let shrinking = std::thread::spawn(move || resize(&shrink_path, 1 << 20));
+    assert_eq!(asked.recv().unwrap(), (1 << 20, true));
+    assert_eq!(client.capacity(), 4 << 20, "ask alone does not change capacity before acceptance");
+    client.resized(1 << 20, true).unwrap();
+    shrinking.join().unwrap().unwrap();
+    assert_eq!(client.capacity(), 1 << 20);
+    assert_eq!(client.info().unwrap().capacity, 1 << 20);
+
+    // Rejected shrink: capacity stays unchanged.
+    let reject_path = path.clone();
+    let rejecting = std::thread::spawn(move || resize(&reject_path, 512 << 10));
+    assert_eq!(asked.recv().unwrap(), (512 << 10, true));
+    client.resized(512 << 10, false).unwrap();
+    assert_eq!(rejecting.join().unwrap(), Err(Errno::ENOSPC));
+    assert_eq!(client.capacity(), 1 << 20);
+    assert_eq!(client.info().unwrap().capacity, 1 << 20);
+
+    drop(client);
     served.join().unwrap();
 }
 

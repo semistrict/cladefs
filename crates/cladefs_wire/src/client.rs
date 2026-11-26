@@ -157,7 +157,9 @@ impl CellClient {
                 errno => Error::new(anyhow::Error::new(errno).context("the daemon named no arena")),
             })?;
         let Opened { cell, tenant, arena, max_map_count, ephemeral, capacity } = opened;
-        client.current_capacity.store(capacity, Ordering::Relaxed);
+        // Preserve any non-ask `CAPACITY` notification received after the server published the
+        // writer and before `OPEN`'s reply was decoded (board 11697).
+        client.capacity_state.lock().unwrap().current.get_or_insert(capacity);
         let mut fds = reply.fds.into_iter();
         let (Some(own), Some(public)) = (fds.next(), fds.next()) else {
             return Err(Error::msg("the daemon sent no physical memory"));
@@ -196,6 +198,19 @@ impl CellClient {
 
     /// [`CellClient::resized`], waiting for the daemon holding no thread.
     pub async fn resized_async(&self, capacity: u64, took: bool) -> Result<()> {
+        // Update the cached capacity before sending an accepted shrink answer: `Shrinking::resize`
+        // holds its per-connection resize lock until our `RESIZED` arrives, so any subsequent
+        // rollback (`Asked::drop` -> non-ask `CAPACITY(kept)`) or later resize notification is
+        // causally ordered after this update (board 11697).
+        {
+            let mut state = self.client.capacity_state.lock().unwrap();
+            if state.pending_shrink == Some(capacity) {
+                state.pending_shrink = None;
+                if took {
+                    state.current = Some(capacity);
+                }
+            }
+        }
         self.client.request(&Request::Resized { capacity, took }).await.map(drop)
     }
 
@@ -237,9 +252,9 @@ impl CellClient {
     }
 
     /// The cell's current capacity in bytes, as reported in `OPEN`'s reply and updated by
-    /// non-ask `CAPACITY` notifications (board 11697).
+    /// `CAPACITY` notifications and accepted shrinks (board 11697).
     pub fn capacity(&self) -> u64 {
-        self.client.current_capacity.load(Ordering::Relaxed)
+        self.client.capacity_state.lock().unwrap().current.unwrap_or(0)
     }
 
     /// The daemon's physical memory, which it handed this VM process as it connected,
@@ -1070,6 +1085,15 @@ pub fn spawn_on_replies(future: impl std::future::Future<Output = ()> + Send + '
     runnable.run();
 }
 
+/// Tracks the cell's current capacity across `OPEN`, non-ask `CAPACITY` notifications, and
+/// accepted shrink asks (`RESIZED` with `took == true`) without letting an `OPEN` reply overwrite
+/// a newer concurrent `CAPACITY` notification (board 11697).
+#[derive(Default)]
+struct CapacityState {
+    current: Option<u64>,
+    pending_shrink: Option<u64>,
+}
+
 /// The connection, its requests waiting for replies, and the window's second stage, which the
 /// thread receiving from the daemon makes its changes to.
 struct Client {
@@ -1087,9 +1111,8 @@ struct Client {
     /// cladefs: held while a [`STAGE_COUNTS`] is made and sent, by whatever thread: the last sent
     /// says its window's budget as it was last set (board 10098).
     telling: Mutex<()>,
-    /// The cell's current capacity in bytes, initialized from `OPEN` and updated on non-ask
-    /// `CAPACITY` notifications (board 11697).
-    current_capacity: AtomicU64,
+    /// The cell's current capacity and pending shrink ask (board 11697).
+    capacity_state: Mutex<CapacityState>,
     /// What the daemon's changes of the cell's capacity go to
     /// ([`CellClient::on_capacity`]).
     capacity: OnceLock<Box<dyn Fn(u64, bool) + Send + Sync>>,
@@ -1113,7 +1136,7 @@ impl Client {
             stage: OnceLock::new(),
             stage_counts: StageCosts::default(),
             telling: Mutex::new(()),
-            current_capacity: AtomicU64::new(0),
+            capacity_state: Mutex::new(CapacityState::default()),
             capacity: OnceLock::new(),
             stats_asked: OnceLock::new(),
             closing: Default::default(),
@@ -1299,13 +1322,20 @@ impl Client {
             let stage = match Told::decode(&header, &message.payload) {
                 Ok(Told::Stage(stage)) => stage,
                 Ok(Told::Capacity { capacity, ask }) => {
-                    if !ask {
-                        self.current_capacity.store(capacity, Ordering::Relaxed);
+                    {
+                        let mut state = self.capacity_state.lock().unwrap();
+                        if ask {
+                            state.pending_shrink = Some(capacity);
+                        } else {
+                            state.current = Some(capacity);
+                            state.pending_shrink = None;
+                        }
                     }
                     match self.capacity.get() {
                         Some(changed) => changed(capacity, ask),
                         // No guest to ask: it refuses.
                         None if ask => {
+                            self.capacity_state.lock().unwrap().pending_shrink = None;
                             drop(self.request(&Request::Resized { capacity, took: false }));
                         }
                         None => {}
@@ -1955,5 +1985,53 @@ impl Faults for DaemonFaults {
 
     fn lost(&self) -> bool {
         self.client.lost.happened()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codec::Opened;
+    use cladefs_core::pages::ArenaId;
+
+    /// board 11697 (hotbed review 165): a non-ask `CAPACITY` grow notification queued after the
+    /// daemon published the writer and received before `OPEN`'s reply is decoded must not be
+    /// overwritten by the older capacity snapshot carried in `OPEN`'s reply.
+    #[test]
+    fn open_does_not_overwrite_concurrent_capacity_grow() {
+        let (client_stream, server_stream) = UnixStream::pair().unwrap();
+        let server = std::thread::spawn(move || {
+            let sender = Sender::new(server_stream.try_clone().unwrap()).unwrap();
+            let mut receiver = Receiver::new(server_stream);
+            let open = receiver.receive(|| 0).unwrap().unwrap();
+            assert_eq!(open.header.kind, OPEN);
+            // Concurrent grow arrives before OPEN's reply.
+            let (grow_header, grow_payload) =
+                Told::Capacity { capacity: 4 << 20, ask: false }.encode();
+            sender.send(grow_header, &grow_payload, &[]).unwrap();
+            // Now send OPEN's reply carrying the older 2 MiB capacity snapshot.
+            let opened = Opened {
+                cell: 7,
+                tenant: 1,
+                arena: ArenaId::DEFAULT,
+                max_map_count: None,
+                ephemeral: false,
+                capacity: 2 << 20,
+            };
+            let reply = Header::new(REPLY, open.header.id).with_body(&opened.to_body());
+            let own = tempfile::tempfile().unwrap();
+            let public = tempfile::tempfile().unwrap();
+            sender.send(reply, &opened.capacity_bytes(), &[own.as_fd(), public.as_fd()]).unwrap();
+        });
+
+        let client =
+            CellClient::over(client_stream, Path::new("store"), Opening::Existing).unwrap();
+        assert_eq!(
+            client.capacity(),
+            4 << 20,
+            "OPEN reply must not clobber a newer concurrent CAPACITY grow"
+        );
+        drop(client);
+        server.join().unwrap();
     }
 }

@@ -2240,30 +2240,62 @@ async fn subsequent_flushes_in_an_open_segment_sync_no_directory() {
     }
 }
 
-/// cladefs: board 11709: multiple segments closed and framed in a single `make_durable` batch before
-/// any log file has been created for them recover cleanly across crashes without losing an earlier
-/// framed segment while keeping a later one.
+/// cladefs: board 11709 (hotbed review 165): a spanning commit that closes multiple segments in a
+/// single `make_durable` batch when NONE of those segments have durable log files yet recovers
+/// cleanly across a crash after every filesystem operation inside that batch (`fail_after`),
+/// verifying the intra-batch `SEGMENTS` directory sync + barrier between renames.
 #[tokio::test(flavor = "multi_thread")]
 async fn unlogged_multi_segment_batches_recover_across_crashes() {
-    for seed in 0..32 {
+    let options = Options { max_extent: OPTIONS.segment_size, ..OPTIONS };
+    let len = 2 * BLOCK;
+    let per_segment = OPTIONS.segment_size as usize / len;
+    // Six segments' worth (`segment_limit() = 2 * segment_size`, so 3 filled + 1 open = 4
+    // segments) of compressible extents written BEFORE any commit or flush, so zero segment log
+    // files exist when the spanning commit closes and frames them in one batch.
+    let extents = 6 * per_segment as u64;
+    let data = |sequence: u64| pattern(sequence as u8, 0, len);
+    for operations in 0.. {
         let dir = MemDir::serial();
-        let cell = create(dir.clone(), 64 << 20);
-        for sequence in 1..=3 {
-            cell.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
-            cell.close_segment().unwrap();
-            cell.commit_ordered(Some(format!("root {sequence}").as_bytes())).await.unwrap();
+        let description = Description { block_size: BLOCK as u32, capacity: 4 << 20, cell: CELL };
+        let cell = LocalCell::create(dir.clone(), description, options).unwrap();
+        for sequence in 1..=extents {
+            cell.write(extent(sequence), 0, &data(sequence)).await.unwrap();
         }
-        let crashed = dir.crash(seed);
-        drop(cell);
-        let reopened = LocalCell::open(crashed, OPTIONS).unwrap();
-        let last = reopened.last_commit().unwrap();
-        assert!(last <= 3, "seed {seed}: last commit {last}");
-        for sequence in 1..=last {
-            assert_eq!(
-                read(&reopened, extent(sequence), 0, BLOCK),
-                pattern(sequence as u8, 0, BLOCK),
-                "seed {seed}, extent {sequence}"
+        assert!(
+            dir.list(&of("logs", CELL.id)).unwrap().is_empty(),
+            "all closed segments must be unlogged before the spanning commit"
+        );
+        let before = local_cell::timings();
+        dir.fail_after(Some(operations));
+        cell.close_segment().unwrap();
+        let committed = cell.commit(None).await;
+        dir.fail_after(None);
+        for seed in 0..16 {
+            let reopened = LocalCell::open(dir.crash(seed), options).unwrap_or_else(|error| {
+                panic!("stopped after {operations} operations, seed {seed}: {error:#}")
+            });
+            let at = format!("stopped after {operations} operations, seed {seed}");
+            let durable = reopened.last_commit().unwrap() == 1;
+            assert!(
+                reopened.last_commit().unwrap() <= 1,
+                "{at}: unexpected commit {}",
+                reopened.last_commit().unwrap()
             );
+            for sequence in 1..=extents {
+                let mut buf = vec![0; len];
+                let intact =
+                    reopened.read(extent(sequence), 0, &mut buf).is_ok() && buf == data(sequence);
+                assert_eq!(durable, intact, "{at}: extent {sequence}, durable or not");
+            }
+        }
+        drop(cell);
+        if committed.is_ok() {
+            let after = local_cell::timings();
+            let batches = after.durable.count - before.durable.count;
+            let segments = after.durable_segments - before.durable_segments;
+            assert_eq!(batches, 1, "all unlogged segments must enter one make_durable batch");
+            assert!(segments >= 3, "expected multi-segment unlogged batch, got {segments}");
+            break;
         }
     }
 }

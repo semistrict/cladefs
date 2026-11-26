@@ -2367,6 +2367,13 @@ impl Connection {
         // it (doc-22).
         // Closed before its hold lets its path go, if it fails here.
         let open_cell = self.open_held(&resolved, &hold, &effective_how, named_cell).await?;
+        let capacity = match open_cell.info() {
+            Ok(info) => info.capacity,
+            Err(err) => {
+                cladefs_core::open_cell::release(open_cell).await;
+                return Err(err);
+            }
+        };
         if let Some(pool) = self.daemon().disk_pool()
             && let Some(cell) = named_cell
         {
@@ -2377,7 +2384,6 @@ impl Connection {
         self.start_behind(move |stopped| flush_behind(flushing_daemon, flushed, stopped));
         let cell = open_cell.cell();
         let ephemeral = open_cell.is_ephemeral();
-        let capacity = open_cell.info()?.capacity;
         // cladefs: should its VM process go, and a writer wait for its cell to close, the cell's
         // uploader stops at once rather than upload what it holds first (TASK-216).
         if let Some(cut_short) = open_cell.cut_short() {
