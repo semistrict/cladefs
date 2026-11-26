@@ -27,3 +27,6 @@
 34      board 5748: the same open cell dropped open, in the replicated disk-faults profile
 149     board 10506: board 5668's, its store's removal failing too, the description's rename (EIO): the store, looking made, refused every take after (EEXIST) (Linux)
 145     board 10663: every extent a writer made freed before another host took the cell, the harness's guest minted from 0 again, past its extents alone, not its writer's floor: each write refused (EPERM), none told uploaded
+92      board 6034: ephemeral disk-faults profile with BUGGIFY enabled lost Local-committed blocks
+109     board 6032: ephemeral disk-faults profile host 3 never answered under live-migration disk faults
+199     board 6032: ephemeral disk-faults profile cell noted on every host under live-migration disk faults

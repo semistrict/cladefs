@@ -198,6 +198,7 @@ fn world() -> (Arc<RoutedBucket>, Arc<bucket_cell::faults::Seeded>) {
     let _ = cladefs::cladefsd::logging::to_stderr();
     // SAFETY: the simulation's one thread, before any node reads the environment.
     unsafe { std::env::set_var("CLADEFS_MASTER_KEY", "ab".repeat(32)) };
+    bucket_cell::buggify::enable(madsim::runtime::Handle::current().seed());
     let odds = bucket_cell::faults::Odds {
         delay_most: Duration::from_millis(50),
         fail_before: 0.05,
