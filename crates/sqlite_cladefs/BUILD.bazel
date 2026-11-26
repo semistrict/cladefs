@@ -88,11 +88,14 @@ cladefs_rust_test(
     deps = _TEST_DEPS,
 )
 
+# Each test in a process of its own, as nextest runs them: they share the process's daemon
+# (`Daemon::process`) and set its environment.
 cladefs_rust_test(
     name = "daemon_test",
     srcs = ["tests/daemon.rs"] + _TEST_COMMON_SRCS,
     aliases = MADSIM_TOKIO_ALIAS,
     crate_root = "tests/daemon.rs",
+    isolated = True,
     proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
     target_compatible_with = ["@platforms//os:linux"],
     deps = _TEST_DEPS,
