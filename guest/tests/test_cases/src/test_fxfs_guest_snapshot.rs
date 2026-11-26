@@ -231,7 +231,7 @@ mod host {
         ShrinkMemoryRequest, StatCellRequest,
     };
     use cladefs::memory_cell::MemoryCell;
-    use cladefs::{Filesystem, Image, Storage};
+    use cladefs::{Filesystem, Storage};
     use futures::executor::block_on;
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixListener;
@@ -332,14 +332,13 @@ mod host {
     /// Formats the empty cell at `path`, with the default volume, `volumes` others and `RO_VOLUME`.
     fn format(path: &Path, volumes: usize) -> anyhow::Result<()> {
         block_on(async {
-            let image = Image::format(Storage::open(path).await?).await?;
-            image.create_volume("default").await?.unmount().await?;
+            let fs = Filesystem::format(Storage::open(path).await?).await?;
             for volume in 0..volumes {
-                image.create_volume(&format!("v{volume}")).await?.unmount().await?;
+                fs.create_volume(&format!("v{volume}")).await?;
             }
-            image.create_volume(RO_VOLUME).await?.unmount().await?;
-            image.compact().await?;
-            image.close().await?;
+            fs.create_volume(RO_VOLUME).await?;
+            fs.compact().await?;
+            fs.close().await?;
             Ok(())
         })
     }

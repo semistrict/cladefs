@@ -26,7 +26,7 @@ pub mod host {
         AttachBaseRequest, ForkCellRequest, MakePublicRequest,
     };
     use cladefs::testing::Control;
-    use cladefs::{Image, Storage};
+    use cladefs::{Filesystem, Storage};
     use futures::executor::block_on;
     use fxfs_automount::upcall::{Answer, Newest};
     use std::cell::Cell;
@@ -58,11 +58,13 @@ pub mod host {
         let cell = crate::common::create_cell(cladefsd, capacity)?;
         let path = crate::common::cell_disk_path(disk_root, cell);
         block_on(async {
-            let image = Image::format(Storage::open(&path).await?).await?;
-            for volume in ["default"].iter().chain(volumes) {
-                image.create_volume(volume).await?.unmount().await?;
+            let fs = Filesystem::format(Storage::open(&path).await?).await?;
+            for volume in volumes {
+                if *volume != "default" {
+                    fs.create_volume(volume).await?;
+                }
             }
-            image.close().await?;
+            fs.close().await?;
             Ok::<_, anyhow::Error>(())
         })?;
         Ok(cell)

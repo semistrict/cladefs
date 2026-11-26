@@ -26,7 +26,10 @@ use futures::future::Shared;
 use fxfs::errors::FxfsError;
 use fxfs::filesystem::{FxFilesystemBuilder, OpenFxFilesystem, SyncOptions};
 use fxfs::lsm_tree::LSMTree;
-use fxfs::lsm_tree::types::{MergeableKey, Value};
+use fxfs::lsm_tree::Query;
+use fxfs::lsm_tree::types::{ItemRef, LayerIterator, MergeableKey, Value};
+use fxfs::object_store::allocator::merge::filter_tombstones;
+use fxfs::object_store::allocator::{Allocator, AllocatorValue};
 use fxfs::object_store::volume::root_volume;
 use fxfs::object_store::{NewChildStoreOptions, SetExtendedAttributeMode};
 use fxfs_posix::{Fxfs, Platform, ReaddirStart};
@@ -274,16 +277,50 @@ pub fn fxfs_runtime(handle: Option<&tokio::runtime::Handle>) -> tokio::runtime::
     }
 }
 
+/// What a volume takes of its filesystem's metadata ([`Filesystem::metadata`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct VolumeMetadata {
+    /// The size of the layers of the volume's tree, which what its journal holds yet is in none of.
+    pub layer_bytes: u64,
+    /// The records of the volume's extents in the allocator's tree, which every mount of the
+    /// filesystem scans whole.
+    pub allocator_records: u64,
+}
+
+/// The records in `allocator`'s tree of the extents of the store `store_id`.
+async fn allocator_records(allocator: &Allocator, store_id: u64) -> anyhow::Result<u64> {
+    let layer_set = allocator.tree().layer_set();
+    let mut merger = layer_set.merger();
+    let mut records = filter_tombstones(merger.query(Query::FullScan).await?).await?;
+    let mut count = 0;
+    while let Some(ItemRef { value, .. }) = records.get() {
+        if matches!(value, AllocatorValue::Abs { owner_object_id, .. }
+            if *owner_object_id == store_id)
+        {
+            count += 1;
+        }
+        records.advance().await?;
+    }
+    Ok(count)
+}
+
 /// How a filesystem is mounted.
 #[derive(Clone, Debug)]
 pub struct Options {
     runtime: Option<tokio::runtime::Handle>,
+    volume: String,
 }
 
 impl Options {
-    /// The default options.
+    /// The default options (opens the `"default"` volume).
     pub fn new() -> Self {
-        Self { runtime: None }
+        Self { runtime: None, volume: VOLUME_NAME.to_owned() }
+    }
+
+    /// Selects the named volume to open or create instead of [`VOLUME_NAME`] (`"default"`).
+    pub fn volume(&mut self, name: impl Into<String>) -> &mut Self {
+        self.volume = name.into();
+        self
     }
 
     /// Runs Fxfs's tasks on `runtime` instead of the shared fallback runtime (board 11689).
@@ -805,12 +842,13 @@ impl Filesystem {
         Options::new().format(storage).await
     }
 
-    /// Mounts or formats `storage` and opens/creates its `"default"` volume directly.
+    /// Mounts or formats `storage` and opens/creates the configured volume directly.
     async fn start(options: &Options, storage: Storage, format: bool) -> Result<Self, Error> {
         let cell = storage.cell();
         let (device, storage_kind) = storage.into_parts();
         let barriers = matches!(storage_kind, Kind::Image { .. });
         let runtime = options.fxfs_runtime();
+        let volume_name = options.volume.clone();
         let (filesystem, store) = enter(&runtime, async move {
             let filesystem = FxFilesystemBuilder::new()
                 .format(format)
@@ -821,9 +859,9 @@ impl Filesystem {
             let opened = async {
                 let root = root_volume(filesystem.clone()).await?;
                 if format {
-                    root.new_volume(VOLUME_NAME, NewChildStoreOptions::default()).await
+                    root.new_volume(&volume_name, NewChildStoreOptions::default()).await
                 } else {
-                    root.volume(VOLUME_NAME).await
+                    root.volume(&volume_name).await
                 }
             }
             .await;
@@ -929,6 +967,50 @@ impl Filesystem {
                 .map(|store| TreeCompactions::of(store.tree()))
                 .fold(TreeCompactions::default(), std::ops::Add::add),
         })
+    }
+
+    /// Creates an additional empty volume named `name` on this Fxfs filesystem (board 13920).
+    pub async fn create_volume(&self, name: &str) -> Result<(), Error> {
+        let name = name.to_owned();
+        self.inner
+            .run(|fxfs| async move {
+                let filesystem = fxfs.filesystem().clone();
+                let root = root_volume(filesystem).await.map_err(errno)?;
+                root.new_volume(&name, NewChildStoreOptions::default()).await.map_err(errno)?;
+                Ok(())
+            })
+            .await
+            .map_err(Error::new)
+    }
+
+    /// Compacts the journal into the filesystem's trees (board 13920).
+    pub async fn compact(&self) -> Result<(), Error> {
+        self.inner
+            .run(|fxfs| async move {
+                fxfs.filesystem().journal().force_compact().await.map_err(errno)
+            })
+            .await
+            .map_err(Error::new)
+    }
+
+    /// What this filesystem's volume takes of its metadata (board 13920).
+    pub async fn metadata(&self) -> Result<VolumeMetadata> {
+        self.inner
+            .run(|fxfs| async move {
+                let filesystem = fxfs.filesystem();
+                let store_id = fxfs.volume_id();
+                let store = filesystem
+                    .object_manager()
+                    .store(store_id)
+                    .ok_or_else(|| errno(FxfsError::NotFound.into()))?;
+                let layer_set = store.tree().layer_set();
+                let layers = layer_set.layers.iter().filter_map(|layer| layer.handle());
+                let layer_bytes = layers.map(|layer| layer.get_size()).sum();
+                let allocator_records =
+                    allocator_records(&filesystem.allocator(), store_id).await.map_err(errno)?;
+                Ok(VolumeMetadata { layer_bytes, allocator_records })
+            })
+            .await
     }
 }
 

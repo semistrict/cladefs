@@ -18,7 +18,7 @@ pub mod node;
 mod sparse_shrink_tests;
 pub mod storage;
 
-pub use filesystem::{Compactions, Filesystem, Node, Options, TreeCompactions};
+pub use filesystem::{Compactions, Filesystem, Node, Options, TreeCompactions, VolumeMetadata};
 pub use node::{
     Attr, DirEntry, FileType, Inode, Owner, RenameFlags, SetAttr, SetTime, StatFs, XattrMode,
 };

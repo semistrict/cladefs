@@ -33,7 +33,7 @@ mod host {
     use crate::common::{cladefs_guest_should_run, setup_rootfs};
     use crate::vm::Vm;
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
-    use cladefs::{Image, Storage};
+    use cladefs::{Filesystem, Options, Storage};
     use futures::executor::block_on;
     use std::path::Path;
 
@@ -44,11 +44,11 @@ mod host {
     /// Formats the empty cell at `path` with `VOLUMES`.
     fn format(path: &Path) -> anyhow::Result<()> {
         block_on(async {
-            let image = Image::format(Storage::open(path).await?).await?;
-            for volume in VOLUMES {
-                image.create_volume(volume).await?.unmount().await?;
+            let fs = Filesystem::format(Storage::open(path).await?).await?;
+            for volume in VOLUMES.iter().copied().filter(|&v| v != "default") {
+                fs.create_volume(volume).await?;
             }
-            image.close().await?;
+            fs.close().await?;
             Ok(())
         })
     }
@@ -56,8 +56,7 @@ mod host {
     /// What `volume`'s file holds in the cell at `path`.
     fn read(path: &Path, volume: &str) -> anyhow::Result<Vec<u8>> {
         block_on(async {
-            let image = Image::mount(Storage::open(path).await?).await?;
-            let fs = image.open_volume(volume).await?;
+            let fs = Options::new().volume(volume).mount(Storage::open(path).await?).await?;
             let (file, attr) = fs.root().lookup(FILE.as_bytes()).await?;
             let mut data = vec![0; attr.size as usize];
             let mut read = 0;
@@ -65,8 +64,7 @@ mod host {
                 read += file.read(read as u64, &mut data[read..]).await?;
             }
             drop(file);
-            fs.unmount().await?;
-            image.close().await?;
+            fs.close().await?;
             Ok(data)
         })
     }

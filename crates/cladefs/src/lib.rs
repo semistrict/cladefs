@@ -56,6 +56,6 @@ pub use cladefs_core::{
 };
 pub use cladefs_fs::{
     Attr, Compactions, DirEntry, FileType, Filesystem, Inode, Node, Options, Owner, RenameFlags,
-    SetAttr, SetTime, StatFs, Storage, TreeCompactions, XattrMode,
+    SetAttr, SetTime, StatFs, Storage, TreeCompactions, VolumeMetadata, XattrMode,
 };
 pub use cladefs_wire::{CellClient, DaemonConnection, DaemonDevice, Unmapped};
