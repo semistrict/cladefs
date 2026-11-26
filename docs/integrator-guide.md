@@ -39,7 +39,10 @@ Callers never choose host directories or paths. Every control RPC (`CreateCell`,
 `AttachBase`, `MigrateCell`, `HandOverCell`, `AbortMigration`) addresses cells by `(tenant, cell)`
 alone. On the VM socket (`OPEN`), Firecracker passes `"TENANT/CELL"` (in Crockford base 32) to open
 an existing cell, or `"TENANT/0"` / `"0/0"` to let the daemon create or fork a new cell on the best
-managed disk. Raw host paths are refused with `EINVAL`.
+managed disk. On a granted tenant's socket, `"0/0"` is a new cell of that tenant's, and any other
+tenant's cell is refused with `EACCES`. Raw host paths are refused with `EINVAL`. `StatCell`'s
+`placement_token` says which placement of a cell this host holds, open or not
+(`docs/operating-a-host.md`).
 
 Use `ListDisks` and `SetDiskGovernance` (or `cladefsctl disks` / `cladefsctl set-disk`) to inspect
 disk health/capacities and adjust per-disk caps, headroom, dirty budgets, or placement modes

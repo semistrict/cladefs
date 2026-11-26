@@ -2154,6 +2154,7 @@ mod cli {
             fast_wal_bucket,
             fast_wal_degraded,
             ephemeral,
+            placement_token,
         } = stat;
         serde_json::json!({
             "tenant": base32_id::Short(*tenant).to_string(),
@@ -2169,6 +2170,7 @@ mod cli {
             "inherited_extents": inherited_extents,
             "committed": committed,
             "uploading": uploading,
+            "placement_token": placement_token,
             "taken_token": taken_token,
             "taken_epoch": taken_epoch,
             "taken_unix_ms": taken_unix_ms,

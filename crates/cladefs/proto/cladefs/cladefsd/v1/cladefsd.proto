@@ -928,6 +928,12 @@ message StatCellResponse {
   // Whether this cell is a host-local ephemeral cell (doc-25): kept on host SSD alone, never
   // uploaded to the bucket.
   bool ephemeral = 32;
+  // The fencing token of this host's placement of the cell, whether a VM process has it open or
+  // not (board 13879): the token PlaceCell (or CreateCell's) placed it at, or, never placed, the
+  // daemon's own (`CLADEFSD_TOKEN`). A host's copy is the cell's latest placement while no other
+  // host's placement has a greater one. taken_token is the same, but only while uploading. 0 for
+  // an ephemeral cell, which no placement holds.
+  uint64 placement_token = 33;
 }
 
 // Asks for the cells the daemon serves.

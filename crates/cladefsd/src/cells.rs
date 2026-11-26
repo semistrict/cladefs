@@ -664,10 +664,7 @@ pub(crate) fn mount_keeping(daemon: &Arc<Daemon>) -> Result<local_cell::upload::
 
 /// How `daemon`'s cells' uploaders keep them in their buckets.
 fn keeping(daemon: &Daemon) -> Result<local_cell::upload::Options, Errno> {
-    let token = cladefs_core::bucket::host_token().map_err(|err| {
-        log::error!("cladefsd: {err}");
-        Errno::EINVAL
-    })?;
+    let token = daemon_token()?;
     let (cache, interval) = (part_cache(daemon)?, upload_interval());
     let held = Some(crate::memory::held_parts_on(daemon).clone());
     // cladefs: and the hosts its replicated cells' configurations are made of (doc-21).
@@ -1580,10 +1577,14 @@ pub(super) struct CellState {
     pub upload: Option<local_cell::upload::UploadStatus>,
     /// Whether this cell is a host-local ephemeral cell (doc-25).
     pub ephemeral: bool,
+    /// The fencing token of this host's placement of it, open or not ([`placement_token`]): none
+    /// for an ephemeral cell, which no bucket keeps.
+    pub placement: Option<u64>,
 }
 
-/// What `open_cell` is, and holds; `open` if a connection has it open.
-fn state_of(open_cell: &OpenCell, open: bool) -> Result<CellState, Errno> {
+/// What `open_cell`, the cell at `path`, is, and holds; `open` if a connection has it open.
+fn state_of(open_cell: &OpenCell, path: &Path, open: bool) -> Result<CellState, Errno> {
+    let ephemeral = open_cell.is_ephemeral();
     Ok(CellState {
         cell: open_cell.cell(),
         info: open_cell.info()?,
@@ -1592,7 +1593,29 @@ fn state_of(open_cell: &OpenCell, open: bool) -> Result<CellState, Errno> {
         open,
         committed: open_cell.committed()?,
         upload: open_cell.upload_status()?,
-        ephemeral: open_cell.is_ephemeral(),
+        ephemeral,
+        placement: (!ephemeral).then(|| placement_token(path)).transpose()?,
+    })
+}
+
+/// The fencing token of this host's placement of the bucket-backed cell at `path`, whether a
+/// connection has it open or not (board 13879): the one it was placed at, as its description
+/// says ([`place`]); or, never placed, the daemon's own, which its uploader takes it with
+/// ([`keeping`]).
+fn placement_token(path: &Path) -> Result<u64, Errno> {
+    let placed = local_cell::upload::blocking(|| local_cell::host_token(path)).map_err(|err| {
+        log::warn!("cladefsd: reading the placement of {}: {err:#}", path.display());
+        Errno::EIO
+    })?;
+    placed.map_or_else(daemon_token, Ok)
+}
+
+/// The fencing token of this host's placement (`CLADEFSD_TOKEN`): `EINVAL` if it names none,
+/// logged.
+fn daemon_token() -> Result<u64, Errno> {
+    cladefs_core::bucket::host_token().map_err(|err| {
+        log::error!("cladefsd: {err}");
+        Errno::EINVAL
     })
 }
 
@@ -1617,7 +1640,7 @@ pub(super) fn list(daemon: &Daemon) -> Result<Vec<(PathBuf, CellState)>, Errno> 
         // Even after an error, release every cell through inspect.
         inspect(daemon, cell, |cell| {
             if let Ok(cells) = &mut listed {
-                match state_of(cell, true) {
+                match state_of(cell, &path, true) {
                     Ok(state) => cells.push((path, state)),
                     Err(err) => listed = Err(err),
                 }
@@ -1630,14 +1653,14 @@ pub(super) fn list(daemon: &Daemon) -> Result<Vec<(PathBuf, CellState)>, Errno> 
 /// What the cell at `path` on `daemon` is, and holds.
 pub(super) async fn stat(daemon: &Arc<Daemon>, path: PathBuf) -> Result<CellState, Errno> {
     if let Some(open_cell) = open_by_connection(daemon, &path) {
-        return inspect(daemon, open_cell, |cell| state_of(cell, true));
+        return inspect(daemon, open_cell, |cell| state_of(cell, &path, true));
     }
     let _held = hold(daemon, &path).await?;
     if !local_cell::upload::blocking(|| host_fs::exists(&path)) {
         return Err(Errno::ENOENT);
     }
     let open_cell = open_here(daemon, &path).await?;
-    let state = state_of(&open_cell, false);
+    let state = state_of(&open_cell, &path, false);
     open_cell.close().await;
     state
 }

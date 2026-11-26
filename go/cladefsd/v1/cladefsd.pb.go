@@ -3401,9 +3401,15 @@ type StatCellResponse struct {
 	FastWalDegraded bool `protobuf:"varint,31,opt,name=fast_wal_degraded,json=fastWalDegraded,proto3" json:"fast_wal_degraded,omitempty"`
 	// Whether this cell is a host-local ephemeral cell (doc-25): kept on host SSD alone, never
 	// uploaded to the bucket.
-	Ephemeral     bool `protobuf:"varint,32,opt,name=ephemeral,proto3" json:"ephemeral,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Ephemeral bool `protobuf:"varint,32,opt,name=ephemeral,proto3" json:"ephemeral,omitempty"`
+	// The fencing token of this host's placement of the cell, whether a VM process has it open or
+	// not (board 13879): the token PlaceCell (or CreateCell's) placed it at, or, never placed, the
+	// daemon's own (`CLADEFSD_TOKEN`). A host's copy is the cell's latest placement while no other
+	// host's placement has a greater one. taken_token is the same, but only while uploading. 0 for
+	// an ephemeral cell, which no placement holds.
+	PlacementToken uint64 `protobuf:"varint,33,opt,name=placement_token,json=placementToken,proto3" json:"placement_token,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *StatCellResponse) Reset() {
@@ -3644,6 +3650,13 @@ func (x *StatCellResponse) GetEphemeral() bool {
 		return x.Ephemeral
 	}
 	return false
+}
+
+func (x *StatCellResponse) GetPlacementToken() uint64 {
+	if x != nil {
+		return x.PlacementToken
+	}
+	return 0
 }
 
 // Asks for the cells the daemon serves.
@@ -6265,7 +6278,7 @@ const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\x10SyncCellResponse\"C\n" +
 	"\x0fStatCellRequest\x12\x16\n" +
 	"\x06tenant\x18\x02 \x01(\x04R\x06tenant\x12\x12\n" +
-	"\x04cell\x18\x03 \x01(\x04R\x04cellJ\x04\b\x01\x10\x02\"\x81\b\n" +
+	"\x04cell\x18\x03 \x01(\x04R\x04cellJ\x04\b\x01\x10\x02\"\xaa\b\n" +
 	"\x10StatCellResponse\x12\x1a\n" +
 	"\bcapacity\x18\x02 \x01(\x04R\bcapacity\x12\x12\n" +
 	"\x04used\x18\x03 \x01(\x04R\x04used\x12\x1c\n" +
@@ -6301,7 +6314,8 @@ const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\bfast_wal\x18\x1d \x01(\bR\afastWal\x12&\n" +
 	"\x0ffast_wal_bucket\x18\x1e \x01(\tR\rfastWalBucket\x12*\n" +
 	"\x11fast_wal_degraded\x18\x1f \x01(\bR\x0ffastWalDegraded\x12\x1c\n" +
-	"\tephemeral\x18  \x01(\bR\tephemeralB\x0f\n" +
+	"\tephemeral\x18  \x01(\bR\tephemeral\x12'\n" +
+	"\x0fplacement_token\x18! \x01(\x04R\x0eplacementTokenB\x0f\n" +
 	"\r_forced_afterJ\x04\b\x01\x10\x02J\x04\b\x15\x10\x16\"\x12\n" +
 	"\x10ListCellsRequest\"L\n" +
 	"\x11ListCellsResponse\x127\n" +

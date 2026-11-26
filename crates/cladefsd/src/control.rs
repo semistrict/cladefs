@@ -620,6 +620,7 @@ fn stat_response(state: cells::CellState) -> StatCellResponse {
         fast_wal_bucket,
         fast_wal_degraded,
         ephemeral: state.ephemeral,
+        placement_token: state.placement.unwrap_or(0),
     }
 }
 

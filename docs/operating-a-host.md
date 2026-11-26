@@ -219,6 +219,12 @@ used by more than one process, or across a daemon's restarts, needs a file or
 cloud bucket. cladefsctl, without the daemon, changes existing cells on the same terms, and makes new cell directories (`take`, `import`)
 anywhere.
 
+`StatCell`'s `placement_token` is the fencing token of this host's placement of a
+cell, whether a VM process has it open or not (board 13879): the token
+`PlaceCell` or `CreateCell` placed it at, or, never placed, `CLADEFSD_TOKEN`. A
+host's copy is the cell's latest placement while no other host holds one of a
+greater token. `taken_token` says the same, but only while the cell uploads.
+
 ### Replicated cells' replica directories
 
 A host keeps the logs it holds of other hosts' replicated cells, and its promises

@@ -79,6 +79,8 @@ fn cells_through_the_control_api() {
             fast_wal_bucket: String::new(),
             fast_wal_degraded: false,
             ephemeral: false,
+            // Never placed: the daemon's placement's, CLADEFSD_TOKEN (board 13879).
+            placement_token: 1,
         }
     );
 
@@ -106,9 +108,12 @@ fn cells_through_the_control_api() {
     let vm = daemon.open(forked);
     assert_eq!(vm.root().unwrap(), b"base");
     drop(vm);
-    daemon.wait_closed(forked);
+    // Board 13879: closed, the placement CreateCell made it at.
+    assert_eq!(daemon.wait_closed(forked).placement_token, 2);
 
     daemon.place(cell, 3).unwrap();
+    let placed = daemon.stat(cell).unwrap();
+    assert_eq!((placed.open, placed.placement_token), (false, 3));
     daemon.delete(forked).unwrap();
     assert_eq!(failure(daemon.stat(forked)), (Code::NotFound, Errno::ENOENT));
 
@@ -144,7 +149,7 @@ fn open_cells_are_listed_with_their_takings_and_uploads() {
         assert_eq!((stat.cell, stat.open, stat.uploading), (cell.id, true, true));
         // TASK-454: the extent the first wrote; none, the second.
         assert_eq!((stat.own_extents, stat.inherited_extents), (extents, 0));
-        assert_eq!((stat.taken_token, stat.taken_epoch), (1, 1));
+        assert_eq!((stat.taken_token, stat.taken_epoch, stat.placement_token), (1, 1, 1));
         assert!((millis(before)..=millis(after)).contains(&stat.taken_unix_ms), "{stat:?}");
         assert_eq!(stat.uploaded, stat.committed, "{stat:?}");
         assert_eq!((stat.pending_upload_bytes, stat.oldest_pending_ms), (0, 0));
@@ -1278,6 +1283,8 @@ fn memory_cells_through_the_control_api() {
     let eph_stat = daemon.stat(eph_id).unwrap();
     assert!(eph_stat.ephemeral);
     assert!(!eph_stat.uploading);
+    // No placement holds an ephemeral cell (board 13879).
+    assert_eq!(eph_stat.placement_token, 0);
     let eph_open = cladefs::memory_cell::MemoryCell::open_ephemeral_existing(
         &daemon.vms,
         std::path::Path::new(&eph_id.to_string()),
