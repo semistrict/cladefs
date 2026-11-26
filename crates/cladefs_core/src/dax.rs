@@ -30,7 +30,8 @@
 //! a page mapped there anew. A window that doesn't copy, a host test's, refuses every write.
 
 pub mod failures;
-#[cfg(all(test, feature = "shuttle"))]
+// Its guest's only second stage is Linux's (`uffd::shuttle_tests`): elsewhere nothing runs it.
+#[cfg(all(test, feature = "shuttle", target_os = "linux"))]
 mod shuttle_tests;
 #[cfg(target_os = "linux")]
 pub mod uffd;
