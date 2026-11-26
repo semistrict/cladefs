@@ -127,9 +127,16 @@ pub fn page_size() -> u64 {
         // SAFETY: sysconf has no preconditions.
         let size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
         let size = u64::try_from(size).expect("the host's page size");
-        assert!(SLAB.is_multiple_of(size) && SLAB / size <= 256, "pages of {size} bytes");
+        assert!(pages_fit(size), "pages of {size} bytes");
         size
     })
+}
+
+/// Whether a host's pages of `size` bytes are pages slabs are made of: a slab a whole number of
+/// them, 256 at most, so 4 KiB to 1 MiB. What the daemon's doctor checks of the host's before
+/// anything asks its page size, which panics otherwise (board 14217).
+pub fn pages_fit(size: u64) -> bool {
+    size > 0 && SLAB.is_multiple_of(size) && SLAB / size <= 256
 }
 
 /// The pages of a slab.

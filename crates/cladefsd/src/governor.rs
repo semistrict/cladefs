@@ -713,22 +713,17 @@ pub fn shares(target: u64, tenants: &[(u64, u64)]) -> Vec<(u64, u64)> {
         .collect()
 }
 
-/// Starts `daemon`'s memory governor on its runtime for the rest of the daemon's life. Fails hard
-/// if the host lacks any prerequisite for unified MGLRU + swap + proactive VM memory governance
-/// (`cachestat(2)`, MGLRU enabled, `SwapTotal >= floor`, and writable `/sys/fs/cgroup` with
-/// `CAP_DAC_OVERRIDE` or delegated VM cgroups), rather than silently degrading to a broken
-/// split-brain configuration.
+/// Starts `daemon`'s memory governor on its runtime for the rest of the daemon's life, the host's
+/// support for it checked by the doctor first, which refuses to start the daemon without it
+/// ([`governed_checks`], board 14217), rather than silently degrading to a broken split-brain
+/// configuration.
 /// cladefs: a supervised service on the daemon's runtime ([`super::run::service`]), as its shrinks
 /// wait for the pages they evict holding no thread (board 2946).
 pub(super) fn start_on(daemon: &Arc<Daemon>) -> Result<(), String> {
     let host = host_memory().map_err(|err| format!("reading the host's memory: {err}"))?;
     let limit = limit(host.total);
     let (headroom, floor) = (headroom(limit)?, floor(limit)?);
-    // Test binaries built with `tests-kms` (forbidden in release builds by `lib.rs`) run
-    // unprivileged integration tests without host swap/CAP_DAC_OVERRIDE; production binaries
-    // always enforce `require_host_support`.
-    #[cfg(all(target_os = "linux", not(madsim), not(feature = "tests-kms")))]
-    require_host_support(floor)?;
+    // cladefs: its host's support checked by the doctor before the daemon started (board 14217).
     daemon.governor.floor.store(floor, Ordering::Relaxed);
     // Unify periodic memory governance with reactive slab relief onto one OS eviction thread
     // outside madsim/Shuttle (board 11703), avoiding a second eviction loop competing with relief.
@@ -780,67 +775,98 @@ pub fn host_supported() -> bool {
     }
 }
 
-/// Fail-hard startup check for governed mode on Linux: ensures `cachestat(2)`, MGLRU, host swap
-/// (`SwapTotal >= floor`), and cgroup v2 reclaim permissions (writable `/sys/fs/cgroup` plus
-/// either `CAP_DAC_OVERRIDE` or explicit `CLADEFSD_VM_CGROUP_DELEGATED=1` when VM cgroups are
-/// delegated to the daemon's user) are all active before the daemon accepts any VM.
+/// The host's support for governed mode on Linux (board 14217's doctor runs these, every one, before
+/// the daemon starts, refusing if any fails): `cachestat(2)`; MGLRU enabled; host swap
+/// (`SwapTotal >= floor`); and cgroup v2 reclaim permissions, a writable cgroup2 `/sys/fs/cgroup`
+/// plus either `CAP_DAC_OVERRIDE` or explicit `CLADEFSD_VM_CGROUP_DELEGATED=1` when VM cgroups are
+/// delegated to the daemon's user. Each check's name, and what it found, or what is wrong.
 #[cfg(all(target_os = "linux", not(madsim)))]
-pub fn require_host_support(floor: u64) -> Result<(), String> {
-    cladefs_core::slabs::require_cachestat().map_err(|err| format!("memory governor: {err}"))?;
-
-    let lru_enabled = std::fs::read_to_string("/sys/kernel/mm/lru_gen/enabled").map_err(|err| {
-        format!(
-            "memory governor: reading /sys/kernel/mm/lru_gen/enabled: {err} \
-             (Linux MGLRU is required for unified memory governance)"
-        )
-    })?;
-    if !mglru_enabled_of(&lru_enabled) {
-        return Err("memory governor: MGLRU is disabled (/sys/kernel/mm/lru_gen/enabled=0); \
-             run `cladefsd --setup-host` or `echo y > /sys/kernel/mm/lru_gen/enabled`"
-            .into());
-    }
-
-    let meminfo = std::fs::read_to_string("/proc/meminfo")
-        .map_err(|err| format!("memory governor: reading /proc/meminfo: {err}"))?;
-    let swap_total = swap_total_of(&meminfo);
-    if swap_total < floor {
-        return Err(format!(
-            "memory governor: host has {swap_total} bytes of swap (SwapTotal), below governed \
-             floor {floor} bytes; run `cladefsd --setup-host` to provision zram or configure swap"
-        ));
-    }
-
+pub fn governed_checks(floor: u64) -> Vec<(&'static str, Result<String, String>)> {
+    let cachestat = cladefs_core::slabs::require_cachestat()
+        .map(|()| "cachestat(2) works".to_owned())
+        .map_err(|err| format!("{err} (Linux 6.5 or later)"));
+    let mglru = match std::fs::read_to_string("/sys/kernel/mm/lru_gen/enabled") {
+        Err(err) => Err(format!(
+            "reading /sys/kernel/mm/lru_gen/enabled: {err} (Linux MGLRU is required for unified \
+             memory governance)"
+        )),
+        Ok(raw) if mglru_enabled_of(&raw) => Ok(format!("enabled ({})", raw.trim())),
+        Ok(_) => Err("MGLRU is disabled (/sys/kernel/mm/lru_gen/enabled=0); run `cladefsd \
+             --setup-host` or `echo y > /sys/kernel/mm/lru_gen/enabled`"
+            .into()),
+    };
+    let swap = std::fs::read_to_string("/proc/meminfo")
+        .map_err(|err| format!("reading /proc/meminfo: {err}"))
+        .and_then(|meminfo| match swap_total_of(&meminfo) {
+            total if total >= floor => Ok(format!("{total} bytes, the floor {floor}")),
+            total => Err(format!(
+                "{total} bytes of swap (SwapTotal), below the governed floor {floor} bytes; run \
+                 `cladefsd --setup-host` to provision zram or configure swap"
+            )),
+        });
     let delegated = node_local::env::var("CLADEFSD_VM_CGROUP_DELEGATED")
         .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
-    if !delegated {
-        let status = std::fs::read_to_string("/proc/self/status")
-            .map_err(|err| format!("memory governor: reading /proc/self/status: {err}"))?;
-        if !has_cap_dac_override(&status) {
-            return Err("memory governor: missing CAP_DAC_OVERRIDE for proactive VM \
-                 memory.reclaim (set AmbientCapabilities=CAP_CHOWN CAP_FOWNER CAP_KILL \
-                 CAP_DAC_OVERRIDE, or delegate VM cgroups to the daemon user and set \
-                 CLADEFSD_VM_CGROUP_DELEGATED=1)"
-                .into());
-        }
-    }
+    let reclaim = match delegated {
+        true => Ok("VM cgroups delegated (CLADEFSD_VM_CGROUP_DELEGATED)".to_owned()),
+        false => std::fs::read_to_string("/proc/self/status")
+            .map_err(|err| format!("reading /proc/self/status: {err}"))
+            .and_then(|status| match has_cap_dac_override(&status) {
+                true => Ok("CAP_DAC_OVERRIDE held".to_owned()),
+                false => Err("missing CAP_DAC_OVERRIDE for proactive VM memory.reclaim (set \
+                     AmbientCapabilities=CAP_CHOWN CAP_FOWNER CAP_KILL CAP_DAC_OVERRIDE, or \
+                     delegate VM cgroups to the daemon user and set \
+                     CLADEFSD_VM_CGROUP_DELEGATED=1)"
+                    .to_owned()),
+            }),
+    };
+    vec![
+        ("cachestat", cachestat),
+        ("MGLRU", mglru),
+        ("swap", swap),
+        ("cgroup2 at /sys/fs/cgroup", cgroup2_writable()),
+        ("VM memory reclaim", reclaim),
+    ]
+}
 
-    // SAFETY: `libc::statvfs` is a plain C struct where an all-zero bit pattern is valid.
-    let mut vfs: libc::statvfs = unsafe { std::mem::zeroed() };
-    // SAFETY: valid NUL-terminated path and initialized statvfs buffer.
-    let rc = unsafe { libc::statvfs(c"/sys/fs/cgroup".as_ptr(), &raw mut vfs) };
-    if rc != 0 {
+/// Whether `/sys/fs/cgroup` is cgroup v2, mounted writable: VM reclaim finds VM cgroups by their
+/// cgroup v2 paths alone (`cgroup_v2_path_of`), so that a v1 or hybrid mount, which passed before,
+/// left it reclaiming nothing (board 14217).
+#[cfg(all(target_os = "linux", not(madsim)))]
+fn cgroup2_writable() -> Result<String, String> {
+    // SAFETY: `libc::statfs` is a plain C struct where an all-zero bit pattern is valid.
+    let mut fs: libc::statfs = unsafe { std::mem::zeroed() };
+    // SAFETY: a valid NUL-terminated path and an initialized statfs buffer.
+    if unsafe { libc::statfs(c"/sys/fs/cgroup".as_ptr(), &raw mut fs) } != 0 {
+        return Err(format!("statfs(/sys/fs/cgroup): {}", std::io::Error::last_os_error()));
+    }
+    if fs.f_type as i64 != libc::CGROUP2_SUPER_MAGIC as i64 {
         return Err(format!(
-            "memory governor: statvfs(/sys/fs/cgroup): {}",
-            std::io::Error::last_os_error()
+            "/sys/fs/cgroup is not cgroup v2 (its filesystem's magic is {:#x}): boot with \
+             systemd.unified_cgroup_hierarchy=1",
+            fs.f_type
         ));
     }
+    // SAFETY: `libc::statvfs` is a plain C struct where an all-zero bit pattern is valid.
+    let mut vfs: libc::statvfs = unsafe { std::mem::zeroed() };
+    // SAFETY: a valid NUL-terminated path and an initialized statvfs buffer.
+    if unsafe { libc::statvfs(c"/sys/fs/cgroup".as_ptr(), &raw mut vfs) } != 0 {
+        return Err(format!("statvfs(/sys/fs/cgroup): {}", std::io::Error::last_os_error()));
+    }
     if (vfs.f_flag & libc::ST_RDONLY) != 0 {
-        return Err("memory governor: /sys/fs/cgroup is mounted read-only \
-             (set ProtectControlGroups=no and ReadWritePaths=... /sys/fs/cgroup)"
+        return Err("/sys/fs/cgroup is mounted read-only (set ProtectControlGroups=no and \
+             ReadWritePaths=... /sys/fs/cgroup)"
             .into());
     }
+    Ok("cgroup v2, writable".into())
+}
 
-    Ok(())
+/// Governed mode's prerequisites, as [`governed_checks`] finds them: the first failing.
+#[cfg(all(target_os = "linux", not(madsim)))]
+pub fn require_host_support(floor: u64) -> Result<(), String> {
+    match governed_checks(floor).into_iter().find(|(_, found)| found.is_err()) {
+        Some((check, Err(err))) => Err(format!("memory governor: {check}: {err}")),
+        _ => Ok(()),
+    }
 }
 
 /// Idempotent root pre-start host setup (`cladefsd --setup-host`, e.g. systemd

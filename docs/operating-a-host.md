@@ -553,18 +553,46 @@ histograms, their stats or the VM processes out (`--leave-out`), the daemon's ow
 the least; `ListCells` (`cells`), to `StatCell` each cell; `ListVersions`, to drop versions;
 `ListEphemeralHosts`, to decommission hosts gone for good.
 
-## What the daemon refuses to start without
+## The daemon's doctor: what it checks of the host as it starts
 
-What only failed once it served, the daemon refuses as it starts, saying why (boards 8533,
-8595), so that the host's setup gets fixed:
+The daemon checks the host's limits and kernel features as it starts, every one in one place
+(`cladefsd::doctor`, board 14217), logging what each found. `cladefsd --doctor [MEMORY_BYTES]`
+prints the same without starting the daemon (a memory size given, as one given to a daemon, leaves
+the memory governor's prerequisites out), and fails if the daemon would refuse to start:
+
+```
+ok       page size: 4096 bytes
+ok       open files: 1048576 (room for 4941 cells' files at their most)
+ok       SO_PEERPIDFD: supported
+warning  vm.max_map_count: 65530, under the 262144 a host of many VMs' windows wants: ...
+ok       cachestat: cachestat(2) works
+...
+```
+
+A **warning** is something the daemon runs with, worse:
+
+- **Open files** (`RLIMIT_NOFILE`) under its own 1,024 and room for 256 cells' files at their most
+  (212 each, 55,296): it serves fewer connections at once. The systemd unit's `LimitNOFILE`
+  (below, Running under systemd) sets it.
+- **`vm.max_map_count`** under 262,144: VM processes' windows map fewer runs of pages at once.
+- **Memory pressure stall information** (PSI) missing, in governed mode: the governor goes by
+  watermarks alone, and reclaims no VM's memory.
+
+A **requirement** the daemon refuses to start without, every one said at once:
 
 - **Linux 6.5 or later.** The daemon knows the process at the other end of a VM socket by the
   socket's pidfd (`SO_PEERPIDFD`, 6.5), and kills that process when it stops acknowledging the
   daemon's changes to its window. On an older kernel it refuses to start: the pid of the process
   that connected, opened after the fact, may be another process's by then, which it would kill.
   `architecture.md` lists the rest of what it needs of the kernel.
-- **55,296 open files** (`RLIMIT_NOFILE`: its own 1,024, and 212 for each of 256 cells): the
-  systemd unit's `LimitNOFILE` (below, Running under systemd).
+- **Pages of 4 KiB to 1 MiB**, which its 1 MiB slabs are made of.
+- **In governed mode** (no memory size given): `cachestat(2)`, MGLRU enabled, swap at least the
+  governor's floor, cgroup v2 at a writable `/sys/fs/cgroup`, and `CAP_DAC_OVERRIDE` or VM cgroups
+  delegated (`CLADEFSD_VM_CGROUP_DELEGATED=1`). `cladefsd --setup-host` provisions the first three.
+
+What the daemon's configuration names it refuses as it starts too, as only failing once it served
+before (board 8595):
+
 - **Every `CLADEFSD_ROOTS` directory there**, and a directory: one missing is refused as it
   starts, rather than every cell under it later.
 - **A part cache it can open**: every `CLADEFSD_PART_CACHE` shard there, not locked by another
@@ -574,8 +602,8 @@ What only failed once it served, the daemon refuses as it starts, saying why (bo
 ## Access to userfaultfd
 
 On Linux, DAX windows take KVM's faults through userfaultfd, which needs
-access to `/dev/userfaultfd` (or `vm.unprivileged_userfaultfd=1`). To grant it
-to the `kvm` group:
+access to `/dev/userfaultfd` (`vm.unprivileged_userfaultfd=1` does not do: only the device is
+used). To grant it to the `kvm` group:
 
 ```sh
 echo 'KERNEL=="userfaultfd", GROUP="kvm", MODE="0660"' |
@@ -667,7 +695,7 @@ What it sets, and why:
   three quarters of it over a connection's cell's files at their most (212 by default: its
   segments', its sealed and open extents' raw files, its open and full segments', its flushes',
   its sockets and its VM process's pidfd; board 9975, board 12555, board 12887), 3,709
-  connections at 1,048,576, 195 at the floor; it refuses to start under 55,296 (board 8595).
+  connections at 1,048,576, 195 at the floor; under 55,296 its doctor warns (board 14217).
 - `TimeoutStopSec=90` above `CLADEFSD_DRAIN=60`: SIGTERM drains (`docs/upgrading-a-host.md`), and
   systemd's SIGKILL at the stop timeout would cut a longer drain short, its cells not uploaded.
 - `MemoryLow` set to at least the daemon's shared DAX cache floor (by default `1/8` of the host's

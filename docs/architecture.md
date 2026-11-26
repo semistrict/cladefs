@@ -155,9 +155,11 @@ frozen, holds the pages it may still map until the daemon has killed it
 (TASK-79.9). It knows the process by the socket's pidfd (`SO_PEERPIDFD`, Linux
 6.5), and refuses to start on a kernel without it (board 8533): the pid of the process that
 connected, opened after the fact (`pidfd_open`), may be another process's by then, which the
-daemon would kill. It refuses to start, too, under a limit of open files of 55,296
-(`RLIMIT_NOFILE`: its own 1,024, and 212 for each of 256 cells), with a `CLADEFSD_ROOTS`
-directory it can't resolve, a part cache it can't open (board 8595), or—in governed memory mode
+daemon would kill. Its doctor checks that and every other limit and kernel feature as it starts
+(`cladefsd::doctor`, `cladefsd --doctor`, board 14217): it warns of a limit of open files under
+55,296 (`RLIMIT_NOFILE`: its own 1,024, and 212 for each of 256 cells). It refuses to start with
+a `CLADEFSD_ROOTS` directory it can't resolve, a part cache it can't open (board 8595), or—in
+governed memory mode
 (no fixed `MEMORY_BYTES`)—without Linux 6.5+ `cachestat(2)`, MGLRU enabled, swap at least the
 governor's floor, and writable `/sys/fs/cgroup` with `CAP_DAC_OVERRIDE` (or
 `CLADEFSD_VM_CGROUP_DELEGATED=1`); `cladefsd --setup-host` provisions the kernel settings and zram

@@ -102,6 +102,7 @@ mod daemon;
 pub use cladefs_wire::device;
 pub mod disk;
 pub mod disks;
+pub mod doctor;
 pub mod drain;
 // cladefs: libcladefs's, outside the simulation (board 13909).
 #[cfg(not(madsim))]
@@ -268,7 +269,7 @@ fn remove_unfinished(private: &Path, bound: &Path) -> std::io::Result<()> {
 /// Raises the process's limit of open files to the most it may: each cell it serves keeps its
 /// own segments' and extents' files open, and its connection's (see the module's docs, TASK-34),
 /// for every VM on the host, which the usual default of 1024 runs out of after a hundred or so.
-/// cladefs: a daemon then refuses to start under [`open_files_floor`] (board 8595).
+/// cladefs: its doctor then warns of a limit under [`open_files_floor`] (board 14217).
 pub fn raise_open_files_limit() -> std::io::Result<()> {
     let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
     // SAFETY: Plain system calls on a limit the process owns.
@@ -317,11 +318,11 @@ fn most_open_files(hard: libc::rlim_t) -> std::io::Result<libc::rlim_t> {
 /// VMs are few and whose processes macOS lets keep 10,240 files by default
 /// (`kern.maxfilesperproc`): 32, so that a daemon a process embeds (libcladefs) starts there
 /// without the machine's settings changed (board 13850).
-const FLOOR_CELLS: u64 = if cfg!(target_os = "macos") { 32 } else { 256 };
+pub(crate) const FLOOR_CELLS: u64 = if cfg!(target_os = "macos") { 32 } else { 256 };
 
 /// cladefs: what a daemon keeps open of its own, beside its cells' files, at most: its sockets and
 /// listeners, its log, its part cache's and its bucket's files and connections, its arenas' memfds.
-const OWN_OPEN_FILES: u64 = 1024;
+pub(crate) const OWN_OPEN_FILES: u64 = 1024;
 
 /// cladefs: the open files a cell keeps at most beside its segments', its sealed extents' and its
 /// open extents' raw files (each `local_cell::Options::open_files`): its open segment's raw + log
@@ -341,33 +342,12 @@ pub(crate) fn cell_open_files() -> u64 {
     segments_and_extents + CELL_OPEN_FILES_BESIDE
 }
 
-/// cladefs: the limit of open files (`RLIMIT_NOFILE`) under which a daemon refuses to start (board
-/// 8595): its own, and [`FLOOR_CELLS`] cells' at their most. A lower limit started a daemon that
-/// answered `EMFILE` once its host was busy, its VMs failing to open their cells or to connect
-/// (TASK-79.35).
+/// cladefs: the limit of open files (`RLIMIT_NOFILE`) under which the daemon's doctor warns (board
+/// 14217; it refused to start before, board 8595): its own, and [`FLOOR_CELLS`] cells' at their
+/// most. Under it, the daemon serves fewer connections at once (`server::most_connections`), not
+/// answering `EMFILE` once its host is busy (TASK-79.35).
 pub fn open_files_floor() -> u64 {
     OWN_OPEN_FILES + FLOOR_CELLS * cell_open_files()
-}
-
-/// cladefs: refuses a limit of open files under [`open_files_floor`], naming it (board 8595): the
-/// soft limit, which `raise_open_files_limit` raises to the hard one before the daemon boots.
-#[cfg(not(madsim))]
-fn require_open_files() -> anyhow::Result<()> {
-    let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
-    // SAFETY: A plain system call writing the process's limit into `limit`.
-    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
-        let err = std::io::Error::last_os_error();
-        return Err(anyhow::Error::new(err).context("reading the limit of open files"));
-    }
-    let floor = open_files_floor();
-    anyhow::ensure!(
-        limit.rlim_cur >= floor,
-        "RLIMIT_NOFILE: the limit of open files is {}, under the {floor} the extent daemon needs to \
-         start ({OWN_OPEN_FILES} of its own, and room for {FLOOR_CELLS} cells' files): raise its \
-         hard limit (LimitNOFILE= of its systemd unit, or ulimit -Hn; on macOS, kern.maxfilesperproc too)",
-        limit.rlim_cur
-    );
-    Ok(())
 }
 
 #[cfg(test)]

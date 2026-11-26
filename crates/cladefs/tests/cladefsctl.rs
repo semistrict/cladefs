@@ -1164,19 +1164,65 @@ fn the_daemon_refuses_a_part_cache_it_cannot_use() {
     assert!(error.contains("Not a directory"), "{error}");
 }
 
-/// board 8595: a limit of open files under the daemon's floor stops it at its start, naming
-/// RLIMIT_NOFILE and the floor: it served, and answered EMFILE once its host was busy.
+/// board 14217: a limit of open files under the daemon's floor is a warning, its doctor's, naming
+/// RLIMIT_NOFILE, the floor and the cells it leaves room for, and the daemon starts and serves
+/// (the user, 2026-11-26). It refused to start before (board 8595).
 #[cfg(target_os = "linux")]
 #[test]
-fn the_daemon_refuses_too_few_open_files() {
+fn the_daemon_warns_of_too_few_open_files() {
+    use std::os::unix::process::CommandExt as _;
     let dir = tempfile::tempdir().unwrap();
     let floor = cladefs::cladefsd::open_files_floor();
-    let error = refused_to_start(dir.path(), &[], Some(floor - 1));
-    assert!(
-        error.contains(&format!(
-            "RLIMIT_NOFILE: the limit of open files is {}, under the {floor}",
-            floor - 1
-        )),
-        "{error}"
+    let disk = dir.path().join("disk0");
+    std::fs::create_dir_all(&disk).unwrap();
+    let control = dir.path().join("control.sock");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_cladefsd"));
+    command.arg(dir.path().join("vms.sock")).env("CLADEFSD_GRPC", &control);
+    command.env("CLADEFSD_ROOTS", &disk).envs(HOST);
+    let limit = floor - 1;
+    // SAFETY: Between fork and exec, a system call alone, async-signal-safe.
+    unsafe {
+        command.pre_exec(move || {
+            let limit = libc::rlimit { rlim_cur: limit, rlim_max: limit };
+            match libc::setrlimit(libc::RLIMIT_NOFILE, &limit) {
+                0 => Ok(()),
+                _ => Err(std::io::Error::last_os_error()),
+            }
+        });
+    }
+    let mut daemon = KillOnDrop(command.stderr(std::process::Stdio::piped()).spawn().unwrap());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while std::os::unix::net::UnixStream::connect(&control).is_err() {
+        assert!(daemon.0.try_wait().unwrap().is_none(), "the daemon exited");
+        assert!(std::time::Instant::now() < deadline, "the daemon never served");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    daemon.0.kill().unwrap();
+    daemon.0.wait().unwrap();
+    let mut stderr = String::new();
+    std::io::Read::read_to_string(&mut daemon.0.stderr.take().unwrap(), &mut stderr).unwrap();
+    let cells = (limit - 1024) / 212;
+    let warned = format!(
+        "cladefsd: doctor: open files: RLIMIT_NOFILE is {limit}, under the {floor} for 256 cells' \
+         files at their most: the daemon serves room for {cells}"
     );
+    assert!(stderr.contains(&warned), "{stderr}");
+}
+
+/// board 14217: `cladefsd --doctor` says what the daemon's doctor finds of the host, a line a
+/// check, starting no daemon: with a memory size, as a daemon given one, no governor's check.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_doctor_says_what_it_finds_of_the_host() {
+    let output = Command::new(env!("CARGO_BIN_EXE_cladefsd"))
+        .args(["--doctor", "1073741824"])
+        .output()
+        .unwrap();
+    let said = String::from_utf8(output.stdout).unwrap();
+    // Each line `MARK     CHECK: WHAT IT FOUND`, its mark padded to 8.
+    let checks: Vec<&str> =
+        (said.lines()).map(|line| line[9..].split_once(": ").unwrap().0).collect();
+    assert_eq!(checks, ["page size", "open files", "SO_PEERPIDFD", "vm.max_map_count"], "{said}");
+    assert!(said.starts_with("ok       page size: "), "{said}");
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
 }

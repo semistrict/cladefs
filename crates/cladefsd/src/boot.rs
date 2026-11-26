@@ -43,14 +43,12 @@ pub(super) async fn boot_daemon(
     // cladefs: its KMS, which every cell is encrypted under: none chosen, it refuses to start,
     // naming CLADEFS_KMS and CLADEFS_MASTER_KEY (TASK-411.28).
     cladefs_core::bucket::require_kms_on(&daemon.host).map_err(anyhow::Error::msg)?;
-    // cladefs: what only failed once it served refused now (board 8595): too few open files for
-    // its cells, outside the simulation, whose hosts share its process's; a kernel that can't say
-    // which process to kill of a VM process's socket (board 8533); roots it can't resolve; a part
-    // cache it can't open, missing, locked, or unable to bypass the page cache, whether or not it
-    // has peers (TASK-406.1).
+    // cladefs: the host checked by its doctor, every limit and kernel feature at once, refusing
+    // what running without would make wrong (board 14217), outside the simulation, whose hosts
+    // share its process's; then roots it can't resolve, and a part cache it can't open, missing,
+    // locked, or unable to bypass the page cache, whether or not it has peers (TASK-406.1).
     #[cfg(not(madsim))]
-    crate::require_open_files()?;
-    crate::server::require_peer_pidfds()?;
+    crate::doctor::at_boot(crate::doctor::Needs { governed: memory.is_none() })?;
     local_cell::upload::blocking(|| crate::server::resolve_roots_on(daemon))
         .map_err(anyhow::Error::msg)?;
     if daemon.disk_pool.get().is_none() {
@@ -232,9 +230,9 @@ pub(super) async fn boot_embedded(
     let socket = config.daemon.vm_socket.clone();
     let host = cladefs_core::bucket::Host::from_env().map_err(anyhow::Error::msg)?;
     cladefs_core::bucket::require_kms_on(&daemon.host).map_err(anyhow::Error::msg)?;
+    // cladefs: the host checked by its doctor (board 14217), as `boot_daemon` has it.
     #[cfg(not(madsim))]
-    crate::require_open_files()?;
-    crate::server::require_peer_pidfds()?;
+    crate::doctor::at_boot(crate::doctor::Needs { governed: config.memory.bytes.is_none() })?;
 
     let enable_part_cache = config.disk.part_cache;
     let enable_replicas = config.peers.replicas;

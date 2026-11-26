@@ -213,6 +213,9 @@ fn main() -> anyhow::Result<()> {
     if std::env::args().nth(1).as_deref() == Some("--setup-host") {
         return setup_host();
     }
+    if std::env::args().nth(1).as_deref() == Some("--doctor") {
+        return doctor(std::env::args().nth(2));
+    }
     // cladefs: its large buffers given back as they are freed, before any thread is made
     // (TASK-317).
     cladefs::cladefsd::memory::return_large_allocations();
@@ -264,6 +267,26 @@ fn setup_host() -> anyhow::Result<()> {
     return cladefs::cladefsd::governor::setup_host().map_err(anyhow::Error::msg);
     #[cfg(not(target_os = "linux"))]
     anyhow::bail!("cladefsd --setup-host: the memory governor's host settings are Linux's")
+}
+
+#[cfg(not(madsim))]
+/// `cladefsd --doctor [MEMORY_BYTES]`: the host's limits and kernel features, as the daemon checks
+/// them as it starts (`cladefsd::doctor`, board 14217), printed, the daemon started not: a memory
+/// size given, as a daemon given one, the memory governor's prerequisites aren't checked. Fails if
+/// the daemon would refuse to start.
+fn doctor(memory: Option<String>) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+    let memory = memory.map(|memory| memory.parse::<u64>());
+    let memory = memory.transpose().context("MEMORY_BYTES must be a number")?;
+    // As a boot raises it first (libcladefs).
+    cladefs::cladefsd::raise_open_files_limit().context("raising the limit of open files")?;
+    let needs = cladefs::cladefsd::doctor::Needs { governed: memory.is_none() };
+    let report = cladefs::cladefsd::doctor::examine(needs);
+    print!("{report}");
+    match report.refusal() {
+        Some(refused) => anyhow::bail!("the extent daemon would refuse to start: {refused}"),
+        None => Ok(()),
+    }
 }
 
 /// Drains `daemon` on SIGTERM, as an orchestrator stops it, within `bound`, and exits
