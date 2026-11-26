@@ -78,6 +78,8 @@ pub struct Daemon {
     pub(super) flush_turns: Semaphore,
     /// Connected VM processes tracked for quarantine and watchdog.
     pub(super) vm_peers: Mutex<Vec<Arc<server::Peer>>>,
+    /// Per-thread active quarantine waiters for [`server::Parking::counting`] (board 11703).
+    pub(super) parking: Mutex<Vec<(std::thread::ThreadId, Arc<server::Waiting>)>>,
     /// Starts the VM peer watchdog and registers quarantine once per daemon.
     pub(super) watching_vm_peers: Once,
     /// Count of wedged VM processes (killed but not yet exited past `KILLED_EXITING`).
@@ -146,6 +148,7 @@ impl Daemon {
             roots: OnceLock::new(),
             flush_turns: Semaphore::new(server::FLUSHES),
             vm_peers: Mutex::new(Vec::new()),
+            parking: Mutex::new(Vec::new()),
             watching_vm_peers: Once::new(),
             wedged: AtomicU64::new(0),
             pool: OnceLock::new(),

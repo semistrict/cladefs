@@ -39,6 +39,7 @@
 
 use crate::Daemon;
 use crate::governor::DiskHeadroom;
+use crate::quota::QuotaRegistry;
 use bucket_cell::host_disk::{self, HostDisk};
 use cladefs_core::Errno;
 use local_cell::footprint::{self, Allotment};
@@ -46,49 +47,23 @@ use std::collections::HashMap;
 #[cfg(test)]
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// What a cell a tenant's VM process makes is admitted as ([`footprint::STORE_MADE`]).
 pub const STORE_MADE: u64 = footprint::STORE_MADE;
 
 /// Per-daemon disk registry and governor startup state, owned by [`Daemon`].
 pub(super) struct State {
-    registry: Mutex<Registry>,
+    registry: Mutex<QuotaRegistry<Disk>>,
     started: OnceLock<()>,
 }
 
 impl State {
     pub(super) fn new() -> Self {
         Self {
-            registry: Mutex::new(Registry { disks: Vec::new(), limits: None, weights: None }),
+            registry: Mutex::new(QuotaRegistry::new(footprint::DEFAULT_WEIGHT)),
             started: OnceLock::new(),
         }
-    }
-}
-
-struct Registry {
-    /// The disks of the tenants alive: a tenant revoked and granted again with another directory,
-    /// while its earlier VM processes live on, has two for a while, each limited.
-    disks: Vec<Weak<Disk>>,
-    /// The tenants' limits, in bytes, by ID: those granted later, or again, are limited as they
-    /// are made.
-    limits: Option<HashMap<u64, u64>>,
-    /// The tenants' weights, by ID, as their limits are ([`set_weight`]).
-    weights: Option<HashMap<u64, u64>>,
-}
-
-impl Registry {
-    fn alive(&self) -> impl Iterator<Item = Arc<Disk>> + '_ {
-        self.disks.iter().filter_map(Weak::upgrade)
-    }
-
-    fn limit(&self, tenant: u64) -> Option<u64> {
-        self.limits.as_ref().and_then(|limits| limits.get(&tenant).copied())
-    }
-
-    fn weight(&self, tenant: u64) -> u64 {
-        let weight = self.weights.as_ref().and_then(|weights| weights.get(&tenant).copied());
-        weight.unwrap_or(footprint::DEFAULT_WEIGHT)
     }
 }
 
@@ -149,8 +124,7 @@ impl Disk {
             allotment.set_weight(weight);
         }
         let disk = Arc::new(Self { tenant, allotments, group });
-        registry.disks.retain(|alive| alive.strong_count() > 0);
-        registry.disks.push(Arc::downgrade(&disk));
+        registry.register(&disk);
         Ok(disk)
     }
 
@@ -193,11 +167,7 @@ pub(super) fn set_limit_on(
     };
     crate::grants::check_tenant(id)?;
     let mut registry = daemon.disk.registry.lock().unwrap();
-    let limits = registry.limits.get_or_insert_with(HashMap::new);
-    match bytes {
-        Some(bytes) => limits.insert(id, bytes),
-        None => limits.remove(&id),
-    };
+    registry.set_limit(id, bytes);
     for disk in registry.alive().filter(|disk| disk.tenant == id) {
         if let Some(group) = &disk.group {
             group.set_limit(bytes);
@@ -221,7 +191,7 @@ pub fn set_limit(tenant: Option<u64>, bytes: Option<u64>) -> Result<(), Errno> {
 pub(super) fn set_weight_on(daemon: &Daemon, tenant: u64, weight: u64) -> Result<(), Errno> {
     crate::grants::check_tenant(tenant)?;
     let mut registry = daemon.disk.registry.lock().unwrap();
-    registry.weights.get_or_insert_with(HashMap::new).insert(tenant, weight);
+    registry.set_weight(tenant, weight);
     for disk in registry.alive().filter(|disk| disk.tenant == tenant) {
         for allotment in &disk.allotments {
             allotment.set_weight(weight);

@@ -727,6 +727,22 @@ pub(super) fn start_on(daemon: &Arc<Daemon>) -> Result<(), String> {
     #[cfg(all(target_os = "linux", not(madsim), not(feature = "tests-kms")))]
     require_host_support(floor)?;
     daemon.governor.floor.store(floor, Ordering::Relaxed);
+    // Unify periodic memory governance with reactive slab relief onto one OS eviction thread
+    // outside madsim/Shuttle (board 11703), avoiding a second eviction loop competing with relief.
+    #[cfg(not(madsim))]
+    {
+        daemon.host.cache().relieve_pressure();
+        let weak = Arc::downgrade(daemon);
+        let mut tick = GovernorLoop::new(daemon.host.cache().refaults(), headroom, floor);
+        if daemon.host.slabs().attach_governor(INTERVAL, move |service_relief| {
+            let Some(daemon) = weak.upgrade() else { return };
+            if let Some((allowance, mode)) = tick.sample_and_decide(&daemon) {
+                memory::govern_with_sync_on(&daemon, allowance, mode, service_relief);
+            }
+        }) {
+            return Ok(());
+        }
+    }
     let governing = Arc::clone(daemon);
     crate::run::service(daemon, "memory governor", move || govern_every(governing, headroom, floor))
         .map_err(|err| format!("starting the memory governor: {err}"))
@@ -1144,123 +1160,158 @@ pub fn decide(
     Decision { allowance: base.bytes, mode, full: base.full, pressured, thrashing }
 }
 
-/// cladefs: governs `daemon`'s memory now and every [`INTERVAL`] after, leaving `headroom` free
-/// and keeping `floor` ([`start_on`]), for as long as the daemon runs.
-async fn govern_every(daemon: Arc<Daemon>, headroom: u64, floor: u64) {
-    let mut policy = PolicyState::default();
-    let mut refaults = RefaultWindow::new(daemon.host.cache().refaults());
-    let mut last_tick = std::time::Instant::now();
+struct GovernorLoop {
+    headroom: u64,
+    floor: u64,
+    policy: PolicyState,
+    refaults: RefaultWindow,
+    last_tick: std::time::Instant,
     #[cfg(all(target_os = "linux", not(madsim)))]
-    let mut last_cold_harvest = last_tick;
+    last_cold_harvest: std::time::Instant,
     #[cfg(all(target_os = "linux", not(madsim)))]
-    let mut last_vm_reclaim = last_tick;
-    loop {
+    last_vm_reclaim: std::time::Instant,
+}
+
+impl GovernorLoop {
+    fn new(initial_refaults: u64, headroom: u64, floor: u64) -> Self {
         let now = std::time::Instant::now();
-        let elapsed = now.saturating_duration_since(last_tick).max(Duration::from_millis(1));
-        match memory_sample() {
-            Ok(sample) => {
-                last_tick = now;
-                daemon.host.cache().advance_ms(elapsed.as_millis().min(u64::MAX as u128) as u64);
-                let refaults_per_sec =
-                    refaults.record_elapsed(daemon.host.cache().refaults(), elapsed);
-                let was_full = daemon.governor.full.load(Ordering::Relaxed);
-                let was_thrashing = daemon.governor.thrashing.load(Ordering::Relaxed);
-                policy.full = was_full;
-                let held = memory::governed_bytes_on(&daemon);
-                let decision =
-                    decide(held, sample, headroom, floor, refaults_per_sec, elapsed, &mut policy);
-                let reported_psi = sample.cgroup_psi.or(sample.host_psi).unwrap_or_default();
-                daemon.governor.pressured.store(decision.pressured, Ordering::Relaxed);
-                daemon.governor.thrashing.store(decision.thrashing, Ordering::Relaxed);
-                daemon.governor.target.store(decision.allowance, Ordering::Relaxed);
-                daemon.governor.refaults_per_sec.store(refaults_per_sec, Ordering::Relaxed);
-                daemon
-                    .governor
-                    .psi_some_avg10_bps
-                    .store(u64::from(reported_psi.some_avg10_bps), Ordering::Relaxed);
-                daemon
-                    .governor
-                    .psi_full_avg10_bps
-                    .store(u64::from(reported_psi.full_avg10_bps), Ordering::Relaxed);
-                if decision.full && !was_full {
-                    daemon.governor.fulls.fetch_add(1, Ordering::Relaxed);
-                }
-                if decision.full != was_full {
-                    log::warn!(
-                        "cladefsd: the host's memory is {}: {} bytes available, the floor {floor}",
-                        if decision.full { "full, making no cell more" } else { "no longer full" },
-                        sample.host.available
-                    );
-                }
-                if decision.thrashing != was_thrashing {
-                    log::warn!(
-                        "cladefsd: extent cache refault thrashing {}: {refaults_per_sec} refaults/s, \
-                         {} bytes available, target {}, floor {floor}",
-                        if decision.thrashing {
-                            "detected, holding mapped extents"
-                        } else {
-                            "cleared"
-                        },
-                        sample.host.available,
-                        decision.allowance
-                    );
-                }
-                daemon.governor.full.store(decision.full, Ordering::Relaxed);
+        Self {
+            headroom,
+            floor,
+            policy: PolicyState::default(),
+            refaults: RefaultWindow::new(initial_refaults),
+            last_tick: now,
+            #[cfg(all(target_os = "linux", not(madsim)))]
+            last_cold_harvest: now,
+            #[cfg(all(target_os = "linux", not(madsim)))]
+            last_vm_reclaim: now,
+        }
+    }
 
-                #[cfg(all(target_os = "linux", not(madsim)))]
-                {
-                    if now.saturating_duration_since(last_cold_harvest) >= COLD_HARVEST_INTERVAL {
-                        last_cold_harvest = now;
-                        if !decision.thrashing
-                            && (decision.pressured
-                                || sample.host.available < headroom.saturating_mul(2))
-                        {
-                            spawn_cold_harvest(&daemon);
-                        }
-                    }
-                    if now.saturating_duration_since(last_vm_reclaim) >= VM_RECLAIM_INTERVAL {
-                        last_vm_reclaim = now;
-                        // Budget proactive VM reclaim strictly from raw host `MemAvailable`,
-                        // never `cladefsd`'s own cgroup limit (swapping sibling VMs cannot free
-                        // room inside `cladefsd`'s cgroup).
-                        let pass_budget = vm_reclaim_pass_budget(headroom, sample.host_available);
-                        if pass_budget > 0
-                            && sample.host_swap_free
-                                > vm_reclaim_swap_reserve(sample.host_swap_total)
-                        {
-                            spawn_vm_reclaim(
-                                &daemon,
-                                sample.host_swap_free,
-                                sample.host_swap_total,
-                                pass_budget,
-                            );
-                        }
-                    }
-                }
-
-                // While proactive VM reclaim is actively running or recently reclaimed guest RAM,
-                // cap `cladefsd`'s growth at its current resident size so it does not ratchet
-                // guest RAM into swap only to consume the freed RAM itself.
-                #[cfg(all(target_os = "linux", not(madsim)))]
-                let effective_allowance = if is_vm_reclaim_holding(&daemon, now) {
-                    let held_aligned = held.div_ceil(SLAB).saturating_mul(SLAB).max(floor);
-                    decision.allowance.min(held_aligned)
-                } else {
-                    decision.allowance
-                };
-                #[cfg(not(all(target_os = "linux", not(madsim))))]
-                let effective_allowance = decision.allowance;
-
-                memory::govern_with_on(&daemon, effective_allowance, decision.mode).await
+    fn sample_and_decide(&mut self, daemon: &Arc<Daemon>) -> Option<(u64, ReclaimMode)> {
+        let now = std::time::Instant::now();
+        let elapsed = now.saturating_duration_since(self.last_tick).max(Duration::from_millis(1));
+        let sample = match memory_sample() {
+            Ok(sample) => sample,
+            Err(err) => {
+                log::error!("cladefsd: reading the host's memory: {err}");
+                return None;
             }
-            Err(err) => log::error!("cladefsd: reading the host's memory: {err}"),
+        };
+        self.last_tick = now;
+        daemon.host.cache().advance_ms(elapsed.as_millis().min(u64::MAX as u128) as u64);
+        let refaults_per_sec =
+            self.refaults.record_elapsed(daemon.host.cache().refaults(), elapsed);
+        let was_full = daemon.governor.full.load(Ordering::Relaxed);
+        let was_thrashing = daemon.governor.thrashing.load(Ordering::Relaxed);
+        self.policy.full = was_full;
+        let held = memory::governed_bytes_on(daemon);
+        let decision = decide(
+            held,
+            sample,
+            self.headroom,
+            self.floor,
+            refaults_per_sec,
+            elapsed,
+            &mut self.policy,
+        );
+        let reported_psi = sample.cgroup_psi.or(sample.host_psi).unwrap_or_default();
+        daemon.governor.pressured.store(decision.pressured, Ordering::Relaxed);
+        daemon.governor.thrashing.store(decision.thrashing, Ordering::Relaxed);
+        daemon.governor.target.store(decision.allowance, Ordering::Relaxed);
+        daemon.governor.refaults_per_sec.store(refaults_per_sec, Ordering::Relaxed);
+        daemon
+            .governor
+            .psi_some_avg10_bps
+            .store(u64::from(reported_psi.some_avg10_bps), Ordering::Relaxed);
+        daemon
+            .governor
+            .psi_full_avg10_bps
+            .store(u64::from(reported_psi.full_avg10_bps), Ordering::Relaxed);
+        if decision.full && !was_full {
+            daemon.governor.fulls.fetch_add(1, Ordering::Relaxed);
+        }
+        if decision.full != was_full {
+            log::warn!(
+                "cladefsd: the host's memory is {}: {} bytes available, the floor {}",
+                if decision.full { "full, making no cell more" } else { "no longer full" },
+                sample.host.available,
+                self.floor
+            );
+        }
+        if decision.thrashing != was_thrashing {
+            log::warn!(
+                "cladefsd: extent cache refault thrashing {}: {refaults_per_sec} refaults/s, \
+                 {} bytes available, target {}, floor {}",
+                if decision.thrashing { "detected, holding mapped extents" } else { "cleared" },
+                sample.host.available,
+                decision.allowance,
+                self.floor
+            );
+        }
+        daemon.governor.full.store(decision.full, Ordering::Relaxed);
+
+        #[cfg(all(target_os = "linux", not(madsim)))]
+        {
+            if now.saturating_duration_since(self.last_cold_harvest) >= COLD_HARVEST_INTERVAL {
+                self.last_cold_harvest = now;
+                if !decision.thrashing
+                    && (decision.pressured
+                        || sample.host.available < self.headroom.saturating_mul(2))
+                {
+                    spawn_cold_harvest(daemon);
+                }
+            }
+            if now.saturating_duration_since(self.last_vm_reclaim) >= VM_RECLAIM_INTERVAL {
+                self.last_vm_reclaim = now;
+                // Budget proactive VM reclaim strictly from raw host `MemAvailable`,
+                // never `cladefsd`'s own cgroup limit (swapping sibling VMs cannot free
+                // room inside `cladefsd`'s cgroup).
+                let pass_budget = vm_reclaim_pass_budget(self.headroom, sample.host_available);
+                if pass_budget > 0
+                    && sample.host_swap_free > vm_reclaim_swap_reserve(sample.host_swap_total)
+                {
+                    spawn_vm_reclaim(
+                        daemon,
+                        sample.host_swap_free,
+                        sample.host_swap_total,
+                        pass_budget,
+                    );
+                }
+            }
+        }
+
+        // While proactive VM reclaim is actively running or recently reclaimed guest RAM,
+        // cap `cladefsd`'s growth at its current resident size so it does not ratchet
+        // guest RAM into swap only to consume the freed RAM itself.
+        #[cfg(all(target_os = "linux", not(madsim)))]
+        let effective_allowance = if is_vm_reclaim_holding(daemon, now) {
+            let held_aligned = held.div_ceil(SLAB).saturating_mul(SLAB).max(self.floor);
+            decision.allowance.min(held_aligned)
+        } else {
+            decision.allowance
+        };
+        #[cfg(not(all(target_os = "linux", not(madsim))))]
+        let effective_allowance = decision.allowance;
+
+        Some((effective_allowance, decision.mode))
+    }
+}
+
+/// cladefs: governs `daemon`'s memory now and every [`INTERVAL`] after, leaving `headroom` free
+/// and keeping `floor` ([`start_on`]), used when no OS eviction thread runs (madsim / Shuttle).
+async fn govern_every(daemon: Arc<Daemon>, headroom: u64, floor: u64) {
+    let mut tick = GovernorLoop::new(daemon.host.cache().refaults(), headroom, floor);
+    loop {
+        if let Some((effective_allowance, mode)) = tick.sample_and_decide(&daemon) {
+            memory::govern_with_on(&daemon, effective_allowance, mode).await;
         }
         tokio::time::sleep(INTERVAL).await;
     }
 }
 
 /// Runs one non-overlapping budgeted `cachestat(2)` cold-part harvest pass on a blocking worker
-/// thread so syscalls never stall the governor tick loop.
+/// thread so syscalls never stall the eviction thread.
 #[cfg(all(target_os = "linux", not(madsim)))]
 fn spawn_cold_harvest(daemon: &Arc<Daemon>) {
     if daemon
@@ -1272,8 +1323,9 @@ fn spawn_cold_harvest(daemon: &Arc<Daemon>) {
         return;
     }
     let daemon = Arc::clone(daemon);
+    let runtime = daemon.runtime().handle().clone();
     // Real Linux cachestat(2) slab harvesting on a background worker, outside the simulation.
-    tokio::task::spawn_blocking(move || {
+    runtime.spawn_blocking(move || {
         struct Clear<'a>(&'a AtomicBool);
         impl Drop for Clear<'_> {
             fn drop(&mut self) {
@@ -1300,7 +1352,7 @@ fn is_vm_reclaim_holding(daemon: &Daemon, now: std::time::Instant) -> bool {
 
 /// Runs one non-overlapping TMO proactive `memory.reclaim` pass across connected external VM
 /// processes' cgroups on a blocking worker thread so synchronous kernel reclaim never stalls the
-/// governor tick loop. Completely orchestrator-agnostic: discovers each VM's cgroup from its
+/// eviction thread. Completely orchestrator-agnostic: discovers each VM's cgroup from its
 /// authenticated `SO_PEERPIDFD`.
 #[cfg(all(target_os = "linux", not(madsim)))]
 fn spawn_vm_reclaim(
@@ -1318,8 +1370,9 @@ fn spawn_vm_reclaim(
         return;
     }
     let daemon = Arc::clone(daemon);
+    let runtime = daemon.runtime().handle().clone();
     // Real Linux cgroup v2 memory.reclaim write on a blocking worker, outside the simulation.
-    tokio::task::spawn_blocking(move || {
+    runtime.spawn_blocking(move || {
         struct Clear<'a>(&'a AtomicBool);
         impl Drop for Clear<'_> {
             fn drop(&mut self) {

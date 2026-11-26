@@ -299,58 +299,12 @@ impl ExtentCache {
     }
 
     /// Allocates one host page in `arena` for a composed DAX page, retrying with backoff while
-    /// the host's total cap is governed and memory may still return (board 5662) rather than
-    /// failing a DAX fault with `ENOMEM` and aborting the VM process.
+    /// the host's total cap is governed and memory may still return (board 5662, board 11703)
+    /// rather than failing a DAX fault with `ENOMEM` and aborting the VM process.
     pub async fn alloc_composed(&self, arena: ArenaId) -> crate::Result<PartSlab> {
-        let mut pause = RETRY_FIRST;
-        loop {
-            let alloc = match self.slabs.alloc(arena, 1, slabs::Wait::No) {
-                Ok(slab) => Ok(slab),
-                Err(slabs::NoMemory) => {
-                    #[cfg(all(not(madsim), not(feature = "shuttle")))]
-                    {
-                        if tokio::runtime::Handle::try_current().is_ok() {
-                            let slabs = self.slabs.clone();
-                            tokio::task::spawn_blocking(move || {
-                                slabs.alloc(arena, 1, slabs::Wait::Yes)
-                            })
-                            .await
-                            .expect("a composed DAX page allocation panicked")
-                        } else {
-                            self.slabs.alloc(arena, 1, slabs::Wait::Yes)
-                        }
-                    }
-                    #[cfg(any(madsim, feature = "shuttle"))]
-                    {
-                        self.slabs.alloc(arena, 1, slabs::Wait::Yes)
-                    }
-                }
-            };
-            match alloc {
-                Ok(slab) => return Ok(slab),
-                Err(slabs::NoMemory)
-                    if self.slabs.room_may_come(arena)
-                        && self.total_is_the_hosts.load(Ordering::Relaxed) =>
-                {
-                    waiting_for_memory();
-                    #[cfg(not(feature = "shuttle"))]
-                    {
-                        if tokio::runtime::Handle::try_current().is_ok() {
-                            tokio::time::sleep(pause).await;
-                        } else {
-                            std::thread::sleep(pause);
-                        }
-                    }
-                    #[cfg(feature = "shuttle")]
-                    {
-                        let _ = pause;
-                        shuttle::thread::yield_now();
-                    }
-                    pause = (pause * 2).min(RETRY_MOST);
-                }
-                Err(slabs::NoMemory) => return Err(crate::Errno::ENOMEM),
-            }
-        }
+        alloc_with_retry(&self.slabs, || self.total_is_the_hosts.load(Ordering::Relaxed), arena, 1)
+            .await
+            .map_err(|_| crate::Errno::ENOMEM)
     }
 
     /// cladefs: returns the [`crate::CellId`]s of all extents currently cached (including recently
@@ -982,25 +936,61 @@ fn let_go_least_used(
     idle.into_iter().take(excess).filter_map(|(_, key)| extents.remove(&key)).collect()
 }
 
-/// cladefs: a run of `pages` pages of `arena` on `slabs` for a page-in, waiting for relief if it
-/// must, off the pager's workers (board 5662).
-async fn allocate(
+/// cladefs: allocates a run of `pages` pages of `arena` on `slabs`, waiting for relief off async
+/// workers when in Tokio and retrying with bounded backoff while the host's governed total cap is
+/// full and room may still return (board 5662, board 11703).
+async fn alloc_with_retry(
     slabs: &Arc<slabs::HostSlabs>,
+    total_is_the_hosts: impl Fn() -> bool,
     arena: ArenaId,
     pages: u64,
 ) -> Result<PartSlab, slabs::NoMemory> {
-    if let Ok(slab) = slabs.alloc(arena, pages, slabs::Wait::No) {
-        return Ok(slab);
+    let mut pause = RETRY_FIRST;
+    loop {
+        let alloc = match slabs.alloc(arena, pages, slabs::Wait::No) {
+            Ok(slab) => Ok(slab),
+            Err(slabs::NoMemory) => {
+                #[cfg(all(not(madsim), not(feature = "shuttle")))]
+                {
+                    if tokio::runtime::Handle::try_current().is_ok() {
+                        let slabs = slabs.clone();
+                        tokio::task::spawn_blocking(move || {
+                            slabs.alloc(arena, pages, slabs::Wait::Yes)
+                        })
+                        .await
+                        .expect("a slab allocation panicked")
+                    } else {
+                        slabs.alloc(arena, pages, slabs::Wait::Yes)
+                    }
+                }
+                #[cfg(any(madsim, feature = "shuttle"))]
+                {
+                    slabs.alloc(arena, pages, slabs::Wait::Yes)
+                }
+            }
+        };
+        match alloc {
+            Ok(slab) => return Ok(slab),
+            Err(slabs::NoMemory) if slabs.room_may_come(arena) && total_is_the_hosts() => {
+                waiting_for_memory();
+                #[cfg(not(feature = "shuttle"))]
+                {
+                    if tokio::runtime::Handle::try_current().is_ok() {
+                        tokio::time::sleep(pause).await;
+                    } else {
+                        std::thread::sleep(pause);
+                    }
+                }
+                #[cfg(feature = "shuttle")]
+                {
+                    let _ = pause;
+                    shuttle::thread::yield_now();
+                }
+                pause = (pause * 2).min(RETRY_MOST);
+            }
+            Err(slabs::NoMemory) => return Err(slabs::NoMemory),
+        }
     }
-    #[cfg(not(madsim))]
-    {
-        let slabs = slabs.clone();
-        return tokio::task::spawn_blocking(move || slabs.alloc(arena, pages, slabs::Wait::Yes))
-            .await
-            .expect("a page-in's allocation panicked");
-    }
-    #[cfg(madsim)]
-    return slabs.alloc(arena, pages, slabs::Wait::Yes);
 }
 
 #[cfg(test)]
@@ -2009,23 +1999,18 @@ impl CachedExtent {
         // 5662), the governor telling the VM manager by refusing cells
         // (`cladefsd::governor::full`). At its arena's own cap, or past a limit the control API
         // set, it fails, as before.
-        let mut pause = RETRY_FIRST;
-        let slab = loop {
-            match allocate(&self.slabs, self.arena, pages.end - pages.start).await {
-                Ok(slab) => break slab,
-                Err(slabs::NoMemory)
-                    if self.slabs.room_may_come(self.arena)
-                        && self.cache.upgrade().is_some_and(|cache| {
-                            cache.total_is_the_hosts.load(Ordering::Relaxed)
-                        }) =>
-                {
-                    waiting_for_memory();
-                    tokio::time::sleep(pause).await;
-                    pause = (pause * 2).min(RETRY_MOST);
-                }
-                Err(slabs::NoMemory) => return Err(anyhow::Error::new(NoPages)),
-            }
-        };
+        let slab = alloc_with_retry(
+            &self.slabs,
+            || {
+                self.cache
+                    .upgrade()
+                    .is_some_and(|cache| cache.total_is_the_hosts.load(Ordering::Relaxed))
+            },
+            self.arena,
+            pages.end - pages.start,
+        )
+        .await
+        .map_err(|_| anyhow::Error::new(NoPages))?;
         let offset = pages.start * page_size();
         // What of it the extent holds; past it, zeros.
         let len = self.len.saturating_sub(offset).min(slab.len());

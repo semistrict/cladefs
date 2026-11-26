@@ -123,4 +123,21 @@ impl Signal {
         }
         *signaled = false;
     }
+
+    /// Waits for it to be signaled or for `duration` to elapse, unsignaling if signaled.
+    #[cfg(not(feature = "shuttle"))]
+    pub(super) fn wait_timeout(&self, duration: std::time::Duration) {
+        let mut signaled = self.signaled.lock().unwrap();
+        if !*signaled && !duration.is_zero() {
+            let (guard, _) = self.cond.wait_timeout(signaled, duration).unwrap();
+            signaled = guard;
+        }
+        *signaled = false;
+    }
+
+    /// Under Shuttle no real OS eviction thread spawns; falls back to [`Self::wait`].
+    #[cfg(feature = "shuttle")]
+    pub(super) fn wait_timeout(&self, _duration: std::time::Duration) {
+        self.wait();
+    }
 }

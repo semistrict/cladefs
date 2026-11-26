@@ -5,9 +5,9 @@
 # Killer: cladefsd::tests::frozen_vm_processes_hold_no_other_tenants_memory
 --- a/crates/cladefsd/src/server.rs
 +++ b/crates/cladefsd/src/server.rs
-@@ -3112,7 +3112,7 @@ fn quarantine(freed: crate::slabs::Quarantined) {
-         live
-     };
+@@ -3500,7 +3500,7 @@ fn quarantine(freed: cladefs_core::slabs::Quarantined) {
+     let counted = AtomicBool::new(waiting.is_some());
+     let freed = Arc::new(Parked { freed: Some(freed), waiting, counted });
      for daemon in &live {
 -        for peer in daemon.vm_peers.lock().unwrap().iter().filter(|peer| staged.contains(&peer.id))
 +        for peer in daemon.vm_peers.lock().unwrap().iter().filter(|_| !staged.is_empty())

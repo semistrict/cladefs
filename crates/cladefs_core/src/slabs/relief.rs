@@ -17,9 +17,8 @@
 
 use super::sync::Signal;
 use super::{Arena, ArenaId, HostSlabs, Node, SLAB, Starved, Wait};
-use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 /// What a pass frees for an arena at least: four slabs, so that the next allocations find room.
@@ -76,13 +75,23 @@ pub(super) enum Relieving {
     Total,
 }
 
-/// The relief thread's: what wakes it, and whether it runs.
+/// Periodic governor callback run on the unified eviction thread (board 11703).
+pub(super) struct GovernorTick {
+    interval: Duration,
+    next: Instant,
+    tick: Box<dyn FnMut(&mut dyn FnMut()) + Send>,
+}
+
+/// The relief/eviction thread's: what wakes it, whether it runs, and its optional periodic
+/// governor tick (board 11703).
 pub(super) struct Reliever {
-    /// Signaled as an allocation asks for relief.
+    /// Signaled as an allocation asks for relief, a governor attaches, or counted quarantine clears.
     wanted: Signal,
     /// Whether the thread runs: once it has gone, as its evictor panicked, the allocations it
     /// would make room for fail.
     running: AtomicBool,
+    /// Optional periodic memory-governor tick driven on the same thread as slab relief.
+    governor: Mutex<Option<GovernorTick>>,
 }
 
 impl Reliever {
@@ -90,23 +99,75 @@ impl Reliever {
         self.running.store(false, Ordering::Release);
         self.wanted.signal();
     }
+
+    #[cfg(not(madsim))]
+    pub(super) fn signal(&self) {
+        self.wanted.signal();
+    }
+
+    #[cfg(not(madsim))]
+    pub(super) fn wait_timeout(&self, duration: Duration) {
+        self.wanted.wait_timeout(duration);
+    }
 }
 
-thread_local! {
-    /// On the relief thread, the cap its evictor is evicting for, while it is (TASK-161, board
-    /// 12315).
-    // Per thread, the relief thread's alone: no simulated host has one (TASK-685.14).
-    static RELIEVING: Cell<Option<Relieving>> = const { Cell::new(None) };
+/// Guard restoring `node.set_relieving(None)` on scope exit or panic (board 11703).
+struct RelievingGuard<'a>(&'a Node);
+
+impl<'a> RelievingGuard<'a> {
+    fn enter(node: &'a Node, target: Relieving) -> Self {
+        node.set_relieving(Some(target));
+        Self(node)
+    }
 }
 
-/// The cap relief's pass is evicting for, if this is the relief thread, in its evictor: the runs
-/// it frees, quarantined, are owed to it until they come back.
-pub(super) fn relieving() -> Option<Relieving> {
-    RELIEVING.get()
+impl Drop for RelievingGuard<'_> {
+    fn drop(&mut self) {
+        self.0.set_relieving(None);
+    }
+}
+
+/// Attaches a periodic governor tick to `slabs`'s unified eviction thread (board 11703).
+#[cfg(not(madsim))]
+pub(super) fn attach_governor_on(
+    slabs: &HostSlabs,
+    interval: Duration,
+    tick: impl FnMut(&mut dyn FnMut()) + Send + 'static,
+) -> bool {
+    if cfg!(feature = "shuttle") {
+        return false;
+    }
+    let gov = GovernorTick { interval, next: Instant::now(), tick: Box::new(tick) };
+    if let Some(slot) = slabs.reliever.get() {
+        let Some(reliever) = slot.as_ref() else {
+            return false;
+        };
+        if !reliever.running.load(Ordering::Acquire) {
+            return false;
+        }
+        *reliever.governor.lock().unwrap() = Some(gov);
+        reliever.wanted.signal();
+        return true;
+    }
+    *slabs.pending_governor.lock().unwrap() = Some(gov);
+    // Re-check in case `relieve_with_on` initialized `slabs.reliever` concurrently.
+    if let Some(slot) = slabs.reliever.get() {
+        let Some(reliever) = slot.as_ref() else {
+            slabs.pending_governor.lock().unwrap().take();
+            return false;
+        };
+        if let Some(gov) = slabs.pending_governor.lock().unwrap().take() {
+            *reliever.governor.lock().unwrap() = Some(gov);
+            reliever.wanted.signal();
+        }
+        return reliever.running.load(Ordering::Acquire);
+    }
+    true
 }
 
 /// Starts the relief of starved arenas on `slabs`, on a thread of its own, which frees runs with
-/// `evict`. Starts once per [`HostSlabs`]; under Shuttle or madsim no thread starts.
+/// `evict` and drives any attached periodic memory governor tick (board 11703). Starts once per
+/// [`HostSlabs`]; under Shuttle or madsim no thread starts.
 pub(super) fn relieve_with_on(
     slabs: &Arc<HostSlabs>,
     evict: impl FnMut(Option<ArenaId>, u64) -> u64 + Send + 'static,
@@ -117,10 +178,15 @@ pub(super) fn relieve_with_on(
     ));
     let weak = Arc::downgrade(slabs);
     slabs.reliever.get_or_init(|| {
-        let reliever = Arc::new(Reliever { wanted: Signal::new(), running: AtomicBool::new(true) });
+        let pending = slabs.pending_governor.lock().unwrap().take();
+        let reliever = Arc::new(Reliever {
+            wanted: Signal::new(),
+            running: AtomicBool::new(true),
+            governor: Mutex::new(pending),
+        });
         let thread = reliever.clone();
         let spawned =
-            super::sync::try_spawn("arena-relief-thread", move || relieve(&thread, weak, evict));
+            super::sync::try_spawn("cladefs-eviction", move || relieve(&thread, weak, evict));
         let installed = spawned.as_ref().is_ok_and(|spawned| *spawned).then_some(reliever);
         started = spawned.map(drop);
         installed
@@ -183,10 +249,45 @@ fn relief_bytes(arena: &Arena, starved: Starved, pages: u16) -> u64 {
     relief_bytes_for(cap_pages.saturating_mul(ps), overshoot_pages.saturating_mul(ps))
 }
 
-/// The relief thread: frees runs with `evict` for each arena asked for since its last pass, starved
-/// still at the cap it was asked at, and owed nothing a pass before quarantined, the arena's own at
-/// its own cap, any arena's (deduplicated across all waiting arenas) at the total's, and records
-/// what it freed, which the arena's allocations waiting then try again with.
+/// Runs one reactive relief pass for any starved arenas on `node`.
+fn relieve_pass(node: &Arc<Node>, evict: &mut impl FnMut(Option<ArenaId>, u64) -> u64) {
+    let mut arena_asks = Vec::new();
+    let mut total_asks = Vec::new();
+    for arena in node.all() {
+        let Some((starved, pages)) = arena.state.lock().unwrap().relief.asked.take() else {
+            continue;
+        };
+        match starved {
+            Starved::Arena => arena_asks.push((arena, pages)),
+            Starved::Total => total_asks.push((arena, pages)),
+            Starved::Removed => unreachable!("relief asked for {:?}, removed", arena.id),
+        }
+    }
+    for (arena, pages) in arena_asks {
+        // An ask made stale, by a pass that relieved the arena since, as its allocations asked
+        // again while it ran (TASK-79.76), or by a cap changed, has nothing to relieve: a pass
+        // would evict as much again for no allocation. Nor has one made while what a pass
+        // evicted for it is quarantined still (TASK-161), or during empty-pass backoff
+        // (board 12315).
+        if !wants_relief(&arena, Starved::Arena, pages) {
+            continue;
+        }
+        let target = relief_bytes(&arena, Starved::Arena, pages);
+        let freed = {
+            let _relieving = RelievingGuard::enter(node, Relieving::Arena(arena.id));
+            evict(Some(arena.id), target)
+        };
+        if relieved_arena(&arena, freed, pages) {
+            node.pulse();
+        }
+    }
+    if !total_asks.is_empty() {
+        relieve_total(node, &total_asks, evict);
+    }
+}
+
+/// The unified eviction thread: frees runs with `evict` for each starved arena and drives the
+/// periodic memory governor tick when attached (TASK-50.3, board 12315, board 11703).
 fn relieve(
     reliever: &Reliever,
     slabs: Weak<HostSlabs>,
@@ -194,43 +295,39 @@ fn relieve(
 ) {
     let _gone = Gone(reliever, &slabs);
     loop {
-        reliever.wanted.wait();
+        let wait_for = reliever
+            .governor
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|gov| gov.next.saturating_duration_since(Instant::now()));
+        match wait_for {
+            Some(dur) if dur.is_zero() => {}
+            Some(dur) => reliever.wanted.wait_timeout(dur),
+            None => reliever.wanted.wait(),
+        }
         if !reliever.running.load(Ordering::Acquire) {
             break;
         }
         let Some(slabs) = slabs.upgrade() else { break };
         let node = slabs.node();
-        let mut arena_asks = Vec::new();
-        let mut total_asks = Vec::new();
-        for arena in node.all() {
-            let Some((starved, pages)) = arena.state.lock().unwrap().relief.asked.take() else {
-                continue;
-            };
-            match starved {
-                Starved::Arena => arena_asks.push((arena, pages)),
-                Starved::Total => total_asks.push((arena, pages)),
-                Starved::Removed => unreachable!("relief asked for {:?}, removed", arena.id),
+        relieve_pass(node, &mut evict);
+        let due = {
+            let mut slot = reliever.governor.lock().unwrap();
+            if slot.as_ref().is_some_and(|gov| Instant::now() >= gov.next) {
+                slot.take()
+            } else {
+                None
             }
-        }
-        for (arena, pages) in arena_asks {
-            // An ask made stale, by a pass that relieved the arena since, as its allocations asked
-            // again while it ran (TASK-79.76), or by a cap changed, has nothing to relieve: a pass
-            // would evict as much again for no allocation. Nor has one made while what a pass
-            // evicted for it is quarantined still (TASK-161), or during empty-pass backoff
-            // (board 12315).
-            if !wants_relief(&arena, Starved::Arena, pages) {
-                continue;
+        };
+        if let Some(mut gov) = due {
+            let mut service_relief = || relieve_pass(node, &mut evict);
+            (gov.tick)(&mut service_relief);
+            gov.next = Instant::now() + gov.interval;
+            let mut slot = reliever.governor.lock().unwrap();
+            if slot.is_none() {
+                *slot = Some(gov);
             }
-            let target = relief_bytes(&arena, Starved::Arena, pages);
-            RELIEVING.set(Some(Relieving::Arena(arena.id)));
-            let freed = evict(Some(arena.id), target);
-            RELIEVING.set(None);
-            if relieved_arena(&arena, freed, pages) {
-                node.pulse();
-            }
-        }
-        if !total_asks.is_empty() {
-            relieve_total(node, &total_asks, &mut evict);
         }
     }
 }
@@ -255,9 +352,10 @@ fn relieve_total(
         return;
     }
     let target = relief_bytes(rep, Starved::Total, *max_pages);
-    RELIEVING.set(Some(Relieving::Total));
-    let freed = evict(None, target);
-    RELIEVING.set(None);
+    let freed = {
+        let _relieving = RelievingGuard::enter(node, Relieving::Total);
+        evict(None, target)
+    };
     if relieved_total(node, asks, freed) {
         node.pulse();
     }
@@ -461,9 +559,8 @@ mod tests {
             let slab = alloc(arena, u64::from(whole), Wait::No).unwrap();
             slab.stage_to(VmProcessId(1));
             // Freed by relief's pass for the total cap, which is owed it.
-            RELIEVING.set(Some(Relieving::Total));
+            let _relieving = RelievingGuard::enter(node(), Relieving::Total);
             drop(slab);
-            RELIEVING.set(None);
         }
         assert_eq!(node().total_owed.load(Ordering::Acquire), 2 * u64::from(whole));
         assert_eq!(default.starved(whole), Some(Starved::Total));

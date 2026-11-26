@@ -15,12 +15,13 @@
 //! metrics name tenants by their IDs.
 
 use crate::Daemon;
+use crate::quota::QuotaRegistry;
 use crate::server::{Parking, Tenant};
 use cladefs_core::Errno;
 use cladefs_core::slabs::SLAB;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex};
 
 /// Per-daemon memory governance, tenant registry, held-parts cache, and in-flight byte budgets,
 /// owned by [`Daemon`].
@@ -48,10 +49,8 @@ impl State {
     pub(super) fn new() -> Self {
         Self {
             registry: Mutex::new(Registry {
-                tenants: Vec::new(),
-                limits: None,
+                quotas: QuotaRegistry::new(DEFAULT_WEIGHT),
                 in_flight: None,
-                weights: None,
                 total: None,
             }),
             governed: AtomicU64::new(u64::MAX),
@@ -70,17 +69,10 @@ impl State {
 pub const DEFAULT_WEIGHT: u64 = 1;
 
 struct Registry {
-    /// The tenants alive, which may outlive their grants, while their VM processes do: a tenant
-    /// revoked and granted again goes on as it was ([`alive`]), but with another directory, when
-    /// it is two at once for a while, each limited.
-    tenants: Vec<Weak<Tenant>>,
-    /// The tenants' limits, in bytes, by ID: those granted later, or again, are limited as they
-    /// are made.
-    limits: Option<HashMap<u64, u64>>,
+    /// Live tenants, their byte limits, and their weights (`super::quota`, board 11703).
+    quotas: QuotaRegistry<Tenant>,
     /// cladefs: the tenants' bytes in flight ([`InFlight`]), by ID, as their limits are.
     in_flight: Option<HashMap<u64, u64>>,
-    /// cladefs: the tenants' weights, by ID, as their limits are ([`set_weight`], TASK-358).
-    weights: Option<HashMap<u64, u64>>,
     /// cladefs: the limit on every tenant's memory together the control API set, if it did, which
     /// the governor's allowance lowers further ([`govern`]).
     total: Option<u64>,
@@ -88,18 +80,15 @@ struct Registry {
 
 impl Registry {
     fn alive(&self) -> impl Iterator<Item = Arc<Tenant>> + '_ {
-        self.tenants.iter().filter_map(Weak::upgrade)
+        self.quotas.alive()
     }
 
     fn limit(&self, tenant: u64) -> Option<u64> {
-        self.limits.as_ref().and_then(|limits| limits.get(&tenant).copied())
+        self.quotas.limit(tenant)
     }
 
     fn weight(&self, tenant: u64) -> u64 {
-        self.weights
-            .as_ref()
-            .and_then(|weights| weights.get(&tenant).copied())
-            .unwrap_or(DEFAULT_WEIGHT)
+        self.quotas.weight(tenant)
     }
 
     /// Limits every tenant's memory together to the least of the control API's limit and the
@@ -135,8 +124,7 @@ pub(super) fn register_on(daemon: &Daemon, tenant: &Arc<Tenant>) {
     }
     let budget = registry.in_flight.as_ref().and_then(|set| set.get(&tenant.id()).copied());
     tenant.in_flight().set_budget(budget);
-    registry.tenants.retain(|alive| alive.strong_count() > 0);
-    registry.tenants.push(Arc::downgrade(tenant));
+    registry.quotas.register(tenant);
 }
 
 /// Limits the memory of the tenant `tenant` on `daemon` to `bytes`, rounded down to pages, or
@@ -157,11 +145,7 @@ pub(super) fn set_limit_on(
     };
     crate::grants::check_tenant(id)?;
     let mut registry = daemon.memory.registry.lock().unwrap();
-    let limits = registry.limits.get_or_insert_with(HashMap::new);
-    match bytes {
-        Some(bytes) => limits.insert(id, bytes),
-        None => limits.remove(&id),
-    };
+    registry.quotas.set_limit(id, bytes);
     for tenant in registry.alive().filter(|tenant| tenant.id() == id) {
         daemon.host.slabs().set_arena_cap(tenant.arena(), bytes);
     }
@@ -179,7 +163,7 @@ pub fn set_limit(tenant: Option<u64>, bytes: Option<u64>) -> Result<(), Errno> {
 pub(super) fn set_weight_on(daemon: &Daemon, tenant: u64, weight: u64) -> Result<(), Errno> {
     crate::grants::check_tenant(tenant)?;
     let mut registry = daemon.memory.registry.lock().unwrap();
-    registry.weights.get_or_insert_with(HashMap::new).insert(tenant, weight);
+    registry.quotas.set_weight(tenant, weight);
     Ok(())
 }
 
@@ -234,24 +218,11 @@ pub(super) async fn govern_on(daemon: &Daemon, allowance: u64) {
     .await
 }
 
-/// cladefs: `daemon`'s governor's look at the host's memory under `mode`: always trims derived
-/// caches, spare slabs, and idle (unmapped) DAX extents first; shrinks actively-mapped DAX extents
-/// only under [`super::governor::ReclaimMode::Mapped`] (rate-limited by `max_shrink_bytes`), while
-/// [`super::governor::ReclaimMode::IdleOnly`] caps growth at the remaining mapped working set
-/// without triggering synchronous relief eviction of hot mapped extents.
-pub(super) async fn govern_with_on(
-    daemon: &Daemon,
-    allowance: u64,
-    mode: crate::governor::ReclaimMode,
-) {
-    use crate::governor::ReclaimMode;
-    use cladefs_core::cache::EvictScope;
-
+/// Trims all derived (non-slab) caches on `daemon` to fit within `allowance`.
+fn trim_derived_caches(daemon: &Daemon, allowance: u64) {
     daemon.memory.governed.store(allowance, Ordering::Relaxed);
     // cladefs: every tenant's bytes in flight within a share of what it allows (board 8465).
     total_in_flight_on(daemon).govern(allowance / GOVERNED_IN_FLIGHT_SHARE);
-    // cladefs: its shrinks wait for what they evict this long at most, together (board 8535).
-    let deadline = std::time::Instant::now() + PARKED_WAIT;
     let parts = held_parts_on(daemon);
     let room = allowance.saturating_sub(daemon.host.slabs().arenas_bytes());
     if parts.bytes() > room {
@@ -294,52 +265,24 @@ pub(super) async fn govern_with_on(
     if cladefs_core::host_cell::decoded_kept_bytes_on(&daemon.host) > room {
         cladefs_core::host_cell::evict_decoded_on(&daemon.host, room);
     }
+}
 
-    if matches!(mode, ReclaimMode::None) || daemon.host.slabs().arenas_bytes() <= allowance {
-        let registry = daemon.memory.registry.lock().unwrap();
-        registry.apply_total(&daemon.host, allowance);
-        return;
-    }
+fn weighted_tenants(daemon: &Daemon) -> Vec<(u64, u64)> {
+    let registry = daemon.memory.registry.lock().unwrap();
+    let mut ids: Vec<u64> = registry.alive().map(|tenant| tenant.id()).collect();
+    ids.sort();
+    ids.dedup();
+    ids.into_iter().map(|id| (id, registry.weight(id))).collect()
+}
 
-    let weighted: Vec<(u64, u64)> = {
-        let registry = daemon.memory.registry.lock().unwrap();
-        let mut ids: Vec<u64> = registry.alive().map(|tenant| tenant.id()).collect();
-        ids.sort();
-        ids.dedup();
-        ids.into_iter().map(|id| (id, registry.weight(id))).collect()
-    };
-
-    // Always reclaim spare slabs and idle (unmapped) extents first: zero VM TLB shootdowns or DAX
-    // fault storms on active windows. Under sustained `IdleOnly` where the previous pass found no
-    // idle extents and neither cache membership nor resident bytes changed, skip rescanning every
-    // extent for 2 seconds so 100 ms governor ticks stay O(1).
-    daemon.host.slabs().release_spares(None);
-    let before_idle = daemon.host.slabs().arenas_bytes();
-    if before_idle > allowance {
-        let now = std::time::Instant::now();
-        let seq_before = daemon.host.cache().idle_change_seq();
-        let skip_idle_scan = matches!(mode, ReclaimMode::IdleOnly)
-            && daemon.memory.idle_empty.lock().unwrap().is_some_and(|(until, seq, bytes)| {
-                now < until && seq == seq_before && bytes == before_idle
-            });
-        if !skip_idle_scan {
-            shrink_weighted(daemon, &weighted, allowance, EvictScope::IdleOnly, deadline).await;
-            let after_idle = daemon.host.slabs().arenas_bytes();
-            let mut slot = daemon.memory.idle_empty.lock().unwrap();
-            if after_idle >= before_idle && after_idle > allowance {
-                *slot = Some((now + std::time::Duration::from_secs(2), seq_before, after_idle));
-            } else {
-                *slot = None;
-            }
-        }
-    }
-
-    let effective_cap = match mode {
+fn effective_cap_for(daemon: &Daemon, allowance: u64, mode: crate::governor::ReclaimMode) -> u64 {
+    use crate::governor::ReclaimMode;
+    match mode {
         ReclaimMode::None => allowance,
         ReclaimMode::IdleOnly => {
             // Stop growing past the mapped working set that remains, without setting `total_cap`
-            // below resident mapped bytes (which would make `arena-relief-thread` synchronously
-            // evict hot mapped extents on the next page-in).
+            // below resident mapped bytes (which would make eviction synchronously evict hot
+            // mapped extents on the next page-in).
             let remaining = daemon.host.slabs().arenas_bytes();
             remaining.div_ceil(SLAB).saturating_mul(SLAB).max(allowance)
         }
@@ -351,19 +294,279 @@ pub(super) async fn govern_with_on(
                 current.saturating_sub(max_shrink_bytes).max(allowance)
             }
         }
-    };
-
-    {
-        let registry = daemon.memory.registry.lock().unwrap();
-        daemon.memory.governed.store(effective_cap, Ordering::Relaxed);
-        registry.apply_total(&daemon.host, effective_cap);
     }
+}
+
+fn skip_idle_scan(
+    daemon: &Daemon,
+    mode: crate::governor::ReclaimMode,
+    now: std::time::Instant,
+    seq_before: u64,
+    before_idle: u64,
+) -> bool {
+    matches!(mode, crate::governor::ReclaimMode::IdleOnly)
+        && daemon.memory.idle_empty.lock().unwrap().is_some_and(|(until, seq, bytes)| {
+            now < until && seq == seq_before && bytes == before_idle
+        })
+}
+
+fn record_idle_scan(
+    daemon: &Daemon,
+    now: std::time::Instant,
+    seq_before: u64,
+    before_idle: u64,
+    allowance: u64,
+) {
+    let after_idle = daemon.host.slabs().arenas_bytes();
+    let mut slot = daemon.memory.idle_empty.lock().unwrap();
+    if after_idle >= before_idle && after_idle > allowance {
+        *slot = Some((now + std::time::Duration::from_secs(2), seq_before, after_idle));
+    } else {
+        *slot = None;
+    }
+}
+
+fn apply_governed_cap(daemon: &Daemon, effective_cap: u64) {
+    let registry = daemon.memory.registry.lock().unwrap();
+    daemon.memory.governed.store(effective_cap, Ordering::Relaxed);
+    registry.apply_total(&daemon.host, effective_cap);
+}
+
+/// cladefs: `daemon`'s governor's look at the host's memory under `mode`: always trims derived
+/// caches, spare slabs, and idle (unmapped) DAX extents first; shrinks actively-mapped DAX extents
+/// only under [`crate::governor::ReclaimMode::Mapped`] (rate-limited by `max_shrink_bytes`), while
+/// [`crate::governor::ReclaimMode::IdleOnly`] caps growth at the remaining mapped working set
+/// without triggering synchronous relief eviction of hot mapped extents.
+pub(super) async fn govern_with_on(
+    daemon: &Daemon,
+    allowance: u64,
+    mode: crate::governor::ReclaimMode,
+) {
+    use crate::governor::ReclaimMode;
+    use cladefs_core::cache::EvictScope;
+
+    // cladefs: its shrinks wait for what they evict this long at most, together (board 8535).
+    let deadline = std::time::Instant::now() + PARKED_WAIT;
+    trim_derived_caches(daemon, allowance);
+
+    if matches!(mode, ReclaimMode::None) || daemon.host.slabs().arenas_bytes() <= allowance {
+        let registry = daemon.memory.registry.lock().unwrap();
+        registry.apply_total(&daemon.host, allowance);
+        return;
+    }
+
+    let weighted = weighted_tenants(daemon);
+
+    daemon.host.slabs().release_spares(None);
+    let before_idle = daemon.host.slabs().arenas_bytes();
+    if before_idle > allowance {
+        let now = std::time::Instant::now();
+        let seq_before = daemon.host.cache().idle_change_seq();
+        if !skip_idle_scan(daemon, mode, now, seq_before, before_idle) {
+            shrink_weighted(daemon, &weighted, allowance, EvictScope::IdleOnly, deadline).await;
+            record_idle_scan(daemon, now, seq_before, before_idle, allowance);
+        }
+    }
+
+    let effective_cap = effective_cap_for(daemon, allowance, mode);
+    apply_governed_cap(daemon, effective_cap);
 
     if let ReclaimMode::Mapped { .. } = mode
         && daemon.host.slabs().arenas_bytes() > effective_cap
     {
         shrink_weighted(daemon, &weighted, effective_cap, EvictScope::GovernorMapped, deadline)
             .await;
+    }
+}
+
+/// Synchronous equivalent of [`govern_with_on`] executed on the single unified OS eviction thread
+/// (board 11703), servicing starved arena relief via `service_relief` while waiting on quarantined
+/// VM unmaps.
+#[cfg(not(madsim))]
+pub(super) fn govern_with_sync_on(
+    daemon: &Daemon,
+    allowance: u64,
+    mode: crate::governor::ReclaimMode,
+    service_relief: &mut dyn FnMut(),
+) {
+    use crate::governor::ReclaimMode;
+    use cladefs_core::cache::EvictScope;
+
+    let deadline = std::time::Instant::now() + PARKED_WAIT;
+    trim_derived_caches(daemon, allowance);
+
+    if matches!(mode, ReclaimMode::None) || daemon.host.slabs().arenas_bytes() <= allowance {
+        let registry = daemon.memory.registry.lock().unwrap();
+        registry.apply_total(&daemon.host, allowance);
+        return;
+    }
+
+    let weighted = weighted_tenants(daemon);
+
+    daemon.host.slabs().release_spares(None);
+    let before_idle = daemon.host.slabs().arenas_bytes();
+    if before_idle > allowance {
+        let now = std::time::Instant::now();
+        let seq_before = daemon.host.cache().idle_change_seq();
+        if !skip_idle_scan(daemon, mode, now, seq_before, before_idle) {
+            shrink_weighted_sync(
+                daemon,
+                &weighted,
+                allowance,
+                EvictScope::IdleOnly,
+                deadline,
+                service_relief,
+            );
+            record_idle_scan(daemon, now, seq_before, before_idle, allowance);
+        }
+    }
+
+    let effective_cap = effective_cap_for(daemon, allowance, mode);
+    apply_governed_cap(daemon, effective_cap);
+
+    if let ReclaimMode::Mapped { .. } = mode
+        && daemon.host.slabs().arenas_bytes() > effective_cap
+    {
+        shrink_weighted_sync(
+            daemon,
+            &weighted,
+            effective_cap,
+            EvictScope::GovernorMapped,
+            deadline,
+            service_relief,
+        );
+    }
+}
+
+#[cfg(not(madsim))]
+fn shrink_weighted_sync(
+    daemon: &Daemon,
+    weighted: &[(u64, u64)],
+    target: u64,
+    scope: cladefs_core::cache::EvictScope,
+    deadline: std::time::Instant,
+    service_relief: &mut dyn FnMut(),
+) {
+    let mut over: Vec<(u64, u64, u64)> = crate::governor::shares(target, weighted)
+        .into_iter()
+        .filter_map(|(id, share)| {
+            let held = held_by(daemon, id);
+            held.checked_sub(share).filter(|&over| over > 0).map(|over| (over, id, share))
+        })
+        .collect();
+    over.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    for (_, id, share) in over {
+        let current_total = daemon.host.slabs().arenas_bytes();
+        let excess = current_total.saturating_sub(target);
+        if excess == 0 {
+            break;
+        }
+        let held = held_by(daemon, id);
+        if held > share {
+            let tenant_target = share.max(held.saturating_sub(excess));
+            if let Err(err) = shrink_scoped_by_sync(
+                daemon,
+                Some(id),
+                tenant_target,
+                scope,
+                deadline,
+                service_relief,
+            ) && err != Errno::ENOENT
+            {
+                log::error!("cladefsd: shrinking a tenant's memory to its share: {err}");
+            }
+        }
+    }
+    if daemon.host.slabs().arenas_bytes() > target
+        && let Err(err) =
+            shrink_scoped_by_sync(daemon, None, target, scope, deadline, service_relief)
+    {
+        log::error!("cladefsd: shrinking the daemon's memory to the host's: {err}");
+    }
+}
+
+#[cfg(not(madsim))]
+fn shrink_scoped_by_sync(
+    daemon: &Daemon,
+    tenant: Option<u64>,
+    target: u64,
+    scope: cladefs_core::cache::EvictScope,
+    deadline: std::time::Instant,
+    service_relief: &mut dyn FnMut(),
+) -> Result<u64, Errno> {
+    let slabs = daemon.host.slabs();
+    let Some(id) = tenant else {
+        evict_until_sync(
+            daemon,
+            None,
+            scope,
+            || slabs.arenas_bytes_in_use().saturating_sub(target),
+            deadline,
+            service_relief,
+        );
+        slabs.release_spares(None);
+        return Ok(slabs.arenas_bytes());
+    };
+    let arenas: Vec<_> = (daemon.memory.registry.lock().unwrap().alive())
+        .filter(|tenant| tenant.id() == id)
+        .map(|tenant| tenant.arena())
+        .collect();
+    if arenas.is_empty() {
+        return Err(Errno::ENOENT);
+    }
+    let held = || arenas.iter().map(|arena| slabs.arena_bytes(*arena)).sum::<u64>();
+    let in_use = || arenas.iter().map(|arena| slabs.arena_bytes_in_use(*arena)).sum::<u64>();
+    for arena in &arenas {
+        evict_until_sync(
+            daemon,
+            Some(*arena),
+            scope,
+            || in_use().saturating_sub(target),
+            deadline,
+            service_relief,
+        );
+        slabs.release_spares(Some(*arena));
+    }
+    Ok(held())
+}
+
+#[cfg(not(madsim))]
+fn evict_until_sync(
+    daemon: &Daemon,
+    arena: Option<cladefs_core::slabs::ArenaId>,
+    scope: cladefs_core::cache::EvictScope,
+    deficit: impl Fn() -> u64,
+    deadline: std::time::Instant,
+    service_relief: &mut dyn FnMut(),
+) {
+    let slabs = daemon.host.slabs();
+    loop {
+        let want = deficit().min(MAX_SHRINK_BATCH);
+        if want == 0 {
+            return;
+        }
+        let wake_slabs = Arc::clone(slabs);
+        let parking = Parking::with_wake(Arc::new(move || wake_slabs.signal_eviction()));
+        let stop = |evicted: u64| evicted >= want || deficit() == 0;
+        let evicted =
+            parking.counting(daemon, || daemon.host.cache().evict_with_scope(arena, scope, stop));
+        if !parking.parked() {
+            if evicted == 0 || deficit() == 0 {
+                return;
+            }
+            continue;
+        }
+        while parking.parked() {
+            service_relief();
+            if !parking.parked() {
+                break;
+            }
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            slabs.wait_eviction(left.min(std::time::Duration::from_millis(50)));
+        }
     }
 }
 
@@ -478,7 +681,7 @@ async fn shrink_scoped_by(
     let slabs = daemon.host.slabs();
     let Some(id) = tenant else {
         evict_until(
-            &daemon.host,
+            daemon,
             None,
             scope,
             || slabs.arenas_bytes_in_use().saturating_sub(target),
@@ -499,14 +702,8 @@ async fn shrink_scoped_by(
     let held = || arenas.iter().map(|arena| slabs.arena_bytes(*arena)).sum::<u64>();
     let in_use = || arenas.iter().map(|arena| slabs.arena_bytes_in_use(*arena)).sum::<u64>();
     for arena in &arenas {
-        evict_until(
-            &daemon.host,
-            Some(*arena),
-            scope,
-            || in_use().saturating_sub(target),
-            deadline,
-        )
-        .await;
+        evict_until(daemon, Some(*arena), scope, || in_use().saturating_sub(target), deadline)
+            .await;
         slabs.release_spares(Some(*arena));
     }
     Ok(held())
@@ -517,10 +714,10 @@ async fn shrink_scoped_by(
 /// keeping unmap bursts bounded.
 const MAX_SHRINK_BATCH: u64 = 64 * SLAB;
 
-/// cladefs: evicts the pages of `arena`'s cached extents on `host` within `scope`, until `deficit`
-/// reaches 0 (or nothing remains to evict).
+/// cladefs: evicts the pages of `arena`'s cached extents on `daemon` within `scope`, until
+/// `deficit` reaches 0 (or nothing remains to evict).
 async fn evict_until(
-    host: &cladefs_core::Host,
+    daemon: &Daemon,
     arena: Option<cladefs_core::slabs::ArenaId>,
     scope: cladefs_core::cache::EvictScope,
     deficit: impl Fn() -> u64,
@@ -533,7 +730,8 @@ async fn evict_until(
         }
         let parking = Parking::new();
         let stop = |evicted: u64| evicted >= want || deficit() == 0;
-        let evicted = parking.counting(|| host.cache().evict_with_scope(arena, scope, stop));
+        let evicted =
+            parking.counting(daemon, || daemon.host.cache().evict_with_scope(arena, scope, stop));
         if !parking.parked() {
             if evicted == 0 || deficit() == 0 {
                 return;

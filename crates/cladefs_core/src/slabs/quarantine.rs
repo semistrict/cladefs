@@ -48,7 +48,7 @@ impl Quarantined {
         let pages = u64::from(held.run.pages);
         held.arena.state.lock().unwrap().quarantined += pages;
         held.arena.node.quarantined.fetch_add(pages, Ordering::Release);
-        let relieving = match relief::relieving() {
+        let relieving = match held.arena.node.relieving() {
             Some(relief::Relieving::Arena(id)) => held.arena.node.arena(id).map(|arena| {
                 arena.state.lock().unwrap().relief.owed += pages;
                 RelievingTarget::Arena(arena)

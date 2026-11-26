@@ -3482,13 +3482,6 @@ mod refusal_tests {
 /// its mappings with it ([`Peer::gone`]). The run is freed as the last of them lets go: at once, if
 /// none waits.
 fn quarantine(freed: cladefs_core::slabs::Quarantined) {
-    let waiting = PARKING.with_borrow(Clone::clone);
-    if let Some(waiting) = &waiting {
-        waiting.parked.fetch_add(1, Ordering::SeqCst);
-    }
-    let staged = freed.staged().to_vec();
-    let counted = AtomicBool::new(waiting.is_some());
-    let freed = Arc::new(Parked { freed: Some(freed), waiting, counted });
     let live: Vec<Arc<Daemon>> = {
         let mut daemons = DAEMONS.lock().unwrap();
         let mut live = Vec::with_capacity(daemons.len());
@@ -3501,6 +3494,23 @@ fn quarantine(freed: cladefs_core::slabs::Quarantined) {
         });
         live
     };
+    let tid = std::thread::current().id();
+    let waiting = live.iter().find_map(|daemon| {
+        daemon
+            .parking
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(id, _)| *id == tid)
+            .map(|(_, waiting)| Arc::clone(waiting))
+    });
+    if let Some(waiting) = &waiting {
+        waiting.parked.fetch_add(1, Ordering::SeqCst);
+    }
+    let staged = freed.staged().to_vec();
+    let counted = AtomicBool::new(waiting.is_some());
+    let freed = Arc::new(Parked { freed: Some(freed), waiting, counted });
     for daemon in &live {
         for peer in daemon.vm_peers.lock().unwrap().iter().filter(|peer| staged.contains(&peer.id))
         {
@@ -3538,8 +3548,13 @@ impl Parked {
         if let Some(waiting) = &self.waiting
             && self.counted.swap(false, Ordering::SeqCst)
         {
-            waiting.parked.fetch_sub(1, Ordering::SeqCst);
+            let prev = waiting.parked.fetch_sub(1, Ordering::SeqCst);
             waiting.freed.notify(usize::MAX);
+            if prev == 1
+                && let Some(wake) = &waiting.wake
+            {
+                wake();
+            }
         }
     }
 }
@@ -3554,21 +3569,15 @@ impl Drop for Parked {
 /// cladefs: how many batches of the pages a shrink freed are quarantined still ([`Parking`]), and
 /// what says one of them is free.
 #[derive(Default)]
-struct Waiting {
+pub(super) struct Waiting {
     parked: std::sync::atomic::AtomicUsize,
     freed: event_listener::Event,
-}
-
-thread_local! {
-    /// cladefs: while this thread frees pages for a shrink ([`Parking::counting`]), what counts
-    /// them.
-    static PARKING: std::cell::RefCell<Option<Arc<Waiting>>> = const { std::cell::RefCell::new(None) };
+    wake: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 /// cladefs: has the pages a shrink frees, quarantined ([`quarantine`]), counted until they are
-/// free, which [`Parking::wait`] waits for (TASK-79.9): as a shrink of the daemon's memory, which
-/// evicts until it holds no more than it is asked to, finds what it holds once what it evicted is
-/// free, rather than at once, the pages a window mapped waiting for its VM process.
+/// free, which [`Parking::wait`] (async) or the unified eviction thread (sync) waits for
+/// (TASK-79.9, board 11703).
 pub(super) struct Parking(Arc<Waiting>);
 
 impl Parking {
@@ -3577,19 +3586,31 @@ impl Parking {
         Self(Arc::default())
     }
 
-    /// cladefs: `free`'s output, counting the pages it frees, on this thread, as it runs (board
-    /// 2946): the thread is what [`quarantine`] knows them by, and a task awaiting
-    /// [`Parking::wait`] may go on on another, so what frees runs whole, synchronously, on the
-    /// thread that counts it, and the waiting is the task's.
-    pub(super) fn counting<T>(&self, free: impl FnOnce() -> T) -> T {
-        /// What this thread counted for before, given back as `free` returns or unwinds.
-        struct Restore(Option<Arc<Waiting>>);
-        impl Drop for Restore {
+    /// Counts quarantined runs and invokes `wake` once all counted runs are released (board 11703).
+    #[cfg(not(madsim))]
+    pub(super) fn with_wake(wake: Arc<dyn Fn() + Send + Sync>) -> Self {
+        Self(Arc::new(Waiting {
+            parked: std::sync::atomic::AtomicUsize::new(0),
+            freed: event_listener::Event::new(),
+            wake: Some(wake),
+        }))
+    }
+
+    /// cladefs: `free`'s output, counting the pages it frees on this thread on `daemon` as it runs
+    /// (board 2946, board 11703).
+    pub(super) fn counting<T>(&self, daemon: &Daemon, free: impl FnOnce() -> T) -> T {
+        struct Restore<'a>(&'a Daemon, std::thread::ThreadId);
+        impl Drop for Restore<'_> {
             fn drop(&mut self) {
-                PARKING.set(self.0.take());
+                let mut parking = self.0.parking.lock().unwrap();
+                if let Some(pos) = parking.iter().rposition(|(tid, _)| *tid == self.1) {
+                    parking.remove(pos);
+                }
             }
         }
-        let _restore = Restore(PARKING.replace(Some(self.0.clone())));
+        let tid = std::thread::current().id();
+        daemon.parking.lock().unwrap().push((tid, Arc::clone(&self.0)));
+        let _restore = Restore(daemon, tid);
         free()
     }
 

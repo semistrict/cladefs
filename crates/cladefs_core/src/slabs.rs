@@ -165,6 +165,7 @@ pub struct HostSlabs {
     memory_bytes: OnceLock<u64>,
     node: OnceLock<Arc<Node>>,
     reliever: Arc<OnceLock<Option<Arc<relief::Reliever>>>>,
+    pending_governor: std::sync::Mutex<Option<relief::GovernorTick>>,
 }
 
 impl HostSlabs {
@@ -173,6 +174,7 @@ impl HostSlabs {
             memory_bytes: OnceLock::new(),
             node: OnceLock::new(),
             reliever: Arc::new(OnceLock::new()),
+            pending_governor: std::sync::Mutex::new(None),
         })
     }
 
@@ -258,6 +260,9 @@ pub(super) struct Node {
     arenas: Mutex<(BTreeMap<ArenaId, Arc<Arena>>, u32)>,
     /// The relief thread slot shared with [`HostSlabs`].
     reliever: Arc<OnceLock<Option<Arc<relief::Reliever>>>>,
+    /// The cap currently being relieved on the eviction thread, keyed by thread ID so no
+    /// process-wide thread-local is needed (TASK-161, board 12315, board 11703).
+    relieving: std::sync::Mutex<Option<(std::thread::ThreadId, relief::Relieving)>>,
     /// The most pages the arenas may populate together: physical memory's size.
     capacity: u64,
     /// The most the total cap lets them, or `u64::MAX`.
@@ -322,6 +327,7 @@ impl Node {
         Self {
             arenas: Mutex::new((BTreeMap::new(), ArenaId::DEFAULT.0 + 1)),
             reliever,
+            relieving: std::sync::Mutex::new(None),
             capacity,
             total_cap: AtomicU64::new(u64::MAX),
             populated: AtomicU64::new(0),
@@ -342,6 +348,16 @@ impl Node {
 
     fn reliever(&self) -> Option<&relief::Reliever> {
         self.reliever.get()?.as_deref()
+    }
+
+    pub(super) fn relieving(&self) -> Option<relief::Relieving> {
+        let tid = std::thread::current().id();
+        self.relieving.lock().unwrap().and_then(|(id, target)| (id == tid).then_some(target))
+    }
+
+    pub(super) fn set_relieving(&self, target: Option<relief::Relieving>) {
+        let tid = std::thread::current().id();
+        *self.relieving.lock().unwrap() = target.map(|t| (tid, t));
     }
 
     /// The most pages the arenas may populate together, as the caps stand.
@@ -926,6 +942,38 @@ impl HostSlabs {
         evict: impl FnMut(Option<ArenaId>, u64) -> u64 + Send + 'static,
     ) -> std::io::Result<()> {
         relief::relieve_with_on(self, evict)
+    }
+
+    /// Attaches a periodic memory-governor tick onto this host's single OS eviction thread,
+    /// returning `true` if attached to a live eviction thread or `false` if no OS thread runs
+    /// (Shuttle / madsim) so the caller can fall back to an async task (board 11703).
+    #[cfg(not(madsim))]
+    pub fn attach_governor(
+        &self,
+        interval: std::time::Duration,
+        tick: impl FnMut(&mut dyn FnMut()) + Send + 'static,
+    ) -> bool {
+        relief::attach_governor_on(self, interval, tick)
+    }
+
+    /// Wakes the eviction thread immediately (used when counted quarantined slabs return,
+    /// board 11703).
+    #[cfg(not(madsim))]
+    pub fn signal_eviction(&self) {
+        if let Some(Some(reliever)) = self.reliever.get() {
+            reliever.signal();
+        }
+    }
+
+    /// Waits on the eviction thread's signal up to `duration` (used inside synchronous governor
+    /// quarantine waits so starved arena asks and returning slabs wake immediately, board 11703).
+    #[cfg(not(madsim))]
+    pub fn wait_eviction(&self, duration: std::time::Duration) {
+        if let Some(Some(reliever)) = self.reliever.get() {
+            reliever.wait_timeout(duration);
+        } else {
+            std::thread::sleep(duration);
+        }
     }
 }
 

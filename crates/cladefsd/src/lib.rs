@@ -126,6 +126,7 @@ pub mod otel;
 pub mod peers;
 mod pool;
 pub mod process;
+mod quota;
 mod reads;
 mod run;
 pub mod server;
