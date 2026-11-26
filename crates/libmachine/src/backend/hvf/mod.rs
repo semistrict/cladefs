@@ -365,7 +365,10 @@ fn create_vm() -> Result<()> {
         if ipa != HV_SUCCESS {
             ipa
         } else {
-            let _ = hv_vm_config_set_ipa_granule(config, HV_IPA_GRANULE_4KB);
+            // Before macOS 26, the framework's own granule, 16 KiB.
+            if let Some(set_ipa_granule) = hv_vm_config_set_ipa_granule() {
+                let _ = set_ipa_granule(config, HV_IPA_GRANULE_4KB);
+            }
             hv_vm_create(config)
         }
     };

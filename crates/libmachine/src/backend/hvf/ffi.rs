@@ -43,6 +43,24 @@ pub(crate) const HV_SYS_REG_CNTV_CVAL_EL0: hv_sys_reg_t = 0xdf1a;
 /// `hv_ipa_granule_t` (macOS 26).
 pub(crate) const HV_IPA_GRANULE_4KB: u32 = 0;
 
+/// `hv_vm_config_set_ipa_granule`.
+pub(crate) type hv_vm_config_set_ipa_granule_t =
+    unsafe extern "C" fn(config: os_object_t, granule: u32) -> hv_return_t;
+
+/// `hv_vm_config_set_ipa_granule`, macOS 26's, if this host's framework has it: looked up as the
+/// process runs, not linked, since an SDK before macOS 26's has no stub for it to link against,
+/// and a host before it no function (board 13741).
+pub(crate) fn hv_vm_config_set_ipa_granule() -> Option<hv_vm_config_set_ipa_granule_t> {
+    // SAFETY: A NUL-terminated name, looked up in every image loaded, Hypervisor.framework's
+    // among them (linked below).
+    let symbol =
+        unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"hv_vm_config_set_ipa_granule".as_ptr()) };
+    // SAFETY: The framework's function of this name has the type its header gives it.
+    (!symbol.is_null()).then(|| unsafe {
+        std::mem::transmute::<*mut c_void, hv_vm_config_set_ipa_granule_t>(symbol)
+    })
+}
+
 /// `hv_vcpu_exit_exception_t`.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -71,7 +89,6 @@ unsafe extern "C" {
         config: os_object_t,
         ipa_bit_length: u32,
     ) -> hv_return_t;
-    pub(crate) fn hv_vm_config_set_ipa_granule(config: os_object_t, granule: u32) -> hv_return_t;
     pub(crate) fn hv_vm_create(config: os_object_t) -> hv_return_t;
     pub(crate) fn hv_vm_destroy() -> hv_return_t;
     pub(crate) fn hv_vm_get_max_vcpu_count(max_vcpu_count: *mut u32) -> hv_return_t;
