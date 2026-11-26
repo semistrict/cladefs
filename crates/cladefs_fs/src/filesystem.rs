@@ -170,7 +170,8 @@ fn xattr_errno(error: anyhow::Error) -> Errno {
     fxfs_posix::xattr_errno(&error)
 }
 
-/// The error of a volume/filesystem open operation, preserving the Fxfs errno if one caused it.
+/// The error of an operation on volumes or the whole filesystem, with the context Fxfs gave it
+/// and the errno of the Fxfs error causing it, if one did.
 fn volume_error(error: anyhow::Error) -> Error {
     match error.chain().any(|cause| cause.downcast_ref::<FxfsError>().is_some()) {
         true => {
@@ -969,28 +970,41 @@ impl Filesystem {
         })
     }
 
-    /// Creates an additional empty volume named `name` on this Fxfs filesystem (board 13920).
+    /// Creates an additional empty volume named `name` on this Fxfs filesystem (board 13920), and
+    /// compacts the journal, so that the filesystem's trees hold the new volume whole.
+    ///
+    /// Without the compaction, creating many volumes runs the filesystem out of room: a store's
+    /// creation takes a few hundred bytes of the journal, and Fxfs keeps room for flushing what the
+    /// journal holds at four times its size (`reserved_space_from_journal_usage`), but the first
+    /// flush of a new store writes it a layer file and rewrites its info, some 10 KiB. Compacted
+    /// at once, the store is flushed alone while that room is there; 256 left to the next
+    /// compaction needed more than its metadata reservation held, and failed with ENOSPC on a
+    /// 128 MiB cell (board 14222). The unmount of each new volume the deleted `Image` did hid this:
+    /// its sync padded the journal to a block per volume, which raised the reservation enough.
     pub async fn create_volume(&self, name: &str) -> Result<(), Error> {
         let name = name.to_owned();
         self.inner
             .run(|fxfs| async move {
-                let filesystem = fxfs.filesystem().clone();
-                let root = root_volume(filesystem).await.map_err(errno)?;
-                root.new_volume(&name, NewChildStoreOptions::default()).await.map_err(errno)?;
-                Ok(())
+                let filesystem = fxfs.filesystem();
+                let created = async {
+                    let root = root_volume(filesystem.clone()).await?;
+                    root.new_volume(&name, NewChildStoreOptions::default()).await?;
+                    filesystem.journal().force_compact().await
+                };
+                Ok(created.await)
             })
             .await
-            .map_err(Error::new)
+            .map_err(Error::new)?
+            .map_err(volume_error)
     }
 
     /// Compacts the journal into the filesystem's trees (board 13920).
     pub async fn compact(&self) -> Result<(), Error> {
         self.inner
-            .run(|fxfs| async move {
-                fxfs.filesystem().journal().force_compact().await.map_err(errno)
-            })
+            .run(|fxfs| async move { Ok(fxfs.filesystem().journal().force_compact().await) })
             .await
-            .map_err(Error::new)
+            .map_err(Error::new)?
+            .map_err(volume_error)
     }
 
     /// What this filesystem's volume takes of its metadata (board 13920).
@@ -1850,6 +1864,28 @@ mod tests {
             assert_eq!(file.read(0, &mut read).await, Ok(data.len()));
             assert_eq!(read, data);
             drop(file);
+            fs.close().await.unwrap();
+        });
+    }
+
+    /// A cell takes as many volumes as the guest's snapshot tests format on theirs, 256 and more on
+    /// 128 MiB, one after another with nothing between them, then compacted (board 14222).
+    #[test]
+    fn hundreds_of_volumes_fit_a_small_cell() {
+        block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("image");
+            let fs =
+                Filesystem::format(Storage::create(&path, 128 << 20).await.unwrap()).await.unwrap();
+            for volume in 0..257 {
+                if let Err(error) = fs.create_volume(&format!("v{volume}")).await {
+                    panic!("creating volume {volume}: {error:#}");
+                }
+            }
+            fs.compact().await.unwrap();
+            fs.close().await.unwrap().check().await.unwrap();
+            let storage = Storage::open(&path).await.unwrap();
+            let fs = Options::new().volume("v256").mount(storage).await.unwrap();
             fs.close().await.unwrap();
         });
     }
