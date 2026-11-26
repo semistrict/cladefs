@@ -25,6 +25,7 @@ _CLADEFS_ALIASES = select({
 
 exports_files([
     "Cargo.toml",
+    "build/release_link.rs",
     "build/stamp.rs",
 ])
 
@@ -47,6 +48,7 @@ cargo_build_script(
     name = "cladefs_build_script",
     srcs = [
         "build.rs",
+        "build/release_link.rs",
         "build/stamp.rs",
     ],
     build_script_env = {
