@@ -337,6 +337,16 @@ impl Machined for Service {
         Ok(Response::new(proto::SuspendMachineResponse {}))
     }
 
+    async fn balloon(
+        &self,
+        request: Request<proto::BalloonRequest>,
+    ) -> Result<Response<proto::BalloonResponse>, Status> {
+        let proto::BalloonRequest { name, target_bytes } = request.into_inner();
+        let entry = self.machines.get(&name)?;
+        let balloon = self.machines.balloon(&entry, target_bytes).await?;
+        Ok(Response::new(proto::BalloonResponse { balloon: Some(balloon) }))
+    }
+
     async fn resume_machine(
         &self,
         request: Request<proto::ResumeMachineRequest>,

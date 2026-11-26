@@ -49,7 +49,7 @@ pub(crate) struct Start {
 /// What machined asks of a running machine.
 #[derive(Clone, PartialEq, prost::Message)]
 pub(crate) struct Request {
-    #[prost(oneof = "request::Kind", tags = "2, 3, 4, 5")]
+    #[prost(oneof = "request::Kind", tags = "2, 3, 4, 5, 6")]
     pub(crate) kind: Option<request::Kind>,
 }
 
@@ -68,11 +68,20 @@ pub(crate) mod request {
         /// Wakes its suspended guest.
         #[prost(message, tag = "5")]
         Resume(super::Empty),
+        /// Sets its balloon's target, if given, and says how it stands.
+        #[prost(message, tag = "6")]
+        Balloon(super::BalloonTarget),
     }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, prost::Message)]
 pub(crate) struct Empty {}
+
+#[derive(Clone, Copy, PartialEq, Eq, prost::Message)]
+pub(crate) struct BalloonTarget {
+    #[prost(uint64, optional, tag = "1")]
+    pub(crate) bytes: Option<u64>,
+}
 
 /// What the helper says.
 #[derive(Clone, PartialEq, prost::Message)]
@@ -110,19 +119,24 @@ pub(crate) struct Answer {
     pub(crate) code: i32,
     #[prost(string, tag = "2")]
     pub(crate) message: String,
+    /// A balloon's, as it stands, answering a Balloon request.
+    #[prost(message, optional, tag = "3")]
+    pub(crate) balloon: Option<crate::proto::BalloonStatus>,
 }
 
 impl Answer {
-    pub(crate) fn of(result: Result<(), tonic::Status>) -> Self {
+    pub(crate) fn of(result: Result<Option<crate::proto::BalloonStatus>, tonic::Status>) -> Self {
         match result {
-            Ok(()) => Self { code: 0, message: String::new() },
-            Err(status) => Self { code: status.code().into(), message: status.message().into() },
+            Ok(balloon) => Self { code: 0, message: String::new(), balloon },
+            Err(status) => {
+                Self { code: status.code().into(), message: status.message().into(), balloon: None }
+            }
         }
     }
 
-    pub(crate) fn result(self) -> Result<(), tonic::Status> {
+    pub(crate) fn result(self) -> Result<Option<crate::proto::BalloonStatus>, tonic::Status> {
         match self.code {
-            0 => Ok(()),
+            0 => Ok(self.balloon),
             code => Err(tonic::Status::new(code.into(), self.message)),
         }
     }

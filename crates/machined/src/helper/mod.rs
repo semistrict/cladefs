@@ -194,6 +194,7 @@ async fn run(
         }
     };
     let generation = machine.vsock().map_or(0, |v| v.generation());
+    let balloon = machine.balloon().cloned();
     let stop = machine.stop_handle();
     let shared = Arc::new(Shared {
         closing: AtomicBool::new(false),
@@ -226,7 +227,9 @@ async fn run(
         tokio::select! {
             how = &mut ended_rx => break how.unwrap_or_else(|_| ended(How::Failed, "the machine's run thread panicked")),
             request = wire::read::<_, Request>(from), if reading => match request {
-                Ok(Some(Request { kind: Some(kind) })) => take(kind, &shared, &stop, &answers),
+                Ok(Some(Request { kind: Some(kind) })) => {
+                    take(kind, &shared, &stop, balloon.as_ref(), &answers);
+                }
                 Ok(Some(Request { kind: None })) => log::warn!("an empty request from machined"),
                 // machined gone, or its socket broken: the machine goes too.
                 Ok(None) | Err(_) => {
@@ -283,58 +286,80 @@ fn close(shared: &Shared, stop: &StopHandle) {
     stop.stop();
 }
 
-/// Takes machined's request: a stop at once; what the run thread does between runs queued for
-/// it, its answer's receiver queued to be sent in order.
+/// An answer to machined, to come: a balloon's state for a Balloon request.
+type Answered = Result<Option<crate::proto::BalloonStatus>, Status>;
+type Answering = futures::future::BoxFuture<'static, Answered>;
+
+/// Takes machined's request: a stop at once, a balloon's at once from its handle; what the run
+/// thread does between runs queued for it. Each answer's future is queued to be sent in order.
 fn take(
     kind: request::Kind,
     shared: &Shared,
     stop: &StopHandle,
-    answers: &mpsc::UnboundedSender<oneshot::Receiver<Result<(), Status>>>,
+    balloon: Option<&libmachine::Balloon>,
+    answers: &mpsc::UnboundedSender<Answering>,
 ) {
-    let (reply, answer) = oneshot::channel();
-    #[cfg_attr(
-        not(target_os = "linux"),
-        allow(unused_variables, reason = "requests are KVM's alone")
-    )]
-    let asked = match kind {
+    use futures::FutureExt as _;
+    let answer: Answering = match kind {
         request::Kind::Stop(_) => return close(shared, stop),
+        request::Kind::Balloon(target) => {
+            let state = balloon
+                .map(|balloon| {
+                    if let Some(bytes) = target.bytes {
+                        balloon.set_target(bytes);
+                    }
+                    crate::proto::BalloonStatus {
+                        target_bytes: balloon.target(),
+                        actual_bytes: balloon.actual(),
+                        discarded_bytes: balloon.discarded(),
+                    }
+                })
+                .ok_or_else(|| Status::failed_precondition("the machine has no balloon"));
+            futures::future::ready(state.map(Some)).boxed()
+        }
         #[cfg(target_os = "linux")]
-        request::Kind::Snapshot(path) => Asked::Snapshot(path.into(), reply),
-        #[cfg(target_os = "linux")]
-        request::Kind::Suspend(dir) => Asked::Suspend(dir.into(), reply),
-        #[cfg(target_os = "linux")]
-        request::Kind::Resume(_) => Asked::Resume(reply),
+        kind @ (request::Kind::Snapshot(_)
+        | request::Kind::Suspend(_)
+        | request::Kind::Resume(_)) => {
+            let (reply, answer) = oneshot::channel();
+            let asked = match kind {
+                request::Kind::Snapshot(path) => Asked::Snapshot(path.into(), reply),
+                request::Kind::Suspend(dir) => Asked::Suspend(dir.into(), reply),
+                _ => Asked::Resume(reply),
+            };
+            // Gone: its sender dropped, which answers it "the machine ended".
+            if let Some(queue) = lock(&shared.asked).as_mut() {
+                queue.push(asked);
+            }
+            // The run thread takes it once its run stops.
+            stop.stop();
+            async move {
+                let done = answer.await;
+                done.unwrap_or_else(|_| Err(Status::failed_precondition("the machine ended")))
+                    .map(|()| None)
+            }
+            .boxed()
+        }
         #[cfg(not(target_os = "linux"))]
         request::Kind::Snapshot(_) | request::Kind::Suspend(_) | request::Kind::Resume(_) => {
-            let _ = reply.send(Err(Status::unimplemented(
-                "machines on Hypervisor.framework can't be snapshotted or suspended yet (board 13399)",
-            )));
-            // The answer goes in its turn.
-            let _ = answers.send(answer);
-            return;
+            futures::future::ready(Err(Status::unimplemented(
+                "machines on Hypervisor.framework can't be snapshotted or suspended yet (board \
+                 13399)",
+            )))
+            .boxed()
         }
     };
-    #[cfg(target_os = "linux")]
-    {
-        // Gone: its sender dropped, which answers it "the machine ended".
-        if let Some(queue) = lock(&shared.asked).as_mut() {
-            queue.push(asked);
-        }
-        let _ = answers.send(answer);
-        // The run thread takes it once its run stops.
-        stop.stop();
-    }
+    // The answering task gone: the helper is ending.
+    let _ = answers.send(answer);
 }
 
 /// Sends each request's answer as it comes, in the order they were asked.
 async fn answer_in_order(
-    mut answering: mpsc::UnboundedReceiver<oneshot::Receiver<Result<(), Status>>>,
+    mut answering: mpsc::UnboundedReceiver<Answering>,
     events: mpsc::Sender<Event>,
 ) {
     while let Some(answer) = answering.recv().await {
-        let result =
-            answer.await.unwrap_or_else(|_| Err(Status::failed_precondition("the machine ended")));
-        if !tell(&events, event::Kind::Answer(Answer::of(result))).await {
+        if !tell(&events, event::Kind::Answer(Answer::of(answer.await))).await {
             return;
         }
     }

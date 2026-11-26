@@ -591,6 +591,21 @@ impl Machines {
             .map_err(|e| Status::internal(format!("removing {}: {e}", path.display())))
     }
 
+    /// A running machine's balloon: its target set to `target` bytes, if given, and how it stands.
+    pub(crate) async fn balloon(
+        &self,
+        entry: &Arc<Entry>,
+        target: Option<u64>,
+    ) -> Result<proto::BalloonStatus, Status> {
+        if !entry.spec.balloon {
+            return Err(Status::failed_precondition(format!(
+                "machine {:?} has no balloon: its spec asks for none",
+                entry.name
+            )));
+        }
+        entry.require_running()?.vm.balloon(target).await
+    }
+
     /// Suspends a running machine.
     #[cfg(target_os = "linux")]
     pub(crate) async fn suspend(&self, entry: &Arc<Entry>) -> Result<(), Status> {

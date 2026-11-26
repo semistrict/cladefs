@@ -5,6 +5,7 @@
 //! Virtio devices (virtio 1.2), all attached over the modern virtio-PCI
 //! transport (doc-30), and the thread that runs their queues.
 
+pub(crate) mod balloon;
 pub(crate) mod extent;
 #[cfg(target_os = "linux")]
 pub(crate) mod net;
@@ -166,6 +167,12 @@ pub(crate) trait VirtioDevice: Send {
     /// The host side signalled [`wake_fd`](Self::wake_fd): use the ready
     /// queues as for [`process_queue`](Self::process_queue).
     fn woken(&mut self, _queues: &mut [DeviceQueue], _mem: &GuestMemoryMmap) {}
+
+    /// Whether its configuration changed on its own since asked last (the balloon's target): the
+    /// transport then tells the driver (a configuration change interrupt). Asked as it is woken.
+    fn take_config_change(&mut self) -> bool {
+        false
+    }
 
     /// The device's state for a snapshot, taken with every vCPU stopped
     /// and the device thread held off (guest memory and the queues are the

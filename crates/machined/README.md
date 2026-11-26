@@ -75,6 +75,7 @@ can't be snapshotted or suspended yet (board 13399: UNIMPLEMENTED).
 | `ReadFile`, `WriteFile` | A guest's file, out or in, in chunks, 64 MiB at most. |
 | `SnapshotMachine`, `RestoreMachine`, `DeleteSnapshot` | KVM: a running machine's snapshot, by name, in machined's state directory; a new machine from it, RUNNING in milliseconds. |
 | `SuspendMachine`, `ResumeMachine` | KVM: an idle guest's RAM to a file until a device has something for it, or a resume. |
+| `Balloon` | A machine with `balloon` in its spec: its guest's free memory reported and given back to the host as it frees it, and a target set, which the guest's driver inflates to. |
 
 Exec, ReadFile, WriteFile and the sync need libmachine's agent in the guest
 (`libmachine_action=agent` on the test initramfs's command line). A guest with an agent of its own
@@ -130,7 +131,6 @@ hotbed places on machined's runtime.
 
 hotbed's worker runs each workspace as a Firecracker VM today (`internal/vm` in hotbed); machined
 is to run them on a Mac. Beyond what machined offers: a
-network on Hypervisor.framework (board 13399), port forwards into the guest (board 13486), a
-balloon (board 13490), and machines that
+network on Hypervisor.framework (board 13399), port forwards into the guest (board 13486), and machines that
 outlive a machined restart (board 13492). hotbed's guestd boots from a read-only tools disk under
 Firecracker; under machined it comes in the initramfs (`Boot.initramfs`).

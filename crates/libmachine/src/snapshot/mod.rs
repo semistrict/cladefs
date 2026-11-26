@@ -49,7 +49,7 @@ use codec::{Decoder, Encoder};
 
 /// The snapshot format this libmachine writes and reads; any other is
 /// refused.
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
 
 const MAGIC: [u8; 8] = *b"lmsnap\0\0";
 const HEADER_LEN: usize = 64;
@@ -333,6 +333,7 @@ impl Snapshot {
             extent_daemon: None,
             extent_stores: Vec::new(),
             nested_virtualization: false,
+            balloon: false,
         }
     }
 

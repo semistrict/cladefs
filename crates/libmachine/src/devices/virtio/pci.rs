@@ -190,6 +190,9 @@ pub(crate) struct VirtioPci {
     queue_vectors: Vec<u16>,
     isr: u8,
     activated: bool,
+    /// Bumped each time the device's configuration changes on its own (the balloon's target), so
+    /// that a driver reading it reads it whole (virtio 1.2, section 4.1.4.3).
+    config_generation: u8,
 
     /// Each queue's notification eventfd.
     notify: Vec<EventFd>,
@@ -363,6 +366,7 @@ impl VirtioPci {
             queues,
             queue_vectors: vec![NO_VECTOR; queue_count],
             isr: 0,
+            config_generation: 0,
             activated: false,
             notify,
             notify_registered: None,
@@ -436,7 +440,7 @@ impl VirtioPci {
         self.signal_moved(&before);
     }
 
-    /// The device's host side has work for the guest.
+    /// The device's host side has work for the guest, or changed its configuration.
     pub(crate) fn woken(&mut self) {
         if !self.activated {
             return;
@@ -444,6 +448,24 @@ impl VirtioPci {
         let before = self.used_positions();
         self.device.woken(&mut self.queues, &self.mem);
         self.signal_moved(&before);
+        if self.device.take_config_change() {
+            self.config_generation = self.config_generation.wrapping_add(1);
+            self.signal_config();
+        }
+    }
+
+    /// Interrupts the driver for a configuration change: its MSI-X vector, or the ISR's second
+    /// bit (virtio 1.2, section 4.1.4.5).
+    fn signal_config(&mut self) {
+        self.stats.interrupts += 1;
+        self.doorbell.ring();
+        if self.msix.enabled() {
+            if self.config_vector != NO_VECTOR {
+                self.msix.trigger(self.config_vector);
+            }
+        } else {
+            self.isr |= 2;
+        }
     }
 
     /// Where each queue's used ring is now.
@@ -569,8 +591,7 @@ impl VirtioPci {
         put(12, &word(self.driver_features, self.driver_feature_select).to_le_bytes());
         put(16, &self.config_vector.to_le_bytes());
         put(18, &(self.queues.len() as u16).to_le_bytes());
-        // config_generation (21): the configuration never changes on its own.
-        put(20, &[self.status, 0]);
+        put(20, &[self.status, self.config_generation]);
         put(22, &self.queue_select.to_le_bytes());
         if let Some(q) = self.selected_queue() {
             let index = usize::from(self.queue_select);
@@ -820,6 +841,7 @@ impl VirtioPci {
         e.u16(self.queue_select);
         e.u8(self.isr);
         e.bool(self.activated);
+        e.u8(self.config_generation);
         e.count(self.queues.len());
         for (queue, &vector) in self.queues.iter().zip(&self.queue_vectors) {
             queue.save(e);
@@ -852,6 +874,7 @@ impl VirtioPci {
         self.queue_select = d.u16()?;
         self.isr = d.u8()?;
         self.activated = d.bool()?;
+        self.config_generation = d.u8()?;
         let n = d.count(1)?;
         if n != self.queues.len() {
             return Err(Error::Snapshot(format!(

@@ -226,3 +226,30 @@ pub async fn make_version(socket: &Path, cell: &machined::proto::Cell) -> u64 {
     let request = MakeVersionRequest { tenant: cell.tenant, cell: cell.cell, ..Default::default() };
     cladefsd(socket).await.make_version(request).await.unwrap().into_inner().version
 }
+
+/// The memory process `pid` holds: its physical footprint on macOS (what Activity Monitor shows,
+/// which leaves out pages given back as reusable), its resident set on Linux.
+pub fn footprint(pid: u32) -> u64 {
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY: zeroed is a valid rusage_info_v2, which proc_pid_rusage fills.
+        let mut info: libc::rusage_info_v2 = unsafe { std::mem::zeroed() };
+        // SAFETY: `info` is the flavor's struct.
+        let done = unsafe {
+            libc::proc_pid_rusage(
+                libc::c_int::try_from(pid).unwrap(),
+                libc::RUSAGE_INFO_V2,
+                (&raw mut info).cast(),
+            )
+        };
+        assert_eq!(done, 0, "proc_pid_rusage({pid}): {}", std::io::Error::last_os_error());
+        info.ri_phys_footprint
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
+        let line = status.lines().find(|l| l.starts_with("VmRSS:")).unwrap();
+        let kib: u64 = line.split_whitespace().nth(1).unwrap().parse().unwrap();
+        kib * 1024
+    }
+}

@@ -89,6 +89,7 @@ const (
 	Machined_DeleteSnapshot_FullMethodName  = "/machined.v1.Machined/DeleteSnapshot"
 	Machined_SuspendMachine_FullMethodName  = "/machined.v1.Machined/SuspendMachine"
 	Machined_ResumeMachine_FullMethodName   = "/machined.v1.Machined/ResumeMachine"
+	Machined_Balloon_FullMethodName         = "/machined.v1.Machined/Balloon"
 )
 
 // MachinedClient is the client API for Machined service.
@@ -141,6 +142,9 @@ type MachinedClient interface {
 	SuspendMachine(ctx context.Context, in *SuspendMachineRequest, opts ...grpc.CallOption) (*SuspendMachineResponse, error)
 	// Wakes a suspended machine; returns once it runs (at once if it wasn't suspended).
 	ResumeMachine(ctx context.Context, in *ResumeMachineRequest, opts ...grpc.CallOption) (*ResumeMachineResponse, error)
+	// A running machine's balloon (its spec's `balloon`): its target set, if the request gives
+	// one, and how it stands. FAILED_PRECONDITION if the machine doesn't run, or has none.
+	Balloon(ctx context.Context, in *BalloonRequest, opts ...grpc.CallOption) (*BalloonResponse, error)
 }
 
 type machinedClient struct {
@@ -344,6 +348,16 @@ func (c *machinedClient) ResumeMachine(ctx context.Context, in *ResumeMachineReq
 	return out, nil
 }
 
+func (c *machinedClient) Balloon(ctx context.Context, in *BalloonRequest, opts ...grpc.CallOption) (*BalloonResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(BalloonResponse)
+	err := c.cc.Invoke(ctx, Machined_Balloon_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // MachinedServer is the server API for Machined service.
 // All implementations must embed UnimplementedMachinedServer
 // for forward compatibility.
@@ -394,6 +408,9 @@ type MachinedServer interface {
 	SuspendMachine(context.Context, *SuspendMachineRequest) (*SuspendMachineResponse, error)
 	// Wakes a suspended machine; returns once it runs (at once if it wasn't suspended).
 	ResumeMachine(context.Context, *ResumeMachineRequest) (*ResumeMachineResponse, error)
+	// A running machine's balloon (its spec's `balloon`): its target set, if the request gives
+	// one, and how it stands. FAILED_PRECONDITION if the machine doesn't run, or has none.
+	Balloon(context.Context, *BalloonRequest) (*BalloonResponse, error)
 	mustEmbedUnimplementedMachinedServer()
 }
 
@@ -451,6 +468,9 @@ func (UnimplementedMachinedServer) SuspendMachine(context.Context, *SuspendMachi
 }
 func (UnimplementedMachinedServer) ResumeMachine(context.Context, *ResumeMachineRequest) (*ResumeMachineResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ResumeMachine not implemented")
+}
+func (UnimplementedMachinedServer) Balloon(context.Context, *BalloonRequest) (*BalloonResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Balloon not implemented")
 }
 func (UnimplementedMachinedServer) mustEmbedUnimplementedMachinedServer() {}
 func (UnimplementedMachinedServer) testEmbeddedByValue()                  {}
@@ -718,6 +738,24 @@ func _Machined_ResumeMachine_Handler(srv interface{}, ctx context.Context, dec f
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Machined_Balloon_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BalloonRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MachinedServer).Balloon(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Machined_Balloon_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MachinedServer).Balloon(ctx, req.(*BalloonRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Machined_ServiceDesc is the grpc.ServiceDesc for Machined service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -768,6 +806,10 @@ var Machined_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ResumeMachine",
 			Handler:    _Machined_ResumeMachine_Handler,
+		},
+		{
+			MethodName: "Balloon",
+			Handler:    _Machined_Balloon_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

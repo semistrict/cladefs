@@ -246,6 +246,104 @@ async fn a_machine_boots_from_its_cell() {
     daemon.shutdown().await;
 }
 
+/// A machine's balloon (board 13490): what its guest frees goes back to the host by itself
+/// (free page reporting), its helper's memory falling with it; and a target the host sets, which
+/// the guest's driver inflates to and deflates from.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_balloon_gives_memory_back() {
+    let Some((kernel, initramfs)) = guest() else { return };
+    let daemon = Daemon::start_guest(&kernel, &initramfs).await;
+    let mut client = daemon.client.clone();
+    let spec = proto::MachineSpec {
+        memory_bytes: 1 << 30,
+        balloon: true,
+        ..daemon.spec("quiet libmachine_action=agent").await
+    };
+    create(&mut client, "b", spec).await;
+    let started = client.start_machine(proto::StartMachineRequest { name: "b".into() }).await;
+    let pid = started.unwrap().into_inner().machine.unwrap().pid;
+    let balloon =
+        |target: Option<u64>| proto::BalloonRequest { name: "b".into(), target_bytes: target };
+
+    // 512 MiB used, then freed.
+    let fill = "mount -t tmpfs -o size=600m none /tmp && dd if=/dev/urandom of=/tmp/f bs=1M count=512 2>/dev/null && sync";
+    let (_, err, exit) = exec(&mut client, "b", &["sh", "-c", fill], None).await.unwrap();
+    assert_eq!(exit, proto::exec_exit::Status::Code(0), "{}", String::from_utf8_lossy(&err));
+    let full = common::footprint(pid);
+    assert!(full > 512 << 20, "the helper holds the guest's 512 MiB: {full}");
+    let (_, _, exit) = exec(&mut client, "b", &["rm", "/tmp/f"], None).await.unwrap();
+    assert_eq!(exit, proto::exec_exit::Status::Code(0));
+    let back = tokio::time::timeout(STATE_WAIT, async {
+        loop {
+            let now = common::footprint(pid);
+            if now + (384 << 20) < full {
+                return now;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    })
+    .await;
+    let back = match back {
+        Ok(back) => back,
+        Err(_) => {
+            let now = client.balloon(balloon(None)).await.unwrap().into_inner().balloon.unwrap();
+            let (dmesg, _, _) = exec(&mut client, "b", &["sh", "-c", "dmesg | grep -i -e balloon -e reporting; ls /sys/bus/virtio/drivers/; cat /sys/bus/virtio/devices/*/features"], None).await.unwrap();
+            panic!(
+                "the helper still holds {} of {full} bytes; {now:?}; guest: {}",
+                common::footprint(pid),
+                String::from_utf8_lossy(&dmesg)
+            );
+        }
+    };
+    let reported = client.balloon(balloon(None)).await.unwrap().into_inner().balloon.unwrap();
+    assert!(reported.discarded_bytes >= 384 << 20, "{reported:?}, {back} of {full}");
+    assert_eq!((reported.target_bytes, reported.actual_bytes), (0, 0));
+
+    // Inflated to a target, then deflated.
+    let target = 256 << 20;
+    let set = client.balloon(balloon(Some(target))).await.unwrap().into_inner().balloon.unwrap();
+    assert_eq!(set.target_bytes, target);
+    let inflated = tokio::time::timeout(STATE_WAIT, async {
+        loop {
+            let now = client.balloon(balloon(None)).await.unwrap().into_inner().balloon.unwrap();
+            if now.actual_bytes == target {
+                return now;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("the guest inflated its balloon to the target");
+    assert!(inflated.discarded_bytes > reported.discarded_bytes, "{inflated:?}");
+    client.balloon(balloon(Some(0))).await.unwrap();
+    tokio::time::timeout(STATE_WAIT, async {
+        while client
+            .balloon(balloon(None))
+            .await
+            .unwrap()
+            .into_inner()
+            .balloon
+            .unwrap()
+            .actual_bytes
+            != 0
+        {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("the guest deflated its balloon");
+    let (_, _, exit) = exec(&mut client, "b", &["true"], None).await.unwrap();
+    assert_eq!(exit, proto::exec_exit::Status::Code(0), "the guest runs on");
+
+    // A machine without one has none.
+    create(&mut client, "plain", daemon.spec("quiet libmachine_action=agent").await).await;
+    client.start_machine(proto::StartMachineRequest { name: "plain".into() }).await.unwrap();
+    let none =
+        client.balloon(proto::BalloonRequest { name: "plain".into(), target_bytes: None }).await;
+    assert_eq!(none.unwrap_err().code(), Code::FailedPrecondition);
+    daemon.shutdown().await;
+}
+
 /// Each machine runs in a helper process of its own (board 13460): several at once, on
 /// Hypervisor.framework too; one whose helper dies ends with that said, while machined and the
 /// others run on.

@@ -150,6 +150,55 @@ impl Shared {
             panic!("{len:#x} bytes at {guest_addr:#x}: {err}");
         }
     }
+    /// Gives the host back the `len` bytes of guest RAM at `guest_addr`, at `host` in this
+    /// process, whose contents the guest gave up (the balloon's): out of the VM, their host pages
+    /// replaced by fresh anonymous memory, and into the VM again, zeros. `madvise` frees no page
+    /// Hypervisor.framework maps, as measured (board 13490). Nothing once the VM is gone. The
+    /// guest must not touch the range meanwhile, as a balloon's guest doesn't the pages it gives;
+    /// a VM that can't have its RAM back is broken: a panic.
+    ///
+    /// # Safety
+    ///
+    /// `host..host + len` is guest RAM this VM maps at `guest_addr`, whole host pages of it.
+    pub(crate) unsafe fn discard_ram(
+        &self,
+        guest_addr: u64,
+        host: std::ptr::NonNull<u8>,
+        len: u64,
+    ) {
+        let live = self.live.read().unwrap_or_else(|e| e.into_inner());
+        if !*live {
+            return;
+        }
+        let len = len as usize;
+        // SAFETY: As the caller promises; the VM exists while `live` is held.
+        check("unmap guest RAM given back", unsafe { hv_vm_unmap(guest_addr, len) })
+            .unwrap_or_else(|err| panic!("{len:#x} bytes at {guest_addr:#x}: {err}"));
+        // SAFETY: The range is this process's guest RAM, mapped by it alone, out of the VM now.
+        let fresh = unsafe {
+            libc::mmap(
+                host.as_ptr().cast(),
+                len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_FIXED | libc::MAP_ANON | libc::MAP_PRIVATE,
+                -1,
+                0,
+            )
+        };
+        assert_eq!(
+            fresh,
+            host.as_ptr().cast(),
+            "replacing {len:#x} bytes of guest RAM at {guest_addr:#x}: {}",
+            std::io::Error::last_os_error()
+        );
+        let flags = HV_MEMORY_READ | HV_MEMORY_WRITE | HV_MEMORY_EXEC;
+        // SAFETY: As the caller promises; mapped back as `Vm::new` mapped it.
+        check("map guest RAM given back", unsafe {
+            hv_vm_map(host.as_ptr().cast(), guest_addr, len, flags)
+        })
+        .unwrap_or_else(|err| panic!("{len:#x} bytes at {guest_addr:#x}: {err}"));
+    }
+
     /// Wakes every vCPU waiting for an interrupt: one was just sent to the GIC.
     pub(crate) fn interrupt_sent(&self) {
         for cpu in &self.cpus {

@@ -183,6 +183,7 @@ pub(crate) fn plan(images: &Path, spec: &proto::MachineSpec) -> Result<Plan, Sta
             serial_capture_limit: 0,
             // The daemon its helper connects to is the helper's to name (`crate::helper`).
             extent_stores: vec![root],
+            balloon: spec.balloon,
             ..MachineConfig::default()
         },
         boot: LinuxBoot {

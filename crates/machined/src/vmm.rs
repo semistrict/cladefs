@@ -29,6 +29,9 @@ use tonic::Status;
 
 use crate::helper::wire::{self, Event, How, Request, event, request};
 
+/// An answer of the helper's: a balloon's state, answering a Balloon request.
+type Answered = Result<Option<crate::proto::BalloonStatus>, Status>;
+
 /// Whether machines here can have a network: on KVM alone (board 13399).
 pub(crate) const NETWORK: bool = cfg!(target_os = "linux");
 
@@ -77,7 +80,7 @@ struct Shared {
     /// machined's end of the helper's socket; None once the helper is gone.
     to: tokio::sync::Mutex<Option<OwnedWriteHalf>>,
     /// The answers awaited, oldest first: the helper answers in the order it was asked.
-    answers: Mutex<std::collections::VecDeque<oneshot::Sender<Result<(), Status>>>>,
+    answers: Mutex<std::collections::VecDeque<oneshot::Sender<Answered>>>,
 }
 
 /// The helper binary of this machined: `machined-vm`, beside machined's own.
@@ -213,25 +216,33 @@ impl Vm {
     /// Writes a snapshot of the machine to `path`: the guest is paused for it, and runs on.
     #[cfg(target_os = "linux")]
     pub(crate) async fn snapshot(&self, path: PathBuf) -> Result<(), Status> {
-        self.ask(request::Kind::Snapshot(path.to_string_lossy().into_owned())).await
+        self.ask(request::Kind::Snapshot(path.to_string_lossy().into_owned())).await.map(drop)
     }
 
     /// Suspends the guest once it is idle into a file in `dir`.
     #[cfg(target_os = "linux")]
     pub(crate) async fn suspend(&self, dir: PathBuf) -> Result<(), Status> {
-        self.ask(request::Kind::Suspend(dir.to_string_lossy().into_owned())).await
+        self.ask(request::Kind::Suspend(dir.to_string_lossy().into_owned())).await.map(drop)
     }
 
     /// Wakes a suspended guest; returns once it runs again.
     #[cfg(target_os = "linux")]
     pub(crate) async fn resume(&self) -> Result<(), Status> {
-        self.ask(request::Kind::Resume(wire::Empty {})).await
+        self.ask(request::Kind::Resume(wire::Empty {})).await.map(drop)
+    }
+
+    /// Sets the balloon's target to `target` bytes, if given: how the balloon stands.
+    pub(crate) async fn balloon(
+        &self,
+        target: Option<u64>,
+    ) -> Result<crate::proto::BalloonStatus, Status> {
+        let asked = self.ask(request::Kind::Balloon(wire::BalloonTarget { bytes: target })).await?;
+        asked.ok_or_else(|| Status::internal("the helper answered a balloon request with none"))
     }
 
     /// Asks the helper `kind`, and waits for its answer: its awaited answer queued, under the
     /// socket's lock, in the order the requests go.
-    #[cfg(target_os = "linux")]
-    async fn ask(&self, kind: request::Kind) -> Result<(), Status> {
+    async fn ask(&self, kind: request::Kind) -> Answered {
         let (reply, answer) = oneshot::channel();
         {
             let mut to = self.shared.to.lock().await;
@@ -251,7 +262,6 @@ impl Drop for Vm {
     }
 }
 
-#[cfg(target_os = "linux")]
 fn gone() -> Status {
     Status::failed_precondition("the machine ended")
 }

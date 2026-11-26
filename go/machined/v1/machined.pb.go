@@ -295,8 +295,12 @@ type MachineSpec struct {
 	// files' data from the daemon's extent cache, shared by every machine on the host: 0 for none,
 	// every read and write then a request to the daemon.
 	RootDaxWindowBytes uint64 `protobuf:"varint,8,opt,name=root_dax_window_bytes,json=rootDaxWindowBytes,proto3" json:"root_dax_window_bytes,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// Gives the guest a virtio-balloon: its free memory reported and given back to the host as it
+	// frees it (free page reporting), and a target the host sets (Balloon). A machine with one is
+	// not snapshotted or suspended yet.
+	Balloon       bool `protobuf:"varint,9,opt,name=balloon,proto3" json:"balloon,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *MachineSpec) Reset() {
@@ -383,6 +387,13 @@ func (x *MachineSpec) GetRootDaxWindowBytes() uint64 {
 		return x.RootDaxWindowBytes
 	}
 	return 0
+}
+
+func (x *MachineSpec) GetBalloon() bool {
+	if x != nil {
+		return x.Balloon
+	}
+	return false
 }
 
 // A Linux kernel and how it boots.
@@ -2845,11 +2856,179 @@ func (*ResumeMachineResponse) Descriptor() ([]byte, []int) {
 	return file_machined_v1_machined_proto_rawDescGZIP(), []int{44}
 }
 
+// What a Balloon call asks.
+type BalloonRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The machine's name.
+	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	// The bytes of its guest's memory the guest is to give back, in 4 KiB pages (rounded down):
+	// its balloon's target, which its driver inflates to, or deflates to as it falls. Unset leaves
+	// the target as it is.
+	TargetBytes   *uint64 `protobuf:"varint,2,opt,name=target_bytes,json=targetBytes,proto3,oneof" json:"target_bytes,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BalloonRequest) Reset() {
+	*x = BalloonRequest{}
+	mi := &file_machined_v1_machined_proto_msgTypes[45]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BalloonRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BalloonRequest) ProtoMessage() {}
+
+func (x *BalloonRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_machined_v1_machined_proto_msgTypes[45]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BalloonRequest.ProtoReflect.Descriptor instead.
+func (*BalloonRequest) Descriptor() ([]byte, []int) {
+	return file_machined_v1_machined_proto_rawDescGZIP(), []int{45}
+}
+
+func (x *BalloonRequest) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *BalloonRequest) GetTargetBytes() uint64 {
+	if x != nil && x.TargetBytes != nil {
+		return *x.TargetBytes
+	}
+	return 0
+}
+
+// What a Balloon call answers.
+type BalloonResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Its balloon now.
+	Balloon       *BalloonStatus `protobuf:"bytes,1,opt,name=balloon,proto3" json:"balloon,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BalloonResponse) Reset() {
+	*x = BalloonResponse{}
+	mi := &file_machined_v1_machined_proto_msgTypes[46]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BalloonResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BalloonResponse) ProtoMessage() {}
+
+func (x *BalloonResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_machined_v1_machined_proto_msgTypes[46]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BalloonResponse.ProtoReflect.Descriptor instead.
+func (*BalloonResponse) Descriptor() ([]byte, []int) {
+	return file_machined_v1_machined_proto_rawDescGZIP(), []int{46}
+}
+
+func (x *BalloonResponse) GetBalloon() *BalloonStatus {
+	if x != nil {
+		return x.Balloon
+	}
+	return nil
+}
+
+// A machine's balloon.
+type BalloonStatus struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The bytes the guest is to give back.
+	TargetBytes uint64 `protobuf:"varint,1,opt,name=target_bytes,json=targetBytes,proto3" json:"target_bytes,omitempty"`
+	// The bytes its driver says it holds in the balloon.
+	ActualBytes uint64 `protobuf:"varint,2,opt,name=actual_bytes,json=actualBytes,proto3" json:"actual_bytes,omitempty"`
+	// The bytes of guest memory given back to the host since the machine started: inflated, and
+	// reported free by the guest.
+	DiscardedBytes uint64 `protobuf:"varint,3,opt,name=discarded_bytes,json=discardedBytes,proto3" json:"discarded_bytes,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *BalloonStatus) Reset() {
+	*x = BalloonStatus{}
+	mi := &file_machined_v1_machined_proto_msgTypes[47]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BalloonStatus) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BalloonStatus) ProtoMessage() {}
+
+func (x *BalloonStatus) ProtoReflect() protoreflect.Message {
+	mi := &file_machined_v1_machined_proto_msgTypes[47]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BalloonStatus.ProtoReflect.Descriptor instead.
+func (*BalloonStatus) Descriptor() ([]byte, []int) {
+	return file_machined_v1_machined_proto_rawDescGZIP(), []int{47}
+}
+
+func (x *BalloonStatus) GetTargetBytes() uint64 {
+	if x != nil {
+		return x.TargetBytes
+	}
+	return 0
+}
+
+func (x *BalloonStatus) GetActualBytes() uint64 {
+	if x != nil {
+		return x.ActualBytes
+	}
+	return 0
+}
+
+func (x *BalloonStatus) GetDiscardedBytes() uint64 {
+	if x != nil {
+		return x.DiscardedBytes
+	}
+	return 0
+}
+
 var File_machined_v1_machined_proto protoreflect.FileDescriptor
 
 const file_machined_v1_machined_proto_rawDesc = "" +
 	"\n" +
-	"\x1amachined/v1/machined.proto\x12\vmachined.v1\"\x9e\x03\n" +
+	"\x1amachined/v1/machined.proto\x12\vmachined.v1\"\xb8\x03\n" +
 	"\vMachineSpec\x12\x14\n" +
 	"\x05vcpus\x18\x01 \x01(\rR\x05vcpus\x12!\n" +
 	"\fmemory_bytes\x18\x02 \x01(\x04R\vmemoryBytes\x12%\n" +
@@ -2858,7 +3037,8 @@ const file_machined_v1_machined_proto_rawDesc = "" +
 	"\x04root\x18\x05 \x01(\v2\x11.machined.v1.CellR\x04root\x12,\n" +
 	"\x12vsock_listen_ports\x18\x06 \x03(\rR\x10vsockListenPorts\x12<\n" +
 	"\x06labels\x18\a \x03(\v2$.machined.v1.MachineSpec.LabelsEntryR\x06labels\x121\n" +
-	"\x15root_dax_window_bytes\x18\b \x01(\x04R\x12rootDaxWindowBytes\x1a9\n" +
+	"\x15root_dax_window_bytes\x18\b \x01(\x04R\x12rootDaxWindowBytes\x12\x18\n" +
+	"\aballoon\x18\t \x01(\bR\aballoon\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"_\n" +
@@ -2996,7 +3176,17 @@ const file_machined_v1_machined_proto_rawDesc = "" +
 	"\x16SuspendMachineResponse\"*\n" +
 	"\x14ResumeMachineRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\"\x17\n" +
-	"\x15ResumeMachineResponse*^\n" +
+	"\x15ResumeMachineResponse\"]\n" +
+	"\x0eBalloonRequest\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12&\n" +
+	"\ftarget_bytes\x18\x02 \x01(\x04H\x00R\vtargetBytes\x88\x01\x01B\x0f\n" +
+	"\r_target_bytes\"G\n" +
+	"\x0fBalloonResponse\x124\n" +
+	"\aballoon\x18\x01 \x01(\v2\x1a.machined.v1.BalloonStatusR\aballoon\"~\n" +
+	"\rBalloonStatus\x12!\n" +
+	"\ftarget_bytes\x18\x01 \x01(\x04R\vtargetBytes\x12!\n" +
+	"\factual_bytes\x18\x02 \x01(\x04R\vactualBytes\x12'\n" +
+	"\x0fdiscarded_bytes\x18\x03 \x01(\x04R\x0ediscardedBytes*^\n" +
 	"\fEgressAction\x12\x1d\n" +
 	"\x19EGRESS_ACTION_UNSPECIFIED\x10\x00\x12\x17\n" +
 	"\x13EGRESS_ACTION_ALLOW\x10\x01\x12\x16\n" +
@@ -3017,8 +3207,7 @@ const file_machined_v1_machined_proto_rawDesc = "" +
 	"\x11EXIT_REASON_RESET\x10\x03\x12\x18\n" +
 	"\x14EXIT_REASON_SHUTDOWN\x10\x04\x12\x1b\n" +
 	"\x17EXIT_REASON_BOOT_FAILED\x10\x05\x12\x16\n" +
-	"\x12EXIT_REASON_FAILED\x10\x062\xd7\n" +
-	"\n" +
+	"\x12EXIT_REASON_FAILED\x10\x062\x9d\v\n" +
 	"\bMachined\x12V\n" +
 	"\rCreateMachine\x12!.machined.v1.CreateMachineRequest\x1a\".machined.v1.CreateMachineResponse\x12S\n" +
 	"\fStartMachine\x12 .machined.v1.StartMachineRequest\x1a!.machined.v1.StartMachineResponse\x12P\n" +
@@ -3036,7 +3225,8 @@ const file_machined_v1_machined_proto_rawDesc = "" +
 	"\x0eRestoreMachine\x12\".machined.v1.RestoreMachineRequest\x1a#.machined.v1.RestoreMachineResponse\x12Y\n" +
 	"\x0eDeleteSnapshot\x12\".machined.v1.DeleteSnapshotRequest\x1a#.machined.v1.DeleteSnapshotResponse\x12Y\n" +
 	"\x0eSuspendMachine\x12\".machined.v1.SuspendMachineRequest\x1a#.machined.v1.SuspendMachineResponse\x12V\n" +
-	"\rResumeMachine\x12!.machined.v1.ResumeMachineRequest\x1a\".machined.v1.ResumeMachineResponseB9Z7github.com/semistrict/cladefs/go/machined/v1;machinedv1b\x06proto3"
+	"\rResumeMachine\x12!.machined.v1.ResumeMachineRequest\x1a\".machined.v1.ResumeMachineResponse\x12D\n" +
+	"\aBalloon\x12\x1b.machined.v1.BalloonRequest\x1a\x1c.machined.v1.BalloonResponseB9Z7github.com/semistrict/cladefs/go/machined/v1;machinedv1b\x06proto3"
 
 var (
 	file_machined_v1_machined_proto_rawDescOnce sync.Once
@@ -3051,7 +3241,7 @@ func file_machined_v1_machined_proto_rawDescGZIP() []byte {
 }
 
 var file_machined_v1_machined_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_machined_v1_machined_proto_msgTypes = make([]protoimpl.MessageInfo, 48)
+var file_machined_v1_machined_proto_msgTypes = make([]protoimpl.MessageInfo, 51)
 var file_machined_v1_machined_proto_goTypes = []any{
 	(EgressAction)(0),               // 0: machined.v1.EgressAction
 	(MachineState)(0),               // 1: machined.v1.MachineState
@@ -3101,15 +3291,18 @@ var file_machined_v1_machined_proto_goTypes = []any{
 	(*SuspendMachineResponse)(nil),  // 45: machined.v1.SuspendMachineResponse
 	(*ResumeMachineRequest)(nil),    // 46: machined.v1.ResumeMachineRequest
 	(*ResumeMachineResponse)(nil),   // 47: machined.v1.ResumeMachineResponse
-	nil,                             // 48: machined.v1.MachineSpec.LabelsEntry
-	nil,                             // 49: machined.v1.ExecStart.EnvEntry
-	nil,                             // 50: machined.v1.RestoreMachineRequest.LabelsEntry
+	(*BalloonRequest)(nil),          // 48: machined.v1.BalloonRequest
+	(*BalloonResponse)(nil),         // 49: machined.v1.BalloonResponse
+	(*BalloonStatus)(nil),           // 50: machined.v1.BalloonStatus
+	nil,                             // 51: machined.v1.MachineSpec.LabelsEntry
+	nil,                             // 52: machined.v1.ExecStart.EnvEntry
+	nil,                             // 53: machined.v1.RestoreMachineRequest.LabelsEntry
 }
 var file_machined_v1_machined_proto_depIdxs = []int32{
 	4,  // 0: machined.v1.MachineSpec.boot:type_name -> machined.v1.Boot
 	5,  // 1: machined.v1.MachineSpec.network:type_name -> machined.v1.Network
 	8,  // 2: machined.v1.MachineSpec.root:type_name -> machined.v1.Cell
-	48, // 3: machined.v1.MachineSpec.labels:type_name -> machined.v1.MachineSpec.LabelsEntry
+	51, // 3: machined.v1.MachineSpec.labels:type_name -> machined.v1.MachineSpec.LabelsEntry
 	6,  // 4: machined.v1.Network.egress:type_name -> machined.v1.EgressRule
 	7,  // 5: machined.v1.Network.port_forwards:type_name -> machined.v1.PortForward
 	0,  // 6: machined.v1.EgressRule.action:type_name -> machined.v1.EgressAction
@@ -3127,48 +3320,51 @@ var file_machined_v1_machined_proto_depIdxs = []int32{
 	10, // 18: machined.v1.WatchMachineResponse.status:type_name -> machined.v1.MachineStatus
 	29, // 19: machined.v1.ExecRequest.start:type_name -> machined.v1.ExecStart
 	30, // 20: machined.v1.ExecRequest.close_stdin:type_name -> machined.v1.ExecCloseStdin
-	49, // 21: machined.v1.ExecStart.env:type_name -> machined.v1.ExecStart.EnvEntry
+	52, // 21: machined.v1.ExecStart.env:type_name -> machined.v1.ExecStart.EnvEntry
 	32, // 22: machined.v1.ExecResponse.started:type_name -> machined.v1.ExecStarted
 	33, // 23: machined.v1.ExecResponse.exit:type_name -> machined.v1.ExecExit
-	50, // 24: machined.v1.RestoreMachineRequest.labels:type_name -> machined.v1.RestoreMachineRequest.LabelsEntry
+	53, // 24: machined.v1.RestoreMachineRequest.labels:type_name -> machined.v1.RestoreMachineRequest.LabelsEntry
 	9,  // 25: machined.v1.RestoreMachineResponse.machine:type_name -> machined.v1.Machine
-	12, // 26: machined.v1.Machined.CreateMachine:input_type -> machined.v1.CreateMachineRequest
-	14, // 27: machined.v1.Machined.StartMachine:input_type -> machined.v1.StartMachineRequest
-	16, // 28: machined.v1.Machined.StopMachine:input_type -> machined.v1.StopMachineRequest
-	18, // 29: machined.v1.Machined.DeleteMachine:input_type -> machined.v1.DeleteMachineRequest
-	20, // 30: machined.v1.Machined.GetMachine:input_type -> machined.v1.GetMachineRequest
-	22, // 31: machined.v1.Machined.ListMachines:input_type -> machined.v1.ListMachinesRequest
-	24, // 32: machined.v1.Machined.WatchMachine:input_type -> machined.v1.WatchMachineRequest
-	26, // 33: machined.v1.Machined.StreamConsole:input_type -> machined.v1.StreamConsoleRequest
-	28, // 34: machined.v1.Machined.Exec:input_type -> machined.v1.ExecRequest
-	34, // 35: machined.v1.Machined.ReadFile:input_type -> machined.v1.ReadFileRequest
-	36, // 36: machined.v1.Machined.WriteFile:input_type -> machined.v1.WriteFileRequest
-	38, // 37: machined.v1.Machined.SnapshotMachine:input_type -> machined.v1.SnapshotMachineRequest
-	40, // 38: machined.v1.Machined.RestoreMachine:input_type -> machined.v1.RestoreMachineRequest
-	42, // 39: machined.v1.Machined.DeleteSnapshot:input_type -> machined.v1.DeleteSnapshotRequest
-	44, // 40: machined.v1.Machined.SuspendMachine:input_type -> machined.v1.SuspendMachineRequest
-	46, // 41: machined.v1.Machined.ResumeMachine:input_type -> machined.v1.ResumeMachineRequest
-	13, // 42: machined.v1.Machined.CreateMachine:output_type -> machined.v1.CreateMachineResponse
-	15, // 43: machined.v1.Machined.StartMachine:output_type -> machined.v1.StartMachineResponse
-	17, // 44: machined.v1.Machined.StopMachine:output_type -> machined.v1.StopMachineResponse
-	19, // 45: machined.v1.Machined.DeleteMachine:output_type -> machined.v1.DeleteMachineResponse
-	21, // 46: machined.v1.Machined.GetMachine:output_type -> machined.v1.GetMachineResponse
-	23, // 47: machined.v1.Machined.ListMachines:output_type -> machined.v1.ListMachinesResponse
-	25, // 48: machined.v1.Machined.WatchMachine:output_type -> machined.v1.WatchMachineResponse
-	27, // 49: machined.v1.Machined.StreamConsole:output_type -> machined.v1.StreamConsoleResponse
-	31, // 50: machined.v1.Machined.Exec:output_type -> machined.v1.ExecResponse
-	35, // 51: machined.v1.Machined.ReadFile:output_type -> machined.v1.ReadFileResponse
-	37, // 52: machined.v1.Machined.WriteFile:output_type -> machined.v1.WriteFileResponse
-	39, // 53: machined.v1.Machined.SnapshotMachine:output_type -> machined.v1.SnapshotMachineResponse
-	41, // 54: machined.v1.Machined.RestoreMachine:output_type -> machined.v1.RestoreMachineResponse
-	43, // 55: machined.v1.Machined.DeleteSnapshot:output_type -> machined.v1.DeleteSnapshotResponse
-	45, // 56: machined.v1.Machined.SuspendMachine:output_type -> machined.v1.SuspendMachineResponse
-	47, // 57: machined.v1.Machined.ResumeMachine:output_type -> machined.v1.ResumeMachineResponse
-	42, // [42:58] is the sub-list for method output_type
-	26, // [26:42] is the sub-list for method input_type
-	26, // [26:26] is the sub-list for extension type_name
-	26, // [26:26] is the sub-list for extension extendee
-	0,  // [0:26] is the sub-list for field type_name
+	50, // 26: machined.v1.BalloonResponse.balloon:type_name -> machined.v1.BalloonStatus
+	12, // 27: machined.v1.Machined.CreateMachine:input_type -> machined.v1.CreateMachineRequest
+	14, // 28: machined.v1.Machined.StartMachine:input_type -> machined.v1.StartMachineRequest
+	16, // 29: machined.v1.Machined.StopMachine:input_type -> machined.v1.StopMachineRequest
+	18, // 30: machined.v1.Machined.DeleteMachine:input_type -> machined.v1.DeleteMachineRequest
+	20, // 31: machined.v1.Machined.GetMachine:input_type -> machined.v1.GetMachineRequest
+	22, // 32: machined.v1.Machined.ListMachines:input_type -> machined.v1.ListMachinesRequest
+	24, // 33: machined.v1.Machined.WatchMachine:input_type -> machined.v1.WatchMachineRequest
+	26, // 34: machined.v1.Machined.StreamConsole:input_type -> machined.v1.StreamConsoleRequest
+	28, // 35: machined.v1.Machined.Exec:input_type -> machined.v1.ExecRequest
+	34, // 36: machined.v1.Machined.ReadFile:input_type -> machined.v1.ReadFileRequest
+	36, // 37: machined.v1.Machined.WriteFile:input_type -> machined.v1.WriteFileRequest
+	38, // 38: machined.v1.Machined.SnapshotMachine:input_type -> machined.v1.SnapshotMachineRequest
+	40, // 39: machined.v1.Machined.RestoreMachine:input_type -> machined.v1.RestoreMachineRequest
+	42, // 40: machined.v1.Machined.DeleteSnapshot:input_type -> machined.v1.DeleteSnapshotRequest
+	44, // 41: machined.v1.Machined.SuspendMachine:input_type -> machined.v1.SuspendMachineRequest
+	46, // 42: machined.v1.Machined.ResumeMachine:input_type -> machined.v1.ResumeMachineRequest
+	48, // 43: machined.v1.Machined.Balloon:input_type -> machined.v1.BalloonRequest
+	13, // 44: machined.v1.Machined.CreateMachine:output_type -> machined.v1.CreateMachineResponse
+	15, // 45: machined.v1.Machined.StartMachine:output_type -> machined.v1.StartMachineResponse
+	17, // 46: machined.v1.Machined.StopMachine:output_type -> machined.v1.StopMachineResponse
+	19, // 47: machined.v1.Machined.DeleteMachine:output_type -> machined.v1.DeleteMachineResponse
+	21, // 48: machined.v1.Machined.GetMachine:output_type -> machined.v1.GetMachineResponse
+	23, // 49: machined.v1.Machined.ListMachines:output_type -> machined.v1.ListMachinesResponse
+	25, // 50: machined.v1.Machined.WatchMachine:output_type -> machined.v1.WatchMachineResponse
+	27, // 51: machined.v1.Machined.StreamConsole:output_type -> machined.v1.StreamConsoleResponse
+	31, // 52: machined.v1.Machined.Exec:output_type -> machined.v1.ExecResponse
+	35, // 53: machined.v1.Machined.ReadFile:output_type -> machined.v1.ReadFileResponse
+	37, // 54: machined.v1.Machined.WriteFile:output_type -> machined.v1.WriteFileResponse
+	39, // 55: machined.v1.Machined.SnapshotMachine:output_type -> machined.v1.SnapshotMachineResponse
+	41, // 56: machined.v1.Machined.RestoreMachine:output_type -> machined.v1.RestoreMachineResponse
+	43, // 57: machined.v1.Machined.DeleteSnapshot:output_type -> machined.v1.DeleteSnapshotResponse
+	45, // 58: machined.v1.Machined.SuspendMachine:output_type -> machined.v1.SuspendMachineResponse
+	47, // 59: machined.v1.Machined.ResumeMachine:output_type -> machined.v1.ResumeMachineResponse
+	49, // 60: machined.v1.Machined.Balloon:output_type -> machined.v1.BalloonResponse
+	44, // [44:61] is the sub-list for method output_type
+	27, // [27:44] is the sub-list for method input_type
+	27, // [27:27] is the sub-list for extension type_name
+	27, // [27:27] is the sub-list for extension extendee
+	0,  // [0:27] is the sub-list for field type_name
 }
 
 func init() { file_machined_v1_machined_proto_init() }
@@ -3192,13 +3388,14 @@ func file_machined_v1_machined_proto_init() {
 		(*ExecExit_Code)(nil),
 		(*ExecExit_Signal)(nil),
 	}
+	file_machined_v1_machined_proto_msgTypes[45].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_machined_v1_machined_proto_rawDesc), len(file_machined_v1_machined_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   48,
+			NumMessages:   51,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

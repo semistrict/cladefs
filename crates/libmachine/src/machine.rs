@@ -62,6 +62,10 @@ pub struct MachineConfig {
     /// with KVM (nested virtualization): its kernel boots at EL2. Hypervisor.framework's on hosts
     /// that have it (Apple M3 and later, macOS 15 and later); refused elsewhere, KVM's included.
     pub nested_virtualization: bool,
+    /// Gives the guest a virtio-balloon ([`Machine::balloon`], [`crate::Balloon`]): its free pages
+    /// reported and given back to the host, and a target the host sets. A machine with one is
+    /// neither snapshotted nor suspended yet (board 13994).
+    pub balloon: bool,
 }
 
 impl MachineConfig {
@@ -85,6 +89,7 @@ impl Default for MachineConfig {
             extent_daemon: None,
             extent_stores: Vec::new(),
             nested_virtualization: false,
+            balloon: false,
         }
     }
 }
@@ -197,6 +202,8 @@ pub struct Machine {
     serial: serial::SharedOutput,
     /// The host's end of the vsock device (board machines).
     vsock: Option<crate::Vsock>,
+    /// The host's side of the balloon, if the machine has one.
+    balloon: Option<crate::Balloon>,
     /// The network's handle, if the machine has one.
     network: Option<crate::net::Network>,
     /// Where the virtio-net device puts its host streams when suspended.
@@ -565,6 +572,35 @@ fn extent_daemon(config: &MachineConfig) -> Result<Option<&Arc<crate::ExtentDaem
     Ok(Some(daemon))
 }
 
+/// The balloon of `config`'s, if it asks for one ([`MachineConfig::balloon`]), added to `devices`,
+/// and its host handle.
+fn balloon_device(
+    config: &MachineConfig,
+    vm: &backend::Vm,
+    devices: &mut Vec<Box<dyn crate::devices::virtio::VirtioDevice>>,
+) -> Result<Option<crate::Balloon>> {
+    if !config.balloon {
+        return Ok(None);
+    }
+    #[cfg(target_os = "linux")]
+    let free = {
+        let _ = vm;
+        crate::devices::virtio::balloon::madvise_ram()
+    };
+    #[cfg(target_os = "macos")]
+    let free: crate::devices::virtio::balloon::FreeRam = {
+        let shared = vm.shared().clone();
+        Box::new(move |guest_addr, host, len| {
+            // SAFETY: the balloon gives whole host pages of this VM's guest RAM, given up.
+            unsafe { shared.discard_ram(guest_addr, host, len) };
+            Ok(())
+        })
+    };
+    let (device, balloon) = crate::devices::virtio::balloon::Device::new(free)?;
+    devices.push(Box::new(device));
+    Ok(Some(balloon))
+}
+
 /// The extent store devices of `config`'s ([`MachineConfig::extent_stores`]), with a request
 /// queue per vCPU, their DAX windows' BARs from `bars`, stopping the machine through `stop` as one
 /// can't go on: on Hypervisor.framework, the windows' pages mapped by libmachine (board 13069).
@@ -731,6 +767,7 @@ impl Machine {
             doorbell,
             serial,
             vsock: None,
+            balloon: None,
             network: None,
             #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
             net_slot: NetSlot::default(),
@@ -843,6 +880,7 @@ impl Machine {
         // any transport's.
         let mut bars = crate::devices::pci::BarAllocator::new();
         let mut all = extent_devices(&config, &vm, &mut bars, &stop)?;
+        let balloon = balloon_device(&config, &vm, &mut all)?;
         all.extend(devices);
         let pc = PcDevices::new(&vm, card, all, None, doorbell, bars)?;
         let output = serial::output(config.serial_capture_limit);
@@ -855,6 +893,7 @@ impl Machine {
             live.pci = Some(pc.pci);
         }
         machine.vsock = Some(pc.vsock);
+        machine.balloon = balloon;
         machine.network = network;
         machine.net_slot = net_slot;
         machine.caller_devices = caller_devices;
@@ -931,6 +970,7 @@ impl Machine {
         // The extent store devices first, as on the PC.
         let mut bars = crate::devices::pci::BarAllocator::new();
         let mut devices = extent_devices(&config, &vm, &mut bars, &stop)?;
+        let balloon = balloon_device(&config, &vm, &mut devices)?;
         let (vsock_device, vsock) = VsockDevice::new(GUEST_CID)?;
         devices.extend([Box::new(Rng) as Box<dyn VirtioDevice>, Box::new(vsock_device)]);
         let pci =
@@ -949,6 +989,7 @@ impl Machine {
             output,
         )?;
         machine.live_mut()?.pci = Some(pci);
+        machine.balloon = balloon;
         machine.vsock = Some(vsock);
         Ok(machine)
     }
@@ -982,6 +1023,11 @@ impl Machine {
                 "a machine with a network cannot be snapshotted: its connections are host \
                  sockets that no restored machine could share"
                     .into(),
+            ));
+        }
+        if self.balloon.is_some() {
+            return Err(Error::Snapshot(
+                "a machine with a balloon is not snapshotted yet (board 13994)".into(),
             ));
         }
         let refreeze = matches!(self.body, Body::Frozen(_));
@@ -1102,6 +1148,11 @@ impl Machine {
                 "a machine with devices of the caller's cannot be suspended: a suspension frees \
                  the devices, and only the caller could make them again"
                     .into(),
+            ));
+        }
+        if self.balloon.is_some() {
+            return Err(Error::InvalidConfig(
+                "a machine with a balloon is not suspended yet (board 13994)".into(),
             ));
         }
         let layout = live.vm.memory_layout();
@@ -1306,10 +1357,11 @@ impl Machine {
             vcpus: self.vcpu_count,
             network: None,
             serial_capture_limit: 0,
-            // No machine with extent store devices is suspended.
+            // No machine with extent store devices or a balloon is suspended.
             extent_daemon: None,
             extent_stores: Vec::new(),
             nested_virtualization: false,
+            balloon: false,
         };
         let network = self.network.as_ref().map(|n| {
             NetCard::Adopt(
@@ -1687,6 +1739,11 @@ impl Machine {
     #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn vcpu_thread_cpu_times(&self) -> Vec<Duration> {
         self.live().map(|live| live.vcpus.thread_cpu_times()).unwrap_or_default()
+    }
+
+    /// The host's side of the machine's balloon, if it has one ([`MachineConfig::balloon`]).
+    pub fn balloon(&self) -> Option<&crate::Balloon> {
+        self.balloon.as_ref()
     }
 
     /// The host's end of the machine's vsock (board machines only): connect to

@@ -105,6 +105,9 @@ service Machined {
   rpc SuspendMachine(SuspendMachineRequest) returns (SuspendMachineResponse);
   // Wakes a suspended machine; returns once it runs (at once if it wasn't suspended).
   rpc ResumeMachine(ResumeMachineRequest) returns (ResumeMachineResponse);
+  // A running machine's balloon (its spec's `balloon`): its target set, if the request gives
+  // one, and how it stands. FAILED_PRECONDITION if the machine doesn't run, or has none.
+  rpc Balloon(BalloonRequest) returns (BalloonResponse);
 }
 
 // What a machine is: its guest's size, what it boots, its network, its root.
@@ -135,6 +138,10 @@ message MachineSpec {
   // files' data from the daemon's extent cache, shared by every machine on the host: 0 for none,
   // every read and write then a request to the daemon.
   uint64 root_dax_window_bytes = 8;
+  // Gives the guest a virtio-balloon: its free memory reported and given back to the host as it
+  // frees it (free page reporting), and a target the host sets (Balloon). A machine with one is
+  // not snapshotted or suspended yet.
+  bool balloon = 9;
 }
 
 // A Linux kernel and how it boots.
@@ -531,3 +538,30 @@ message ResumeMachineRequest {
 
 // ResumeMachine's answer.
 message ResumeMachineResponse {}
+
+// What a Balloon call asks.
+message BalloonRequest {
+  // The machine's name.
+  string name = 1;
+  // The bytes of its guest's memory the guest is to give back, in 4 KiB pages (rounded down):
+  // its balloon's target, which its driver inflates to, or deflates to as it falls. Unset leaves
+  // the target as it is.
+  optional uint64 target_bytes = 2;
+}
+
+// What a Balloon call answers.
+message BalloonResponse {
+  // Its balloon now.
+  BalloonStatus balloon = 1;
+}
+
+// A machine's balloon.
+message BalloonStatus {
+  // The bytes the guest is to give back.
+  uint64 target_bytes = 1;
+  // The bytes its driver says it holds in the balloon.
+  uint64 actual_bytes = 2;
+  // The bytes of guest memory given back to the host since the machine started: inflated, and
+  // reported free by the guest.
+  uint64 discarded_bytes = 3;
+}
