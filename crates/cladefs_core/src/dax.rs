@@ -31,6 +31,8 @@
 
 pub mod failures;
 // Its guest's only second stage is Linux's (`uffd::shuttle_tests`): elsewhere nothing runs it.
+#[cfg(target_os = "macos")]
+pub mod hvf;
 #[cfg(all(test, feature = "shuttle", target_os = "linux"))]
 mod shuttle_tests;
 #[cfg(target_os = "linux")]
@@ -170,10 +172,10 @@ pub trait Prefault: Send + Sync {
     fn prefault(&self, offset: u64, len: u64);
 }
 
-/// What resolves the faults on a window's second stage in host memory: the VM process's connection
-/// to the extent daemon, which holds the window (`crate::cladefsd`), or the window itself, in tests
-/// whose window is in this process's host memory (`Dax::in_host_memory`).
-#[cfg(target_os = "linux")]
+/// What resolves the faults on a window's second stage, in host memory (`dax::uffd`) or a guest's
+/// (`dax::hvf`): the VM process's connection to the extent daemon, which holds the window
+/// (`crate::cladefsd`), or the window itself, in tests whose window is in this process's host
+/// memory (`Dax::in_host_memory`).
 pub trait Faults: Send + Sync {
     /// The window's size in bytes.
     fn size(&self) -> u64;

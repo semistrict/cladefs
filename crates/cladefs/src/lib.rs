@@ -39,6 +39,10 @@ pub mod testing {
     pub use cladefsd::testing_control::{Control, control_path};
 }
 
+/// A DAX window's second stage in a guest's memory that its VMM maps, Hypervisor.framework's
+/// (board 13069).
+#[cfg(target_os = "macos")]
+pub use cladefs_core::dax::hvf::{GuestMemory, HvfSecondStage};
 pub use cladefs_core::{
     Access, AccessFailures, CellAccess, CellHolding, CellId, CellOf, CellRole, CellSnapshot,
     CellVersion, Commit, DaxWindow, Errno, Error, ExtentId, ExtentInfo, FailingRun, Failure, Host,

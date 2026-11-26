@@ -14,8 +14,9 @@ use crate::wire::*;
 use bucket_cell::cell::Kind;
 #[cfg(target_os = "linux")]
 use cladefs_core::Prefault;
-#[cfg(target_os = "linux")]
 use cladefs_core::dax::Faults;
+#[cfg(target_os = "macos")]
+use cladefs_core::dax::hvf::{FaultThread, GuestMemory, HvfSecondStage as WindowStage};
 #[cfg(target_os = "linux")]
 use cladefs_core::dax::uffd::{FaultThread, UffdSecondStage as WindowStage};
 use cladefs_core::error::{Errno, Error, Result};
@@ -26,8 +27,6 @@ use cladefs_core::{
 };
 use futures::channel::oneshot;
 use futures::future::BoxFuture;
-#[cfg(not(target_os = "linux"))]
-use no_window::{NoFaultThread as FaultThread, NoStage as WindowStage};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::os::fd::{AsFd, OwnedFd};
@@ -750,6 +749,46 @@ impl CellClient {
         self.window_faults.set(faults_of.clone()).map_err(|_| Error::new(Errno::EEXIST))?;
         *faults = Some(stage.serve(faults_of)?);
         Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl CellClient {
+    /// Creates the cell's window in the guest memory of a VMM that maps it itself, as
+    /// Hypervisor.framework's do (`dax::hvf`, board 13069): the daemon's pages are mapped into the
+    /// guest through `guest` as the window maps them, read-only, and the guest's faults there,
+    /// which the VMM hands to the stage returned ([`WindowStage::fault`]), go to the daemon. A
+    /// writer's copies on write, of `private_max` private pages at most, as on Linux. `EINVAL` of
+    /// a `private_max` of 0.
+    pub fn create_dax_window_in_guest(
+        &self,
+        size: u64,
+        guest: Arc<dyn GuestMemory>,
+        private_max: u64,
+    ) -> Result<Arc<WindowStage>, Error> {
+        if private_max == 0 {
+            return Err(Error::new(Errno::EINVAL));
+        }
+        let mut faults = self.faults.lock().unwrap();
+        if faults.is_some() {
+            return Err(Error::new(Errno::EEXIST));
+        }
+        let memories = (self.memories.iter())
+            .map(|(arena, fd)| Ok((*arena, fd.as_fd().try_clone_to_owned()?)))
+            .collect::<std::io::Result<_>>()
+            .map_err(Error::new)?;
+        let stage = WindowStage::new(size, memories, guest)?;
+        stage.copy_on_write(private_max)?;
+        self.client.stage.set(stage.clone()).map_err(|_| Error::new(Errno::EEXIST))?;
+        let budget = stage.budget() as u64;
+        self.client.request_blocking(&Request::Window { size, copying: true, budget })?;
+        self.client.tell_budget();
+        self.copying.store(true, Ordering::Release);
+        let faults_of =
+            Arc::new(DaemonFaults { client: self.client.clone(), size, unmapped: None });
+        self.window_faults.set(faults_of.clone()).map_err(|_| Error::new(Errno::EEXIST))?;
+        *faults = Some(stage.serve(faults_of)?);
+        Ok(stage)
     }
 }
 
@@ -1708,7 +1747,6 @@ impl Drop for TakenSlot {
 }
 
 /// The window's faults, which the daemon resolves.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code, reason = "a window's: Linux's"))]
 struct DaemonFaults {
     client: Arc<Client>,
     size: u64,
@@ -1727,7 +1765,6 @@ pub trait Unmapped: Send + Sync {
 }
 
 impl DaemonFaults {
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code, reason = "a window's: Linux's"))]
     fn fault_with(&self, fault: Fault) -> BoxFuture<'_, Result<()>> {
         let Some(unmapped) = &self.unmapped else {
             let reply = self.client.request(&Request::Fault(fault));
@@ -1741,7 +1778,6 @@ impl DaemonFaults {
     }
 }
 
-#[cfg(target_os = "linux")]
 impl Faults for DaemonFaults {
     fn size(&self) -> u64 {
         self.size
@@ -1757,74 +1793,5 @@ impl Faults for DaemonFaults {
 
     fn lost(&self) -> bool {
         self.client.lost.happened()
-    }
-}
-
-/// cladefs: a VM process's window on macOS, where it has none: the VMM there is its window's second
-/// stage itself (Hypervisor.framework, board 13069), not this process's userfaultfd's. Its stage
-/// and fault thread are never made ([`CellClient`] makes no window there), so they hold no value:
-/// every use of one is a `match` of nothing, and a client without a window does what it does
-/// without one on Linux.
-#[cfg(not(target_os = "linux"))]
-mod no_window {
-    use super::DaemonFaults;
-    use cladefs_core::dax::{Anew, Private};
-    use cladefs_core::error::{Errno, Result};
-    use cladefs_core::pages::PhysLocation;
-
-    /// A window's second stage that is never made.
-    pub(super) enum NoStage {}
-
-    /// A thread serving a window's faults that is never started.
-    pub(super) enum NoFaultThread {}
-
-    impl NoStage {
-        pub(super) async fn make_private(
-            &self,
-            _: &DaemonFaults,
-            _: u64,
-            _: u64,
-        ) -> Result<(), Errno> {
-            match *self {}
-        }
-        pub(super) fn private_runs(&self) -> Result<Vec<std::ops::Range<u64>>> {
-            match *self {}
-        }
-        pub(super) fn private_pages(&self) -> u64 {
-            match *self {}
-        }
-        pub(super) fn private_costs(&self) -> [u64; 3] {
-            match *self {}
-        }
-        pub(super) fn prefault(&self, _: u64, _: u64) {
-            match *self {}
-        }
-        pub(super) fn budget(&self) -> usize {
-            match *self {}
-        }
-        pub(super) fn size(&self) -> u64 {
-            match *self {}
-        }
-        pub(super) fn taken(&self) -> [u64; 2] {
-            match *self {}
-        }
-        pub(super) fn installed(&self) -> u64 {
-            match *self {}
-        }
-        pub(super) fn release(&self) {
-            match *self {}
-        }
-    }
-
-    impl cladefs_core::SecondStage for NoStage {
-        fn map(&self, _: u64, _: PhysLocation, _: u64) {
-            match *self {}
-        }
-        fn unmap(&self, _: u64, _: u64, _: Private) {
-            match *self {}
-        }
-        fn remap(&self, _: u64, _: u64, _: Private, _: &[Anew]) {
-            match *self {}
-        }
     }
 }
