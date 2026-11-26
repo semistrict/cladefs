@@ -102,3 +102,31 @@ file a build reads through the window (a crate's sources, a `Cargo.toml`) is suc
 - One run on a loaded host; the rebuild times are not a measurement.
 - The run's `cachestat` sums counted each hard link of cargo's outputs (`deps/` and `debug/`):
   they read 11.2 GiB cached against `Cached` 7.9 GiB. The script counts each inode once since.
+
+## On the new kernel (guest-kernel-2d730c0a, 6.18.62 with Linux's fix), the same afternoon
+
+hotbed's VMs moved to the new kernel at about 13:15 (board 13582, 13454). The same measurement,
+building `cladefsd` (main had split `cladefs`; not the same build, so its times don't compare),
+in an 18.5 GiB ubu1 guest ([guest-new-kernel.log](ubu1-guest-page-cache-2026-11-26/guest-new-kernel.log)):
+
+| phase | guest Cached | outputs DAX |
+| --- | --- | --- |
+| built (289.8 s) | 1348 MiB | 4130 of 7350 |
+| warm rebuild | 417 MiB | 7325 of 7350 |
+| fadvise DONTNEED on the outputs | 20 MiB | 7350 of 7350 |
+
+The build itself ran into ubu1's memory limit, and hotbed's worker reclaimed this guest's page cache
+five times in three minutes (`reclaimed guest page cache under host memory pressure`): on this
+kernel each drop evicted the outputs' inodes, and the build read them back through the window.
+On the old one the same drops left them page-cache inodes, and the guest held 7.9 GiB. cladefsd
+then let the VM go and killed it in the rebuild after the fadvise (`closed its connection,
+reaching pages still`), as it had killed seven old-kernel VMs on ubu1 earlier that day (board
+13944), so the run has no drop_caches phases.
+
+scripts/sample-vm-memory.py sampled every hotbed VM on ubu1 and asahimbp every 5 minutes for two
+hours after the switch ([fleet-samples.jsonl](ubu1-guest-page-cache-2026-11-26/fleet-samples.jsonl)):
+the guest cgroup of a VM running a command held a median 0.4 GiB of file cache on ubu1 (51 samples)
+and 0.8 GiB on asahimbp (20), but up to 9.6 and 12.2 GiB during big builds, until hotbed's reclaim,
+which runs only once the host is short (5% PSI, cladefsd pressure, 80% of its limit), dropped it.
+The kernel's fix makes a drop stick; when to drop, before the host is short, is still hotbed's
+guestd's to decide (doc-30 §2). Too few old-kernel VMs ran in the window to compare.
