@@ -4,8 +4,9 @@
 # Kernel: sim
 # Killer: scenarios kick_races_stop
 #
-# board 10373: cladefs_dax_kick read `stopping` and queued the budget's worker with no lock against
-# cladefs_dax_stop, which set it and then cancel_work_sync'ed the work: a kick that read it before
+# board 10373: cladefs_dax_kick read whether the worker stops (`stopping`, now `stops`) and
+# queued the budget's worker with no lock against cladefs_dax_stop, which set it and then
+# cancel_work_sync'ed the work: a kick that read it before
 # a stop queued the round after the stop's cancel, and the worker ran on a filesystem unmounting
 # (relieve's igrab, Busy inodes after unmount) or frozen (writeback while cladefs_freeze ran).
 # Found by the verifying review of board 8555 (hotbed review 70); no test kicked across a stop.
@@ -15,11 +16,11 @@
 --- a/guest/linux/fs/cladefs/dax.c
 +++ b/guest/linux/fs/cladefs/dax.c
 @@ -214,10 +214,7 @@
- 	if (READ_ONCE(dax->stopping))
+ 	if (READ_ONCE(dax->stops))
  		return;
  	cladefs_dax_pause_file(CLADEFS_DAX_STEP_KICK, 0);
 -	mutex_lock(&dax->kick_lock);
--	if (!dax->stopping)
+-	if (!dax->stops)
 -		queue_work(dax->wq, &dax->work);
 -	mutex_unlock(&dax->kick_lock);
 +	queue_work(dax->wq, &dax->work);

@@ -211,11 +211,11 @@ void cladefs_dax_kick(struct cladefs_dax *dax, bool clean)
 {
 	if (clean)
 		atomic_set(&dax->clean, 1);
-	if (READ_ONCE(dax->stopping))
+	if (READ_ONCE(dax->stops))
 		return;
 	cladefs_dax_pause_file(CLADEFS_DAX_STEP_KICK, 0);
 	mutex_lock(&dax->kick_lock);
-	if (!dax->stopping)
+	if (!dax->stops)
 		queue_work(dax->wq, &dax->work);
 	mutex_unlock(&dax->kick_lock);
 }
@@ -2225,7 +2225,7 @@ static void cladefs_dax_work(struct work_struct *work)
 	atomic64_set(&dax->rebinds_done, asked);
 	atomic64_inc(&dax->rounds);
 	wake_up_all(&dax->budget_wait);
-	if (every && !READ_ONCE(dax->stopping)) {
+	if (every && !READ_ONCE(dax->stops)) {
 		msleep(every);
 		cladefs_dax_kick(dax, false);
 	}
@@ -3261,8 +3261,8 @@ void cladefs_dax_remove_volume(struct cladefs_dax *dax, struct cladefs_dax_volum
 	void *entry;
 	cladefs_nofs_scope();
 
-	/* cladefs: the budget's worker, which uses the volume's files, waits. */
-	cladefs_dax_stop(dax);
+	/* cladefs: the budget's worker, which uses the volume's files, stopped by the caller. */
+	WARN_ON_ONCE(!READ_ONCE(dax->stops));
 	/* Reclaim may hold one of its files still: it finds it has no volume. */
 	mutex_lock(&dax->files_lock);
 	list_del(&volume->list);
@@ -3289,7 +3289,6 @@ void cladefs_dax_remove_volume(struct cladefs_dax *dax, struct cladefs_dax_volum
 		atomic_long_dec(&dax->unsealed);
 	xa_destroy(&volume->unsealed);
 	kfree(volume);
-	cladefs_dax_start(dax);
 }
 
 /*
@@ -3324,27 +3323,36 @@ int cladefs_dax_settle(struct cladefs_dax *dax)
 }
 
 /*
- * cladefs: stops the budget's worker, and waits for it: before a volume goes, or the filesystem
- * unmounts, or freezes. A write it would have made room for waits meanwhile.
+ * cladefs: stops the budget's worker, and waits for it: before a volume's inodes are evicted, or
+ * the filesystem freezes. A write it would have made room for waits meanwhile. Stops are counted,
+ * each held until the cladefs_dax_start that balances it, whatever other stops and starts come
+ * meanwhile: one flag, a volume's leave cleared the stop of another volume's eviction under way,
+ * and the worker's relieve took that volume's inodes (board 12453).
  */
 void cladefs_dax_stop(struct cladefs_dax *dax)
 {
 	/* cladefs: under the kicks' lock, so that none queues a round once it is set (board 10373). */
 	mutex_lock(&dax->kick_lock);
-	WRITE_ONCE(dax->stopping, true);
+	WRITE_ONCE(dax->stops, dax->stops + 1);
 	mutex_unlock(&dax->kick_lock);
 	cancel_work_sync(&dax->work);
 }
 
-/* cladefs: starts the budget's worker again, unless the filesystem is frozen, and has it run. */
+/*
+ * cladefs: balances one cladefs_dax_stop, and has the worker run once no other stop holds it: a
+ * frozen filesystem's does, until its thaw.
+ */
 void cladefs_dax_start(struct cladefs_dax *dax)
 {
-	if (cladefs_is_frozen(dax->filesystem))
-		return;
+	bool started;
+
 	mutex_lock(&dax->kick_lock);
-	WRITE_ONCE(dax->stopping, false);
+	if (!WARN_ON_ONCE(!dax->stops))
+		WRITE_ONCE(dax->stops, dax->stops - 1);
+	started = !dax->stops;
 	mutex_unlock(&dax->kick_lock);
-	cladefs_dax_kick(dax, false);
+	if (started)
+		cladefs_dax_kick(dax, false);
 }
 
 /*
@@ -3364,8 +3372,8 @@ void cladefs_dax_frozen(struct cladefs_dax *dax)
 }
 
 /*
- * Stops the budget's worker, once nothing writes any more: before the filesystem unmounts, or
- * freezes, while its device takes requests.
+ * Stops the budget's worker, once nothing writes any more, before the filesystem freezes, while
+ * its device takes requests: until cladefs_dax_thaw.
  */
 void cladefs_dax_quiesce(struct cladefs_dax *dax)
 {

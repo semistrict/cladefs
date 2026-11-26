@@ -128,16 +128,27 @@ unsigned long sim_mm_writable_mapping(u64 page, u64 pages);
 void sim_mm_watch(unsigned long addr);
 
 /*
- * A mount, as fs/cladefs/super.c's, of the sim's Fxfs (cladefs/cladefs.c): its files, opened, and the model
- * of what each holds (kernel/shadow.c). Freed, it syncs, unmaps what maps its files, and evicts
- * those it hasn't, as an unmount does.
+ * A mount, as fs/cladefs/super.c's, of a volume of the sim's Fxfs (cladefs/cladefs.c): its files,
+ * opened, and the model of what each holds (kernel/shadow.c); its filesystem, whose DAX and model
+ * of Fxfs its other volumes share (sim_mount_volume). Freed, it unmaps what maps its files, then
+ * unmounts as cladefs_vfs_kill_sb does: the budget's worker stopped, the volume synced, its files'
+ * inodes evicted, and the volume gone, the last closing the filesystem. With `hold_kill` set, it
+ * waits once it has stopped the worker, `killing` then, until a test clears it.
  */
+struct sim_filesystem;
 struct sim_mount {
 	struct super_block sb;
 	struct cladefs_vfs_info *info;
 	struct list_head files, shadows;
+	struct sim_filesystem *filesystem;
+	bool hold_kill, killing;
 };
 struct sim_mount *sim_mount_new(void);
+/*
+ * Another volume of `mount`'s filesystem, mounted, its files its own: NULL if its share of the DAX
+ * failed, as a sweep has it.
+ */
+struct sim_mount *sim_mount_volume(struct sim_mount *mount);
 void sim_mount_free(struct sim_mount *mount);
 /*
  * The end of a run, which every test calls once its tasks are done (TASK-149.15, TASK-149.18): the

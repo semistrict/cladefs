@@ -308,19 +308,20 @@ struct cladefs_dax *cladefs_dax_create(struct cladefs_filesystem *filesystem);
 /*
  * `dax`'s share for the volume `fs`, mounted: its files, by their inode numbers; or an ERR_PTR.
  * cladefs_dax_remove_volume gives it back, before the volume unmounts, with others staying; otherwise
- * cladefs_dax_quiesce stops what uses it, and cladefs_dax_destroy frees it.
+ * cladefs_dax_destroy frees it.
  */
 struct cladefs_dax_volume *cladefs_dax_add_volume(struct cladefs_dax *dax, struct cladefs *fs);
 /*
  * Lets go of what `dax`'s window keeps of `volume`, its inodes evicted, its data synced, and frees
- * it: the window goes on for the other volumes.
+ * it, with the budget's worker stopped (cladefs_dax_stop): the window goes on for the other volumes.
  */
 void cladefs_dax_remove_volume(struct cladefs_dax *dax, struct cladefs_dax_volume *volume);
 /* Writes back every DAX file's dirty pages, before a sync: 0, or the first error. */
 int cladefs_dax_settle(struct cladefs_dax *dax);
 /*
- * cladefs: stops the budget's worker (dax.c), and waits for it, before a volume unmounts;
- * cladefs_dax_start starts it again, unless the filesystem is frozen.
+ * cladefs: stops the budget's worker (dax.c), and waits for it, before a volume's inodes are
+ * evicted. Stops are counted: cladefs_dax_start balances one, and the worker runs again once
+ * none holds it, a freeze's (cladefs_dax_quiesce) included (board 12453).
  */
 void cladefs_dax_stop(struct cladefs_dax *dax);
 void cladefs_dax_start(struct cladefs_dax *dax);
@@ -330,8 +331,8 @@ void cladefs_dax_start(struct cladefs_dax *dax);
  */
 void cladefs_dax_frozen(struct cladefs_dax *dax);
 /*
- * Stops `dax`'s background work, once nothing writes, before the filesystem unmounts, or freezes;
- * cladefs_dax_thaw starts it again.
+ * Stops `dax`'s background work, once nothing writes, before the filesystem freezes;
+ * cladefs_dax_thaw balances it (cladefs_dax_stop, cladefs_dax_start).
  */
 void cladefs_dax_quiesce(struct cladefs_dax *dax);
 void cladefs_dax_thaw(struct cladefs_dax *dax);

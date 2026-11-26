@@ -3026,13 +3026,17 @@ static void cladefs_vfs_filesystem_leave(struct cladefs_vfs_info *info)
 		filesystem->volumes_frozen--;
 	}
 	filesystem->volumes--;
-	if (info->dax_volume && filesystem->volumes)
-		cladefs_dax_remove_volume(info->dax, info->dax_volume);
-	else if (info->dax && !filesystem->volumes)
-		cladefs_dax_quiesce(info->dax);
-	/* cladefs: the budget's worker, which cladefs_vfs_kill_sb stopped, for the volumes left. */
-	else if (info->dax)
+	/*
+	 * cladefs: the budget's worker, which cladefs_vfs_kill_sb stopped for the volume's eviction:
+	 * the volume goes from the DAX with it stopped, and that stop is balanced for the volumes
+	 * left. The last's holds until cladefs_dax_destroy. Stops are counted: another volume's
+	 * eviction, or a freeze, holds the worker stopped still (board 12453).
+	 */
+	if (info->dax && filesystem->volumes) {
+		if (info->dax_volume)
+			cladefs_dax_remove_volume(info->dax, info->dax_volume);
 		cladefs_dax_start(info->dax);
+	}
 	if (info->fs) {
 		nofs = memalloc_nofs_save();
 		cladefs_unmount(info->fs);
@@ -3269,8 +3273,8 @@ static void cladefs_vfs_kill_sb(struct super_block *sb)
 	struct cladefs_vfs_info *info = cladefs_vfs_info(sb);
 
 	/*
-	 * cladefs: the DAX's budget's worker holds no inode of the volume as the VFS
-	 * evicts them all: it is started again as the volume leaves, if others stay.
+	 * cladefs: the DAX's budget's worker holds no inode of the volume as the VFS evicts them all:
+	 * the volume's leave balances this stop, if others stay (cladefs_vfs_filesystem_leave).
 	 */
 	if (info->dax)
 		cladefs_dax_stop(info->dax);

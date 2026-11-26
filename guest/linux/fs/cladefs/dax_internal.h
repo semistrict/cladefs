@@ -68,7 +68,7 @@ enum cladefs_dax_step {
 	 */
 	CLADEFS_DAX_STEP_COUNTED = 10,
 	/*
-	 * A kick of the budget's worker that found it not stopping, before it takes the lock it
+	 * A kick of the budget's worker that found it not stopped, before it takes the lock it
 	 * queues the worker's round under (cladefs_dax_kick, board 10373): of no file, waiting unless
 	 * cladefs.dax_pause_ino names one. Not to be paused in a parameter's setter
 	 * (cladefs.dax_rebind_now, dax_rebind_every kick): it holds the module's parameter lock, which
@@ -283,8 +283,9 @@ struct cladefs_dax {
 	 * test asks; its rounds, which those it throttles wait for (`budget_wait`); whether it is to
 	 * write back whatever is dirty (`clean`), as asked since its last round; the asks to rebind
 	 * everything it can (cladefs.dax_rebind_now), and those its rounds have served, which a check
-	 * waits for; and whether it stops, the filesystem unmounting or freezing, set under
-	 * `kick_lock`, which a kick reads it and queues a round under (cladefs_dax_kick, board 10373).
+	 * waits for; and how many stop it, a volume's inodes evicted or the filesystem frozen, each
+	 * until its start (cladefs_dax_stop, board 12453), changed under `kick_lock`, which a kick
+	 * reads it and queues a round under (cladefs_dax_kick, board 10373).
 	 */
 	struct work_struct work;
 	wait_queue_head_t budget_wait;
@@ -292,7 +293,7 @@ struct cladefs_dax {
 	atomic_t clean;
 	atomic64_t rebinds_asked, rebinds_done;
 	struct mutex kick_lock;
-	bool stopping;
+	unsigned int stops;
 	/* cladefs: the page-cache inodes in the volumes' `unsealed`, which the worker prunes. */
 	atomic_long_t unsealed;
 	/*

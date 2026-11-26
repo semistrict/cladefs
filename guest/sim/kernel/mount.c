@@ -25,6 +25,18 @@ struct sim_file {
 	bool evicted;
 };
 
+/*
+ * A filesystem, as super.c's cladefs_vfs_filesystem: the DAX, and the model of Fxfs, which its
+ * volumes share, the files of each a volume's own; how many volumes it has, under its lock, which
+ * a volume's leave holds.
+ */
+struct sim_filesystem {
+	struct mutex lock;
+	unsigned int volumes;
+	struct cladefs_dax *dax;
+	struct cladefs *fs;
+};
+
 /* The mount, while there is one; whether a run made one, and whether its end was checked. */
 static struct sim_mount *live;
 static bool mounted, ended;
@@ -44,6 +56,7 @@ static void unended(void)
 static __noreturn void mount_failed(struct sim_mount *mount, const char *why, long err)
 {
 	sim_unexpected("the mount: %s: %ld", why, err);
+	kfree(mount->filesystem);
 	kfree(mount->info);
 	kfree(mount);
 	sim_log("sim: the mount failed: the run ends\n");
@@ -56,6 +69,7 @@ struct sim_mount *sim_mount_new(void)
 {
 	struct sim_mount *mount = kzalloc(sizeof(*mount), GFP_KERNEL);
 	struct cladefs_vfs_info *info = kzalloc(sizeof(*info), GFP_KERNEL);
+	struct sim_filesystem *filesystem = kzalloc(sizeof(*filesystem), GFP_KERNEL);
 	struct cladefs *fs = cladefs_sim_new();
 
 	if (!mounted)
@@ -67,6 +81,7 @@ struct sim_mount *sim_mount_new(void)
 	INIT_LIST_HEAD(&mount->files);
 	INIT_LIST_HEAD(&mount->shadows);
 	mount->info = info;
+	mount->filesystem = filesystem;
 	if (!fs)
 		mount_failed(mount, "no device", -ENODEV);
 	info->fs = fs;
@@ -83,7 +98,43 @@ struct sim_mount *sim_mount_new(void)
 	}
 	mount->sb.s_fs_info = info;
 	mount->sb.s_maxbytes = MAX_LFS_FILESIZE;
+	mutex_init(&filesystem->lock);
+	filesystem->volumes = 1;
+	filesystem->dax = info->dax;
+	filesystem->fs = fs;
 	live = mount;
+	return mount;
+}
+
+/*
+ * As cladefs_vfs_filesystem_join's and cladefs_vfs_fill_super's, of a volume of a filesystem
+ * mounted: its files are the model of Fxfs's as the filesystem's others are, their inode numbers
+ * apart. Not the run's mount, which sim_end checks: a test unmounts it.
+ */
+struct sim_mount *sim_mount_volume(struct sim_mount *of)
+{
+	struct sim_filesystem *filesystem = of->filesystem;
+	struct sim_mount *mount = kzalloc(sizeof(*mount), GFP_KERNEL);
+	struct cladefs_vfs_info *info = kzalloc(sizeof(*info), GFP_KERNEL);
+
+	INIT_LIST_HEAD(&mount->files);
+	INIT_LIST_HEAD(&mount->shadows);
+	mount->info = info;
+	mount->filesystem = filesystem;
+	mount->sb.s_fs_info = info;
+	mount->sb.s_maxbytes = MAX_LFS_FILESIZE;
+	info->fs = filesystem->fs;
+	info->dax = filesystem->dax;
+	info->dax_volume = cladefs_dax_add_volume(info->dax, info->fs);
+	if (IS_ERR(info->dax_volume)) {
+		sim_unexpected("a volume: cladefs_dax_add_volume: %ld", PTR_ERR(info->dax_volume));
+		kfree(info);
+		kfree(mount);
+		return NULL;
+	}
+	mutex_lock(&filesystem->lock);
+	filesystem->volumes++;
+	mutex_unlock(&filesystem->lock);
 	return mount;
 }
 
@@ -140,20 +191,30 @@ static int sync_mount(struct sim_mount *mount)
 }
 
 /*
- * As an unmount: every mapping of the mount's files gone, synced, as the VFS syncs a filesystem it
- * unmounts, the files' inodes evicted (evict_inodes), then cladefs_vfs_kill_sb's, of the last volume.
+ * As an unmount: every mapping of the mount's files gone; then cladefs_vfs_kill_sb's: the budget's
+ * worker stopped, then kill_anon_super's sync, as the VFS syncs a filesystem it unmounts, and the
+ * files' inodes evicted (evict_inodes); then cladefs_vfs_filesystem_leave's, under the
+ * filesystem's lock: the volume gone, and the stop balanced for the volumes left. The last
+ * volume's stop holds until cladefs_dax_destroy, and it goes from the DAX too, which super.c leaves
+ * to the destroy as the device goes, so that the end sees the window map nothing.
  */
 void sim_mount_free(struct sim_mount *mount)
 {
+	struct sim_filesystem *filesystem = mount->filesystem;
 	struct cladefs_vfs_info *info = mount->info;
 	struct sim_file *file, *next;
 	struct vm_area_struct *vma, *after;
+	unsigned int volumes;
 	int err;
 
 	list_for_each_entry_safe(vma, after, &sim_mm.vmas, mm_list) {
 		if (vma->vm_file->f_inode->i_sb == &mount->sb)
 			sim_munmap(vma->vm_start);
 	}
+	cladefs_dax_stop(info->dax);
+	WRITE_ONCE(mount->killing, true);
+	while (READ_ONCE(mount->hold_kill))
+		msleep(1);
 	err = sync_mount(mount);
 	if (err)
 		sim_panic("syncing the mount: %d", err);
@@ -161,10 +222,17 @@ void sim_mount_free(struct sim_mount *mount)
 		if (!file->evicted)
 			sim_file_evict(&file->file);
 	}
-	cladefs_dax_quiesce(info->dax);
+	mutex_lock(&filesystem->lock);
+	volumes = --filesystem->volumes;
 	cladefs_dax_remove_volume(info->dax, info->dax_volume);
-	cladefs_dax_destroy(info->dax);
-	cladefs_sim_free(info->fs);
+	if (volumes)
+		cladefs_dax_start(info->dax);
+	mutex_unlock(&filesystem->lock);
+	if (!volumes) {
+		cladefs_dax_destroy(info->dax);
+		cladefs_sim_free(info->fs);
+		kfree(filesystem);
+	}
 	list_for_each_entry_safe(file, next, &mount->files, list) {
 		list_del(&file->list);
 		kfree(file);

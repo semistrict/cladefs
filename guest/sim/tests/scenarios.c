@@ -2010,6 +2010,76 @@ static void kick_races_stop(void)
 	cow_check_file("after the kick", 8 * PAGE_SIZE);
 }
 
+/*
+ * board 12453: two more volumes of the filesystem unmount at once, the scenario's own staying. The
+ * first's cladefs_vfs_kill_sb stops the budget's worker and is held there, before its sync and
+ * eviction (kill_anon_super), as the second's whole unmount, its leave starting the worker again
+ * for the volumes left, and a freeze and its thaw (cladefs_dax_quiesce, cladefs_dax_thaw), come and
+ * go, and a seal's end asks for a round, four dirty private pages waiting for one. Each stop holds
+ * until the start that balances it: no round runs while the first's eviction is to come; once its
+ * leave balances its stop, the worker serves a kick. One flag, the second's leave cleared the
+ * first's stop, and the worker ran with the first's inodes being evicted: on a guest, relieve's
+ * igrab of one, Busy inodes after unmount.
+ */
+static void unmount_volume(void *arg)
+{
+	sim_mount_free(arg);
+}
+
+static void volume_leaves_during_eviction(void)
+{
+	struct cladefs_dax *dax = mount->info->dax;
+	struct sim_mount *evicting, *leaving;
+	struct task_struct *unmount;
+	u64 writebacks;
+	struct file *file;
+	char bytes[PAGE_SIZE];
+
+	evicting = sim_mount_volume(mount);
+	leaving = sim_mount_volume(mount);
+	/* A sweep's failure took one's share of the DAX: nothing to see. */
+	if (!evicting || !leaving) {
+		if (evicting)
+			sim_mount_free(evicting);
+		if (leaving)
+			sim_mount_free(leaving);
+		return;
+	}
+	/* Each volume going has a file, an inode to evict. */
+	fill(bytes, sizeof(bytes), 7);
+	file = sim_file_new(evicting);
+	check(sim_write(file, 0, bytes, sizeof(bytes)) == sizeof(bytes), "the evicting volume's write");
+	file = sim_file_new(leaving);
+	check(sim_write(file, 0, bytes, sizeof(bytes)) == sizeof(bytes), "the leaving volume's write");
+	cow_mapped_file(8);
+	WRITE_ONCE(evicting->hold_kill, true);
+	unmount = sim_spawn("unmount", unmount_volume, evicting);
+	sim_await(READ_ONCE(evicting->killing), "the unmount never stopped the worker");
+	/* Its sync writes back the filesystem's every file: the pages are dirtied after. */
+	sim_mount_free(leaving);
+	cow_put_pages(0, 3, 1);
+	check(sim_dax_stat(mount, "dax_dirty_pages") == 4, "%llu dirty pages, not 4",
+	      sim_dax_stat(mount, "dax_dirty_pages"));
+	writebacks = sim_dax_stat(mount, "dax_writebacks");
+	cladefs_dax_kick(dax, true);
+	cladefs_dax_quiesce(dax);
+	cladefs_dax_thaw(dax);
+	/* Time for a round started too soon to run. */
+	msleep(100);
+	check(sim_dax_stat(mount, "dax_writebacks") == writebacks &&
+	      sim_dax_stat(mount, "dax_dirty_pages") == 4,
+	      "the worker ran with a volume's eviction to come: dax_writebacks %llu -> %llu, dax_dirty_pages 4 -> %llu",
+	      writebacks, sim_dax_stat(mount, "dax_writebacks"),
+	      sim_dax_stat(mount, "dax_dirty_pages"));
+	WRITE_ONCE(evicting->hold_kill, false);
+	wait_for(unmount);
+	/* Its leave balanced the last stop: started again, the worker serves a kick. */
+	cow_put_pages(4, 7, 2);
+	cladefs_dax_kick(dax, true);
+	sim_await(!sim_dax_stat(mount, "dax_dirty_pages"), "no round once the last stop was balanced");
+	cow_check_file("after the volumes left", 8 * PAGE_SIZE);
+}
+
 static const struct {
 	const char *name;
 	void (*run)(void);
@@ -2065,6 +2135,7 @@ static const struct {
 	SCENARIO(shared_reads_stay),
 	SCENARIO(knobs_against_unmount),
 	SCENARIO(kick_races_stop),
+	SCENARIO(volume_leaves_during_eviction),
 };
 
 static void scenario(void *arg)

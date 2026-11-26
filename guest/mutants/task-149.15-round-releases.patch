@@ -17,6 +17,6 @@
  	atomic64_inc(&dax->rounds);
  	wake_up_all(&dax->budget_wait);
 +	cladefs_dax_released(dax);
- 	if (every && !READ_ONCE(dax->stopping)) {
+ 	if (every && !READ_ONCE(dax->stops)) {
  		msleep(every);
  		cladefs_dax_kick(dax, false);
