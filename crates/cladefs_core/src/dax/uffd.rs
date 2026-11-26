@@ -332,6 +332,19 @@ pub fn guest_thread_started() {
     guest_thread(thread);
 }
 
+/// cladefs: the calling thread, which [`guest_thread_started`] said is a vCPU's, is no more: it
+/// exits. Its ID is the kernel's to reuse, for any thread, a worker's of KVM's whose faults may be
+/// loads among them, and a process that runs many VMs one after another, as libmachine's does, would
+/// keep every one it ever ran otherwise (board 13067's review).
+pub fn guest_thread_ended() {
+    // SAFETY: Plain system call.
+    let thread = unsafe { libc::syscall(libc::SYS_gettid) } as u32;
+    let mut threads = GUEST_THREADS.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(at) = threads.iter().position(|&each| each == thread) {
+        threads.swap_remove(at);
+    }
+}
+
 /// cladefs: thread `thread`'s accesses are the guest's own ([`guest_thread_started`]).
 pub fn guest_thread(thread: u32) {
     GUEST_THREADS.write().unwrap_or_else(std::sync::PoisonError::into_inner).push(thread);

@@ -1038,7 +1038,7 @@ fn workers_take_serve_and_return_requests() {
     assert_eq!(interrupt.0.load(Ordering::Relaxed), 3);
 }
 
-/// TASK-535: a queue whose event cannot enter epoll fails activation synchronously.
+/// TASK-535: a queue whose event poll can't wait on fails activation synchronously.
 #[test]
 fn workers_refuse_an_unwatchable_queue_event() {
     let dir = daemon();
@@ -1046,7 +1046,7 @@ fn workers_refuse_an_unwatchable_queue_event() {
     let mut device =
         Device::new(config(&dir, "store"), 2, Arc::new(FakeVm::default()), lost).unwrap();
     device.activate(device.features(), Arc::new(Counted::default())).unwrap();
-    // A regular file is an open descriptor, but Linux refuses to watch it with epoll.
+    // A regular file is an open descriptor, but one poll finds always readable: no event.
     let event = std::fs::File::create(dir.0.join("queue-event")).unwrap().into();
     let queue =
         FakeQueue { available: Default::default(), returned: mpsc::channel().0, used: Vec::new() };

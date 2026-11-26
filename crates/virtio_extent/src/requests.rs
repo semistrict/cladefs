@@ -463,6 +463,24 @@ mod linux {
             &self.served
         }
     }
+
+    impl crate::workers::Serve for Requests {
+        fn serve(
+            self: Arc<Self>,
+            buffers: Result<Buffers, crate::BoxError>,
+            complete: crate::workers::Completion,
+        ) {
+            Requests::serve(&self, buffers, complete);
+        }
+
+        fn wait_idle(&self) {
+            Requests::wait_idle(self);
+        }
+
+        fn log_served(&self) {
+            self.served.log();
+        }
+    }
 }
 
 #[cfg(test)]

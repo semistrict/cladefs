@@ -20,12 +20,15 @@
 //! - [`Device`] (Linux): a device's cell, configuration space, notices, DAX window and
 //!   snapshots, which a VMM's adapter holds beside its transport's state.
 //! - [`Buffers`], [`handle`] and, on Linux, [`Requests`]: serving a request whose buffers the
-//!   adapter took off a queue, over any [`Backend`]; on Linux, [`Workers`], a thread each queue,
-//!   taking requests off a [`RequestQueue`] of the VMM's transport and returning them.
+//!   adapter took off a queue, over any [`Backend`]; [`Workers`], a thread each queue, taking
+//!   requests off a [`RequestQueue`] of the VMM's transport as its event (an eventfd, or a pipe on
+//!   macOS) is notified, and returning them.
 //! - [`RequestQueue`], [`QueueInterrupt`], [`ConfigInterrupt`], [`WindowVm`] and
 //!   [`PrefaultGuestMemory`]: what only the VMM can do,
 //!   which its adapter implements.
 //! - [`persist`]: the device in a snapshot of its VM, as plain values.
+//! - [`vcpu`] (Linux): a VMM's vCPUs' retries of a guest's accesses failing as the window changes,
+//!   and what they tell of one that keeps failing; [`kvm`] (x86-64 Linux): KVM's prefault.
 //!
 //! README.md lists what a VMM's adapter does.
 
@@ -37,14 +40,20 @@ mod buffers;
 mod config;
 #[cfg(target_os = "linux")]
 mod device;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub mod kvm;
 mod notices;
 pub mod persist;
 pub mod protocol;
 mod requests;
 mod sync;
 #[cfg(target_os = "linux")]
-mod window;
+pub mod vcpu;
 #[cfg(target_os = "linux")]
+mod window;
+// Started by the device alone, which is Linux's until cladefs's daemon client builds on macOS
+// (board 13471): its tests run everywhere.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod workers;
 
 pub use backend::Backend;
@@ -59,7 +68,6 @@ pub use requests::Requests;
 pub use requests::{Served, handle};
 #[cfg(target_os = "linux")]
 pub use window::{DaxWindowError, PrefaultGuestMemory, WindowVm, dax_window_at};
-#[cfg(target_os = "linux")]
 pub use workers::{Popped, QueueInterrupt, RequestQueue, WorkerQueue, Workers};
 
 /// An error of the VMM's, which the device passes on.

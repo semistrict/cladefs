@@ -13,7 +13,9 @@ adapter) and libmachine (`crates/libmachine`, board 13067).
   driver's features (`check_acked`) and of a snapshot's version (`check_version`).
 - **Configuration** (`Config`): a device's, as a VMM's user gives it, serializable, with its
   validation and the features it makes.
-- **The device** (`Device`, Linux): opens its cell in cladefs's extent daemon, builds and reads
+- **The device** (`Device`, Linux): opens its cell in cladefs's extent daemon (at its
+  configuration's socket, `Device::new`, or over a connection the VMM made, `Device::connected`:
+  libmachine's to the daemon of its own process, board 13471), builds and reads
   its configuration space, hears the daemon's notices (capacity, asks for
   the guest's stats) and has the VMM raise a configuration change interrupt for them, makes and
   creates the DAX window, and takes snapshots of the store and restores from them.
@@ -23,12 +25,19 @@ adapter) and libmachine (`crates/libmachine`, board 13067).
   `EINVAL`, within the device's `protocol::Bounds` (TASK-470); `Requests` serves a queue's on the
   threads receiving the daemon's replies, counting those in flight and what each type took;
   `Workers`, a thread each queue, take them off the VMM's `RequestQueue`s as the driver notifies
-  them.
+  them, waiting on each queue's event, an eventfd or a pipe's read end (macOS has no eventfd),
+  with epoll on Linux (the calls Firecracker's VMM seccomp filter allows) and poll(2) elsewhere,
+  so they build and run on Linux and macOS.
+- **vCPUs** (`vcpu`, Linux; `kvm`, x86-64 Linux): a vCPU's retries of a guest's accesses that fail
+  as cladefs changes the window's memory, and what it tells of one that keeps failing
+  (`FailingAccesses`); KVM's `KVM_PRE_FAULT_MEMORY` on a vCPU descriptor the VMM made
+  (`KvmPrefault`).
 - **Snapshots** (`persist`): the device's state as plain serializable values, and doc-4's
   freeze, version and fork protocol (`Device::take_snapshot`, `Device::restore`).
 
-Nothing in its public API is Firecracker's or KVM's, and it depends on no VMM's crates, nor on
-vm-memory: guest memory reaches it as host addresses and lengths.
+Nothing in its public API is Firecracker's, and nothing KVM's but `vcpu`'s and `kvm`'s, which
+every VMM on KVM needs alike; it depends on no VMM's crates, nor on vm-memory: guest memory
+reaches it as host addresses and lengths.
 
 ## What a VMM's adapter does
 
@@ -43,7 +52,8 @@ Its transport and queues:
 - As the driver activates the device: checks the features, sets up the queues the driver made
   ready, calls `Device::activate` with a `ConfigInterrupt` that raises the transport's
   configuration change interrupt, then `Device::start_workers` with each ready queue: a
-  `RequestQueue` of its transport's, the eventfd the driver notifies it through, and a
+  `RequestQueue` of its transport's, the event the driver notifies it through (an eventfd, or a
+  pipe's read end), and a
   `QueueInterrupt` (its MSI-X vector).
 - Its `RequestQueue` pops the chains the driver made available (re-enabling notifications, with
   event idx, before it finds none) and turns each into `Buffers` (`push_readable` and
@@ -67,18 +77,22 @@ The DAX window:
 - Describes the window to the driver as shared memory region `DAX_WINDOW_SHM_ID` with
   `VIRTIO_PCI_CAP_SHARED_MEMORY_CFG` capabilities on that BAR (`Device::shm_region`).
 - Gives the device a `PrefaultGuestMemory` if it can (`Device::set_prefault`): KVM's
-  `KVM_PRE_FAULT_MEMORY`, on a vCPU of its own that never runs (Firecracker's `KvmPrefault`).
+  `KVM_PRE_FAULT_MEMORY`, on a vCPU of its own that never runs (`kvm::KvmPrefault`, over the
+  descriptor of a vCPU the VMM creates with its guest's CPUID).
 
 Its vCPUs:
 
-- Call `cladefs::guest_thread_started` on each vCPU thread before it first runs.
-- Retry `KVM_RUN` when it fails with `EFAULT` while cladefs remaps the window
-  (`cladefs::AccessFailures`), and stop the VM when the failures persist, telling what it can of
-  them (`dax_window_at`, `cladefs::describe_windows`; `dax_window_at` assumes one VM per process,
-  as Firecracker's are). Firecracker exits with status 159.
+- Call `cladefs::guest_thread_started` on each vCPU thread before it first runs, and
+  `cladefs::guest_thread_ended` as it exits if the process outlives the VM (libmachine's runs
+  many), whose thread IDs the kernel reuses.
+- Retry `KVM_RUN` when it fails with `EFAULT` (or `KVM_EXIT_MEMORY_FAULT`) while cladefs remaps
+  the window, and stop the VM when the failures persist, telling what it can of them:
+  `vcpu::FailingAccesses`, a vCPU's (`dax_window_at` in what it tells assumes one VM per process,
+  as Firecracker's are). Firecracker exits with status 159; libmachine's run ends with
+  `Error::ExtentStore`.
 - Stop the VM when a cell's private pages pass `private_max` (the guest's write is refused),
   and when the extent daemon goes (`OnLost`, which `Device::new` takes; Firecracker exits with
-  status 158).
+  status 158, libmachine's machine stops with `Error::ExtentStore`).
 
 Snapshots:
 
@@ -91,5 +105,5 @@ Snapshots:
 ## Tests
 
 `cargo nextest run -p virtio_extent`: the protocol, configuration, notices and request handling
-over a fake cell in fake guest memory, everywhere; on Linux, `tests/daemon.rs` serves requests
+over a fake cell in fake guest memory, and the workers on pipe events, everywhere; on Linux, `tests/daemon.rs` serves requests
 from a daemon of the test's, and makes, activates, snapshots and restores devices over one.

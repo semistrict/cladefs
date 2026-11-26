@@ -5674,6 +5674,7 @@ version = "0.1.0"
 dependencies = [
  "bincode",
  "cladefs",
+ "cladefs_core",
  "formats",
  "fprint",
  "futures",

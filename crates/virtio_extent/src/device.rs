@@ -7,7 +7,6 @@
 //! transport's state (queues, interrupts, the window's BAR), and calls it as the driver
 //! activates and resets the device, and as the VM is snapshotted and restored.
 
-use std::path::Path;
 use std::sync::Arc;
 
 use cladefs::{CellClient, DaemonConnection, WindowMapping};
@@ -140,15 +139,30 @@ impl std::fmt::Debug for Device {
 
 impl Device {
     /// A device as `config` describes, with `queues` request queues, as its VM boots: opens its
-    /// cell, creating it if it doesn't exist, in the extent daemon, and maps its DAX window, if it
-    /// has one, into `vm`'s guest. `on_lost` stops the VM as the daemon goes.
+    /// cell, creating it if it doesn't exist, in the extent daemon listening at its
+    /// `cladefsd_socket`, and maps its DAX window, if it has one, into `vm`'s guest. `on_lost` stops
+    /// the VM as the daemon goes.
     pub fn new(
         config: Config,
         queues: u16,
         vm: Arc<dyn WindowVm>,
         on_lost: OnLost,
     ) -> Result<Self, Error> {
-        Self::make(config, queues, Making::Boot, vm, on_lost)
+        Self::make(config, Daemon::Socket, queues, Making::Boot, vm, on_lost)
+    }
+
+    /// [`Device::new`], its cell opened over `daemon`, a connection the VMM made, rather than at
+    /// `config`'s socket, which it ignores: the device's one seam to its daemon. libmachine's
+    /// connects in memory to the daemon of its own process (libcladefs, board 13471), or, from a
+    /// helper process of a server's, over the wire to the server's (board 13460).
+    pub fn connected(
+        config: Config,
+        daemon: DaemonConnection,
+        queues: u16,
+        vm: Arc<dyn WindowVm>,
+        on_lost: OnLost,
+    ) -> Result<Self, Error> {
+        Self::make(config, Daemon::Connected(daemon), queues, Making::Boot, vm, on_lost)
     }
 
     /// The device a snapshot's `state` holds, with `queues` request queues, as many as it had: its
@@ -163,20 +177,43 @@ impl Device {
         vm: Arc<dyn WindowVm>,
         on_lost: OnLost,
     ) -> Result<Self, Error> {
+        Self::restoring(state, Daemon::Socket, queues, vm, on_lost)
+    }
+
+    /// [`Device::restore`], over `daemon`, as [`Device::connected`].
+    pub fn restore_connected(
+        state: &State,
+        daemon: DaemonConnection,
+        queues: u16,
+        vm: Arc<dyn WindowVm>,
+        on_lost: OnLost,
+    ) -> Result<Self, Error> {
+        Self::restoring(state, Daemon::Connected(daemon), queues, vm, on_lost)
+    }
+
+    fn restoring(
+        state: &State,
+        daemon: Daemon,
+        queues: u16,
+        vm: Arc<dyn WindowVm>,
+        on_lost: OnLost,
+    ) -> Result<Self, Error> {
         let snapshot = Snapshot::from(state);
         let making = Making::Restore { snapshot: &snapshot, window_addr: state.window_addr };
-        let mut device = Self::make(Config::from(&state.config), queues, making, vm, on_lost)?;
+        let config = Config::from(&state.config);
+        let mut device = Self::make(config, daemon, queues, making, vm, on_lost)?;
         device.notices.set_frozen(state.frozen);
         device.mappings.clone_from(&snapshot.mappings);
         device.snapshot = Some(snapshot);
         Ok(device)
     }
 
-    /// A device as `config` describes, with `queues` request queues, made as `making` says: its
-    /// cell opened, or, restored from a snapshot, forked from the snapshot's version if it doesn't
-    /// exist; its window in guest memory where the snapshot had it.
+    /// A device as `config` describes, with `queues` request queues, made as `making` says, on
+    /// `daemon`: its cell opened, or, restored from a snapshot, forked from the snapshot's version
+    /// if it doesn't exist; its window in guest memory where the snapshot had it.
     fn make(
         config: Config,
+        daemon: Daemon,
         queues: u16,
         making: Making<'_>,
         vm: Arc<dyn WindowVm>,
@@ -207,7 +244,12 @@ impl Device {
             cladefs::userfaultfd_accessible()
                 .map_err(|err| Error::Userfaultfd(config.id.clone(), err))?;
         }
-        let cell = connect(&config.cladefsd_socket, &config.id, &on_lost)
+        let daemon = match daemon {
+            Daemon::Socket => DaemonConnection::connect(&config.cladefsd_socket),
+            Daemon::Connected(daemon) => Ok(daemon),
+        };
+        let cell = daemon
+            .map(|daemon| hear_lost(daemon, &config.id, &on_lost))
             .and_then(|daemon| match &making {
                 Making::Boot => daemon.open(&config.path_on_host, config.capacity),
                 Making::Restore { snapshot, .. } => match snapshot.target {
@@ -362,7 +404,7 @@ impl Device {
         queues: Vec<WorkerQueue<Q>>,
         name: &str,
     ) -> std::io::Result<Workers<Q>> {
-        Workers::start(queues, name, || self.requests())
+        Workers::start(queues, name, || Arc::new(self.requests()))
     }
 
     /// Activates the device, the driver having taken features `acked`, every one offered, and its
@@ -532,7 +574,9 @@ impl Device {
     /// cladefs: reopens the device's cell on a paused VM after [`Device::release_cell`] (e.g., on
     /// migration abort), recreating its DAX window and restoring the window mappings captured on
     /// release. Idempotent if already open. On error, keeps the cell released and preserves the
-    /// captured mappings so the caller may retry.
+    /// captured mappings so the caller may retry. It reconnects at the configuration's socket: a
+    /// device made over a connection of the VMM's ([`Device::connected`]) has none to reopen over
+    /// yet, libmachine's migrating none.
     pub fn reopen_cell(&mut self) -> Result<(), Error> {
         if self.cell.is_some() {
             return Ok(());
@@ -543,7 +587,8 @@ impl Device {
         } else {
             self.config.path_on_host.clone()
         };
-        let cell = connect(&self.config.cladefsd_socket, &self.config.id, &self.on_lost)
+        let cell = DaemonConnection::connect(&self.config.cladefsd_socket)
+            .map(|daemon| hear_lost(daemon, &self.config.id, &self.on_lost))
             .and_then(|daemon| daemon.open_existing(&target))
             .map_err(|err| Error::Cell(target.clone(), err))?;
         let expected = u64::from_le(self.config_space.cell);
@@ -631,23 +676,26 @@ impl Device {
     }
 }
 
-/// cladefs: a connection to the extent daemon listening at `socket`, the device `id`'s, which has
-/// `on_lost` stop the VM once the daemon goes: the guest's disk is gone then, and the VM stops at
-/// once, rather than going on with every request failing (TASK-50.2). Said before the cell opens
-/// over it, so that a daemon going as it opens, as the VM is created, stops it so too, rather than
-/// as a cell that failed to open (TASK-232).
-fn connect(
-    socket: impl AsRef<Path>,
-    id: &str,
-    on_lost: &OnLost,
-) -> Result<DaemonConnection, cladefs::Error> {
-    let daemon = DaemonConnection::connect(socket)?;
+/// How a device reaches its cell's extent daemon.
+enum Daemon {
+    /// At its configuration's `cladefsd_socket`.
+    Socket,
+    /// Over a connection the VMM made ([`Device::connected`]).
+    Connected(DaemonConnection),
+}
+
+/// cladefs: `daemon`, the device `id`'s connection to its extent daemon, which has `on_lost` stop
+/// the VM once the daemon goes: the guest's disk is gone then, and the VM stops at once, rather
+/// than going on with every request failing (TASK-50.2). Said before the cell opens over it, so
+/// that a daemon going as it opens, as the VM is created, stops it so too, rather than as a cell
+/// that failed to open (TASK-232).
+fn hear_lost(daemon: DaemonConnection, id: &str, on_lost: &OnLost) -> DaemonConnection {
     let (id, on_lost) = (id.to_owned(), on_lost.clone());
     daemon.on_lost(move || {
         error!("extent device {id}: the extent daemon went");
         on_lost();
     });
-    Ok(daemon)
+    daemon
 }
 
 /// cladefs: has the daemon's asks for the stats of `cell`'s VM process and guest ask the guest,

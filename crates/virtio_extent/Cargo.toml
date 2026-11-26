@@ -30,6 +30,9 @@ thiserror.workspace = true
 zerocopy.workspace = true
 
 [dev-dependencies]
+# The daemon tests' cells encrypt under the tests' KMS (TASK-411.28), as `-p virtio_extent` alone
+# builds them too, not only the workspace, whose dev-dependencies turn it on.
+cladefs_core = { workspace = true, features = ["tests-kms"] }
 proptest.workspace = true
 serde_json = "1.0.154"
 
