@@ -8,7 +8,7 @@ license.workspace = true
 publish = false
 
 [features]
-testing = ["cladefs_core/testing", "cladefs_fs/testing", "cladefs_wire/testing", "extent_keys/testing"]
+testing = ["cladefs_core/testing", "cladefs_fs/testing", "cladefs_wire/testing", "cladefsd/testing", "extent_keys/testing"]
 shuttle = ["cladefs_core/shuttle"]
 failpoints = ["fail/failpoints", "cladefs_core/failpoints", "cladefs_fs/failpoints", "cladefs_wire/failpoints"]
 loom = ["cladefs_core/loom"]
