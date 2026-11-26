@@ -4011,13 +4011,17 @@ async fn large_flushes_use_runs_synced_without_reading_raw_segments_back() {
     for seq in 1..=9u64 {
         cell.write(extent(seq), 0, &pattern(seq as u8, 0, chunk)).await.unwrap();
     }
+    // The commit's reads alone: not the framer's of the nine parts the writes filled, looking at
+    // each ahead as the segment fills (TASK-400), which may land in the commit otherwise: one did,
+    // a MiB, in most runs (board 13403).
+    cell.wait_looked_ahead().await;
     let before = dir.read().get("open-segments").copied().unwrap_or(0);
     cell.commit(None).await.unwrap();
     let after = dir.read().get("open-segments").copied().unwrap_or(0);
-    // None, once board 13403 is fixed: one extent's run is read back still, where Runs::Checked
-    // reads all nine.
-    assert!(
-        after - before <= chunk as u64,
+    // Runs::Checked would read all nine back.
+    assert_eq!(
+        after - before,
+        0,
         "large flush should use Runs::Synced with no raw-segment read-back, read {} bytes",
         after - before
     );
