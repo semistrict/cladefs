@@ -541,3 +541,100 @@ fn apply_diff_files_overlays_sparse_diffs_and_preserves_base_holes() {
     );
     memory_cell.close().unwrap();
 }
+
+/// board 11681: lazy `MemoryCell::Mapper::map` warms `ExtentCache` daemon-side via
+/// `MAP_MANY | MAP_MANY_WARM` rather than issuing a throwaway 680/688 KiB `READ` IPC copy, while
+/// keeping eager prefaulting intact.
+#[test]
+fn lazy_memory_cell_node_map_warms_without_throwaway_ipc_read() {
+    // SAFETY: nextest runs each test in a process of its own, whose other threads don't read
+    // the environment yet.
+    unsafe {
+        std::env::set_var("CLADEFSD_BUCKET", "memory:///cells");
+        std::env::set_var("CLADEFSD_TOKEN", "1");
+    }
+    let served = |kind: &str| -> u64 {
+        let metrics = cladefs::cladefsd::metrics::render();
+        let prefix = format!("cladefsd_requests_total{{kind=\"{kind}\"}} ");
+        metrics
+            .lines()
+            .find_map(|line| line.strip_prefix(&prefix))
+            .map_or(0, |v| v.parse().unwrap())
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || cladefs::cladefsd::server::serve(listener));
+    let ps = page_size();
+    let pages = 32u64;
+    let size = pages * ps;
+
+    let base_cell = MemoryCell::open(&socket, &dir.path().join("base"), size).unwrap();
+    let image: Vec<u8> =
+        (0..pages).flat_map(|page| pattern((page + 1) as u8, ps as usize)).collect();
+    base_cell.write(0, &image).unwrap();
+    base_cell.commit().unwrap();
+    let version = base_cell.make_version().unwrap();
+    base_cell.close().unwrap();
+
+    // Evict all cached extents so the forked window's first touch must warm cold extents.
+    cladefs_core::cache::evict_least_used(None, |_| false);
+
+    let memory_cell =
+        MemoryCell::open_forked(&socket, &dir.path().join("fork"), version, size).unwrap();
+    // SAFETY: Anonymous memory, reserving none, the test's: the window's.
+    let raw = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            size as usize,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE,
+            -1,
+            0,
+        )
+    };
+    assert_ne!(raw, libc::MAP_FAILED);
+    let base = NonNull::new(raw.cast::<u8>()).unwrap();
+    let prefaulted = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    struct CountPrefault(Arc<std::sync::atomic::AtomicU64>);
+    impl Prefault for CountPrefault {
+        fn prefault(&self, _offset: u64, len: u64) {
+            self.0.fetch_add(len, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    // SAFETY: `base` is reserved for `size` bytes and outlives `memory_cell`.
+    unsafe { memory_cell.window(base, size, Some(Arc::new(CountPrefault(prefaulted.clone())))) }
+        .unwrap();
+
+    // Prime BlockDevice's tree metadata first so only the data node map itself is measured.
+    let _ = memory_cell.extents().unwrap();
+    let read_bytes_before = cladefs::stats::stats().read_bytes;
+    let map_manys_before = served("map_many");
+
+    cladefs::guest_thread_started();
+    let got: Vec<u8> = (0..size as usize)
+        // SAFETY: Reading mapped memory-cell window pages.
+        .map(|i| unsafe { (base.as_ptr().add(i) as *const u8).read_volatile() })
+        .collect();
+    assert_eq!(got, image);
+    assert!(
+        served("map_many") > map_manys_before,
+        "lazy node map should use MAP_MANY with MAP_MANY_WARM"
+    );
+    // `image_mappings` reads at most one 4 KiB radix-tree metadata block; the old throwaway
+    // `blocks.read(start, &mut vec![0; size])` copied the entire `size` (32 pages) over IPC.
+    let read_bytes = cladefs::stats::stats().read_bytes - read_bytes_before;
+    assert!(
+        read_bytes < size,
+        "lazy node map read {read_bytes} bytes over IPC (window size {size}): throwaway data READ regression"
+    );
+    assert!(
+        prefaulted.load(std::sync::atomic::Ordering::Relaxed) >= size,
+        "eager prefaulting must still install the node's pages"
+    );
+    memory_cell.close().unwrap();
+    // SAFETY: Unmaps the test reservation after `memory_cell` closed.
+    unsafe {
+        libc::munmap(base.as_ptr().cast(), size as usize);
+    }
+}

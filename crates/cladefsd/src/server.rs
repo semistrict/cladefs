@@ -1259,7 +1259,7 @@ fn traced(span: &trace::Span, request: &Request<'_>) {
         Request::Write { data: Data::Inline(data), .. } => (Some(data.len() as u64), None),
         Request::Write { data: Data::Transfer { len, .. }, .. } => (Some(*len), None),
         Request::Map(mapping) => (Some(mapping.len), Some(1)),
-        Request::MapMany(mappings) => {
+        Request::MapMany { mappings, .. } => {
             // Each within a window, as decoding has them: summed so that no count of them wraps
             // (board 2776).
             let bytes = mappings.iter().fold(0u64, |sum, mapping| sum.saturating_add(mapping.len));
@@ -1952,10 +1952,15 @@ impl Connection {
                 self.traced_maps(began, open_cell, std::slice::from_ref(mapping));
                 Ok(())
             }
-            // cladefs: in one change of the window (TASK-92.14).
-            Request::MapMany(mappings) => {
+            // cladefs: in one change of the window (TASK-92.14; with optional daemon-side cache
+            // warming via `MAP_MANY_WARM`, board 11681).
+            Request::MapMany { mappings, warm } => {
                 let began = std::time::Instant::now();
-                open_cell.map_many(mappings).await?;
+                if *warm {
+                    open_cell.map_many_warm(mappings).await?;
+                } else {
+                    open_cell.map_many(mappings).await?;
+                }
                 self.traced_maps(began, open_cell, mappings);
                 Ok(())
             }

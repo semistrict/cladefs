@@ -510,12 +510,33 @@ impl CellClient {
             mappings => {
                 let most = (MAX_PAYLOAD / MAPPING_BYTES) as usize;
                 for mappings in mappings.chunks(most) {
-                    let map = Request::MapMany(Cow::Borrowed(mappings));
+                    let map = Request::MapMany { mappings: Cow::Borrowed(mappings), warm: false };
                     self.client.request(&map).await?;
                 }
                 Ok(())
             }
         }
+    }
+
+    /// cladefs: [`CellClient::map_many`] with [`MAP_MANY_WARM`], warming each mapped extent range
+    /// in the daemon's extent cache before installing the mappings so a following
+    /// [`CellClient::prefault`] installs already-present pages without a throwaway `READ` IPC copy
+    /// (board 11681). Always sends `MAP_MANY` (even for one mapping) so the warm flag applies.
+    pub fn map_many_warm(&self, mappings: &[WindowMapping]) -> Result<()> {
+        blocking(self.map_many_warm_async(mappings))
+    }
+
+    /// [`CellClient::map_many_warm`], waiting for the daemon holding no thread.
+    pub async fn map_many_warm_async(&self, mappings: &[WindowMapping]) -> Result<()> {
+        if mappings.is_empty() {
+            return Ok(());
+        }
+        let most = (MAX_PAYLOAD / MAPPING_BYTES) as usize;
+        for mappings in mappings.chunks(most) {
+            let map = Request::MapMany { mappings: Cow::Borrowed(mappings), warm: true };
+            self.client.request(&map).await?;
+        }
+        Ok(())
     }
 
     /// Maps `len` bytes at `offset` in `extent`, sealed, into the window at `window_offset`,

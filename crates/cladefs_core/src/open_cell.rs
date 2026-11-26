@@ -1585,7 +1585,7 @@ impl OpenCell {
         offset: u64,
         len: u64,
         window_offset: u64,
-    ) -> Result<(Arc<dyn Source>, u64)> {
+    ) -> Result<(Arc<CachedExtent>, u64)> {
         self.dax_range_checked(window_offset, len)?;
         // cladefs: a base's is of the cache's one copy of it.
         let base = self.base_holding(extent).await?;
@@ -1604,7 +1604,7 @@ impl OpenCell {
         if !offset.is_multiple_of(unit) {
             return Err(Errno::EINVAL);
         }
-        let cached: Arc<dyn Source> = match &base {
+        let cached = match &base {
             Some((base, _)) => base.cached(extent, extent_len).await?,
             None => self.cached(extent, extent_len).await?,
         };
@@ -1618,6 +1618,16 @@ impl OpenCell {
     /// ([`OpenCell::window_mappings`]) are mapped again so as its VM is restored, where a `MAP`
     /// each took a change of their own (TASK-92.14).
     pub async fn map_many(&self, mappings: &[WindowMapping]) -> Result<()> {
+        self.map_many_with(mappings, false).await
+    }
+
+    /// cladefs: [`OpenCell::map_many`], warming each mapped extent range in the daemon's
+    /// [`ExtentCache`] before installing the mappings (`MAP_MANY_WARM`, board 11681).
+    pub async fn map_many_warm(&self, mappings: &[WindowMapping]) -> Result<()> {
+        self.map_many_with(mappings, true).await
+    }
+
+    async fn map_many_with(&self, mappings: &[WindowMapping], warm: bool) -> Result<()> {
         let start = std::time::Instant::now();
         // What each maps, as far as the first that fails. Pre-size to `mappings.len()` so a large
         // `MAP_MANY` avoids 2x Vec growth overhead above `MAP_MANY_HELD` (TASK-614, board 2624).
@@ -1627,17 +1637,30 @@ impl OpenCell {
             let WindowMapping { window_offset, len, contents } = *mapping;
             let mapped = match contents {
                 MappingContents::Extent { extent, offset } => {
-                    let mapped = self.mapped_of(extent, offset, len, window_offset).await;
-                    mapped.map(|(cached, within)| {
-                        if within > 0 {
-                            let source = Some((cached, offset));
-                            pieces.push(DaxMapping { offset: window_offset, len: within, source });
+                    match self.mapped_of(extent, offset, len, window_offset).await {
+                        Ok((cached, within)) => {
+                            let warmed = if warm && within > 0 {
+                                cached.warm(offset, within).await
+                            } else {
+                                Ok(())
+                            };
+                            warmed.map(|()| {
+                                if within > 0 {
+                                    let source: Arc<dyn Source> = cached;
+                                    pieces.push(DaxMapping {
+                                        offset: window_offset,
+                                        len: within,
+                                        source: Some((source, offset)),
+                                    });
+                                }
+                                if len > within {
+                                    let (offset, len) = (window_offset + within, len - within);
+                                    pieces.push(DaxMapping { offset, len, source: None });
+                                }
+                            })
                         }
-                        if len > within {
-                            let (offset, len) = (window_offset + within, len - within);
-                            pieces.push(DaxMapping { offset, len, source: None });
-                        }
-                    })
+                        Err(errno) => Err(errno),
+                    }
                 }
                 MappingContents::Zeros => self.dax_range_checked(window_offset, len).map(|()| {
                     pieces.push(DaxMapping { offset: window_offset, len, source: None });

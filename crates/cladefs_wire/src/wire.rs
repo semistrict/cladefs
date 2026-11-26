@@ -597,7 +597,9 @@ const _: () = {
 /// 11673).
 /// Version 21: [`MAPPINGS`] takes [`MAPPINGS_QUIESCENT`] to check that no extent is open before
 /// returning the window's mappings (live migration snapshot/release without `make_version`).
-pub const VERSION: u64 = 21;
+/// Version 22: [`MAP_MANY`] takes [`MAP_MANY_WARM`] to warm each mapped extent range in the
+/// daemon's extent cache before installing the mappings (board 11681).
+pub const VERSION: u64 = 22;
 
 /// cladefs: a flag of any request, which says the guest request it is a call for, the guest's
 /// number of it (`crate::request`, TASK-260): little-endian, not 0, in the first
@@ -791,6 +793,10 @@ pub const FORK_DROP: u32 = 1 << 1;
 /// cladefs: a [`MAPPINGS`] that fails with `EBUSY` if any extent is open (`!is_quiescent`), used
 /// when taking a live-migration snapshot or releasing a paused VM's cell without `make_version`.
 pub const MAPPINGS_QUIESCENT: u32 = 1 << 0;
+/// cladefs: a [`MAP_MANY`] that warms each mapped extent range in the daemon's extent cache before
+/// installing the mappings, so lazy memory-cell node maps prefault without a throwaway `READ` IPC
+/// copy (board 11681).
+pub const MAP_MANY_WARM: u32 = 1 << 0;
 pub const MAPPING_ZEROS: u64 = 1 << 1;
 /// cladefs: a `COMMIT` that completes once uploaded, not once ordered: doc-4's `COMMIT_UPLOADED`,
 /// at its bit, as every flag doc-4 has too is here.

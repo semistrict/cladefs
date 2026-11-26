@@ -54,8 +54,10 @@ pub enum Request<'a> {
     FreeMany { first: ExtentId, rest: Cow<'a, [ExtentId]> },
     /// [`MAP`]: the mapping into the window.
     Map(WindowMapping),
-    /// cladefs: [`MAP_MANY`]: the mappings into the window, in order, one at least.
-    MapMany(Cow<'a, [WindowMapping]>),
+    /// cladefs: [`MAP_MANY`]: the mappings into the window, in order, one at least. With
+    /// `warm` ([`MAP_MANY_WARM`]), warms each mapped extent range in the daemon's extent cache
+    /// before installing the mappings (board 11681).
+    MapMany { mappings: Cow<'a, [WindowMapping]>, warm: bool },
     /// [`UNMAP`].
     Unmap { window_offset: u64, len: u64 },
     /// [`COMMIT`], completing as `commit` says, setting the root to `root` if given.
@@ -210,8 +212,9 @@ fn known_flags(kind: u32) -> Result<u32, Errno> {
         WINDOW => WINDOW_COPYING,
         FORK => FORK_QUIESCENT | FORK_DROP,
         MAPPINGS => MAPPINGS_QUIESCENT,
+        MAP_MANY => MAP_MANY_WARM,
         STATS => STATS_GUEST,
-        FREE | FREE_MANY | UNMAP | ROOT | INFO | RESIZED | TRANSFER | BUILD | MAP_MANY => 0,
+        FREE | FREE_MANY | UNMAP | ROOT | INFO | RESIZED | TRANSFER | BUILD => 0,
         _ => return Err(Errno::EINVAL),
     })
 }
@@ -241,7 +244,7 @@ impl<'a> Request<'a> {
             Request::Free(_) => FREE,
             Request::FreeMany { .. } => FREE_MANY,
             Request::Map(_) => MAP,
-            Request::MapMany(_) => MAP_MANY,
+            Request::MapMany { .. } => MAP_MANY,
             Request::Unmap { .. } => UNMAP,
             Request::Commit { .. } => COMMIT,
             Request::Root => ROOT,
@@ -417,8 +420,9 @@ impl<'a> Request<'a> {
                 };
                 Encoded::with_body(MAP, flags, &body)
             }
-            Request::MapMany(mappings) => {
-                Encoded::empty(MAP_MANY, 0).carrying(mappings_payload(mappings))
+            Request::MapMany { mappings, warm } => {
+                Encoded::empty(MAP_MANY, flag(*warm, MAP_MANY_WARM))
+                    .carrying(mappings_payload(mappings))
             }
             Request::Unmap { window_offset, len } => {
                 let body = RangeBody { offset: *window_offset, len: *len };
@@ -622,7 +626,10 @@ impl<'a> Request<'a> {
                 header.decode_empty()?;
                 match mappings(payload)? {
                     mappings if mappings.is_empty() => return Err(Errno::EINVAL),
-                    mappings => Request::MapMany(Cow::Owned(mappings)),
+                    mappings => Request::MapMany {
+                        mappings: Cow::Owned(mappings),
+                        warm: has(MAP_MANY_WARM),
+                    },
                 }
             }
             UNMAP => {
@@ -1597,21 +1604,24 @@ mod tests {
             Request::FreeMany { first: extent, rest: Cow::Owned(rest) },
             map(MappingContents::Extent { extent: other, offset: a }),
             map(MappingContents::Zeros),
-            Request::MapMany(Cow::Owned(vec![
-                WindowMapping {
-                    window_offset,
-                    len: window_len,
-                    contents: MappingContents::Extent {
-                        extent: other,
-                        offset: ending(a, window_len),
+            Request::MapMany {
+                mappings: Cow::Owned(vec![
+                    WindowMapping {
+                        window_offset,
+                        len: window_len,
+                        contents: MappingContents::Extent {
+                            extent: other,
+                            offset: ending(a, window_len),
+                        },
                     },
-                },
-                WindowMapping {
-                    window_offset: unmapped,
-                    len: unmapped_len,
-                    contents: MappingContents::Zeros,
-                },
-            ])),
+                    WindowMapping {
+                        window_offset: unmapped,
+                        len: unmapped_len,
+                        contents: MappingContents::Zeros,
+                    },
+                ]),
+                warm: one,
+            },
             Request::Unmap { window_offset: unmapped, len: unmapped_len },
             Request::Commit { commit, root: one.then_some(&fields.data[..]) },
             Request::Root,
@@ -1951,6 +1961,7 @@ mod tests {
                 FORK => 0b11,
                 STATS => 0b1,
                 MAPPINGS => 0b1,
+                MAP_MANY => 0b1,
                 _ => 0,
             }
         };
@@ -2283,16 +2294,35 @@ mod tests {
                 vec![],
             ),
             (
-                Request::MapMany(Cow::Owned(vec![
-                    WindowMapping {
+                Request::MapMany {
+                    mappings: Cow::Owned(vec![
+                        WindowMapping {
+                            window_offset: 5,
+                            len: 4,
+                            contents: MappingContents::Extent { extent, offset: 3 },
+                        },
+                        WindowMapping {
+                            window_offset: 6,
+                            len: 4,
+                            contents: MappingContents::Zeros,
+                        },
+                    ]),
+                    warm: false,
+                },
+                Header::new(MAP_MANY, 0),
+                [5u64, 4, 7, 9, 3, 0, 6, 4, 0, 0, 0, MAPPING_ZEROS].map(u64::to_le_bytes).concat(),
+            ),
+            (
+                Request::MapMany {
+                    mappings: Cow::Owned(vec![WindowMapping {
                         window_offset: 5,
                         len: 4,
                         contents: MappingContents::Extent { extent, offset: 3 },
-                    },
-                    WindowMapping { window_offset: 6, len: 4, contents: MappingContents::Zeros },
-                ])),
-                Header::new(MAP_MANY, 0),
-                [5u64, 4, 7, 9, 3, 0, 6, 4, 0, 0, 0, MAPPING_ZEROS].map(u64::to_le_bytes).concat(),
+                    }]),
+                    warm: true,
+                },
+                Header::new(MAP_MANY, 0).with_flags(MAP_MANY_WARM),
+                [5u64, 4, 7, 9, 3, 0].map(u64::to_le_bytes).concat(),
             ),
             (
                 Request::Commit { commit: Commit::Uploaded, root: Some(&b"r"[..]) },
@@ -2657,7 +2687,7 @@ mod tests {
     fn the_wire_is_its_version() {
         /// The version, and the fingerprint of the wire it is. A change to the wire is a new
         /// version, both changed together, never the fingerprint alone.
-        const WIRE: (u64, u64) = (21, 0x8a2b028f75b67cb1);
+        const WIRE: (u64, u64) = (22, 0xf3f035a6bc4a5797);
         let fingerprint = fingerprint();
         assert_eq!(
             (VERSION, fingerprint),

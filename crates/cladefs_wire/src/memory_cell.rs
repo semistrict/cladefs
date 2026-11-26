@@ -607,22 +607,21 @@ impl Mapper {
     }
 
     /// Maps the runs of node `node` of the image, as its last commit has them, and installs its
-    /// pages ahead of the guest's touches: its data read through the cell first, so that the
-    /// daemon holds its pages, which only then the mapping names, and the window installs. A page
-    /// installed takes a load of the guest's no fault here (see the module docs).
+    /// pages ahead of the guest's touches: `MAP_MANY` with `MAP_MANY_WARM` warms each mapped
+    /// extent range in the daemon's extent cache directly (no throwaway IPC plaintext copy,
+    /// board 11681) before installing the mappings, and `prefault` installs the cached pages into
+    /// the window. A page installed takes a load of the guest's no fault here (see the module docs).
     fn map(&self, node: u64) -> Result<(), Error> {
         let gone = || Error::new(Errno::EIO).context("the memory cell went");
         let (blocks, client) =
             (self.blocks.upgrade().ok_or_else(gone)?, self.client.upgrade().ok_or_else(gone)?);
         let start = node * self.nodes.node_bytes;
         let len = self.nodes.node_bytes.min(self.nodes.size - start);
-        let mut read = vec![0; len as usize];
-        blocks.read(start, &mut read).map_err(Error::new)?;
         let mappings = image_mappings(&blocks, start, len)?;
         {
             let mut naming = self.nodes.naming.lock().unwrap();
             naming[(node / 64) as usize] |= 1 << (node % 64);
-            client.map_many(&mappings).map_err(Error::new)?;
+            client.map_many_warm(&mappings).map_err(Error::new)?;
         }
         client.prefault(start, len);
         Ok(())

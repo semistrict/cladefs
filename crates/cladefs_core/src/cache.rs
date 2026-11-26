@@ -1748,6 +1748,50 @@ impl CachedExtent {
         parts.len() as u64
     }
 
+    /// cladefs: brings the parts holding `len` bytes at `offset` into memory in parallel through
+    /// the pager pool, returning an error if the extent is revoked or any part fails to read
+    /// (board 11681). Used by `MAP_MANY` with `MAP_MANY_WARM` so lazy memory-cell node maps warm
+    /// the daemon's cache directly without copying plaintext across IPC.
+    pub async fn warm(self: &Arc<Self>, offset: u64, len: u64) -> Result<()> {
+        let clamped = self.len.saturating_sub(offset).min(len);
+        if clamped == 0 {
+            return Ok(());
+        }
+        self.used();
+        let ps = page_size();
+        let pages = offset / ps..offset.saturating_add(clamped).div_ceil(ps);
+        let want: Vec<usize> = self.parts_of(pages).collect();
+        let to_fill = {
+            let mut table = self.parts.with(Mutex::lock);
+            if table.revoked {
+                return Err(Errno::EACCES);
+            }
+            Self::mark_filling(&mut table, want.iter().copied())
+        };
+        for &part in &to_fill {
+            let span = self.page_in_span(part);
+            spawn_page_in(&self.cache, self.clone().read_part(part, span, None));
+        }
+        loop {
+            let listener = {
+                let table = self.parts.with(Mutex::lock);
+                if table.revoked {
+                    return Err(Errno::EACCES);
+                }
+                if !want.iter().any(|&part| matches!(table.slots[part], PartSlot::Filling)) {
+                    for &part in &want {
+                        if let PartSlot::Failed(errno) = table.slots[part] {
+                            return Err(errno);
+                        }
+                    }
+                    return Ok(());
+                }
+                self.changed.listen()
+            };
+            listener.await;
+        }
+    }
+
     /// Copies its `len` bytes at `offset`, and zeros past them, into `slab`, if its parts they are
     /// of are all in memory: whether they were (TASK-234). A part laid out as `slab` is copied from
     /// its slab in the kernel; others are read from their slabs into a buffer, and written.
