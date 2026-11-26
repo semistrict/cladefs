@@ -1997,6 +1997,8 @@ async fn ephemeral_attrition(disk: bool, aborts: bool) -> Result<(), String> {
     if disk {
         host_fs::faults::set(DISK_FAULTS);
     }
+    // Migrations prepared, and those that moved the cell.
+    let (mut tried, mut handed) = (0u32, 0u32);
     for round in 0..ROUNDS {
         let writing = write_round(host as u8 + 1, Some(child), round, WRITES, told.clone());
         let mut written = node(host).spawn(writing);
@@ -2031,6 +2033,7 @@ async fn ephemeral_attrition(disk: bool, aborts: bool) -> Result<(), String> {
         if migrating.await.unwrap().is_err() {
             continue;
         }
+        tried += 1;
         madsim::time::sleep(Duration::from_millis(madsim::rand::thread_rng().gen_range(0..1000)))
             .await;
         if madsim::rand::thread_rng().gen_bool(0.3) {
@@ -2078,6 +2081,7 @@ async fn ephemeral_attrition(disk: bool, aborts: bool) -> Result<(), String> {
                 ended => return Err(format!("round {round}: ending the migration: {ended:?}")),
             };
             if moved {
+                handed += 1;
                 host = target;
             }
             log::info!("round {round}: the migration aborted, the cell on host {}", host + 1);
@@ -2091,7 +2095,10 @@ async fn ephemeral_attrition(disk: bool, aborts: bool) -> Result<(), String> {
             .await
         });
         match handing.await.unwrap() {
-            Ok(_) => host = target,
+            Ok(_) => {
+                handed += 1;
+                host = target;
+            }
             Err(cladefs::Errno::EAGAIN) => log::info!("round {round}: the hand-over refused"),
             Err(errno) => return Err(format!("round {round}: handing over: {errno:?}")),
         }
@@ -2105,6 +2112,33 @@ async fn ephemeral_attrition(disk: bool, aborts: bool) -> Result<(), String> {
         // default, its reaper looking a quarter of that apart (specs/ephemeral, `TargetAbort`).
         madsim::time::sleep(Duration::from_secs(300 + 75 + 30)).await;
     }
+    // Board 9292: migrated once more, the faults healed, it is handed over: a build whose targets
+    // refused every migration (a check refusing every prepare, formats never matching) kept the
+    // cell on host 1 throughout, and every round above went on as if refused rightly. No draw of
+    // the seed's here, so that the rounds above draw as they did.
+    let (target, source) = ((host + 1) % 3, host as u8 + 1);
+    let migrated = manager.spawn(async move {
+        let request =
+            MigrateCellRequest { tenant: 0, cell: child, peer: peer(source % 3 + 1).to_string() };
+        calling(source, || {
+            let request = request.clone();
+            async move { connect(source).await.migrate_cell(request).await }
+        })
+        .await?;
+        calling(source, || {
+            let request = HandOverCellRequest { tenant: 0, cell: child, token: None };
+            async move { connect(source).await.hand_over_cell(request).await }
+        })
+        .await
+    });
+    if let Err(errno) = migrated.await.unwrap() {
+        return Err(format!(
+            "the faults healed, the cell's migration from host {source} failed: {errno:?}, {handed} of \
+             {tried} hand-overs accepted before"
+        ));
+    }
+    host = target;
+    eprintln!("hand-overs accepted: {handed} of {tried}, then the last");
     let expected = told.uploaded.lock().unwrap().clone();
     // Read on its host, again if the host's node starts anew meanwhile, as one whose boot failed on
     // a disk fault does, 1 to 10 s after (board 5721): the read's task goes with it, cancelled.
