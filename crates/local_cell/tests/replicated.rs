@@ -1305,6 +1305,9 @@ enum Misreport {
     /// Its logs of segments' records [`PAD`] bytes longer than they are, padded with what no
     /// record frames.
     Garbled,
+    /// Its odd own-extent logs (`log & 1 == 1`) have a damaged frame length on frame 0 while
+    /// keeping the same (or longer) reported byte count (board 5406).
+    GarbledOdd { pad: usize },
     /// A log more, [`EMPTY_LOG`], ending at nothing, its file empty: as a member holds a log
     /// whose first append failed after its file was made (board 5914).
     Empty,
@@ -1356,6 +1359,13 @@ impl local_cell::upload::Members for Misreporting {
                             *end += if *log & 1 == 0 { PAD as u64 } else { 0 };
                         }
                     }
+                    Misreport::GarbledOdd { pad } => {
+                        for (log, end) in &mut ends {
+                            if *log & 1 == 1 && *end > 0 {
+                                *end += pad as u64;
+                            }
+                        }
+                    }
                     Misreport::Empty => ends.push((EMPTY_LOG, 0)),
                 }
             }
@@ -1382,6 +1392,16 @@ impl local_cell::upload::Members for Misreporting {
                     let mut bytes = self.peers.read(cell, configuration, member, log, end).await?;
                     if log & 1 == 0 {
                         bytes.extend(std::iter::repeat_n(0xa5, PAD));
+                    }
+                    Ok(bytes)
+                }
+                Misreport::GarbledOdd { pad } => {
+                    let mut bytes = self.peers.read(cell, configuration, member, log, end).await?;
+                    if log & 1 == 1 && bytes.len() >= 20 {
+                        // Corrupt the first own_frame's length field (bytes 12..20) so it points
+                        // past the end of the log while keeping total byte length >= honest copy.
+                        bytes[12..20].copy_from_slice(&(u64::MAX / 2).to_le_bytes());
+                        bytes.extend(std::iter::repeat_n(0x5a, pad));
                     }
                     Ok(bytes)
                 }
@@ -1930,4 +1950,186 @@ async fn takeover_seeded_with_continued_only_segment_preserves_new_commits() {
     assert!(taken2.last_commit().unwrap() >= new_last);
     assert_eq!(host.contents(&taken2).await, expected);
     drop(uploader2);
+}
+
+/// Board 5406: takeovers authenticate members' odd own-extent logs against the authenticated
+/// even records logs, so a member holding a damaged odd log (equal or longer byte count) is
+/// passed over in favor of an intact member copy.
+#[tokio::test(flavor = "multi_thread")]
+async fn takes_prefer_authentic_own_extent_logs_to_damaged_copies() {
+    for pad in [0usize, PAD] {
+        let host = replicated_host().await;
+        let all = directories(&["a", "b", "c", "d", "e"]);
+        let lost = Lost::default();
+        let peers = |me: &str| Peers { me: me.into(), all: all.clone(), lost: lost.clone() };
+        let writer =
+            Host { runtime: host_runtime::HostRuntime::new(), bucket: host.bucket.clone() };
+        let dir = MemDir::new();
+        LocalCell::make(&dir, DESCRIPTION, Some(URL), None).unwrap();
+        let wish = bucket_cell::layout::Wish::new(1, bucket_cell::layout::Fsync::Replicated);
+        let recovering = LocalCell::recover_unmade(dir).unwrap();
+        let (cell, uploader) =
+            writer.open_replicated(recovering, 1, wish, peers("a")).await.unwrap();
+        cell.made().unwrap();
+        cell.close_segment().unwrap();
+        uploader.uploaded(cell.last_commit().unwrap()).await.unwrap();
+
+        // Commit a large own extent (> OPTIONS.large_extent = 24 KiB) replicated to BOTH b and c.
+        let seq = cell.info().unwrap().next_sequence;
+        let own_extent = ExtentId { cell: DESCRIPTION.cell.id, sequence: seq };
+        cell.write(own_extent, 0, &common::noise(42, 40 << 10)).await.unwrap();
+        cell.commit_ordered(Some(b"own-5406")).await.unwrap();
+        cell.flush().await.unwrap();
+        let last = cell.last_commit().unwrap();
+        uploader.replicated(last).await.unwrap();
+        assert!(uploader.last_uploaded() < last, "must be replicated only, not uploaded");
+        // Wait until both b and c hold the odd own-extent log.
+        let cfg = configuration_named(&host).await;
+        let has_odd = |member: &str, idx: usize| {
+            let k = (DESCRIPTION.cell, key(&cfg), cfg.members[idx].incarnation);
+            (0..10u64).any(|seg| {
+                all[member].read(k, replicate::own_of(seg), 0, 1).is_ok_and(|b| !b.is_empty())
+            })
+        };
+        until("both b and c hold odd log", async || has_odd("b", 1) && has_odd("c", 2)).await;
+        let expected = writer.contents(&cell).await;
+        let replicator = cell.replicator().unwrap();
+        lose(writer, (uploader, cell), replicator);
+
+        // Lose writer `a`; corrupt `b`'s odd log (config-order first!) with damaged frame length
+        // (equal length when pad == 0, longer when pad == PAD). Takeover on `d` must fall back
+        // to `c`'s intact odd log copy.
+        lost.lock().unwrap().insert("a".into());
+        let misreporting = Misreporting {
+            peers: peers("d"),
+            member: "b".into(),
+            how: Misreport::GarbledOdd { pad },
+        };
+        let elsewhere = MemDir::new();
+        LocalCell::make(&elsewhere, DESCRIPTION, Some(URL), None).unwrap();
+        let recovering = LocalCell::recover_unmade(elsewhere).unwrap();
+        let runtime = Runtime {
+            handle: host.runtime.handle().clone(),
+            uploads: Budget::new(Limits::UNBOUNDED),
+            keys: bucket_cell::keys::testing::host(),
+        };
+        let options = upload::Options {
+            interval: Duration::from_secs(3600),
+            upload_closed: false,
+            members: Some(upload::MembersOf(Arc::new(misreporting))),
+            replace_after: Duration::from_secs(1),
+            ..upload::Options::default()
+        };
+        let (taken, uploader) =
+            upload::open(recovering, OPTIONS, host.bucket.clone(), (2, options), &runtime)
+                .await
+                .unwrap();
+        taken.made().unwrap();
+        assert!(taken.last_commit().unwrap() >= last);
+        assert_eq!(host.contents(&taken).await, expected);
+        drop(uploader);
+    }
+}
+
+/// Board 5402: crashing after syncing a large own extent and sending its commit to members, but
+/// before appending the local WAL record, leaves `extents/<cell>/<seq>` on disk while members
+/// are ahead. Reopening on the same directory must recover cleanly instead of failing
+/// `AlreadyExists`.
+#[tokio::test(flavor = "multi_thread")]
+async fn reopen_after_crash_between_large_extent_member_send_and_local_wal_append() {
+    let host = replicated_host().await;
+    let all = directories(&["a", "b", "c", "d", "e"]);
+    let lost = Lost::default();
+    let peers = |me: &str| Peers { me: me.into(), all: all.clone(), lost: lost.clone() };
+    let writer = Host { runtime: host_runtime::HostRuntime::new(), bucket: host.bucket.clone() };
+    let dir = MemDir::new();
+    LocalCell::make(&dir, DESCRIPTION, Some(URL), None).unwrap();
+    let wish = bucket_cell::layout::Wish::new(1, bucket_cell::layout::Fsync::Replicated);
+    let recovering = LocalCell::recover_unmade(dir.clone()).unwrap();
+    let (cell, uploader) = writer.open_replicated(recovering, 1, wish, peers("a")).await.unwrap();
+    cell.made().unwrap();
+    cell.close_segment().unwrap();
+    uploader.uploaded(cell.last_commit().unwrap()).await.unwrap();
+
+    // First commit a small extent so the local WAL is non-empty (exercising `drop_wal` too).
+    let first = commit(&cell, 0, 1).await;
+    uploader.replicated(first).await.unwrap();
+    // Snapshot the local directory BEFORE the large extent's local WAL record is appended.
+    let ensure_parent_dirs = |d: &MemDir, path: &str| {
+        let mut prefix = String::new();
+        let mut parts = path.split('/').peekable();
+        while let Some(part) = parts.next() {
+            if parts.peek().is_none() {
+                break;
+            }
+            if !prefix.is_empty() {
+                prefix.push('/');
+            }
+            prefix.push_str(part);
+            match local_cell::Dir::create_dir(d, &prefix) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => panic!("create_dir({prefix}): {e}"),
+            }
+        }
+    };
+    let crashed = MemDir::new();
+    LocalCell::make(&crashed, DESCRIPTION, Some(URL), None).unwrap();
+    for (path, _) in crashed.files() {
+        local_cell::Dir::remove(&crashed, &path).unwrap();
+    }
+    for (path, bytes) in dir.files() {
+        ensure_parent_dirs(&crashed, &path);
+        let data = path.starts_with("open-segments/")
+            || path.starts_with("segments/")
+            || path.starts_with("extents/");
+        let file = local_cell::Dir::create(&crashed, &path, data).unwrap();
+        if !bytes.is_empty() {
+            local_cell::File::write_at(&file, &bytes, 0).unwrap();
+        }
+        local_cell::File::sync(&file).unwrap();
+    }
+
+    // Write and replicate two large own extents (> 24 KiB) to members so reopen exercises both
+    // matching-bytes reuse and stale-orphan replacement in `replicate::restore`.
+    let seq1 = cell.info().unwrap().next_sequence;
+    let own1 = ExtentId { cell: DESCRIPTION.cell.id, sequence: seq1 };
+    cell.write(own1, 0, &common::noise(99, 40 << 10)).await.unwrap();
+    let seq2 = cell.info().unwrap().next_sequence;
+    let own2 = ExtentId { cell: DESCRIPTION.cell.id, sequence: seq2 };
+    cell.write(own2, 0, &common::noise(100, 40 << 10)).await.unwrap();
+    cell.commit_ordered(Some(b"large-5402")).await.unwrap();
+    cell.flush().await.unwrap();
+    let last = cell.last_commit().unwrap();
+    uploader.replicated(last).await.unwrap();
+    assert!(uploader.last_uploaded() < last, "must be replicated via members, not bucket");
+    let expected = writer.contents(&cell).await;
+
+    // Copy the synced own-extent files into `crashed`, simulating a crash right between syncing
+    // `extents/<cell>/<seq>` + sending to members and appending the local WAL record. Leave the
+    // second file truncated/stale to also cover orphan replacement.
+    let mut own_files: Vec<(String, Vec<u8>)> =
+        dir.files().into_iter().filter(|(path, _)| path.starts_with("extents/")).collect();
+    own_files.sort_by(|a, b| a.0.cmp(&b.0));
+    assert!(own_files.len() >= 2, "expected synced own-extent files in dir");
+    for (idx, (path, bytes)) in own_files.into_iter().enumerate() {
+        ensure_parent_dirs(&crashed, &path);
+        if local_cell::Dir::open(&crashed, &path, true).is_err() {
+            let file = local_cell::Dir::create(&crashed, &path, true).unwrap();
+            let payload = if idx == 0 { &bytes[..] } else { &bytes[..bytes.len().min(64)] };
+            local_cell::File::write_at(&file, payload, 0).unwrap();
+            local_cell::File::sync(&file).unwrap();
+        }
+    }
+
+    let replicator = cell.replicator().unwrap();
+    lose(writer, (uploader, cell), replicator);
+
+    // Reopen on `crashed` (same host `a`): members are ahead and `extents/<cell>/<seq>` already
+    // exists on disk. `restored()` must succeed instead of failing `AlreadyExists`.
+    let recovering = LocalCell::recover(crashed).unwrap();
+    let (reopened, uploader) = host.open_replicated(recovering, 2, None, peers("a")).await.unwrap();
+    assert!(reopened.last_commit().unwrap() >= last);
+    assert_eq!(host.contents(&reopened).await, expected);
+    drop(uploader);
 }

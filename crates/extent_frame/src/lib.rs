@@ -1748,6 +1748,24 @@ pub fn check(bytes: &[u8]) -> Result<(), Corrupt> {
     Ok(())
 }
 
+/// cladefs: verifies that `bytes` is a whole, authentic extent frame under `keys` (trailer, part
+/// table MAC, footer CRC/MAC, and every part's CRC and AEAD/MAC tag) and returns its logical
+/// `data_len` (board 5406).
+pub fn check_under(bytes: &[u8], keys: &dyn Keys) -> Result<u64, Error> {
+    let parts = Parts::of(bytes, keys)?;
+    let footer = parts.frame.footer();
+    parts.check_footer(&bytes[footer.start as usize..footer.end as usize])?;
+    for index in 0..parts.stored.len() as u64 {
+        let part = parts.part(index)?;
+        let range = part.stored.range();
+        let slice = bytes
+            .get(range.start as usize..range.end as usize)
+            .ok_or_else(|| corrupt("part, past its end"))?;
+        part.unpack(slice)?;
+    }
+    Ok(parts.frame.data_len)
+}
+
 /// cladefs: whether `suffix`, an object's last bytes, its trailer at their end, is a frame of this
 /// format whose encrypt says it is in the clear, kind 0, as objects were before TASK-411.28: what a
 /// checker of a cell's files, holding no key, tells one left so by, which every reader refuses as

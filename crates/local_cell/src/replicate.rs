@@ -290,6 +290,41 @@ pub(crate) fn own_frames_end(bytes: &[u8]) -> Result<usize, anyhow::Error> {
     parse_own(bytes).map(|(_, end)| end)
 }
 
+/// Authenticates an odd own-extent log `bytes` for `cell` under `keys` against the `required`
+/// `(sequence -> data_len)` own extents named by the segment's authenticated even records log,
+/// returning the byte offset past the last whole authentic frame (board 5406).
+pub(crate) fn own_whole_authentic(
+    bytes: &[u8],
+    cell: extent_frame::segment::CellId,
+    keys: &bucket_cell::keys::Ring,
+    required: &BTreeMap<u64, u64>,
+) -> Result<usize, anyhow::Error> {
+    use anyhow::Context as _;
+    let (frames, end) = parse_own(bytes)?;
+    if end == 0 && !bytes.is_empty() {
+        anyhow::bail!("own-extent log has no whole valid frame ({} bytes)", bytes.len());
+    }
+    let cell_keys = keys.of(cell.id);
+    let mut seen: BTreeMap<u64, u64> = BTreeMap::new();
+    for (sequence, file) in frames {
+        let data_len = extent_frame::check_under(file, &cell_keys)
+            .with_context(|| format!("own extent {sequence} failed frame authentication"))?;
+        seen.insert(sequence, data_len);
+    }
+    for (&sequence, &expected_len) in required {
+        match seen.get(&sequence) {
+            Some(&got_len) if got_len == expected_len => {}
+            Some(&got_len) => anyhow::bail!(
+                "own extent {sequence} has length {got_len}, authenticated records expect {expected_len}"
+            ),
+            None => anyhow::bail!(
+                "own extent {sequence} (length {expected_len}) missing from own-extent log"
+            ),
+        }
+    }
+    Ok(end)
+}
+
 /// What of `logs`, what members hold of a replicated cell `cell`'s writer's logs by their numbers,
 /// goes on from `last`, the last commit the cell's head names (TASK-537.3.4): the segments after
 /// the last whose records name a commit through `last`, the head acknowledging whole segments, so
@@ -438,6 +473,45 @@ pub fn restore<D: crate::Dir>(
         }
         crate::File::sync(&file).with_context(|| format!("syncing {path}"))
     };
+    let write_own = |path: &str, bytes: &[u8]| -> Result<(), anyhow::Error> {
+        match dir.create(path, true) {
+            Ok(file) => {
+                if !bytes.is_empty() {
+                    crate::File::write_at(&file, bytes, 0)
+                        .with_context(|| format!("writing {path}"))?;
+                }
+                crate::File::sync(&file).with_context(|| format!("syncing {path}"))
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                // board 5402: a crash between syncing an own extent + sending to members and
+                // appending the local WAL record leaves `extents/<cell>/<seq>` on disk while
+                // members are ahead. Reuse it if its bytes match, otherwise replace the orphan.
+                let existing = dir.open(path, true).with_context(|| format!("opening {path}"))?;
+                let size =
+                    crate::File::size(&existing).with_context(|| format!("sizing {path}"))?;
+                if size == bytes.len() as u64 {
+                    let mut got = vec![0u8; bytes.len()];
+                    if !got.is_empty() {
+                        crate::File::read_at(&existing, &mut got, 0)
+                            .with_context(|| format!("reading {path}"))?;
+                    }
+                    if got == bytes {
+                        return crate::File::sync(&existing)
+                            .with_context(|| format!("syncing {path}"));
+                    }
+                }
+                drop(existing);
+                dir.remove(path).with_context(|| format!("removing stale {path}"))?;
+                let file = dir.create(path, true).with_context(|| format!("making {path}"))?;
+                if !bytes.is_empty() {
+                    crate::File::write_at(&file, bytes, 0)
+                        .with_context(|| format!("writing {path}"))?;
+                }
+                crate::File::sync(&file).with_context(|| format!("syncing {path}"))
+            }
+            Err(err) => Err(anyhow::Error::from(err).context(format!("making {path}"))),
+        }
+    };
     for (log, bytes) in &kept {
         match log & 1 {
             0 => {
@@ -447,7 +521,7 @@ pub fn restore<D: crate::Dir>(
             _ => {
                 for (sequence, file) in own_frames(bytes)? {
                     let extent = storage_device::ExtentId { cell: cell.id, sequence };
-                    write(&extent_path(extent), &file, true)?;
+                    write_own(&extent_path(extent), &file)?;
                 }
             }
         }

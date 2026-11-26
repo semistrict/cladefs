@@ -683,10 +683,23 @@ pub(crate) fn replica_whole(
     segment: SegmentId,
     keys: &bucket_cell::keys::Ring,
 ) -> Result<usize, Error> {
+    replica_whole_own(log, segment, keys).map(|(end, _)| end)
+}
+
+/// cladefs: like [`replica_whole`], also returning the `(sequence, len)` pairs of every own extent
+/// named by the authentic records in `0..end`, so takeover can authenticate the segment's odd
+/// own-extent log against them (board 5406).
+pub(crate) fn replica_whole_own(
+    log: &[u8],
+    segment: SegmentId,
+    keys: &bucket_cell::keys::Ring,
+) -> Result<(usize, Vec<(u64, u64)>), Error> {
     let header = LogHeader::of(log, segment)
         .ok_or_else(|| anyhow::anyhow!("{segment:?}'s log has no header of its own"))?;
     let encryption = header.encryption(segment, keys)?;
-    LogRecord::decode_to(log, segment, Some(&encryption)).map(|(_, end)| end)
+    let (records, end) = LogRecord::decode_to(log, segment, Some(&encryption))?;
+    let own = records.into_iter().flat_map(|record| record.contents.own).collect();
+    Ok((end, own))
 }
 
 /// cladefs: the commits each of the records of `log`, as [`replica_commits`] reads it, names:

@@ -967,12 +967,17 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         }
         let members = self.members()?;
         let mut logs = Vec::with_capacity(copies.len());
+        // Own extents `(sequence -> data_len)` named by each segment's authenticated even records
+        // log (`log & 1 == 0`, always iterated before `(segment << 1) | 1` in `BTreeMap` order),
+        // used to authenticate and check completeness of the odd own-extent log (board 5406).
+        let mut required_own: BTreeMap<u64, BTreeMap<u64, u64>> = BTreeMap::new();
         let mut holding =
             crate::replicate::Holding::on(self.host.as_ref().map(|h| Arc::clone(&h.hot_budget)));
         {
             for (log, held) in copies {
                 let segment = crate::layout::SegmentId { cell: cell.id, number: log >> 1 };
-                let (mut best, mut refused) = (None::<Vec<u8>>, Vec::new());
+                let (mut best, mut best_own, mut refused) =
+                    (None::<Vec<u8>>, Vec::<(u64, u64)>::new(), Vec::new());
                 // The longest copy read whole, and the longest that could not be read, with why.
                 let (mut read, mut unread) = (0, None::<(u64, String)>);
                 for (end, member) in held {
@@ -1002,26 +1007,36 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                         )));
                     }
                     read = read.max(end);
-                    // A segment's records, as far as they are whole and authentic; its own
-                    // extents' files, whose records name them, as they are.
-                    if log & 1 == 0 {
-                        match crate::wal::replica_whole(&bytes, segment, keys) {
-                            // Cut to what is whole, its allocation with it: what it holds is
-                            // what is counted (Codex's review 56).
-                            Ok(whole) if whole < bytes.len() => {
-                                bytes.truncate(whole);
-                                bytes.shrink_to_fit();
-                            }
-                            Ok(_) => {}
-                            Err(err) => {
-                                holding.release(end);
-                                log::warn!(
-                                    "cladefs: {}'s log {log} of {cell:?}: {err:#}: passed over",
-                                    member.address
-                                );
-                                refused.push(format!("{}: {err:#}", member.address));
-                                continue;
-                            }
+                    // Both even records logs and odd own-extent logs are authenticated under
+                    // `keys`; odd logs are also verified against the own extents named by the
+                    // segment's authenticated even records log (TASK-684, board 5406).
+                    let mut copy_own = Vec::new();
+                    let whole_res = if log & 1 == 0 {
+                        crate::wal::replica_whole_own(&bytes, segment, keys).map(|(whole, own)| {
+                            copy_own = own;
+                            whole
+                        })
+                    } else {
+                        let empty = BTreeMap::new();
+                        let required = required_own.get(&segment.number).unwrap_or(&empty);
+                        crate::replicate::own_whole_authentic(&bytes, cell, keys, required)
+                    };
+                    match whole_res {
+                        // Cut to what is whole, its allocation with it: what it holds is what is
+                        // counted (Codex's review 56).
+                        Ok(whole) if whole < bytes.len() => {
+                            bytes.truncate(whole);
+                            bytes.shrink_to_fit();
+                        }
+                        Ok(_) => {}
+                        Err(err) => {
+                            holding.release(end);
+                            log::warn!(
+                                "cladefs: {}'s log {log} of {cell:?}: {err:#}: passed over",
+                                member.address
+                            );
+                            refused.push(format!("{}: {err:#}", member.address));
+                            continue;
                         }
                     }
                     if best.as_ref().is_none_or(|best| bytes.len() > best.len()) {
@@ -1029,6 +1044,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                         if let Some(was) = best.replace(bytes) {
                             holding.release(was.len() as u64);
                         }
+                        best_own = copy_own;
                     } else {
                         holding.release(end);
                     }
@@ -1041,7 +1057,12 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                     )));
                 }
                 match best {
-                    Some(bytes) => logs.push((log, bytes)),
+                    Some(bytes) => {
+                        if log & 1 == 0 && !best_own.is_empty() {
+                            required_own.insert(segment.number, best_own.into_iter().collect());
+                        }
+                        logs.push((log, bytes));
+                    }
                     None => {
                         return Err(Failure::msg(format!(
                             "no member's copy of log {log} of {cell:?} is authentic: {}",
