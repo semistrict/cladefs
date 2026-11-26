@@ -48,7 +48,7 @@ export const anchors = {
   upload: { path: "crates/bucket_cell/src/writer.rs", snippet: "pub async fn upload(&self, segment: u64) -> Result<(), Error>", note: "A segment to the bucket." },
   acknowledge: { path: "crates/bucket_cell/src/writer.rs", snippet: "pub async fn acknowledge(&self) -> Result<Option<u64>, Error>", note: "Acknowledged by swapping the cell's head, only while it is still the writer's." },
   head_swap: { path: "crates/bucket_cell/src/head.rs", snippet: "pub async fn swap(", note: "The cell's head, swapped on the condition that it is the version its holder wrote." },
-  bucket: { path: "crates/bucket_cell/src/bucket.rs", snippet: "pub trait Bucket: Send + Sync + 'static", note: "Anything with conditional writes: S3, GCS, a directory." },
+  bucket: { path: "crates/bucket_cell/src/bucket.rs", snippet: "pub trait Bucket: BucketSend + BucketSync + 'static", note: "Anything with conditional writes: S3, GCS, a directory." },
   origin: { path: "crates/bucket_cell/src/layout.rs", snippet: "pub struct Origin {", note: "A child's origin: its parent and the segment its version closed. It inherits its parent's extents without copying." },
   fetcher: { path: "crates/bucket_cell/src/fetch.rs", snippet: "pub struct Fetcher<B: Bucket>", note: "Reads extents from a bucket by parts, under a budget." },
   dax_window: { path: "crates/cladefs/src/dax.rs", snippet: "pub struct DaxWindow(Arc<Window>);", note: "A DAX window of an extent-store device." },
