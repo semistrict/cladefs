@@ -36,9 +36,17 @@ extern const struct kernel_param_ops param_ops_bool, param_ops_uint, param_ops_u
 	module_param_cb(name_, &param_ops_##type, &(value), perm)
 #define MODULE_PARM_DESC(name, description)
 
-/* Sets the parameter `name` as `cladefs.name=value` would: 0, or the parameter's -errno. */
+/*
+ * Sets the parameter `name` as writing `cladefs.name` in sysfs would, under the parameters' lock
+ * (kernel_param_lock): 0, or the parameter's -errno.
+ */
 int sim_param_set(const char *name, const char *value);
-/* A numeric parameter's value. */
+/* A numeric parameter's value, read as sysfs reads it, under the parameters' lock. */
 unsigned long sim_param_read(const char *name);
+/*
+ * As sim_param_read, under no lock: the simulator's own look, from its scheduler, where no task may
+ * wait (sim_sweep_watch). Never a test's, which reads as a guest's check does.
+ */
+unsigned long sim_param_peek(const char *name);
 
 #endif

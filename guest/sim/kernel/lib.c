@@ -369,33 +369,63 @@ const struct kernel_param_ops param_ops_bool = { param_set_bool, param_get_bool 
 const struct kernel_param_ops param_ops_uint = { param_set_uint, param_get_uint };
 const struct kernel_param_ops param_ops_ulong = { param_set_ulong, param_get_ulong };
 
-unsigned long sim_param_read(const char *name)
-{
-	extern const struct kernel_param __start_sim_params[], __stop_sim_params[];
-	const struct kernel_param *param;
-	unsigned long number;
-	char value[24];
+/*
+ * The parameters' lock: Linux's kernel_param_lock, which param_attr_store and param_attr_show hold
+ * across a parameter's set and get, the module's for all of its parameters (board 12768). So a
+ * setter that waits, at a pause point or for a lock, holds up every other parameter's read and
+ * write, as on a guest, where clearing cladefs.dax_pause would wait for it.
+ */
+static DEFINE_MUTEX(kernel_param_lock);
 
-	for (param = __start_sim_params; param < __stop_sim_params; param++) {
-		if (!strcmp(param->name, name)) {
-			param->ops->get(value, param);
-			if (sscanf(value, "%lu", &number) != 1)
-				sim_panic("parameter %s isn't a number: %s", name, value);
-			return number;
-		}
-	}
-	sim_panic("no parameter %s", name);
-}
-
-int sim_param_set(const char *name, const char *value)
+static const struct kernel_param *param_of(const char *name)
 {
 	extern const struct kernel_param __start_sim_params[], __stop_sim_params[];
 	const struct kernel_param *param;
 
 	for (param = __start_sim_params; param < __stop_sim_params; param++) {
 		if (!strcmp(param->name, name))
-			return param->ops->set(value, param);
+			return param;
 	}
 	sim_panic("no parameter %s", name);
+}
+
+static unsigned long param_number(const struct kernel_param *param, const char *value)
+{
+	unsigned long number;
+
+	if (sscanf(value, "%lu", &number) != 1)
+		sim_panic("parameter %s isn't a number: %s", param->name, value);
+	return number;
+}
+
+unsigned long sim_param_read(const char *name)
+{
+	const struct kernel_param *param = param_of(name);
+	char value[24];
+
+	mutex_lock(&kernel_param_lock);
+	param->ops->get(value, param);
+	mutex_unlock(&kernel_param_lock);
+	return param_number(param, value);
+}
+
+unsigned long sim_param_peek(const char *name)
+{
+	const struct kernel_param *param = param_of(name);
+	char value[24];
+
+	param->ops->get(value, param);
+	return param_number(param, value);
+}
+
+int sim_param_set(const char *name, const char *value)
+{
+	const struct kernel_param *param = param_of(name);
+	int err;
+
+	mutex_lock(&kernel_param_lock);
+	err = param->ops->set(value, param);
+	mutex_unlock(&kernel_param_lock);
+	return err;
 }
 

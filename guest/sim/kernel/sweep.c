@@ -70,7 +70,7 @@ void sim_sweep_watch(u64 now)
 {
 	if (!sweep_failed || now - failed_ns < SWEEP_AFTER_NS)
 		return;
-	if (!sim_param_read("dax_paused") && !cladefs_sim_commit_held() && !cladefs_sim_seal_held() &&
+	if (!sim_param_peek("dax_paused") && !cladefs_sim_commit_held() && !cladefs_sim_seal_held() &&
 	    !sim_device_held())
 		return;
 	sim_log("sim: sweep: a task waits at a pause point, or a hold, its test can't let go of, %llu s after call %llu failed: void, the run ends\n",
