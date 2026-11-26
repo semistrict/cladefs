@@ -86,12 +86,14 @@ struct Cell {
 }
 
 impl Cell {
-    /// A new SQLite cell, the `index`th, filled.
-    fn create(index: u64) -> Self {
+    /// A new SQLite cell, the `index`th, filled; and how long making it took, then filling it.
+    fn create(index: u64) -> (Self, Duration, Duration) {
+        let started = Instant::now();
         let (id, database) =
             daemon::create_embedded(Daemon::process(), 0, CAPACITY, Options::default())
                 .unwrap_or_else(|error| panic!("cell {index}, after {index} held: {error:#}"));
         let mut cell = Self::mount(database, id, index);
+        let (made, started) = (started.elapsed(), Instant::now());
         cell.connection
             .execute_batch(
                 "CREATE TABLE records (offset INTEGER PRIMARY KEY, ts INTEGER NOT NULL, \
@@ -101,7 +103,7 @@ impl Cell {
         for _ in 0..RECORDS / BATCH {
             cell.append(BATCH);
         }
-        cell
+        (cell, made, started.elapsed())
     }
 
     /// The cell `id` opened again, the `index`th, holding `records`.
@@ -121,6 +123,7 @@ impl Cell {
         let connection =
             Connection::open_with_flags_and_vfs("records.db", OpenFlags::default(), vfs.as_str())
                 .unwrap();
+        lean(&connection);
         Self { index, id, records: 0, connection, registration, database }
     }
 
@@ -178,6 +181,26 @@ impl Cell {
         drop(registration);
         database.close().unwrap();
     }
+}
+
+/// `connection` configured as a process holding thousands of databases would (board 13916): no
+/// lookaside memory, SQLite's default 120 KB a connection, and a page cache of 64 KiB, its reads
+/// being of the cell's page cache below it, which holds them once, under the daemon's budget.
+/// SQLite's defaults took 159 KiB a cell of 465 (density.rs, ubu1, 2026-11-26).
+fn lean(connection: &Connection) {
+    // SAFETY: the connection's handle, just opened, no statement prepared: no lookaside memory in
+    // use, which SQLite requires to change it; a null buffer of no slots turns it off.
+    let set = unsafe {
+        rusqlite::ffi::sqlite3_db_config(
+            connection.handle(),
+            rusqlite::ffi::SQLITE_DBCONFIG_LOOKASIDE,
+            std::ptr::null_mut::<std::ffi::c_void>(),
+            0 as std::ffi::c_int,
+            0 as std::ffi::c_int,
+        )
+    };
+    assert_eq!(set, rusqlite::ffi::SQLITE_OK, "turning lookaside memory off");
+    connection.execute_batch("PRAGMA cache_size = -64").unwrap();
 }
 
 /// The fake record at `offset` of the `index`th cell: a timestamp, a key of a thousand, and a
@@ -352,6 +375,20 @@ fn sqlite_cells_held_open_at_once() {
         .map_or(CELLS, |cells| cells.parse().expect("CLADEFS_SQLITE_DENSITY_CELLS: a number"));
     // As cladefsd does before it boots: what the daemon serves at once is of this limit.
     cladefs::cladefsd::raise_open_files_limit().unwrap();
+    // No connection's page cache allocated ahead in bulk (SQLITE_DEFAULT_PCACHE_INITSZ, 20 pages,
+    // 87 KiB whatever its cache_size: heaptrack, pcache1InitBulk), its pages allocated as they are
+    // read, up to the cache_size `lean` sets: SQLite's 104 KiB a connection went to 78 (board
+    // 13916). Process-wide, before SQLite is initialized.
+    // SAFETY: before any other thread, or anything of SQLite's, runs: what sqlite3_config needs.
+    let configured = unsafe {
+        rusqlite::ffi::sqlite3_config(
+            rusqlite::ffi::SQLITE_CONFIG_PAGECACHE,
+            std::ptr::null_mut::<std::ffi::c_void>(),
+            0 as std::ffi::c_int,
+            0 as std::ffi::c_int,
+        )
+    };
+    assert_eq!(configured, rusqlite::ffi::SQLITE_OK, "no bulk page cache");
     let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     cladefs::cladefsd::Daemon::process().configure_disks(&[dir.path().join("disk0")]).unwrap();
     // SAFETY: before this process starts any other thread.
@@ -377,25 +414,26 @@ fn sqlite_cells_held_open_at_once() {
     let mut first_step = None;
     let mut cells: Vec<Cell> = Vec::with_capacity(cells_wanted);
     let mut step = 0;
+    // How long the steps took making and filling their cells, at once each, probes aside.
+    let mut opening = Duration::ZERO;
     while cells.len() < cells_wanted {
         step += 1;
         let added = STEP.min(cells_wanted - cells.len());
         // The step's cells made at once, each on a thread of its own, as a process opening many
         // databases would (board 13918).
         let first = cells.len() as u64;
-        let made: Vec<(Cell, Duration)> = std::thread::scope(|scope| {
+        let stepped = Instant::now();
+        let made: Vec<(Cell, Duration, Duration)> = std::thread::scope(|scope| {
             let making: Vec<_> = (first..first + added as u64)
-                .map(|index| {
-                    scope.spawn(move || {
-                        let started = Instant::now();
-                        (Cell::create(index), started.elapsed())
-                    })
-                })
+                .map(|index| scope.spawn(move || Cell::create(index)))
                 .collect();
             making.into_iter().map(|making| making.join().unwrap()).collect()
         });
-        let opens = made.iter().map(|(_, took)| *took).collect();
-        cells.extend(made.into_iter().map(|(cell, _)| cell));
+        let stepped = stepped.elapsed();
+        opening += stepped;
+        let opens = made.iter().map(|(_, made, _)| *made).collect();
+        let fills = made.iter().map(|(_, _, filled)| *filled).collect();
+        cells.extend(made.into_iter().map(|(cell, _, _)| cell));
         let (mut reads, mut appends) = (Vec::new(), Vec::new());
         let (open, probes) = (cells.len(), PROBES.min(cells.len()));
         for probe in 0..probes {
@@ -411,12 +449,15 @@ fn sqlite_cells_held_open_at_once() {
         let (now, stats) = (Process::now(), stats());
         let n = cells.len();
         println!(
-            "sqlite-density: step={step} cells={n} added={added} open_p99_ms={:.1} \
+            "sqlite-density: step={step} cells={n} added={added} step_ms={} open_p99_ms={:.1} \
+             fill_p99_ms={:.1} \
              anon_kib_per_cell={:.1} sqlite_kib_per_cell={:.1} page_cache_kib_per_cell={:.1} \
              shmem_kib_per_cell={:.1} threads_per_cell={:.2} \
              files_per_cell={:.2} daemon_memory_mib={} stores_open={} read_p99_ms={:.2} \
              append_p99_ms={:.2}",
+            stepped.as_millis(),
             p99_ms(opens),
+            p99_ms(fills),
             per(now.anon_kib.saturating_sub(before.anon_kib), n),
             per(now.sqlite_kib.saturating_sub(before.sqlite_kib), n),
             per(now.page_cache_kib.saturating_sub(before.page_cache_kib), n),
@@ -431,6 +472,12 @@ fn sqlite_cells_held_open_at_once() {
         first_step.get_or_insert_with(|| (n, now, files_by_kind(), threads_by_name()));
     }
     assert_eq!(stats().gauges["stores_open"], cells.len() as u64);
+    let opened = opening.as_secs_f64();
+    println!(
+        "sqlite-density: opened cells={} in {opened:.1} s ({:.1} cells/s)",
+        cells.len(),
+        cells.len() as f64 / opened
+    );
 
     // What each cell after the first step cost: the process's fixed costs, its pools' threads and
     // the like, the first step's.
@@ -456,7 +503,8 @@ fn sqlite_cells_held_open_at_once() {
         (cost(now.sqlite_kib, then.sqlite_kib), cost(now.page_cache_kib, then.page_cache_kib));
     println!(
         "sqlite-density: a cell costs threads={threads:.2} files={files:.2} maps={maps:.2} \
-         anon_kib={anon_kib:.1} (sqlite_kib={sqlite_kib:.1} page_cache_kib={page_cache_kib:.1}) \
+         anon_kib={anon_kib:.1} (sqlite_kib={sqlite_kib:.1} \
+         page_cache_kib={page_cache_kib:.1}) \
          shmem_kib={shmem_kib:.1}"
     );
     assert!(threads <= Budget::THREADS, "{threads:.2} threads a cell");
