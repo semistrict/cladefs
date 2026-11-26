@@ -102,6 +102,10 @@ pub struct Daemon {
     /// Shared HTTP/2 peer gRPC channel pool across GetPart, replication, and migration (board
     /// 11713, board 11659).
     pub(super) peer_channels: OnceLock<peers::Channels>,
+    /// Highest `PeersUpdated` generation installed locally on this daemon, serialized with peer
+    /// list updates so a racing `SetPeers` RPC cannot overwrite a newer polled generation
+    /// (hotbed review 140 finding 520).
+    pub(super) peers_generation: Mutex<u64>,
     /// Outgoing and incoming ephemeral cell migration state.
     pub(super) migrations: migration::State,
     /// Active VM connection reports for `GetStats` and `/metrics`.
@@ -159,6 +163,7 @@ impl Daemon {
             disk_pool: OnceLock::new(),
             peer_credentials: Mutex::new(None),
             peer_channels: OnceLock::new(),
+            peers_generation: Mutex::new(0),
             migrations: migration::State::new(),
             stats_reports: Mutex::new(Vec::new()),
             process: process::State::new(),

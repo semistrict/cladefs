@@ -434,17 +434,39 @@ impl Drop for Hold {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OperationHolder {
+    #[cfg(not(madsim))]
+    Task(tokio::task::Id),
+    Thread(std::thread::ThreadId),
+}
+
+impl OperationHolder {
+    fn current() -> Self {
+        #[cfg(not(madsim))]
+        if let Some(task) = tokio::task::try_id() {
+            return Self::Task(task);
+        }
+        Self::Thread(std::thread::current().id())
+    }
+}
+
 #[derive(Default)]
 struct Operations {
-    running: Mutex<usize>,
+    holders: Mutex<Vec<OperationHolder>>,
     idle: Event,
 }
 
 impl Operations {
+    fn held_by_current(&self) -> bool {
+        let current = OperationHolder::current();
+        self.holders.lock().unwrap().contains(&current)
+    }
+
     async fn idle(&self) {
         loop {
             let idle = self.idle.listen();
-            if *self.running.lock().unwrap() == 0 {
+            if self.holders.lock().unwrap().is_empty() {
                 return;
             }
             idle.await;
@@ -452,14 +474,19 @@ impl Operations {
     }
 }
 
-struct Operation(Arc<Operations>);
+struct Operation {
+    operations: Arc<Operations>,
+    holder: OperationHolder,
+}
 
 impl Drop for Operation {
     fn drop(&mut self) {
-        let mut running = self.0.running.lock().unwrap();
-        *running -= 1;
-        if *running == 0 {
-            self.0.idle.notify(usize::MAX);
+        let mut holders = self.operations.holders.lock().unwrap();
+        if let Some(pos) = holders.iter().rposition(|&holder| holder == self.holder) {
+            holders.remove(pos);
+        }
+        if holders.is_empty() {
+            self.operations.idle.notify(usize::MAX);
         }
     }
 }
@@ -504,8 +531,9 @@ impl Inner {
         let (fxfs, _operation) = {
             let mut state = self.state.lock().unwrap();
             let fxfs = state.mounted()?.fxfs.clone();
-            *self.operations.running.lock().unwrap() += 1;
-            (fxfs, Operation(Arc::clone(&self.operations)))
+            let holder = OperationHolder::current();
+            self.operations.holders.lock().unwrap().push(holder);
+            (fxfs, Operation { operations: Arc::clone(&self.operations), holder })
         };
         // `f(fxfs)` owns `fxfs`, so `fxfs` is dropped before `_operation` even if cancelled.
         enter(&self.runtime, f(fxfs)).await
@@ -907,14 +935,30 @@ impl Filesystem {
 impl Drop for Filesystem {
     /// Unmounts and closes the filesystem if it has not finished unmounting, blocking the
     /// dropping thread until teardown completes. Await `close` or `unmount` rather than dropping
-    /// a mounted filesystem.
+    /// a mounted filesystem, and await or drop any in-flight `Node` operation futures owned by
+    /// the same task first (inline zero-copy operations cannot advance while their owning task
+    /// blocks in `Drop`).
     ///
     /// # Panics
     ///
-    /// If a mounted filesystem is dropped on its own `current_thread` Tokio runtime.
+    /// If a mounted filesystem is dropped on its own `current_thread` Tokio runtime, or while
+    /// the dropping task itself holds an in-flight `Node` operation future.
     fn drop(&mut self) {
         if self.inner.finished.load(Ordering::Acquire) {
             return;
+        }
+        if self.inner.operations.held_by_current() {
+            if std::thread::panicking() {
+                log::error!(
+                    "cladefs: skipping blocking unmount during unwind while current task holds \
+                     an in-flight Node operation"
+                );
+                return;
+            }
+            panic!(
+                "cladefs: dropped a mounted Filesystem while this task holds an in-flight Node \
+                 operation; await or drop the operation before dropping Filesystem"
+            );
         }
         if self.inner.on_own_current_thread() && std::thread::panicking() {
             log::error!(
@@ -2044,6 +2088,25 @@ mod tests {
             assert_eq!(file.write(0, b"inline").await, Ok(6));
             drop(file);
             fs.close().await.unwrap().check().await.unwrap();
+        });
+    }
+
+    /// Dropping a mounted `Filesystem` on the same task that holds a suspended inline `Node`
+    /// operation future panics immediately rather than deadlocking in `operations.idle()`
+    /// (hotbed review 140 finding 518).
+    #[test]
+    #[should_panic(expected = "in-flight Node operation")]
+    fn dropping_mounted_filesystem_with_same_task_write_panics_instead_of_deadlocking() {
+        const BLOCK: usize = Storage::BLOCK_SIZE as usize;
+        block_on(async {
+            let fs = Filesystem::format(Storage::memory(8 << 20)).await.unwrap();
+            let (file, _) = fs.root().create(b"file", 0o644, OWNER).await.unwrap();
+            let inner = Arc::clone(&fs.inner);
+            let _release = hold_lock(&inner, file.inode().0).await;
+            let data = [3; BLOCK];
+            let mut write = Box::pin(file.write(0, &data));
+            assert!(futures::poll!(&mut write).is_pending());
+            drop(fs);
         });
     }
 }

@@ -209,7 +209,7 @@ pub fn governed_bytes() -> u64 {
 /// memory down to `allowance`.
 #[cfg(not(madsim))]
 #[cfg_attr(not(test), allow(dead_code))]
-pub(super) async fn govern_on(daemon: &Daemon, allowance: u64) {
+pub(super) async fn govern_on(daemon: &Arc<Daemon>, allowance: u64) {
     govern_with_on(
         daemon,
         allowance,
@@ -337,8 +337,31 @@ fn apply_governed_cap(daemon: &Daemon, effective_cap: u64) {
 /// only under [`crate::governor::ReclaimMode::Mapped`] (rate-limited by `max_shrink_bytes`), while
 /// [`crate::governor::ReclaimMode::IdleOnly`] caps growth at the remaining mapped working set
 /// without triggering synchronous relief eviction of hot mapped extents.
+///
+/// Outside `madsim` and Shuttle, delegates directly to [`govern_with_sync_on_wait`] on a blocking
+/// thread so tests and production execute the exact same synchronous eviction and `Parking::with_wake`
+/// quarantine-wait path (hotbed review 139 finding 2).
+#[cfg(not(madsim))]
 pub(super) async fn govern_with_on(
-    daemon: &Daemon,
+    daemon: &Arc<Daemon>,
+    allowance: u64,
+    mode: crate::governor::ReclaimMode,
+) {
+    let daemon = Arc::clone(daemon);
+    // Run the production sync eviction path outside the simulation on a blocking thread so async
+    // callers do not block a Tokio worker.
+    tokio::task::spawn_blocking(move || {
+        govern_with_sync_on_wait(&daemon, allowance, mode, &mut SyncWait::Standalone);
+    })
+    .await
+    .expect("govern_with_sync_on blocking task panicked");
+}
+
+/// Async version of [`govern_with_on`] used under `madsim` where no OS eviction thread runs and
+/// quarantine waits must yield cooperatively to the runtime.
+#[cfg(madsim)]
+pub(super) async fn govern_with_on(
+    daemon: &Arc<Daemon>,
     allowance: u64,
     mode: crate::governor::ReclaimMode,
 ) {
@@ -379,9 +402,31 @@ pub(super) async fn govern_with_on(
     }
 }
 
+/// How [`evict_until_sync`] wakes and waits on quarantined VM unmaps.
+#[cfg(not(madsim))]
+enum SyncWait<'a> {
+    /// Running on the unified `"cladefs-eviction"` OS thread: shares `slabs`'s wakeup signal with
+    /// starved-arena relief and services relief between every step and during quarantine waits.
+    EvictionThread(&'a mut dyn FnMut()),
+    /// Running off the eviction thread (e.g. `memory::govern` tests): uses a local condvar via
+    /// [`Parking::with_wake`] so it exercises the exact production sync path without consuming the
+    /// eviction thread's `wanted` signal.
+    Standalone,
+}
+
+#[cfg(not(madsim))]
+impl SyncWait<'_> {
+    fn service_relief(&mut self) {
+        match self {
+            Self::EvictionThread(service) => service(),
+            Self::Standalone => {}
+        }
+    }
+}
+
 /// Synchronous equivalent of [`govern_with_on`] executed on the single unified OS eviction thread
-/// (board 11703), servicing starved arena relief via `service_relief` while waiting on quarantined
-/// VM unmaps.
+/// (board 11703), servicing starved arena relief via `service_relief` between steps and while
+/// waiting on quarantined VM unmaps.
 #[cfg(not(madsim))]
 pub(super) fn govern_with_sync_on(
     daemon: &Daemon,
@@ -389,11 +434,27 @@ pub(super) fn govern_with_sync_on(
     mode: crate::governor::ReclaimMode,
     service_relief: &mut dyn FnMut(),
 ) {
+    govern_with_sync_on_wait(
+        daemon,
+        allowance,
+        mode,
+        &mut SyncWait::EvictionThread(service_relief),
+    );
+}
+
+#[cfg(not(madsim))]
+fn govern_with_sync_on_wait(
+    daemon: &Daemon,
+    allowance: u64,
+    mode: crate::governor::ReclaimMode,
+    wait: &mut SyncWait<'_>,
+) {
     use crate::governor::ReclaimMode;
     use cladefs_core::cache::EvictScope;
 
     let deadline = std::time::Instant::now() + PARKED_WAIT;
     trim_derived_caches(daemon, allowance);
+    wait.service_relief();
 
     if matches!(mode, ReclaimMode::None) || daemon.host.slabs().arenas_bytes() <= allowance {
         let registry = daemon.memory.registry.lock().unwrap();
@@ -415,7 +476,7 @@ pub(super) fn govern_with_sync_on(
                 allowance,
                 EvictScope::IdleOnly,
                 deadline,
-                service_relief,
+                wait,
             );
             record_idle_scan(daemon, now, seq_before, before_idle, allowance);
         }
@@ -433,7 +494,7 @@ pub(super) fn govern_with_sync_on(
             effective_cap,
             EvictScope::GovernorMapped,
             deadline,
-            service_relief,
+            wait,
         );
     }
 }
@@ -445,7 +506,7 @@ fn shrink_weighted_sync(
     target: u64,
     scope: cladefs_core::cache::EvictScope,
     deadline: std::time::Instant,
-    service_relief: &mut dyn FnMut(),
+    wait: &mut SyncWait<'_>,
 ) {
     let mut over: Vec<(u64, u64, u64)> = crate::governor::shares(target, weighted)
         .into_iter()
@@ -464,22 +525,17 @@ fn shrink_weighted_sync(
         let held = held_by(daemon, id);
         if held > share {
             let tenant_target = share.max(held.saturating_sub(excess));
-            if let Err(err) = shrink_scoped_by_sync(
-                daemon,
-                Some(id),
-                tenant_target,
-                scope,
-                deadline,
-                service_relief,
-            ) && err != Errno::ENOENT
+            if let Err(err) =
+                shrink_scoped_by_sync(daemon, Some(id), tenant_target, scope, deadline, wait)
+                && err != Errno::ENOENT
             {
                 log::error!("cladefsd: shrinking a tenant's memory to its share: {err}");
             }
         }
+        wait.service_relief();
     }
     if daemon.host.slabs().arenas_bytes() > target
-        && let Err(err) =
-            shrink_scoped_by_sync(daemon, None, target, scope, deadline, service_relief)
+        && let Err(err) = shrink_scoped_by_sync(daemon, None, target, scope, deadline, wait)
     {
         log::error!("cladefsd: shrinking the daemon's memory to the host's: {err}");
     }
@@ -492,7 +548,7 @@ fn shrink_scoped_by_sync(
     target: u64,
     scope: cladefs_core::cache::EvictScope,
     deadline: std::time::Instant,
-    service_relief: &mut dyn FnMut(),
+    wait: &mut SyncWait<'_>,
 ) -> Result<u64, Errno> {
     let slabs = daemon.host.slabs();
     let Some(id) = tenant else {
@@ -502,7 +558,7 @@ fn shrink_scoped_by_sync(
             scope,
             || slabs.arenas_bytes_in_use().saturating_sub(target),
             deadline,
-            service_relief,
+            wait,
         );
         slabs.release_spares(None);
         return Ok(slabs.arenas_bytes());
@@ -523,7 +579,7 @@ fn shrink_scoped_by_sync(
             scope,
             || in_use().saturating_sub(target),
             deadline,
-            service_relief,
+            wait,
         );
         slabs.release_spares(Some(*arena));
     }
@@ -537,7 +593,7 @@ fn evict_until_sync(
     scope: cladefs_core::cache::EvictScope,
     deficit: impl Fn() -> u64,
     deadline: std::time::Instant,
-    service_relief: &mut dyn FnMut(),
+    wait: &mut SyncWait<'_>,
 ) {
     let slabs = daemon.host.slabs();
     loop {
@@ -545,11 +601,27 @@ fn evict_until_sync(
         if want == 0 {
             return;
         }
-        let wake_slabs = Arc::clone(slabs);
-        let parking = Parking::with_wake(Arc::new(move || wake_slabs.signal_eviction()));
+        let standalone = matches!(wait, SyncWait::Standalone)
+            .then(|| Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new())));
+        let parking = match wait {
+            SyncWait::EvictionThread(_) => {
+                let wake_slabs = Arc::clone(slabs);
+                Parking::with_wake(Arc::new(move || wake_slabs.signal_eviction()))
+            }
+            SyncWait::Standalone => {
+                let sig = Arc::clone(standalone.as_ref().unwrap());
+                Parking::with_wake(Arc::new(move || {
+                    *sig.0.lock().unwrap() = true;
+                    sig.1.notify_all();
+                }))
+            }
+        };
         let stop = |evicted: u64| evicted >= want || deficit() == 0;
         let evicted =
             parking.counting(daemon, || daemon.host.cache().evict_with_scope(arena, scope, stop));
+        // Service starved-arena relief after every eviction batch (not only when quarantined) so
+        // non-parked governor shrinks cannot stall DAX page-ins (hotbed review 139 finding 1).
+        wait.service_relief();
         if !parking.parked() {
             if evicted == 0 || deficit() == 0 {
                 return;
@@ -557,7 +629,7 @@ fn evict_until_sync(
             continue;
         }
         while parking.parked() {
-            service_relief();
+            wait.service_relief();
             if !parking.parked() {
                 break;
             }
@@ -565,7 +637,19 @@ fn evict_until_sync(
             if left.is_zero() {
                 break;
             }
-            slabs.wait_eviction(left.min(std::time::Duration::from_millis(50)));
+            let slice = left.min(std::time::Duration::from_millis(50));
+            match wait {
+                SyncWait::EvictionThread(_) => slabs.wait_eviction(slice),
+                SyncWait::Standalone => {
+                    let sig = standalone.as_ref().unwrap();
+                    let mut signaled = sig.0.lock().unwrap();
+                    if !*signaled && parking.parked() {
+                        let (guard, _) = sig.1.wait_timeout(signaled, slice).unwrap();
+                        signaled = guard;
+                    }
+                    *signaled = false;
+                }
+            }
         }
     }
 }
@@ -573,6 +657,7 @@ fn evict_until_sync(
 /// Evicts each tenant down to its weighted share of `target`, then any arena down to `target`,
 /// restricted to `scope`. Caps each tenant's eviction by the remaining global excess above
 /// `target` so multi-tenant weighted passes still honor `Mapped { max_shrink_bytes }` rate limits.
+#[cfg(madsim)]
 async fn shrink_weighted(
     daemon: &Daemon,
     weighted: &[(u64, u64)],

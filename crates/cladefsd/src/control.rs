@@ -1522,23 +1522,31 @@ impl Cladefsd for Control {
         let published = async {
             let number = bucket_cell::events::bucket_number(&bucket).await?;
             let auth = bucket_cell::events::authority(&bucket).await?;
-            bucket_cell::events::publish(
+            let log = bucket_cell::events::publish(
                 &*auth,
                 bucket_cell::events::Publish::PeersUpdated {
                     bucket: number,
                     addresses: addresses.clone(),
                 },
             )
-            .await
+            .await?;
+            Ok::<_, bucket_cell::Error>((number, log))
         }
         .await;
-        if let Err(err) = published {
-            let failure = local_cell::upload::Failure::Bucket(err);
-            let errno = cladefs_core::bucket::errno(&failure).unwrap_or(Errno::EIO);
-            log::error!("cladefsd: publishing SetPeers to events: {failure}");
-            return Err(saying(errno, format!("publishing SetPeers to events: {failure}")));
-        }
-        reply(crate::peers::set_on(&self.daemon, addresses).map(|()| SetPeersResponse {}))
+        let (number, log) = match published {
+            Ok(published) => published,
+            Err(err) => {
+                let failure = local_cell::upload::Failure::Bucket(err);
+                let errno = cladefs_core::bucket::errno(&failure).unwrap_or(Errno::EIO);
+                log::error!("cladefsd: publishing SetPeers to events: {failure}");
+                return Err(saying(errno, format!("publishing SetPeers to events: {failure}")));
+            }
+        };
+        let generation = log.peers_for(number).map_or(0, |peers| peers.generation);
+        reply(
+            crate::peers::set_generation_on(&self.daemon, generation, addresses)
+                .map(|_| SetPeersResponse {}),
+        )
     }
 
     async fn shred_cell(

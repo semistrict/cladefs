@@ -243,7 +243,7 @@ cargo run --bin cladefsctl -- import /tmp/cladefs/base 1073741824 /tmp/alpine.ta
 cargo run --bin cladefsctl -- stat /tmp/cladefs/base
 ```
 
-On Linux, start `cladefsd` with `CLADEFSD_GRPC` to fork and manage live cells through the daemon (`cladefsctl fork /tmp/cladefs/base /tmp/cladefs/vm1`); `stat` on the fork then shows its bytes as `inherited`, holding the base's extents without copying them.
+On Linux, start `cladefsd` with `CLADEFSD_GRPC` to fork and manage live cells through the daemon (`cladefsctl fork 0/<CELL>` using the cell ID printed by `cladefsctl import`); `stat` on the fork then shows its bytes as `inherited`, holding the base's extents without copying them.
 
 Boot guests, on Linux with KVM. This builds the guest kernel and Firecracker, starts a daemon and
 runs the guest tests, each of which boots VMs that mount Fxfs from an extent store device:

@@ -734,7 +734,15 @@ pub(super) fn start_on(daemon: &Arc<Daemon>) -> Result<(), String> {
         daemon.host.cache().relieve_pressure();
         let weak = Arc::downgrade(daemon);
         let mut tick = GovernorLoop::new(daemon.host.cache().refaults(), headroom, floor);
+        let mut started = false;
         if daemon.host.slabs().attach_governor(INTERVAL, move |service_relief| {
+            if !started {
+                started = true;
+                // Triggered on the unified eviction thread under `Awaited("memory governor")` so
+                // supervision tests and runtime panic aborts still verify the live governor path
+                // (hotbed review 140 finding 521).
+                fail::fail_point!("cladefsd::service::memory governor");
+            }
             let Some(daemon) = weak.upgrade() else { return };
             if let Some((allowance, mode)) = tick.sample_and_decide(&daemon) {
                 memory::govern_with_sync_on(&daemon, allowance, mode, service_relief);

@@ -59,25 +59,9 @@
 //! cladefsctl mount detach [--force] TENANT CELL
 //! cladefsctl mount list
 //!
-//! # Without the daemon: cells by their directory, DIR, which nothing has open.
-//! cladefsctl create DIR CAPACITY
-//! cladefsctl take [--force] DIR CAPACITY TENANT/CELL [TOKEN]
-//! cladefsctl place [--force] DIR TOKEN
-//! cladefsctl sync DIR
+//! # Without the daemon: offline bootstrap, read-only inspection, and bucket administration.
 //! cladefsctl import DIR CAPACITY IMAGE [REF]
 //! cladefsctl import-memory [--version] DIR FILE
-//! cladefsctl fork SRC DST
-//! cladefsctl version DIR
-//! cladefsctl versions DIR
-//! cladefsctl drop-versions DIR VERSION...
-//! cladefsctl share DIR VERSION
-//! cladefsctl unshare DIR VERSION
-//! cladefsctl delete DIR
-//! cladefsctl drop DIR
-//! cladefsctl resize DIR CAPACITY
-//! cladefsctl public DIR
-//! cladefsctl public-attach-only DIR
-//! cladefsctl attach DIR BASE_DIR
 //! cladefsctl stat DIR
 //! cladefsctl shred-cell TENANT/CELL       # with CLADEFSD_BUCKET, as with --bucket
 //! cladefsctl shred-tenant TENANT          # with CLADEFSD_BUCKET, as with --bucket
@@ -631,12 +615,10 @@ mod cli {
     enum Command {
         /// cladefs: a new cell, its ID its bucket's to give (TASK-364, hotbed question 547).
         Create {
-            dir: Option<PathBuf>,
             tenant: u64,
             capacity: u64,
         },
         Take {
-            dir: Option<PathBuf>,
             capacity: u64,
             cell: cladefs::CellId,
             token: Option<u64>,
@@ -666,7 +648,6 @@ mod cli {
         },
         Fork {
             src: Target,
-            dst: Option<PathBuf>,
             target_tenant: Option<u64>,
         },
         /// cladefs: a version made (doc-20).
@@ -1035,7 +1016,6 @@ mod cli {
                     if daemon_mode && rest.len() <= 1 =>
                 {
                     Self::Take {
-                        dir: None,
                         capacity: capacity(size)?,
                         cell: parse_cell(cell)?,
                         token: rest.first().map(|rest| token(rest)).transpose()?,
@@ -1044,27 +1024,24 @@ mod cli {
                 }
                 ["take", size, cell, ref rest @ ..] if daemon_mode && rest.len() <= 1 => {
                     Self::Take {
-                        dir: None,
                         capacity: capacity(size)?,
                         cell: parse_cell(cell)?,
                         token: rest.first().map(|rest| token(rest)).transpose()?,
                         force: false,
                     }
                 }
-                ["take", "--force", dir, size, cell, ref rest @ ..]
+                ["take", "--force", _dir, size, cell, ref rest @ ..]
                     if !daemon_mode && rest.len() <= 1 =>
                 {
                     Self::Take {
-                        dir: Some(dir.into()),
                         capacity: capacity(size)?,
                         cell: parse_cell(cell)?,
                         token: rest.first().map(|rest| token(rest)).transpose()?,
                         force: true,
                     }
                 }
-                ["take", dir, size, cell, ref rest @ ..] if !daemon_mode && rest.len() <= 1 => {
+                ["take", _dir, size, cell, ref rest @ ..] if !daemon_mode && rest.len() <= 1 => {
                     Self::Take {
-                        dir: Some(dir.into()),
                         capacity: capacity(size)?,
                         cell: parse_cell(cell)?,
                         token: rest.first().map(|rest| token(rest)).transpose()?,
@@ -1072,15 +1049,13 @@ mod cli {
                     }
                 }
                 ["create", "--tenant", t, size] if daemon_mode => {
-                    Self::Create { dir: None, tenant: tenant(t)?, capacity: capacity(size)? }
+                    Self::Create { tenant: tenant(t)?, capacity: capacity(size)? }
                 }
                 ["create", size] if daemon_mode => Self::Create {
-                    dir: None,
                     tenant: bucket_cell::layout::DEFAULT_TENANT,
                     capacity: capacity(size)?,
                 },
-                ["create", dir, size] if !daemon_mode => Self::Create {
-                    dir: Some(dir.into()),
+                ["create", _dir, size] if !daemon_mode => Self::Create {
                     tenant: bucket_cell::layout::DEFAULT_TENANT,
                     capacity: capacity(size)?,
                 },
@@ -1154,19 +1129,14 @@ mod cli {
                 },
                 ["fork", "--tenant", t, src] if daemon_mode => Self::Fork {
                     src: Target::Cell(parse_cell(src)?),
-                    dst: None,
                     target_tenant: Some(tenant(t)?),
                 },
-                ["fork", src] if daemon_mode => Self::Fork {
-                    src: Target::Cell(parse_cell(src)?),
-                    dst: None,
-                    target_tenant: None,
-                },
-                ["fork", src, dst] if !daemon_mode => Self::Fork {
-                    src: Target::Dir(src.into()),
-                    dst: Some(dst.into()),
-                    target_tenant: None,
-                },
+                ["fork", src] if daemon_mode => {
+                    Self::Fork { src: Target::Cell(parse_cell(src)?), target_tenant: None }
+                }
+                ["fork", src, _dst] if !daemon_mode => {
+                    Self::Fork { src: Target::Dir(src.into()), target_tenant: None }
+                }
                 ["version", cell] => Self::Version { target: target(cell)? },
                 ["versions", cell] => Self::Versions { target: target(cell)? },
                 ["drop-versions", cell, ref ids @ ..] if !ids.is_empty() => Self::DropVersions {

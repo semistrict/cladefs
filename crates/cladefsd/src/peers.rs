@@ -505,16 +505,30 @@ pub(super) fn check_on(daemon: &Daemon, addresses: &[String]) -> Result<(), clad
     Ok(())
 }
 
-/// Has the hosts sharing the bucket on `daemon` be those at `addresses` (`SetPeers`).
-pub(super) fn set_on(daemon: &Daemon, addresses: Vec<String>) -> Result<(), cladefs_core::Errno> {
+/// Has the hosts sharing the bucket on `daemon` be those at `addresses` if `generation` is newer
+/// than the generation already installed locally (`SetPeers`, `events` poller; hotbed review 140
+/// finding 520). Serialized under `daemon.peers_generation` so a racing `SetPeers` RPC cannot
+/// overwrite a newer generation already applied by the poller. Returns `true` if applied.
+pub(super) fn set_generation_on(
+    daemon: &Daemon,
+    generation: u64,
+    addresses: Vec<String>,
+) -> Result<bool, cladefs_core::Errno> {
     check_on(daemon, &addresses)?;
     let peers = cladefs_core::bucket::peers_on(&daemon.host).ok_or(cladefs_core::Errno::ENOTSUP)?;
+    let mut current = daemon.peers_generation.lock().unwrap();
+    if generation > 0 && generation <= *current {
+        return Ok(false);
+    }
     log::info!("cladefsd: peers: {}", addresses.join(","));
     peers.set(addresses.clone());
     if let Some(channels) = daemon.peer_channels.get() {
         channels.prune(&addresses);
     }
-    Ok(())
+    if generation > *current {
+        *current = generation;
+    }
+    Ok(true)
 }
 
 /// Whether `address` is a host's `HOST:PORT`, as a peer is reached at.

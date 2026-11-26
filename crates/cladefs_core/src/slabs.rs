@@ -350,12 +350,12 @@ impl Node {
         self.reliever.get()?.as_deref()
     }
 
-    pub(super) fn relieving(&self) -> Option<relief::Relieving> {
+    fn relieving(&self) -> Option<relief::Relieving> {
         let tid = std::thread::current().id();
         self.relieving.lock().unwrap().and_then(|(id, target)| (id == tid).then_some(target))
     }
 
-    pub(super) fn set_relieving(&self, target: Option<relief::Relieving>) {
+    fn set_relieving(&self, target: Option<relief::Relieving>) {
         let tid = std::thread::current().id();
         *self.relieving.lock().unwrap() = target.map(|t| (tid, t));
     }

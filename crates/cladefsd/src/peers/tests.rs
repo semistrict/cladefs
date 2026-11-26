@@ -1583,3 +1583,43 @@ fn concurrent_peer_and_migration_clients_exceeding_connection_limit_share_one_co
         "GetPart and {count} concurrent migration/peer clients should share one HTTP/2 connection"
     );
 }
+
+/// Hotbed review 140 finding 520: a racing `SetPeers` RPC completing after the events poller has
+/// already installed a newer generation must not overwrite the daemon's peer list with the stale
+/// generation.
+#[test]
+fn set_generation_ignores_stale_peer_list() {
+    struct NoopLink;
+    impl Link for NoopLink {
+        fn get(&self, _asked: Asked) -> BoxFuture<'static, Result<Option<Vec<u8>>, Refusal>> {
+            Box::pin(std::future::ready(Ok(None)))
+        }
+    }
+
+    let daemon = Daemon::new();
+    let bucket =
+        Arc::new(RoutedBucket::unrouted(Arc::new(bucket_cell::object_bucket::ObjectBucket::new(
+            Arc::new(object_store::memory::InMemory::new()),
+            "peers-gen-test",
+        ))));
+    let peers = cladefs_core::bucket::peers::Peers::new("127.0.0.1:9000", |_| Arc::new(NoopLink));
+    cladefs_core::bucket::ask_peers_on(&daemon.host, bucket, peers.clone()).unwrap();
+
+    assert_eq!(
+        super::set_generation_on(&daemon, 2, vec!["127.0.0.1:9002".into()]),
+        Ok(true),
+        "generation 2 should apply"
+    );
+    assert_eq!(
+        super::set_generation_on(&daemon, 1, vec!["127.0.0.1:9001".into()]),
+        Ok(false),
+        "stale generation 1 must be ignored"
+    );
+    assert_eq!(peers.addresses(), vec!["127.0.0.1:9000".to_owned(), "127.0.0.1:9002".to_owned()]);
+    assert_eq!(
+        super::set_generation_on(&daemon, 3, vec!["127.0.0.1:9003".into()]),
+        Ok(true),
+        "newer generation 3 should apply"
+    );
+    assert_eq!(peers.addresses(), vec!["127.0.0.1:9000".to_owned(), "127.0.0.1:9003".to_owned()]);
+}

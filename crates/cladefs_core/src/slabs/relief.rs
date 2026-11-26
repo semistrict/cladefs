@@ -311,6 +311,12 @@ fn relieve(
         }
         let Some(slabs) = slabs.upgrade() else { break };
         let node = slabs.node();
+        // Once a memory governor is attached, supervise every relief and governor pass under
+        // `Holding::work("memory governor")` so any panic on the unified eviction thread aborts
+        // the daemon naming `"memory governor"` rather than silently halting both relief and
+        // governance (hotbed review 140 finding 521).
+        let supervised = reliever.governor.lock().unwrap().is_some();
+        let _supervised = supervised.then(|| local_cell::shared::Holding::work("memory governor"));
         relieve_pass(node, &mut evict);
         let due = {
             let mut slot = reliever.governor.lock().unwrap();
@@ -323,6 +329,10 @@ fn relieve(
         if let Some(mut gov) = due {
             let mut service_relief = || relieve_pass(node, &mut evict);
             (gov.tick)(&mut service_relief);
+            // Re-check starved arenas immediately after the governor tick returns so an ask that
+            // arrived near tick end (or whose `wanted` signal was consumed by `wait_eviction`) is
+            // relieved without waiting up to `gov.interval` (hotbed review 139 finding 1).
+            relieve_pass(node, &mut evict);
             gov.next = Instant::now() + gov.interval;
             let mut slot = reliever.governor.lock().unwrap();
             if slot.is_none() {
@@ -737,5 +747,74 @@ mod tests {
         assert_eq!(relief_bytes_for(4096 * SLAB, SLAB), MAX_RELIEF_HEADROOM);
         assert_eq!(relief_bytes_for(1024 * SLAB, 30 * SLAB), 29 * SLAB + MAX_RELIEF_HEADROOM);
         assert_eq!(relief_bytes_for(4096 * SLAB, 200 * SLAB), MAX_RELIEF_BATCH);
+    }
+
+    /// Hotbed review 139 finding 1: a slow governor tick that calls `service_relief()` between
+    /// steps unblocks a starved `alloc(Wait::Yes)` promptly instead of blocking it for the full
+    /// tick duration, and a relief ask whose `wanted` signal was consumed by `wait_eviction` at
+    /// tick end is still serviced immediately without sleeping for the governor interval.
+    #[cfg(not(madsim))]
+    #[test]
+    fn governor_tick_services_starved_relief_and_post_tick_asks_promptly() {
+        use std::sync::atomic::AtomicBool;
+
+        let whole = (SLAB / page_size()) as u16;
+        let slabs = HostSlabs::new();
+        slabs.set_total_cap(Some(SLAB));
+        let held = Arc::new(Mutex::new(vec![
+            slabs.alloc(ArenaId::DEFAULT, u64::from(whole), Wait::No).unwrap(),
+        ]));
+        let held_evict = Arc::clone(&held);
+        slabs
+            .relieve_with(move |_, _| held_evict.lock().unwrap().pop().map_or(0, |slab| slab.len()))
+            .unwrap();
+
+        let in_tick = Arc::new(AtomicBool::new(false));
+        let in_tick_cb = Arc::clone(&in_tick);
+        let ran = Arc::new(AtomicBool::new(false));
+        let ran_cb = Arc::clone(&ran);
+        let slabs_cb = Arc::clone(&slabs);
+        assert!(slabs.attach_governor(Duration::from_secs(5), move |service_relief| {
+            if ran_cb.swap(true, Ordering::AcqRel) {
+                return;
+            }
+            in_tick_cb.store(true, Ordering::Release);
+            // Simulate a multi-step governor pass (400 ms total) calling `service_relief` between
+            // steps, then consuming `wanted` once via `wait_eviction` right before returning.
+            for _ in 0..8 {
+                std::thread::sleep(Duration::from_millis(50));
+                service_relief();
+            }
+            slabs_cb.wait_eviction(Duration::from_millis(20));
+            in_tick_cb.store(false, Ordering::Release);
+        }));
+
+        let wait_start = Instant::now();
+        while !in_tick.load(Ordering::Acquire) {
+            assert!(wait_start.elapsed() < Duration::from_secs(2), "governor tick never started");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        // Starved alloc arriving mid-tick must be serviced by `service_relief()` well before the
+        // 400 ms tick finishes.
+        let started = Instant::now();
+        let slab1 = slabs.alloc(ArenaId::DEFAULT, u64::from(whole), Wait::Yes).unwrap();
+        let mid_tick_elapsed = started.elapsed();
+        assert!(
+            mid_tick_elapsed < Duration::from_millis(250),
+            "mid-tick relief waited too long: {mid_tick_elapsed:?}"
+        );
+
+        // Hold `slab1` back and starve again right as the tick calls `wait_eviction` and returns:
+        // post-tick `relieve_pass` must service it immediately instead of sleeping 5 s.
+        held.lock().unwrap().push(slab1);
+        let started = Instant::now();
+        let slab2 = slabs.alloc(ArenaId::DEFAULT, u64::from(whole), Wait::Yes).unwrap();
+        let post_tick_elapsed = started.elapsed();
+        assert!(
+            post_tick_elapsed < Duration::from_secs(1),
+            "post-tick relief stalled for governor interval: {post_tick_elapsed:?}"
+        );
+        drop(slab2);
+        held.lock().unwrap().clear();
     }
 }
