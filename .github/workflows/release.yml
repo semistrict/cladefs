@@ -122,7 +122,8 @@ jobs:
           set -euo pipefail
           work="$RUNNER_TEMP/cladefs-guest-kernel"
           mkdir -p "$work" release-out
-          img="$(CLADEFS_GUEST_KERNEL_WORK="$work" scripts/build-guest-kernel.sh "${{ matrix.karch }}")"
+          # The script prints make's output, then the image's path, last.
+          img="$(CLADEFS_GUEST_KERNEL_WORK="$work" scripts/build-guest-kernel.sh "${{ matrix.karch }}" | tail -n 1)"
           ls -lh "$img"
           vmlinux="$(find "$work" -maxdepth 2 -name vmlinux | head -n 1)"
           readelf -S "$vmlinux" | grep -q '\.BTF'
