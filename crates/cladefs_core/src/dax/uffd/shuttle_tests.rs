@@ -1987,3 +1987,88 @@ fn sub_host_page_remap_end_races_make_private_by_pct() {
     Runner::new(PctScheduler::new(3, runs(RUNS)), config())
         .run(|| sub_host_page_remap_races_make_private(Private::End));
 }
+
+/// board 11673: an unaligned sub-host-page `remap` (`offset = unit`, `len = unit`,
+/// `unit = page_size() / 4`) racing concurrent `make_private` on the same sub-page must execute
+/// atomically under one `self.pages` lock so `make_private` never observes cleared `mapped_mask`
+/// and fails with spurious `Err(Errno::EINVAL)`.
+fn unaligned_sub_host_page_remap_races_make_private(private: Private) {
+    let ps = page_size();
+    let unit = (ps / 4) as usize;
+    let sub_off = unit as u64;
+    let sub_len = unit as u64;
+    let memory = ModelMemory::default();
+    let base = 64 * ps as usize;
+    // SAFETY: The model changes no memory.
+    let stage = unsafe {
+        UffdSecondStage::with_host_and_unit(
+            base,
+            ps,
+            unit,
+            memory.clone(),
+            Memories::InProcess,
+            None,
+            Mappings::new(usize::MAX),
+        )
+    }
+    .unwrap();
+    stage.copy_on_write(1).unwrap();
+    let telling = Arc::new(Telling { stage: stage.clone() });
+    let (mut dax, _) = Dax::with_stage_and_unit_on(
+        crate::Host::process(),
+        crate::pages::ArenaId::DEFAULT,
+        ps,
+        unit as u64,
+        Some(telling),
+        true,
+    )
+    .unwrap();
+    let src_a = TestSource::filled(1, FIRST).source();
+    let src_b = TestSource::filled(1, SECOND).source();
+    dax.map(0, &src_a, 0, ps);
+    let mut new_phys = None;
+    src_b.each_present(0..1, &mut |present| new_phys = Some(present.at));
+    let new_phys = new_phys.expect("src_b is in memory");
+
+    let window = dax.window.clone();
+    let stage_a = stage.clone();
+    let remapper = thread::spawn(move || {
+        stage_a.remap(
+            sub_off,
+            sub_len,
+            private,
+            &[
+                crate::dax::Anew::Mapped { offset: sub_off, len: sub_len },
+                crate::dax::Anew::Map { offset: 0, phys: new_phys, len: ps },
+            ],
+        );
+    });
+    let stage_b = stage.clone();
+    let win_b = window.clone();
+    let privatizer = thread::spawn(move || {
+        future::block_on(stage_b.make_private(win_b.as_ref(), sub_off, sub_len))
+    });
+    remapper.join().unwrap();
+    let res = privatizer.join().unwrap();
+    assert_eq!(
+        res,
+        Ok(()),
+        "unaligned remap must never expose cleared mapped_mask to make_private"
+    );
+    let guest = HostGuest { memory, stage, window, base };
+    let got = load_byte(&guest, 0);
+    assert!(got == FIRST || got == SECOND, "unexpected byte {got:#x}");
+    drop(dax);
+}
+
+#[test]
+fn unaligned_sub_host_page_remap_keep_never_causes_einval_in_make_private() {
+    Runner::new(PctScheduler::new(3, runs(RUNS)), config())
+        .run(|| unaligned_sub_host_page_remap_races_make_private(Private::Keep));
+}
+
+#[test]
+fn unaligned_sub_host_page_remap_end_never_causes_einval_in_make_private() {
+    Runner::new(PctScheduler::new(3, runs(RUNS)), config())
+        .run(|| unaligned_sub_host_page_remap_races_make_private(Private::End));
+}

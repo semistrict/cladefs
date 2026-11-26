@@ -25,8 +25,6 @@ use std::sync::Mutex;
 // (`super::client`), and the daemon's outside the simulation, whose guests' connections are in
 // memory, macOS's included (board 2912).
 #[cfg(target_os = "linux")]
-use crate::codec::{Stage, StageOp};
-#[cfg(target_os = "linux")]
 use std::io::{Read, Write};
 #[cfg(target_os = "linux")]
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
@@ -444,6 +442,21 @@ pub struct StageMapBody {
     pub reserved: u32,
 }
 
+/// Entry in a [`STAGE_REMAP`]'s payload (board 11673): either [`STAGE_MAPPED`] (naming a newly
+/// mapped window range, with `arena == 0` and `phys_offset == 0`) or [`STAGE_MAP`] (mapping
+/// physical pages at `arena`/`phys_offset`).
+#[repr(C)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, FromBytes, IntoBytes, Immutable, KnownLayout,
+)]
+pub struct StageAnewEntry {
+    pub kind: u32,
+    pub arena: u32,
+    pub offset: u64,
+    pub phys_offset: u64,
+    pub len: u64,
+}
+
 /// Inline body of a reply to [`OPEN`]. `version` sits at [`VERSION_OFFSET`], fixed across every
 /// wire version.
 #[repr(C)]
@@ -585,7 +598,7 @@ const _: () = {
 /// ([`FORKED_EPHEMERAL`]) for local-only quiesced ephemeral snapshots.
 /// Version 19: a [`STAGE_COUNTS`]'s `id` is its window's budget now, said again as it changes
 /// (board 10098).
-pub const VERSION: u64 = 19;
+pub const VERSION: u64 = 20;
 
 /// cladefs: a flag of any request, which says the guest request it is a call for, the guest's
 /// number of it (`crate::request`, TASK-260): little-endian, not 0, in the first
@@ -823,6 +836,10 @@ pub const STAGE_MAP: u32 = 101;
 pub const STAGE_UNMAP: u32 = 103;
 /// cladefs: the window maps `args[1]` bytes at `args[0]` anew (`SecondStage::window_mapped`).
 pub const STAGE_MAPPED: u32 = 106;
+/// cladefs: atomically unmaps `RangeBody { offset, len }` (keeping private pages if
+/// [`STAGE_KEEP_PRIVATE`]) and applies the [`StageAnewEntry`] array carried in its payload
+/// (`SecondStage::remap`, board 11673).
+pub const STAGE_REMAP: u32 = 110;
 // 108 made a page private, the daemon's copy on write, which a VM process makes itself now (doc-26),
 // not reused.
 /// The cell's capacity is `args[0]` bytes now, which the guest takes (the control API's
@@ -1105,18 +1122,17 @@ impl AsyncSender {
         self.queue(header, payload, fds)
     }
 
-    /// cladefs: sends `headers`, messages of no payload, as [`AsyncSender::send`] would one after
-    /// another, but at once, in as few writes as the socket takes: the operations of one change to
-    /// a window, which its VM process then reads, and makes, together (TASK-91.16). `headers` is
-    /// called with the sender's queue locked, so that what it makes, such as the IDs it gives,
-    /// is in the order it is sent in.
+    /// cladefs: sends `messages` as [`AsyncSender::send`] would one after another, but at once, in
+    /// as few writes as the socket takes: the operations of one change to a window (TASK-91.16,
+    /// board 11673). `messages` is called with the sender's queue locked, so that what it makes,
+    /// such as the IDs it gives, is in the order it is sent in.
     pub fn send_all(
         self: &std::sync::Arc<Self>,
-        headers: impl FnOnce() -> Vec<Header>,
+        messages: impl FnOnce() -> Vec<(Header, Vec<u8>)>,
     ) -> io::Result<()> {
         let mut queue = self.queue.lock().unwrap();
-        for header in headers() {
-            self.push(&mut queue, header, Vec::new(), Vec::new())?;
+        for (header, payload) in messages() {
+            self.push(&mut queue, header, payload, Vec::new())?;
         }
         self.flush(&mut queue)
     }
@@ -1408,83 +1424,6 @@ impl Receiver {
         Self { stream, buffer, start: 0, end: 0, fds: Default::default() }
     }
 
-    /// cladefs: takes what follows the stage unmap `unmap`, already waiting whole in the socket, of
-    /// the window's change it begins (TASK-91.16): first the acknowledged unmaps adjacent to it or
-    /// overlapping it, which it joins, then the window's mapping anew of the range they unmap
-    /// ([`STAGE_MAPPED`]) and its pages ([`STAGE_MAP`]), each within it, which it returns, in
-    /// order, for the VM process to make with the unmap at once. Up to 63 messages, without
-    /// crossing another, a gap, or partial input. The unmap's ID becomes the largest of those it
-    /// joined, whose acknowledgement is of every ID before it, as IDs reach the wire in order
-    /// (TASK-160.11): not a later map's, which takes no access away. Each message is taken as
-    /// [`Stage::decode`] has it: one it refuses, it leaves.
-    /// cladefs: unmaps join only those that keep the private pages, or end them, as it does
-    /// (doc-26).
-    pub fn take_change(&mut self, unmap: &mut Stage) -> io::Result<Vec<cladefs_core::dax::Anew>> {
-        let StageOp::Unmap { offset, len, keep_private } = unmap.op else { return Ok(Vec::new()) };
-        let (mut start, Some(mut end)) = (offset, offset.checked_add(len)) else {
-            return Ok(Vec::new());
-        };
-        if len == 0 {
-            return Ok(Vec::new());
-        }
-        let mut id = unmap.id;
-        let mut anew = false;
-        let taken = self.take_waiting(|next| {
-            // One it refuses, it leaves, as the doc says.
-            let next = Stage::decode(next).ok()?;
-            let (at, len, made) = match next.op {
-                StageOp::Unmap { offset, len, keep_private: keep }
-                    if !anew && len != 0 && keep == keep_private =>
-                {
-                    let next_end = offset.checked_add(len)?;
-                    if offset > end || next_end < start {
-                        return None;
-                    }
-                    (start, end) = (start.min(offset), end.max(next_end));
-                    id = id.max(next.id);
-                    return Some(None);
-                }
-                StageOp::Mapped { offset, len } => {
-                    (offset, len, cladefs_core::dax::Anew::Mapped { offset, len })
-                }
-                StageOp::Map { offset, phys, len } => {
-                    (offset, len, cladefs_core::dax::Anew::Map { offset, phys, len })
-                }
-                _ => return None,
-            };
-            anew = true;
-            let within = at >= start && at.checked_add(len).is_some_and(|at_end| at_end <= end);
-            (len != 0 && within).then_some(Some(made))
-        })?;
-        unmap.id = id;
-        unmap.op = StageOp::Unmap { offset: start, len: end - start, keep_private };
-        Ok(taken.into_iter().flatten().collect())
-    }
-
-    /// cladefs: receives the messages already read or waiting whole in the socket, up to 63, as
-    /// long as `take` takes each, in order, none with a payload or descriptors: a read of the
-    /// socket's, at most, that waits for nothing. Bounded, so that what is made of them together,
-    /// and acknowledged once all is, waits for no more. What `take` makes of each, it returns.
-    fn take_waiting<T>(
-        &mut self,
-        mut take: impl FnMut(&Header) -> Option<T>,
-    ) -> io::Result<Vec<T>> {
-        const MOST: usize = 63;
-        self.read(libc::MSG_DONTWAIT)?;
-        let mut taken = Vec::new();
-        while taken.len() < MOST
-            && let Some(next) = self.buffered_header()
-        {
-            if next.len != 0 || next.fds != 0 {
-                break;
-            }
-            let Some(made) = take(&next) else { break };
-            self.start += size_of::<Header>();
-            taken.push(made);
-        }
-        Ok(taken)
-    }
-
     /// The next message, or `None` once the other end has closed the connection: one whose payload
     /// is past [`MAX_PAYLOAD`] only if `most`, asked then, allows that many bytes, as a reply to
     /// [`MAPPINGS`] of a large window may hold (TASK-79.43).
@@ -1686,28 +1625,28 @@ pub fn pair() -> ((Sender, Receiver), (Sender, Receiver)) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codec::{Stage, StageOp};
     use cladefs_core::dax::Anew;
     use std::os::fd::AsFd;
 
-    fn unmap(id: u64, offset: u64, len: u64) -> Stage {
-        Stage { id, op: StageOp::Unmap { offset, len, keep_private: false } }
+    fn unmap(offset: u64, len: u64) -> StageOp {
+        StageOp::Unmap { offset, len, keep_private: false }
     }
 
-    fn map(id: u64, offset: u64, len: u64) -> Stage {
+    fn map(offset: u64, len: u64) -> StageOp {
         let phys = cladefs_core::pages::PhysLocation {
             arena: cladefs_core::pages::ArenaId(0),
             offset: 1 << 20,
         };
-        Stage { id, op: StageOp::Map { offset, phys, len } }
+        StageOp::Map { offset, phys, len }
     }
 
-    fn mapped(id: u64, offset: u64, len: u64) -> Stage {
-        Stage { id, op: StageOp::Mapped { offset, len } }
+    fn mapped(offset: u64, len: u64) -> StageOp {
+        StageOp::Mapped { offset, len }
     }
 
-    /// What a change takes of `stage`, a map or a mapping anew.
-    fn anew(stage: Stage) -> Anew {
-        match stage.op {
+    fn anew(op: StageOp) -> Anew {
+        match op {
             StageOp::Map { offset, phys, len } => Anew::Map { offset, phys, len },
             StageOp::Mapped { offset, len } => Anew::Mapped { offset, len },
             op => panic!("{op:?} is taken as no map"),
@@ -1715,114 +1654,101 @@ mod tests {
     }
 
     #[test]
-    fn unmaps_join_adjacent_ranges_and_ack_only_consumed_taking_ids() {
+    fn unmaps_join_adjacent_ranges_into_atomic_stage_remap() {
+        let coalesced = crate::codec::coalesce_stage_ops(vec![
+            unmap(8192, 4096),
+            unmap(4096, 4096),
+            unmap(4096, 8192),
+            unmap(12288, 4096),
+            mapped(4096, 12288),
+        ]);
+        assert_eq!(
+            coalesced,
+            vec![StageOp::Remap {
+                offset: 4096,
+                len: 12288,
+                keep_private: false,
+                anew: vec![Anew::Mapped { offset: 4096, len: 12288 }],
+            }]
+        );
         let ((sender, _), (_, mut receiver)) = pair();
-        // Includes reversed address order, overlap, and IDs allocated in a different order.
-        for stage in [
-            unmap(7, 8192, 4096),
-            unmap(3, 4096, 4096),
-            unmap(5, 4096, 8192),
-            unmap(6, 12288, 4096),
-        ] {
-            sender.send(stage.encode(), &[], &[]).unwrap();
-        }
-        let mapped = mapped(99, 4096, 12288);
-        sender.send(mapped.encode(), &[], &[]).unwrap();
+        let stage = Stage { id: 7, op: coalesced.into_iter().next().unwrap() };
+        let (header, payload) = stage.encode();
+        sender.send(header, &payload, &[]).unwrap();
         let reply = Header::new(REPLY, 100);
         let file = tempfile::tempfile().unwrap();
         sender.send(reply, &[], &[file.as_fd()]).unwrap();
-        let header = receiver.receive(|| 0).unwrap().unwrap().header;
-        let mut stage = Stage::decode(&header).unwrap();
-        assert_eq!(receiver.take_change(&mut stage).unwrap(), [anew(mapped)]);
-        assert_eq!(stage, unmap(7, 4096, 12288));
+        let msg = receiver.receive(|| 0).unwrap().unwrap();
+        assert_eq!(Stage::decode(&msg.header, &msg.payload).unwrap(), stage);
         let message = receiver.receive(|| 0).unwrap().unwrap();
         assert_eq!(message.header, Header { fds: 1, ..reply }, "the header says its descriptor");
         assert_eq!(message.fds.len(), 1);
     }
 
-    /// cladefs: an unmap takes the window's mapping anew of what it unmaps, and the maps of its
-    /// pages, each within it, in order, up to the first that isn't (TASK-91.16): one outside it,
-    /// one of another kind, or an unmap after them, which begins the next change.
+    /// cladefs: an unmap coalesces the window's mapping anew of what it unmaps, and the maps of
+    /// its pages, each within it, in order, up to the first that isn't (TASK-91.16, board 11673).
     #[test]
     fn unmaps_take_the_maps_within_them() {
-        for (after, taken) in
-            [(map(5, 8192, 8192), 3), (unmap(5, 4096, 4096), 3), (map(5, 4096, 8192), 4)]
-        {
-            let ((sender, _), (_, mut receiver)) = pair();
-            let sent = [mapped(2, 4096, 8192), map(3, 4096, 4096), map(4, 8192, 4096), after];
-            for stage in sent {
-                sender.send(stage.encode(), &[], &[]).unwrap();
-            }
-            let mut first = unmap(1, 4096, 8192);
-            let made: Vec<_> = sent[..taken].iter().copied().map(anew).collect();
-            assert_eq!(receiver.take_change(&mut first).unwrap(), made);
-            assert_eq!(first, unmap(1, 4096, 8192), "the unmap's ID is never a map's");
+        for (after, taken) in [(map(8192, 8192), 3), (unmap(4096, 4096), 3), (map(4096, 8192), 4)] {
+            let sent = [mapped(4096, 8192), map(4096, 4096), map(8192, 4096), after.clone()];
+            let mut ops = vec![unmap(4096, 8192)];
+            ops.extend(sent.iter().cloned());
+            let coalesced = crate::codec::coalesce_stage_ops(ops);
+            let made: Vec<_> = sent[..taken].iter().cloned().map(anew).collect();
+            let expected_first =
+                StageOp::Remap { offset: 4096, len: 8192, keep_private: false, anew: made };
+            assert_eq!(coalesced[0], expected_first);
             if taken < sent.len() {
-                assert_eq!(receiver.receive(|| 0).unwrap().unwrap().header, after.encode());
-            }
-        }
-    }
-
-    #[test]
-    fn unmap_batches_leave_gaps_other_operations_and_partial_headers_untouched() {
-        for variation in 0..6 {
-            let ((sender, _), (_, mut receiver)) = pair();
-            let mut first = unmap(1, 4096, 4096);
-            assert_eq!(receiver.take_change(&mut first).unwrap(), Vec::<Anew>::new());
-            let mut next = unmap(2, 8192, 4096).encode();
-            match variation {
-                0 => {
-                    let mut body = next.read_body::<RangeBody>();
-                    body.offset += 4096;
-                    next.set_body(&body);
-                }
-                // An unmap keeping the private pages, after one ending them (doc-26).
-                1 => next.flags |= STAGE_KEEP_PRIVATE,
-                2 => next.flags = 0,
-                3 => next.set_body(&RangeBody { offset: u64::MAX - 1024, len: 4096 }),
-                4 => {}
-                5 => next.len = 3,
-                _ => unreachable!(),
-            }
-            if variation == 4 {
-                write_all(&sender.0.lock().unwrap().stream, &next.as_bytes()[..17]).unwrap();
-                assert_eq!(receiver.take_change(&mut first).unwrap(), Vec::<Anew>::new());
-                assert_eq!(first, unmap(1, 4096, 4096));
-                write_all(&sender.0.lock().unwrap().stream, &next.as_bytes()[17..]).unwrap();
-                assert_eq!(receiver.take_change(&mut first).unwrap(), Vec::<Anew>::new());
-                assert_eq!(first, unmap(2, 4096, 8192));
+                assert_eq!(coalesced.len(), 2);
+                assert_eq!(coalesced[1], after);
             } else {
-                let payload = vec![9; next.len as usize];
-                sender.send(next, &payload, &[]).unwrap();
-                assert_eq!(receiver.take_change(&mut first).unwrap(), Vec::<Anew>::new());
-                assert_eq!(first, unmap(1, 4096, 4096));
-                let received = receiver.receive(|| 0).unwrap().unwrap();
-                assert_eq!((received.header, received.payload), (next, payload));
+                assert_eq!(coalesced.len(), 1);
             }
         }
     }
 
     #[test]
-    fn unmap_batches_bound_the_work_taken_from_the_socket() {
+    fn unmap_batches_leave_gaps_and_different_keep_private_separate() {
+        // Gap between unmaps stays separate.
+        assert_eq!(
+            crate::codec::coalesce_stage_ops(vec![unmap(4096, 4096), unmap(12288, 4096)]),
+            vec![unmap(4096, 4096), unmap(12288, 4096)]
+        );
+        // Different `keep_private` stays separate (doc-26).
+        let keep = StageOp::Unmap { offset: 8192, len: 4096, keep_private: true };
+        assert_eq!(
+            crate::codec::coalesce_stage_ops(vec![unmap(4096, 4096), keep.clone()]),
+            vec![unmap(4096, 4096), keep]
+        );
+    }
+
+    /// board 11673: a remap batch with >64 `STAGE_MAP` entries arrives as one atomic `STAGE_REMAP`
+    /// frame over the wire (even when written in partial chunks), never split across messages.
+    #[test]
+    fn stage_remap_batch_over_64_entries_is_atomic_over_wire() {
+        let count = 128u64;
+        let mut ops = vec![unmap(0, count * 4096), mapped(0, count * 4096)];
+        for i in 0..count {
+            ops.push(map(i * 4096, 4096));
+        }
+        let coalesced = crate::codec::coalesce_stage_ops(ops);
+        assert_eq!(coalesced.len(), 1, "entire >64-entry remap must coalesce into one STAGE_REMAP");
+        let stage = Stage { id: 1, op: coalesced.into_iter().next().unwrap() };
+        let (header, payload) = stage.encode();
+        assert_eq!(header.kind, STAGE_REMAP);
         let ((sender, _), (_, mut receiver)) = pair();
-        for id in 1..=128 {
-            sender.send(unmap(id, id * 4096, 4096).encode(), &[], &[]).unwrap();
-        }
-        let mut next_id = 1;
-        let mut total_joined = 0;
-        while next_id <= 128 {
-            let header = receiver.receive(|| 0).unwrap().unwrap().header;
-            let mut stage = Stage::decode(&header).unwrap();
-            assert_eq!(stage.id, next_id);
-            assert_eq!(receiver.take_change(&mut stage).unwrap(), Vec::<Anew>::new());
-            let StageOp::Unmap { len, .. } = stage.op else { panic!("{stage:?} is no unmap") };
-            let count = len / 4096;
-            assert!(count <= 64, "{count} unmaps joined");
-            assert_eq!(stage, unmap(next_id + count - 1, next_id * 4096, count * 4096));
-            total_joined += count - 1;
-            next_id += count;
-        }
-        assert!(total_joined > 0);
+        // Write header + payload in small chunks across the socket to prove partial writes never
+        // split the remap into separate unmap and map deliveries.
+        let mut wire_bytes = header.as_bytes().to_vec();
+        wire_bytes.extend_from_slice(&payload);
+        let writer = std::thread::spawn(move || {
+            for chunk in wire_bytes.chunks(17) {
+                write_all(&sender.0.lock().unwrap().stream, chunk).unwrap();
+            }
+        });
+        let received = receiver.receive(|| 0).unwrap().unwrap();
+        writer.join().unwrap();
+        assert_eq!(Stage::decode(&received.header, &received.payload).unwrap(), stage);
     }
 
     /// Messages arrive whole and in order, with their payloads, and descriptors sent with one
@@ -1903,7 +1829,9 @@ mod tests {
         };
         let file = tempfile::tempfile().unwrap();
         sender.send(Header::new(REPLY, 1), Vec::new(), &[file.as_fd()]).unwrap();
-        let batch = || vec![Header::new(STAGE_UNMAP, 2), Header::new(STAGE_MAP, 3)];
+        let batch = || {
+            vec![(Header::new(STAGE_UNMAP, 2), Vec::new()), (Header::new(STAGE_MAP, 3), Vec::new())]
+        };
         sender.send_all(batch).unwrap();
         assert_eq!(ids(3), [1, 2, 3]);
 
@@ -1915,7 +1843,8 @@ mod tests {
                 std::thread::spawn(move || {
                     for _ in 0..batches {
                         let id = || next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        let batch = || (0..3).map(|_| Header::new(STAGE_MAP, id())).collect();
+                        let batch =
+                            || (0..3).map(|_| (Header::new(STAGE_MAP, id()), Vec::new())).collect();
                         sender.send_all(batch).unwrap();
                     }
                 })

@@ -3094,18 +3094,14 @@ impl<H: HostMemory> SecondStage for UffdSecondStage<H> {
         let ps = page_size();
         let all_mask = self.all_subpages_mask();
         let process_writes = self.process_writes.load(Ordering::Relaxed);
-        if !offset.is_multiple_of(ps) || !len.is_multiple_of(ps) {
-            self.unmap(offset, len, private);
-            for anew in anew {
-                match *anew {
-                    Anew::Mapped { offset, len } => self.window_mapped(offset, len),
-                    Anew::Map { offset, phys, len } => self.map(offset, phys, len),
-                }
-            }
-            return;
-        }
-        let (addr, len) = self.addr(offset, len);
-        let range = self.page_range(addr, len);
+        // board 11673: handle both host-page-aligned and sub-page (`self.unit`-aligned) remaps
+        // atomically under the same `self.pages` lock so concurrent `make_private` never observes
+        // cleared `mapped_mask` bits between unmap and `Anew::Mapped`/`Anew::Map`.
+        let (start_off, end_off) = (offset as usize, (offset + len) as usize);
+        let h_start = offset - offset % ps;
+        let h_end = (offset + len).next_multiple_of(ps);
+        let (addr, h_len) = self.addr(h_start, h_end - h_start);
+        let range = self.page_range(addr, h_len);
         let page_size = ps as usize;
         let maps: Vec<(usize, usize, crate::pages::PhysLocation)> = (anew.iter())
             .filter_map(|anew| match *anew {
@@ -3159,14 +3155,10 @@ impl<H: HostMemory> SecondStage for UffdSecondStage<H> {
                 while at < range.end && !kept[at - range.start] {
                     at += 1;
                 }
-                let mut taking = pages.take_away_bytes(
-                    start * page_size,
-                    at * page_size,
-                    private,
-                    self.unit,
-                    all_mask,
-                    true,
-                );
+                let run_start = (start * page_size).max(start_off);
+                let run_end = (at * page_size).min(end_off);
+                let mut taking =
+                    pages.take_away_bytes(run_start, run_end, private, self.unit, all_mask, true);
                 Self::took(&self.taken.left_out, taking.installed);
                 pages.update(start..at, |pages| {
                     pages.iter_mut().for_each(|page| (page.mapped, page.restricted) = (None, false))
@@ -3277,20 +3269,26 @@ impl<H: HostMemory> SecondStage for UffdSecondStage<H> {
         };
         // The ranges it takes away: between the maps it leaves in place, one more than they.
         let room = maps.len() + 1;
-        self.change(addr, len, room, record, |(taken, extra_withheld, extra_staled, refreshes)| {
-            for (run, taking) in taken {
-                let addr = self.base + run.start * page_size;
-                self.take_away(addr, run.len() * page_size, taking);
-            }
-            for at in extra_withheld {
-                let addr = self.base + at * page_size;
-                self.host.protect(addr, page_size, libc::PROT_READ | libc::PROT_WRITE);
-            }
-            for at in extra_staled {
-                self.mark_stale_vma(self.base + at * page_size);
-            }
-            self.apply_in_place_refreshes(&refreshes);
-        });
+        self.change(
+            addr,
+            h_len,
+            room,
+            record,
+            |(taken, extra_withheld, extra_staled, refreshes)| {
+                for (run, taking) in taken {
+                    let addr = self.base + run.start * page_size;
+                    self.take_away(addr, run.len() * page_size, taking);
+                }
+                for at in extra_withheld {
+                    let addr = self.base + at * page_size;
+                    self.host.protect(addr, page_size, libc::PROT_READ | libc::PROT_WRITE);
+                }
+                for at in extra_staled {
+                    self.mark_stale_vma(self.base + at * page_size);
+                }
+                self.apply_in_place_refreshes(&refreshes);
+            },
+        );
     }
 
     fn window_mapped(&self, offset: u64, len: u64) {

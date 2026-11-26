@@ -162,7 +162,7 @@ async fn receive(mut receiver: AsyncReceiver, sender: Arc<AsyncSender>, waiting:
             }
             continue;
         }
-        let answer = match Told::decode(&header) {
+        let answer = match Told::decode(&header, &message.payload) {
             Ok(Told::Stats { ask }) => Request::Stats { ask, guest: None },
             Ok(Told::Capacity { capacity, ask: true }) => {
                 Request::Resized { capacity, took: false }

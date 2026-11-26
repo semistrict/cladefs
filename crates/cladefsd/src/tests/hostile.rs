@@ -1539,14 +1539,26 @@ fn receive(
             }
         }
         // Each page it maps of its tenant's arena, or the public one, as KVM would map it.
-        let arena = match header.kind {
-            STAGE_MAP => Some(u64::from(header.read_body::<StageMapBody>().arena)),
-            _ => None,
-        };
-        if let Some(arena) = arena
-            && theirs.arenas.iter().any(|theirs| u64::from(theirs.0) == arena)
-        {
-            seen.stolen.push(format!("their arena mapped: {header:?}"));
+        let mut arenas = Vec::new();
+        match header.kind {
+            STAGE_MAP => arenas.push(u64::from(header.read_body::<StageMapBody>().arena)),
+            STAGE_REMAP => {
+                if let Ok(entries) =
+                    <[StageAnewEntry] as zerocopy::FromBytes>::ref_from_bytes(&message.payload)
+                {
+                    for entry in entries {
+                        if entry.kind == STAGE_MAP {
+                            arenas.push(u64::from(entry.arena));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        for arena in arenas {
+            if theirs.arenas.iter().any(|theirs| u64::from(theirs.0) == arena) {
+                seen.stolen.push(format!("their arena mapped: {header:?}"));
+            }
         }
         for fd in &message.fds {
             if theirs.memories.contains(&identity(fd.as_fd())) {

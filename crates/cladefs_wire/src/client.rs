@@ -1164,12 +1164,14 @@ impl Client {
     /// last did, as it makes them (TASK-91.16).
     fn receive(&self, mut receiver: Receiver) {
         RECEIVING.set(true);
-        // What a reply to MAPPINGS holds at most, past a message's most otherwise: a mapping per
-        // logical block of its window (TASK-79.43).
+        // What a reply to MAPPINGS or an atomic STAGE_REMAP holds at most, past a message's most
+        // otherwise: up to one mapping (or Mapped+Map pair) per logical block of its window
+        // (TASK-79.43, board 11673).
         let mappings = || {
             let blocks =
                 self.stage.get().map_or(0, |stage| stage.size() / cladefs_core::dax::map_unit());
-            blocks * MAPPING_BYTES
+            let per_block = MAPPING_BYTES.max(2 * size_of::<crate::wire::StageAnewEntry>() as u64);
+            blocks * per_block
         };
         let mut told = std::time::Instant::now();
         let mut told_private = told;
@@ -1196,7 +1198,7 @@ impl Client {
             }
             // cladefs: as the codec has it, which refuses what the daemon gives no meaning
             // (TASK-160.9).
-            let mut stage = match Told::decode(&header) {
+            let stage = match Told::decode(&header, &message.payload) {
                 Ok(Told::Stage(stage)) => stage,
                 Ok(Told::Capacity { capacity, ask }) => {
                     match self.capacity.get() {
@@ -1221,21 +1223,15 @@ impl Client {
                     break;
                 }
             };
-            let taken = match receiver.take_change(&mut stage) {
-                Ok(taken) => taken,
-                Err(err) => {
-                    log::error!("receiving a change to the window: {err}");
-                    break;
-                }
-            };
+            let taking = stage.op.taking();
             let start = std::time::Instant::now();
-            let made = self.make(stage.op, &taken);
+            let made = self.make(stage.op);
             self.stage_counts.count_since(start);
             if let Err(err) = made {
                 log::error!("making the extent daemon's change to the window: {err}");
                 break;
             }
-            let tell = if stage.op.taking() {
+            let tell = if taking {
                 let ack = Made::Ack { id: stage.id, counts: self.stage_counts() };
                 self.sender.send(ack.encode(), &[], &[])
             } else if told.elapsed() >= STAGE_COUNTS_EVERY {
@@ -1343,17 +1339,16 @@ impl Client {
         self.request(&Request::Stats { ask, guest })
     }
 
-    /// Makes the stage operation `op` to the window, with what was taken after it, at once: an
-    /// unmap with what follows it within what it unmaps, as [`Receiver::take_change`] takes them
-    /// (TASK-91.16); cladefs: keeping the private pages there, or ending them, as it says
-    /// (doc-26).
-    fn make(&self, op: StageOp, anew: &[cladefs_core::dax::Anew]) -> std::io::Result<()> {
+    /// Makes the stage operation `op` to the window at once: a [`StageOp::Remap`] unmaps and
+    /// applies its `anew` entries atomically (TASK-91.16, board 11673); cladefs: keeping the
+    /// private pages there, or ending them, as it says (doc-26).
+    fn make(&self, op: StageOp) -> std::io::Result<()> {
         use cladefs_core::dax::Private;
         let stage = self.stage.get().ok_or_else(|| std::io::Error::other("no window"))?;
         let private = |keep| if keep { Private::Keep } else { Private::End };
         match op {
-            StageOp::Unmap { offset, len, keep_private } if !anew.is_empty() => {
-                stage.remap(offset, len, private(keep_private), anew)
+            StageOp::Remap { offset, len, keep_private, anew } => {
+                stage.remap(offset, len, private(keep_private), &anew)
             }
             StageOp::Map { offset, phys, len } => stage.map(offset, phys, len),
             StageOp::Unmap { offset, len, keep_private } => {

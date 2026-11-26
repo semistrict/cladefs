@@ -2390,8 +2390,8 @@ impl Connection {
     /// Tells the VM process the cell's capacity is `capacity` bytes, or, if `ask`, asks its guest
     /// to shrink to it ([`CAPACITY`]).
     fn tell_capacity(&self, capacity: u64, ask: bool) -> Result<(), Errno> {
-        let told = Told::Capacity { capacity, ask }.encode();
-        self.peer.sender.send(told, Vec::new(), &[]).map_err(|err| {
+        let (header, payload) = Told::Capacity { capacity, ask }.encode();
+        self.peer.sender.send(header, payload, &[]).map_err(|err| {
             log::warn!("cladefsd: telling a VM process its capacity: {err}");
             Errno::EIO
         })
@@ -3695,17 +3695,24 @@ impl VmProcessStage {
         let mut change = self.change.with(Mutex::lock);
         match change.as_mut() {
             Some(ops) => ops.push(op),
-            None => self.send_now(&[op]),
+            None => self.send_now(vec![op]),
         }
     }
 
-    /// Sends `ops` at once, in order, each with the next ID ([`Acks::sent`]), given as they are
-    /// queued, so that IDs reach the VM process in order: the VM process acknowledges those that
-    /// take access to pages away ([`StageOp::taking`]), each for every ID before it.
-    fn send_now(&self, ops: &[StageOp]) {
-        let stages = || ops.iter().map(|op| Stage { id: self.acks.sent(op), op: *op }.encode());
+    /// Coalesces `ops` (folding unmap+mapped+map runs into atomic `STAGE_REMAP` messages, board
+    /// 11673) and sends them at once, in order, each with the next ID ([`Acks::sent`]), given as
+    /// they are queued, so that IDs reach the VM process in order: the VM process acknowledges
+    /// those that take access to pages away ([`StageOp::taking`]), each for every ID before it.
+    fn send_now(&self, ops: Vec<StageOp>) {
+        let coalesced = cladefs_wire::codec::coalesce_stage_ops(ops);
+        let stages = || {
+            coalesced
+                .iter()
+                .map(|op| Stage { id: self.acks.sent(op), op: op.clone() }.encode())
+                .collect()
+        };
         // Failing, the VM process is gone, and its mappings with it.
-        let _ = self.sender.send_all(|| stages().collect());
+        let _ = self.sender.send_all(stages);
     }
 }
 
@@ -3734,7 +3741,7 @@ impl SecondStage for VmProcessStage {
             return;
         };
         if !ops.is_empty() {
-            self.send_now(&ops);
+            self.send_now(ops);
         }
     }
 

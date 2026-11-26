@@ -5865,7 +5865,10 @@ impl HandVm {
             &[],
             false,
         );
-        assert!(staged.iter().any(|header| header.kind == STAGE_UNMAP), "{staged:?}");
+        assert!(
+            staged.iter().any(|header| matches!(header.kind, STAGE_UNMAP | STAGE_REMAP)),
+            "{staged:?}"
+        );
         staged.iter().map(|header| header.id).max().unwrap()
     }
 }

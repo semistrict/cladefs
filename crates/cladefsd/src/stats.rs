@@ -420,7 +420,8 @@ impl Report {
         let sender = self.sender.upgrade()?;
         let (answered, answer) = tokio::sync::oneshot::channel();
         self.asked.lock().unwrap().push(Asked { ask, at, answered });
-        if let Err(err) = sender.send(Told::Stats { ask }.encode(), Vec::new(), &[]) {
+        let (header, payload) = Told::Stats { ask }.encode();
+        if let Err(err) = sender.send(header, payload, &[]) {
             log::warn!("cladefsd: asking a VM process for its stats: {err}");
             self.forget(ask);
             return None;

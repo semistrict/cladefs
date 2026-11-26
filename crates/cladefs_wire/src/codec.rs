@@ -946,8 +946,9 @@ impl Made {
     }
 }
 
-/// What the daemon tells a VM process unasked: none of it carries a payload or descriptors.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// What the daemon tells a VM process unasked: carries a payload only for [`STAGE_REMAP`] and no
+/// descriptors.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Told {
     /// A stage operation, which the VM process makes of its window.
     Stage(Stage),
@@ -959,43 +960,55 @@ pub enum Told {
 }
 
 impl Told {
-    pub fn encode(&self) -> Header {
-        match *self {
+    pub fn encode(&self) -> (Header, Vec<u8>) {
+        match self {
             Told::Stage(stage) => stage.encode(),
-            Told::Capacity { capacity, ask } => Header::new(CAPACITY, 0)
-                .with_flags(if ask { CAPACITY_ASK } else { 0 })
-                .with_body(&CapacityBody { capacity }),
-            Told::Stats { ask } => Header::new(STATS_ASK, 0).with_body(&StatsBody { ask }),
+            Told::Capacity { capacity, ask } => (
+                Header::new(CAPACITY, 0)
+                    .with_flags(if *ask { CAPACITY_ASK } else { 0 })
+                    .with_body(&CapacityBody { capacity: *capacity }),
+                Vec::new(),
+            ),
+            Told::Stats { ask } => {
+                (Header::new(STATS_ASK, 0).with_body(&StatsBody { ask: *ask }), Vec::new())
+            }
         }
     }
 
-    /// What the message of `header` says: `EINVAL` unless one of these, as its kind allows.
+    /// What the message of `header` and `payload` says: `EINVAL` unless one of these, as its kind
+    /// allows.
     #[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
-    pub fn decode(header: &Header) -> Result<Self, Errno> {
+    pub fn decode(header: &Header, payload: &[u8]) -> Result<Self, Errno> {
         let Header { kind, flags, status, fds, len, .. } = *header;
-        if status != 0 || fds != 0 || len != 0 {
+        if status != 0 || fds != 0 || len != payload.len() as u64 {
             return Err(Errno::EINVAL);
         }
         let known = |known: u32| if flags & !known == 0 { Ok(()) } else { Err(Errno::EINVAL) };
         match kind {
             CAPACITY => {
+                if !payload.is_empty() {
+                    return Err(Errno::EINVAL);
+                }
                 known(CAPACITY_ASK)?;
                 let body: CapacityBody = header.decode_body()?;
                 Ok(Told::Capacity { capacity: body.capacity, ask: flags & CAPACITY_ASK != 0 })
             }
             STATS_ASK => {
+                if !payload.is_empty() {
+                    return Err(Errno::EINVAL);
+                }
                 known(0)?;
                 let body: StatsBody = header.decode_body()?;
                 Ok(Told::Stats { ask: body.ask })
             }
-            _ => Stage::decode(header).map(Told::Stage),
+            _ => Stage::decode(header, payload).map(Told::Stage),
         }
     }
 }
 
 /// A stage operation, of the daemon's window's second stage in a VM process's memory, which the
 /// VM process makes, and acknowledges ([`ACK`]) if it takes access to pages away.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Stage {
     /// Its ID, which an acknowledgement names.
     pub id: u64,
@@ -1003,7 +1016,7 @@ pub struct Stage {
 }
 
 /// What a [`Stage`] operation does, to the window's bytes at `offset`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StageOp {
     /// [`STAGE_MAP`]: maps `len` bytes of physical memory at `phys`, read-only.
     Map { offset: u64, phys: PhysLocation, len: u64 },
@@ -1013,57 +1026,157 @@ pub enum StageOp {
     Unmap { offset: u64, len: u64, keep_private: bool },
     /// cladefs: [`STAGE_MAPPED`].
     Mapped { offset: u64, len: u64 },
+    /// cladefs: [`STAGE_REMAP`]: atomically unmaps `offset..offset + len` and applies `anew`
+    /// (`SecondStage::remap`, board 11673).
+    Remap { offset: u64, len: u64, keep_private: bool, anew: Vec<cladefs_core::dax::Anew> },
 }
 
 impl StageOp {
     /// Whether it takes access to pages away, which its VM process acknowledges ([`STAGE_ACK`]).
     pub fn taking(&self) -> bool {
         match self {
-            StageOp::Unmap { .. } => true,
+            StageOp::Unmap { .. } | StageOp::Remap { .. } => true,
             StageOp::Map { .. } | StageOp::Mapped { .. } => false,
         }
     }
 }
 
+/// Coalesces a window change's sequence of [`StageOp`]s on the sender side before writing them to
+/// the wire (TASK-91.16, board 11673): joins adjacent/overlapping `Unmap`s with matching
+/// `keep_private` and folds all immediately following `Mapped` and `Map` entries within the joined
+/// range into a single atomic [`StageOp::Remap`], with no 64-message split limit.
+pub fn coalesce_stage_ops(ops: Vec<StageOp>) -> Vec<StageOp> {
+    use cladefs_core::dax::Anew;
+    let mut out = Vec::with_capacity(ops.len());
+    let mut iter = ops.into_iter().peekable();
+    while let Some(op) = iter.next() {
+        let StageOp::Unmap { offset, len, keep_private } = op else {
+            out.push(op);
+            continue;
+        };
+        let (mut start, Some(mut end)) = (offset, offset.checked_add(len)) else {
+            out.push(StageOp::Unmap { offset, len, keep_private });
+            continue;
+        };
+        if len == 0 {
+            out.push(StageOp::Unmap { offset, len, keep_private });
+            continue;
+        }
+        let mut anew = Vec::new();
+        while let Some(next) = iter.peek() {
+            match next {
+                StageOp::Unmap { offset, len, keep_private: keep }
+                    if anew.is_empty() && *len != 0 && *keep == keep_private =>
+                {
+                    let Some(next_end) = offset.checked_add(*len) else { break };
+                    if *offset > end || next_end < start {
+                        break;
+                    }
+                    start = start.min(*offset);
+                    end = end.max(next_end);
+                    iter.next();
+                }
+                StageOp::Mapped { offset, len }
+                    if *len != 0
+                        && *offset >= start
+                        && offset.checked_add(*len).is_some_and(|e| e <= end) =>
+                {
+                    let (offset, len) = (*offset, *len);
+                    iter.next();
+                    anew.push(Anew::Mapped { offset, len });
+                }
+                StageOp::Map { offset, phys, len }
+                    if *len != 0
+                        && *offset >= start
+                        && offset.checked_add(*len).is_some_and(|e| e <= end) =>
+                {
+                    let (offset, phys, len) = (*offset, *phys, *len);
+                    iter.next();
+                    anew.push(Anew::Map { offset, phys, len });
+                }
+                _ => break,
+            }
+        }
+        if anew.is_empty() {
+            out.push(StageOp::Unmap { offset: start, len: end - start, keep_private });
+        } else {
+            out.push(StageOp::Remap { offset: start, len: end - start, keep_private, anew });
+        }
+    }
+    out
+}
+
 impl Stage {
-    pub fn encode(&self) -> Header {
-        let mut header = match self.op {
+    pub fn encode(&self) -> (Header, Vec<u8>) {
+        let mut payload = Vec::new();
+        let mut header = match &self.op {
             StageOp::Map { offset, phys, len } => {
                 let body = StageMapBody {
-                    offset,
+                    offset: *offset,
                     phys_offset: phys.offset,
-                    len,
+                    len: *len,
                     arena: phys.arena.0,
                     reserved: 0,
                 };
                 Header::new(STAGE_MAP, self.id).with_body(&body)
             }
             StageOp::Unmap { offset, len, keep_private } => {
-                let keep = if keep_private { STAGE_KEEP_PRIVATE } else { 0 };
+                let keep = if *keep_private { STAGE_KEEP_PRIVATE } else { 0 };
                 Header::new(STAGE_UNMAP, self.id)
                     .with_flags(keep)
-                    .with_body(&RangeBody { offset, len })
+                    .with_body(&RangeBody { offset: *offset, len: *len })
             }
-            StageOp::Mapped { offset, len } => {
-                Header::new(STAGE_MAPPED, self.id).with_body(&RangeBody { offset, len })
+            StageOp::Mapped { offset, len } => Header::new(STAGE_MAPPED, self.id)
+                .with_body(&RangeBody { offset: *offset, len: *len }),
+            StageOp::Remap { offset, len, keep_private, anew } => {
+                payload.reserve(anew.len() * size_of::<StageAnewEntry>());
+                for entry in anew {
+                    let wire = match *entry {
+                        cladefs_core::dax::Anew::Mapped { offset, len } => StageAnewEntry {
+                            kind: STAGE_MAPPED,
+                            arena: 0,
+                            offset,
+                            phys_offset: 0,
+                            len,
+                        },
+                        cladefs_core::dax::Anew::Map { offset, phys, len } => StageAnewEntry {
+                            kind: STAGE_MAP,
+                            arena: phys.arena.0,
+                            offset,
+                            phys_offset: phys.offset,
+                            len,
+                        },
+                    };
+                    payload.extend_from_slice(wire.as_bytes());
+                }
+                let keep = if *keep_private { STAGE_KEEP_PRIVATE } else { 0 };
+                let mut h = Header::new(STAGE_REMAP, self.id)
+                    .with_flags(keep)
+                    .with_body(&RangeBody { offset: *offset, len: *len });
+                h.len = payload.len() as u64;
+                h
             }
         };
         if self.op.taking() {
             header.flags |= STAGE_ACK;
         }
-        header
+        (header, payload)
     }
 
-    /// The stage operation the message of `header` is: `EINVAL` unless one, acknowledged as it
-    /// takes access away or not, of no payload or descriptors.
+    /// The stage operation the message of `header` and `payload` is: `EINVAL` unless one,
+    /// acknowledged as it takes access away or not, with no descriptors, and with a payload only
+    /// for [`STAGE_REMAP`].
     #[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
-    pub fn decode(header: &Header) -> Result<Self, Errno> {
+    pub fn decode(header: &Header, payload: &[u8]) -> Result<Self, Errno> {
         let Header { kind, flags, id, status, fds, len, .. } = *header;
-        if status != 0 || fds != 0 || len != 0 {
+        if status != 0 || fds != 0 || len != payload.len() as u64 {
             return Err(Errno::EINVAL);
         }
         let op = match kind {
             STAGE_MAP => {
+                if !payload.is_empty() {
+                    return Err(Errno::EINVAL);
+                }
                 let body: StageMapBody = header.decode_body()?;
                 if body.reserved != 0 {
                     return Err(Errno::EINVAL);
@@ -1072,19 +1185,73 @@ impl Stage {
                 StageOp::Map { offset: body.offset, phys, len: body.len }
             }
             STAGE_UNMAP => {
+                if !payload.is_empty() {
+                    return Err(Errno::EINVAL);
+                }
                 let body: RangeBody = header.decode_body()?;
                 let keep_private = flags & STAGE_KEEP_PRIVATE != 0;
                 StageOp::Unmap { offset: body.offset, len: body.len, keep_private }
             }
             STAGE_MAPPED => {
+                if !payload.is_empty() {
+                    return Err(Errno::EINVAL);
+                }
                 let body: RangeBody = header.decode_body()?;
                 StageOp::Mapped { offset: body.offset, len: body.len }
+            }
+            STAGE_REMAP => {
+                if payload.is_empty() {
+                    return Err(Errno::EINVAL);
+                }
+                let body: RangeBody = header.decode_body()?;
+                if body.len == 0 {
+                    return Err(Errno::EINVAL);
+                }
+                let end = body.offset.checked_add(body.len).ok_or(Errno::EINVAL)?;
+                let entries =
+                    <[StageAnewEntry]>::ref_from_bytes(payload).map_err(|_| Errno::EINVAL)?;
+                let mut anew = Vec::with_capacity(entries.len());
+                for entry in entries {
+                    if entry.len == 0 || entry.offset < body.offset {
+                        return Err(Errno::EINVAL);
+                    }
+                    let entry_end = entry.offset.checked_add(entry.len).ok_or(Errno::EINVAL)?;
+                    if entry_end > end {
+                        return Err(Errno::EINVAL);
+                    }
+                    match entry.kind {
+                        STAGE_MAPPED => {
+                            if entry.arena != 0 || entry.phys_offset != 0 {
+                                return Err(Errno::EINVAL);
+                            }
+                            anew.push(cladefs_core::dax::Anew::Mapped {
+                                offset: entry.offset,
+                                len: entry.len,
+                            });
+                        }
+                        STAGE_MAP => {
+                            let phys = PhysLocation {
+                                arena: ArenaId(entry.arena),
+                                offset: entry.phys_offset,
+                            };
+                            anew.push(cladefs_core::dax::Anew::Map {
+                                offset: entry.offset,
+                                phys,
+                                len: entry.len,
+                            });
+                        }
+                        _ => return Err(Errno::EINVAL),
+                    }
+                }
+                let keep_private = flags & STAGE_KEEP_PRIVATE != 0;
+                StageOp::Remap { offset: body.offset, len: body.len, keep_private, anew }
             }
             _ => return Err(Errno::EINVAL),
         };
         let acknowledged = if op.taking() { STAGE_ACK } else { 0 };
         let keep = match op {
-            StageOp::Unmap { keep_private: true, .. } => STAGE_KEEP_PRIVATE,
+            StageOp::Unmap { keep_private: true, .. }
+            | StageOp::Remap { keep_private: true, .. } => STAGE_KEEP_PRIVATE,
             _ => 0,
         };
         if flags != acknowledged | keep {
@@ -1831,20 +1998,44 @@ mod tests {
             StageOp::Unmap { offset: 0, len: 4096, keep_private: false },
             StageOp::Unmap { offset: 0, len: 4096, keep_private: true },
             StageOp::Mapped { offset: 0, len: 4096 },
+            StageOp::Remap {
+                offset: 0,
+                len: 4096,
+                keep_private: false,
+                anew: vec![
+                    cladefs_core::dax::Anew::Mapped { offset: 0, len: 4096 },
+                    cladefs_core::dax::Anew::Map { offset: 0, phys, len: 4096 },
+                ],
+            },
+            StageOp::Remap {
+                offset: 0,
+                len: 4096,
+                keep_private: true,
+                anew: vec![cladefs_core::dax::Anew::Mapped { offset: 0, len: 4096 }],
+            },
         ];
         let told = ops
-            .map(|op| Told::Stage(Stage { id: 1, op }))
             .into_iter()
+            .map(|op| Told::Stage(Stage { id: 1, op }))
             .chain([Told::Capacity { capacity: 4096, ask: false }, Told::Stats { ask: 1 }]);
         for told in told {
-            let header = told.encode();
-            assert_eq!(Told::decode(&header), Ok(told));
+            let (header, payload) = told.encode();
+            assert_eq!(Told::decode(&header, &payload), Ok(told.clone()));
             for bit in (0..32).map(|bit| 1u32 << bit) {
                 let flipped = Header { flags: header.flags ^ bit, ..header };
                 let known = matches!(told, Told::Capacity { .. }) && bit == CAPACITY_ASK
-                    || matches!(told, Told::Stage(Stage { op: StageOp::Unmap { .. }, .. }))
-                        && bit == STAGE_KEEP_PRIVATE;
-                assert_eq!(Told::decode(&flipped).is_ok(), known, "{told:?}, flag {bit:#x}");
+                    || matches!(
+                        told,
+                        Told::Stage(Stage {
+                            op: StageOp::Unmap { .. } | StageOp::Remap { .. },
+                            ..
+                        })
+                    ) && bit == STAGE_KEEP_PRIVATE;
+                assert_eq!(
+                    Told::decode(&flipped, &payload).is_ok(),
+                    known,
+                    "{told:?}, flag {bit:#x}"
+                );
             }
         }
         for bit in (0..32).map(|bit| 1u32 << bit) {
@@ -2167,7 +2358,7 @@ mod tests {
             },
         };
         assert_eq!(
-            map.encode(),
+            map.encode().0,
             Header::new(STAGE_MAP, 4).with_body(&StageMapBody {
                 offset: 1,
                 phys_offset: 2,
@@ -2180,10 +2371,11 @@ mod tests {
         let acked = Header::new(STAGE_UNMAP, 4)
             .with_flags(STAGE_ACK)
             .with_body(&RangeBody { offset: 1, len: 2 });
-        assert_eq!(unmap.encode(), acked);
+        assert_eq!(unmap.encode().0, acked);
         let kept = Stage { id: 4, op: StageOp::Unmap { offset: 1, len: 2, keep_private: true } };
-        assert_eq!(kept.encode(), acked.with_flags(STAGE_ACK | STAGE_KEEP_PRIVATE));
-        let ask = Told::Capacity { capacity: 4096, ask: true }.encode();
+        assert_eq!(kept.encode().0, acked.with_flags(STAGE_ACK | STAGE_KEEP_PRIVATE));
+        let (ask, ask_payload) = Told::Capacity { capacity: 4096, ask: true }.encode();
+        assert!(ask_payload.is_empty());
         assert_eq!(
             ask,
             Header::new(CAPACITY, 0)
@@ -2206,7 +2398,8 @@ mod tests {
         // cladefs: a STAGE_COUNTS says its window's budget in its id (board 10098).
         let counted = Made::Counts(StageCounts { budget: 7, ..counts }).encode();
         assert_eq!(counted, Header::new(STAGE_COUNTS, 7).with_body(&ack.body.0));
-        let asked = Told::Stats { ask: 6 }.encode();
+        let (asked, asked_payload) = Told::Stats { ask: 6 }.encode();
+        assert!(asked_payload.is_empty());
         assert_eq!(asked, Header::new(STATS_ASK, 0).with_body(&StatsBody { ask: 6 }));
         let private = Made::PrivateCounts([1, 64, 5, 2, 9]).encode();
         assert_eq!(
@@ -2237,12 +2430,13 @@ mod tests {
                 StageOp::Unmap { offset: a, len: b, keep_private: ask },
                 StageOp::Mapped { offset: a, len: b },
             ];
-            let told = stages.map(|op| Told::Stage(Stage { id, op })).into_iter().chain([
+            let told = stages.into_iter().map(|op| Told::Stage(Stage { id, op })).chain([
                 Told::Capacity { capacity: a, ask },
                 Told::Stats { ask: b },
             ]);
             for told in told {
-                prop_assert_eq!(Told::decode(&told.encode()), Ok(told));
+                let (h, p) = told.encode();
+                prop_assert_eq!(Told::decode(&h, &p), Ok(told));
             }
             let low = |word: u64| word & u64::from(u32::MAX);
             let counts =
@@ -2336,7 +2530,24 @@ mod tests {
             arena: 0,
             reserved: 1,
         });
-        assert_eq!(Stage::decode(&bad_stage).err(), Some(Errno::EINVAL));
+        assert_eq!(Stage::decode(&bad_stage, &[]).err(), Some(Errno::EINVAL));
+        // STAGE_REMAP malformed cases: empty payload, out-of-range entry, unknown entry kind.
+        let mut empty_remap = Header::new(STAGE_REMAP, 1)
+            .with_flags(STAGE_ACK)
+            .with_body(&RangeBody { offset: 0, len: 4096 });
+        assert_eq!(Stage::decode(&empty_remap, &[]).err(), Some(Errno::EINVAL));
+        let oob_entry = StageAnewEntry {
+            kind: STAGE_MAPPED,
+            arena: 0,
+            offset: 4096,
+            phys_offset: 0,
+            len: 4096,
+        };
+        empty_remap.len = size_of::<StageAnewEntry>() as u64;
+        assert_eq!(Stage::decode(&empty_remap, oob_entry.as_bytes()).err(), Some(Errno::EINVAL));
+        let bad_kind =
+            StageAnewEntry { kind: STAGE_UNMAP, arena: 0, offset: 0, phys_offset: 0, len: 4096 };
+        assert_eq!(Stage::decode(&empty_remap, bad_kind.as_bytes()).err(), Some(Errno::EINVAL));
 
         let mut dirty_forked = Header::new(REPLY, 1).with_body(&ForkedBody {
             version: 2,
@@ -2437,7 +2648,7 @@ mod tests {
     fn the_wire_is_its_version() {
         /// The version, and the fingerprint of the wire it is. A change to the wire is a new
         /// version, both changed together, never the fingerprint alone.
-        const WIRE: (u64, u64) = (19, 0xefc2d957595fd9d);
+        const WIRE: (u64, u64) = (20, 0xe59a25cc27a0b917);
         let fingerprint = fingerprint();
         assert_eq!(
             (VERSION, fingerprint),
@@ -2492,12 +2703,23 @@ mod tests {
             StageOp::Unmap { offset: 4096, len: 8192, keep_private: false },
             StageOp::Unmap { offset: 4096, len: 8192, keep_private: true },
             StageOp::Mapped { offset: 4096, len: 8192 },
+            StageOp::Remap {
+                offset: 4096,
+                len: 8192,
+                keep_private: false,
+                anew: vec![
+                    cladefs_core::dax::Anew::Mapped { offset: 4096, len: 8192 },
+                    cladefs_core::dax::Anew::Map { offset: 4096, phys, len: 4096 },
+                ],
+            },
         ]
-        .map(|op| Told::Stage(Stage { id: 2, op }))
         .into_iter()
+        .map(|op| Told::Stage(Stage { id: 2, op }))
         .chain([Told::Capacity { capacity: 1 << 30, ask: true }, Told::Stats { ask: 6 }]);
         for told in told {
-            header(&mut hashed, told.encode());
+            let (h, p) = told.encode();
+            header(&mut hashed, h);
+            hashed(&p);
         }
         let (counts, other) = (
             StageCounts { costs: [1, 2, 3, 4], installed: 5, private: 6, budget: 0 },
