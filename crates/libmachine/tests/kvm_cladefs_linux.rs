@@ -152,7 +152,7 @@ fn cladefs_kernel_sees_a_consistent_platform() {
         "ACPI: Using ACPI (MADT) for SMP configuration information",
         "00:00: ttyS0 at I/O 0x3f8",
         "ACPI: PM: Preparing to enter system sleep state S5",
-        "fxfs: Rust runtime ready",
+        "cladefs: Rust runtime ready",
     ] {
         assert!(console.contains(good), "missing {good:?} in console:\n{console}");
     }
