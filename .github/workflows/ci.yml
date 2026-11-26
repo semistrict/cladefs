@@ -207,6 +207,11 @@ jobs:
             target
           key: cargo-${{ runner.os }}-${{ matrix.parts }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-${{ matrix.parts }}-
+      # cladefs: the files a daemon may keep open, as a host's (board 13850): macOS lets a process
+      # keep 10,240 (kern.maxfilesperproc), which serves 38 VM processes' connections, fewer than
+      # the control API's tests open at once; each daemon raises its own limit to it.
+      - name: The open files a process may keep, as a host's
+        run: sudo sysctl -w kern.maxfiles=1048576 kern.maxfilesperproc=524288
       # Every failure, not the first alone. Within macOS's 256 open files a process, as the
       # stores', the bucket's and physical memory's tests were run within, all passing (TASK-149.20.2).
       - name: scripts/test.sh

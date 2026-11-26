@@ -414,6 +414,22 @@ fn connection_limits() -> (usize, usize) {
 #[cfg(test)]
 pub(super) static CONNECTION_LIMITS_GIVEN: OnceLock<(Option<usize>, usize)> = OnceLock::new();
 
+/// cladefs: the most connections a tenant's VM processes have at once: [`MAX_CONNECTIONS`], or as
+/// a test gives it ([`TENANT_CONNECTIONS_GIVEN`]).
+fn tenant_connections() -> usize {
+    #[cfg(test)]
+    if let Some(&most) = TENANT_CONNECTIONS_GIVEN.get() {
+        return most;
+    }
+    MAX_CONNECTIONS
+}
+
+/// cladefs: a tenant's most connections in a test, in place of [`MAX_CONNECTIONS`]: a process
+/// holding both ends of 4096, three files each with the daemon's clone, passes the 10,240 files
+/// macOS lets a process have by default (`kern.maxfilesperproc`, board 13850).
+#[cfg(test)]
+pub(super) static TENANT_CONNECTIONS_GIVEN: OnceLock<usize> = OnceLock::new();
+
 /// cladefs: a tenant's connection counted among its connections, and every tenant's on its daemon,
 /// until dropped.
 struct Counted {
@@ -431,8 +447,9 @@ impl Counted {
         let mut total = tenant.daemon.connected.lock().unwrap();
         let connections = &tenant.memory.connections;
         let own = connections.load(Ordering::Acquire);
-        if own >= MAX_CONNECTIONS {
-            return Err(format!("its tenant has {MAX_CONNECTIONS}"));
+        let tenants_most = tenant_connections();
+        if own >= tenants_most {
+            return Err(format!("its tenant has {tenants_most}"));
         }
         // Of the others' shares, what their VM processes leave, which this one takes none of.
         let kept = crate::memory::reserved_connections_left_on(&tenant.daemon, reserved);

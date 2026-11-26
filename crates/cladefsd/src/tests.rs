@@ -4649,10 +4649,13 @@ fn tenants_connections_are_bounded() {
     use std::io::Read as _;
     host();
     crate::raise_open_files_limit().unwrap();
-    // cladefs: the daemon's most connections past the tenant's, whatever the host's limit of open
-    // files gives it: macOS's (`kern.maxfilesperproc`) gave it 1016, a tenant's 4096 never
-    // reached (board 13065).
-    let given = (Some(2 * crate::server::MAX_CONNECTIONS), crate::server::RESERVED_CONNECTIONS);
+    // cladefs: a tenant's most connections 256, not 4096, whose ends this process would hold
+    // past macOS's 10,240 files a process (board 13850); the daemon's most past them, whatever
+    // the host's limit of open files gives it: macOS's (`kern.maxfilesperproc`) gave it 1016
+    // (board 13065).
+    const TENANTS: usize = 256;
+    crate::server::TENANT_CONNECTIONS_GIVEN.set(TENANTS).unwrap();
+    let given = (Some(2 * TENANTS), crate::server::RESERVED_CONNECTIONS);
     crate::server::CONNECTION_LIMITS_GIVEN.set(given).unwrap();
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("cladefsd.sock");
@@ -4664,8 +4667,7 @@ fn tenants_connections_are_bounded() {
     let first =
         CellClient::over(ours, &dir.path().join("first"), Opening::Create(1 << 20, Kind::Fxfs));
     let first = first.unwrap();
-    let connected: Vec<UnixStream> =
-        (1..crate::server::MAX_CONNECTIONS).map(|_| connect_queued(&socket)).collect();
+    let connected: Vec<UnixStream> = (1..TENANTS).map(|_| connect_queued(&socket)).collect();
     let past = connect_queued(&socket);
     let closed = within(std::time::Duration::from_secs(10), move || {
         (&past).read(&mut [0]).map_err(|err| err.kind())
