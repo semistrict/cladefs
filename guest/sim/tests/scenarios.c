@@ -15,6 +15,8 @@
 
 #include <sim/sim.h>
 #include <linux/virtio_extent.h>
+/* cladefs_dax_kick, which kick_races_stop calls as a seal's end does. */
+#include "../../linux/fs/cladefs/dax_internal.h"
 
 #define WINDOW_LEN (64UL << 20)
 /* A chunk's data and more, which only a range of its own maps. */
@@ -25,6 +27,7 @@
 #define PAUSE_WRITEBACK BIT(8)
 #define PAUSE_FAULTED BIT(9)
 #define PAUSE_COUNTED BIT(10)
+#define PAUSE_KICK BIT(11)
 /* A chunk's range, the window's whole ranges, at a chunk's alignment. */
 #define CHUNK_LEN (2UL << 20)
 /*
@@ -1956,6 +1959,57 @@ static void knobs_against_unmount(void)
 	      knobs_found, knobs_none);
 }
 
+/*
+ * board 10373: a kick of the budget's worker, to write back what is dirty, as a seal's end, the
+ * budget and the window kick it, held where it found the worker not stopping
+ * (CLADEFS_DAX_STEP_KICK) as the filesystem quiesces, as it freezes or unmounts, then let go: once
+ * cladefs_dax_stop has returned, no round runs until cladefs_dax_start, though four dirty private
+ * pages wait for one. Read unlocked against the stop, the kick queued the round after the stop's
+ * cancel_work_sync, which ran on the quiesced filesystem, writing the pages back (vm1, under
+ * ASan). The kicker is a task of its own, not a parameter's setter, which would hold the
+ * parameters' lock that clearing cladefs.dax_pause takes.
+ */
+static void kick_now(void *arg)
+{
+	cladefs_dax_kick(arg, true);
+}
+
+static void kick_races_stop(void)
+{
+	struct cladefs_dax *dax = mount->info->dax;
+	u64 done, writebacks, dirty;
+	struct task_struct *kicker;
+	char step[24];
+
+	cow_mapped_file(8);
+	cow_put_pages(0, 3, 1);
+	check(sim_dax_stat(mount, "dax_dirty_pages") == 4, "%llu dirty pages, not 4",
+	      sim_dax_stat(mount, "dax_dirty_pages"));
+	snprintf(step, sizeof(step), "%lu", PAUSE_KICK);
+	sim_param_set("dax_pause_ino", "0");
+	sim_param_set("dax_pause", step);
+	kicker = sim_spawn("kicker", kick_now, dax);
+	sim_await(sim_param_read("dax_paused") & PAUSE_KICK, "no kick waits at its step");
+	cladefs_dax_quiesce(dax);
+	done = sim_dax_stat(mount, "dax_rebinds_done");
+	writebacks = sim_dax_stat(mount, "dax_writebacks");
+	dirty = sim_dax_stat(mount, "dax_dirty_pages");
+	sim_param_set("dax_pause", "0");
+	wait_for(kicker);
+	/* Time for a round queued late to run. */
+	msleep(100);
+	check(sim_dax_stat(mount, "dax_rebinds_done") == done &&
+	      sim_dax_stat(mount, "dax_writebacks") == writebacks &&
+	      sim_dax_stat(mount, "dax_dirty_pages") == dirty,
+	      "the worker ran after cladefs_dax_stop returned: dax_rebinds_done %llu -> %llu, dax_writebacks %llu -> %llu, dax_dirty_pages %llu -> %llu",
+	      done, sim_dax_stat(mount, "dax_rebinds_done"), writebacks,
+	      sim_dax_stat(mount, "dax_writebacks"), dirty, sim_dax_stat(mount, "dax_dirty_pages"));
+	/* Started again, the worker serves the kick: it writes the pages back. */
+	cladefs_dax_thaw(dax);
+	sim_await(!sim_dax_stat(mount, "dax_dirty_pages"), "no round wrote back once started again");
+	cow_check_file("after the kick", 8 * PAGE_SIZE);
+}
+
 static const struct {
 	const char *name;
 	void (*run)(void);
@@ -2010,6 +2064,7 @@ static const struct {
 	SCENARIO(region_maps_at_once),
 	SCENARIO(shared_reads_stay),
 	SCENARIO(knobs_against_unmount),
+	SCENARIO(kick_races_stop),
 };
 
 static void scenario(void *arg)
