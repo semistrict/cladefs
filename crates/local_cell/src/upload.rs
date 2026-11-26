@@ -1814,9 +1814,13 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         };
         // cladefs: a replicated cell's configuration kept whole beside (TASK-537.3.5).
         self.spawn_keeper(&writer);
-        // The segments uploaded, and as many as were when the last checkpoint was begun; and
-        // whether any segment since the last checkpoint freed extents (hotbed question 535).
-        let (mut segments, mut checkpointed, mut freed_since_checkpoint) = (0u64, 0u64, false);
+        // The segments uploaded, and as many as were when the last checkpoint was begun; and the
+        // newest segment taken that freed extents, which a clean close checkpoints unless the
+        // head's checkpoint covers it (hotbed question 535): by its number, not a flag a periodic
+        // checkpoint clears, as one begun before that segment was acknowledged covers it not
+        // (board 13938).
+        let (mut segments, mut checkpointed) = (0u64, 0u64);
+        let mut freed: Option<u64> = None;
         let mut in_flight = InFlight::default();
         // cladefs: head acknowledgements (`Writer::acknowledge`) and periodic checkpoint uploads
         // (`Writer::checkpoint`) run in separate slots beside segment uploads: checkpoint PUTs
@@ -1894,7 +1898,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                 close &= !gathered.closed;
                 urgent &= !gathered.closed;
                 more = gathered.took;
-                freed_since_checkpoint |= gathered.freed;
+                freed = freed.max(gathered.freed);
                 credit.uploaded(gathered.data);
                 if more {
                     continue;
@@ -1907,21 +1911,23 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                     && relocating.is_none()
                 {
                     // A checkpoint on clean shutdown (doc-7, Checkpoints), skipped below
-                    // `checkpoint_min_on_close` once the cell already has a checkpoint and no
-                    // extents were freed or named versions remain uncheckpointed (hotbed question
-                    // 535, board 11995). Checking `head.versions` against `head.checkpoint`
-                    // covers versions that were in flight during a periodic checkpoint, survived a
-                    // failed periodic checkpoint, or persisted across an unclean stop.
+                    // `checkpoint_min_on_close` once the cell already has a checkpoint and the
+                    // head's checkpoint covers every segment that freed extents and every named
+                    // version (hotbed question 535, board 11995, board 13938, hotbed question
+                    // 584). Checking each by its segment against `head.checkpoint` covers those
+                    // in flight during a periodic checkpoint, or past a failed one; versions,
+                    // named in the head, also those persisted across an unclean stop.
                     let uncheckpointed = segments.saturating_sub(checkpointed);
                     let head = writer.head().await;
                     let checkpoint_at = head.checkpoint.map(|(at, _)| at);
+                    let uncovered = |segment: u64| checkpoint_at.is_none_or(|at| segment > at);
                     let no_checkpoint_yet = checkpoint_at.is_none();
-                    let uncheckpointed_version = head
-                        .versions
-                        .iter()
-                        .any(|version| checkpoint_at.is_none_or(|cp| version.at > cp));
+                    let uncheckpointed_free = freed.is_some_and(uncovered);
+                    let uncheckpointed_version =
+                        head.versions.iter().any(|version| uncovered(version.at));
                     if (uncheckpointed >= self.options.checkpoint_min_on_close
-                        || (uncheckpointed > 0 && (freed_since_checkpoint || no_checkpoint_yet))
+                        || (uncheckpointed > 0 && no_checkpoint_yet)
+                        || uncheckpointed_free
                         || uncheckpointed_version)
                         && let Err(err) = writer.checkpoint().await
                     {
@@ -2043,7 +2049,6 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                                 && !stop
                             {
                                 checkpointed = segments;
-                                freed_since_checkpoint = false;
                                 checkpoint_work = Some(Self::checkpointing(writer.clone()));
                             }
                             if in_flight.ready_to_ack() {
@@ -2538,10 +2543,11 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         }
         let mut segments = Vec::with_capacity(closed.len());
         let data = closed.iter().map(|closed| closed.data_len).sum();
-        let freed = closed.iter().any(|closed| !closed.footer.contents.frees.is_empty());
+        let mut freed = None;
         for closed in closed {
             let (number, tag) = (closed.number, closed.tag());
             let continues = closed.footer.contents.continued.is_some();
+            let frees = !closed.footer.contents.frees.is_empty();
             // cladefs: what reads its files, on a blocking thread, as `blocking` gives (board
             // 2944).
             let (own, size) = blocking(|| -> Result<_, Failure> {
@@ -2561,6 +2567,9 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             let closed = Arc::new(closed);
             let body = Body::new(size, move || blocking(|| closed.bytes()));
             let segment = writer.add_segment(Objects { footer, segment: body, own, data_len })?;
+            if frees {
+                freed = Some(segment);
+            }
             segments.push(Uploading { segment, number, tag, continues });
         }
         let took = !segments.is_empty();
@@ -2660,8 +2669,9 @@ struct Gathered {
     /// Whether it closed the cell's open segment, as asked: what was committed before is in the
     /// segments the cell closed, taken, or to be taken next.
     closed: bool,
-    /// Whether any segment taken freed extents (hotbed question 535).
-    freed: bool,
+    /// cladefs: the newest segment taken that freed extents, by its number in the cell, which
+    /// `cladefs-gc` reclaims once a checkpoint covers it (hotbed question 535, board 13938).
+    freed: Option<u64>,
 }
 
 /// A segment uploading: its number in the cell, and in the open cell; the tag of the open cell's

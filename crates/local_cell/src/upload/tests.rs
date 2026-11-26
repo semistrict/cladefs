@@ -923,138 +923,159 @@ async fn closed_segments_upload_immediately_with_long_interval_without_closing_o
     doc.uploader.close().await;
 }
 
-/// Out-of-order upload completions refill `IN_FLIGHT` slots immediately without head-of-line
-/// blocking behind a slow earliest segment, while acknowledgements still advance strictly in order.
-#[tokio::test(flavor = "multi_thread")]
-async fn out_of_order_upload_completions_refill_slots_without_hol_blocking() {
-    use object_store::ObjectStore;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+/// An object store in memory whose segment PUTs wait, in the order they start, for the gates
+/// given them ([`GatedSegments::gate`]), each counted as it starts and, held, said held
+/// ([`GatedSegments::held`]); those started past the gates go through at once: for tests of
+/// uploads completing out of order.
+#[derive(Debug)]
+struct GatedSegments {
+    inner: object_store::memory::InMemory,
+    gates: std::sync::Mutex<std::collections::VecDeque<Arc<tokio::sync::Notify>>>,
+    held: tokio::sync::Semaphore,
+    started: std::sync::atomic::AtomicUsize,
+}
 
-    #[derive(Debug)]
-    struct HoldFirstSegment {
-        inner: Arc<object_store::memory::InMemory>,
-        first_seen: Arc<tokio::sync::Notify>,
-        release_first: Arc<tokio::sync::Notify>,
-        segments_started: Arc<AtomicUsize>,
-    }
-
-    impl std::fmt::Display for HoldFirstSegment {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "HoldFirstSegment")
+impl GatedSegments {
+    fn new() -> Self {
+        Self {
+            inner: object_store::memory::InMemory::new(),
+            gates: Default::default(),
+            held: tokio::sync::Semaphore::new(0),
+            started: Default::default(),
         }
     }
 
-    impl ObjectStore for HoldFirstSegment {
-        fn put_opts<'life0, 'life1, 'async_trait>(
-            &'life0 self,
-            location: &'life1 object_store::path::Path,
-            payload: object_store::PutPayload,
-            opts: object_store::PutOptions,
-        ) -> futures::future::BoxFuture<'async_trait, object_store::Result<object_store::PutResult>>
-        where
-            'life0: 'async_trait,
-            'life1: 'async_trait,
-            Self: 'async_trait,
-        {
-            Box::pin(async move {
-                let key = location.as_ref();
-                if key.contains("/segments/") {
-                    let n = self.segments_started.fetch_add(1, Ordering::SeqCst);
-                    if n == 0 {
-                        self.first_seen.notify_one();
-                        self.release_first.notified().await;
-                    }
+    /// A gate for the next segment PUT to start, which waits until it is opened (`notify_one`).
+    fn gate(&self) -> Arc<tokio::sync::Notify> {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        self.gates.lock().unwrap().push_back(gate.clone());
+        gate
+    }
+
+    /// Waits until another segment PUT is held at its gate.
+    async fn held(&self) {
+        self.held.acquire().await.unwrap().forget();
+    }
+
+    /// How many segment PUTs started.
+    fn started(&self) -> usize {
+        self.started.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl std::fmt::Display for GatedSegments {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "GatedSegments")
+    }
+}
+
+impl object_store::ObjectStore for GatedSegments {
+    fn put_opts<'life0, 'life1, 'async_trait>(
+        &'life0 self,
+        location: &'life1 object_store::path::Path,
+        payload: object_store::PutPayload,
+        opts: object_store::PutOptions,
+    ) -> futures::future::BoxFuture<'async_trait, object_store::Result<object_store::PutResult>>
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move {
+            if location.as_ref().contains("/segments/") {
+                self.started.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let gate = self.gates.lock().unwrap().pop_front();
+                if let Some(gate) = gate {
+                    self.held.add_permits(1);
+                    gate.notified().await;
                 }
-                self.inner.put_opts(location, payload, opts).await
-            })
-        }
-
-        fn put_multipart_opts<'life0, 'life1, 'async_trait>(
-            &'life0 self,
-            location: &'life1 object_store::path::Path,
-            opts: object_store::PutMultipartOptions,
-        ) -> futures::future::BoxFuture<
-            'async_trait,
-            object_store::Result<Box<dyn object_store::MultipartUpload>>,
-        >
-        where
-            'life0: 'async_trait,
-            'life1: 'async_trait,
-            Self: 'async_trait,
-        {
-            self.inner.put_multipart_opts(location, opts)
-        }
-
-        fn get_opts<'life0, 'life1, 'async_trait>(
-            &'life0 self,
-            location: &'life1 object_store::path::Path,
-            options: object_store::GetOptions,
-        ) -> futures::future::BoxFuture<'async_trait, object_store::Result<object_store::GetResult>>
-        where
-            'life0: 'async_trait,
-            'life1: 'async_trait,
-            Self: 'async_trait,
-        {
-            self.inner.get_opts(location, options)
-        }
-
-        fn delete_stream(
-            &self,
-            locations: futures::stream::BoxStream<
-                'static,
-                object_store::Result<object_store::path::Path>,
-            >,
-        ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::path::Path>>
-        {
-            self.inner.delete_stream(locations)
-        }
-
-        fn list(
-            &self,
-            prefix: Option<&object_store::path::Path>,
-        ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
-        {
-            self.inner.list(prefix)
-        }
-
-        fn list_with_delimiter<'life0, 'life1, 'async_trait>(
-            &'life0 self,
-            prefix: Option<&'life1 object_store::path::Path>,
-        ) -> futures::future::BoxFuture<'async_trait, object_store::Result<object_store::ListResult>>
-        where
-            'life0: 'async_trait,
-            'life1: 'async_trait,
-            Self: 'async_trait,
-        {
-            self.inner.list_with_delimiter(prefix)
-        }
-
-        fn copy_opts<'life0, 'life1, 'life2, 'async_trait>(
-            &'life0 self,
-            from: &'life1 object_store::path::Path,
-            to: &'life2 object_store::path::Path,
-            options: object_store::CopyOptions,
-        ) -> futures::future::BoxFuture<'async_trait, object_store::Result<()>>
-        where
-            'life0: 'async_trait,
-            'life1: 'async_trait,
-            'life2: 'async_trait,
-            Self: 'async_trait,
-        {
-            self.inner.copy_opts(from, to, options)
-        }
+            }
+            self.inner.put_opts(location, payload, opts).await
+        })
     }
 
-    let first_seen = Arc::new(tokio::sync::Notify::new());
-    let release_first = Arc::new(tokio::sync::Notify::new());
-    let segments_started = Arc::new(AtomicUsize::new(0));
-    let store = Arc::new(HoldFirstSegment {
-        inner: Arc::new(object_store::memory::InMemory::new()),
-        first_seen: first_seen.clone(),
-        release_first: release_first.clone(),
-        segments_started: segments_started.clone(),
-    });
-    let bucket = Arc::new(ObjectBucket::new(store, "").unrouted());
+    fn put_multipart_opts<'life0, 'life1, 'async_trait>(
+        &'life0 self,
+        location: &'life1 object_store::path::Path,
+        opts: object_store::PutMultipartOptions,
+    ) -> futures::future::BoxFuture<
+        'async_trait,
+        object_store::Result<Box<dyn object_store::MultipartUpload>>,
+    >
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.inner.put_multipart_opts(location, opts)
+    }
+
+    fn get_opts<'life0, 'life1, 'async_trait>(
+        &'life0 self,
+        location: &'life1 object_store::path::Path,
+        options: object_store::GetOptions,
+    ) -> futures::future::BoxFuture<'async_trait, object_store::Result<object_store::GetResult>>
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.inner.get_opts(location, options)
+    }
+
+    fn delete_stream(
+        &self,
+        locations: futures::stream::BoxStream<
+            'static,
+            object_store::Result<object_store::path::Path>,
+        >,
+    ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::path::Path>> {
+        self.inner.delete_stream(locations)
+    }
+
+    fn list(
+        &self,
+        prefix: Option<&object_store::path::Path>,
+    ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>> {
+        self.inner.list(prefix)
+    }
+
+    fn list_with_delimiter<'life0, 'life1, 'async_trait>(
+        &'life0 self,
+        prefix: Option<&'life1 object_store::path::Path>,
+    ) -> futures::future::BoxFuture<'async_trait, object_store::Result<object_store::ListResult>>
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.inner.list_with_delimiter(prefix)
+    }
+
+    fn copy_opts<'life0, 'life1, 'life2, 'async_trait>(
+        &'life0 self,
+        from: &'life1 object_store::path::Path,
+        to: &'life2 object_store::path::Path,
+        options: object_store::CopyOptions,
+    ) -> futures::future::BoxFuture<'async_trait, object_store::Result<()>>
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        'life2: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.inner.copy_opts(from, to, options)
+    }
+}
+
+/// A cell made in `store`, a bucket in memory, opened with an uploader of `options`, each closed
+/// segment uploaded at once, as [`GatedSegments`]'s tests want.
+async fn open_gated(
+    store: &Arc<GatedSegments>,
+    url: &str,
+    options: Options,
+) -> (Arc<RoutedBucket>, Arc<LocalCell<MemDir>>, Uploader<MemDir>) {
+    let bucket = Arc::new(ObjectBucket::new(store.clone(), "").unrouted());
     let host = Runtime {
         handle: tokio::runtime::Handle::current(),
         uploads: Budget::new(Limits::UNBOUNDED),
@@ -1062,14 +1083,14 @@ async fn out_of_order_upload_completions_refill_slots_without_hol_blocking() {
     };
     let dir = MemDir::new();
     let description = Description { block_size: BLOCK as u32, capacity: 1 << 30, cell: CELL };
-    LocalCell::make(&dir, description, Some("memory:///hol"), None).unwrap();
+    LocalCell::make(&dir, description, Some(url), None).unwrap();
     lifecycle::create(&*bucket, CELL, 1).await.unwrap();
     let options = Options {
         interval: Duration::from_secs(3600),
         upload_closed: true,
         ack_coalesce: Duration::ZERO,
         relocate: false,
-        ..Options::default()
+        ..options
     };
     let recovering = LocalCell::recover_unmade(dir).unwrap();
     let (cell, uploader) =
@@ -1077,23 +1098,33 @@ async fn out_of_order_upload_completions_refill_slots_without_hol_blocking() {
             .await
             .unwrap();
     cell.made().unwrap();
+    (bucket, cell, uploader)
+}
+
+/// Out-of-order upload completions refill `IN_FLIGHT` slots immediately without head-of-line
+/// blocking behind a slow earliest segment, while acknowledgements still advance strictly in order.
+#[tokio::test(flavor = "multi_thread")]
+async fn out_of_order_upload_completions_refill_slots_without_hol_blocking() {
+    let store = Arc::new(GatedSegments::new());
+    let first = store.gate();
+    let (bucket, cell, uploader) = open_gated(&store, "memory:///hol", Options::default()).await;
 
     // Close more than IN_FLIGHT segments: with FuturesOrdered, holding segment 0 would freeze
-    // segments_started at IN_FLIGHT forever; with FuturesUnordered, later completions immediately
-    // refill slots until all total segments have started uploading.
+    // the segments started at IN_FLIGHT forever; with FuturesUnordered, later completions
+    // immediately refill slots until all total segments have started uploading.
     let total = IN_FLIGHT + 4;
     for sequence in 1..=total as u64 {
         cell.write(ExtentId::new(CELL.id, sequence), 0, &[sequence as u8; BLOCK]).await.unwrap();
         cell.close_segment().unwrap();
         cell.commit(None).await.unwrap();
     }
-    first_seen.notified().await;
+    store.held().await;
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while segments_started.load(Ordering::SeqCst) < total && std::time::Instant::now() < deadline {
+    while store.started() < total && std::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert_eq!(
-        segments_started.load(Ordering::SeqCst),
+        store.started(),
         total,
         "all {total} segments (> IN_FLIGHT={IN_FLIGHT}) must start uploading while segment 0 is held"
     );
@@ -1101,13 +1132,57 @@ async fn out_of_order_upload_completions_refill_slots_without_hol_blocking() {
     assert_eq!(uploader.last_uploaded(), 0);
 
     // Releasing segment 0 lets the entire contiguous prefix acknowledge cleanly.
-    release_first.notify_one();
+    first.notify_one();
     let last = cell.last_commit().unwrap();
     uploader.uploaded(last).await.unwrap();
     uploader.close().await;
     let state = bucket_cell::recover(&*bucket, CELL, None).await.unwrap().state;
     let sequences: Vec<u64> = state.extents.keys().map(|e| e.sequence).collect();
     assert_eq!(sequences, (1..=total as u64).collect::<Vec<_>>());
+}
+
+/// Board 13938 (hotbed review 144): a segment freeing an extent gathered, its upload slow, while
+/// a periodic checkpoint, begun as the segment before it was acknowledged, covers it not: the
+/// clean close still checkpoints the free, below `checkpoint_min_on_close`, so that
+/// `cladefs-gc` can reclaim it. Before, the periodic checkpoint cleared the flag the free's
+/// gathering set, and the close checkpointed nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn clean_close_checkpoints_a_free_a_periodic_checkpoint_missed() {
+    let store = Arc::new(GatedSegments::new());
+    let options = Options { checkpoint_every: 2, checkpoint_min_on_close: 4, ..Options::default() };
+    let (bucket, cell, uploader) = open_gated(&store, "memory:///missed", options).await;
+
+    // A, uploaded: the first segment.
+    cell.write(ExtentId::new(CELL.id, 1), 0, &[1; BLOCK]).await.unwrap();
+    cell.close_segment().unwrap();
+    cell.commit(None).await.unwrap();
+    uploader.uploaded(cell.last_commit().unwrap()).await.unwrap();
+
+    // B, then F, freeing A's extent, both held as they upload.
+    let (b_gate, f_gate) = (store.gate(), store.gate());
+    cell.write(ExtentId::new(CELL.id, 2), 0, &[2; BLOCK]).await.unwrap();
+    cell.close_segment().unwrap();
+    cell.commit(None).await.unwrap();
+    let b = cell.last_commit().unwrap();
+    store.held().await;
+    cell.free(ExtentId::new(CELL.id, 1)).unwrap();
+    cell.close_segment().unwrap();
+    cell.commit(None).await.unwrap();
+    let f = cell.last_commit().unwrap();
+    store.held().await;
+
+    // B lands and is acknowledged, the second segment uploaded beginning a periodic checkpoint,
+    // of B: F gathered, not acknowledged. Then F lands, and the cell closes cleanly.
+    b_gate.notify_one();
+    uploader.uploaded(b).await.unwrap();
+    f_gate.notify_one();
+    uploader.uploaded(f).await.unwrap();
+    uploader.close().await;
+    cell.close().await.unwrap();
+
+    let head = bucket_cell::head::get(&*bucket, CELL).await.unwrap().unwrap();
+    let checkpoint = head.checkpoint.map(|(segment, _)| segment);
+    assert_eq!(checkpoint, Some(head.end - 1), "the clean close must checkpoint the free");
 }
 
 /// Batched WAL acknowledgement updates the start file once for a contiguous prefix, rejects a
