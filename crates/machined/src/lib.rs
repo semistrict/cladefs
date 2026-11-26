@@ -9,7 +9,7 @@
 //! (`proto/machined/v1/machined.proto`; the README says how to run it).
 //!
 //! - [`start`] serves it, as [`Config`] says, on a Unix socket, TCP with mutual TLS, or both
-//!   (`listen`); `src/main.rs` is the binary over it.
+//!   (`listen`); its binary (`main.rs`) is a thin one over it.
 //! - Every request is checked once, where it enters (`checks`), then done on the machines
 //!   (`machines`), each of which runs through machined's one seam over libmachine (`vmm`), which
 //!   board 13460 fills on macOS with a helper process per machine.
@@ -18,7 +18,7 @@
 //! - [`client`] connects a Rust client to a machined's Unix socket.
 //!
 //! Machines' roots on cells of the extent daemon machined embeds (libcladefs, board 13471), and
-//! that daemon's Cladefsd service on machined's endpoint, wait on boards 13067 and 13471.
+//! that daemon's Cladefsd service on machined's endpoint, wait on board 13553.
 #![cfg(any(
     all(target_os = "linux", target_arch = "x86_64"),
     all(target_os = "macos", target_arch = "aarch64")
