@@ -1,0 +1,69 @@
+# Copyright 2026 The cladefs Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+load("@rules_go//proto:def.bzl", "go_proto_library")
+
+package(default_visibility = ["//visibility:public"])
+
+go_proto_library(
+    name = "cladefsd_go_proto",
+    compilers = [
+        "@rules_go//proto:go_proto",
+        "@rules_go//proto:go_grpc_v2",
+    ],
+    importpath = "github.com/semistrict/cladefs/go/cladefsd/v1",
+    proto = "//crates/cladefs/proto/cladefs/cladefsd/v1:cladefsd_proto",
+)
+
+go_library(
+    name = "cladefsdv1",
+    srcs = ["client.go"],
+    embed = [":cladefsd_go_proto"],
+    importpath = "github.com/semistrict/cladefs/go/cladefsd/v1",
+    deps = [
+        "//go/mount/v1:mountv1",
+        "@org_golang_google_grpc//:grpc",
+        "@org_golang_google_grpc//credentials/insecure",
+        "@org_golang_google_grpc//health/grpc_health_v1",
+        "@org_golang_google_grpc//metadata",
+        "@org_golang_google_grpc//status",
+    ],
+)
+
+go_test(
+    name = "cladefsdv1_test",
+    srcs = ["client_test.go"],
+    deps = [
+        ":cladefsdv1",
+        "//go/mount/v1:mountv1",
+        "@org_golang_google_grpc//:grpc",
+        "@org_golang_google_grpc//codes",
+        "@org_golang_google_grpc//health",
+        "@org_golang_google_grpc//health/grpc_health_v1",
+        "@org_golang_google_grpc//metadata",
+        "@org_golang_google_grpc//status",
+        "@org_golang_google_protobuf//proto",
+    ],
+)
+
+go_test(
+    name = "daemon_test",
+    srcs = ["daemon_test.go"],
+    data = ["//crates/cladefs:cladefsd"],
+    env = {
+        "CLADEFSD": "../../../$(rootpath //crates/cladefs:cladefsd)",
+        "CLADEFSD_HEADROOM": "0",
+    },
+    gotags = ["cladefsd"],
+    target_compatible_with = ["@platforms//os:linux"],
+    deps = [
+        ":cladefsdv1",
+        "@org_golang_google_grpc//:grpc",
+        "@org_golang_google_grpc//backoff",
+        "@org_golang_google_grpc//codes",
+        "@org_golang_google_grpc//health/grpc_health_v1",
+        "@org_golang_google_grpc//status",
+    ],
+)

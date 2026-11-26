@@ -1,0 +1,74 @@
+# Copyright 2026 The cladefs Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
+load("//tools/bazel:guest_kernel.bzl", "guest_linux_kernel")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(glob([
+    "fs/cladefs/*.c",
+    "fs/cladefs/*.h",
+    "include/linux/*.h",
+    "configs/*.config",
+    "patches/*.patch",
+]))
+
+# Kernel variant build flags matching scripts/build-guest-kernel.sh env knobs.
+bool_flag(name = "profile", build_setting_default = False)
+bool_flag(name = "debug", build_setting_default = False)
+bool_flag(name = "kasan", build_setting_default = False)
+bool_flag(name = "lock_stat", build_setting_default = False)
+bool_flag(name = "coverage", build_setting_default = False)
+bool_flag(name = "rust_checks", build_setting_default = False)
+
+filegroup(
+    name = "cladefs_headers",
+    srcs = glob([
+        "fs/cladefs/*.h",
+        "include/linux/*.h",
+    ]),
+)
+
+filegroup(
+    name = "cladefs_sim_sources",
+    srcs = [
+        "fs/cladefs/data.c",
+        "fs/cladefs/dax.c",
+        "fs/cladefs/dax_debug.c",
+        "fs/cladefs/device.c",
+        "fs/cladefs/pages.c",
+    ],
+)
+
+filegroup(
+    name = "all_sources",
+    srcs = glob(["**/*"]),
+)
+
+guest_linux_kernel(
+    name = "vmlinux",
+    arch = "x86_64",
+    rust_staticlib = "//guest/rust/cladefs-linux:cladefs_linux_x86_64",
+    srcs = [
+        ":all_sources",
+        "//guest/rust:all_sources",
+        "//scripts:all_scripts",
+    ],
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:linux"],
+)
+
+guest_linux_kernel(
+    name = "Image",
+    arch = "arm64",
+    rust_staticlib = "//guest/rust/cladefs-linux:cladefs_linux_arm64",
+    srcs = [
+        ":all_sources",
+        "//guest/rust:all_sources",
+        "//scripts:all_scripts",
+    ],
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:linux"],
+)

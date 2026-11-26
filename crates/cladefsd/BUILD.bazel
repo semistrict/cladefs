@@ -1,0 +1,131 @@
+# Copyright 2026 The cladefs Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@crates//:defs.bzl", "all_crate_deps")
+load("//tools/bazel:rust.bzl", "cladefs_rust_library", "cladefs_rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["Cargo.toml"])
+
+filegroup(
+    name = "crate_files",
+    srcs = glob(["Cargo.toml", "src/**/*.rs"], allow_empty = True),
+)
+
+_DAEMON_ALIASES = {
+    "@crates//:madsim-tokio": "tokio",
+    "@crates//:tonic": "tonic",
+}
+
+_LIB_SRCS = glob(["src/**/*.rs"])
+
+_BASE_DEPS = [
+    "//crates/base32_id",
+    "//crates/block_device",
+    "//crates/cladefs_proto",
+    "//crates/formats",
+    "//crates/host_fs",
+    "//crates/node_local",
+    "//crates/storage_device",
+]
+
+_PROD_DEPS = _BASE_DEPS + [
+    "//crates/bucket_cell",
+    "//crates/cladefs_core",
+    "//crates/cladefs_fs",
+    "//crates/cladefs_wire",
+    "//crates/extent_frame",
+    "//crates/extent_keys",
+    "//crates/local_cell",
+]
+
+_TEST_DEPS = _BASE_DEPS + [
+    "//crates/bucket_cell:bucket_cell_testing",
+    "//crates/cladefs_core:cladefs_core_for_test",
+    "//crates/cladefs_fs:cladefs_fs_for_test",
+    "//crates/cladefs_wire:cladefs_wire_for_test",
+    "//crates/extent_frame:extent_frame_testing",
+    "//crates/extent_keys:extent_keys_testing",
+    "//crates/local_cell:local_cell_testing",
+]
+
+_PROC_MACROS = all_crate_deps(proc_macro = True)
+
+_COMPAT = select({
+    "//tools/bazel:linux_or_madsim": [],
+    "//conditions:default": ["@platforms//:incompatible"],
+})
+
+cladefs_rust_library(
+    name = "cladefsd",
+    srcs = _LIB_SRCS,
+    aliases = _DAEMON_ALIASES,
+    proc_macro_deps = _PROC_MACROS,
+    target_compatible_with = _COMPAT,
+    deps = _PROD_DEPS + all_crate_deps(normal = True),
+)
+
+cladefs_rust_library(
+    name = "cladefsd_testing",
+    srcs = _LIB_SRCS,
+    aliases = _DAEMON_ALIASES,
+    crate_features = ["testing"],
+    crate_name = "cladefsd",
+    proc_macro_deps = _PROC_MACROS,
+    target_compatible_with = _COMPAT,
+    deps = _BASE_DEPS + [
+        "//crates/bucket_cell:bucket_cell_testing",
+        "//crates/cladefs_core:cladefs_core_testing",
+        "//crates/cladefs_fs:cladefs_fs_testing",
+        "//crates/cladefs_wire:cladefs_wire_testing",
+        "//crates/extent_frame:extent_frame_testing",
+        "//crates/extent_keys:extent_keys_testing",
+        "//crates/local_cell:local_cell_testing",
+    ] + all_crate_deps(normal = True),
+)
+
+cladefs_rust_library(
+    name = "cladefsd_tests_kms",
+    srcs = _LIB_SRCS,
+    aliases = _DAEMON_ALIASES,
+    crate_features = ["testing", "tests-kms"],
+    crate_name = "cladefsd",
+    proc_macro_deps = _PROC_MACROS,
+    target_compatible_with = _COMPAT,
+    deps = _BASE_DEPS + [
+        "//crates/bucket_cell:bucket_cell_testing",
+        "//crates/cladefs_core:cladefs_core_tests_kms",
+        "//crates/cladefs_fs:cladefs_fs_tests_kms",
+        "//crates/cladefs_wire:cladefs_wire_tests_kms",
+        "//crates/extent_frame:extent_frame_testing",
+        "//crates/extent_keys:extent_keys_testing",
+        "//crates/local_cell:local_cell_testing",
+    ] + all_crate_deps(normal = True),
+)
+
+cladefs_rust_library(
+    name = "cladefsd_for_test",
+    srcs = _LIB_SRCS,
+    aliases = _DAEMON_ALIASES,
+    crate_features = ["failpoints", "testing", "tests-kms"],
+    crate_name = "cladefsd",
+    proc_macro_deps = _PROC_MACROS,
+    target_compatible_with = _COMPAT,
+    deps = _TEST_DEPS + all_crate_deps(normal = True),
+)
+
+cladefs_rust_test(
+    name = "cladefsd_test",
+    aliases = _DAEMON_ALIASES,
+    crate = ":cladefsd_for_test",
+    crate_features = ["failpoints", "testing", "tests-kms"],
+    data = ["//:Cargo.lock", "//formats:all"],
+    isolated = True,
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    shard_count = 4,
+    target_compatible_with = _COMPAT,
+    timeout = "long",
+    deps = all_crate_deps(normal_dev = True),
+)

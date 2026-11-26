@@ -1,0 +1,105 @@
+# Copyright 2026 The cladefs Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@crates//:defs.bzl", "all_crate_deps")
+load("//tools/bazel:rust.bzl", "MADSIM_TOKIO_ALIAS", "cladefs_rust_library", "cladefs_rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["Cargo.toml"])
+
+filegroup(
+    name = "crate_files",
+    srcs = glob(["Cargo.toml", "src/**/*.rs"], allow_empty = True),
+)
+
+_LIB_SRCS = glob(["src/**/*.rs"])
+
+_BASE_DEPS = [
+    "//crates/base32_id",
+    "//crates/block_device",
+    "//crates/fuchsia-async:fuchsia_async",
+    "//crates/fxfs",
+    "//crates/fxfs-posix:fxfs_posix",
+    "//crates/host_fs",
+    "//crates/node_local",
+    "//crates/storage_device",
+]
+
+_PROD_DEPS = _BASE_DEPS + [
+    "//crates/bucket_cell",
+    "//crates/cladefs_core",
+    "//crates/extent_frame",
+    "//crates/local_cell",
+]
+
+_TEST_DEPS = _BASE_DEPS + [
+    "//crates/bucket_cell:bucket_cell_testing",
+    "//crates/cladefs_core:cladefs_core_for_test",
+    "//crates/extent_frame:extent_frame_testing",
+    "//crates/local_cell:local_cell_testing",
+]
+
+_PROC_MACROS = all_crate_deps(proc_macro = True)
+
+cladefs_rust_library(
+    name = "cladefs_fs",
+    srcs = _LIB_SRCS,
+    aliases = MADSIM_TOKIO_ALIAS,
+    proc_macro_deps = _PROC_MACROS,
+    deps = _PROD_DEPS + all_crate_deps(normal = True),
+)
+
+cladefs_rust_library(
+    name = "cladefs_fs_testing",
+    srcs = _LIB_SRCS,
+    aliases = MADSIM_TOKIO_ALIAS,
+    crate_features = ["testing"],
+    crate_name = "cladefs_fs",
+    proc_macro_deps = _PROC_MACROS,
+    deps = _BASE_DEPS + [
+        "//crates/bucket_cell:bucket_cell_testing",
+        "//crates/cladefs_core:cladefs_core_testing",
+        "//crates/extent_frame:extent_frame_testing",
+        "//crates/local_cell:local_cell_testing",
+    ] + all_crate_deps(normal = True),
+)
+
+cladefs_rust_library(
+    name = "cladefs_fs_tests_kms",
+    srcs = _LIB_SRCS,
+    aliases = MADSIM_TOKIO_ALIAS,
+    crate_features = ["testing", "tests-kms"],
+    crate_name = "cladefs_fs",
+    proc_macro_deps = _PROC_MACROS,
+    deps = _BASE_DEPS + [
+        "//crates/bucket_cell:bucket_cell_testing",
+        "//crates/cladefs_core:cladefs_core_tests_kms",
+        "//crates/extent_frame:extent_frame_testing",
+        "//crates/local_cell:local_cell_testing",
+    ] + all_crate_deps(normal = True),
+)
+
+cladefs_rust_library(
+    name = "cladefs_fs_for_test",
+    srcs = _LIB_SRCS,
+    aliases = MADSIM_TOKIO_ALIAS,
+    crate_features = ["failpoints", "testing", "tests-kms"],
+    crate_name = "cladefs_fs",
+    proc_macro_deps = _PROC_MACROS,
+    deps = _TEST_DEPS + all_crate_deps(normal = True),
+)
+
+cladefs_rust_test(
+    name = "cladefs_fs_test",
+    aliases = MADSIM_TOKIO_ALIAS,
+    crate = ":cladefs_fs_for_test",
+    crate_features = ["failpoints", "testing", "tests-kms"],
+    isolated = True,
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    timeout = "long",
+    deps = [
+        "//crates/extent_keys:extent_keys_testing",
+    ] + all_crate_deps(normal_dev = True),
+)

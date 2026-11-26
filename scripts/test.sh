@@ -62,7 +62,7 @@ if part clippy; then
     # boards 10218, 10489), and the Shuttle, loom and madsim builds below. `--no-deps` keeps
     # Fuchsia path dependencies under the workspace rule above.
     cladefs_crates=(
-        -p base32_id -p block_device -p bucket_cell -p cladefs -p cladefs-examples
+        -p base32_id -p block_device -p bucket_cell -p cladefs -p cladefs_core -p cladefs_fs -p cladefs_wire -p cladefsd -p cladefs-examples
         -p extent_frame -p extent_keys -p formats -p fxfs-automount -p fxfs-posix
         -p fxfs-sim-diff -p gc_wasm -p host_fs -p local_cell -p node_local -p sqlite_cladefs
         -p virtio_extent
@@ -77,16 +77,16 @@ if part clippy; then
         "${cladefs_crates[@]}" --lib --bins -- "${cladefs_lints[@]}"
     cargo clippy --locked --manifest-path "$root/Cargo.toml" --no-deps \
         -p gc_wasm --target wasm32-unknown-unknown -- "${cladefs_lints[@]}"
-    cargo clippy --locked --manifest-path "$root/Cargo.toml" --no-deps -p local_cell -p cladefs \
+    cargo clippy --locked --manifest-path "$root/Cargo.toml" --no-deps -p local_cell -p cladefs_core \
         --features shuttle --tests -- "${cladefs_lints[@]}"
-    cargo clippy --locked --manifest-path "$root/Cargo.toml" --no-deps -p cladefs -p virtio_extent \
+    cargo clippy --locked --manifest-path "$root/Cargo.toml" --no-deps -p cladefs_core -p virtio_extent \
         --features loom --tests -- "${cladefs_lints[@]}"
     # The madsim build's (doc-24): the simulated crates and their tests under madsim, built as the
     # madsim part builds them, whose code no other build compiles either: its warnings, 13 on
     # Linux, went unseen there behind a `cargo check` (board 5652).
     env RUSTFLAGS="$madsim_rustflags" CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$root/target}/madsim" \
         cargo clippy --locked --manifest-path "$root/Cargo.toml" --no-deps -p node_local -p host_fs \
-        -p bucket_cell -p local_cell -p cladefs --lib --test madsim -- "${cladefs_lints[@]}"
+        -p bucket_cell -p local_cell -p cladefs_core -p cladefs_fs -p cladefs_wire -p cladefsd -p cladefs --lib --test madsim -- "${cladefs_lints[@]}"
 fi
 # The simulation of bucket_cell's protocol over local_cell's extent stores (TASK-88): its profiles'
 # soaks, and its rules' seed searches, each until a seed with the rule off finds what the rule
@@ -114,7 +114,7 @@ fi
 if part madsim; then
     madsim=(env RUSTFLAGS="$madsim_rustflags" CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$root/target}/madsim")
     "${madsim[@]}" cargo check --locked --manifest-path "$root/Cargo.toml" -p node_local \
-        -p host_fs -p bucket_cell -p local_cell -p cladefs
+        -p host_fs -p bucket_cell -p local_cell -p cladefs_core -p cladefs_fs -p cladefs_wire -p cladefsd -p cladefs
     # Each test over CLADEFS_MADSIM_SEEDS seeds, 20 unless said, from MADSIM_TEST_SEED's, 1 unless
     # said, after the regression seeds, those that once failed (crates/cladefs/tests/madsim-seeds,
     # TASK-685.8): each seed a process of its own, as what a simulation's hosts held in memory,
@@ -136,12 +136,12 @@ if part shuttle; then
         --test shuttle
     cargo nextest run --locked --manifest-path "$root/Cargo.toml" -p local_cell --features shuttle \
         --lib shuttle_tests::
-    cargo nextest run --locked --manifest-path "$root/Cargo.toml" -p cladefs --features shuttle \
+    cargo nextest run --locked --manifest-path "$root/Cargo.toml" -p cladefs_core --features shuttle \
         --lib shuttle_tests::
     # The protocols of atomics under loom, each crate's `loom` feature, whose every interleaving
     # and weak ordering Shuttle, seeing every atomic as SeqCst, can't run (docs/memory-ordering.md,
     # TASK-444.2).
-    for crate in cladefs virtio_extent; do
+    for crate in cladefs_core virtio_extent; do
         cargo nextest run --locked --manifest-path "$root/Cargo.toml" -p "$crate" --features loom \
             --lib loom::
     done

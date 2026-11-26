@@ -1,0 +1,50 @@
+# Copyright 2026 The cladefs Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("//tools/bazel:rust.bzl", "cladefs_rust_library", "cladefs_rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["Cargo.toml"])
+
+filegroup(
+    name = "crate_files",
+    srcs = glob(["Cargo.toml", "src/**/*", "tests/**/*"], allow_empty = True),
+)
+
+cladefs_rust_library(
+    name = "node_local",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    deps = all_crate_deps(normal = True) + select({
+        "//tools/bazel:madsim_enabled": ["@crates//:madsim"],
+        "//conditions:default": [],
+    }),
+)
+
+cladefs_rust_test(
+    name = "node_local_test",
+    aliases = aliases(normal_dev = True, proc_macro_dev = True),
+    crate = ":node_local",
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    deps = all_crate_deps(normal_dev = True),
+)
+
+cladefs_rust_test(
+    name = "madsim_test",
+    srcs = ["tests/madsim.rs"],
+    aliases = aliases(normal = True, normal_dev = True),
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+    tags = ["madsim"],
+    target_compatible_with = select({
+        "//tools/bazel:madsim_enabled": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = [
+        ":node_local",
+        "@crates//:madsim",
+    ] + all_crate_deps(normal = True, normal_dev = True),
+)

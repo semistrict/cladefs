@@ -3,8 +3,8 @@
 # scopedWaits, board 6208).
 # Kind: memory
 # Killer: cladefsd::tests::frozen_vm_processes_hold_no_other_tenants_memory
---- a/crates/cladefs/src/cladefsd/server.rs
-+++ b/crates/cladefs/src/cladefsd/server.rs
+--- a/crates/cladefsd/src/server.rs
++++ b/crates/cladefsd/src/server.rs
 @@ -3112,7 +3112,7 @@ fn quarantine(freed: crate::slabs::Quarantined) {
          live
      };

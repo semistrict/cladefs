@@ -3,8 +3,8 @@
 # (TASK-149.35).
 # Kind: memory
 # Killer: cladefsd::tests::hostile::a_tenants_in_flight_data_is_bounded
---- a/crates/cladefs/src/cladefsd/server.rs
-+++ b/crates/cladefs/src/cladefsd/server.rs
+--- a/crates/cladefsd/src/server.rs
++++ b/crates/cladefsd/src/server.rs
 @@ -1214,7 +1214,7 @@ impl Connection {
          }
          // Admitted one at a time, as its messages are received, so nothing came in meanwhile.

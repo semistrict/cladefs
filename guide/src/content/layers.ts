@@ -44,7 +44,7 @@ export const layers: Layer[] = [
       "daemon over a Unix socket. It maps the daemon's physical memory (memfds) into the memory " +
       "KVM follows for the window, and reports the guest's faults there to the daemon through " +
       "userfaultfd.",
-    dirs: ["crates/virtio_extent", "vendor/firecracker/src/vmm/src/devices/virtio/extent", "crates/cladefs/src/dax/uffd.rs"],
+    dirs: ["crates/virtio_extent", "vendor/firecracker/src/vmm/src/devices/virtio/extent", "crates/cladefs_core/src/dax/uffd.rs"],
     anchors: ["vmm_handle", "vmm_window", "cell_client", "uffd_serve", "vmm_private_max"],
     docs: ["doc-4"],
     provenance: "Firecracker is upstream's, at v1.18.0; the extent device is cladefs's: crates/virtio_extent, which libmachine shares, and its adapter in the fork semistrict/firecracker.",
@@ -57,7 +57,7 @@ export const layers: Layer[] = [
       "One process serves the cells of a host's hundreds of VMs, so each sealed extent is " +
       "one copy in memory, shared by every VM that maps it. It keeps each VM's window (its page " +
       "tables, mappings and private pages) and makes commits local behind the guest.",
-    dirs: ["crates/cladefs/src/cladefsd", "crates/cladefs/src/open_cell.rs", "crates/cladefs/src/dax.rs"],
+    dirs: ["crates/cladefsd/src", "crates/cladefs_core/src/open_cell.rs", "crates/cladefs_core/src/dax.rs"],
     anchors: ["server_serve", "open_cell", "es_commit_ordered", "flush_behind", "es_map", "dax_window", "dax_fault", "cow"],
     docs: ["doc-2", "doc-13"],
     provenance: "cladefs's own.",
@@ -71,7 +71,7 @@ export const layers: Layer[] = [
       "VM process maps pages of, in 1 MiB part slabs the daemon reads and writes by offset. Arenas " +
       "may be capped, ask for relief (evicting cached extents) when starved, and keep a freed slab " +
       "in quarantine until the VM processes it was staged to unmap it.",
-    dirs: ["crates/cladefs/src/slabs.rs", "crates/cladefs/src/cache.rs", "crates/cladefs/src/pages.rs"],
+    dirs: ["crates/cladefs_core/src/slabs.rs", "crates/cladefs_core/src/cache.rs", "crates/cladefs_core/src/pages.rs"],
     anchors: ["extent_cache", "cache_cached", "cached_extent", "evict", "relieve", "arena"],
     docs: ["doc-13"],
     provenance: "cladefs's own: part slabs (doc-26), in place of the Zircon kernel port's PMM.",

@@ -235,7 +235,7 @@ def outside_the_seam(path, text):
     why it is outside the simulation (the VM socket, FUSE, metrics, signals, clients). Its tests
     aside, a file's test module and what follows it among them."""
     posix = path.as_posix()
-    if "crates/cladefs/src/cladefsd/" not in posix or posix.endswith(("/run.rs", "/tests.rs")) \
+    if "crates/cladefsd/src/" not in posix or posix.endswith(("/run.rs", "/tests.rs", "/fuse_control.rs", "/testing_control.rs")) \
             or "/tests/" in posix:
         return
     lines = text.splitlines()
@@ -255,13 +255,13 @@ def outside_the_seam(path, text):
 # `Path` asks the file system itself.
 OFF_HOST_FS = re.compile(r"\bstd::fs\b|\bstd::os::unix::fs::(FileExt|MetadataExt|OpenOptionsExt)\b|"
                          r"\.(exists|canonicalize|try_exists)\(\)")
-OFF_HOST_FS_CRATES = ("crates/cladefs/src/", "crates/local_cell/src/", "crates/bucket_cell/src/")
+OFF_HOST_FS_CRATES = ("crates/cladefs/src/", "crates/cladefs_core/src/", "crates/cladefs_fs/src/", "crates/cladefs_wire/src/", "crates/cladefsd/src/", "crates/local_cell/src/", "crates/bucket_cell/src/")
 # The files whose reading or writing of the host's file system is outside the simulation as a
 # whole (doc-24): FUSE, the VM sockets and a VM process's client, procfs, the image an import reads,
 # a file bucket, the tools; and those that are tests' alone.
 OFF_HOST_FS_FILES = (
-    "/fuse/", "/cladefsd/grants.rs", "/cladefsd/mod.rs", "/cladefsd/mount.rs",
-    "/cladefsd/client.rs", "/cladefsd/governor.rs", "/cladefsd/process.rs", "/dax/uffd.rs",
+    "/fuse/", "/cladefsd/src/grants.rs", "/cladefsd/src/lib.rs", "/cladefsd/src/mount.rs",
+    "/cladefs_wire/src/client.rs", "/cladefsd/src/governor.rs", "/cladefsd/src/process.rs", "/cladefsd/src/fuse_control.rs", "/dax/uffd.rs",
     "/import.rs", "/import/", "/storage/", "/bucket_cell/src/local.rs", "/bucket_cell/src/faults.rs",
     "/src/bin/", "/testing.rs", "_faults.rs", "/bucket/lifecycle.rs", "/bucket/write_budgets.rs",
     "/upload/encrypted.rs", "/memory_cell.rs",

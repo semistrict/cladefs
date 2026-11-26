@@ -136,6 +136,11 @@ host_fs = { path = "crates/host_fs" }
 fxfs = { path = "crates/fxfs" }
 fxfs_macros = { path = "crates/fxfs_macros" }
 fxfs-posix = { path = "crates/fxfs-posix" }
+cladefs_proto = { path = "crates/cladefs_proto" }
+cladefs_core = { path = "crates/cladefs_core" }
+cladefs_wire = { path = "crates/cladefs_wire" }
+cladefs_fs = { path = "crates/cladefs_fs" }
+cladefsd = { path = "crates/cladefsd" }
 
 # cladefs: what a release cladefsd is built with, each choice made, not Cargo's default (board
 # 8597). docs/operating-a-host.md says how a host's daemon is built.

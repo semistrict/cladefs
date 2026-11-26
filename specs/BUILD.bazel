@@ -1,0 +1,67 @@
+# Copyright 2026 The cladefs Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//tools/bazel:tla.bzl", "tla_spec_test")
+
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "all_files",
+    srcs = glob(["**/*.tla", "**/*.cfg"]),
+)
+
+# Deep models (tagged `\* deep` in their .cfg) run only via dedicated *_deep_tla_test targets.
+_DEEP_CFGS = [
+    "ephemeral/EphemeralDeep.cfg",
+    "fast-wal/FastWalDeep.cfg",
+    "part-slabs/PartSlabsWide.cfg",
+    "replication/ReplicationDeep.cfg",
+    "replication/ReplicationDeferReplaces.cfg",
+    "replication/ReplicationFailuresDeep.cfg",
+]
+
+_SPECS = [
+    "bucket",
+    "buckets",
+    "dax-cow",
+    "ephemeral",
+    "fast-wal",
+    "journal",
+    "part-slabs",
+    "replication",
+]
+
+[
+    tla_spec_test(
+        name = spec.replace("-", "_") + "_tla_test",
+        spec_dir = spec,
+        srcs = glob(
+            [spec + "/**/*"],
+            exclude = _DEEP_CFGS,
+        ),
+        tags = ["manual"],
+    )
+    for spec in _SPECS
+]
+
+[
+    tla_spec_test(
+        name = cfg.rsplit("/", 1)[-1][:-4].lower() + "_tla_test",
+        models = [cfg.split("/", 1)[0] + "/" + cfg.rsplit("/", 1)[-1][:-4]],
+        spec_dir = cfg.split("/", 1)[0],
+        srcs = glob([cfg.split("/", 1)[0] + "/**/*"]),
+        tags = [
+            "deep",
+            "manual",
+        ],
+        timeout = "eternal",
+    )
+    for cfg in _DEEP_CFGS
+]
+
+test_suite(
+    name = "all_tla",
+    tags = ["tla"],
+    tests = [":" + spec.replace("-", "_") + "_tla_test" for spec in _SPECS],
+)

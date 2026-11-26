@@ -1,0 +1,23 @@
+# Copyright 2026 The cladefs Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_go//go:def.bzl", "go_test")
+
+# Note: compat_test invokes go/compat.sh which runs `buf` via `go run` (needs network/modcache)
+# and `git` over a temp repo; tagged manual unless run with host Go/buf cache available.
+go_test(
+    name = "compat_test",
+    srcs = ["compat_test.go"],
+    data = [
+        "//crates/cladefs/proto/cladefs/cladefsd/v1:cladefsd.proto",
+        "//crates/cladefs/proto/cladefs/mount/v1:mount.proto",
+        "//crates/cladefs/proto/cladefs/peer/v1:peer.proto",
+        "//crates/cladefs:proto_buf_yaml",
+        "//go:buf.sh",
+        "//go:compat.sh",
+        "//go:go.mod",
+        "//go:go.sum",
+    ],
+    tags = ["external", "local"],
+)

@@ -1,0 +1,330 @@
+# Copyright 2026 The cladefs Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@aspect_rules_js//js:defs.bzl", "js_binary")
+load("@bazel_skylib//lib:selects.bzl", "selects")
+load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
+load("@rules_rust//rust:defs.bzl", "rust_library")
+load(":rust_tools.bzl", "rust_host_toolchain_files")
+
+package(default_visibility = ["//visibility:public"])
+
+rust_host_toolchain_files(
+    name = "rust_host_toolchain",
+)
+
+exports_files([
+    "firecracker_seccomp_build.rs",
+    "run_isolated_rust_test.py",
+    "run_py_with_rust.sh",
+    "run_sim_test.sh",
+    "run_tla.sh",
+    "vite_build.mjs",
+])
+
+js_binary(
+    name = "vite_build_tool",
+    entry_point = "vite_build.mjs",
+)
+
+# Enables the deterministic madsim simulation build (doc-24, --config=madsim).
+bool_flag(
+    name = "madsim",
+    build_setting_default = False,
+)
+
+# Enables the fail crate's failpoints in opt builds (--config=sim); always off in --config=release.
+bool_flag(
+    name = "failpoints",
+    build_setting_default = False,
+)
+
+config_setting(
+    name = "madsim_enabled",
+    flag_values = {":madsim": "true"},
+)
+
+config_setting(
+    name = "opt_without_failpoints",
+    flag_values = {":failpoints": "false"},
+    values = {"compilation_mode": "opt"},
+)
+
+config_setting(
+    name = "is_linux",
+    constraint_values = ["@platforms//os:linux"],
+)
+
+config_setting(
+    name = "is_musl",
+    constraint_values = [
+        "@platforms//os:linux",
+        "//tools/platforms:musl",
+    ],
+)
+
+selects.config_setting_group(
+    name = "linux_or_madsim",
+    match_any = [
+        ":is_linux",
+        ":madsim_enabled",
+    ],
+)
+
+# -----------------------------------------------------------------------------
+# Config-aware fail crate (TASK-320: zero failpoints in release/musl, on in dev/sim)
+# -----------------------------------------------------------------------------
+_FAIL_DEPS = [
+    "@crates//:log",
+    "@crates//:once_cell",
+    "@crates//:rand08",
+]
+
+_RAND08_ALIAS = {
+    "@crates//:rand08": "rand",
+}
+
+_REAL_TONIC_ALIAS = {
+    "@crates//:real_tonic": "tonic",
+}
+
+rust_library(
+    name = "fail_release",
+    srcs = ["@crates//:fail-srcs"],
+    aliases = _RAND08_ALIAS,
+    compile_data = ["@crates//:fail-compile-data"],
+    crate_name = "fail",
+    crate_root = "@crates//:fail-lib-rs",
+    edition = "2021",
+    rustc_env_files = ["@crates//:fail-env"],
+    rustc_flags = ["--cap-lints=allow"],
+    tags = ["noclippy"],
+    version = "0.5.1",
+    deps = _FAIL_DEPS,
+)
+
+rust_library(
+    name = "fail_failpoints",
+    srcs = ["@crates//:fail-srcs"],
+    aliases = _RAND08_ALIAS,
+    compile_data = ["@crates//:fail-compile-data"],
+    crate_features = ["failpoints"],
+    crate_name = "fail",
+    crate_root = "@crates//:fail-lib-rs",
+    edition = "2021",
+    rustc_env_files = ["@crates//:fail-env"],
+    rustc_flags = ["--cap-lints=allow"],
+    tags = ["noclippy"],
+    version = "0.5.1",
+    deps = _FAIL_DEPS,
+)
+
+alias(
+    name = "fail_lib",
+    actual = select({
+        ":opt_without_failpoints": ":fail_release",
+        "//conditions:default": ":fail_failpoints",
+    }),
+)
+
+# -----------------------------------------------------------------------------
+# Config-aware madsim / madsim-tokio / madsim-tonic (cfg(madsim) deps active only
+# under --config=madsim; zero overhead on production/musl builds)
+# -----------------------------------------------------------------------------
+_MADSIM_COMMON_DEPS = [
+    "@crates//:bincode",
+    "@crates//:bytes",
+    "@crates//:futures-util",
+    "@crates//:lazy_static",
+    "@crates//:rand08",
+    "@crates//:serde",
+    "@crates//:spin-0.9.9",
+    "@crates//:tokio",
+    "@crates//:tracing",
+    "@crates//:tracing-subscriber",
+]
+
+rust_library(
+    name = "madsim_nosim",
+    srcs = ["@crates//:madsim-srcs"],
+    aliases = _RAND08_ALIAS,
+    compile_data = ["@crates//:madsim-compile-data"],
+    crate_features = [
+        "bincode",
+        "default",
+        "macros",
+        "madsim-macros",
+        "rpc",
+    ],
+    crate_name = "madsim",
+    crate_root = "@crates//:madsim-lib-rs",
+    edition = "2021",
+    proc_macro_deps = [
+        "@crates//:madsim-macros",
+    ],
+    rustc_env_files = ["@crates//:madsim-env"],
+    rustc_flags = ["--cap-lints=allow"],
+    tags = ["noclippy"],
+    version = "0.2.34",
+    deps = _MADSIM_COMMON_DEPS + [
+        "@crates//:tokio-util",
+    ],
+)
+
+rust_library(
+    name = "madsim_sim",
+    srcs = ["@crates//:madsim-srcs"],
+    aliases = _RAND08_ALIAS,
+    compile_data = ["@crates//:madsim-compile-data"],
+    crate_features = [
+        "bincode",
+        "default",
+        "macros",
+        "madsim-macros",
+        "rpc",
+    ],
+    crate_name = "madsim",
+    crate_root = "@crates//:madsim-lib-rs",
+    edition = "2021",
+    proc_macro_deps = [
+        "@crates//:madsim-macros",
+        "@crates//:rustversion",
+    ],
+    rustc_env_files = ["@crates//:madsim-env"],
+    rustc_flags = ["--cap-lints=allow"],
+    tags = ["noclippy"],
+    version = "0.2.34",
+    deps = _MADSIM_COMMON_DEPS + [
+        "@crates//:ahash",
+        "@crates//:async-channel",
+        "@crates//:async-stream",
+        "@crates//:async-task",
+        "@crates//:downcast-rs",
+        "@crates//:errno",
+        "@crates//:libc",
+        "@crates//:naive-timer",
+        "@crates//:panic-message",
+        "@crates//:rand_xoshiro-0.6.0",
+        "@crates//:toml",
+    ],
+)
+
+alias(
+    name = "madsim_lib",
+    actual = select({
+        ":madsim_enabled": ":madsim_sim",
+        "//conditions:default": ":madsim_nosim",
+    }),
+)
+
+_MADSIM_TOKIO_FEATURES = [
+    "macros",
+    "net",
+    "rt",
+    "rt-multi-thread",
+    "sync",
+    "test-util",
+    "time",
+]
+
+rust_library(
+    name = "madsim_tokio_nosim",
+    srcs = ["@crates//:madsim-tokio-srcs"],
+    compile_data = ["@crates//:madsim-tokio-compile-data"],
+    crate_features = _MADSIM_TOKIO_FEATURES,
+    crate_name = "madsim_tokio",
+    crate_root = "@crates//:madsim-tokio-lib-rs",
+    edition = "2021",
+    rustc_env_files = ["@crates//:madsim-tokio-env"],
+    rustc_flags = ["--cap-lints=allow"],
+    tags = ["noclippy"],
+    version = "0.2.30",
+    deps = [
+        "@crates//:tokio",
+    ],
+)
+
+rust_library(
+    name = "madsim_tokio_sim",
+    srcs = ["@crates//:madsim-tokio-srcs"],
+    compile_data = ["@crates//:madsim-tokio-compile-data"],
+    crate_features = _MADSIM_TOKIO_FEATURES,
+    crate_name = "madsim_tokio",
+    crate_root = "@crates//:madsim-tokio-lib-rs",
+    edition = "2021",
+    rustc_env_files = ["@crates//:madsim-tokio-env"],
+    rustc_flags = ["--cap-lints=allow"],
+    tags = ["noclippy"],
+    version = "0.2.30",
+    deps = [
+        ":madsim_sim",
+        "@crates//:spin-0.9.9",
+        "@crates//:tokio",
+    ],
+)
+
+alias(
+    name = "madsim_tokio_lib",
+    actual = select({
+        ":madsim_enabled": ":madsim_tokio_sim",
+        "//conditions:default": ":madsim_tokio_nosim",
+    }),
+)
+
+rust_library(
+    name = "madsim_tonic_nosim",
+    srcs = ["@crates//:madsim-tonic-srcs"],
+    aliases = _REAL_TONIC_ALIAS,
+    compile_data = ["@crates//:madsim-tonic-compile-data"],
+    crate_features = [
+        "default",
+        "tls-aws-lc",
+    ],
+    crate_name = "madsim_tonic",
+    crate_root = "@crates//:madsim-tonic-lib-rs",
+    edition = "2021",
+    rustc_env_files = ["@crates//:madsim-tonic-env"],
+    rustc_flags = ["--cap-lints=allow"],
+    tags = ["noclippy"],
+    version = "0.6.0+0.14",
+    deps = [
+        "@crates//:real_tonic",
+    ],
+)
+
+rust_library(
+    name = "madsim_tonic_sim",
+    srcs = ["@crates//:madsim-tonic-srcs"],
+    aliases = _REAL_TONIC_ALIAS,
+    compile_data = ["@crates//:madsim-tonic-compile-data"],
+    crate_features = [
+        "default",
+        "tls-aws-lc",
+    ],
+    crate_name = "madsim_tonic",
+    crate_root = "@crates//:madsim-tonic-lib-rs",
+    edition = "2021",
+    rustc_env_files = ["@crates//:madsim-tonic-env"],
+    rustc_flags = ["--cap-lints=allow"],
+    tags = ["noclippy"],
+    version = "0.6.0+0.14",
+    deps = [
+        ":madsim_sim",
+        "@crates//:async-stream",
+        "@crates//:chrono",
+        "@crates//:futures-util",
+        "@crates//:real_tonic",
+        "@crates//:tokio",
+        "@crates//:tower",
+        "@crates//:tracing",
+    ],
+)
+
+alias(
+    name = "madsim_tonic_lib",
+    actual = select({
+        ":madsim_enabled": ":madsim_tonic_sim",
+        "//conditions:default": ":madsim_tonic_nosim",
+    }),
+)

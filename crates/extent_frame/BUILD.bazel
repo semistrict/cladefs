@@ -1,0 +1,79 @@
+# Copyright 2026 The cladefs Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("//tools/bazel:rust.bzl", "cladefs_rust_library", "cladefs_rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["Cargo.toml"])
+
+filegroup(
+    name = "crate_files",
+    srcs = glob(["Cargo.toml", "src/**/*", "tests/**/*"], allow_empty = True),
+)
+
+cladefs_rust_library(
+    name = "extent_frame",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
+    crate_features = ["crypto"],
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    deps = [
+        "//crates/base32_id",
+        "//crates/extent_keys",
+        "//crates/formats",
+        "//crates/fprint",
+        "//crates/storage_device",
+    ] + all_crate_deps(normal = True),
+)
+
+cladefs_rust_library(
+    name = "extent_frame_keyless",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
+    crate_features = ["pure-zstd"],
+    crate_name = "extent_frame",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    deps = [
+        "//crates/base32_id",
+        "//crates/extent_keys:extent_keys_keyless",
+        "//crates/formats",
+        "//crates/fprint",
+        "//crates/storage_device",
+        "@crates//:bincode",
+        "@crates//:ruzstd",
+        "@crates//:serde",
+        "@crates//:thiserror",
+    ],
+)
+
+cladefs_rust_library(
+    name = "extent_frame_testing",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
+    crate_features = ["crypto"],
+    crate_name = "extent_frame",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    deps = [
+        "//crates/base32_id",
+        "//crates/extent_keys:extent_keys_testing",
+        "//crates/formats",
+        "//crates/fprint",
+        "//crates/storage_device",
+    ] + all_crate_deps(normal = True),
+)
+
+cladefs_rust_test(
+    name = "extent_frame_test",
+    aliases = aliases(normal_dev = True, proc_macro_dev = True),
+    crate = ":extent_frame",
+    crate_features = ["crypto"],
+    data = [
+        "//:Cargo.lock",
+        "//formats:all",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    deps = all_crate_deps(normal_dev = True),
+)

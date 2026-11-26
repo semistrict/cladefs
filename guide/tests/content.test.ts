@@ -14,8 +14,8 @@ import { indexRepo } from "../tools/lib/symbols.ts";
 describe("code by text, from the local source", () => {
   test("rg gets the snippet quoted for a shell, quotes and all", () => {
     expect(shellQuote("Transaction<'_>")).toBe("'Transaction<'\\''_>'");
-    expect(rgCommand("crates/cladefs/src/open_cell.rs", "pub struct OpenCell")).toBe(
-      "rg -n -F 'pub struct OpenCell' crates/cladefs/src/open_cell.rs",
+    expect(rgCommand("crates/cladefs_core/src/open_cell.rs", "pub struct OpenCell")).toBe(
+      "rg -n -F 'pub struct OpenCell' crates/cladefs_core/src/open_cell.rs",
     );
   });
 
@@ -72,7 +72,7 @@ describe("Page Pilot", () => {
     const accepted = transferTasks.map((task) => [task.id, [...new Set(symbols.filter(task.accepts).map((s) => `${s.path} ${s.name}`))].sort()]);
     expect(accepted).toEqual([
       ["private-before-dirty", ["guest/linux/fs/cladefs/dax.c cladefs_dax_dirty", "guest/linux/fs/cladefs/device.c cladefs_device_private"]],
-      ["host-copy", ["crates/cladefs/src/dax/uffd.rs make_private"]],
+      ["host-copy", ["crates/cladefs_core/src/dax/uffd.rs make_private"]],
       ["rebind", ["guest/linux/fs/cladefs/dax.c cladefs_dax_rebind", "guest/linux/fs/cladefs/dax.c cladefs_dax_rebind_range"]],
     ]);
     for (const task of transferTasks) {

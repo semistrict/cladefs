@@ -1,0 +1,63 @@
+# Copyright 2026 The cladefs Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//tools/bazel:guest_kernel.bzl", "guest_rust_staticlib")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["Cargo.toml"])
+
+filegroup(
+    name = "srcs",
+    srcs = glob(["**/*"]),
+)
+
+_RUST_KERNEL_INPUTS = [
+    "//:Cargo.toml",
+    "//:Cargo.lock",
+    "//guest/rust:all_sources",
+    "//crates/base32_id:Cargo.toml",
+    "//crates/block_device:Cargo.toml",
+    "//crates/bucket_cell:Cargo.toml",
+    "//crates/cladefs:Cargo.toml",
+    "//crates/cladefs-examples:Cargo.toml",
+    "//crates/extent_frame:Cargo.toml",
+    "//crates/extent_keys:Cargo.toml",
+    "//crates/formats:Cargo.toml",
+    "//crates/fprint:crate_files",
+    "//crates/fprint-macros:crate_files",
+    "//crates/fuchsia-async:crate_files",
+    "//crates/fuchsia-async-macro:crate_files",
+    "//crates/fuchsia-sync:crate_files",
+    "//crates/fxfs:crate_files",
+    "//crates/fxfs-automount:Cargo.toml",
+    "//crates/fxfs-posix:crate_files",
+    "//crates/fxfs-sim-diff:Cargo.toml",
+    "//crates/fxfs_macros:crate_files",
+    "//crates/gc_wasm:Cargo.toml",
+    "//crates/host_fs:Cargo.toml",
+    "//crates/local_cell:Cargo.toml",
+    "//crates/node_local:Cargo.toml",
+    "//crates/sqlite_cladefs:Cargo.toml",
+    "//crates/storage_device:crate_files",
+    "//crates/storage_units:crate_files",
+    "//crates/storage_xts:Cargo.toml",
+    "//crates/virtio_extent:Cargo.toml",
+]
+
+guest_rust_staticlib(
+    name = "cladefs_linux_x86_64",
+    arch = "x86_64",
+    srcs = _RUST_KERNEL_INPUTS,
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:linux"],
+)
+
+guest_rust_staticlib(
+    name = "cladefs_linux_arm64",
+    arch = "arm64",
+    srcs = _RUST_KERNEL_INPUTS,
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:linux"],
+)

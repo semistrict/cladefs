@@ -1,5 +1,5 @@
-# The extent daemon and the host's side of Fxfs: Fuchsia's filesystem, which guests run in their
-# own kernels over extent stores.
+# cladefs facade library, production binaries (cladefsd, cladefsctl, cladefs-mount, cladefs-gets),
+# and end-to-end integration tests.
 [package]
 name = "cladefs"
 version = "0.1.0"
@@ -8,136 +8,93 @@ license.workspace = true
 publish = false
 
 [features]
-# Images for tests of importing them, here and in the guest's (`import::testing`); what tests,
-# here and in sqlite_cladefs', look for on the host's disk beside cells (`testing`); and the
-# tests' KMS, which tests' processes and benches encrypt under (`remote::testing`, TASK-411.28).
-testing = ["extent_keys/testing"]
-# The extent daemon's registry of open cells and its resize/fork coordination (cell_table,
-# TASK-44.6), and the kernel and its DAX windows, with their userfaultfd stage (dax,
-# TASK-44.3), on Shuttle's locks, whose scheduler then chooses every interleaving of their tests'
-# threads. Only for those tests: `cargo nextest run -p cladefs --features shuttle --lib
-# shuttle_tests::`.
-shuttle = ["dep:shuttle"]
-# cladefs: the failpoints (the fail crate's) of the extent daemon's requests, and of the steps of a
-# fork's protocol here and in local_cell and bucket_cell (`faults`), which the FAILPOINTS
-# environment variable sets, or CLADEFS_FAULT_SEED from a seed: a request of a kind failing or
-# waiting, or a step failing, as configured (TASK-44.10). Without the feature they are nothing:
-# scripts/test-e2e.sh builds the daemon with it for CLADEFS_FAILPOINTS, in the sim profile, as a
-# release build refuses it (bucket_cell, TASK-320). This crate's tests have it, and so its
-# examples would: they are cladefs-examples'.
-failpoints = ["fail/failpoints"]
-# The protocols of atomics in `sync`'s terms (`hearing`) on loom's atomics, whose model then runs
-# every interleaving of their models' threads under the orderings each access asks for
-# (docs/memory-ordering.md, TASK-444.2). Only for those models, as loom's atomics work only in one:
-# `cargo nextest run -p cladefs --features loom --lib loom::`.
-loom = ["dep:loom"]
-# cladefs: a host whose environment names no KMS and gives no master key encrypts under the tests' KMS,
-# every tenant's KEK one known key (`remote::testing`, TASK-411.28), as every process does that
-# this crate's tests and sqlite_cladefs' start (cladefsd, cladefsctl, cladefs-mount), agreeing
-# with them: every cell is encrypted, and a process given no KMS refuses to start, but a test's needs
-# none. Never a host's: a release build refuses it.
-tests-kms = ["testing"]
+testing = ["cladefs_core/testing", "cladefs_fs/testing", "cladefs_wire/testing", "extent_keys/testing"]
+shuttle = ["cladefs_core/shuttle"]
+failpoints = ["fail/failpoints", "cladefs_core/failpoints", "cladefs_fs/failpoints", "cladefs_wire/failpoints"]
+loom = ["cladefs_core/loom"]
+tests-kms = ["testing", "cladefs_core/tests-kms", "cladefs_fs/tests-kms", "cladefs_wire/tests-kms"]
 
 [dependencies]
-node_local.workspace = true
-host_fs.workspace = true
 anyhow.workspace = true
-thiserror.workspace = true
+async-trait.workspace = true
+base32_id.workspace = true
 bitflags.workspace = true
+block_device.workspace = true
+bucket_cell.workspace = true
+cladefs_core.workspace = true
+cladefs_fs.workspace = true
+cladefs_wire.workspace = true
+event-listener.workspace = true
+extent_frame.workspace = true
+extent_keys.workspace = true
+fail = "0.5.1"
+flate2.workspace = true
+formats.workspace = true
 fuchsia-async.workspace = true
 futures.workspace = true
 fxfs.workspace = true
 fxfs-posix.workspace = true
+host_fs.workspace = true
 libc.workspace = true
-log.workspace = true
-rand.workspace = true
-smallvec.workspace = true
-pin-project-lite.workspace = true
-storage_device.workspace = true
-block_device.workspace = true
-zerocopy.workspace = true
-async-trait.workspace = true
-event-listener.workspace = true
-bucket_cell.workspace = true
-extent_frame.workspace = true
-base32_id.workspace = true
-formats.workspace = true
-extent_keys.workspace = true
 local_cell.workspace = true
-tokio.workspace = true
-url.workspace = true
-tar = { version = "0.4.46", default-features = false }
-flate2.workspace = true
-sha2.workspace = true
-siphasher.workspace = true
+log.workspace = true
+node_local.workspace = true
+opentelemetry = { version = "0.33.1", default-features = false, features = ["trace"] }
+opentelemetry-otlp = { version = "0.33.1", default-features = false, features = ["http-proto", "reqwest-blocking-client", "reqwest-rustls", "trace"] }
+opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["trace"] }
+pin-project-lite.workspace = true
+rand.workspace = true
 serde.workspace = true
 serde_json = "1.0.154"
+sha2.workspace = true
+siphasher.workspace = true
+smallvec.workspace = true
+storage_device.workspace = true
+tar = { version = "0.4.46", default-features = false }
+thiserror.workspace = true
+tokio.workspace = true
 toml.workspace = true
-shuttle = { workspace = true, optional = true }
-fail = "0.5.1"
-opentelemetry = { version = "0.33.1", default-features = false, features = ["trace"] }
-opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["trace"] }
-# cladefs: its TLS named (`reqwest-rustls`: rustls over aws-lc-rs, the host's roots or SSL_CERT_FILE's),
-# so that an `https://` collector is reached by what this crate asks for, never by another crate's
-# turning reqwest's TLS on (board 8569; tests/tracing.rs exports to one).
-opentelemetry-otlp = { version = "0.33.1", default-features = false, features = ["http-proto", "reqwest-blocking-client", "reqwest-rustls", "trace"] }
-loom = { workspace = true, optional = true }
+url.workspace = true
+zerocopy.workspace = true
 
-[dev-dependencies]
-async-trait.workspace = true
-cladefs = { path = ".", features = ["failpoints", "testing", "tests-kms"] }
-# Panics holding a lock shared beyond one cell, in tests that ask (TASK-149.24).
-local_cell = { workspace = true, features = ["testing"] }
-# Tests' cells, of a cell of their own (`layout::test_cell`, TASK-364).
-bucket_cell = { workspace = true, features = ["testing"] }
-# A KMS counting its calls (TASK-411.3).
-extent_keys = { workspace = true, features = ["testing"] }
-# What the hostile VM process test looks for in the memory it is given (TASK-149.17).
-memchr.workspace = true
-object_store.workspace = true
-proptest.workspace = true
-tempfile.workspace = true
-opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["trace", "testing"] }
-madsim = "=0.2.34"
-# cladefs: the tests' OTLP collector over HTTPS (tests/tracing.rs, board 8569): rustls (Apache-2.0
-# OR ISC OR MIT), over aws-lc-rs, as tonic's TLS here.
-rustls = { version = "0.23.46", default-features = false, features = ["aws-lc-rs", "std"] }
-# cladefs: the daemon's /metrics checked by a strict parser of Prometheus' text format, as a
-# scraper parses it (`cladefsd::metrics`, board 10482): openmetrics-parser (LGPL-3.0, a test's
-# alone, in no binary; hotbed question on its licence), over pest (MIT OR Apache-2.0).
-openmetrics-parser = "0.5.1"
-
-[lints]
-workspace = true
-
-# The extent daemon's (cladefsd): Linux's, and under madsim everywhere, as its simulation runs on
-# macOS too (board 2912).
 [target.'cfg(any(target_os = "linux", madsim))'.dependencies]
-async-task = "4.7.1"
-# cladefs: the bodies of gRPC answers, watched to their trailers' status (`cladefsd::grpc`, board
-# 8565): http-body (MIT), tonic's.
-http-body = "1.1.0"
-hyper-util = { version = "0.1.21", features = ["tokio"] }
-pprof = { version = "0.15.0", default-features = false, features = ["prost-codec", "flamegraph", "frame-pointer"] }
+cladefsd.workspace = true
 prost = "0.14.4"
-tokio-stream = { version = "0.1.19", features = ["net"] }
-# cladefs: TLS (rustls over aws-lc-rs, which rustls here uses already) for the peer service's
-# mutual authentication (board 8437).
 tonic = { package = "madsim-tonic", version = "=0.6.0", features = ["tls-aws-lc"] }
 tonic-health = "0.14.6"
 tonic-prost = "0.14.6"
 tower = "0.5.3"
+http-body = "1.1.0"
+hyper-util = { version = "0.1.21", features = ["tokio"] }
+tokio-stream = { version = "0.1.19", features = ["net"] }
 
 [target.'cfg(target_env = "musl")'.dependencies]
-mimalloc = { workspace = true, features = ["extended"] }
 libmimalloc-sys.workspace = true
+mimalloc = { workspace = true, features = ["extended"] }
 
-# Firecracker's seccompiler (Apache-2.0, vendor/firecracker), which compiles its production seccomp
-# filters, to run the VMM's side of DAX windows under them (tests/seccomp.rs, TASK-149.28). It
-# links libseccomp (LGPL-2.1), which macOS lacks.
+[dev-dependencies]
+async-trait.workspace = true
+bucket_cell = { workspace = true, features = ["testing"] }
+cladefs = { path = ".", features = ["failpoints", "testing", "tests-kms"] }
+cladefs_core = { workspace = true, features = ["failpoints", "testing", "tests-kms"] }
+cladefs_fs = { workspace = true, features = ["failpoints", "testing", "tests-kms"] }
+cladefs_wire = { workspace = true, features = ["failpoints", "testing", "tests-kms"] }
+extent_keys = { workspace = true, features = ["testing"] }
+local_cell = { workspace = true, features = ["testing"] }
+madsim = "=0.2.34"
+memchr.workspace = true
+object_store.workspace = true
+openmetrics-parser = "0.5.1"
+opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["trace", "testing"] }
+proptest.workspace = true
+rustls = { version = "0.23.46", default-features = false, features = ["aws-lc-rs", "std"] }
+tempfile.workspace = true
+
+[target.'cfg(any(target_os = "linux", madsim))'.dev-dependencies]
+cladefsd = { workspace = true, features = ["failpoints", "testing", "tests-kms"] }
+
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 seccompiler = { path = "../../vendor/firecracker/src/seccompiler" }
 
-[build-dependencies]
-madsim-tonic-build = { version = "=0.6.0", default-features = false, features = ["prost", "transport"] }
-protox = "0.10.0"
+[lints]
+workspace = true

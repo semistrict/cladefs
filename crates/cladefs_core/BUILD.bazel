@@ -1,0 +1,162 @@
+# Copyright 2026 The cladefs Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@crates//:defs.bzl", "all_crate_deps")
+load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
+load("//tools/bazel:rust.bzl", "MADSIM_TOKIO_ALIAS", "cladefs_rust_library", "cladefs_rust_test")
+load("//tools/bazel:stamp.bzl", "cladefs_stamp_env")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "Cargo.toml",
+    "build/stamp.rs",
+])
+
+filegroup(
+    name = "crate_files",
+    srcs = glob(["Cargo.toml", "build.rs", "build/**/*.rs", "src/**/*.rs"], allow_empty = True),
+)
+
+cladefs_stamp_env(
+    name = "build_commit_env",
+)
+
+cargo_build_script(
+    name = "cladefs_core_build_script",
+    srcs = [
+        "build.rs",
+        "build/stamp.rs",
+    ],
+    build_script_env = {
+        "CARGO_ENCODED_RUSTFLAGS": "-Cforce-frame-pointers=yes",
+    },
+    build_script_env_files = [":build_commit_env"],
+    crate_root = "build.rs",
+    data = ["//scripts:build-commit.sh"],
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(build_proc_macro = True),
+    deps = all_crate_deps(build = True),
+)
+
+_LIB_SRCS = glob(["src/**/*.rs"])
+
+_BASE_DEPS = [
+    ":cladefs_core_build_script",
+    "//crates/base32_id",
+    "//crates/formats",
+    "//crates/fxfs-posix:fxfs_posix",
+    "//crates/host_fs",
+    "//crates/node_local",
+    "//crates/storage_device",
+]
+
+_PROD_DEPS = _BASE_DEPS + [
+    "//crates/bucket_cell",
+    "//crates/extent_frame",
+    "//crates/extent_keys",
+    "//crates/local_cell",
+]
+
+_TEST_DEPS = _BASE_DEPS + [
+    "//crates/bucket_cell:bucket_cell_testing",
+    "//crates/extent_frame:extent_frame_testing",
+    "//crates/extent_keys:extent_keys_testing",
+    "//crates/local_cell:local_cell_testing",
+]
+
+_PROC_MACROS = all_crate_deps(proc_macro = True)
+
+cladefs_rust_library(
+    name = "cladefs_core",
+    srcs = _LIB_SRCS,
+    aliases = MADSIM_TOKIO_ALIAS,
+    proc_macro_deps = _PROC_MACROS,
+    deps = _PROD_DEPS + all_crate_deps(normal = True),
+)
+
+cladefs_rust_library(
+    name = "cladefs_core_testing",
+    srcs = _LIB_SRCS,
+    aliases = MADSIM_TOKIO_ALIAS,
+    crate_features = ["testing"],
+    crate_name = "cladefs_core",
+    proc_macro_deps = _PROC_MACROS,
+    deps = _TEST_DEPS + all_crate_deps(normal = True),
+)
+
+cladefs_rust_library(
+    name = "cladefs_core_tests_kms",
+    srcs = _LIB_SRCS,
+    aliases = MADSIM_TOKIO_ALIAS,
+    crate_features = ["testing", "tests-kms"],
+    crate_name = "cladefs_core",
+    proc_macro_deps = _PROC_MACROS,
+    deps = _TEST_DEPS + all_crate_deps(normal = True),
+)
+
+cladefs_rust_library(
+    name = "cladefs_core_for_test",
+    srcs = _LIB_SRCS,
+    aliases = MADSIM_TOKIO_ALIAS,
+    crate_features = ["failpoints", "testing", "tests-kms"],
+    crate_name = "cladefs_core",
+    proc_macro_deps = _PROC_MACROS,
+    deps = _TEST_DEPS + all_crate_deps(normal = True),
+)
+
+cladefs_rust_library(
+    name = "cladefs_core_shuttle",
+    srcs = _LIB_SRCS,
+    aliases = MADSIM_TOKIO_ALIAS,
+    crate_features = ["failpoints", "shuttle", "testing", "tests-kms"],
+    crate_name = "cladefs_core",
+    proc_macro_deps = _PROC_MACROS,
+    deps = _TEST_DEPS + ["@crates//:shuttle"] + all_crate_deps(normal = True),
+)
+
+cladefs_rust_library(
+    name = "cladefs_core_loom",
+    srcs = _LIB_SRCS,
+    aliases = MADSIM_TOKIO_ALIAS,
+    crate_features = ["failpoints", "loom", "testing", "tests-kms"],
+    crate_name = "cladefs_core",
+    proc_macro_deps = _PROC_MACROS,
+    deps = _TEST_DEPS + ["@crates//:loom"] + all_crate_deps(normal = True),
+)
+
+cladefs_rust_test(
+    name = "cladefs_core_test",
+    aliases = MADSIM_TOKIO_ALIAS,
+    crate = ":cladefs_core_for_test",
+    crate_features = ["failpoints", "testing", "tests-kms"],
+    data = ["//:Cargo.lock", "//formats:all"],
+    isolated = True,
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    shard_count = 4,
+    timeout = "long",
+    deps = all_crate_deps(normal_dev = True),
+)
+
+cladefs_rust_test(
+    name = "cladefs_core_shuttle_test",
+    aliases = MADSIM_TOKIO_ALIAS,
+    args = ["shuttle_tests::"],
+    crate = ":cladefs_core_shuttle",
+    crate_features = ["failpoints", "shuttle", "testing", "tests-kms"],
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    tags = ["shuttle"],
+    deps = all_crate_deps(normal_dev = True),
+)
+
+cladefs_rust_test(
+    name = "cladefs_core_loom_test",
+    aliases = MADSIM_TOKIO_ALIAS,
+    args = ["loom::"],
+    crate = ":cladefs_core_loom",
+    crate_features = ["failpoints", "loom", "testing", "tests-kms"],
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    tags = ["loom"],
+    deps = all_crate_deps(normal_dev = True),
+)

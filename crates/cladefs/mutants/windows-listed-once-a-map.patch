@@ -3,8 +3,8 @@
 # before it asks whether the window maps the extent (spec rule registerOnce).
 # Kind: memory
 # Killer: open_cell::tests::maps_over_an_extents_own_range_put_its_window_on_it_once
---- a/crates/cladefs/src/cache.rs
-+++ b/crates/cladefs/src/cache.rs
+--- a/crates/cladefs_core/src/cache.rs
++++ b/crates/cladefs_core/src/cache.rs
 @@ -1347,11 +1347,13 @@
      /// registerOnce, TASK-602).
      fn mapped(&self, window: &Arc<Window>) {
@@ -21,8 +21,8 @@
      }
  
      fn origin(&self) -> Origin {
---- a/crates/cladefs/src/dax.rs
-+++ b/crates/cladefs/src/dax.rs
+--- a/crates/cladefs_core/src/dax.rs
++++ b/crates/cladefs_core/src/dax.rs
 @@ -1116,11 +1116,9 @@
          private: Private,
      ) -> (Vec<PartSlab>, Vec<Arc<dyn Source>>) {

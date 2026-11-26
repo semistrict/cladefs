@@ -8,3 +8,6 @@ guide/src/generated/
 .agent-name
 # What a mutant runner stopped by SIGKILL left in the tree (scripts/lib/patches.sh).
 .mutant-in
+# Bazel convenience symlinks and optional local overrides.
+/bazel-*
+.bazelrc.local

@@ -1,0 +1,26 @@
+# Copyright 2026 The cladefs Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//tools/bazel:rust.bzl", "cladefs_rust_binary", "cladefs_rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["Cargo.toml"])
+
+cladefs_rust_binary(
+    name = "guest-agent",
+    srcs = glob(["src/**/*.rs"]),
+    target_compatible_with = ["@platforms//os:linux"],
+    deps = [
+        "//crates/fxfs-automount:fxfs_automount",
+        "//guest/tests/test_cases:test_cases_guest",
+        "@crates//:anyhow",
+    ],
+)
+
+cladefs_rust_test(
+    name = "guest_agent_test",
+    crate = ":guest-agent",
+    target_compatible_with = ["@platforms//os:linux"],
+)

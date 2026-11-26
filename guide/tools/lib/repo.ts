@@ -117,7 +117,9 @@ export function git(args: string[], cwd = REPO): string {
 /** The repo's commit, and the Firecracker submodule's, which links into its own repo name. */
 export function revisions(repo = REPO): { commit: string; firecracker: string } {
   return {
-    commit: git(["rev-parse", "HEAD"], repo),
-    firecracker: git(["rev-parse", "HEAD"], join(repo, "vendor", "firecracker")),
+    commit: process.env.CLADEFS_BUILD_COMMIT || git(["rev-parse", "HEAD"], repo),
+    firecracker:
+      process.env.CLADEFS_FIRECRACKER_COMMIT ||
+      git(["rev-parse", "HEAD"], join(repo, "vendor", "firecracker")),
   };
 }

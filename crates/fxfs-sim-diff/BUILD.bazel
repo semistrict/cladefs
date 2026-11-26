@@ -1,0 +1,65 @@
+# Copyright 2026 The cladefs Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("@rules_cc//cc:defs.bzl", "cc_library")
+load("//tools/bazel:rust.bzl", "cladefs_rust_library", "cladefs_rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["Cargo.toml"])
+
+filegroup(
+    name = "crate_files",
+    srcs = glob(["Cargo.toml", "src/**/*", "tests/**/*"], allow_empty = True),
+)
+
+# Native Bazel C build of guest/sim's Fxfs model over crates/fxfs-sim-diff/shim
+# (replaces build.rs's cc crate invocation).
+cc_library(
+    name = "fxfs_sim_model",
+    srcs = [
+        "shim/shim.c",
+        "//guest/sim:cladefs/cladefs.c",
+    ],
+    hdrs = glob(["shim/**/*.h"]) + [
+        "//guest/linux:cladefs_headers",
+    ],
+    copts = [
+        "-std=gnu11",
+        "-fexceptions",
+        "-Wall",
+        "-Wno-unused-function",
+        "-Wno-unused-variable",
+        "-Icrates/fxfs-sim-diff/shim",
+        "-Iguest/sim/cladefs",
+    ],
+    alwayslink = True,
+)
+
+cladefs_rust_library(
+    name = "fxfs_sim_diff",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
+    crate_name = "fxfs_sim_diff",
+    link_deps = [":fxfs_sim_model"],
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    deps = [
+        "//crates/fxfs-posix:fxfs_posix",
+    ] + all_crate_deps(normal = True),
+)
+
+cladefs_rust_test(
+    name = "fxfs_sim_diff_test",
+    aliases = aliases(normal_dev = True, proc_macro_dev = True),
+    # The C simulator model uses process-global state; tests must not run concurrently.
+    args = ["--test-threads=1"],
+    crate = ":fxfs_sim_diff",
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    deps = [
+        "//crates/fuchsia-async:fuchsia_async",
+        "//crates/fxfs",
+        "//crates/storage_device",
+    ] + all_crate_deps(normal_dev = True),
+)

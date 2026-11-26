@@ -1,0 +1,328 @@
+# Copyright 2026 The cladefs Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@crates//:defs.bzl", "all_crate_deps")
+load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
+load("//tools/bazel:rust.bzl", "cladefs_rust_binary", "cladefs_rust_library", "cladefs_rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "crate_files",
+    srcs = glob(["Cargo.toml", "src/**/*", "tests/**/*"], allow_empty = True),
+)
+
+_CLADEFS_ALIASES = select({
+    "//tools/bazel:linux_or_madsim": {
+        "@crates//:madsim-tokio": "tokio",
+        "@crates//:tonic": "tonic",
+    },
+    "//conditions:default": {
+        "@crates//:madsim-tokio": "tokio",
+    },
+})
+
+exports_files([
+    "Cargo.toml",
+    "build/stamp.rs",
+])
+
+filegroup(
+    name = "proto_buf_yaml",
+    srcs = ["proto/buf.yaml"],
+)
+
+filegroup(
+    name = "peer_tls_testdata",
+    srcs = glob(["tests/peer-tls/**/*"]),
+)
+
+filegroup(
+    name = "otlp_tls_testdata",
+    srcs = glob(["tests/otlp-tls/**/*"]),
+)
+
+cargo_build_script(
+    name = "cladefs_build_script",
+    srcs = [
+        "build.rs",
+        "build/stamp.rs",
+    ],
+    build_script_env = {
+        "CARGO_ENCODED_RUSTFLAGS": "-Cforce-frame-pointers=yes",
+    },
+    crate_root = "build.rs",
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(build_proc_macro = True),
+    deps = all_crate_deps(build = True),
+)
+
+_BASE_INTERNAL_DEPS = [
+    ":cladefs_build_script",
+    "//crates/base32_id",
+    "//crates/block_device",
+    "//crates/formats",
+    "//crates/fuchsia-async:fuchsia_async",
+    "//crates/fxfs",
+    "//crates/fxfs-posix:fxfs_posix",
+    "//crates/host_fs",
+    "//crates/node_local",
+    "//crates/storage_device",
+]
+
+_PROD_DAEMON_DEP = select({
+    "//tools/bazel:linux_or_madsim": ["//crates/cladefsd"],
+    "//conditions:default": [],
+})
+
+_TESTING_DAEMON_DEP = select({
+    "//tools/bazel:linux_or_madsim": ["//crates/cladefsd:cladefsd_testing"],
+    "//conditions:default": [],
+})
+
+_TESTS_KMS_DAEMON_DEP = select({
+    "//tools/bazel:linux_or_madsim": ["//crates/cladefsd:cladefsd_tests_kms"],
+    "//conditions:default": [],
+})
+
+_FOR_TEST_DAEMON_DEP = select({
+    "//tools/bazel:linux_or_madsim": ["//crates/cladefsd:cladefsd_for_test"],
+    "//conditions:default": [],
+})
+
+_PROD_INTERNAL_DEPS = _BASE_INTERNAL_DEPS + [
+    "//crates/bucket_cell",
+    "//crates/cladefs_core",
+    "//crates/cladefs_fs",
+    "//crates/cladefs_wire",
+    "//crates/extent_frame",
+    "//crates/extent_keys",
+    "//crates/local_cell",
+] + _PROD_DAEMON_DEP
+
+_TEST_INTERNAL_DEPS = _BASE_INTERNAL_DEPS + [
+    "//crates/bucket_cell:bucket_cell_testing",
+    "//crates/cladefs_core:cladefs_core_for_test",
+    "//crates/cladefs_fs:cladefs_fs_for_test",
+    "//crates/cladefs_wire:cladefs_wire_for_test",
+    "//crates/extent_frame:extent_frame_testing",
+    "//crates/extent_keys:extent_keys_testing",
+    "//crates/local_cell:local_cell_testing",
+] + _FOR_TEST_DAEMON_DEP
+
+_COMMON_PROC_MACRO_DEPS = all_crate_deps(proc_macro = True)
+
+cladefs_rust_library(
+    name = "cladefs",
+    srcs = ["src/lib.rs"],
+    aliases = _CLADEFS_ALIASES,
+    proc_macro_deps = _COMMON_PROC_MACRO_DEPS,
+    deps = _PROD_INTERNAL_DEPS + all_crate_deps(normal = True),
+)
+
+cladefs_rust_library(
+    name = "cladefs_testing",
+    srcs = ["src/lib.rs"],
+    aliases = _CLADEFS_ALIASES,
+    crate_features = ["testing"],
+    crate_name = "cladefs",
+    proc_macro_deps = _COMMON_PROC_MACRO_DEPS,
+    deps = _BASE_INTERNAL_DEPS + [
+        "//crates/bucket_cell:bucket_cell_testing",
+        "//crates/cladefs_core:cladefs_core_testing",
+        "//crates/cladefs_fs:cladefs_fs_testing",
+        "//crates/cladefs_wire:cladefs_wire_testing",
+        "//crates/extent_frame:extent_frame_testing",
+        "//crates/extent_keys:extent_keys_testing",
+        "//crates/local_cell:local_cell_testing",
+    ] + _TESTING_DAEMON_DEP + all_crate_deps(normal = True),
+)
+
+cladefs_rust_library(
+    name = "cladefs_tests_kms",
+    srcs = ["src/lib.rs"],
+    aliases = _CLADEFS_ALIASES,
+    crate_features = ["testing", "tests-kms"],
+    crate_name = "cladefs",
+    proc_macro_deps = _COMMON_PROC_MACRO_DEPS,
+    deps = _BASE_INTERNAL_DEPS + [
+        "//crates/bucket_cell:bucket_cell_testing",
+        "//crates/cladefs_core:cladefs_core_tests_kms",
+        "//crates/cladefs_fs:cladefs_fs_tests_kms",
+        "//crates/cladefs_wire:cladefs_wire_tests_kms",
+        "//crates/extent_frame:extent_frame_testing",
+        "//crates/extent_keys:extent_keys_testing",
+        "//crates/local_cell:local_cell_testing",
+    ] + _TESTS_KMS_DAEMON_DEP + all_crate_deps(normal = True),
+)
+
+cladefs_rust_library(
+    name = "cladefs_for_test",
+    srcs = ["src/lib.rs"],
+    aliases = _CLADEFS_ALIASES,
+    crate_features = ["failpoints", "testing", "tests-kms"],
+    crate_name = "cladefs",
+    proc_macro_deps = _COMMON_PROC_MACRO_DEPS,
+    deps = _TEST_INTERNAL_DEPS + all_crate_deps(normal = True),
+)
+
+_PROD_BIN_DEPS = [":cladefs"] + _PROD_INTERNAL_DEPS + all_crate_deps(normal = True)
+
+cladefs_rust_binary(
+    name = "cladefsd",
+    srcs = ["src/bin/cladefsd.rs"],
+    aliases = _CLADEFS_ALIASES,
+    proc_macro_deps = _COMMON_PROC_MACRO_DEPS,
+    target_compatible_with = ["@platforms//os:linux"],
+    deps = _PROD_BIN_DEPS,
+)
+
+cladefs_rust_binary(
+    name = "cladefsctl",
+    srcs = ["src/bin/cladefsctl.rs"],
+    aliases = _CLADEFS_ALIASES,
+    proc_macro_deps = _COMMON_PROC_MACRO_DEPS,
+    deps = _PROD_BIN_DEPS,
+)
+
+cladefs_rust_binary(
+    name = "cladefs-mount",
+    srcs = ["src/bin/cladefs-mount.rs"],
+    aliases = _CLADEFS_ALIASES,
+    proc_macro_deps = _COMMON_PROC_MACRO_DEPS,
+    target_compatible_with = ["@platforms//os:linux"],
+    deps = _PROD_BIN_DEPS,
+)
+
+cladefs_rust_binary(
+    name = "cladefs-gets",
+    srcs = ["src/bin/cladefs-gets.rs"],
+    aliases = _CLADEFS_ALIASES,
+    proc_macro_deps = _COMMON_PROC_MACRO_DEPS,
+    deps = _PROD_BIN_DEPS,
+)
+
+_TEST_BIN_DEPS = [":cladefs_for_test"] + _TEST_INTERNAL_DEPS + all_crate_deps(normal = True)
+
+cladefs_rust_binary(
+    name = "cladefsd_for_test",
+    srcs = ["src/bin/cladefsd.rs"],
+    aliases = _CLADEFS_ALIASES,
+    crate_features = ["failpoints", "testing", "tests-kms"],
+    proc_macro_deps = _COMMON_PROC_MACRO_DEPS,
+    target_compatible_with = ["@platforms//os:linux"],
+    deps = _TEST_BIN_DEPS,
+)
+
+cladefs_rust_binary(
+    name = "cladefsctl_for_test",
+    srcs = ["src/bin/cladefsctl.rs"],
+    aliases = _CLADEFS_ALIASES,
+    crate_features = ["failpoints", "testing", "tests-kms"],
+    proc_macro_deps = _COMMON_PROC_MACRO_DEPS,
+    deps = _TEST_BIN_DEPS,
+)
+
+cladefs_rust_binary(
+    name = "cladefs-mount_for_test",
+    srcs = ["src/bin/cladefs-mount.rs"],
+    aliases = _CLADEFS_ALIASES,
+    crate_features = ["failpoints", "testing", "tests-kms"],
+    proc_macro_deps = _COMMON_PROC_MACRO_DEPS,
+    target_compatible_with = ["@platforms//os:linux"],
+    deps = _TEST_BIN_DEPS,
+)
+
+cladefs_rust_test(
+    name = "madsim_test",
+    srcs = ["tests/madsim.rs"],
+    aliases = _CLADEFS_ALIASES,
+    data = [":peer_tls_testdata"],
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+    tags = ["madsim"],
+    target_compatible_with = select({
+        "//tools/bazel:madsim_enabled": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    timeout = "long",
+    deps = _TEST_BIN_DEPS + all_crate_deps(normal_dev = True),
+)
+
+_INTEGRATION_TEST_DEPS = _TEST_BIN_DEPS + all_crate_deps(normal_dev = True)
+_INTEGRATION_TEST_PROC_MACRO_DEPS = all_crate_deps(proc_macro = True, proc_macro_dev = True)
+_COMMON_TEST_SRCS = glob(["tests/common/**/*.rs"])
+
+_INTEGRATION_TESTS = {
+    "arenas": {"linux": False, "common": False, "bins": [], "data": []},
+    "bases": {"linux": True, "common": True, "bins": [], "data": []},
+    "bucket_logging": {"linux": True, "common": False, "bins": [], "data": []},
+    "cells": {"linux": False, "common": False, "bins": ["cladefsctl"], "data": []},
+    "cladefsctl": {"linux": True, "common": False, "bins": ["cladefsctl", "cladefsd"], "data": []},
+    "control": {"linux": True, "common": True, "bins": [], "data": []},
+    "disk": {"linux": True, "common": True, "bins": [], "data": []},
+    "disk_full": {"linux": True, "common": True, "bins": [], "data": []},
+    "drain": {"linux": True, "common": False, "bins": ["cladefsd"], "data": []},
+    "filesystem": {"linux": False, "common": False, "bins": [], "data": []},
+    "fuse": {"linux": False, "common": False, "bins": [], "data": []},
+    "fuse_differential": {"linux": True, "common": False, "bins": [], "data": []},
+    "fuse_mount": {"linux": True, "common": False, "bins": ["cladefs-mount", "cladefsctl", "cladefsd"], "data": []},
+    "governor": {"linux": True, "common": False, "bins": [], "data": []},
+    "grants": {"linux": True, "common": True, "bins": ["cladefsd"], "data": []},
+    "handover": {"linux": True, "common": False, "bins": ["cladefsd"], "data": []},
+    "image": {"linux": False, "common": False, "bins": [], "data": []},
+    "import": {"linux": False, "common": False, "bins": ["cladefsctl"], "data": []},
+    "isolation": {"linux": True, "common": True, "bins": ["cladefsd"], "data": []},
+    "memory": {"linux": True, "common": True, "bins": [], "data": []},
+    "memory_cell": {"linux": True, "common": False, "bins": [], "data": [], "isolated": True},
+    "migration": {"linux": True, "common": False, "bins": ["cladefsd"], "data": [":peer_tls_testdata"]},
+    "page_in_tracing": {"linux": True, "common": True, "bins": [], "data": []},
+    "pages": {"linux": False, "common": False, "bins": [], "data": []},
+    "peers": {"linux": True, "common": False, "bins": ["cladefsd"], "data": [":peer_tls_testdata"]},
+    "replicated": {"linux": True, "common": False, "bins": ["cladefsd"], "data": [":peer_tls_testdata"]},
+    "storage": {"linux": False, "common": False, "bins": [], "data": []},
+    "supervision": {"linux": True, "common": False, "bins": ["cladefsd"], "data": []},
+    "tenants": {"linux": True, "common": True, "bins": [], "data": []},
+    "tracing": {"linux": True, "common": False, "bins": ["cladefsd"], "data": [":otlp_tls_testdata"]},
+}
+
+_BIN_TARGETS = {
+    "cladefsd": ":cladefsd_for_test",
+    "cladefsctl": ":cladefsctl_for_test",
+    "cladefs-mount": ":cladefs-mount_for_test",
+}
+
+[
+    cladefs_rust_test(
+        name = test_name + "_test",
+        srcs = ["tests/" + test_name + ".rs"] + (_COMMON_TEST_SRCS if cfg["common"] else []),
+        aliases = _CLADEFS_ALIASES,
+        crate_root = "tests/" + test_name + ".rs",
+        data = cfg["data"] + [_BIN_TARGETS[b] for b in cfg["bins"]],
+        isolated = cfg.get("isolated", False),
+        proc_macro_deps = _INTEGRATION_TEST_PROC_MACRO_DEPS,
+        rustc_env = {
+            "CARGO_BIN_EXE_" + b: "$(rootpath " + _BIN_TARGETS[b] + ")"
+            for b in cfg["bins"]
+        },
+        target_compatible_with = ["@platforms//os:linux"] if cfg["linux"] else [],
+        deps = _INTEGRATION_TEST_DEPS,
+    )
+    for test_name, cfg in _INTEGRATION_TESTS.items()
+]
+
+cladefs_rust_test(
+    name = "seccomp_test",
+    srcs = ["tests/seccomp.rs"] + _COMMON_TEST_SRCS,
+    aliases = _CLADEFS_ALIASES,
+    crate_root = "tests/seccomp.rs",
+    data = [
+        "Cargo.toml",
+        "//vendor:firecracker_seccomp_resources",
+    ],
+    proc_macro_deps = _INTEGRATION_TEST_PROC_MACRO_DEPS,
+    target_compatible_with = ["@platforms//os:linux"],
+    deps = _INTEGRATION_TEST_DEPS + [
+        "//vendor:seccompiler",
+    ],
+)

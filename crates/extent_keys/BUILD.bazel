@@ -1,0 +1,77 @@
+# Copyright 2026 The cladefs Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("//tools/bazel:rust.bzl", "cladefs_rust_library", "cladefs_rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["Cargo.toml"])
+
+filegroup(
+    name = "crate_files",
+    srcs = glob(["Cargo.toml", "src/**/*", "tests/**/*"], allow_empty = True),
+)
+
+_COMMON_DEPS = [
+    "//crates/base32_id",
+    "//crates/formats",
+    "//crates/fprint",
+    "//crates/storage_xts",
+]
+
+cladefs_rust_library(
+    name = "extent_keys",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
+    crate_features = ["crypto"],
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    deps = _COMMON_DEPS + all_crate_deps(normal = True),
+)
+
+cladefs_rust_library(
+    name = "extent_keys_keyless",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
+    crate_name = "extent_keys",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    deps = [
+        "//crates/base32_id",
+        "//crates/formats",
+        "//crates/fprint",
+        "@crates//:serde",
+        "@crates//:thiserror",
+    ],
+)
+
+cladefs_rust_library(
+    name = "extent_keys_testing",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
+    crate_features = [
+        "crypto",
+        "testing",
+    ],
+    crate_name = "extent_keys",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    deps = _COMMON_DEPS + all_crate_deps(normal = True) + [
+        "@crates//:tempfile",
+    ],
+)
+
+cladefs_rust_test(
+    name = "extent_keys_test",
+    aliases = aliases(normal_dev = True, proc_macro_dev = True),
+    crate = ":extent_keys_testing",
+    crate_features = [
+        "crypto",
+        "testing",
+    ],
+    data = [
+        "//:Cargo.lock",
+        "//formats:all",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    deps = all_crate_deps(normal_dev = True),
+)

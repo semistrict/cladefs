@@ -1,0 +1,81 @@
+# Copyright 2026 The cladefs Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//tools/bazel:rust.bzl", "cladefs_rust_library", "cladefs_rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["Cargo.toml"])
+
+_SRCS = glob(["src/**/*.rs"])
+
+_COMPILE_DATA = glob(["python-sandbox/**/*"]) + [
+    "//scripts:bpftrace/cladefs-latency.bt",
+]
+
+# Share crates already in @crates with //crates/* to avoid duplicate crate SVHs across the boundary;
+# only guest/tests-only crates (nix, tempdir) come from @guest_tests_crates.
+_BASE_DEPS = [
+    "//crates/fxfs-automount:fxfs_automount",
+    "@crates//:anyhow",
+    "@guest_tests_crates//:nix",
+    "@guest_tests_crates//:tempdir",
+]
+
+cladefs_rust_library(
+    name = "test_cases_host",
+    srcs = _SRCS,
+    compile_data = _COMPILE_DATA,
+    crate_features = ["host"],
+    crate_name = "test_cases",
+    proc_macro_deps = [
+        "//guest/tests/macros",
+    ],
+    target_compatible_with = ["@platforms//os:linux"],
+    deps = _BASE_DEPS + [
+        "//crates/base32_id",
+        "//crates/bucket_cell:bucket_cell_testing",
+        "//crates/cladefs:cladefs_testing",
+        "//crates/extent_frame:extent_frame_testing",
+        "//crates/extent_keys:extent_keys_testing",
+        "//crates/local_cell:local_cell_testing",
+        "@crates//:bytes",
+        "@crates//:futures",
+        "@crates//:http-body-util",
+        "@crates//:hyper",
+        "@crates//:hyper-util",
+        "@crates//:serde",
+        "@crates//:serde_json",
+        "@crates//:tokio",
+    ],
+)
+
+cladefs_rust_library(
+    name = "test_cases_guest",
+    srcs = _SRCS,
+    compile_data = _COMPILE_DATA,
+    crate_features = ["guest"],
+    crate_name = "test_cases",
+    proc_macro_deps = [
+        "//guest/tests/macros",
+    ],
+    target_compatible_with = ["@platforms//os:linux"],
+    deps = _BASE_DEPS + [
+        "@crates//:serde_json",
+    ],
+)
+
+cladefs_rust_test(
+    name = "test_cases_host_test",
+    crate = ":test_cases_host",
+    crate_features = ["host"],
+    target_compatible_with = ["@platforms//os:linux"],
+)
+
+cladefs_rust_test(
+    name = "test_cases_guest_test",
+    crate = ":test_cases_guest",
+    crate_features = ["guest"],
+    target_compatible_with = ["@platforms//os:linux"],
+)

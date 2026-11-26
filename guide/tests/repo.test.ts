@@ -19,7 +19,7 @@ describe("where code comes from", () => {
     ["crates/fxfs/src/object_store/journal.rs", "fuchsia-changed"],
     ["crates/storage_device/src/extent.rs", "cladefs"],
     ["crates/fxfs/src/round.rs", "fuchsia"],
-    ["crates/cladefs/src/open_cell.rs", "cladefs"],
+    ["crates/cladefs_core/src/open_cell.rs", "cladefs_core"],
     ["crates/bucket_cell/src/writer.rs", "cladefs"],
     ["guest/linux/fs/cladefs/dax.c", "cladefs"],
   ])("%s is %s", (path, origin) => {
@@ -46,16 +46,16 @@ describe("the symbol index", () => {
   });
 
   test("test code is left out", () => {
-    expect(isTestPath("crates/cladefs/src/cladefsd/tests/open.rs")).toBe(true);
-    expect(isTestPath("crates/cladefs/src/cache_tests.rs")).toBe(true);
-    expect(isTestPath("crates/cladefs/src/cache.rs")).toBe(false);
+    expect(isTestPath("crates/cladefsd/src/tests/open.rs")).toBe(true);
+    expect(isTestPath("crates/cladefs_core/src/cache_tests.rs")).toBe(true);
+    expect(isTestPath("crates/cladefs_core/src/cache.rs")).toBe(false);
   });
 
   test("it finds cladefs's and Fuchsia's symbols, with their docs and anchors", async () => {
     const symbols = await indexRepo();
-    const openCell = symbols.find((s) => s.path === "crates/cladefs/src/open_cell.rs" && s.name === "OpenCell" && s.kind === "struct");
+    const openCell = symbols.find((s) => s.path === "crates/cladefs_core/src/open_cell.rs" && s.name === "OpenCell" && s.kind === "struct");
     expect(openCell).toEqual({
-      path: "crates/cladefs/src/open_cell.rs",
+      path: "crates/cladefs_core/src/open_cell.rs",
       kind: "struct",
       name: "OpenCell",
       container: "",

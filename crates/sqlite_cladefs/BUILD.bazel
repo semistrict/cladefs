@@ -1,0 +1,113 @@
+# Copyright 2026 The cladefs Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@crates//:defs.bzl", "all_crate_deps")
+load("//tools/bazel:rust.bzl", "MADSIM_TOKIO_ALIAS", "cladefs_rust_binary", "cladefs_rust_library", "cladefs_rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["Cargo.toml"])
+
+filegroup(
+    name = "crate_files",
+    srcs = glob(["Cargo.toml", "src/**/*", "tests/**/*"], allow_empty = True),
+)
+
+_PROD_DEPS = [
+    "//crates/block_device",
+    "//crates/storage_device",
+] + select({
+    "@platforms//os:linux": ["//crates/cladefs"],
+    "//conditions:default": [],
+})
+
+_TEST_LIB_DEPS = [
+    "//crates/block_device:block_device_testing",
+    "//crates/storage_device",
+] + select({
+    "@platforms//os:linux": ["//crates/cladefs:cladefs_tests_kms"],
+    "//conditions:default": [],
+})
+
+cladefs_rust_library(
+    name = "sqlite_cladefs",
+    srcs = glob(["src/**/*.rs"]),
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    deps = _PROD_DEPS + all_crate_deps(normal = True),
+)
+
+cladefs_rust_library(
+    name = "sqlite_cladefs_for_test",
+    srcs = glob(["src/**/*.rs"]),
+    crate_name = "sqlite_cladefs",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    deps = _TEST_LIB_DEPS + all_crate_deps(normal = True),
+)
+
+cladefs_rust_test(
+    name = "sqlite_cladefs_test",
+    aliases = MADSIM_TOKIO_ALIAS,
+    crate = ":sqlite_cladefs_for_test",
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    deps = [
+        "//crates/bucket_cell:bucket_cell_testing",
+        "//crates/cladefs:cladefs_tests_kms",
+        "//crates/extent_frame:extent_frame_testing",
+        "//crates/extent_keys:extent_keys_testing",
+        "//crates/local_cell:local_cell_testing",
+    ] + all_crate_deps(normal_dev = True),
+)
+
+_TEST_COMMON_SRCS = glob(["tests/common/**/*.rs"])
+_TEST_DEPS = [
+    ":sqlite_cladefs_for_test",
+    "//crates/block_device:block_device_testing",
+    "//crates/bucket_cell:bucket_cell_testing",
+    "//crates/cladefs:cladefs_tests_kms",
+    "//crates/extent_frame:extent_frame_testing",
+    "//crates/extent_keys:extent_keys_testing",
+    "//crates/local_cell:local_cell_testing",
+    "//crates/storage_device",
+] + all_crate_deps(normal = True, normal_dev = True)
+
+cladefs_rust_test(
+    name = "sqlite_test",
+    srcs = ["tests/sqlite.rs"] + _TEST_COMMON_SRCS,
+    aliases = MADSIM_TOKIO_ALIAS,
+    crate_root = "tests/sqlite.rs",
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+    deps = _TEST_DEPS,
+)
+
+cladefs_rust_test(
+    name = "image_test",
+    srcs = ["tests/image.rs"],
+    aliases = MADSIM_TOKIO_ALIAS,
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+    deps = _TEST_DEPS,
+)
+
+cladefs_rust_test(
+    name = "daemon_test",
+    srcs = ["tests/daemon.rs"] + _TEST_COMMON_SRCS,
+    aliases = MADSIM_TOKIO_ALIAS,
+    crate_root = "tests/daemon.rs",
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+    target_compatible_with = ["@platforms//os:linux"],
+    deps = _TEST_DEPS,
+)
+
+[
+    cladefs_rust_binary(
+        name = ex,
+        srcs = ["examples/" + ex + ".rs"],
+        aliases = MADSIM_TOKIO_ALIAS,
+        proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+        deps = _TEST_DEPS,
+    )
+    for ex in [
+        "sqlite-bench",
+        "sqlite-commit-profile",
+    ]
+]

@@ -1,0 +1,300 @@
+# Copyright 2026 The cladefs Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+"""Native Bazel targets for vendor/firecracker (Firecracker VMM + cladefs extent device,
+Jailer, seccompiler, acpi_tables, utils) without modifying the git submodule."""
+
+load("@firecracker_crates//:defs.bzl", "all_crate_deps")
+load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "firecracker.base",
+    "firecracker.lock",
+    "firecracker.rewrites",
+])
+
+filegroup(
+    name = "firecracker_seccomp_resources",
+    srcs = glob([
+        "firecracker/resources/seccomp/*.json",
+        "firecracker/resources/cladefs/seccomp/*.json",
+    ]),
+)
+
+filegroup(
+    name = "firecracker_extent_srcs",
+    srcs = glob(["firecracker/src/vmm/src/devices/virtio/extent/**/*.rs"]),
+)
+
+# -----------------------------------------------------------------------------
+# seccompiler (Apache-2.0, linked by crates/cladefs/tests/seccomp.rs and Firecracker build.rs)
+# -----------------------------------------------------------------------------
+cargo_build_script(
+    name = "seccompiler_build_script",
+    srcs = ["firecracker/src/seccompiler/build.rs"],
+    edition = "2024",
+    target_compatible_with = ["@platforms//os:linux"],
+)
+
+rust_library(
+    name = "seccompiler",
+    srcs = glob(
+        ["firecracker/src/seccompiler/src/**/*.rs"],
+        exclude = ["firecracker/src/seccompiler/src/bin.rs"],
+    ),
+    crate_name = "seccompiler",
+    crate_root = "firecracker/src/seccompiler/src/lib.rs",
+    edition = "2024",
+    proc_macro_deps = [
+        "@crates//:displaydoc",
+    ],
+    target_compatible_with = ["@platforms//os:linux"],
+    deps = [
+        ":seccompiler_build_script",
+        "@crates//:bitcode",
+        "@crates//:clap",
+        "@crates//:libc",
+        "@crates//:serde",
+        "@crates//:serde_json",
+        "@crates//:thiserror",
+        "@crates//:zerocopy",
+    ],
+)
+
+rust_binary(
+    name = "seccompiler-bin",
+    srcs = ["firecracker/src/seccompiler/src/bin.rs"],
+    crate_root = "firecracker/src/seccompiler/src/bin.rs",
+    edition = "2024",
+    rustc_env = {
+        "CARGO_PKG_VERSION": "1.18.0",
+    },
+    target_compatible_with = ["@platforms//os:linux"],
+    deps = [
+        ":seccompiler",
+        "@crates//:clap",
+    ],
+)
+
+# -----------------------------------------------------------------------------
+# Firecracker internal crates: utils, acpi_tables, vmm (with cladefs feature)
+# -----------------------------------------------------------------------------
+rust_library(
+    name = "utils",
+    srcs = glob(["firecracker/src/utils/src/**/*.rs"]),
+    crate_name = "utils",
+    crate_root = "firecracker/src/utils/src/lib.rs",
+    edition = "2024",
+    proc_macro_deps = [
+        "@firecracker_crates//:displaydoc",
+    ],
+    target_compatible_with = ["@platforms//os:linux"],
+    deps = [
+        "@firecracker_crates//:libc",
+        "@firecracker_crates//:thiserror",
+    ],
+)
+
+rust_library(
+    name = "utils_test_utils",
+    srcs = glob(["firecracker/src/utils/src/**/*.rs"]),
+    crate_features = ["test-utils"],
+    crate_name = "utils",
+    crate_root = "firecracker/src/utils/src/lib.rs",
+    edition = "2024",
+    proc_macro_deps = [
+        "@firecracker_crates//:displaydoc",
+    ],
+    target_compatible_with = ["@platforms//os:linux"],
+    deps = [
+        "@firecracker_crates//:libc",
+        "@firecracker_crates//:thiserror",
+    ],
+)
+
+rust_library(
+    name = "acpi_tables",
+    srcs = glob(["firecracker/src/acpi-tables/src/**/*.rs"]),
+    crate_name = "acpi_tables",
+    crate_root = "firecracker/src/acpi-tables/src/lib.rs",
+    edition = "2024",
+    proc_macro_deps = [
+        "@firecracker_crates//:displaydoc",
+    ],
+    target_compatible_with = ["@platforms//os:linux"],
+    deps = [
+        "@firecracker_crates//:thiserror",
+        "@firecracker_crates//:vm-memory",
+        "@firecracker_crates//:zerocopy",
+    ],
+)
+
+_VMM_COMMON_DEPS = [
+    ":acpi_tables",
+    "//crates/cladefs",
+    "//crates/virtio_extent",
+    "@firecracker_crates//:aws-lc-rs",
+    "@firecracker_crates//:base64",
+    "@firecracker_crates//:bitcode",
+    "@firecracker_crates//:bitflags",
+    "@firecracker_crates//:bitvec",
+    "@firecracker_crates//:byteorder",
+    "@firecracker_crates//:crc32fast",
+    "@firecracker_crates//:crc64",
+    "@firecracker_crates//:derive_more",
+    "@firecracker_crates//:event-manager",
+    "@firecracker_crates//:futures",
+    "@firecracker_crates//:kvm-bindings",
+    "@firecracker_crates//:kvm-ioctls",
+    "@firecracker_crates//:libc",
+    "@firecracker_crates//:linux-loader",
+    "@firecracker_crates//:log",
+    "@firecracker_crates//:memfd",
+    "@firecracker_crates//:micro_http",
+    "@firecracker_crates//:semver",
+    "@firecracker_crates//:serde",
+    "@firecracker_crates//:serde_json",
+    "@firecracker_crates//:slab",
+    "@firecracker_crates//:thiserror",
+    "@firecracker_crates//:userfaultfd",
+    "@firecracker_crates//:uuid",
+    "@firecracker_crates//:vhost",
+    "@firecracker_crates//:vm-allocator",
+    "@firecracker_crates//:vm-memory",
+    "@firecracker_crates//:vm-superio",
+    "@firecracker_crates//:vmm-sys-util",
+    "@firecracker_crates//:zerocopy",
+] + select({
+    "@platforms//cpu:aarch64": ["@firecracker_crates//:vm-fdt"],
+    "//conditions:default": [],
+})
+
+_VMM_PROC_MACRO_DEPS = [
+    "@firecracker_crates//:displaydoc",
+]
+
+rust_library(
+    name = "vmm",
+    srcs = glob(["firecracker/src/vmm/src/**/*.rs"]),
+    crate_features = ["cladefs"],
+    crate_name = "vmm",
+    crate_root = "firecracker/src/vmm/src/lib.rs",
+    edition = "2024",
+    proc_macro_deps = _VMM_PROC_MACRO_DEPS,
+    target_compatible_with = ["@platforms//os:linux"],
+    deps = [":utils"] + _VMM_COMMON_DEPS,
+)
+
+rust_test(
+    name = "vmm_test",
+    srcs = glob(["firecracker/src/vmm/src/**/*.rs"]),
+    crate_features = ["cladefs"],
+    crate_name = "vmm",
+    crate_root = "firecracker/src/vmm/src/lib.rs",
+    data = glob(["firecracker/src/vmm/src/test_utils/**/*"]),
+    edition = "2024",
+    proc_macro_deps = _VMM_PROC_MACRO_DEPS,
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "vendor/firecracker/src/vmm",
+    },
+    tags = ["firecracker"],
+    target_compatible_with = ["@platforms//os:linux"],
+    deps = [
+        ":utils_test_utils",
+        "@firecracker_crates//:criterion",
+        "@firecracker_crates//:device_tree",
+        "@firecracker_crates//:itertools",
+        "@firecracker_crates//:proptest",
+    ] + _VMM_COMMON_DEPS,
+)
+
+# -----------------------------------------------------------------------------
+# Firecracker VMM binary (with cladefs extent device + merged seccomp BPF)
+# -----------------------------------------------------------------------------
+cargo_build_script(
+    name = "firecracker_build_script",
+    srcs = ["//tools/bazel:firecracker_seccomp_build.rs"],
+    crate_root = "//tools/bazel:firecracker_seccomp_build.rs",
+    data = [":firecracker_seccomp_resources"],
+    edition = "2024",
+    target_compatible_with = ["@platforms//os:linux"],
+    deps = [
+        ":seccompiler",
+        "@crates//:serde_json",
+    ],
+)
+
+_FIRECRACKER_DEPS = [
+    ":firecracker_build_script",
+    ":utils",
+    ":vmm",
+    "@firecracker_crates//:event-manager",
+    "@firecracker_crates//:libc",
+    "@firecracker_crates//:micro_http",
+    "@firecracker_crates//:serde",
+    "@firecracker_crates//:serde_json",
+    "@firecracker_crates//:thiserror",
+    "@firecracker_crates//:vmm-sys-util",
+]
+
+_FIRECRACKER_PROC_MACRO_DEPS = [
+    "@firecracker_crates//:displaydoc",
+    "@firecracker_crates//:serde_derive",
+]
+
+rust_library(
+    name = "firecracker_lib",
+    srcs = glob(
+        ["firecracker/src/firecracker/src/**/*.rs"],
+        exclude = ["firecracker/src/firecracker/src/main.rs"],
+    ),
+    crate_features = ["cladefs"],
+    crate_name = "firecracker",
+    crate_root = "firecracker/src/firecracker/src/lib.rs",
+    edition = "2024",
+    proc_macro_deps = _FIRECRACKER_PROC_MACRO_DEPS,
+    rustc_env = {
+        "CARGO_PKG_VERSION": "1.18.0",
+    },
+    target_compatible_with = ["@platforms//os:linux"],
+    deps = _FIRECRACKER_DEPS,
+)
+
+rust_binary(
+    name = "firecracker",
+    srcs = glob(["firecracker/src/firecracker/src/**/*.rs"]),
+    crate_features = ["cladefs"],
+    crate_root = "firecracker/src/firecracker/src/main.rs",
+    edition = "2024",
+    proc_macro_deps = _FIRECRACKER_PROC_MACRO_DEPS,
+    rustc_env = {
+        "CARGO_PKG_VERSION": "1.18.0",
+    },
+    target_compatible_with = ["@platforms//os:linux"],
+    deps = _FIRECRACKER_DEPS,
+)
+
+# -----------------------------------------------------------------------------
+# Jailer binary
+# -----------------------------------------------------------------------------
+rust_binary(
+    name = "jailer",
+    srcs = glob(["firecracker/src/jailer/src/**/*.rs"]),
+    crate_root = "firecracker/src/jailer/src/main.rs",
+    edition = "2024",
+    rustc_env = {
+        "CARGO_PKG_VERSION": "1.18.0",
+    },
+    target_compatible_with = ["@platforms//os:linux"],
+    deps = [
+        ":utils",
+        "@firecracker_crates//:libc",
+        "@firecracker_crates//:regex",
+        "@firecracker_crates//:thiserror",
+        "@firecracker_crates//:vmm-sys-util",
+    ],
+)

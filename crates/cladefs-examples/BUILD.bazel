@@ -1,0 +1,80 @@
+# Copyright 2026 The cladefs Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@crates//:defs.bzl", "all_crate_deps")
+load("//tools/bazel:rust.bzl", "MADSIM_TOKIO_ALIAS", "cladefs_rust_binary", "cladefs_rust_library")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["Cargo.toml"])
+
+filegroup(
+    name = "crate_files",
+    srcs = glob(["Cargo.toml", "src/**/*", "tests/**/*"], allow_empty = True),
+)
+
+cladefs_rust_library(
+    name = "cladefs_examples",
+    srcs = glob(["src/**/*.rs"]),
+    crate_name = "cladefs_examples",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    deps = all_crate_deps(normal = True),
+)
+
+_EXAMPLE_DEPS = [
+    ":cladefs_examples",
+    "//crates/base32_id",
+    "//crates/bucket_cell:bucket_cell_testing",
+    "//crates/cladefs:cladefs_testing",
+    "//crates/extent_frame:extent_frame_testing",
+    "//crates/extent_keys:extent_keys_testing",
+    "//crates/fuchsia-async:fuchsia_async",
+    "//crates/fxfs",
+    "//crates/local_cell:local_cell_unkept",
+    "//crates/storage_device",
+] + all_crate_deps(normal = True, normal_dev = True)
+
+_EXAMPLE_PROC_MACRO_DEPS = all_crate_deps(proc_macro = True, proc_macro_dev = True)
+
+_LINUX_EXAMPLES = [
+    "cladefsd-mapbench",
+]
+
+_PORTABLE_EXAMPLES = [
+    "cell-bench",
+    "cell-read",
+    "cell-tree",
+    "filesystem-io-bench",
+    "fork-bench",
+    "frame-bench",
+    "fxfs-metabench",
+    "fxfs-stack",
+    "import-bench",
+    "pagein-bench",
+    "span-bench",
+    "versions-pass-bench",
+]
+
+[
+    cladefs_rust_binary(
+        name = ex,
+        srcs = ["examples/" + ex + ".rs"],
+        aliases = MADSIM_TOKIO_ALIAS,
+        proc_macro_deps = _EXAMPLE_PROC_MACRO_DEPS,
+        deps = _EXAMPLE_DEPS,
+    )
+    for ex in _PORTABLE_EXAMPLES
+]
+
+[
+    cladefs_rust_binary(
+        name = ex,
+        srcs = ["examples/" + ex + ".rs"],
+        aliases = MADSIM_TOKIO_ALIAS,
+        proc_macro_deps = _EXAMPLE_PROC_MACRO_DEPS,
+        target_compatible_with = ["@platforms//os:linux"],
+        deps = _EXAMPLE_DEPS,
+    )
+    for ex in _LINUX_EXAMPLES
+]

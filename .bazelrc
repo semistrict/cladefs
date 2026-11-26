@@ -1,0 +1,82 @@
+# Copyright 2026 The cladefs Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# Bazel 9 pure Bzlmod configuration.
+common --enable_bzlmod
+common --noenable_workspace
+common --incompatible_strict_action_env
+common --enable_platform_specific_config
+
+# Stamp git commit into STABLE_CLADEFS_BUILD_COMMIT when --stamp is enabled.
+build --workspace_status_command=scripts/bazel-status.sh
+
+# Keep frame pointers in every build so perf and /z/pprof unwind cleanly (TASK-92.39, .cargo/config.toml).
+build --@rules_rust//rust/settings:extra_rustc_flags=-Cforce-frame-pointers=yes
+build --copt=-fno-omit-frame-pointer
+
+# Use hermetic remote JDK 21 for TLA+ (TLC) model checking (zero host JDK needed).
+build --java_runtime_version=remotejdk_21
+build --incompatible_default_to_explicit_init_py
+
+# Always show error output on failing tests and send glibc fatal errors to stderr (TASK-100).
+test --test_output=errors
+test --test_env=LIBC_FATAL_STDERR_=1
+
+# Release profile: matches Cargo.toml [profile.release] (board 8597).
+# Line-tables-only debuginfo for /z/pprof (never stripped), unwind on panic (halts cell), overflow checks on.
+# Note: @rules_rust//rust/settings:extra_rustc_flags is a single string_list_flag (comma-separated).
+build:release -c opt
+build:release --stamp
+build:release --strip=never
+build:release --@rules_rust//rust/settings:extra_rustc_flags=-Cdebuginfo=1,-Cstrip=none,-Cpanic=unwind,-Coverflow-checks=yes,-Cforce-frame-pointers=yes
+
+# Simulation profile: matches Cargo.toml [profile.sim] (TASK-188).
+# Optimized with debug assertions, overflow checks, and failpoints kept on.
+build:sim -c opt
+build:sim --//tools/bazel:failpoints=true
+build:sim --@rules_rust//rust/settings:extra_rustc_flags=-Cdebug-assertions=yes,-Coverflow-checks=yes,-Cforce-frame-pointers=yes
+
+# Deterministic full-stack simulation under madsim (doc-24, TASK-685.12).
+build:madsim --//tools/bazel:madsim=true
+build:madsim --@rules_rust//rust/settings:extra_rustc_flags=--cfg=madsim,-Cforce-frame-pointers=yes
+
+# Optimized madsim simulation (combines sim + madsim into a single extra_rustc_flags list).
+build:sim-madsim -c opt
+build:sim-madsim --//tools/bazel:failpoints=true
+build:sim-madsim --//tools/bazel:madsim=true
+build:sim-madsim --@rules_rust//rust/settings:extra_rustc_flags=--cfg=madsim,-Cdebug-assertions=yes,-Coverflow-checks=yes,-Cforce-frame-pointers=yes
+
+# Guest Linux kernel build (uses host rustup nightly-2026-10-12 + rust-src + kbuild toolchain).
+build:guest-kernel --action_env=CARGO_HOME
+build:guest-kernel --action_env=RUSTUP_HOME
+build:guest-kernel --action_env=HOME
+
+# Fully static Linux musl release builds via toolchains_musl (both x86_64 and aarch64).
+build:musl-x86_64 --config=release
+build:musl-x86_64 --platforms=//tools/platforms:linux_x86_64_musl
+build:musl-aarch64 --config=release
+build:musl-aarch64 --platforms=//tools/platforms:linux_aarch64_musl
+
+# Clippy static analysis matching scripts/test.sh and clippy.toml.
+build:clippy --aspects=@rules_rust//rust:defs.bzl%rust_clippy_aspect
+build:clippy --output_groups=+clippy_checks
+build:clippy --@rules_rust//rust/settings:clippy.toml=//:clippy.toml
+build:clippy --@rules_rust//rust/settings:clippy_flags=-A,clippy::all,-D,clippy::disallowed_methods,-D,warnings
+
+# Stricter clippy config for cladefs's own crates (board 8607).
+build:clippy-cladefs --config=clippy
+build:clippy-cladefs --@rules_rust//rust/settings:clippy_flags=-A,clippy::all,-D,clippy::correctness,-D,clippy::suspicious,-D,clippy::disallowed_methods,-D,warnings
+
+# AddressSanitizer + UndefinedBehaviorSanitizer for C targets (guest/sim).
+build:asan --copt=-fsanitize=address,undefined
+build:asan --linkopt=-fsanitize=address,undefined
+
+# LLVM source-based coverage for C targets (guest/sim).
+build:c-coverage --copt=-fprofile-instr-generate
+build:c-coverage --copt=-fcoverage-mapping
+build:c-coverage --linkopt=-fprofile-instr-generate
+build:c-coverage --linkopt=-fcoverage-mapping
+
+# Optional local overrides (gitignored).
+try-import %workspace%/.bazelrc.local

@@ -3,8 +3,8 @@
 # (TASK-150.5).
 # Kind: path held
 # Killer: cladefsd::tests::hostile::a_compromised_vm_process_harms_no_tenant_beside_it
---- a/crates/cladefs/src/cladefsd/server.rs
-+++ b/crates/cladefs/src/cladefsd/server.rs
+--- a/crates/cladefsd/src/server.rs
++++ b/crates/cladefsd/src/server.rs
 @@ -1263,11 +1263,15 @@
          }
          let key = cell_dir_key(path);

@@ -1,0 +1,265 @@
+# Copyright 2026 The cladefs Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//tools/bazel:guest_sim.bzl",
+    "sim_binary",
+    "sim_headers",
+    "sim_host_object",
+    "sim_kernel_objects",
+    "sim_stubs_object",
+    "sim_test",
+)
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "cladefs/cladefs.c",
+    "shim/ALIASES",
+])
+
+filegroup(
+    name = "all_files",
+    srcs = glob(["**/*.c", "**/*.h"]),
+)
+
+# Mirrors guest/sim/shim/ALIASES: each kernel header aliased to its shim header.
+_SHIM_ALIASES = {
+    "sim/base.h": [
+        "linux/bug.h",
+        "linux/build_bug.h",
+        "linux/compiler.h",
+        "linux/compiler_types.h",
+        "linux/const.h",
+        "linux/container_of.h",
+        "linux/err.h",
+        "linux/errno.h",
+        "linux/export.h",
+        "linux/init.h",
+        "linux/kernel.h",
+        "linux/limits.h",
+        "linux/minmax.h",
+        "linux/stddef.h",
+        "linux/string.h",
+        "linux/types.h",
+        "linux/stringify.h",
+        "linux/module.h",
+        "linux/printk.h",
+        "linux/ratelimit.h",
+        "linux/sizes.h",
+        "linux/align.h",
+        "asm/barrier.h",
+        "asm/types.h",
+        "linux/math.h",
+        "linux/overflow.h",
+        "linux/cleanup.h",
+        "linux/interrupt.h",
+        "linux/of.h",
+        "linux/of_platform.h",
+        "linux/platform_device.h",
+        "linux/device.h",
+    ],
+    "sim/atomic.h": [
+        "linux/atomic.h",
+        "linux/refcount.h",
+    ],
+    "sim/bitops.h": [
+        "linux/bitmap.h",
+        "linux/bitops.h",
+        "linux/log2.h",
+        "linux/find.h",
+    ],
+    "sim/rcu.h": ["linux/rcupdate.h"],
+    "sim/lockdep.h": ["linux/lockdep.h"],
+    "sim/sched.h": [
+        "linux/sched.h",
+        "linux/sched/signal.h",
+        "linux/sched/mm.h",
+        "linux/sched/debug.h",
+        "linux/sched/task.h",
+        "linux/mutex.h",
+        "linux/rwsem.h",
+        "linux/spinlock.h",
+        "linux/spinlock_types.h",
+        "asm/current.h",
+        "linux/preempt.h",
+        "linux/irqflags.h",
+    ],
+    "sim/time.h": [
+        "linux/delay.h",
+        "linux/timekeeping.h",
+        "linux/ktime.h",
+        "linux/jiffies.h",
+    ],
+    "sim/workqueue.h": ["linux/workqueue.h"],
+    "sim/slab.h": [
+        "linux/slab.h",
+        "linux/gfp.h",
+        "linux/gfp_types.h",
+        "linux/vmalloc.h",
+    ],
+    "sim/mm.h": [
+        "linux/mm.h",
+        "linux/mm_types.h",
+        "linux/mmu_notifier.h",
+        "linux/highmem.h",
+        "linux/rmap.h",
+        "linux/memcontrol.h",
+        "linux/pagevec.h",
+        "linux/vmstat.h",
+        "linux/pagewalk.h",
+        "asm/pgalloc.h",
+        "linux/mmzone.h",
+    ],
+    "sim/fs.h": [
+        "linux/fs.h",
+        "linux/falloc.h",
+        "linux/pagemap.h",
+        "linux/uio.h",
+        "linux/writeback.h",
+        "linux/seq_file.h",
+        "linux/blkdev.h",
+        "linux/buffer_head.h",
+        "linux/blk_types.h",
+        "linux/scatterlist.h",
+    ],
+    "sim/module.h": ["linux/moduleparam.h"],
+}
+
+_SAN_FLAGS = ["-fsanitize=address,undefined"]
+
+_SHIM_HEADERS = glob(["shim/**/*.h", "tests/*.h"]) + [
+    "//guest/linux:cladefs_headers",
+    "@amazon_linux_sim_kernel//:sim_private_headers",
+]
+
+sim_headers(
+    name = "headers",
+    aliases = _SHIM_ALIASES,
+    kernel_headers = "@amazon_linux_sim_kernel//:sim_real_headers",
+)
+
+sim_host_object(
+    name = "host_obj",
+    src = "kernel/host.c",
+    copts = _SAN_FLAGS,
+    hdrs = glob(["shim/sim/*.h"]),
+    target_compatible_with = ["@platforms//os:linux"],
+)
+
+sim_kernel_objects(
+    name = "cladefs_objs",
+    srcs = ["//guest/linux:cladefs_sim_sources"],
+    copts = _SAN_FLAGS,
+    extra_headers = _SHIM_HEADERS,
+    headers = ":headers",
+    target_compatible_with = ["@platforms//os:linux"],
+)
+
+sim_kernel_objects(
+    name = "kernel_real_objs",
+    srcs = ["@amazon_linux_sim_kernel//:sim_real_sources"],
+    copts = _SAN_FLAGS,
+    extra_headers = _SHIM_HEADERS,
+    headers = ":headers",
+    target_compatible_with = ["@platforms//os:linux"],
+)
+
+sim_kernel_objects(
+    name = "fake_objs",
+    srcs = glob(
+        [
+            "kernel/*.c",
+            "cladefs/*.c",
+        ],
+        exclude = ["kernel/host.c"],
+    ),
+    copts = _SAN_FLAGS,
+    extra_headers = _SHIM_HEADERS,
+    headers = ":headers",
+    target_compatible_with = ["@platforms//os:linux"],
+)
+
+sim_kernel_objects(
+    name = "probe_test_obj",
+    srcs = ["tests/smoke.c"],
+    copts = _SAN_FLAGS,
+    extra_headers = _SHIM_HEADERS,
+    headers = ":headers",
+    target_compatible_with = ["@platforms//os:linux"],
+)
+
+sim_stubs_object(
+    name = "stubs_obj",
+    copts = _SAN_FLAGS,
+    extra_headers = _SHIM_HEADERS,
+    headers = ":headers",
+    linkopts = _SAN_FLAGS,
+    target_compatible_with = ["@platforms//os:linux"],
+    deps = [
+        ":cladefs_objs",
+        ":fake_objs",
+        ":host_obj",
+        ":kernel_real_objs",
+        ":probe_test_obj",
+    ],
+)
+
+_COMMON_LINK_OBJS = [
+    ":cladefs_objs",
+    ":fake_objs",
+    ":host_obj",
+    ":kernel_real_objs",
+    ":stubs_obj",
+]
+
+_ONE_RUN_TESTS = [
+    "smoke",
+    "base_extents_sliced",
+    "hole_mapped_then_written",
+    "pmd_over_stale_index",
+    "range_map_failed_part_way",
+    "read_mappings_stay",
+    "read_pressure",
+]
+
+_OTHER_TESTS = [
+    "scenarios",
+    "interleave",
+    "failures",
+]
+
+[
+    sim_binary(
+        name = t,
+        src = "tests/" + t + ".c",
+        copts = _SAN_FLAGS,
+        extra_headers = _SHIM_HEADERS,
+        headers = ":headers",
+        linkopts = _SAN_FLAGS,
+        target_compatible_with = ["@platforms//os:linux"],
+        deps = _COMMON_LINK_OBJS,
+    )
+    for t in _ONE_RUN_TESTS + _OTHER_TESTS
+]
+
+[
+    sim_test(
+        name = t + "_test",
+        binary = ":" + t,
+    )
+    for t in _ONE_RUN_TESTS
+]
+
+sim_test(
+    name = "interleave_smoke_test",
+    args = ["1", "200"],
+    binary = ":interleave",
+)
+
+sim_test(
+    name = "failures_smoke_test",
+    args = ["1", "200"],
+    binary = ":failures",
+)

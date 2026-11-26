@@ -1,0 +1,65 @@
+# Core host-side cell runtime: open cells, extent cache, DAX windows, slabs, buckets, and host state.
+[package]
+name = "cladefs_core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+testing = ["bucket_cell/testing", "extent_keys/testing", "local_cell/testing"]
+shuttle = ["dep:shuttle"]
+failpoints = ["fail/failpoints"]
+loom = ["dep:loom"]
+tests-kms = ["testing"]
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+base32_id.workspace = true
+bitflags.workspace = true
+bucket_cell.workspace = true
+event-listener.workspace = true
+extent_frame.workspace = true
+extent_keys.workspace = true
+fail = "0.5.1"
+formats.workspace = true
+futures.workspace = true
+fxfs-posix.workspace = true
+host_fs.workspace = true
+libc.workspace = true
+local_cell.workspace = true
+log.workspace = true
+loom = { workspace = true, optional = true }
+node_local.workspace = true
+pin-project-lite.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_json = "1.0.154"
+sha2.workspace = true
+shuttle = { workspace = true, optional = true }
+siphasher.workspace = true
+smallvec.workspace = true
+storage_device.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+toml.workspace = true
+url.workspace = true
+zerocopy.workspace = true
+
+[target.'cfg(target_env = "musl")'.dependencies]
+libmimalloc-sys.workspace = true
+mimalloc = { workspace = true, features = ["extended"] }
+
+[dev-dependencies]
+cladefs_core = { path = ".", features = ["failpoints", "testing", "tests-kms"] }
+bucket_cell = { workspace = true, features = ["testing"] }
+extent_keys = { workspace = true, features = ["testing"] }
+local_cell = { workspace = true, features = ["testing"] }
+memchr.workspace = true
+object_store.workspace = true
+proptest.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

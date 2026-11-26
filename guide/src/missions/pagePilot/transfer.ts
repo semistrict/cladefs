@@ -31,7 +31,7 @@ export const transferTasks: TransferTask[] = [
   {
     id: "host-copy",
     question: "Where does the host copy a page into the VM's private memory when the guest asks for it?",
-    accepts: (s) => s.path === "crates/cladefs/src/dax/uffd.rs" && s.name === "make_private",
+    accepts: (s) => s.path === "crates/cladefs_core/src/dax/uffd.rs" && s.name === "make_private",
     hint: "It is the VM process's second stage, in crates/cladefs: what serves PRIVATE.",
     answer: answer("window_make_private"),
   },

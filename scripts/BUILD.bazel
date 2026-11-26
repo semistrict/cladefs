@@ -1,0 +1,30 @@
+# Copyright 2026 The cladefs Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "bazel-status.sh",
+    "build-commit.sh",
+    "build-guest-kernel.sh",
+    "build-guest-sysroot.sh",
+    "check-tla.sh",
+    "bpftrace/cladefs-latency.bt",
+])
+
+filegroup(
+    name = "all_scripts",
+    srcs = glob(
+        ["**/*"],
+        exclude = ["tests/**/*"],
+    ),
+)
+
+sh_test(
+    name = "check_alerts_test",
+    srcs = ["check-alerts.sh"],
+    tags = ["manual"],
+)

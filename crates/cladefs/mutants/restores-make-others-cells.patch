@@ -4,8 +4,8 @@
 # another tenant's (TASK-150.4).
 # Kind: another tenant's
 # Killer: cladefsd::tests::hostile::a_compromised_vm_process_harms_no_tenant_beside_it
---- a/crates/cladefs/src/cladefsd/server.rs
-+++ b/crates/cladefs/src/cladefsd/server.rs
+--- a/crates/cladefsd/src/server.rs
++++ b/crates/cladefsd/src/server.rs
 @@ -2221,11 +2221,11 @@
                  // call). A host crash before leaves it unmade, as if the restore never was.
                  // cladefs: a crash of the daemon's too, its VM processes going with it.

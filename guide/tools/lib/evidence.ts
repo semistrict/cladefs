@@ -171,7 +171,10 @@ export function readEvidence(repo = REPO): Evidence {
   );
   const mutations: Mutation[] = [];
   const specs: Spec[] = [];
-  for (const spec of readdirSync(join(repo, "specs")).sort()) {
+  for (const spec of readdirSync(join(repo, "specs"), { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort()) {
     const dir = join(repo, "specs", spec);
     const tlaFile = sorted(dir, ".tla")[0];
     if (!tlaFile) continue;

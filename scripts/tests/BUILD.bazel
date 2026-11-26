@@ -1,0 +1,89 @@
+# Copyright 2026 The cladefs Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_python//python:defs.bzl", "py_binary", "py_library", "py_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+package(default_visibility = ["//visibility:public"])
+
+py_library(
+    name = "test_helpers",
+    srcs = [
+        "fake_cargo_mutants.py",
+        "fake_container_engine.py",
+        "fake_flock.py",
+        "fake_hotbed.py",
+        "fake_nextest.py",
+        "fake_sysfs.py",
+        "script.py",
+        "test_ab_rounds.py",
+        "test_guest_tags.py",
+    ],
+    imports = ["."],
+)
+
+_COMMON_DATA = [
+    "//:Cargo.lock",
+    "//:Cargo.toml",
+    "//scripts:all_scripts",
+]
+
+# Tests that invoke `cargo` / `rustc` directly are wrapped with Bazel's hermetic Rust toolchain.
+_RUST_TOOL_TESTS = {
+    "test_build_stamp.py": [
+        "//crates/cladefs:build/stamp.rs",
+    ],
+    "test_linux_host.py": [],
+}
+
+_PY_TESTS = glob(
+    ["test_*.py"],
+    exclude = list(_RUST_TOOL_TESTS.keys()),
+)
+
+[
+    py_test(
+        name = f[:-3],
+        srcs = [f],
+        data = _COMMON_DATA,
+        imports = ["."],
+        main = f,
+        tags = ["scripts"],
+        deps = [":test_helpers"],
+    )
+    for f in _PY_TESTS
+]
+
+[
+    py_binary(
+        name = f[:-3] + "_bin",
+        srcs = [f],
+        data = _COMMON_DATA + extra_data,
+        imports = ["."],
+        main = f,
+        deps = [":test_helpers"],
+    )
+    for f, extra_data in _RUST_TOOL_TESTS.items()
+]
+
+[
+    sh_test(
+        name = f[:-3],
+        srcs = ["//tools/bazel:run_py_with_rust.sh"],
+        args = [
+            "$(rootpath :" + f[:-3] + "_bin)",
+            "$(HERMETIC_CARGO)",
+            "$(HERMETIC_RUSTC)",
+        ],
+        data = [
+            ":" + f[:-3] + "_bin",
+            "//tools/bazel:rust_host_toolchain",
+        ] + _COMMON_DATA + extra_data,
+        tags = ["scripts"],
+        toolchains = [
+            "//tools/bazel:rust_host_toolchain",
+        ],
+    )
+    for f, extra_data in _RUST_TOOL_TESTS.items()
+]

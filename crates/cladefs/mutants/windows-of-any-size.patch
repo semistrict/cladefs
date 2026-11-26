@@ -2,8 +2,8 @@
 # bytes voids the connection's memory bound (TASK-150.3).
 # Kind: memory
 # Killer: cladefsd::tests::hostile::a_compromised_vm_process_harms_no_tenant_beside_it
---- a/crates/cladefs/src/cladefsd/codec.rs
-+++ b/crates/cladefs/src/cladefsd/codec.rs
+--- a/crates/cladefs_wire/src/codec.rs
++++ b/crates/cladefs_wire/src/codec.rs
 @@ -598,9 +598,6 @@
                  nothing()?;
                  let body: WindowBody = header.decode_body()?;
@@ -14,13 +14,13 @@
                  Request::Window {
                      size: body.size,
                      copying: has(WINDOW_COPYING),
---- a/crates/cladefs/src/cladefsd/server.rs
-+++ b/crates/cladefs/src/cladefsd/server.rs
+--- a/crates/cladefsd/src/server.rs
++++ b/crates/cladefsd/src/server.rs
 @@ -2788,7 +2788,6 @@
      /// Its window is of `size` bytes, whose mappings, a logical block each at most, a reply to
      /// `MAPPINGS` holds (TASK-79.43).
      fn set_window(&self, size: u64) {
 -        assert!(size <= MAX_WINDOW, "a window past the most the daemon gives credit for");
-         let mappings = size / crate::dax::map_unit() * MAPPING_BYTES;
+         let mappings = size / cladefs_core::dax::map_unit() * MAPPING_BYTES;
          self.mappings.store(mappings, Ordering::Relaxed);
      }

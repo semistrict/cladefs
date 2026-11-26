@@ -1,0 +1,117 @@
+# Copyright 2026 The cladefs Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+package(default_visibility = ["//visibility:public"])
+
+# C library ABI constraint separating default glibc Linux from static musl Linux.
+# Defaults to :gnu so default host/exec Linux platforms never accidentally select
+# musl toolchains.
+constraint_setting(
+    name = "libc",
+    default_constraint_value = ":gnu",
+)
+
+constraint_value(
+    name = "gnu",
+    constraint_setting = ":libc",
+)
+
+constraint_value(
+    name = "musl",
+    constraint_setting = ":libc",
+)
+
+# -----------------------------------------------------------------------------
+# Target Platforms
+# -----------------------------------------------------------------------------
+platform(
+    name = "linux_x86_64_gnu",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+        ":gnu",
+    ],
+)
+
+platform(
+    name = "linux_aarch64_gnu",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:aarch64",
+        ":gnu",
+    ],
+)
+
+platform(
+    name = "linux_x86_64_musl",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+        ":musl",
+    ],
+)
+
+platform(
+    name = "linux_aarch64_musl",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:aarch64",
+        ":musl",
+    ],
+)
+
+# -----------------------------------------------------------------------------
+# Rust Triple config_settings (referenced by crate_universe platforms_template)
+# -----------------------------------------------------------------------------
+config_setting(
+    name = "x86_64-unknown-linux-gnu",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+        ":gnu",
+    ],
+)
+
+config_setting(
+    name = "aarch64-unknown-linux-gnu",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:aarch64",
+        ":gnu",
+    ],
+)
+
+config_setting(
+    name = "x86_64-unknown-linux-musl",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+        ":musl",
+    ],
+)
+
+config_setting(
+    name = "aarch64-unknown-linux-musl",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:aarch64",
+        ":musl",
+    ],
+)
+
+config_setting(
+    name = "aarch64-apple-darwin",
+    constraint_values = [
+        "@platforms//os:macos",
+        "@platforms//cpu:aarch64",
+    ],
+)
+
+config_setting(
+    name = "x86_64-apple-darwin",
+    constraint_values = [
+        "@platforms//os:macos",
+        "@platforms//cpu:x86_64",
+    ],
+)

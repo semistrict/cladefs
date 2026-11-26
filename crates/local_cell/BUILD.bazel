@@ -1,0 +1,189 @@
+# Copyright 2026 The cladefs Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@crates//:defs.bzl", "all_crate_deps")
+load("//tools/bazel:rust.bzl", "MADSIM_TOKIO_ALIAS", "cladefs_rust_library", "cladefs_rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["Cargo.toml"])
+
+filegroup(
+    name = "crate_files",
+    srcs = glob(["Cargo.toml", "src/**/*", "tests/**/*"], allow_empty = True),
+)
+
+_BASE_DEPS = [
+    "//crates/base32_id",
+    "//crates/formats",
+    "//crates/fprint",
+    "//crates/host_fs",
+    "//crates/node_local",
+    "//crates/storage_device",
+]
+
+_PROD_DEPS = _BASE_DEPS + [
+    "//crates/bucket_cell",
+    "//crates/extent_frame",
+    "//crates/extent_keys",
+]
+
+_TEST_DEPS = _BASE_DEPS + [
+    "//crates/bucket_cell:bucket_cell_testing",
+    "//crates/extent_frame:extent_frame_testing",
+    "//crates/extent_keys:extent_keys_testing",
+]
+
+cladefs_rust_library(
+    name = "local_cell",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = MADSIM_TOKIO_ALIAS,
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    deps = _PROD_DEPS + all_crate_deps(normal = True),
+)
+
+cladefs_rust_library(
+    name = "local_cell_unkept",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = MADSIM_TOKIO_ALIAS,
+    crate_features = ["unkept"],
+    crate_name = "local_cell",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    deps = _TEST_DEPS + all_crate_deps(normal = True),
+)
+
+cladefs_rust_library(
+    name = "local_cell_testing",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = MADSIM_TOKIO_ALIAS,
+    crate_features = ["testing"],
+    crate_name = "local_cell",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    deps = _TEST_DEPS + all_crate_deps(normal = True),
+)
+
+cladefs_rust_library(
+    name = "local_cell_for_test",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = MADSIM_TOKIO_ALIAS,
+    crate_features = [
+        "audit",
+        "unkept",
+    ],
+    crate_name = "local_cell",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    deps = _TEST_DEPS + all_crate_deps(normal = True),
+)
+
+cladefs_rust_library(
+    name = "local_cell_shuttle",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = MADSIM_TOKIO_ALIAS,
+    crate_features = [
+        "shuttle",
+        "audit",
+    ],
+    crate_name = "local_cell",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    deps = _TEST_DEPS + [
+        "@crates//:shuttle",
+    ] + all_crate_deps(normal = True),
+)
+
+cladefs_rust_test(
+    name = "local_cell_test",
+    aliases = MADSIM_TOKIO_ALIAS,
+    crate = ":local_cell_for_test",
+    crate_features = [
+        "audit",
+        "unkept",
+    ],
+    data = [
+        "//:Cargo.lock",
+        "//formats:all",
+    ],
+    isolated = True,
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    shard_count = 4,
+    timeout = "long",
+    deps = all_crate_deps(normal_dev = True),
+)
+
+cladefs_rust_test(
+    name = "local_cell_shuttle_lib_test",
+    aliases = MADSIM_TOKIO_ALIAS,
+    args = ["shuttle_tests::"],
+    crate = ":local_cell_shuttle",
+    crate_features = [
+        "shuttle",
+        "audit",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    tags = ["shuttle"],
+    deps = all_crate_deps(normal_dev = True),
+)
+
+cladefs_rust_test(
+    name = "shuttle_test",
+    srcs = glob(["tests/shuttle/**/*.rs"]),
+    aliases = MADSIM_TOKIO_ALIAS,
+    crate_root = "tests/shuttle/main.rs",
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+    tags = ["shuttle"],
+    deps = [
+        ":local_cell_shuttle",
+        "@crates//:shuttle",
+    ] + _TEST_DEPS + all_crate_deps(normal = True, normal_dev = True),
+)
+
+cladefs_rust_test(
+    name = "crash_test",
+    srcs = glob([
+        "tests/crash/**/*.rs",
+        "tests/common/**/*.rs",
+    ]),
+    aliases = MADSIM_TOKIO_ALIAS,
+    crate_root = "tests/crash/main.rs",
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+    deps = [
+        ":local_cell_for_test",
+    ] + _TEST_DEPS + all_crate_deps(normal = True, normal_dev = True),
+)
+
+cladefs_rust_test(
+    name = "madsim_test",
+    srcs = ["tests/madsim.rs"],
+    aliases = MADSIM_TOKIO_ALIAS,
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+    tags = ["madsim"],
+    target_compatible_with = select({
+        "//tools/bazel:madsim_enabled": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = [
+        ":local_cell_for_test",
+        "@crates//:madsim",
+    ] + _TEST_DEPS + all_crate_deps(normal = True, normal_dev = True),
+)
+
+[
+    cladefs_rust_test(
+        name = test_name + "_test",
+        srcs = ["tests/" + test_name + ".rs"] + glob(["tests/common/**/*.rs"]),
+        aliases = MADSIM_TOKIO_ALIAS,
+        crate_root = "tests/" + test_name + ".rs",
+        proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+        deps = [
+            ":local_cell_for_test",
+        ] + _TEST_DEPS + all_crate_deps(normal = True, normal_dev = True),
+    )
+    for test_name in [
+        "cell",
+        "corrupt",
+        "host",
+        "hot_path",
+        "replicated",
+        "reserve",
+    ]
+]

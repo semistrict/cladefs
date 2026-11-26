@@ -1,0 +1,197 @@
+# Copyright 2026 The cladefs Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+"""Native Bazel targets for guide/ (cladefs Flight School) via aspect_rules_js + rules_nodejs."""
+
+load("@aspect_rules_js//js:defs.bzl", "js_binary", "js_run_binary", "js_test")
+load("@guide_npm//:defs.bzl", "npm_link_all_packages")
+load("@guide_npm//guide:typescript/package_json.bzl", tsc_bin = "bin")
+load("@guide_npm//guide:vitest/package_json.bzl", vitest_bin = "bin")
+
+package(default_visibility = ["//visibility:public"])
+
+npm_link_all_packages(name = "node_modules")
+
+exports_files([
+    "index.html",
+    "package.json",
+    "pnpm-lock.yaml",
+    "pnpm-workspace.yaml",
+    "tsconfig.json",
+    "vite.config.ts",
+])
+
+filegroup(
+    name = "srcs",
+    srcs = glob(
+        [
+            "index.html",
+            "package.json",
+            "pnpm-lock.yaml",
+            "pnpm-workspace.yaml",
+            "tsconfig.json",
+            "vite.config.ts",
+            "src/**/*",
+            "tools/**/*",
+            "tests/**/*",
+            "fixtures/**/*",
+        ],
+        exclude = [
+            "node_modules/**",
+            "dist/**",
+            "dist-single/**",
+            "src/generated/**",
+        ],
+    ),
+)
+
+# -----------------------------------------------------------------------------
+# Native Node.js code/evidence/source generators (replacing `pnpm generate`)
+# -----------------------------------------------------------------------------
+js_binary(
+    name = "index_tool",
+    data = [
+        ":node_modules",
+        ":srcs",
+    ],
+    entry_point = "tools/index.ts",
+)
+
+js_binary(
+    name = "evidence_tool",
+    data = [
+        ":node_modules",
+        ":srcs",
+    ],
+    entry_point = "tools/evidence.ts",
+)
+
+js_binary(
+    name = "sources_tool",
+    data = [
+        ":node_modules",
+        ":srcs",
+    ],
+    entry_point = "tools/sources.ts",
+)
+
+js_run_binary(
+    name = "guide_index",
+    srcs = [
+        ":srcs",
+        "//:guide_repo_inputs",
+    ],
+    outs = [
+        "src/generated/meta.json",
+        "src/generated/symbols.json",
+    ],
+    copy_srcs_to_bin = False,
+    env = {
+        "CLADEFS_BUILD_COMMIT": "bazel-build",
+        "CLADEFS_FIRECRACKER_COMMIT": "bazel-build",
+        "CLADEFS_REPO": "../../..",
+    },
+    tool = ":index_tool",
+)
+
+js_run_binary(
+    name = "guide_evidence",
+    srcs = [
+        ":srcs",
+        "//:guide_repo_inputs",
+    ],
+    outs = [
+        "src/generated/evidence.json",
+    ],
+    copy_srcs_to_bin = False,
+    env = {
+        "CLADEFS_REPO": "../../..",
+    },
+    tool = ":evidence_tool",
+)
+
+js_run_binary(
+    name = "guide_sources",
+    srcs = [
+        ":guide_index",
+        ":srcs",
+        "//:guide_repo_inputs",
+    ],
+    outs = [
+        "src/generated/public/sources.json",
+        "src/generated/sources-inline.json",
+    ],
+    copy_srcs_to_bin = False,
+    env = {
+        "CLADEFS_REPO": "../../..",
+    },
+    out_dirs = [
+        "src/generated/public/source",
+    ],
+    tool = ":sources_tool",
+)
+
+# -----------------------------------------------------------------------------
+# Tests: content anchor verification, TypeScript typecheck, Vitest unit suite
+# -----------------------------------------------------------------------------
+js_test(
+    name = "check_test",
+    copy_data_to_bin = False,
+    data = [
+        ":node_modules",
+        ":srcs",
+        "//:guide_repo_inputs",
+    ],
+    entry_point = "tools/check.ts",
+    tags = ["guide"],
+)
+
+tsc_bin.tsc_test(
+    name = "tsc_test",
+    args = [
+        "--noEmit",
+        "-p",
+        ".",
+    ],
+    chdir = package_name(),
+    data = [
+        ":guide_evidence",
+        ":guide_index",
+        ":guide_sources",
+        ":node_modules",
+        ":srcs",
+    ],
+    tags = ["guide"],
+)
+
+vitest_bin.vitest_test(
+    name = "vitest_test",
+    args = ["run"],
+    chdir = package_name(),
+    copy_data_to_bin = False,
+    data = [
+        ":node_modules",
+        ":srcs",
+        "//:guide_repo_inputs",
+    ],
+    tags = ["guide"],
+)
+
+# -----------------------------------------------------------------------------
+# Production Vite bundle (`bazel build //guide:dist`)
+# -----------------------------------------------------------------------------
+js_run_binary(
+    name = "dist",
+    srcs = [
+        ":guide_evidence",
+        ":guide_index",
+        ":guide_sources",
+        ":node_modules",
+        ":srcs",
+    ],
+    args = ["dist"],
+    chdir = package_name(),
+    out_dirs = ["dist"],
+    tool = "//tools/bazel:vite_build_tool",
+)

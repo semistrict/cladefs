@@ -1,0 +1,29 @@
+# Copyright 2026 The cladefs Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//tools/bazel:rust.bzl", "cladefs_rust_binary", "cladefs_rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["Cargo.toml"])
+
+cladefs_rust_binary(
+    name = "runner",
+    srcs = glob(["src/**/*.rs"]),
+    target_compatible_with = ["@platforms//os:linux"],
+    deps = [
+        "//guest/tests/test_cases:test_cases_host",
+        "@crates//:anyhow",
+        "@crates//:serde_json",
+        "@guest_tests_crates//:clap",
+        "@guest_tests_crates//:nix",
+        "@guest_tests_crates//:tempdir",
+    ],
+)
+
+cladefs_rust_test(
+    name = "runner_test",
+    crate = ":runner",
+    target_compatible_with = ["@platforms//os:linux"],
+)

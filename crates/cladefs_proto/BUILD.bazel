@@ -1,0 +1,47 @@
+# Copyright 2026 The cladefs Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@crates//:defs.bzl", "all_crate_deps")
+load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
+load("//tools/bazel:rust.bzl", "cladefs_rust_library")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["Cargo.toml"])
+
+filegroup(
+    name = "crate_files",
+    srcs = glob(["Cargo.toml", "build.rs", "src/**/*.rs"]),
+)
+
+_PROTO_ALIASES = select({
+    "//tools/bazel:linux_or_madsim": {
+        "@crates//:tonic": "tonic",
+    },
+    "//conditions:default": {},
+})
+
+cargo_build_script(
+    name = "cladefs_proto_build_script",
+    srcs = ["build.rs"],
+    crate_root = "build.rs",
+    data = [
+        "//crates/cladefs/proto/cladefs/cladefsd/v1:cladefsd.proto",
+        "//crates/cladefs/proto/cladefs/mount/v1:mount.proto",
+        "//crates/cladefs/proto/cladefs/peer/v1:peer.proto",
+    ],
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(build_proc_macro = True),
+    deps = all_crate_deps(build = True),
+)
+
+cladefs_rust_library(
+    name = "cladefs_proto",
+    srcs = ["src/lib.rs"],
+    aliases = _PROTO_ALIASES,
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    deps = [
+        ":cladefs_proto_build_script",
+    ] + all_crate_deps(normal = True),
+)

@@ -4,8 +4,8 @@
 # Kind: concurrency
 # Features: shuttle
 # Killer: cache::shuttle_tests::evictions_race_page_ins_and_maps_in_any_order
---- a/crates/cladefs/src/cache.rs
-+++ b/crates/cladefs/src/cache.rs
+--- a/crates/cladefs_core/src/cache.rs
++++ b/crates/cladefs_core/src/cache.rs
 @@ -826,7 +826,7 @@
      Present(PartSlab),
      /// Being evicted, by the eviction holding the token, which holds the slab: unmapped from the

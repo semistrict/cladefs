@@ -1,0 +1,17 @@
+# Copyright 2026 The cladefs Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+"""Bazel targets for crates/fxfs/fuzz (libFuzzer targets, require nightly + sanitizer)."""
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "Cargo.toml",
+    "Cargo.lock",
+])
+
+filegroup(
+    name = "fuzz_targets",
+    srcs = glob(["fuzz_targets/**/*.rs"]),
+)

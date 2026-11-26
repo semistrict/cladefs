@@ -1,0 +1,15 @@
+# Copyright 2026 The cladefs Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@protobuf//bazel:proto_library.bzl", "proto_library")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["cladefsd.proto"])
+
+proto_library(
+    name = "cladefsd_proto",
+    srcs = ["cladefsd.proto"],
+    strip_import_prefix = "/crates/cladefs/proto",
+)

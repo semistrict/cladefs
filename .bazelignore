@@ -1,0 +1,7 @@
+target
+guest/tests/target
+guest/sim/build
+guide/node_modules
+guide/dist
+explainer/node_modules
+vendor/firecracker/build

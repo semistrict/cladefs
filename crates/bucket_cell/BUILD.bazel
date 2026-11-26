@@ -1,0 +1,165 @@
+# Copyright 2026 The cladefs Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@crates//:defs.bzl", "all_crate_deps")
+load("//tools/bazel:rust.bzl", "MADSIM_TOKIO_ALIAS", "cladefs_rust_binary", "cladefs_rust_library", "cladefs_rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["Cargo.toml"])
+
+filegroup(
+    name = "crate_files",
+    srcs = glob(["Cargo.toml", "src/**/*", "tests/**/*"], allow_empty = True),
+)
+
+_BASE_DEPS = [
+    "//crates/base32_id",
+    "//crates/formats",
+    "//crates/fprint",
+    "//crates/host_fs",
+    "//crates/storage_device",
+]
+
+_PROD_DEPS = _BASE_DEPS + [
+    "//crates/extent_frame",
+    "//crates/extent_keys",
+]
+
+_TEST_DEPS = _BASE_DEPS + [
+    "//crates/extent_frame:extent_frame_testing",
+    "//crates/extent_keys:extent_keys_testing",
+]
+
+cladefs_rust_library(
+    name = "bucket_cell",
+    srcs = glob(
+        ["src/**/*.rs"],
+        exclude = ["src/bin/**/*.rs"],
+    ),
+    aliases = MADSIM_TOKIO_ALIAS,
+    crate_features = ["full"],
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    deps = _PROD_DEPS + all_crate_deps(normal = True),
+)
+
+cladefs_rust_library(
+    name = "bucket_cell_keyless_gc",
+    srcs = glob(
+        ["src/**/*.rs"],
+        exclude = ["src/bin/**/*.rs"],
+    ),
+    aliases = MADSIM_TOKIO_ALIAS,
+    crate_features = ["keyless-gc"],
+    crate_name = "bucket_cell",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    deps = [
+        "//crates/base32_id",
+        "//crates/extent_frame:extent_frame_keyless",
+        "//crates/extent_keys:extent_keys_keyless",
+        "//crates/formats",
+        "//crates/fprint",
+        "//crates/storage_device",
+        "@crates//:bincode",
+        "@crates//:bytes",
+        "@crates//:fail",
+        "@crates//:futures",
+        "@crates//:imbl",
+        "@crates//:log",
+        "@crates//:prost",
+        "@crates//:rustc-hash",
+        "@crates//:serde",
+        "@crates//:sha2",
+        "@crates//:thiserror",
+    ],
+)
+
+cladefs_rust_library(
+    name = "bucket_cell_testing",
+    srcs = glob(
+        ["src/**/*.rs"],
+        exclude = ["src/bin/**/*.rs"],
+    ),
+    aliases = MADSIM_TOKIO_ALIAS,
+    crate_features = [
+        "full",
+        "testing",
+    ],
+    crate_name = "bucket_cell",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    deps = _TEST_DEPS + [
+        "@crates//:http-body-util",
+        "@crates//:hyper-util",
+    ] + all_crate_deps(normal = True),
+)
+
+cladefs_rust_binary(
+    name = "cladefs-gc",
+    srcs = ["src/bin/cladefs-gc.rs"],
+    aliases = MADSIM_TOKIO_ALIAS,
+    crate_features = ["full"],
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    deps = [":bucket_cell"] + _PROD_DEPS + all_crate_deps(normal = True),
+)
+
+cladefs_rust_binary(
+    name = "cladefs-gc-fill",
+    srcs = ["src/bin/cladefs-gc-fill.rs"],
+    aliases = MADSIM_TOKIO_ALIAS,
+    crate_features = ["full"],
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    deps = [":bucket_cell"] + _PROD_DEPS + all_crate_deps(normal = True),
+)
+
+cladefs_rust_test(
+    name = "bucket_cell_test",
+    aliases = MADSIM_TOKIO_ALIAS,
+    crate = ":bucket_cell_testing",
+    crate_features = [
+        "full",
+        "testing",
+    ],
+    data = [
+        "//:Cargo.lock",
+        "//formats:all",
+    ],
+    isolated = True,
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    shard_count = 4,
+    timeout = "long",
+    deps = [
+        "//crates/node_local",
+    ] + all_crate_deps(normal_dev = True),
+)
+
+cladefs_rust_test(
+    name = "gc_test",
+    srcs = ["tests/gc.rs"],
+    aliases = MADSIM_TOKIO_ALIAS,
+    data = [":cladefs-gc"],
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+    rustc_env = {
+        "CARGO_BIN_EXE_cladefs-gc": "$(rootpath :cladefs-gc)",
+    },
+    deps = [
+        ":bucket_cell_testing",
+        "//crates/node_local",
+    ] + _TEST_DEPS + all_crate_deps(normal = True, normal_dev = True),
+)
+
+cladefs_rust_test(
+    name = "madsim_test",
+    srcs = ["tests/madsim.rs"],
+    aliases = MADSIM_TOKIO_ALIAS,
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+    tags = ["madsim"],
+    target_compatible_with = select({
+        "//tools/bazel:madsim_enabled": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = [
+        ":bucket_cell_testing",
+        "//crates/node_local",
+    ] + _TEST_DEPS + all_crate_deps(normal = True, normal_dev = True),
+)

@@ -3,8 +3,8 @@
 # every tenant's VMs with it (TASK-149.17).
 # Kind: daemon crashed
 # Killer: cladefsd::tests::hostile::vm_processes_shrinking_their_memory_crash_nothing
---- a/crates/cladefs/src/slabs/object.rs
-+++ b/crates/cladefs/src/slabs/object.rs
+--- a/crates/cladefs_core/src/slabs/object.rs
++++ b/crates/cladefs_core/src/slabs/object.rs
 @@ -202,7 +202,7 @@
      }
      // SAFETY: `fd` was just created and is owned here.

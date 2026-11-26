@@ -2,8 +2,8 @@
 # uncounted by the connection's room: 768 MiB held of 16 (TASK-149.17).
 # Kind: memory
 # Killer: cladefsd::tests::hostile::what_requests_hold_is_within_the_credit
---- a/crates/cladefs/src/cladefsd/codec.rs
-+++ b/crates/cladefs/src/cladefsd/codec.rs
+--- a/crates/cladefs_wire/src/codec.rs
++++ b/crates/cladefs_wire/src/codec.rs
 @@ -458,7 +458,9 @@
                  let (commit, has_root) = decode_commit_flags(flags, Some(COMMIT_LOCAL))?;
                  let root = if has_root {

@@ -1,0 +1,37 @@
+# Copyright 2026 The cladefs Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("//tools/bazel:rust.bzl", "cladefs_rust_library", "cladefs_rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["Cargo.toml"])
+
+filegroup(
+    name = "crate_files",
+    srcs = glob(["Cargo.toml", "src/**/*.rs"]),
+)
+
+cladefs_rust_library(
+    name = "fuchsia_async",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
+    crate_name = "fuchsia_async",
+    proc_macro_deps = [
+        "//crates/fuchsia-async-macro:fuchsia_async_macro",
+    ] + all_crate_deps(proc_macro = True),
+    deps = all_crate_deps(normal = True) + select({
+        "//tools/bazel:madsim_enabled": ["@crates//:madsim"],
+        "//conditions:default": [],
+    }),
+)
+
+cladefs_rust_test(
+    name = "fuchsia_async_test",
+    aliases = aliases(normal_dev = True, proc_macro_dev = True),
+    crate = ":fuchsia_async",
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    deps = all_crate_deps(normal_dev = True),
+)

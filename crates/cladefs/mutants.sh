@@ -89,8 +89,13 @@ for name in "${names[@]}"; do
         case $status in 1) status=100 ;; 100) status=2 ;; esac
     else
         features=$(sed -n 's/^# Features: //p' "$patch")
+        pkg=cladefs_core
+        if [[ $killer == cladefsd::* ]]; then
+            pkg=cladefsd
+            killer=${killer#cladefsd::}
+        fi
         patch_run "$patch" "$log" env CLADEFS_HOSTILE_CASES="$cases" PROPTEST_MAX_SHRINK_ITERS=0 \
-            cargo nextest run -p cladefs --lib ${features:+--features "$features"} --no-fail-fast \
+            cargo nextest run -p "$pkg" --lib ${features:+--features "$features"} --no-fail-fast \
             --run-ignored all -E "test(=$killer)"
         status=$?
     fi

@@ -2,8 +2,8 @@
 # was every tenant's once (TASK-79.17).
 # Kind: another tenant's
 # Killer: cladefsd::tests::hostile::a_compromised_vm_process_harms_no_tenant_beside_it
---- a/crates/cladefs/src/cladefsd/server.rs
-+++ b/crates/cladefs/src/cladefsd/server.rs
+--- a/crates/cladefsd/src/server.rs
++++ b/crates/cladefsd/src/server.rs
 @@ -1743,7 +1743,7 @@ impl Connection {
      /// it says ([`Opened`]): its tenant's arena, and the default one, each read-only (TASK-43,
      /// doc-26); the default tenant's as any other's (TASK-79.17).

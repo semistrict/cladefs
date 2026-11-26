@@ -3,8 +3,8 @@
 # before TASK-364, is refused as another tenant's cell.)
 # Kind: another tenant's
 # Killer: cladefsd::tests::hostile::a_compromised_vm_process_harms_no_tenant_beside_it
---- a/crates/cladefs/src/cladefsd/server.rs
-+++ b/crates/cladefs/src/cladefsd/server.rs
+--- a/crates/cladefsd/src/server.rs
++++ b/crates/cladefsd/src/server.rs
 @@ -510,7 +510,7 @@
      /// `EACCES` unless it is where they name cells ([`CellDirs`]).
      fn holds(&self, path: &Path) -> Result<(), Errno> {

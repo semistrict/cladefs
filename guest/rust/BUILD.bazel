@@ -1,0 +1,24 @@
+# Copyright 2026 The cladefs Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "Cargo.toml",
+    "Cargo.lock",
+    "rust-toolchain.toml",
+])
+
+filegroup(
+    name = "all_sources",
+    srcs = glob([
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+    ]) + [
+        "//guest/rust/cladefs-linux:srcs",
+        "//guest/rust/linux-rt:srcs",
+        "//guest/rust/std:srcs",
+    ],
+)

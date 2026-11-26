@@ -1,0 +1,89 @@
+# Copyright 2026 The cladefs Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@gazelle//:def.bzl", "gazelle")
+
+exports_files([
+    "Cargo.toml",
+    "Cargo.lock",
+    "clippy.toml",
+    "rustfmt.toml",
+    "deny.toml",
+    "rust-toolchain.toml",
+])
+
+# gazelle:prefix github.com/semistrict/cladefs
+gazelle(name = "gazelle")
+
+# Convenience release binaries bundle.
+filegroup(
+    name = "release_bins",
+    srcs = [
+        "//crates/bucket_cell:cladefs-gc",
+        "//crates/cladefs:cladefs-mount",
+        "//crates/cladefs:cladefsctl",
+        "//crates/cladefs:cladefsd",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+# Firecracker VMM + Jailer binaries (Linux only; builds static musl with --config=musl-*).
+filegroup(
+    name = "vmm_bins",
+    srcs = [
+        "//vendor:firecracker",
+        "//vendor:jailer",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+# Repository files indexed and verified by //guide (Flight School).
+filegroup(
+    name = "guide_repo_inputs",
+    srcs = glob([
+        "docs/**/*.md",
+        "dead-ends/**/*.md",
+        "guest/mutants/**/*",
+    ]) + [
+        "//crates/base32_id:crate_files",
+        "//crates/block_device:crate_files",
+        "//crates/bucket_cell:crate_files",
+        "//crates/cladefs:crate_files",
+        "//crates/cladefs_core:crate_files",
+        "//crates/cladefs_fs:crate_files",
+        "//crates/cladefs_proto:crate_files",
+        "//crates/cladefs_wire:crate_files",
+        "//crates/cladefsd:crate_files",
+        "//crates/cladefs-examples:crate_files",
+        "//crates/extent_frame:crate_files",
+        "//crates/extent_keys:crate_files",
+        "//crates/formats:crate_files",
+        "//crates/fprint:crate_files",
+        "//crates/fprint-macros:crate_files",
+        "//crates/fuchsia-async:crate_files",
+        "//crates/fuchsia-async-macro:crate_files",
+        "//crates/fuchsia-sync:crate_files",
+        "//crates/fxfs:crate_files",
+        "//crates/fxfs-automount:crate_files",
+        "//crates/fxfs-posix:crate_files",
+        "//crates/fxfs-sim-diff:crate_files",
+        "//crates/fxfs_macros:crate_files",
+        "//crates/gc_wasm:crate_files",
+        "//crates/host_fs:crate_files",
+        "//crates/local_cell:crate_files",
+        "//crates/node_local:crate_files",
+        "//crates/sqlite_cladefs:crate_files",
+        "//crates/storage_device:crate_files",
+        "//crates/storage_units:crate_files",
+        "//crates/storage_xts:crate_files",
+        "//crates/virtio_extent:crate_files",
+        "//guest/linux:all_sources",
+        "//guest/rust:all_sources",
+        "//guest/sim:all_files",
+        "//specs:all_files",
+        "//vendor:firecracker.base",
+        "//vendor:firecracker_extent_srcs",
+    ],
+    visibility = ["//visibility:public"],
+)
