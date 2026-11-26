@@ -49,6 +49,8 @@ mod test_fxfs_guest_memory_cell;
 use test_fxfs_guest_memory_cell::TestFxfsGuestMemoryCell;
 mod test_fxfs_guest_park_resume;
 use test_fxfs_guest_park_resume::TestFxfsGuestParkResume;
+mod test_fxfs_guest_live_migration;
+use test_fxfs_guest_live_migration::TestFxfsGuestLiveMigration;
 // cladefs: what cladefsd asks of a disk it shares with many VMs and the bucket (TASK-310).
 mod test_fxfs_guest_shared_disk;
 use test_fxfs_guest_shared_disk::TestFxfsGuestSharedDisk;
@@ -613,6 +615,11 @@ pub fn test_cases() -> Vec<TestCase> {
             "fxfs-guest-park-resume-vsock-dax",
             &[Tag::Kernel, Tag::Nightly],
             Box::new(TestFxfsGuestParkResume),
+        ),
+        TestCase::new(
+            "fxfs-guest-live-migration",
+            &[Tag::Kernel, Tag::Nightly],
+            Box::new(TestFxfsGuestLiveMigration),
         ),
         TestCase::new(
             "fxfs-guest-suspend-dax",

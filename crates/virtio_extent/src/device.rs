@@ -16,7 +16,7 @@ use zerocopy::FromZeros;
 
 use crate::config::{Config, private_max};
 use crate::notices::{ConfigInterrupt, Notices};
-use crate::persist::{ConfigState, MappingState, Snapshot, SnapshotError, State};
+use crate::persist::{ConfigState, MappingState, Snapshot, SnapshotError, SnapshotMode, State};
 use crate::protocol::{
     Bounds, ConfigSpace, DAX_WINDOW_SHM_ID, MAX_EXTENT, MAX_ROOT, MAX_TAG_LEN, MAX_TRANSFER,
     QUEUE_SIZE, VIRTIO_EXTENT_F_STATS, VIRTIO_EXTENT_VERSION,
@@ -29,11 +29,16 @@ use crate::workers::{RequestQueue, WorkerQueue, Workers};
 /// rather than going on with every request failing (TASK-50.2). Firecracker exits, saying why.
 pub type OnLost = Arc<dyn Fn() + Send + Sync>;
 
-/// Errors making a device.
+/// Errors making or reopening a device.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("Cannot open the cell {0}: {1:#}")]
     Cell(String, cladefs::Error),
+    #[error(
+        "Extent device {id}: opened cell {found:x}, expected cell {expected:x} (the path does not \
+         hold the migrated cell)"
+    )]
+    CellMismatch { id: String, expected: u64, found: u64 },
     #[error("The tag {0:?} is longer than 36 bytes")]
     TagTooLong(String),
     #[error("Cannot make the DAX window: {0}")]
@@ -44,6 +49,27 @@ pub enum Error {
     WindowNotSaved(String),
     #[error("The extent device {0} has a DAX window, which cannot take its guest's faults: {1:#}")]
     Userfaultfd(String, cladefs::Error),
+    #[error("Extent device {0}: recreating its DAX window after reopen: {1:#}")]
+    ReopenWindow(String, cladefs::Error),
+    #[error("Extent device {0}: remapping its DAX window after reopen: {1}")]
+    ReopenMappings(String, cladefs::Errno),
+}
+
+/// Errors releasing a paused device's cell ([`Device::release_cell`]).
+#[derive(Debug, thiserror::Error)]
+pub enum ReleaseError {
+    #[error(
+        "Extent device {0}: its DAX window holds {1} private pages, whose bytes no extent holds \
+         (sync or freeze the guest's filesystem before releasing its cell)"
+    )]
+    Private(String, u64),
+    #[error(
+        "Extent device {0}: its cell has uncommitted open extents (sync or freeze the guest's \
+         filesystem before releasing its cell)"
+    )]
+    NotQuiescent(String),
+    #[error("Extent device {0}: cannot list its DAX window's mappings before release: {1}")]
+    Mappings(String, cladefs::Errno),
 }
 
 /// Errors activating a device.
@@ -76,8 +102,14 @@ enum Making<'a> {
 pub struct Device {
     config: Config,
     // The cell before the window, whose host memory the cell's fault thread serves: the cell
-    // is dropped first.
-    cell: Arc<CellClient>,
+    // is dropped first. `None` while the cell is released on a paused VM for live-migration
+    // hand-over (`Device::release_cell`).
+    cell: Option<Arc<CellClient>>,
+    /// The opened cell's `(tenant, cell)` ID, kept so `reopen_cell` can reopen managed JBOD cells
+    /// that were initially opened with a `<tenant>/0` create/fork sentinel.
+    cell_id: cladefs::CellId,
+    /// Callback to stop the VM if the extent daemon goes; kept for `reopen_cell`.
+    on_lost: OnLost,
     window: Option<WindowMemory>,
     /// Whether the cell's window is created, which it is on the first activation.
     window_created: bool,
@@ -92,6 +124,9 @@ pub struct Device {
     /// cladefs: the window's mappings to map again as the window is created: those of the snapshot
     /// the device was restored from.
     mappings: Vec<WindowMapping>,
+    /// Window mappings captured when the cell was released (`Device::release_cell`), restored if
+    /// `Device::reopen_cell` reopens the cell after a migration abort.
+    released_mappings: Option<Vec<WindowMapping>>,
 }
 
 impl std::fmt::Debug for Device {
@@ -176,6 +211,19 @@ impl Device {
             .and_then(|daemon| match &making {
                 Making::Boot => daemon.open(&config.path_on_host, config.capacity),
                 Making::Restore { snapshot, .. } => match snapshot.target {
+                    cladefs::CellSnapshot::Version(version) if version.version == 0 => {
+                        let target = if config
+                            .path_on_host
+                            .parse::<cladefs::CellId>()
+                            .is_ok_and(|c| c.id == 0)
+                            && version.cell != 0
+                        {
+                            cladefs::CellId { tenant: version.tenant, id: version.cell }.to_string()
+                        } else {
+                            config.path_on_host.clone()
+                        };
+                        daemon.open_existing(&target)
+                    }
                     cladefs::CellSnapshot::Version(version) => {
                         daemon.open_forked(&config.path_on_host, version, config.capacity)
                     }
@@ -189,6 +237,18 @@ impl Device {
                 },
             })
             .map_err(|err| Error::Cell(config.path_on_host.clone(), err))?;
+        if let Making::Restore { snapshot, .. } = &making
+            && let cladefs::CellSnapshot::Version(version) = snapshot.target
+            && version.version == 0
+            && version.cell != 0
+            && cell.cell() != version.cell
+        {
+            return Err(Error::CellMismatch {
+                id: config.id,
+                expected: version.cell,
+                found: cell.cell(),
+            });
+        }
         config_space.cell = cell.cell().to_le();
         let notices = Arc::new(Notices::default());
         let info =
@@ -216,9 +276,12 @@ impl Device {
             None => None,
         };
 
+        let cell_id = cladefs::CellId { tenant: cell.tenant(), id: cell.cell() };
         Ok(Self {
             config,
-            cell: Arc::new(cell),
+            cell: Some(Arc::new(cell)),
+            cell_id,
+            on_lost,
             window,
             window_created: false,
             prefault: None,
@@ -226,6 +289,7 @@ impl Device {
             notices,
             snapshot: None,
             mappings: Vec::new(),
+            released_mappings: None,
         })
     }
 
@@ -271,9 +335,14 @@ impl Device {
         config.read(offset, data);
     }
 
-    /// Its cell.
+    /// Its cell (panics if called while released; callers check [`Self::is_cell_released`]).
     fn cell(&self) -> &Arc<CellClient> {
-        &self.cell
+        self.cell.as_ref().expect("extent device cell is open")
+    }
+
+    /// Whether the device's cell has been released on a paused VM ([`Self::release_cell`]).
+    pub fn is_cell_released(&self) -> bool {
+        self.cell.is_none()
     }
 
     /// The requests of one of its queues, served with its cell, while the device is activated:
@@ -338,7 +407,7 @@ impl Device {
         // cladefs: it copies on write, of `private_max` pages at most (backlog doc-13).
         let private_max = u64::from_le(self.config_space.private_max);
         // SAFETY: The cell is dropped before the window, as the fields are in that order.
-        unsafe { window.create(&self.cell, self.prefault.clone(), private_max) }?;
+        unsafe { window.create(self.cell(), self.prefault.clone(), private_max) }?;
         self.window_created = true;
         Ok(())
     }
@@ -362,17 +431,29 @@ impl Device {
         Ok(())
     }
 
-    /// cladefs: takes a snapshot of the device's cell, for a snapshot of the VM, paused, whose
-    /// guest's filesystem is frozen, with nothing open (TASK-39.1): `quiesce` has the VMM's
-    /// workers serve the requests they took and stop, as they do for the snapshot, so that none
-    /// changes the window meanwhile; then a version of the cell is made, which restores
-    /// fork, and the window's mappings recorded, which [`Device::state`] says. cladefs: not while
-    /// the window holds private pages, once the workers stopped, whose bytes no extent holds: a VM
-    /// restored from the version would read their sources' old bytes (TASK-203, doc-26). The
-    /// guest's freeze writes them back and rebinds them first, so none is left but one it couldn't.
+    /// cladefs: takes a versioned snapshot of the device's cell ([`SnapshotMode::Versioned`]).
     pub fn take_snapshot(&mut self, quiesce: impl FnOnce()) -> Result<(), SnapshotError> {
+        self.take_snapshot_with(SnapshotMode::Versioned, quiesce)
+    }
+
+    /// cladefs: takes a snapshot of the device's cell according to `mode`:
+    /// - [`SnapshotMode::Versioned`]: requires the guest's filesystem to be frozen, stops workers
+    ///   via `quiesce`, verifies no private DAX pages exist, makes a cell version, and records the
+    ///   window's mappings.
+    /// - [`SnapshotMode::Migration`]: skips the guest frozen check and makes no cell version
+    ///   (`version.version == 0`, recording `version.cell` for restore verification), stops workers
+    ///   via `quiesce`, verifies no private DAX pages and no uncommitted open extents exist, and
+    ///   records the window's mappings for a cell moved whole via `HandOverCell`.
+    pub fn take_snapshot_with(
+        &mut self,
+        mode: SnapshotMode,
+        quiesce: impl FnOnce(),
+    ) -> Result<(), SnapshotError> {
         let id = self.config.id.clone();
-        if !self.notices.frozen() {
+        if self.cell.is_none() {
+            return Err(SnapshotError::Released(id));
+        }
+        if mode == SnapshotMode::Versioned && !self.notices.frozen() {
             return Err(SnapshotError::NotFrozen(id));
         }
         quiesce();
@@ -380,20 +461,125 @@ impl Device {
         if private > 0 {
             return Err(SnapshotError::Private(id, private));
         }
-        let target = self
-            .cell()
-            .snapshot_cell()
-            .map_err(|errno| SnapshotError::Version(id.clone(), errno))?;
-        let mappings = match self.cell().window_mappings() {
-            Ok(mappings) => mappings,
-            Err(errno) => {
-                if let cladefs::CellSnapshot::Version(version) = target {
-                    self.drop_version(version.version);
-                }
-                return Err(SnapshotError::Mappings(id, errno));
+        match mode {
+            SnapshotMode::Versioned => {
+                let target = self
+                    .cell()
+                    .snapshot_cell()
+                    .map_err(|errno| SnapshotError::Version(id.clone(), errno))?;
+                let mappings = match self.cell().window_mappings() {
+                    Ok(mappings) => mappings,
+                    Err(errno) => {
+                        if let cladefs::CellSnapshot::Version(version) = target {
+                            self.drop_version(version.version);
+                        }
+                        return Err(SnapshotError::Mappings(id, errno));
+                    }
+                };
+                self.snapshot = Some(Snapshot { target, mappings });
             }
+            SnapshotMode::Migration => {
+                let mappings = self.cell().window_mappings_quiescent().map_err(|errno| {
+                    if errno == cladefs::Errno::EBUSY {
+                        SnapshotError::NotQuiescent(id.clone())
+                    } else {
+                        SnapshotError::Mappings(id.clone(), errno)
+                    }
+                })?;
+                let target = cladefs::CellSnapshot::Version(cladefs::CellVersion {
+                    tenant: self.cell().tenant(),
+                    cell: self.cell().cell(),
+                    version: 0,
+                });
+                self.snapshot = Some(Snapshot { target, mappings });
+            }
+        }
+        Ok(())
+    }
+
+    /// cladefs: closes the device's cell connection on a paused VM so `HandOverCell` can acquire
+    /// the cell alone, keeping the VM process and its DAX window memory reservation intact so
+    /// [`Device::reopen_cell`] can take the cell back if migration aborts. Idempotent if already
+    /// released. Refuses if private DAX pages or uncommitted open extents exist.
+    pub fn release_cell(&mut self, quiesce: impl FnOnce()) -> Result<(), ReleaseError> {
+        if self.cell.is_none() {
+            return Ok(());
+        }
+        quiesce();
+        let id = self.config.id.clone();
+        let private = self.cell().private_pages();
+        if private > 0 {
+            return Err(ReleaseError::Private(id, private));
+        }
+        let mappings = self.cell().window_mappings_quiescent().map_err(|errno| {
+            if errno == cladefs::Errno::EBUSY {
+                ReleaseError::NotQuiescent(id.clone())
+            } else {
+                ReleaseError::Mappings(id.clone(), errno)
+            }
+        })?;
+        if self.window_created {
+            self.released_mappings = Some(mappings);
+            self.window_created = false;
+        }
+        // Drops the last `Arc<CellClient>` (workers were stopped by `quiesce`), synchronously
+        // releasing the uffd stage, joining the fault thread, and shutting down the daemon socket
+        // without firing `on_lost`.
+        drop(self.cell.take());
+        Ok(())
+    }
+
+    /// cladefs: reopens the device's cell on a paused VM after [`Device::release_cell`] (e.g., on
+    /// migration abort), recreating its DAX window and restoring the window mappings captured on
+    /// release. Idempotent if already open. On error, keeps the cell released and preserves the
+    /// captured mappings so the caller may retry.
+    pub fn reopen_cell(&mut self) -> Result<(), Error> {
+        if self.cell.is_some() {
+            return Ok(());
+        }
+        let target = if self.config.path_on_host.parse::<cladefs::CellId>().is_ok_and(|c| c.id == 0)
+        {
+            self.cell_id.to_string()
+        } else {
+            self.config.path_on_host.clone()
         };
-        self.snapshot = Some(Snapshot { target, mappings });
+        let cell = connect(&self.config.cladefsd_socket, &self.config.id, &self.on_lost)
+            .and_then(|daemon| daemon.open_existing(&target))
+            .map_err(|err| Error::Cell(target.clone(), err))?;
+        let expected = u64::from_le(self.config_space.cell);
+        if cell.cell() != expected {
+            return Err(Error::CellMismatch {
+                id: self.config.id.clone(),
+                expected,
+                found: cell.cell(),
+            });
+        }
+        let info =
+            cell.info().map_err(|err| Error::Cell(self.config.path_on_host.clone(), err.into()))?;
+        self.notices.resizing.opened(info.capacity);
+        let changes = self.notices.clone();
+        cell.on_capacity(move |capacity, ask| changes.resizing.changed(capacity, ask));
+        hear_stats_asks(&cell, &self.notices);
+        self.cell = Some(Arc::new(cell));
+        if let Some(mappings) = self.released_mappings.take() {
+            let result = self
+                .create_dax_window()
+                .map_err(|err| Error::ReopenWindow(self.config.id.clone(), err))
+                .and_then(|()| {
+                    if mappings.is_empty() {
+                        return Ok(());
+                    }
+                    self.cell()
+                        .map_many(&mappings)
+                        .map_err(|errno| Error::ReopenMappings(self.config.id.clone(), errno))
+                });
+            if let Err(err) = result {
+                drop(self.cell.take());
+                self.window_created = false;
+                self.released_mappings = Some(mappings);
+                return Err(err);
+            }
+        }
         Ok(())
     }
 
@@ -404,7 +590,10 @@ impl Device {
     /// Host-local ephemeral snapshots make no bucket version, so dropping them is local-only.
     pub fn drop_snapshot(&mut self) {
         let Some(snapshot) = self.snapshot.take() else { return };
-        if let cladefs::CellSnapshot::Version(version) = snapshot.target {
+        if let cladefs::CellSnapshot::Version(version) = snapshot.target
+            && version.version != 0
+            && self.cell.is_some()
+        {
             self.drop_version(version.version);
         }
     }

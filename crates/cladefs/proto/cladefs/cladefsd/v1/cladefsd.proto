@@ -298,6 +298,12 @@ service Cladefsd {
   // Updates per-disk governance (hard cap, part-cache cap, headroom, dirty budget, placement mode)
   // live at runtime for one managed disk identified by its configured `id` (hotbed question 547).
   rpc SetDiskGovernance(SetDiskGovernanceRequest) returns (SetDiskGovernanceResponse);
+  // Waits on the target daemon until an incoming live migration hand-over for `(tenant, cell)` is
+  // accepted and ready to open, or fails (refused, aborted, idle-reaped, or superseded). Returns at
+  // once if `(tenant, cell)` is already present locally with no migration for it under way, or if
+  // the named migration has already reached a terminal outcome. Respects caller cancellation and
+  // deadlines, and returns UNAVAILABLE if the daemon begins draining.
+  rpc WaitHandOver(WaitHandOverRequest) returns (WaitHandOverResponse);
 }
 
 // A live migration of a cell to begin. The target daemon chooses its own managed JBOD disk.
@@ -441,6 +447,28 @@ message SetDiskGovernanceRequest {
 // Per-disk governance updated.
 message SetDiskGovernanceResponse {}
 
+// Waits for an incoming migration hand-over of `(tenant, cell)` on this target daemon.
+message WaitHandOverRequest {
+  // The migrating cell's tenant ID.
+  uint64 tenant = 1;
+  // The migrating cell's ID.
+  uint64 cell = 2;
+  // Optional migration ID (from MigrateCellResponse.migration). When 0, waits for any incoming
+  // migration of `(tenant, cell)` (or returns immediately if the cell is already present locally
+  // with no active migration). When non-zero, waits specifically for that migration of the cell.
+  uint64 migration = 3;
+}
+
+// An incoming migration hand-over accepted on this target daemon.
+message WaitHandOverResponse {
+  // The migration ID that completed, or 0 if the cell was already present before this daemon
+  // observed a migration for it.
+  uint64 migration = 1;
+  // The cell's tenant ID.
+  uint64 tenant = 2;
+  // The cell's ID.
+  uint64 cell = 3;
+}
 // A host's incarnation to decommission.
 message DecommissionHostRequest {
   // The incarnation of the host's ephemeral cells' directory (CLADEFSD_EPHEMERAL).
@@ -622,13 +650,15 @@ message ForkCellRequest {
   uint64 tenant = 7;
   // The source cell's ID.
   uint64 cell = 8;
-  // Whether the fork is an ephemeral cell (backlog doc-25): kept on the daemon's host alone, never
-  // uploaded, lost with the host's disk, with no versions of its own. Of `version` alone
-  // (INVALID_ARGUMENT otherwise); refused by a daemon keeping no ephemeral cells (ENOTSUP).
-  bool ephemeral = 9;
+  bool ephemeral = 9 [deprecated = true];
   // Optional destination tenant for the forked cell; unset or 0 inherits the source cell's tenant.
   // Cross-tenant forks of a non-default-tenant cell require a shared version (PERMISSION_DENIED).
   optional uint64 target_tenant = 10;
+  // Whether the fork is a persistent (bucket-backed) cell. Defaults to true when unset; set to
+  // false for an ephemeral cell (backlog doc-25): kept on the daemon's host alone, never uploaded,
+  // lost with the host's disk, with no versions of its own. Of `version` alone
+  // (INVALID_ARGUMENT otherwise); refused by a daemon keeping no ephemeral cells (ENOTSUP).
+  optional bool persistent = 11;
 }
 
 // The fork made.

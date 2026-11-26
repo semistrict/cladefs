@@ -21,6 +21,7 @@ cladefs_core.workspace = true
 event-listener.workspace = true
 fail = "0.5.1"
 futures.workspace = true
+host_fs.workspace = true
 libc.workspace = true
 log.workspace = true
 pin-project-lite.workspace = true

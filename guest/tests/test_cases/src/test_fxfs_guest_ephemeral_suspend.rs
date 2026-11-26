@@ -175,7 +175,7 @@ mod host {
                         tenant: base.tenant,
                         cell: base.cell,
                         version: base_ver.version,
-                        ephemeral: true,
+                        persistent: Some(false),
                         ..Default::default()
                     })
                     .await

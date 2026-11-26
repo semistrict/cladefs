@@ -484,6 +484,21 @@ impl From<&State> for Snapshot {
     }
 }
 
+/// How a snapshot of an extent-store device is taken ([`Device::take_snapshot_with`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SnapshotMode {
+    /// Normal forkable VM snapshot: requires the guest's filesystem to be frozen
+    /// (`VIRTIO_EXTENT_T_FREEZE`), checks that no private DAX pages remain, and makes a new cell
+    /// version that restores fork from.
+    #[default]
+    Versioned,
+    /// Live-migration snapshot: skips the guest frozen check and makes no cell version
+    /// (`version.version == 0`, keeping `version.cell` for restore verification), recording the
+    /// DAX window's mappings for a cell moved whole via `HandOverCell`. Still refuses if private
+    /// DAX pages or uncommitted open extents exist, which would be lost when releasing the cell.
+    Migration,
+}
+
 /// Errors taking a snapshot of a device (TASK-39.1).
 #[derive(Debug, thiserror::Error)]
 pub enum SnapshotError {
@@ -492,6 +507,13 @@ pub enum SnapshotError {
          snapshot, and thaw it after)"
     )]
     NotFrozen(String),
+    #[error("Extent device {0}: its cell is currently released (reopen it first)")]
+    Released(String),
+    #[error(
+        "Extent device {0}: its cell has uncommitted open extents (sync or freeze the guest's \
+         filesystem before taking a migration snapshot)"
+    )]
+    NotQuiescent(String),
     #[error("Extent device {0}: cannot make a version of its cell: {1}")]
     Version(String, cladefs::Errno),
     #[error("Extent device {0}: cannot list its DAX window's mappings: {1}")]

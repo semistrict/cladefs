@@ -37,6 +37,7 @@
 //! cladefsctl set-peers [--bucket URL] [ADDRESS...]
 //! cladefsctl migrate TENANT/CELL PEER
 //! cladefsctl hand-over [--token TOKEN] TENANT/CELL
+//! cladefsctl wait-hand-over [--migration ID] TENANT/CELL
 //! cladefsctl abort-migration TENANT/CELL
 //! cladefsctl memory-limit [--tenant TENANT] BYTES|none
 //! cladefsctl memory-weight TENANT WEIGHT
@@ -203,7 +204,8 @@
 //! the cell TENANT/CELL, ephemeral or of the bucket, to the daemon whose peer address is PEER, and
 //! prints `migration ID` (`MigrateCell`); `hand-over` hands the cell over to its migration's
 //! target, a cell of the bucket placed there at the fencing token TOKEN if given
-//! (`HandOverCell`); `abort-migration` ends its
+//! (`HandOverCell`); `wait-hand-over` waits on the target daemon until an incoming hand-over of
+//! TENANT/CELL is accepted or fails (`WaitHandOver`); `abort-migration` ends its
 //! migration, the cell then free to migrate again (`AbortMigration`). `memory-limit` limits the memory the daemon holds extents' pages in
 //! to BYTES, or lifts the limit with `none` (`SetMemoryLimit`); `memory-weight` weighs a tenant's
 //! memory against the others' (`SetMemoryWeight`); `in-flight` sets the bytes in flight a tenant's
@@ -542,6 +544,7 @@ mod cli {
          cladefsctl set-peers [--bucket URL] [ADDRESS...] | \
          cladefsctl migrate TENANT/CELL PEER | \
          cladefsctl hand-over [--token TOKEN] TENANT/CELL | \
+         cladefsctl wait-hand-over [--migration ID] TENANT/CELL | \
          cladefsctl abort-migration TENANT/CELL | \
          cladefsctl memory-limit [--tenant TENANT] BYTES|none | \
          cladefsctl memory-weight TENANT WEIGHT | \
@@ -758,6 +761,12 @@ mod cli {
         HandOver {
             cell: cladefs::CellId,
             token: Option<u64>,
+        },
+        /// cladefs: waits on the target daemon until an incoming hand-over of `cell` is accepted
+        /// or fails (`WaitHandOver`).
+        WaitHandOver {
+            cell: cladefs::CellId,
+            migration: u64,
         },
         /// cladefs: a cell's migration ended (board 8577).
         AbortMigration {
@@ -1231,6 +1240,13 @@ mod cli {
                 ["hand-over", "--token", token, cell] => {
                     Self::HandOver { cell: parse_cell(cell)?, token: Some(number("TOKEN", token)?) }
                 }
+                ["wait-hand-over", cell] => {
+                    Self::WaitHandOver { cell: parse_cell(cell)?, migration: 0 }
+                }
+                ["wait-hand-over", "--migration", migration, cell] => Self::WaitHandOver {
+                    cell: parse_cell(cell)?,
+                    migration: number("MIGRATION", migration)?,
+                },
                 ["abort-migration", cell] => Self::AbortMigration { cell: parse_cell(cell)? },
                 ["memory-limit", ref rest @ ..] => {
                     let (tenant, bytes) = of_tenant(rest)?;
@@ -1455,8 +1471,14 @@ mod cli {
                 }
                 Self::ForkVersion { from, ephemeral, target_tenant } => {
                     let cladefs::CellVersion { tenant, cell, version } = from;
-                    let request =
-                        ForkCellRequest { version, tenant, cell, ephemeral, target_tenant };
+                    let request = ForkCellRequest {
+                        version,
+                        tenant,
+                        cell,
+                        target_tenant,
+                        persistent: Some(!ephemeral),
+                        ..Default::default()
+                    };
                     let made = call!(
                         format!("forking version {version:x} of cell {cell:x}"),
                         fork_cell,
@@ -1622,6 +1644,17 @@ mod cli {
                 Self::HandOver { cell, token } => {
                     let request = HandOverCellRequest { tenant: cell.tenant, cell: cell.id, token };
                     call!(format!("handing cell {cell} over"), hand_over_cell, request);
+                }
+                Self::WaitHandOver { cell, migration } => {
+                    let request =
+                        WaitHandOverRequest { tenant: cell.tenant, cell: cell.id, migration };
+                    let ready = call!(
+                        format!("waiting for a hand-over of cell {cell}"),
+                        wait_hand_over,
+                        request
+                    );
+                    println!("migration {}", ready.migration);
+                    println!("{}", cladefs::CellId { tenant: ready.tenant, id: ready.cell });
                 }
                 Self::AbortMigration { cell } => {
                     let request = AbortMigrationRequest { tenant: cell.tenant, cell: cell.id };
@@ -1883,9 +1916,10 @@ mod cli {
                 Self::Cells { .. } => Some("the cells VM processes have open are"),
                 Self::Counters { .. } => Some("its counters are"),
                 Self::SetPeers { .. } => Some("its peers are"),
-                Self::Migrate { .. } | Self::HandOver { .. } | Self::AbortMigration { .. } => {
-                    Some("migrations are")
-                }
+                Self::Migrate { .. }
+                | Self::HandOver { .. }
+                | Self::WaitHandOver { .. }
+                | Self::AbortMigration { .. } => Some("migrations are"),
                 Self::MemoryLimit { .. }
                 | Self::MemoryWeight { .. }
                 | Self::InFlight { .. }
@@ -2085,6 +2119,7 @@ mod cli {
                 | Self::SetPeers { .. }
                 | Self::Migrate { .. }
                 | Self::HandOver { .. }
+                | Self::WaitHandOver { .. }
                 | Self::AbortMigration { .. }
                 | Self::MemoryLimit { .. }
                 | Self::MemoryWeight { .. }

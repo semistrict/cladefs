@@ -1813,7 +1813,7 @@ async fn fork_ephemeral(
                 version,
                 tenant: stated.tenant,
                 cell: stated.cell,
-                ephemeral: true,
+                persistent: Some(false),
                 ..ForkCellRequest::default()
             };
             async move { connect(1).await.fork_cell(request).await }

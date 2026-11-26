@@ -1281,3 +1281,158 @@ fn ephemeral_device_snapshots_restores_resuspends_and_rejects_stale_restore() {
     assert_eq!((used as usize, status), (BLOCK + RESPONSE, 0));
     drop(restored2);
 }
+
+/// Live-migration snapshot (`SnapshotMode::Migration`) records DAX mappings without requiring
+/// `VIRTIO_EXTENT_T_FREEZE` or calling `make_version`, while still enforcing quiescence (no private
+/// pages, no open extents), and restores directly against the existing cell while rejecting a
+/// mismatched cell ID. `release_cell` closes the cell cleanly on a paused device (refusing
+/// `take_snapshot` while released and refusing release on private pages or open extents), and
+/// `reopen_cell` reopens the cell and restores its DAX window mappings (preserving rollback state
+/// if reopening fails).
+#[test]
+fn migration_snapshot_and_release_reopen_cell() {
+    let dir = daemon();
+    let lost_count = Arc::new(AtomicUsize::new(0));
+    let lost_counter = lost_count.clone();
+    let lost: virtio_extent::OnLost = Arc::new(move || {
+        lost_counter.fetch_add(1, Ordering::Relaxed);
+    });
+    let vm = Arc::new(FakeVm::default());
+    let cfg = Config { capacity: 4 << 20, dax_window_size: Some(4 << 20), ..config(&dir, "store") };
+    let mut device = Device::new(cfg, 1, vm.clone(), lost.clone()).unwrap();
+    let mut space = [0u8; size_of::<ConfigSpace>()];
+    device.read_config(0, &mut space);
+    let cell = u64::from_le(ConfigSpace::read_from_bytes(&space).unwrap().cell);
+    let id = |sequence: u64| ExtentIdLe { cell: cell.to_le(), sequence: sequence.to_le() };
+
+    device.activate(device.features(), Arc::new(Counted::default())).unwrap();
+    let base = vm.host.load(Ordering::Relaxed) as *mut u8;
+    assert!(!base.is_null());
+
+    // Write and commit extent 1, map it at window offset 0, and map a zero page at BLOCK.
+    let w1 = bytes(
+        VIRTIO_EXTENT_T_WRITE,
+        0,
+        Some(IoArgs { id: id(1), offset: 0, len: (BLOCK as u32).to_le(), root_len: 0 }),
+        &vec![0x33u8; BLOCK],
+    );
+    assert_eq!(serve_with(&device, &w1, RESPONSE).1, 0);
+    let commit = bytes(VIRTIO_EXTENT_T_COMMIT, 0, Some(CommitArgs::default()), &[]);
+    assert_eq!(serve_with(&device, &commit, RESPONSE).1, 0);
+    let map = |seq: u64, win_off: u64| {
+        let args = MapArgs {
+            id: id(seq),
+            offset: 0,
+            len: (BLOCK as u64).to_le(),
+            window_offset: win_off.to_le(),
+        };
+        bytes(VIRTIO_EXTENT_T_MAP, 0, Some(args), &[])
+    };
+    let map_zero = |win_off: u64| {
+        let args = MapArgs {
+            id: ExtentIdLe { cell: 0, sequence: 0 },
+            offset: 0,
+            len: (BLOCK as u64).to_le(),
+            window_offset: win_off.to_le(),
+        };
+        bytes(VIRTIO_EXTENT_T_MAP, VIRTIO_EXTENT_MAP_ZEROS, Some(args), &[])
+    };
+    assert_eq!(serve_with(&device, &map(1, 0), RESPONSE).1, 0);
+    assert_eq!(serve_with(&device, &map_zero(BLOCK as u64), RESPONSE).1, 0);
+    // SAFETY: Within the 4 MiB mapped DAX window.
+    let read_block = |blk: usize| unsafe { base.add(blk * BLOCK).read_volatile() };
+    assert_eq!((read_block(0), read_block(1)), (0x33, 0x00));
+
+    // Versioned snapshot still refuses without freeze.
+    assert!(matches!(
+        device.take_snapshot(|| {}),
+        Err(virtio_extent::persist::SnapshotError::NotFrozen(_))
+    ));
+
+    // Uncommitted open extent blocks both Migration snapshot and release_cell.
+    let w_open = bytes(
+        VIRTIO_EXTENT_T_WRITE,
+        0,
+        Some(IoArgs { id: id(2), offset: 0, len: (BLOCK as u32).to_le(), root_len: 0 }),
+        &vec![0x44u8; BLOCK],
+    );
+    assert_eq!(serve_with(&device, &w_open, RESPONSE).1, 0);
+    assert!(matches!(
+        device.take_snapshot_with(virtio_extent::SnapshotMode::Migration, || {}),
+        Err(virtio_extent::persist::SnapshotError::NotQuiescent(_))
+    ));
+    assert!(matches!(
+        device.release_cell(|| {}),
+        Err(virtio_extent::ReleaseError::NotQuiescent(_))
+    ));
+    assert!(!device.is_cell_released());
+    assert_eq!(serve_with(&device, &commit, RESPONSE).1, 0);
+
+    // Private DAX page blocks both Migration snapshot and release_cell.
+    let priv0 = bytes(
+        VIRTIO_EXTENT_T_PRIVATE,
+        0,
+        Some(UnmapArgs { window_offset: 0, len: (BLOCK as u64).to_le() }),
+        &[],
+    );
+    assert_eq!(serve_with(&device, &priv0, RESPONSE).1, 0);
+    assert!(matches!(
+        device.take_snapshot_with(virtio_extent::SnapshotMode::Migration, || {}),
+        Err(virtio_extent::persist::SnapshotError::Private(_, _))
+    ));
+    assert!(matches!(device.release_cell(|| {}), Err(virtio_extent::ReleaseError::Private(_, _))));
+    assert_eq!(serve_with(&device, &map(1, 0), RESPONSE).1, 0);
+
+    // Migration snapshot succeeds without freeze and creates no version (version == 0, cell == cell).
+    device.take_snapshot_with(virtio_extent::SnapshotMode::Migration, || {}).unwrap();
+    let snap = device.snapshot().unwrap().clone();
+    assert_eq!(
+        snap.target,
+        cladefs::CellSnapshot::Version(cladefs::CellVersion { tenant: 0, cell, version: 0 })
+    );
+    assert_eq!(snap.mappings.len(), 2);
+    let state = device.state();
+    assert!(!state.frozen);
+
+    // Release closes the cell cleanly without triggering `on_lost`; release is idempotent;
+    // take_snapshot is refused while released.
+    device.release_cell(|| {}).unwrap();
+    assert!(device.is_cell_released());
+    assert_eq!(lost_count.load(Ordering::Relaxed), 0, "release must not trigger on_lost");
+    device.release_cell(|| {}).unwrap();
+    assert!(matches!(
+        device.take_snapshot_with(virtio_extent::SnapshotMode::Migration, || {}),
+        Err(virtio_extent::persist::SnapshotError::Released(_))
+    ));
+
+    // Reopen restores the cell and DAX window mappings (abort path).
+    device.reopen_cell().unwrap();
+    assert!(!device.is_cell_released());
+    device.reopen_cell().unwrap(); // idempotent
+    assert_eq!((read_block(0), read_block(1)), (0x33, 0x00));
+
+    // Release again and restore a second device from the migration snapshot state (simulating
+    // destination load over the handed-over cell).
+    device.release_cell(|| {}).unwrap();
+    let restored_vm = Arc::new(FakeVm::default());
+    let mut restored = Device::restore(&state, 1, restored_vm.clone(), lost.clone()).unwrap();
+    restored.activate(restored.features(), Arc::new(Counted::default())).unwrap();
+    let restored_base = restored_vm.host.load(Ordering::Relaxed) as *mut u8;
+    // SAFETY: Within the restored device's mapped DAX window.
+    assert_eq!(unsafe { restored_base.read_volatile() }, 0x33);
+    // SAFETY: Within the restored device's mapped DAX window.
+    assert_eq!(unsafe { restored_base.add(BLOCK).read_volatile() }, 0x00);
+
+    // Mismatched cell ID in migration snapshot state is refused on restore.
+    drop(restored);
+    let mut wrong_cell = state.clone();
+    wrong_cell.target = cladefs::CellSnapshot::Version(cladefs::CellVersion {
+        tenant: 0,
+        cell: cell ^ 0x1,
+        version: 0,
+    });
+    let err = Device::restore(&wrong_cell, 1, Arc::new(FakeVm::default()), lost).unwrap_err();
+    assert!(matches!(err, virtio_extent::Error::CellMismatch { .. }), "got {err:?}");
+    drop(device);
+    assert_eq!(lost_count.load(Ordering::Relaxed), 0);
+}

@@ -19,6 +19,7 @@ _COMPILE_DATA = glob(["python-sandbox/**/*"]) + [
 _BASE_DEPS = [
     "//crates/fxfs-automount:fxfs_automount",
     "@crates//:anyhow",
+    "@crates//:tempfile",
     "@guest_tests_crates//:nix",
     "@guest_tests_crates//:tempdir",
 ]

@@ -12,10 +12,12 @@
 
 mod common;
 
+use cladefs::cladefsd::control;
 use cladefs::cladefsd::control::proto::*;
 use cladefs::{CellClient, CellId, Errno};
 use common::daemon::{CAPACITY, Daemon, NEW, failure, name, write};
 use common::pattern;
+use std::time::Duration;
 use tonic::Code;
 
 /// A cell made, written by a VM, grown, forked, made a public base, synced to object storage,
@@ -1610,4 +1612,164 @@ fn concurrent_named_create_cell_returns_eexist_and_leaves_one_copy() {
         .join(base32_id::Padded(cell.id).to_string());
     let copies = [disk0.join(&rel), disk1.join(&rel)].into_iter().filter(|p| p.exists()).count();
     assert_eq!(copies, 1, "expected exactly one on-disk copy across disks");
+}
+
+/// `ForkCellRequest.persistent` (defaults to true; false = ephemeral) replaces the deprecated
+/// `ephemeral` field while continuing to accept `ephemeral: true` and rejecting contradictory
+/// `(ephemeral: true, persistent: Some(true))` with `EINVAL`.
+#[test]
+fn fork_cell_persistent_and_deprecated_ephemeral() {
+    let dir = tempfile::tempdir().unwrap();
+    let bucket = dir.path().join("bucket");
+    let disk = dir.path().join("disk0");
+    let ephemeral = dir.path().join("ephemeral");
+    let vms = dir.path().join("cladefsd.sock");
+    let control = dir.path().join("control.sock");
+    std::fs::create_dir(&bucket).unwrap();
+    std::fs::create_dir(&disk).unwrap();
+    struct KillOnDrop(std::process::Child);
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let _process = KillOnDrop(
+        std::process::Command::new(env!("CARGO_BIN_EXE_cladefsd"))
+            .arg(&vms)
+            .env("CLADEFSD_BUCKET", format!("file://{}/", bucket.display()))
+            .env("CLADEFSD_TOKEN", "1")
+            .env("CLADEFSD_ROOTS", &disk)
+            .env("CLADEFSD_PART_CACHE", dir.path().join("cache"))
+            .env("CLADEFSD_GRPC", &control)
+            .env("CLADEFSD_EPHEMERAL", &ephemeral)
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while std::os::unix::net::UnixStream::connect(&vms).is_err() {
+        assert!(std::time::Instant::now() < deadline, "daemon never served");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let mut client = runtime.block_on(control::connect(&control)).unwrap();
+
+    // Create a base cell, make a version, and sync it to the bucket.
+    let created = runtime
+        .block_on(client.create_cell(CreateCellRequest {
+            capacity: 4 << 20,
+            kind: CellKind::Fxfs.into(),
+            ..Default::default()
+        }))
+        .unwrap()
+        .into_inner();
+    let version = runtime
+        .block_on(client.make_version(MakeVersionRequest {
+            tenant: created.tenant,
+            cell: created.cell,
+            keep_last: 0,
+        }))
+        .unwrap()
+        .into_inner()
+        .version;
+    runtime
+        .block_on(client.sync_cell(SyncCellRequest { tenant: created.tenant, cell: created.cell }))
+        .unwrap();
+
+    let is_ephemeral_cell = |client: &mut control::proto::cladefsd_client::CladefsdClient<
+        tonic::transport::Channel,
+    >,
+                             tenant: u64,
+                             cell: u64| {
+        runtime
+            .block_on(client.stat_cell(StatCellRequest { tenant, cell }))
+            .unwrap()
+            .into_inner()
+            .ephemeral
+    };
+
+    // 1. Default (persistent: None, ephemeral: false) -> persistent bucket-backed cell.
+    let dst_default = runtime
+        .block_on(client.fork_cell(ForkCellRequest {
+            tenant: created.tenant,
+            cell: created.cell,
+            version,
+            ..Default::default()
+        }))
+        .unwrap()
+        .into_inner();
+    assert!(
+        !is_ephemeral_cell(&mut client, dst_default.tenant, dst_default.cell),
+        "default fork must be persistent"
+    );
+
+    // 2. Explicit persistent: Some(true) -> persistent bucket-backed cell.
+    let dst_persistent = runtime
+        .block_on(client.fork_cell(ForkCellRequest {
+            tenant: created.tenant,
+            cell: created.cell,
+            version,
+            persistent: Some(true),
+            ..Default::default()
+        }))
+        .unwrap()
+        .into_inner();
+    assert!(
+        !is_ephemeral_cell(&mut client, dst_persistent.tenant, dst_persistent.cell),
+        "persistent: true must be persistent"
+    );
+
+    // 3. Explicit persistent: Some(false) -> ephemeral cell.
+    let dst_non_persistent = runtime
+        .block_on(client.fork_cell(ForkCellRequest {
+            tenant: created.tenant,
+            cell: created.cell,
+            version,
+            persistent: Some(false),
+            ..Default::default()
+        }))
+        .unwrap()
+        .into_inner();
+    assert!(
+        is_ephemeral_cell(&mut client, dst_non_persistent.tenant, dst_non_persistent.cell),
+        "persistent: false must be ephemeral"
+    );
+
+    // 4. Deprecated ephemeral: true (with persistent: None) still creates an ephemeral cell.
+    #[allow(deprecated)]
+    let dst_deprecated = runtime
+        .block_on(client.fork_cell(ForkCellRequest {
+            tenant: created.tenant,
+            cell: created.cell,
+            version,
+            ephemeral: true,
+            ..Default::default()
+        }))
+        .unwrap()
+        .into_inner();
+    assert!(
+        is_ephemeral_cell(&mut client, dst_deprecated.tenant, dst_deprecated.cell),
+        "deprecated ephemeral: true must still work"
+    );
+
+    // 5. Contradictory (ephemeral: true, persistent: Some(true)) -> EINVAL.
+    #[allow(deprecated)]
+    let conflict = runtime.block_on(client.fork_cell(ForkCellRequest {
+        tenant: created.tenant,
+        cell: created.cell,
+        version,
+        ephemeral: true,
+        persistent: Some(true),
+        ..Default::default()
+    }));
+    assert_eq!(failure(conflict), (Code::InvalidArgument, Errno::EINVAL));
+
+    // 6. persistent: Some(false) without a version (forking live cell directly) -> EINVAL.
+    let no_ver = runtime.block_on(client.fork_cell(ForkCellRequest {
+        tenant: created.tenant,
+        cell: created.cell,
+        persistent: Some(false),
+        ..Default::default()
+    }));
+    assert_eq!(failure(no_ver), (Code::InvalidArgument, Errno::EINVAL));
 }

@@ -1778,7 +1778,10 @@ impl Connection {
                 self.traced_maps(began, open_cell, mappings);
                 Ok(())
             }
-            Request::Mappings => {
+            Request::Mappings { quiescent } => {
+                if *quiescent && !open_cell.is_quiescent()? {
+                    return Err(Errno::EBUSY);
+                }
                 *payload = codec::mappings_payload(&open_cell.window_mappings()?);
                 Ok(())
             }

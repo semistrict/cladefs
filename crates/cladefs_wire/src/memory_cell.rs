@@ -250,6 +250,75 @@ impl MemoryCell {
         self.commit()
     }
 
+    /// Applies sparse diff memory files (as produced by Firecracker's `PUT /snapshot/create` with
+    /// `snapshot_type: "Diff"`) on top of this memory cell in order (oldest to newest), committing
+    /// them once. Must be called before [`MemoryCell::window`].
+    ///
+    /// Only allocated (non-hole) data ranges in each diff file are read and written (via
+    /// [`MemoryCell::write_sparse`], so dirty zero pages become zero holes shadowing non-zero base
+    /// pages); unallocated holes across all diff files stay inherited from the base memory cell
+    /// version with zero copies. When multiple diff files touch the same offset, only the newest
+    /// file's bytes are written.
+    pub fn apply_diff_files(&self, diff_files: &[&Path]) -> Result<(), Error> {
+        use std::io::{Read as _, Seek as _, SeekFrom};
+        if self.window.lock().unwrap().is_some() {
+            return Err(Error::new(Errno::EINVAL)
+                .context("cannot apply diff files after the memory cell window is created"));
+        }
+        if diff_files.is_empty() {
+            return Ok(());
+        }
+        // Validate every diff file up front before writing anything to the cell.
+        let mut opened = Vec::with_capacity(diff_files.len());
+        for path in diff_files {
+            let file = host_fs::File::open(path).map_err(|err| {
+                Error::new(err).context(format!("opening diff {}", path.display()))
+            })?;
+            let held = file.metadata().map_err(Error::new)?.len();
+            if held != self.size {
+                return Err(Error::new(Errno::EINVAL).context(format!(
+                    "diff file {} is {held} bytes, not {}",
+                    path.display(),
+                    self.size
+                )));
+            }
+            opened.push(file);
+        }
+        let page = self.page_size();
+        // Collect page-aligned allocated spans from each diff file and resolve overlaps so later
+        // diff files win and each modified page is written at most once.
+        let mut spans: Vec<(usize, std::ops::Range<u64>)> = Vec::new();
+        for (idx, file) in opened.iter().enumerate() {
+            let ranges = host_fs::data_ranges(file, self.size).map_err(Error::new)?;
+            for range in ranges {
+                let start = (range.start / page) * page;
+                let end = range.end.next_multiple_of(page).min(self.size);
+                if start >= end {
+                    continue;
+                }
+                spans = overlay_diff_span(spans, idx, start..end);
+            }
+        }
+        if spans.is_empty() {
+            return Ok(());
+        }
+        let mut buffer = vec![0u8; cladefs_core::memory::MEMORY_IMPORT_BYTES];
+        for (idx, range) in spans {
+            let file = &mut opened[idx];
+            file.seek(SeekFrom::Start(range.start)).map_err(Error::new)?;
+            let mut offset = range.start;
+            while offset < range.end {
+                let len = (range.end - offset).min(cladefs_core::memory::MEMORY_IMPORT_BYTES as u64)
+                    as usize;
+                let chunk = &mut buffer[..len];
+                file.read_exact(chunk).map_err(Error::new)?;
+                self.write_sparse(offset, chunk)?;
+                offset += len as u64;
+            }
+        }
+        self.commit()
+    }
+
     /// Flushes all private pages in this memory cell's window into the cell (zero pages discarded
     /// as holes), commits them durably, and reclaims them back to the newly committed extents so
     /// no private pages remain.
@@ -573,6 +642,59 @@ impl Drop for Mapper {
         // Each sender dropped, its fault fails.
         state.waiting.clear();
     }
+}
+
+/// Layers `(file_idx, new_range)` on top of sorted, non-overlapping `existing` spans so that the
+/// newer `file_idx` overwrites any overlapped sub-ranges while preserving sorted non-overlapping
+/// order (coalescing adjacent spans from the same `file_idx`).
+fn overlay_diff_span(
+    existing: Vec<(usize, std::ops::Range<u64>)>,
+    file_idx: usize,
+    new: std::ops::Range<u64>,
+) -> Vec<(usize, std::ops::Range<u64>)> {
+    let mut out: Vec<(usize, std::ops::Range<u64>)> = Vec::with_capacity(existing.len() + 2);
+    let mut push = |idx: usize, range: std::ops::Range<u64>| {
+        if range.start >= range.end {
+            return;
+        }
+        if let Some((last_idx, last_range)) = out.last_mut()
+            && *last_idx == idx
+            && last_range.end == range.start
+        {
+            last_range.end = range.end;
+            return;
+        }
+        out.push((idx, range));
+    };
+    let mut inserted = false;
+    for (idx, range) in existing {
+        if range.end <= new.start {
+            push(idx, range);
+        } else if range.start >= new.end {
+            if !inserted {
+                push(file_idx, new.clone());
+                inserted = true;
+            }
+            push(idx, range);
+        } else {
+            // Overlap: keep any prefix before `new.start`.
+            if range.start < new.start {
+                push(idx, range.start..new.start);
+            }
+            if !inserted {
+                push(file_idx, new.clone());
+                inserted = true;
+            }
+            // Keep any suffix after `new.end`.
+            if range.end > new.end {
+                push(idx, new.end..range.end);
+            }
+        }
+    }
+    if !inserted {
+        push(file_idx, new);
+    }
+    out
 }
 
 /// The window's mappings of the `len` bytes of the image at `start`, as its last commit has

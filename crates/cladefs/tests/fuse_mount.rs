@@ -1283,7 +1283,7 @@ fn ephemeral_cells_attach_to_fuse_without_uploading_to_the_bucket() {
                     tenant: 1,
                     cell: base_cell_id,
                     version,
-                    ephemeral: true,
+                    persistent: Some(false),
                     ..Default::default()
                 })
                 .await

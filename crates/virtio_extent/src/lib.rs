@@ -51,8 +51,9 @@ pub use backend::Backend;
 pub use buffers::{Buffers, BuffersError};
 pub use config::{CacheType, Config, ConfigError, PRIVATE_MAX_DEFAULT, private_max};
 #[cfg(target_os = "linux")]
-pub use device::{ActivateError, Device, Error, OnLost, ShmRegion};
+pub use device::{ActivateError, Device, Error, OnLost, ReleaseError, ShmRegion};
 pub use notices::{ConfigInterrupt, Notices, Resizing, StatsAsks};
+pub use persist::SnapshotMode;
 #[cfg(target_os = "linux")]
 pub use requests::Requests;
 pub use requests::{Served, handle};

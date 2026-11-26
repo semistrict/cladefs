@@ -460,3 +460,84 @@ fn ephemeral_memory_cell_suspends_resumes_resuspends_and_deletes_without_bucket_
         "deleting standalone ephemeral memory cell must upload nothing to bucket"
     );
 }
+
+#[test]
+fn apply_diff_files_overlays_sparse_diffs_and_preserves_base_holes() {
+    // SAFETY: nextest runs each test in a process of its own, whose other threads don't read
+    // the environment yet.
+    unsafe {
+        std::env::set_var("CLADEFSD_BUCKET", "memory:///cells");
+        std::env::set_var("CLADEFSD_TOKEN", "1");
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || cladefs::cladefsd::server::serve(listener));
+    let ps = page_size();
+    const PAGES: u64 = 32;
+    let size = PAGES * ps;
+
+    // Create base memory cell version with non-zero pattern on every page.
+    let base_cell = MemoryCell::open(&socket, &dir.path().join("base"), size).unwrap();
+    let mut expected: Vec<u8> =
+        (0..PAGES).flat_map(|page| pattern(page as u8 + 1, ps as usize)).collect();
+    base_cell.write(0, &expected).unwrap();
+    base_cell.commit().unwrap();
+    let v1 = base_cell.make_version().unwrap();
+    let base_extents: std::collections::HashSet<_> =
+        base_cell.extents().unwrap().into_iter().collect();
+    base_cell.close().unwrap();
+
+    // Build two sparse diff files:
+    // - diff0 modifies pages 2 (to 0xaa) and 6 (to 0xbb), and zeroes page 10.
+    // - diff1 modifies page 2 again (to 0xcc, must override diff0) and zeroes page 6
+    //   (must shadow diff0 AND base with zeros), leaving all other pages as sparse holes.
+    let make_sparse = |name: &str, writes: &[(u64, Vec<u8>)]| -> std::path::PathBuf {
+        use std::io::{Seek as _, SeekFrom, Write as _};
+        let path = dir.path().join(name);
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.set_len(size).unwrap();
+        for (page, data) in writes {
+            f.seek(SeekFrom::Start(page * ps)).unwrap();
+            f.write_all(data).unwrap();
+        }
+        f.sync_all().unwrap();
+        path
+    };
+    let p_aa = pattern(0xaa, ps as usize);
+    let p_bb = pattern(0xbb, ps as usize);
+    let p_cc = pattern(0xcc, ps as usize);
+    let zeros = vec![0u8; ps as usize];
+    let diff0 = make_sparse("diff0.mem", &[(2, p_aa), (6, p_bb), (10, zeros.clone())]);
+    let diff1 = make_sparse("diff1.mem", &[(2, p_cc.clone()), (6, zeros.clone())]);
+    let bad_size = dir.path().join("bad.mem");
+    std::fs::write(&bad_size, vec![0u8; (size - ps) as usize]).unwrap();
+
+    expected[2 * ps as usize..3 * ps as usize].copy_from_slice(&p_cc);
+    expected[6 * ps as usize..7 * ps as usize].copy_from_slice(&zeros);
+    expected[10 * ps as usize..11 * ps as usize].copy_from_slice(&zeros);
+
+    let fork = dir.path().join("fork");
+    let memory_cell = MemoryCell::open_forked(&socket, &fork, v1, size).unwrap();
+
+    // Wrong-size diff file is refused up front without writing anything from earlier diffs.
+    let err = memory_cell.apply_diff_files(&[&diff0, &bad_size]).unwrap_err();
+    assert_eq!(err.errno(), Some(Errno::EINVAL));
+    let mut unchanged = vec![0u8; ps as usize];
+    memory_cell.read(2 * ps, &mut unchanged).unwrap();
+    assert_eq!(unchanged, pattern(3, ps as usize), "failed apply must not modify cell");
+
+    // Applying diff0 then diff1 overlays dirty pages while keeping untouched base extents.
+    memory_cell.apply_diff_files(&[&diff0, &diff1]).unwrap();
+    let mut got = vec![0u8; size as usize];
+    memory_cell.read(0, &mut got).unwrap();
+    assert!(got == expected, "overlaid memory cell contents differ from expected");
+
+    // Unmodified pages still inherit base extents (we did not rewrite the whole memory image).
+    let fork_extents = memory_cell.extents().unwrap();
+    assert!(
+        fork_extents.iter().any(|id| base_extents.contains(id)),
+        "unmodified pages should still reference inherited base extents"
+    );
+    memory_cell.close().unwrap();
+}

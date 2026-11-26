@@ -28,6 +28,7 @@ use tonic::codegen::http;
 use tonic::{Code, Request, Response, Status};
 
 /// The API's messages and services, generated from its .proto.
+#[allow(missing_docs)]
 pub mod proto {
     pub use cladefs_proto::cladefsd_v1::*;
 }
@@ -939,17 +940,32 @@ impl Cladefsd for Control {
         &self,
         request: Request<ForkCellRequest>,
     ) -> Result<Response<ForkCellResponse>, Status> {
-        let ForkCellRequest { version, tenant: of_tenant, cell, ephemeral, target_tenant } =
-            request.into_inner();
+        #[allow(deprecated)]
+        let ForkCellRequest {
+            version,
+            tenant: of_tenant,
+            cell,
+            ephemeral,
+            target_tenant,
+            persistent,
+        } = request.into_inner();
         let of = cell_id(of_tenant, cell)?;
+        // Contradictory request: deprecated `ephemeral: true` alongside `persistent: Some(true)`.
+        if ephemeral && persistent == Some(true) {
+            return Err(status(Errno::EINVAL));
+        }
+        let is_ephemeral = match persistent {
+            Some(persistent) => !persistent,
+            None => ephemeral,
+        };
         room_for_a_cell(&self.daemon)?;
-        if version == 0 && ephemeral {
+        if version == 0 && is_ephemeral {
             return Err(status(Errno::EINVAL));
         }
         let explicit_tenant = target_tenant.filter(|&t| t != 0);
         let dest_tenant = explicit_tenant.unwrap_or(of.tenant);
         let pool = Arc::clone(self.disk_pool()?);
-        if version != 0 && ephemeral {
+        if version != 0 && is_ephemeral {
             let disk = pool.pick_disk().map_err(status)?;
             let disk_dir = Arc::clone(&disk);
             let tenant_dir = cells::blocking(move || {
@@ -1029,6 +1045,20 @@ impl Cladefsd for Control {
             pool.forget_cell(id);
         }
         reply(done.map(|()| AbortMigrationResponse {}))
+    }
+
+    async fn wait_hand_over(
+        &self,
+        request: Request<WaitHandOverRequest>,
+    ) -> Result<Response<WaitHandOverResponse>, Status> {
+        let WaitHandOverRequest { tenant, cell, migration } = request.into_inner();
+        let id = cell_id(tenant, cell)?;
+        let waited = super::migration::wait_hand_over_on(&self.daemon, id, migration).await?;
+        Ok(Response::new(WaitHandOverResponse {
+            migration: waited.migration,
+            tenant: waited.cell.tenant,
+            cell: waited.cell.id,
+        }))
     }
 
     async fn decommission_host(

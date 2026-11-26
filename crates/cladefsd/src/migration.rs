@@ -261,6 +261,101 @@ struct BucketMigrations {
     evicted: bool,
 }
 
+/// Result of an incoming migration hand-over returned by [`wait_hand_over_on`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct HandedOver {
+    pub migration: u64,
+    pub cell: CellId,
+}
+
+/// Terminal outcome of an incoming migration into a destination path on this target daemon.
+#[derive(Clone, Debug)]
+enum IncomingOutcome {
+    Accepted(HandedOver),
+    Failed { errno: Errno, reason: String },
+}
+
+/// Maximum number of recent terminal incoming-migration outcomes kept in memory per daemon.
+const INCOMING_OUTCOMES_CAP: usize = 4096;
+
+/// Target-side incoming migration tracking for `WaitHandOver`: active migrations by cell ID
+/// and bounded recent terminal outcomes by cell ID and by migration ID.
+#[derive(Default)]
+struct IncomingEvents {
+    active: HashMap<CellId, u64>,
+    outcomes: HashMap<CellId, (tokio::time::Instant, IncomingOutcome)>,
+    outcomes_by_id: HashMap<u64, (CellId, tokio::time::Instant, IncomingOutcome)>,
+}
+
+impl IncomingEvents {
+    fn trim_cap(&mut self) {
+        while self.outcomes.len() > INCOMING_OUTCOMES_CAP {
+            let Some(oldest) =
+                self.outcomes.iter().min_by_key(|(_, (at, _))| *at).map(|(cell, _)| *cell)
+            else {
+                break;
+            };
+            self.outcomes.remove(&oldest);
+        }
+        while self.outcomes_by_id.len() > INCOMING_OUTCOMES_CAP {
+            let Some(oldest) =
+                self.outcomes_by_id.iter().min_by_key(|(_, (_, at, _))| *at).map(|(id, _)| *id)
+            else {
+                break;
+            };
+            self.outcomes_by_id.remove(&oldest);
+        }
+    }
+
+    fn note_preparing(&mut self, migration: u64, cell: CellId) {
+        self.active.insert(cell, migration);
+        self.outcomes.remove(&cell);
+    }
+
+    fn note_accepted(&mut self, migration: u64, cell: CellId) {
+        if self.active.get(&cell).is_some_and(|&m| m == migration) {
+            self.active.remove(&cell);
+        }
+        let now = tokio::time::Instant::now();
+        let outcome = IncomingOutcome::Accepted(HandedOver { migration, cell });
+        self.outcomes.insert(cell, (now, outcome.clone()));
+        self.outcomes_by_id.insert(migration, (cell, now, outcome));
+        self.trim_cap();
+    }
+
+    fn note_failed(&mut self, cell: CellId, migration: u64, errno: Errno, reason: String) {
+        let was_active = self.active.get(&cell).is_some_and(|&m| m == migration);
+        if was_active {
+            self.active.remove(&cell);
+        }
+        let now = tokio::time::Instant::now();
+        let outcome = IncomingOutcome::Failed { errno, reason };
+        if !self.active.contains_key(&cell) {
+            self.outcomes.insert(cell, (now, outcome.clone()));
+        }
+        self.outcomes_by_id.insert(migration, (cell, now, outcome));
+        self.trim_cap();
+    }
+
+    fn note_superseded(&mut self, cell: CellId, older: u64) {
+        if self.active.get(&cell).is_some_and(|&m| m == older) {
+            self.active.remove(&cell);
+        }
+        let now = tokio::time::Instant::now();
+        let outcome = IncomingOutcome::Failed {
+            errno: Errno::EAGAIN,
+            reason: format!("migration {older:x} superseded by newer migration"),
+        };
+        self.outcomes_by_id.insert(older, (cell, now, outcome));
+        self.trim_cap();
+    }
+
+    fn prune(&mut self, ttl: Duration) {
+        self.outcomes.retain(|_, (at, _)| at.elapsed() < ttl);
+        self.outcomes_by_id.retain(|_, (_, at, _)| at.elapsed() < ttl);
+    }
+}
+
 /// Per-daemon migration state: outgoing migrations from this host and incoming migrations being
 /// taken here (Wave 4C.5, board 10774; bucket-backed extensions, board 11369, board 11530).
 pub(super) struct State {
@@ -299,6 +394,10 @@ pub(super) struct State {
     /// (board 11655).
     #[cfg(test)]
     fail_bucket_open_once: Mutex<Option<Errno>>,
+    /// Active incoming migrations and recent terminal outcomes for `WaitHandOver`.
+    incoming: Mutex<IncomingEvents>,
+    /// Generation counter bumped on every `incoming` state transition to wake `WaitHandOver`.
+    incoming_gen: tokio::sync::watch::Sender<u64>,
 }
 
 impl State {
@@ -307,6 +406,7 @@ impl State {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos() as u64;
+        let (incoming_gen, _) = tokio::sync::watch::channel(0u64);
         Self {
             outgoing: Mutex::new(BTreeMap::new()),
             taking: Mutex::new(HashMap::new()),
@@ -319,7 +419,33 @@ impl State {
             bucket_migrations: Mutex::new(BucketMigrations::default()),
             #[cfg(test)]
             fail_bucket_open_once: Mutex::new(None),
+            incoming: Mutex::new(IncomingEvents::default()),
+            incoming_gen,
         }
+    }
+
+    fn bump_incoming(&self) {
+        self.incoming_gen.send_modify(|g| *g = g.wrapping_add(1));
+    }
+
+    fn note_incoming_preparing(&self, migration: u64, cell: CellId) {
+        self.incoming.lock().unwrap().note_preparing(migration, cell);
+        self.bump_incoming();
+    }
+
+    fn note_incoming_accepted(&self, migration: u64, cell: CellId) {
+        self.incoming.lock().unwrap().note_accepted(migration, cell);
+        self.bump_incoming();
+    }
+
+    fn note_incoming_failed(&self, cell: CellId, migration: u64, errno: Errno, reason: String) {
+        self.incoming.lock().unwrap().note_failed(cell, migration, errno, reason);
+        self.bump_incoming();
+    }
+
+    fn note_incoming_superseded(&self, cell: CellId, older: u64) {
+        self.incoming.lock().unwrap().note_superseded(cell, older);
+        self.bump_incoming();
     }
 
     /// Returns a strictly increasing epoch for an outgoing bucket-backed migration.
@@ -1570,6 +1696,132 @@ async fn let_go_bucket(
     Ok(())
 }
 
+/// Waits on this target daemon until an incoming migration hand-over into `path` is accepted and
+/// Waits on this target daemon until an incoming live migration hand-over of `cell` is accepted
+/// and ready to open, or fails (refused, aborted, idle-reaped, or superseded). When `migration` is
+/// 0, waits for any migration of `cell` (or returns immediately if `cell` is already present on
+/// disk with no active migration for it). When `migration` is non-zero, waits specifically for that
+/// migration of `cell`. Respects caller cancellation/deadlines and daemon drain.
+pub(super) async fn wait_hand_over_on(
+    daemon: &Arc<Daemon>,
+    cell: CellId,
+    migration: u64,
+) -> Result<HandedOver, Status> {
+    let mut gen_rx = daemon.migrations.incoming_gen.subscribe();
+    let mut serving = daemon.serving.subscribe();
+    loop {
+        // Snapshot the current generation before inspecting state so no transition between the
+        // check and `gen_rx.changed().await` can be missed.
+        gen_rx.borrow_and_update();
+        let active_here = {
+            let incoming = daemon.migrations.incoming.lock().unwrap();
+            if migration != 0 {
+                if let Some((out_cell, _, outcome)) = incoming.outcomes_by_id.get(&migration) {
+                    if *out_cell != cell {
+                        return Err(super::control::saying(
+                            Errno::EINVAL,
+                            format!("migration {migration:x} targeted {out_cell}, not {cell}"),
+                        ));
+                    }
+                    return match outcome {
+                        IncomingOutcome::Accepted(handed) => Ok(*handed),
+                        IncomingOutcome::Failed { errno, reason } => {
+                            Err(super::control::saying(*errno, reason.clone()))
+                        }
+                    };
+                }
+                incoming.active.get(&cell).is_some_and(|&m| m == migration)
+            } else if incoming.active.contains_key(&cell) {
+                true
+            } else if let Some((_, outcome)) = incoming.outcomes.get(&cell) {
+                return match outcome {
+                    IncomingOutcome::Accepted(handed) => Ok(*handed),
+                    IncomingOutcome::Failed { errno, reason } => {
+                        Err(super::control::saying(*errno, reason.clone()))
+                    }
+                };
+            } else {
+                false
+            }
+        };
+        if !active_here && let Some(pool) = daemon.disk_pool().cloned() {
+            let local = Arc::clone(daemon.host.local());
+            let on_disk = super::cells::blocking(move || {
+                let Some(check) = pool.find_cell(cell) else {
+                    return Ok(None);
+                };
+                if !host_fs::exists(check.join(local_cell::DESCRIPTION))
+                    || local_cell::unmade_host_on(&local, &check)
+                    || local_cell::deleting_host(&check)
+                {
+                    return Ok(None);
+                }
+                // Best-effort read: if the cell was just removed concurrently, keep waiting.
+                Ok(local_cell::host_cell(&check).ok())
+            })
+            .await
+            .map_err(|errno| super::control::saying(errno, format!("{errno:?}")))?;
+            if let Some(found) = on_disk
+                && found == cell
+            {
+                // Re-verify no migration of `cell` is currently active (e.g., renamed into place
+                // while bucket head CAS is still running).
+                let still_idle =
+                    !daemon.migrations.incoming.lock().unwrap().active.contains_key(&cell);
+                if still_idle {
+                    if migration == 0 {
+                        return Ok(HandedOver { migration: 0, cell });
+                    }
+                    let ephemeral_accepted = match ephemeral_host::host_on(&daemon.host) {
+                        Ok(host) => local_cell::upload::blocking(|| host.accepted(migration)),
+                        // Bucket-only daemons have no ephemeral host directory (ENOTSUP); no
+                        // ephemeral acceptance record exists on them.
+                        Err(Errno::ENOTSUP) => false,
+                        Err(err) => {
+                            return Err(super::control::saying(
+                                err,
+                                format!("checking ephemeral acceptance: {err:?}"),
+                            ));
+                        }
+                    };
+                    let already_accepted = daemon
+                        .migrations
+                        .bucket_migrations
+                        .lock()
+                        .unwrap()
+                        .accepted
+                        .contains_key(&migration)
+                        || ephemeral_accepted;
+                    if already_accepted {
+                        return Ok(HandedOver { migration, cell });
+                    }
+                }
+            }
+        }
+        if !*serving.borrow() {
+            return Err(Status::unavailable("the extent daemon drains, as it is about to exit"));
+        }
+        tokio::select! {
+            biased;
+            () = cladefs_core::caller::gone() => {
+                return Err(Status::cancelled("caller cancelled WaitHandOver"));
+            }
+            changed = serving.changed() => {
+                if changed.is_err() || !*serving.borrow() {
+                    return Err(Status::unavailable(
+                        "the extent daemon drains, as it is about to exit",
+                    ));
+                }
+            }
+            changed = gen_rx.changed() => {
+                if changed.is_err() {
+                    return Err(Status::unavailable("daemon shutting down"));
+                }
+            }
+        }
+    }
+}
+
 /// Ends the migration of the cell at `path` (`AbortMigration`, board 8577, board 11369), as the
 /// module's docs say. Its hand-over not begun: its rounds stopped, its target told to give it up,
 /// and the cell free to migrate again, its guest running on; told not, the target gives it up idle,
@@ -2010,7 +2262,14 @@ pub(super) mod target {
         };
         if !daemon.migrations.prepared.lock().unwrap().contains_key(&migration) {
             log::warn!("cladefsd: migration {migration:x} prepared by a daemon before: given up");
-            refuse(daemon, host, &entry).await?;
+            refuse(
+                daemon,
+                host,
+                &entry,
+                Errno::EAGAIN,
+                "migration prepared by an earlier daemon instance",
+            )
+            .await?;
             return Ok(None);
         }
         Ok(Some((taking, entry)))
@@ -2498,7 +2757,7 @@ pub(super) mod target {
             Some((found, Some(Migrating::Receiving { id: older, .. }))) if found.epoch < epoch => {
                 log::info!("cladefsd: migration {older:x} of {child} superseded by {migration:x}");
                 supersede(&host, found, origin, &bucket).await?;
-                superseded = Some((*older, staging(&found.path, *older)));
+                superseded = Some((*older, found.path.clone(), staging(&found.path, *older)));
                 None
             }
             Some((found, Some(Migrating::Receiving { id: newer, .. }))) => {
@@ -2538,8 +2797,9 @@ pub(super) mod target {
         heard(&daemon, migration);
         // The older migration's files dropped once no entry names it: dropped part way, a staging
         // an entry names is one a retry of its migration may take for whole (board 5721).
-        if let Some((older_id, older)) = superseded {
+        if let Some((older_id, _older_path, older)) = superseded {
             forget(&daemon, older_id);
+            daemon.migrations.note_incoming_superseded(child, older_id);
             if let Err(err) =
                 local_cell::upload::blocking(|| drop_staged(daemon.host.local(), &older))
             {
@@ -2558,7 +2818,7 @@ pub(super) mod target {
         if let Some(failed) = failed {
             // Referred or not: given up, its reference retired, or, that timing out too, left to
             // the reaping of migrations idle too long.
-            refuse(&daemon, &host, &entry).await?;
+            refuse(&daemon, &host, &entry, Errno::EAGAIN, failed.message()).await?;
             return Err(failed);
         }
         // Staged afresh but by this daemon: what a daemon before it staged, it may have lost part
@@ -2578,11 +2838,12 @@ pub(super) mod target {
             })
         });
         if let Err(err) = staging {
-            refuse(&daemon, &host, &entry).await?;
+            refuse(&daemon, &host, &entry, Errno::EIO, &format!("staging failed: {err}")).await?;
             return Err(status("staging", err));
         }
         let seq = next_prep_seq(&daemon);
         daemon.migrations.prepared.lock().unwrap().insert(migration, seq);
+        daemon.migrations.note_incoming_preparing(migration, child);
         log::info!(
             "cladefsd: migration {migration:x} of {child} prepared, to {}",
             entry.path.display()
@@ -2672,7 +2933,11 @@ pub(super) mod target {
                         "cladefsd: migration {:x} of {child} superseded by {migration:x}",
                         found.migration
                     );
-                    superseded = Some((found.migration, staging(&found.path, found.migration)));
+                    superseded = Some((
+                        found.migration,
+                        found.path.clone(),
+                        staging(&found.path, found.migration),
+                    ));
                     None
                 }
                 Some(found) => {
@@ -2702,9 +2967,10 @@ pub(super) mod target {
             })
         })
         .map_err(|err| status("staging", err))?;
-        if let Some((older_id, older_staged)) = superseded {
+        if let Some((older_id, _older_path, older_staged)) = superseded {
             daemon.migrations.bucket_migrations.lock().unwrap().receiving.remove(&older_id);
             forget(&daemon, older_id);
+            daemon.migrations.note_incoming_superseded(child, older_id);
             if let Err(err) =
                 local_cell::upload::blocking(|| drop_staged(daemon.host.local(), &older_staged))
             {
@@ -2724,6 +2990,7 @@ pub(super) mod target {
         daemon.migrations.bucket_migrations.lock().unwrap().receiving.insert(migration, record);
         let seq = next_prep_seq(&daemon);
         daemon.migrations.prepared.lock().unwrap().insert(migration, seq);
+        daemon.migrations.note_incoming_preparing(migration, child);
         heard(&daemon, migration);
         log::info!(
             "cladefsd: bucket-backed migration {migration:x} of {child} prepared, to {}",
@@ -3097,7 +3364,8 @@ pub(super) mod target {
         let (moved_before, lacking, files) = checked.await?;
         if let Some(lacking) = lacking {
             log::warn!("cladefsd: refusing migration {migration:x}: {lacking}");
-            refuse(&daemon, &host, &entry).await?;
+            refuse(&daemon, &host, &entry, Errno::EAGAIN, &format!("hand-over refused: {lacking}"))
+                .await?;
             return Ok(false);
         }
         let into = entry.path.clone();
@@ -3144,6 +3412,7 @@ pub(super) mod target {
             pool.register_cell(child, into);
         }
         forget(&daemon, migration);
+        daemon.migrations.note_incoming_accepted(migration, child);
         Ok(true)
     }
 
@@ -3236,7 +3505,12 @@ pub(super) mod target {
             .await?;
             if let Some(lacking) = lacking {
                 log::warn!("cladefsd: refusing bucket-backed migration {migration:x}: {lacking}");
-                refuse_bucket(&daemon, &receiving);
+                refuse_bucket(
+                    &daemon,
+                    &receiving,
+                    Errno::EAGAIN,
+                    &format!("hand-over refused: {lacking}"),
+                );
                 return Ok(false);
             }
         } else if receiving.token != token {
@@ -3303,7 +3577,12 @@ pub(super) mod target {
                     "cladefsd: refusing bucket-backed migration {migration:x}: holding {}: {errno}",
                     into.display()
                 );
-                refuse_bucket(&daemon, &receiving);
+                refuse_bucket(
+                    &daemon,
+                    &receiving,
+                    errno,
+                    &format!("holding {}: {errno}", into.display()),
+                );
                 return Ok(false);
             }
         };
@@ -3400,6 +3679,7 @@ pub(super) mod target {
                     state.accepted.insert(migration, tokio::time::Instant::now());
                 }
                 forget(&daemon, migration);
+                daemon.migrations.note_incoming_accepted(migration, receiving.child);
                 Ok(true)
             }
             Ok(Err(errno)) => {
@@ -3440,7 +3720,12 @@ pub(super) mod target {
                         log::warn!("cladefsd: dropping {}, refused: {err}", into.display());
                         return Err(status("dropping refused cell", err));
                     }
-                    refuse_bucket(&daemon, &receiving);
+                    refuse_bucket(
+                        &daemon,
+                        &receiving,
+                        errno,
+                        &format!("opening {}: {errno}", into.display()),
+                    );
                     return Ok(false);
                 }
                 log::warn!(
@@ -3598,7 +3883,12 @@ pub(super) mod target {
             if let Err(err) = removed {
                 return Err(status("dropping unreconciled cell", err));
             }
-            refuse_bucket(daemon, receiving);
+            refuse_bucket(
+                daemon,
+                receiving,
+                Errno::EAGAIN,
+                "migration bucket head unchanged on reconcile",
+            );
             return Ok(false);
         }
         match tokio::time::timeout(BUCKET_BOUND, crate::cells::open_here(daemon, &into)).await {
@@ -3617,6 +3907,7 @@ pub(super) mod target {
                     state.accepted.insert(migration, tokio::time::Instant::now());
                 }
                 forget(daemon, migration);
+                daemon.migrations.note_incoming_accepted(migration, receiving.child);
                 Ok(true)
             }
             Ok(Err(errno)) => {
@@ -3645,7 +3936,12 @@ pub(super) mod target {
                     if let Err(err) = removed {
                         return Err(status("dropping fenced migrated cell", err));
                     }
-                    refuse_bucket(daemon, receiving);
+                    refuse_bucket(
+                        daemon,
+                        receiving,
+                        errno,
+                        &format!("reconciling migrated cell refused: {errno}"),
+                    );
                     return Ok(false);
                 }
                 drop(hold);
@@ -3665,7 +3961,7 @@ pub(super) mod target {
     }
 
     /// Drops a staged bucket-backed migration and forgets its target state.
-    fn refuse_bucket(daemon: &Daemon, receiving: &BucketReceiving) {
+    fn refuse_bucket(daemon: &Daemon, receiving: &BucketReceiving, errno: Errno, reason: &str) {
         let migration = receiving.migration;
         daemon.migrations.bucket_migrations.lock().unwrap().receiving.remove(&migration);
         forget(daemon, migration);
@@ -3674,6 +3970,12 @@ pub(super) mod target {
         {
             log::warn!("cladefsd: dropping {}, refused: {err}", staged.display());
         }
+        daemon.migrations.note_incoming_failed(
+            receiving.child,
+            migration,
+            errno,
+            reason.to_owned(),
+        );
     }
 
     /// Runs `work`, of the host's disk, off the runtime's workers ([`run::off_the_runtime`]): a
@@ -3722,7 +4024,7 @@ pub(super) mod target {
                     }
                     return Ok(());
                 }
-                refuse_bucket(&daemon, &receiving);
+                refuse_bucket(&daemon, &receiving, Errno::EAGAIN, "migration aborted by source");
                 count(&COUNTS.taken_given_up, 1);
             }
             return Ok(());
@@ -3733,7 +4035,7 @@ pub(super) mod target {
         }
         // Accepted while this waited its turn: refused not ([`refuse`]).
         let Some((_taking, entry)) = held(&daemon, &host, migration).await? else { return Ok(()) };
-        refuse(&daemon, &host, &entry).await?;
+        refuse(&daemon, &host, &entry, Errno::EAGAIN, "migration aborted by source").await?;
         count(&COUNTS.taken_given_up, 1);
         Ok(())
     }
@@ -3751,6 +4053,8 @@ pub(super) mod target {
         daemon: &Daemon,
         host: &ephemeral_host::Host,
         entry: &Entry,
+        errno: Errno,
+        reason: &str,
     ) -> Result<(), Status> {
         if let Some((migration, _)) = entry.receiving()
             && local_cell::upload::blocking(|| host.accepted(migration))
@@ -3767,6 +4071,7 @@ pub(super) mod target {
                 host.note(&taken).map_err(|err| status("noting the cell", err))
             })?;
             forget(daemon, migration);
+            daemon.migrations.note_incoming_accepted(migration, entry.child);
             return Ok(());
         }
         host.drop_moved(entry).map_err(journal)?;
@@ -3779,6 +4084,12 @@ pub(super) mod target {
             {
                 log::warn!("cladefsd: dropping {}, refused: {err}", staged.display());
             }
+            daemon.migrations.note_incoming_failed(
+                entry.child,
+                migration,
+                errno,
+                reason.to_owned(),
+            );
         }
         Ok(())
     }
@@ -3874,6 +4185,7 @@ pub(super) mod target {
             if state.accepted.len() < before {
                 state.evicted = true;
             }
+            daemon.migrations.incoming.lock().unwrap().prune(accepted_ttl);
             state.receiving.keys().copied().collect()
         };
         let all_taken: HashSet<u64> =
@@ -3921,7 +4233,14 @@ pub(super) mod target {
                     "cladefsd: migration {migration:x} of {} idle {idle:?}: given up",
                     entry.child
                 );
-                refuse(daemon, host, &entry).await?;
+                refuse(
+                    daemon,
+                    host,
+                    &entry,
+                    Errno::ETIMEDOUT,
+                    &format!("migration {migration:x} idle {idle:?}: given up"),
+                )
+                .await?;
                 count(&COUNTS.taken_given_up, 1);
             }
         }
@@ -3982,7 +4301,12 @@ pub(super) mod target {
                 "cladefsd: bucket-backed migration {migration:x} of {} idle {idle:?}: given up",
                 receiving.child
             );
-            refuse_bucket(daemon, &receiving);
+            refuse_bucket(
+                daemon,
+                &receiving,
+                Errno::ETIMEDOUT,
+                &format!("migration {migration:x} idle {idle:?}: given up"),
+            );
             count(&COUNTS.taken_given_up, 1);
         }
         Ok(())

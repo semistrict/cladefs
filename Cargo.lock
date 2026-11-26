@@ -1230,6 +1230,7 @@ dependencies = [
  "event-listener",
  "fail",
  "futures",
+ "host_fs",
  "libc",
  "log",
  "madsim-tokio",

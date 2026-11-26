@@ -134,6 +134,7 @@ const (
 	Cladefsd_AbortMigration_FullMethodName     = "/cladefs.cladefsd.v1.Cladefsd/AbortMigration"
 	Cladefsd_ListDisks_FullMethodName          = "/cladefs.cladefsd.v1.Cladefsd/ListDisks"
 	Cladefsd_SetDiskGovernance_FullMethodName  = "/cladefs.cladefsd.v1.Cladefsd/SetDiskGovernance"
+	Cladefsd_WaitHandOver_FullMethodName       = "/cladefs.cladefsd.v1.Cladefsd/WaitHandOver"
 )
 
 // CladefsdClient is the client API for Cladefsd service.
@@ -358,6 +359,12 @@ type CladefsdClient interface {
 	// Updates per-disk governance (hard cap, part-cache cap, headroom, dirty budget, placement mode)
 	// live at runtime for one managed disk identified by its configured `id` (hotbed question 547).
 	SetDiskGovernance(ctx context.Context, in *SetDiskGovernanceRequest, opts ...grpc.CallOption) (*SetDiskGovernanceResponse, error)
+	// Waits on the target daemon until an incoming live migration hand-over for `(tenant, cell)` is
+	// accepted and ready to open, or fails (refused, aborted, idle-reaped, or superseded). Returns at
+	// once if `(tenant, cell)` is already present locally with no migration for it under way, or if
+	// the named migration has already reached a terminal outcome. Respects caller cancellation and
+	// deadlines, and returns UNAVAILABLE if the daemon begins draining.
+	WaitHandOver(ctx context.Context, in *WaitHandOverRequest, opts ...grpc.CallOption) (*WaitHandOverResponse, error)
 }
 
 type cladefsdClient struct {
@@ -768,6 +775,16 @@ func (c *cladefsdClient) SetDiskGovernance(ctx context.Context, in *SetDiskGover
 	return out, nil
 }
 
+func (c *cladefsdClient) WaitHandOver(ctx context.Context, in *WaitHandOverRequest, opts ...grpc.CallOption) (*WaitHandOverResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(WaitHandOverResponse)
+	err := c.cc.Invoke(ctx, Cladefsd_WaitHandOver_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // CladefsdServer is the server API for Cladefsd service.
 // All implementations must embed UnimplementedCladefsdServer
 // for forward compatibility.
@@ -990,6 +1007,12 @@ type CladefsdServer interface {
 	// Updates per-disk governance (hard cap, part-cache cap, headroom, dirty budget, placement mode)
 	// live at runtime for one managed disk identified by its configured `id` (hotbed question 547).
 	SetDiskGovernance(context.Context, *SetDiskGovernanceRequest) (*SetDiskGovernanceResponse, error)
+	// Waits on the target daemon until an incoming live migration hand-over for `(tenant, cell)` is
+	// accepted and ready to open, or fails (refused, aborted, idle-reaped, or superseded). Returns at
+	// once if `(tenant, cell)` is already present locally with no migration for it under way, or if
+	// the named migration has already reached a terminal outcome. Respects caller cancellation and
+	// deadlines, and returns UNAVAILABLE if the daemon begins draining.
+	WaitHandOver(context.Context, *WaitHandOverRequest) (*WaitHandOverResponse, error)
 	mustEmbedUnimplementedCladefsdServer()
 }
 
@@ -1119,6 +1142,9 @@ func (UnimplementedCladefsdServer) ListDisks(context.Context, *ListDisksRequest)
 }
 func (UnimplementedCladefsdServer) SetDiskGovernance(context.Context, *SetDiskGovernanceRequest) (*SetDiskGovernanceResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SetDiskGovernance not implemented")
+}
+func (UnimplementedCladefsdServer) WaitHandOver(context.Context, *WaitHandOverRequest) (*WaitHandOverResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method WaitHandOver not implemented")
 }
 func (UnimplementedCladefsdServer) mustEmbedUnimplementedCladefsdServer() {}
 func (UnimplementedCladefsdServer) testEmbeddedByValue()                  {}
@@ -1861,6 +1887,24 @@ func _Cladefsd_SetDiskGovernance_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Cladefsd_WaitHandOver_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(WaitHandOverRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CladefsdServer).WaitHandOver(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Cladefsd_WaitHandOver_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CladefsdServer).WaitHandOver(ctx, req.(*WaitHandOverRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Cladefsd_ServiceDesc is the grpc.ServiceDesc for Cladefsd service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -2027,6 +2071,10 @@ var Cladefsd_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SetDiskGovernance",
 			Handler:    _Cladefsd_SetDiskGovernance_Handler,
+		},
+		{
+			MethodName: "WaitHandOver",
+			Handler:    _Cladefsd_WaitHandOver_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

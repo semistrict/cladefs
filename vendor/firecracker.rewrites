@@ -54,3 +54,9 @@ ca06ec6088bb25ad02aae8887f4dc50a41b3586e de36a381b18679c6f8fc8fde9bee4a303d2f5fe
 # devices::virtio::extent::persist for CellSnapshot (snapshot-extent-state v3) for host-local
 # suspend/resume of ephemeral VMs.
 de36a381b18679c6f8fc8fde9bee4a303d2f5fea cc076e3e0ac461021539505d35a1892d6e38e846
+# cladefs-v1.18.0-r7 (branch cladefs-v1.18.0-r7): add PATCH /cladefs/{id} (Released/Open cell state
+# on paused VMs), PUT /snapshot/create for_migration (no fsfreeze, no make_version), and
+# PUT /snapshot/load memory_cell.diff_files (sparse Diff overlays onto forked memory cells), and
+# order the standalone jailer cgroup.controllers (6d5495860) and vsock teardown (0b77d9583) fixes
+# ahead of virtio-pci and cladefs so every commit in the series builds with --features cladefs.
+0b77d9583ed667cf32048235badfd8a056e4c5a7 b9e1fb29768315aca1d2965747c082581497a608

@@ -76,8 +76,9 @@ pub enum Request<'a> {
     DropVersion { version: u64 },
     /// [`RESIZED`]: the guest's answer to a shrink to `capacity` bytes.
     Resized { capacity: u64, took: bool },
-    /// [`MAPPINGS`].
-    Mappings,
+    /// [`MAPPINGS`]: if `quiescent` ([`MAPPINGS_QUIESCENT`]), refuses with `EBUSY` while any
+    /// extent is open.
+    Mappings { quiescent: bool },
     /// [`TRANSFER`]: the area, of `len` bytes.
     Transfer { len: u64, area: Area<'a> },
     /// [`BUILD`]: the commit the VM process was built of, a label's characters, [`MAX_BUILD`] at
@@ -208,9 +209,9 @@ fn known_flags(kind: u32) -> Result<u32, Errno> {
         FAULT => FAULT_PAGE | FAULT_PROBE,
         WINDOW => WINDOW_COPYING,
         FORK => FORK_QUIESCENT | FORK_DROP,
+        MAPPINGS => MAPPINGS_QUIESCENT,
         STATS => STATS_GUEST,
-        FREE | FREE_MANY | UNMAP | ROOT | INFO | RESIZED | MAPPINGS | TRANSFER | BUILD
-        | MAP_MANY => 0,
+        FREE | FREE_MANY | UNMAP | ROOT | INFO | RESIZED | TRANSFER | BUILD | MAP_MANY => 0,
         _ => return Err(Errno::EINVAL),
     })
 }
@@ -249,7 +250,7 @@ impl<'a> Request<'a> {
             Request::Fault(_) => FAULT,
             Request::Version | Request::DropVersion { .. } => FORK,
             Request::Resized { .. } => RESIZED,
-            Request::Mappings => MAPPINGS,
+            Request::Mappings { .. } => MAPPINGS,
             Request::Transfer { .. } => TRANSFER,
             Request::Build(_) => BUILD,
             Request::Stats { .. } => STATS,
@@ -429,7 +430,10 @@ impl<'a> Request<'a> {
                     | flag(*commit == Commit::Uploaded, COMMIT_UPLOADED);
                 Encoded::empty(COMMIT, flags).carrying(root.unwrap_or_default())
             }
-            Request::Root | Request::Info | Request::Mappings => Encoded::empty(self.kind(), 0),
+            Request::Root | Request::Info => Encoded::empty(self.kind(), 0),
+            Request::Mappings { quiescent } => {
+                Encoded::empty(MAPPINGS, flag(*quiescent, MAPPINGS_QUIESCENT))
+            }
             Request::Window { size, copying, budget } => {
                 let body = WindowBody { size: *size, budget: *budget };
                 Encoded::with_body(WINDOW, flag(*copying, WINDOW_COPYING), &body)
@@ -640,14 +644,18 @@ impl<'a> Request<'a> {
                 };
                 Request::Commit { commit, root }
             }
-            ROOT | INFO | MAPPINGS => {
+            ROOT | INFO => {
                 nothing()?;
                 header.decode_empty()?;
                 match kind {
                     ROOT => Request::Root,
-                    INFO => Request::Info,
-                    _ => Request::Mappings,
+                    _ => Request::Info,
                 }
+            }
+            MAPPINGS => {
+                nothing()?;
+                header.decode_empty()?;
+                Request::Mappings { quiescent: has(MAPPINGS_QUIESCENT) }
             }
             WINDOW => {
                 nothing()?;
@@ -1616,7 +1624,8 @@ mod tests {
             Request::Version,
             Request::DropVersion { version: a },
             Request::Resized { capacity: a, took: one },
-            Request::Mappings,
+            Request::Mappings { quiescent: false },
+            Request::Mappings { quiescent: true },
             Request::Transfer { len: a, area: Area(area) },
             Request::Build(&fields.build),
             Request::Stats { ask: a, guest: None },
@@ -1942,6 +1951,7 @@ mod tests {
                 WINDOW => 0b1,
                 FORK => 0b11,
                 STATS => 0b1,
+                MAPPINGS => 0b1,
                 _ => 0,
             }
         };
@@ -2648,7 +2658,7 @@ mod tests {
     fn the_wire_is_its_version() {
         /// The version, and the fingerprint of the wire it is. A change to the wire is a new
         /// version, both changed together, never the fingerprint alone.
-        const WIRE: (u64, u64) = (20, 0xe59a25cc27a0b917);
+        const WIRE: (u64, u64) = (21, 0x8a2b028f75b67cb1);
         let fingerprint = fingerprint();
         assert_eq!(
             (VERSION, fingerprint),

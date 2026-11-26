@@ -129,9 +129,16 @@ in `PUT /snapshot/load` alongside `mem_backend.backend_type = "Cell"`: KVM track
 (including first-time COW into private pages and subsequent writes to private pages), while
 unmodified shared pages remain read-only and clean.
 
+To restore a live-migrated VM on the destination using the same base memory cell version plus
+sparse Firecracker diff files (`snapshot_type: "Diff"`), pass `"diff_files": ["<diff0>", "<diff1>", ...]`
+(ordered oldest to newest) inside `memory_cell` on `PUT /snapshot/load`: Firecracker forks the base
+memory cell version, overlays only allocated ranges from the diff files (later files win; dirty
+zero pages become holes shadowing base pages; unallocated holes stay shared from the base version),
+commits once, and maps the COW window.
+
 ### Host-local suspend/resume of ephemeral VMs (zero bucket uploads)
 
-VMs running on ephemeral Fxfs cells (`ForkCell(..., ephemeral: true)`, doc-25) can be parked to
+VMs running on ephemeral Fxfs cells (`ForkCell(..., persistent: false)`, doc-25) can be parked to
 local SSD and resumed on the **same host** using standalone ephemeral memory cells without
 uploading anything to object storage:
 
@@ -194,8 +201,9 @@ uploading anything to object storage:
 ## Live migration of bucket-backed cells (tail-only peer hand-over)
 
 Both ephemeral and bucket-backed cells migrate live between two hosts sharing a bucket over peer
-mTLS (`CLADEFSD_PEER_ADDRESS` / `CLADEFSD_PEER_TLS`), using `MigrateCell`, `HandOverCell`, and
-`AbortMigration` (or `cladefsctl migrate`, `cladefsctl hand-over`, `cladefsctl abort-migration`).
+mTLS (`CLADEFSD_PEER_ADDRESS` / `CLADEFSD_PEER_TLS`), using `MigrateCell`, `HandOverCell`,
+`WaitHandOver`, and `AbortMigration` (or `cladefsctl migrate`, `cladefsctl hand-over`,
+`cladefsctl wait-hand-over`, `cladefsctl abort-migration`).
 
 For a **bucket-backed cell**, only data not yet acknowledged in the bucket is transferred over peer
 mTLS, avoiding any bucket upload wait during the VM pause:
@@ -206,27 +214,44 @@ mTLS, avoiding any bucket upload wait during the VM pause:
 2. **Pre-copy while the VM runs:** call `MigrateCell(tenant, cell, peer)` on the source daemon. The
    source's uploader keeps uploading finalized segments to the bucket in parallel, while migration
    rounds stream only unacknowledged finalized `segments/` over peer mTLS (skipping any that finish
-   uploading before being sent).
-3. **Pause and hand over:** pause/stop the source VM so its connection to `cladefsd` closes, then
-   call `HandOverCell(tenant, cell, token=<new_fencing_token>)` on the source daemon:
-   - The source cuts its uploader short immediately without draining pending bucket uploads, waits
-     for its local close to finish flushing dirty pages, writes the durable `migrating` marker, and
-     sends only the remaining unuploaded tail (open segment, standalone extents, WAL, logs, store
-     metadata, and any unsent finalized segments).
-   - The target prunes any pre-copied segments already uploaded on the source, places the cell at
-     `token` (if provided), renames it into place on its chosen disk, and takes its head in the
-     bucket (one head CAS for `f = 0` cells; replicated `f >= 1` cells also fence and re-seed their
-     replica configuration) before immediately closing with `cut_short` so no bucket data uploads
-     block the pause.
-   - Once accepted, the source deletes its local cell directory (leaving the cell intact in the
-     bucket) and returns `OK`. Start/resume the VM on the target referencing `"TENANT/CELL"`; the
-     target's uploader uploads the transferred tail to the bucket in the background.
+   uploading before being sent). On the target daemon, start
+   `WaitHandOver(tenant, cell, migration=id)` (or `migration=0` for any incoming hand-over of
+   `(tenant, cell)`) so the target wakes immediately when the hand-over is accepted instead of
+   polling `StatCell`.
+3. **Pause, migration snapshot, release cell, and hand over (abort-safe):**
+   - Quiesce dirty guest data (`syncfs` and rebind clean DAX private pages via
+     `/sys/module/cladefs/parameters/dax_rebind_now`, without needing `fsfreeze`) and pause the
+     source VM (`PATCH /vm` with `{"state": "Paused"}`).
+   - Capture the final migration snapshot with `PUT /snapshot/create` and `"for_migration": true`:
+     this records each extent device's DAX window mappings without requiring a guest `fsfreeze` and
+     without creating a cell version (still verifying that the device has no uncommitted private
+     pages or open extents).
+   - Release each extent device's cell on the paused source VM via `PATCH /cladefs/{id}` with
+     `{"state": "Released"}` (the VM process stays alive, and `Resume` / `CreateSnapshot` are
+     refused while any cell is released).
+   - Call `HandOverCell(tenant, cell, token=<new_fencing_token>)` on the source daemon:
+     - The source cuts its uploader short immediately without draining pending bucket uploads, waits
+       for its local close to finish flushing dirty pages, writes the durable `migrating` marker, and
+       sends only the remaining unuploaded tail (open segment, standalone extents, WAL, logs, store
+       metadata, and any unsent finalized segments).
+     - The target prunes any pre-copied segments already uploaded on the source, places the cell at
+       `token` (if provided), renames it into place on its chosen disk, and takes its head in the
+       bucket (one head CAS for `f = 0` cells; replicated `f >= 1` cells also fence and re-seed their
+       replica configuration) before immediately closing with `cut_short` so no bucket data uploads
+       block the pause, and waking any `WaitHandOver` caller for `(tenant, cell)`.
+     - Once accepted, the source deletes its local cell directory (leaving the cell intact in the
+       bucket) and returns `OK`. Load and resume the VM on the target with `PUT /snapshot/load`
+       (`cladefs_overrides` referencing `"TENANT/CELL"`, which opens the handed-over cell directly
+       and verifies its cell ID); the target's uploader uploads the transferred tail to the bucket in
+       the background.
 4. **Abort / recovery:** call `AbortMigration(tenant, cell)` to cancel before hand-over (the
-   source's uploader resumes normal drain-on-stop) or to resolve an uncertain hand-over. If the
-   target refuses (`EAGAIN`, e.g. a stale fencing `token`) or restarts before taking the bucket head,
-   the source removes its `migrating` marker and resumes serving locally; if the target restarted
-   after taking the bucket head at `token`, retrying `HandOverCell` / `AbortMigration` reconciles
-   against the bucket head and cleans up the source directory.
+   source's uploader resumes normal drain-on-stop) or to resolve an uncertain hand-over. If the cell
+   was released on the paused source VM and the hand-over did not transfer ownership (e.g., aborted
+   before `HandOverCell` or target refused with `EAGAIN`), reopen it with `PATCH /cladefs/{id}`
+   `{"state": "Open"}` (which restores DAX window mappings) and resume the source VM (`PATCH /vm`
+   `{"state": "Resumed"}`). If the target restarted after taking the bucket head at `token`,
+   retrying `HandOverCell` / `AbortMigration` reconciles against the bucket head and cleans up the
+   source directory.
 
 ### 3. When the snapshot is finished with, everywhere
 

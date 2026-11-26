@@ -102,6 +102,15 @@ impl CellClient {
         DaemonConnection::connect(socket)?.open_forked_cell(tenant, from, capacity)
     }
 
+    /// The cell at `cell_dir` that the daemon listening at `socket` serves, if it already exists
+    /// (`ENOENT` otherwise; [`DaemonConnection::open_existing`]).
+    pub fn connect_existing(
+        socket: impl AsRef<Path>,
+        cell_dir: impl AsRef<Path>,
+    ) -> Result<Self, Error> {
+        DaemonConnection::connect(socket)?.open_existing(cell_dir)
+    }
+
     /// The cell at `cell_dir` that the daemon listening at `socket` serves, forked from the version
     /// `from` if it doesn't exist ([`DaemonConnection::open_forked`]).
     pub fn connect_forked(
@@ -457,7 +466,17 @@ impl CellClient {
 
     /// The window's mappings, which a snapshot of the VM records (`MAPPINGS`).
     pub fn window_mappings(&self) -> Result<Vec<WindowMapping>> {
-        let payload = self.client.request_blocking(&Request::Mappings)?.payload;
+        let payload =
+            self.client.request_blocking(&Request::Mappings { quiescent: false })?.payload;
+        // A reply the daemon malformed.
+        crate::codec::mappings(&payload).map_err(|_| Errno::EIO)
+    }
+
+    /// The window's mappings, refusing with `EBUSY` if any extent is open (`!is_quiescent`):
+    /// used when snapshotting or releasing a paused VM's cell for live migration without making a
+    /// version.
+    pub fn window_mappings_quiescent(&self) -> Result<Vec<WindowMapping>> {
+        let payload = self.client.request_blocking(&Request::Mappings { quiescent: true })?.payload;
         // A reply the daemon malformed.
         crate::codec::mappings(&payload).map_err(|_| Errno::EIO)
     }
@@ -775,6 +794,12 @@ impl DaemonConnection {
     /// Called once, of the connection and its cell ([`CellClient::on_daemon_lost`]).
     pub fn on_lost(&self, lost: impl Fn() + Send + Sync + 'static) {
         self.client().lost.listen(Box::new(lost));
+    }
+
+    /// The existing cell at `cell_dir` (`ENOENT` if it doesn't exist): used to reopen a released
+    /// cell on a paused VM or open a cell handed over by live migration.
+    pub fn open_existing(self, cell_dir: impl AsRef<Path>) -> Result<CellClient, Error> {
+        self.opening(cell_dir.as_ref(), Opening::Existing)
     }
 
     /// The cell at `cell_dir`, created with `capacity` bytes if it doesn't exist.
