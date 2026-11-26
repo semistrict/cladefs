@@ -347,14 +347,19 @@ pub(super) async fn govern_with_on(
     allowance: u64,
     mode: crate::governor::ReclaimMode,
 ) {
-    let daemon = Arc::clone(daemon);
-    // Run the production sync eviction path outside the simulation on a blocking thread so async
-    // callers do not block a Tokio worker.
-    tokio::task::spawn_blocking(move || {
-        govern_with_sync_on_wait(&daemon, allowance, mode, &mut SyncWait::Standalone);
-    })
-    .await
-    .expect("govern_with_sync_on blocking task panicked");
+    if tokio::runtime::Handle::try_current().is_ok() {
+        let daemon = Arc::clone(daemon);
+        // Run the production sync eviction path outside the simulation on a blocking thread so
+        // async callers do not block a Tokio worker.
+        tokio::task::spawn_blocking(move || {
+            govern_with_sync_on_wait(&daemon, allowance, mode, &mut SyncWait::Standalone);
+        })
+        .await
+        .expect("govern_with_sync_on blocking task panicked");
+    } else {
+        // Called from a non-Tokio executor (e.g. `futures::executor::block_on` in `cell-bench`).
+        govern_with_sync_on_wait(daemon, allowance, mode, &mut SyncWait::Standalone);
+    }
 }
 
 /// Async version of [`govern_with_on`] used under `madsim` where no OS eviction thread runs and
@@ -1339,5 +1344,17 @@ mod tests {
 
             drop((exts, dax1, win1, dax2, win2, t1, t2));
         });
+    }
+
+    /// board 13925: `govern_on` / `govern_with_on` must work when polled outside a Tokio runtime
+    /// (for example via `futures::executor::block_on` in `cell-bench`).
+    #[cfg(not(madsim))]
+    #[test]
+    fn govern_works_outside_tokio_runtime() {
+        let daemon = crate::Daemon::new();
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        const CAP: u64 = 8 << 20;
+        futures::executor::block_on(super::govern_on(&daemon, CAP));
+        assert_eq!(daemon.memory.governed.load(std::sync::atomic::Ordering::Relaxed), CAP);
     }
 }
