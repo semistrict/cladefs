@@ -23,7 +23,7 @@ use anyhow::Context as _;
 use cladefs_core::error::{Error, Result};
 use cladefs_core::host_cell::{self, Opened};
 use cladefs_core::open_cell::{OpenCell, Opening, release};
-use device::OpenCellDevice;
+pub use device::OpenCellDevice;
 use fxfs::filesystem::FxFilesystem;
 use fxfs::fsck::errors::FsckIssue;
 use fxfs::fsck::{FsckOptions, fsck_volume_with_options, fsck_with_options};

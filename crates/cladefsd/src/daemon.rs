@@ -50,6 +50,9 @@ pub struct Daemon {
     pub(super) connections_work: drain::Work,
     /// Active control API calls counted for drain.
     pub(super) calls_work: drain::Work,
+    /// cladefs: cells open in the daemon's process (`embedded`), counted for drain as connections
+    /// are: a drain waits for their holders to let them go, and refuses more (board 13909).
+    pub(super) embedded_work: drain::Work,
     /// Consolidated Tokio runtime for VM socket I/O, control gRPC, peer gRPC, and memory governor.
     /// Under `madsim`, tasks spawn directly onto the simulated node's runtime.
     #[cfg(not(madsim))]
@@ -139,6 +142,7 @@ impl Daemon {
             draining: watch::channel(false).0,
             connections_work: drain::Work::new(),
             calls_work: drain::Work::new(),
+            embedded_work: drain::Work::new(),
             #[cfg(not(madsim))]
             runtime: OnceLock::new(),
             table: cells::Table::new(),

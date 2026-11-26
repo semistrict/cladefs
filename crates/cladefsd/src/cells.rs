@@ -18,10 +18,9 @@
 //! opens a cell others have open (`EBUSY`).
 
 use crate::Daemon;
-use crate::server::Connection;
 use crate::storage::{daemon_bucket_on, part_cache, upload_closed, upload_interval};
 use bucket_cell::cell::Kind;
-use cladefs_core::cell_table::{self, CellTable, Writer as _};
+use cladefs_core::cell_table::{self, CellTable};
 use cladefs_core::open_cell::{Opening, release};
 use cladefs_core::pages::Arena;
 use cladefs_core::{CellId, CellOf, Errno, ExtentInfo, OpenCell};
@@ -30,14 +29,37 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Weak};
 
-/// The daemon's cells, by their keys ([`cell_dir_key`]): who holds each, a connection writing it or
-/// the daemon working on it, and what is open of it, the cell connections have open or a kept cell
-/// kept open for forks.
-pub(super) type Table = CellTable<Connection, OpenCell, Kept>;
+/// The daemon's cells, by their keys ([`cell_dir_key`]): who holds each, a writer (a VM process's
+/// connection, or a cell embedded in the daemon's process) or the daemon working on it, and what
+/// is open of it, the cell its writer has open or a kept cell kept open for forks.
+pub(super) type Table = CellTable<dyn CellWriter, OpenCell, Kept>;
 
-/// A cell held (`daemon.table`): by a connection writing it, or by the daemon working on it, which
-/// no connection opens meanwhile; until it is dropped.
-pub(super) type Hold = cell_table::Hold<Connection, OpenCell, Kept>;
+/// A cell held (`daemon.table`): by a writer, or by the daemon working on it, which no writer
+/// opens meanwhile; until it is dropped.
+pub(super) type Hold = cell_table::Hold<dyn CellWriter, OpenCell, Kept>;
+
+/// cladefs: what writes a cell the daemon holds (board 13909): a VM process's connection
+/// ([`crate::server::Connection`]), or a cell the daemon's own process has open, with no VM process
+/// ([`crate::embedded::EmbeddedCell`]). What the daemon's work on a cell asks of its writer.
+pub(super) trait CellWriter: cell_table::Writer {
+    /// Its cell, once open.
+    fn cell(&self) -> Option<&Arc<OpenCell>>;
+    /// Sets its cell's capacity to `capacity` bytes (the control API's `ResizeCell`), as its user,
+    /// a guest or the process, agrees.
+    fn resize(
+        &self,
+        capacity: u64,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Errno>> + Send + '_>>;
+    /// It, if it is a VM process's connection: for tests of what a connection does.
+    #[cfg(test)]
+    fn connection(self: Arc<Self>) -> Option<Arc<crate::server::Connection>>;
+}
+
+/// cladefs: the VM process's connection writing the cell `key` names, if one does (tests).
+#[cfg(test)]
+pub(super) fn connection_writing(key: &Path) -> Option<Arc<crate::server::Connection>> {
+    table().writer(key).and_then(CellWriter::connection)
+}
 
 /// Holds the cell `key` names on `daemon` for `connection` to write it, once a connection whose VM
 /// process is gone lets it go, waiting at most [`CLOSING_WAIT`] (`EBUSY`), holding no thread
@@ -46,7 +68,7 @@ pub(super) type Hold = cell_table::Hold<Connection, OpenCell, Kept>;
 pub(super) async fn hold_to_write(
     daemon: &Arc<Daemon>,
     key: &Path,
-    connection: Weak<Connection>,
+    connection: Weak<dyn CellWriter>,
 ) -> Result<Hold, Errno> {
     let (hold, kept) = daemon.table.hold_to_write(key, connection, CLOSING_WAIT).await?;
     close_kept(daemon, kept).await;
@@ -468,6 +490,44 @@ where
 {
     let epoch = (**open_cell).borrow().make_local().await?;
     (**open_cell).borrow().uploaded(epoch).await
+}
+
+/// A new cell of `tenant`'s, its ID given by `daemon`'s bucket: `EIO` if the bucket fails, which
+/// a VM process's errno can't say, so logged.
+pub(super) async fn new_cell(daemon: &Arc<Daemon>, tenant: u64) -> Result<CellId, Errno> {
+    let bucket = daemon_bucket_on(daemon)?;
+    cladefs_core::host_cell::new_cell(&*bucket, tenant).await.map_err(|err| {
+        log::error!("cladefsd: allocating a new cell of tenant {tenant}: {err:#}");
+        Errno::EIO
+    })
+}
+
+/// cladefs: a new cell of `tenant`'s, its ID given by `daemon`'s bucket up front, and its canonical
+/// directory on `disk`, `<disk>/cells/<TENANT>/<CELL>`, its tenant's directory made (hotbed
+/// question 547): so that its opening creates and takes it there in a single taking (epoch 1),
+/// with no staging rename.
+pub(super) async fn new_managed_cell(
+    daemon: &Arc<Daemon>,
+    disk: &Arc<crate::disks::ManagedDisk>,
+    tenant: u64,
+) -> Result<(PathBuf, CellId), Errno> {
+    let cell = new_cell(daemon, tenant).await?;
+    let disk = Arc::clone(disk);
+    let path = blocking(move || {
+        drop(crate::disks::DiskPool::ensure_tenant_dir(&disk, cell.tenant)?);
+        Ok(crate::disks::DiskPool::cell_path(&disk, cell))
+    })
+    .await?;
+    Ok((path, cell))
+}
+
+/// cladefs: the directory of `cell`, a cell kept on one of `pool`'s disks (`ENOENT` if none).
+pub(super) async fn managed_cell_dir(
+    pool: &Arc<crate::disks::DiskPool>,
+    cell: CellId,
+) -> Result<PathBuf, Errno> {
+    let pool = Arc::clone(pool);
+    blocking(move || pool.find_cell(cell).ok_or(Errno::ENOENT)).await
 }
 
 /// The cell a connection has open at `path` on `daemon`, if one has, whose VM process isn't gone.

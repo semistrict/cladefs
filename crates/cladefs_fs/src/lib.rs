@@ -22,4 +22,4 @@ pub use filesystem::{Compactions, Filesystem, Node, Options, TreeCompactions, Vo
 pub use node::{
     Attr, DirEntry, FileType, Inode, Owner, RenameFlags, SetAttr, SetTime, StatFs, XattrMode,
 };
-pub use storage::Storage;
+pub use storage::{OpenCellDevice, Storage};

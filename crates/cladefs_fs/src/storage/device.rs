@@ -44,6 +44,10 @@ pub struct OpenCellDevice {
     collecting: Option<Arc<Collecting>>,
     allocator: TransferBudget,
     block_count: u64,
+    /// cladefs: what holds its cell, if given ([`OpenCellDevice::holding`]): dropped after `cell`,
+    /// as fields drop in order, so that it lets the cell go last, closing it.
+    #[allow(dead_code, reason = "held for its drop")]
+    holder: Option<Arc<dyn std::any::Any + Send + Sync>>,
 }
 
 impl OpenCellDevice {
@@ -52,7 +56,17 @@ impl OpenCellDevice {
         let block_size = OpenCell::BLOCK_SIZE;
         let capacity = cell.info().map_err(Error::new).context("the cell's capacity")?.capacity;
         let allocator = TransferBudget::new(block_size as usize, TRANSFER_BUDGET);
-        Ok(Self { cell, collecting, allocator, block_count: capacity / block_size as u64 })
+        let block_count = capacity / block_size as u64;
+        Ok(Self { cell, collecting, allocator, block_count, holder: None })
+    }
+
+    /// cladefs: `cell` as a device, which `holder` holds open and closes once let go: kept as long
+    /// as the device, and let go after it lets `cell` go (cladefsd's embedded cells, board 13909).
+    pub fn holding(
+        cell: Arc<OpenCell>,
+        holder: Arc<dyn std::any::Any + Send + Sync>,
+    ) -> Result<Self, Error> {
+        Ok(Self { holder: Some(holder), ..Self::new(cell, None)? })
     }
 
     /// Commits the cell as `commit` says, `root` its root if given, on the bucket runtime; then

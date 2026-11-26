@@ -426,7 +426,7 @@ fn shrinks_dropped_by_their_callers_stop_waiting() {
     let tenants = dir.path().join("tenants");
     std::fs::create_dir(&tenants).unwrap();
     std::thread::spawn(move || crate::control::serve_control(listener, tenants));
-    let connection = crate::cells::table().writer(&crate::cells::cell_dir_key(&path)).unwrap();
+    let connection = crate::cells::connection_writing(&crate::cells::cell_dir_key(&path)).unwrap();
 
     control(async {
         let mut api = crate::control::connect(&socket).await.unwrap();
@@ -5782,7 +5782,8 @@ async fn faults_waiting_for_object_storage_hold_up_no_request() {
         })
         .collect();
     // Every fault received, each waiting for a fetch.
-    let connection = crate::cells::table().writer(&crate::cells::cell_dir_key(&restored)).unwrap();
+    let connection =
+        crate::cells::connection_writing(&crate::cells::cell_dir_key(&restored)).unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while connection.unanswered() < FAULTS || gated.waiting() == 0 {
         assert!(std::time::Instant::now() < deadline, "{} faults", connection.unanswered());
@@ -6764,7 +6765,7 @@ fn window_mappings_are_answered_beside_the_stream_data_in_flight() {
     }
     sender.send(Header::new(MAPPINGS, id + reads + 1), &[], &[]).unwrap();
     let key = crate::cells::cell_dir_key(&path);
-    let holder = crate::cells::table().writer(&key).unwrap();
+    let holder = crate::cells::connection_writing(&key).unwrap();
     // Wait until all 4 READs and MAPPINGS are answered and queued past `MAX_STREAM_BYTES +
     // QUEUED_CREDIT` (tolerating up to 2 MiB of kernel Unix socket buffer and failing promptly if
     // the connection is dropped rather than spinning forever; board 11076).
@@ -7531,7 +7532,7 @@ async fn drains_give_up_past_their_bound() {
     assert_eq!(left, expected);
     assert_eq!(
         left.to_string(),
-        "1 VM processes' connections, 0 control calls and 0 cells' uploaders left"
+        "1 VM processes' connections, 0 embedded cells, 0 control calls and 0 cells' uploaders left"
     );
     drop(connection);
 }

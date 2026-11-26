@@ -8,8 +8,8 @@
 
 #![cfg(not(madsim))]
 
-use cladefs_core::{CellId, ExtentId, VolatileSlice, VolatileSliceMut};
-use libcladefs::{CellClient, Config, Daemon, DaemonConnection};
+use cladefs_core::{CellId, Errno, ExtentId, VolatileSlice, VolatileSliceMut};
+use libcladefs::{CellClient, Config, Daemon, DaemonConnection, Kind};
 use std::os::fd::{FromRawFd, IntoRawFd};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
@@ -124,6 +124,18 @@ fn embedded_daemon_serves_cells_in_process_and_to_vm_processes() {
     // Its control API, for an endpoint of this process's own.
     futures::executor::block_on(daemon.control_service()).unwrap();
     assert!(Path::new(&dir.path().join("tenants")).is_dir());
+
+    // A cell embedded in this process, held, holds its drain until let go, and a daemon draining
+    // embeds none (board 13909; Codex, hotbed review 162: the drain timed out on its uploader,
+    // and embedded more).
+    let embedded =
+        futures::executor::block_on(daemon.create_embedded(1, CAPACITY, Kind::Sqlite)).unwrap();
+    let held = futures::executor::block_on(daemon.clone().stop(Duration::from_secs(2)));
+    let held = held.unwrap_err().to_string();
+    assert!(held.contains("1 embedded cells"), "{held}");
+    let refused = futures::executor::block_on(daemon.create_embedded(1, CAPACITY, Kind::Sqlite));
+    assert_eq!(refused.map(drop).unwrap_err().errno(), Some(Errno::EBUSY));
+    drop(embedded);
 
     futures::executor::block_on(daemon.stop(Duration::from_secs(30))).unwrap();
 }

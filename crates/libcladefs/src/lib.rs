@@ -13,6 +13,8 @@
 //!   [`CellClient`], connected in this process: no listener, no path. The client is what an extent
 //!   device serves its guest from (`virtio_extent`'s backend). [`Daemon::connect`] gives a device
 //!   that opens its cell itself (`virtio_extent::Device::connected`) a connection of its own.
+//! - [`Daemon::create_embedded`] and [`Daemon::open_embedded`] open a cell in this process with no
+//!   VM-process wire at all, for a cell no guest uses, as a SQLite database's (board 13909).
 //! - [`Daemon::control_service`] is the daemon's control API (the Cladefsd gRPC service, health,
 //!   and the Mount service of its FUSE mount, Linux's), for the process to serve on an endpoint of
 //!   its own.
@@ -44,6 +46,7 @@ use std::time::Duration;
 
 pub use cladefs_core::{CellId, CellVersion, Error, Result};
 pub use cladefs_wire::{CellClient, DaemonConnection};
+pub use cladefsd::embedded::{EmbeddedCell, Kind};
 /// The gRPC crate [`Daemon::control_service`]'s routes are of, for the process's server.
 pub use tonic;
 
@@ -220,6 +223,28 @@ impl Daemon {
     /// opened for a device.
     pub fn fork(&self, tenant: u64, from: CellVersion, capacity: u64) -> Result<CellClient, Error> {
         self.connect()?.open_forked_cell(tenant, from, capacity)
+    }
+
+    /// A new managed cell of `tenant`'s, holding `kind`, of `capacity` bytes, on a disk the daemon
+    /// picks, open in this process with no VM-process wire (board 13909): for a cell nothing in a
+    /// guest uses, as a SQLite database's. Its device ([`EmbeddedCell::device`]) holds it open, and
+    /// closes it as it goes.
+    pub async fn create_embedded(
+        &self,
+        tenant: u64,
+        capacity: u64,
+        kind: Kind,
+    ) -> Result<Arc<EmbeddedCell>, Error> {
+        let made = self.daemon.create_embedded(tenant, capacity, kind).await;
+        made.map_err(|errno| Error::new(anyhow::Error::new(errno).context("making a cell")))
+    }
+
+    /// The existing managed cell `cell`, open in this process as [`Daemon::create_embedded`]'s is.
+    pub async fn open_embedded(&self, cell: CellId) -> Result<Arc<EmbeddedCell>, Error> {
+        let opened = self.daemon.open_embedded(cell).await;
+        opened.map_err(|errno| {
+            Error::new(anyhow::Error::new(errno).context(format!("opening cell {cell}")))
+        })
     }
 
     /// The daemon's control API, the Cladefsd gRPC service, health and its FUSE mount's Mount, for

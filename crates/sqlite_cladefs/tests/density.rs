@@ -7,8 +7,9 @@
 //! with no VM, as a broker keeping a cell per partition would. The cells-per-host cases
 //! (guest/tests/test_cases/src/test_cells_per_host.rs) measure VMs; this measures cells alone.
 //!
-//! Cells open in steps of [`STEP`], each made, mapped (`daemon::over`) and filled with fake
-//! records in a few transactions. After each step a line says what the cells cost the process
+//! Cells open in steps of [`STEP`], each made embedded in the process's daemon
+//! (`daemon::create_embedded`: no VM-process wire, board 13909) and filled with fake records in a
+//! few transactions. After each step a line says what the cells cost the process
 //! (anonymous memory, the daemon's shared memory it maps, threads, open files, each per cell, over
 //! the process before any cell), the daemon's gauges, and probes' p99: a point read and a
 //! one-record append, on cells spread over those open. What each cell after the first step cost is
@@ -24,21 +25,20 @@
 
 #![cfg(target_os = "linux")]
 
-use cladefs::CellClient;
+use cladefs::cladefsd::Daemon;
 use cladefs::cladefsd::control::proto::{GetStatsRequest, GetStatsResponse, SyncCellRequest};
 use rusqlite::{Connection, OpenFlags, params};
 use sqlite_cladefs::{Database, Options, Registration, daemon, register};
+use std::collections::BTreeMap;
 use std::os::unix::net::UnixListener;
-use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-/// The cells the test opens, unless `CLADEFS_SQLITE_DENSITY_CELLS` says. Board 13871: the daemon
-/// serves `(files - files / 4) / 200` connections, a cell's worst case of open files, so 245 at
-/// 65,536 open files (hotbed's, CI's), each SQLite cell refused past it though it holds ~22: 512
-/// once that is fixed.
-const CELLS: usize = 192;
+/// The cells the test opens, unless `CLADEFS_SQLITE_DENSITY_CELLS` says: some 8,000 open files at
+/// a cell's ~7.8 (board 13914), and under a minute. 4,096 held on ubu1 (hotbed, 2026-11-26) in
+/// 285 s; board 13907 is to 24,500.
+const CELLS: usize = 1024;
 
 /// The cells each step opens.
 const STEP: usize = 64;
@@ -59,17 +59,19 @@ const IDLE: Duration = Duration::from_secs(5);
 /// The cells opened again by ID at the end, spread over all.
 const REOPENED: usize = 16;
 
-/// What each cell opened after the first step may cost the process at most, the daemon's side and
-/// its client's together (board 13862). Measured on ubu1 (hotbed, 2026-11-26), with a margin: 2.03
-/// threads (the client's receiving thread and its window's fault thread), 21.9 open files, 625 KiB
-/// of anonymous memory and 344 KiB of the daemon's shared memory a cell.
+/// What each cell opened after the first step may cost the process at most (board 13862), the
+/// daemon's and SQLite's together. Measured on ubu1 (hotbed, 2026-11-26) at 1,024 and 4,096 cells,
+/// with a margin: no thread, 7.6-7.8 open files (its directory's: board 13914), 380-466 KiB of
+/// anonymous memory (board 13916), none of the daemon's shared memory, an embedded cell's reads
+/// being the open cell's own. Its connection to the daemon cost 2 threads, 14 more files and 344
+/// KiB of shared memory before cells were embedded (board 13909).
 struct Budget;
 
 impl Budget {
-    const THREADS: f64 = 2.25;
-    const FILES: f64 = 24.0;
-    const ANON_KIB: f64 = 1024.0;
-    const SHMEM_KIB: f64 = 512.0;
+    const THREADS: f64 = 0.05;
+    const FILES: f64 = 8.5;
+    const ANON_KIB: f64 = 512.0;
+    const SHMEM_KIB: f64 = 16.0;
 }
 
 /// A SQLite cell open on the daemon, its database filled with records `0..records`, each as
@@ -85,12 +87,11 @@ struct Cell {
 
 impl Cell {
     /// A new SQLite cell, the `index`th, filled.
-    fn create(socket: &Path, index: u64) -> Self {
-        let client = cladefs::DaemonConnection::connect(socket)
-            .and_then(|daemon| daemon.create_sqlite_cell(0, CAPACITY))
-            .unwrap_or_else(|error| panic!("cell {index}, after {index} held: {error}"));
-        let id = cladefs::CellId { tenant: 0, id: client.cell() };
-        let mut cell = Self::mount(Arc::new(client), id, index);
+    fn create(index: u64) -> Self {
+        let (id, database) =
+            daemon::create_embedded(Daemon::process(), 0, CAPACITY, Options::default())
+                .unwrap_or_else(|error| panic!("cell {index}, after {index} held: {error:#}"));
+        let mut cell = Self::mount(database, id, index);
         cell.connection
             .execute_batch(
                 "CREATE TABLE records (offset INTEGER PRIMARY KEY, ts INTEGER NOT NULL, \
@@ -104,25 +105,22 @@ impl Cell {
     }
 
     /// The cell `id` opened again, the `index`th, holding `records`.
-    fn reopen(socket: &Path, id: cladefs::CellId, index: u64, records: i64) -> Self {
-        let client = cladefs::DaemonConnection::connect(socket)
-            .and_then(|daemon| daemon.open_cell(id))
-            .unwrap_or_else(|error| panic!("opening cell {index} ({id}) again: {error}"));
-        let mut cell = Self::mount(Arc::new(client), id, index);
+    fn reopen(id: cladefs::CellId, index: u64, records: i64) -> Self {
+        let database = daemon::open_embedded(Daemon::process(), id, Options::default())
+            .unwrap_or_else(|error| panic!("opening cell {index} ({id}) again: {error:#}"));
+        let mut cell = Self::mount(database, id, index);
         cell.records = records;
         cell
     }
 
-    /// The database on `client`'s cell, mapped, registered as a VFS of its own, and connected to.
-    fn mount(client: Arc<CellClient>, id: cladefs::CellId, index: u64) -> Self {
+    /// `database`, registered as a VFS of its own, and connected to.
+    fn mount(database: Arc<Database>, id: cladefs::CellId, index: u64) -> Self {
         static MOUNTS: AtomicU64 = AtomicU64::new(0);
-        let database = daemon::over(client, CAPACITY, Options::default()).unwrap();
         let vfs = format!("density-{}", MOUNTS.fetch_add(1, Ordering::Relaxed));
         let registration = register(&vfs, database.clone()).unwrap();
         let connection =
             Connection::open_with_flags_and_vfs("records.db", OpenFlags::default(), vfs.as_str())
                 .unwrap();
-        connection.execute_batch(&format!("PRAGMA mmap_size = {CAPACITY}")).unwrap();
         Self { index, id, records: 0, connection, registration, database }
     }
 
@@ -210,6 +208,14 @@ struct Process {
     shmem_kib: u64,
     threads: u64,
     files: u64,
+    /// Its memory mappings, which `vm.max_map_count` bounds.
+    maps: u64,
+    /// Of `anon_kib`, what SQLite holds (`sqlite3_memory_used`): its connections' page caches,
+    /// schemas and statements.
+    sqlite_kib: u64,
+    /// Of `anon_kib`, what the cells' page cache holds (`local_cell::pages`), which its budget
+    /// evicts: the pages of their directories' files, written and read.
+    page_cache_kib: u64,
 }
 
 impl Process {
@@ -220,13 +226,100 @@ impl Process {
             line[name.len()..].trim().trim_end_matches(" kB").parse().unwrap()
         };
         let files = std::fs::read_dir("/proc/self/fd").unwrap().count() as u64;
+        let maps = std::fs::read_to_string("/proc/self/maps").unwrap().lines().count() as u64;
         Self {
             anon_kib: field("RssAnon:"),
             shmem_kib: field("RssShmem:"),
             threads: field("Threads:"),
             files,
+            maps,
+            // SAFETY: a plain query of SQLite's count.
+            sqlite_kib: unsafe { rusqlite::ffi::sqlite3_memory_used() } as u64 >> 10,
+            page_cache_kib: local_cell::pages::shared().usage().held >> 10,
         }
     }
+}
+
+/// `name` with each part holding a digit, between dots, dashes, slashes or spaces, as `#`: so that
+/// a kind's files, or threads, of every cell count as one.
+fn kind_of(name: &str) -> String {
+    let mut kind = String::new();
+    for part in name.split_inclusive(['.', '-', '/', ' ', '_']) {
+        let (word, end) = match part.char_indices().last() {
+            Some((at, c)) if ".-/ _".contains(c) => (&part[..at], &part[at..]),
+            _ => (part, ""),
+        };
+        kind.push_str(if word.chars().any(|c| c.is_ascii_digit()) { "#" } else { word });
+        kind.push_str(end);
+    }
+    kind
+}
+
+/// The process's open files, how many of each kind: a socket, an anonymous inode's kind
+/// (`userfaultfd`, `eventfd`), a memfd, or a file's name and its directories' ([`kind_of`]).
+fn files_by_kind() -> BTreeMap<String, f64> {
+    let mut kinds = BTreeMap::new();
+    for entry in std::fs::read_dir("/proc/self/fd").unwrap() {
+        let target = match std::fs::read_link(entry.unwrap().path()) {
+            Ok(target) => target.to_string_lossy().into_owned(),
+            // Closed since the listing: none of the process's then.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => panic!("reading an open file's name: {error}"),
+        };
+        let kind = match target.split_once(':') {
+            Some(("anon_inode", inner)) => inner.trim_matches(['[', ']']).to_owned(),
+            Some(("socket" | "pipe", _)) => target[..target.find(':').unwrap()].to_owned(),
+            _ if target.starts_with("/memfd:") => "memfd".to_owned(),
+            // A cell's file by the kind of directory it is in too, `logs/#/#`, a cell's files of a
+            // kind being in a directory of the cell's (`local_cell::layout::cell_dir`).
+            _ => {
+                let parts: Vec<&str> = target.rsplitn(4, '/').take(3).collect();
+                kind_of(&parts.into_iter().rev().collect::<Vec<_>>().join("/"))
+            }
+        };
+        *kinds.entry(kind).or_default() += 1.0;
+    }
+    kinds
+}
+
+/// The process's threads by name ([`kind_of`]): how many, and their CPU time in milliseconds.
+fn threads_by_name() -> BTreeMap<String, (f64, f64)> {
+    // SAFETY: a plain query of a constant.
+    let per_second = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as f64;
+    let mut threads = BTreeMap::new();
+    for task in std::fs::read_dir("/proc/self/task").unwrap() {
+        let task = task.unwrap().path();
+        let (comm, stat) = match (
+            std::fs::read_to_string(task.join("comm")),
+            std::fs::read_to_string(task.join("stat")),
+        ) {
+            (Ok(comm), Ok(stat)) => (comm, stat),
+            // Exited since the listing: none of the process's then.
+            (Err(error), _) | (_, Err(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                continue;
+            }
+            (Err(error), _) | (_, Err(error)) => panic!("reading a thread: {error}"),
+        };
+        let fields: Vec<&str> = stat[stat.rfind(')').unwrap() + 2..].split(' ').collect();
+        let ticks = fields[11].parse::<f64>().unwrap() + fields[12].parse::<f64>().unwrap();
+        let entry = threads.entry(kind_of(comm.trim_end())).or_insert((0.0, 0.0));
+        entry.0 += 1.0;
+        entry.1 += ticks * 1000.0 / per_second;
+    }
+    threads
+}
+
+/// What grew from `then` to `now`, divided by `by`, largest first, as `name=value` pairs: those
+/// that moved by a hundredth at least.
+fn grown(then: &BTreeMap<String, f64>, now: &BTreeMap<String, f64>, by: f64) -> String {
+    let mut grown: Vec<(&String, f64)> = (now.iter())
+        .map(|(name, value)| (name, (value - then.get(name).copied().unwrap_or(0.0)) / by))
+        .filter(|(_, value)| value.abs() >= 0.01)
+        .collect();
+    grown.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let pairs: Vec<String> =
+        grown.iter().map(|(name, value)| format!("{name}={value:.2}")).collect();
+    pairs.join(" ")
 }
 
 /// The process's CPU time, user and system, in milliseconds.
@@ -267,9 +360,6 @@ fn sqlite_cells_held_open_at_once() {
         std::env::set_var("CLADEFSD_TOKEN", "1");
     }
     let sockets = tempfile::tempdir().unwrap();
-    let socket = sockets.path().join("cladefsd.sock");
-    let listener = UnixListener::bind(&socket).unwrap();
-    std::thread::spawn(move || cladefs::cladefsd::serve(listener));
     let control_socket = sockets.path().join("control.sock");
     let listener = UnixListener::bind(&control_socket).unwrap();
     let tenants = sockets.path().join("tenants");
@@ -290,12 +380,22 @@ fn sqlite_cells_held_open_at_once() {
     while cells.len() < cells_wanted {
         step += 1;
         let added = STEP.min(cells_wanted - cells.len());
-        let mut opens = Vec::with_capacity(added);
-        for _ in 0..added {
-            let started = Instant::now();
-            cells.push(Cell::create(&socket, cells.len() as u64));
-            opens.push(started.elapsed());
-        }
+        // The step's cells made at once, each on a thread of its own, as a process opening many
+        // databases would (board 13918).
+        let first = cells.len() as u64;
+        let made: Vec<(Cell, Duration)> = std::thread::scope(|scope| {
+            let making: Vec<_> = (first..first + added as u64)
+                .map(|index| {
+                    scope.spawn(move || {
+                        let started = Instant::now();
+                        (Cell::create(index), started.elapsed())
+                    })
+                })
+                .collect();
+            making.into_iter().map(|making| making.join().unwrap()).collect()
+        });
+        let opens = made.iter().map(|(_, took)| *took).collect();
+        cells.extend(made.into_iter().map(|(cell, _)| cell));
         let (mut reads, mut appends) = (Vec::new(), Vec::new());
         let (open, probes) = (cells.len(), PROBES.min(cells.len()));
         for probe in 0..probes {
@@ -312,11 +412,14 @@ fn sqlite_cells_held_open_at_once() {
         let n = cells.len();
         println!(
             "sqlite-density: step={step} cells={n} added={added} open_p99_ms={:.1} \
-             anon_kib_per_cell={:.1} shmem_kib_per_cell={:.1} threads_per_cell={:.2} \
+             anon_kib_per_cell={:.1} sqlite_kib_per_cell={:.1} page_cache_kib_per_cell={:.1} \
+             shmem_kib_per_cell={:.1} threads_per_cell={:.2} \
              files_per_cell={:.2} daemon_memory_mib={} stores_open={} read_p99_ms={:.2} \
              append_p99_ms={:.2}",
             p99_ms(opens),
             per(now.anon_kib.saturating_sub(before.anon_kib), n),
+            per(now.sqlite_kib.saturating_sub(before.sqlite_kib), n),
+            per(now.page_cache_kib.saturating_sub(before.page_cache_kib), n),
             per(now.shmem_kib.saturating_sub(before.shmem_kib), n),
             per(now.threads.saturating_sub(before.threads), n),
             per(now.files.saturating_sub(before.files), n),
@@ -325,21 +428,36 @@ fn sqlite_cells_held_open_at_once() {
             p99_ms(reads),
             p99_ms(appends),
         );
-        first_step.get_or_insert((n, now));
+        first_step.get_or_insert_with(|| (n, now, files_by_kind(), threads_by_name()));
     }
     assert_eq!(stats().gauges["stores_open"], cells.len() as u64);
 
     // What each cell after the first step cost: the process's fixed costs, its pools' threads and
     // the like, the first step's.
-    let ((first, then), now) = (first_step.unwrap(), Process::now());
+    let ((first, then, files_then, threads_then), now) = (first_step.unwrap(), Process::now());
     let added = cells.len() - first;
+    let counts = |threads: &BTreeMap<String, (f64, f64)>| -> BTreeMap<String, f64> {
+        threads.iter().map(|(name, (count, _))| (name.clone(), *count)).collect()
+    };
+    println!(
+        "sqlite-density: a cell's files: {}",
+        grown(&files_then, &files_by_kind(), added as f64)
+    );
+    println!(
+        "sqlite-density: a cell's threads: {}",
+        grown(&counts(&threads_then), &counts(&threads_by_name()), added as f64)
+    );
     let cost = |now: u64, then: u64| per(now.saturating_sub(then), added);
     let (threads, files) = (cost(now.threads, then.threads), cost(now.files, then.files));
     let (anon_kib, shmem_kib) =
         (cost(now.anon_kib, then.anon_kib), cost(now.shmem_kib, then.shmem_kib));
+    let maps = cost(now.maps, then.maps);
+    let (sqlite_kib, page_cache_kib) =
+        (cost(now.sqlite_kib, then.sqlite_kib), cost(now.page_cache_kib, then.page_cache_kib));
     println!(
-        "sqlite-density: a cell costs threads={threads:.2} files={files:.2} \
-         anon_kib={anon_kib:.1} shmem_kib={shmem_kib:.1}"
+        "sqlite-density: a cell costs threads={threads:.2} files={files:.2} maps={maps:.2} \
+         anon_kib={anon_kib:.1} (sqlite_kib={sqlite_kib:.1} page_cache_kib={page_cache_kib:.1}) \
+         shmem_kib={shmem_kib:.1}"
     );
     assert!(threads <= Budget::THREADS, "{threads:.2} threads a cell");
     assert!(files <= Budget::FILES, "{files:.2} open files a cell");
@@ -354,10 +472,19 @@ fn sqlite_cells_held_open_at_once() {
             .unwrap_or_else(|error| panic!("syncing cell {}: {error:#}", cell.index));
     }
     let (cpu_before, commits_before) = (cpu_ms(), stats().counters["commits"]);
+    let threads_before = threads_by_name();
     let idle = Instant::now();
     std::thread::sleep(IDLE);
     let (cpu, commits) = (cpu_ms() - cpu_before, stats().counters["commits"] - commits_before);
-    let cpu_ms_per_s = cpu as f64 / idle.elapsed().as_secs_f64();
+    let idle_s = idle.elapsed().as_secs_f64();
+    let cpu_ms_per_s = cpu as f64 / idle_s;
+    let cpu_of = |threads: &BTreeMap<String, (f64, f64)>| -> BTreeMap<String, f64> {
+        threads.iter().map(|(name, (_, ms))| (name.clone(), *ms)).collect()
+    };
+    println!(
+        "sqlite-density: idle CPU ms/s by thread: {}",
+        grown(&cpu_of(&threads_before), &cpu_of(&threads_by_name()), idle_s)
+    );
     println!(
         "sqlite-density: idle cells={} cpu_ms_per_s={cpu_ms_per_s:.1} commits={commits}",
         cells.len()
@@ -376,7 +503,7 @@ fn sqlite_cells_held_open_at_once() {
         cell.close();
     }
     for (id, index, records) in sample {
-        let cell = Cell::reopen(&socket, id, index, records);
+        let cell = Cell::reopen(id, index, records);
         cell.check();
         cell.close();
     }

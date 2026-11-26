@@ -80,6 +80,8 @@ pub struct Left {
     pub health: bool,
     /// VM processes' connections not yet gone, their cells open.
     pub connections: usize,
+    /// cladefs: cells open in the daemon's process not yet let go of by their holders (board 13909).
+    pub embedded: usize,
     /// The control API's calls in flight.
     pub calls: usize,
     /// Cells whose uploaders have not stopped: open, or closing, uploading still.
@@ -91,11 +93,11 @@ pub struct Left {
 
 impl std::fmt::Display for Left {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let Self { health, connections, calls, uploaders, mount } = self;
+        let Self { health, connections, embedded, calls, uploaders, mount } = self;
         write!(
             f,
-            "{connections} VM processes' connections, {calls} control calls and {uploaders} \
-             cells' uploaders left"
+            "{connections} VM processes' connections, {embedded} embedded cells, {calls} control \
+             calls and {uploaders} cells' uploaders left"
         )?;
         if *mount {
             write!(f, ", and the FUSE mount of cells")?;
@@ -126,6 +128,7 @@ pub async fn drain_daemon(daemon: &Arc<Daemon>, within: Duration) -> Result<(), 
     let drained = async {
         tokio::time::timeout(within.saturating_sub(began.elapsed()), async {
             daemon.connections_work.done().await;
+            daemon.embedded_work.done().await;
             daemon.calls_work.done().await;
             let mount = crate::mount::close_on(daemon).await;
             if let Err(err) = &mount {
@@ -143,6 +146,7 @@ pub async fn drain_daemon(daemon: &Arc<Daemon>, within: Duration) -> Result<(), 
         _ => Err(Left {
             health,
             connections: daemon.connections_work.count(),
+            embedded: daemon.embedded_work.count(),
             calls: daemon.calls_work.count(),
             uploaders: *cladefs_core::bucket::uploaders_on(&daemon.host).borrow(),
             mount: crate::mount::left_on(daemon),

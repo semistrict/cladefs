@@ -103,6 +103,9 @@ pub use cladefs_wire::device;
 pub mod disk;
 pub mod disks;
 pub mod drain;
+// cladefs: libcladefs's, outside the simulation (board 13909).
+#[cfg(not(madsim))]
+pub mod embedded;
 pub mod events;
 pub mod governor;
 mod grants;

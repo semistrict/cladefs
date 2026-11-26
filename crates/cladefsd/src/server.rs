@@ -629,6 +629,11 @@ impl Tenant {
         self.memory.arena.id()
     }
 
+    /// cladefs: its arena itself, which its cells' own pages are of.
+    pub(super) fn memory_arena(&self) -> &Arc<cladefs_core::pages::Arena> {
+        &self.memory.arena
+    }
+
     /// cladefs: what its connections have the daemon hold of its VM processes' requests, within the
     /// bytes in flight they share (TASK-149.35).
     pub(super) fn in_flight(&self) -> &Arc<crate::memory::InFlight> {
@@ -1009,16 +1014,6 @@ impl Connection {
     }
 }
 
-/// A new cell of `tenant`'s, its ID given by `daemon`'s bucket: `EIO` if the bucket fails, which
-/// the VM process's errno can't say, so logged.
-async fn new_cell(daemon: &Arc<Daemon>, tenant: u64) -> Result<cladefs_core::CellId, Errno> {
-    let bucket = crate::storage::daemon_bucket_on(daemon)?;
-    cladefs_core::host_cell::new_cell(&*bucket, tenant).await.map_err(|err| {
-        log::error!("cladefsd: allocating a new cell of tenant {tenant}: {err:#}");
-        Errno::EIO
-    })
-}
-
 /// Lets the cell of `connection`, whose VM process is gone and whose requests are done, go: once
 /// what it committed is durable, if it writes it.
 async fn finish_connection(connection: Arc<Connection>) {
@@ -1366,6 +1361,24 @@ fn serve_future(turn: Turn, serving: impl std::future::Future<Output = ()> + Sen
 impl Writer for Connection {
     fn going(&self) -> bool {
         self.closing.load(Ordering::Acquire) || self.peer.sender.peer_gone()
+    }
+}
+
+impl cells::CellWriter for Connection {
+    fn cell(&self) -> Option<&Arc<OpenCell>> {
+        Connection::cell(self)
+    }
+
+    fn resize(
+        &self,
+        capacity: u64,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Errno>> + Send + '_>> {
+        Box::pin(Connection::resize(self, capacity))
+    }
+
+    #[cfg(test)]
+    fn connection(self: Arc<Self>) -> Option<Arc<Connection>> {
+        Some(self)
     }
 }
 
@@ -2247,10 +2260,7 @@ impl Connection {
         let (resolved, effective_how, named_cell) = if let Some(pool) = self.daemon().disk_pool() {
             let req_cell = self.named(path)?;
             if req_cell.id != 0 {
-                let pool = Arc::clone(pool);
-                let found =
-                    cells::blocking(move || pool.find_cell(req_cell).ok_or(Errno::ENOENT)).await?;
-                (found, how, None)
+                (cells::managed_cell_dir(pool, req_cell).await?, how, None)
             } else {
                 let daemon = self.daemon();
                 let disk = pool.pick_disk()?;
@@ -2261,19 +2271,8 @@ impl Connection {
                         return Err(Errno::EINVAL);
                     }
                     codec::Opening::Create(_, _) => {
-                        // Allocate the cell ID up front so `open_held` creates and takes the cell
-                        // directly at its canonical `<disk>/cells/<TENANT>/<CELL>` path in a
-                        // single taking (epoch = 1) with no staging rename.
-                        let cell = new_cell(daemon, req_cell.tenant).await?;
-                        let disk_prep = Arc::clone(&disk);
-                        let final_path = cells::blocking(move || {
-                            drop(crate::disks::DiskPool::ensure_tenant_dir(
-                                &disk_prep,
-                                cell.tenant,
-                            )?);
-                            Ok(crate::disks::DiskPool::cell_path(&disk_prep, cell))
-                        })
-                        .await?;
+                        let (final_path, cell) =
+                            cells::new_managed_cell(daemon, &disk, req_cell.tenant).await?;
                         (final_path, how, Some(cell))
                     }
                     codec::Opening::CreateEphemeral(capacity, kind) => {
@@ -2342,7 +2341,7 @@ impl Connection {
                             0 => tenant,
                             named => named,
                         };
-                        let child = new_cell(daemon, child_tenant).await?;
+                        let child = cells::new_cell(daemon, child_tenant).await?;
                         let disk_prep = Arc::clone(&disk);
                         let final_path = cells::blocking(move || {
                             drop(crate::disks::DiskPool::ensure_tenant_dir(
@@ -2359,8 +2358,8 @@ impl Connection {
         } else {
             (path.to_owned(), how, None)
         };
-        let hold = cells::hold_to_write(self.daemon(), &cell_dir_key(&resolved), self.this.clone())
-            .await?;
+        let writer: Weak<dyn cells::CellWriter> = self.this.clone();
+        let hold = cells::hold_to_write(self.daemon(), &cell_dir_key(&resolved), writer).await?;
         // cladefs: nor one of another tenant's cells (TASK-364).
         self.tenant.reaches(&resolved)?;
         // cladefs: a cell it makes, within its disk and its tenant's limits, as its making admits

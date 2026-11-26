@@ -149,17 +149,17 @@ pub trait Writer: Send + Sync {
 }
 
 /// The cells, by their keys: an entry each, while anything holds a cell or has it open.
-pub struct CellTable<C, S, P> {
+pub struct CellTable<C: ?Sized, S, P> {
     inner: Arc<Mutex<Inner<C, S, P>>>,
 }
 
-impl<C, S, P> Clone for CellTable<C, S, P> {
+impl<C: ?Sized, S, P> Clone for CellTable<C, S, P> {
     fn clone(&self) -> Self {
         Self { inner: Arc::clone(&self.inner) }
     }
 }
 
-struct Inner<C, S, P> {
+struct Inner<C: ?Sized, S, P> {
     entries: HashMap<PathBuf, Entry<C, S, P>>,
     /// What says a cell is let go, to those waiting to hold it, on threads or not, by its key:
     /// woken as its holder lets it go, and none of another's, as every cell's were, at each
@@ -176,7 +176,7 @@ struct Inner<C, S, P> {
 }
 
 /// A key's entry: who holds its cell, and what is open of it meanwhile.
-enum Entry<C, S, P> {
+enum Entry<C: ?Sized, S, P> {
     /// A connection writes it, from its `OPEN` on: its cell, once open, which the daemon's work
     /// through it, and the cells it is attached to as a base, may share; and what to call as a
     /// writer waits for it, going ([`Hold::when_wanted`]).
@@ -212,7 +212,7 @@ enum Open<S, P> {
 pub type Wanted = Arc<dyn Fn() + Send + Sync>;
 
 /// Who asks to hold a cell.
-enum Claim<C> {
+enum Claim<C: ?Sized> {
     /// The daemon, to work on it.
     Daemon,
     /// The daemon, hurrying a going writer's uploader to cut short and waiting for any closing
@@ -230,14 +230,14 @@ enum Claim<C> {
 /// What a claim got: the cell held, with the cell kept open of it that a writer's claim took
 /// out, to close, and, past [`Rules::one_holder`], the connection holding it, which it passed:
 /// dropped once the table's lock is, as a [`Refused`]'s; or the connection writing it.
-enum Claimed<C, P> {
+enum Claimed<C: ?Sized, P> {
     Held { kept: Option<P>, _passed: Option<Arc<C>> },
     Writer(Arc<C>),
 }
 
 /// Why a claim failed, with the connection holding the cell, if one does: dropped once the
 /// table's lock is, as a connection, dropped last, lets its cell go, which takes the lock.
-enum Refused<C> {
+enum Refused<C: ?Sized> {
     /// A connection not going writes it: `EBUSY`.
     Busy(Arc<C>),
     /// A connection going holds it, or the daemon, which lets it go soon; and what a going
@@ -253,7 +253,7 @@ enum Refused<C> {
 /// open of the cell stays ([`Rules::open_outlives_holders`]): the cell its connection had open,
 /// if others have it still.
 #[must_use = "a cell held is let go as its hold is dropped"]
-pub struct Hold<C, S, P> {
+pub struct Hold<C: ?Sized, S, P> {
     table: CellTable<C, S, P>,
     key: PathBuf,
 }
@@ -263,7 +263,7 @@ pub struct Hold<C, S, P> {
 pub type HeldTaking<C, S, P> = (Hold<C, S, P>, Option<P>);
 
 /// A cell a connection writes, or held by the daemon ([`CellTable::writer_or_hold`]).
-pub enum Holding<C, S, P> {
+pub enum Holding<C: ?Sized, S, P> {
     Writer(Arc<C>),
     Held(Hold<C, S, P>),
 }
@@ -301,7 +301,7 @@ impl<S, P> Open<S, P> {
     }
 }
 
-impl<C: Writer, S, P> Entry<C, S, P> {
+impl<C: Writer + ?Sized, S, P> Entry<C, S, P> {
     /// What a claim of the cell meets, if anything holds it: a connection not going, or a
     /// connection going, or the daemon, which let it go soon.
     fn holder(&self) -> Option<Refused<C>> {
@@ -317,7 +317,7 @@ impl<C: Writer, S, P> Entry<C, S, P> {
     }
 }
 
-impl<C, S, P> Entry<C, S, P> {
+impl<C: ?Sized, S, P> Entry<C, S, P> {
     /// What is open of the cell, its holder gone: the cell a writer had open, closing now.
     fn into_open(self) -> Open<S, P> {
         match self {
@@ -350,7 +350,7 @@ impl<C, S, P> Entry<C, S, P> {
     }
 }
 
-impl<C: Writer, S, P> Inner<C, S, P> {
+impl<C: Writer + ?Sized, S, P> Inner<C, S, P> {
     /// Holds the cell `key` names for `claim`, if it may now: unless a connection not going
     /// writes it, which fails, or a connection going holds it, or the daemon, which is waited for;
     /// or, to a writer or the mount, others have it open, which fails, or it is closing, which is
@@ -416,7 +416,7 @@ impl<C: Writer, S, P> Inner<C, S, P> {
     }
 }
 
-impl<C, S, P> CellTable<C, S, P> {
+impl<C: ?Sized, S, P> CellTable<C, S, P> {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(Inner {
@@ -532,7 +532,7 @@ impl<C, S, P> CellTable<C, S, P> {
     }
 }
 
-impl<C: Writer, S, P> CellTable<C, S, P> {
+impl<C: Writer + ?Sized, S, P> CellTable<C, S, P> {
     /// Holds the cell `key` names, for the daemon: once its holder, if it has one, lets it go,
     /// if that holder is going, or is the daemon, waiting at most `wait` (for ever, if none);
     /// unless a connection not going writes it, which fails with `EBUSY`. What is open of it stays.
@@ -774,7 +774,7 @@ impl<C: Writer, S, P> CellTable<C, S, P> {
     }
 }
 
-impl<C, S, P> Hold<C, S, P> {
+impl<C: ?Sized, S, P> Hold<C, S, P> {
     /// The key of the cell it holds.
     pub fn key(&self) -> &Path {
         &self.key
@@ -852,7 +852,7 @@ impl<C, S, P> Hold<C, S, P> {
     }
 }
 
-impl<C, S, P> Drop for Hold<C, S, P> {
+impl<C: ?Sized, S, P> Drop for Hold<C, S, P> {
     fn drop(&mut self) {
         // Those waiting to hold it may.
         self.table.release(&self.key);

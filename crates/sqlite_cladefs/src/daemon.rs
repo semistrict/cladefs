@@ -11,6 +11,10 @@
 //! userfaultfd. So a page SQLite reads in place is the cache's page itself (or, on a host whose
 //! pages are larger than 4 KiB such as 16 KiB arm64, a direct or composed host page in the
 //! daemon's budgeted slabs).
+//!
+//! Or, embedded, a database on a cell of this process's own daemon ([`create_embedded`], board
+//! 13909): the open cell itself, with no connection, window or thread of its own, as a process
+//! holding many databases needs.
 
 use crate::{Database, Options};
 use anyhow::{Context as _, Error, ensure};
@@ -58,6 +62,45 @@ pub fn over(cell: Arc<CellClient>, window: u64, options: Options) -> Result<Arc<
     let device = DeviceHolder::new(DaemonDevice::new(window.cell.clone().expect("a cell"))?);
     assert_eq!(device.block_size() as u64, block, "a daemon cell's blocks");
     Database::open_mapped(device, Box::new(window), options)
+}
+
+/// cladefs: a database on a new SQLite cell of `tenant`'s, of `capacity` bytes, on a disk of this
+/// process's own daemon, open in its process with no VM-process wire (`cladefsd::embedded`, board
+/// 13909): no socket, window or thread of its own, its reads the open cell's. The cell's ID, and
+/// the database, which holds the cell open until it is closed and dropped.
+pub fn create_embedded(
+    daemon: &Arc<cladefs::cladefsd::Daemon>,
+    tenant: u64,
+    capacity: u64,
+    options: Options,
+) -> Result<(cladefs::CellId, Arc<Database>), Error> {
+    use cladefs::cladefsd::embedded::Kind;
+    let made = futures::executor::block_on(daemon.create_embedded(tenant, capacity, Kind::Sqlite));
+    let cell = made.map_err(Error::new).context("making an embedded SQLite cell")?;
+    let id = cell.id();
+    Ok((id, over_embedded(cell, options)?))
+}
+
+/// cladefs: the database on the existing SQLite cell `cell`, kept on a disk of this process's own
+/// daemon, open in its process as [`create_embedded`]'s is.
+pub fn open_embedded(
+    daemon: &Arc<cladefs::cladefsd::Daemon>,
+    cell: cladefs::CellId,
+    options: Options,
+) -> Result<Arc<Database>, Error> {
+    let opened = futures::executor::block_on(daemon.open_embedded(cell));
+    let opened = opened.map_err(Error::new).with_context(|| format!("opening cell {cell}"))?;
+    over_embedded(opened, options)
+}
+
+/// The database on `cell`'s device, which holds the cell from then on.
+fn over_embedded(
+    cell: Arc<cladefs::cladefsd::embedded::EmbeddedCell>,
+    options: Options,
+) -> Result<Arc<Database>, Error> {
+    let device = cell.device()?;
+    drop(cell);
+    Database::open(DeviceHolder::new(device), options)
 }
 
 /// A cell's DAX window in this process's memory. See the module docs.
