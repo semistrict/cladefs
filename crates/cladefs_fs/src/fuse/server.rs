@@ -170,7 +170,6 @@ pub fn forget_cells(scope: &dyn Fn(cladefs_core::CellId) -> bool) {
 /// cladefs: the [`crate::CellId`]s of every currently mounted, non-halted FUSE cell in this
 /// process, used by `cladefsd::events` to reconcile missed `CellShredded` events when the event
 /// tail was trimmed (board 11665).
-#[cfg(any(target_os = "linux", madsim))]
 pub fn live_cells() -> Vec<cladefs_core::CellId> {
     let servers: Vec<Arc<ServerHandle>> = {
         let mut live = SERVERS.lock().unwrap();

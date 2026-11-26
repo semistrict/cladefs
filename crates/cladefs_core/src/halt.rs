@@ -145,7 +145,6 @@ pub fn halt_cells_on(
 /// cladefs: the [`CellId`]s of every currently open, unhalted cell on `host`, used by
 /// `cladefsd::events` to reconcile missed `CellShredded` events when the event tail was trimmed
 /// (board 11665).
-#[cfg(any(target_os = "linux", madsim))]
 pub fn live_cells_on(host: &crate::Host) -> Vec<CellId> {
     let mut halts = host.halts.0.lock().unwrap();
     let mut cells = Vec::new();

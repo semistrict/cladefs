@@ -310,7 +310,6 @@ impl ExtentCache {
     /// cladefs: returns the [`crate::CellId`]s of all extents currently cached (including recently
     /// closed stores whose cached extents may still hold plaintext), used by `cladefsd::events`
     /// reconciliation after an event-tail gap (board 11665).
-    #[cfg(any(target_os = "linux", madsim))]
     pub fn cached_cells(&self) -> Vec<crate::CellId> {
         let extents = self.extents.with(Mutex::lock);
         let mut cells = Vec::new();
