@@ -197,9 +197,18 @@ pub(crate) async fn take(wait: Duration, vms: bool) -> HostStats {
 
 /// The daemon's counters and gauges, as of now, and `vms`.
 fn of_daemon(daemon: &Daemon, vms: Vec<Vm>) -> HostStats {
+    let governed = super::governor::governed_on(daemon);
     let counters = (crate::stats::stats().named().into_iter())
         .map(|(name, value)| (name.replace('-', "_"), value))
-        .chain([("window_open_maps_refused".to_owned(), crate::open_cell::open_maps_refused())])
+        .chain([
+            ("window_open_maps_refused".to_owned(), crate::open_cell::open_maps_refused()),
+            ("memory_full_entered".to_owned(), governed.fulls),
+            ("memory_refaults".to_owned(), daemon.host.cache().refaults()),
+            ("memory_kernel_cold_harvested_bytes".to_owned(), governed.kernel_cold_harvested_bytes),
+            ("vm_reclaim_bytes".to_owned(), governed.vm_reclaim_bytes),
+            ("vm_reclaim_attempts".to_owned(), governed.vm_reclaim_attempts),
+            ("vm_reclaim_errors".to_owned(), governed.vm_reclaim_errors),
+        ])
         .collect();
     let gauges =
         super::metrics::gauges_on(daemon).into_iter().map(|(name, _, value)| (name, value));

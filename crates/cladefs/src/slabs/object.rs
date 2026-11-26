@@ -12,6 +12,20 @@ use std::io;
 use std::os::fd::FromRawFd;
 use std::os::fd::{AsRawFd, OwnedFd};
 
+/// Kernel page-cache residency counts for a slab's range of an arena's `memfd`, from Linux's
+/// `cachestat(2)` syscall (Linux 6.5+). For `shmem` (`memfd`), pages aged out by MGLRU into swap
+/// entries appear in `evicted_pages`, letting `cladefsd` harvest cold slabs without touching hot
+/// working sets.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SlabResidency {
+    /// Pages currently resident in host RAM.
+    pub cached_pages: u64,
+    /// Pages evicted from RAM (for `memfd`, currently stored in shmem swap entries).
+    pub evicted_pages: u64,
+    /// Subset of `evicted_pages` still inside MGLRU's workingset refault window.
+    pub recently_evicted_pages: u64,
+}
+
 /// An arena's memory object (see the module docs). It only grows.
 pub(super) struct Object {
     fd: std::sync::Arc<OwnedFd>,
@@ -171,6 +185,96 @@ impl Object {
         };
         if punched != 0 {
             return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Queries kernel page-cache residency (`cachestat(2)`, Linux 6.5+) for `[offset, offset + len)`
+    /// on an arena `memfd` descriptor. Returns `None` on non-Linux hosts, under `madsim`, or on
+    /// kernels without `SYS_cachestat`.
+    #[cfg(all(target_os = "linux", not(madsim)))]
+    pub(super) fn cachestat_fd(fd: &OwnedFd, offset: u64, len: u64) -> Option<SlabResidency> {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        // Process-wide fact of the hardware/kernel (outside the simulation): whether SYS_cachestat
+        // (Linux 6.5, syscall 451 on x86_64 and aarch64) is implemented by this host's kernel.
+        static UNSUPPORTED: AtomicBool = AtomicBool::new(false);
+        if UNSUPPORTED.load(Ordering::Relaxed) || len == 0 {
+            return None;
+        }
+        #[repr(C)]
+        struct CachestatRange {
+            off: u64,
+            len: u64,
+        }
+        #[repr(C)]
+        struct Cachestat {
+            nr_cache: u64,
+            nr_dirty: u64,
+            nr_writeback: u64,
+            nr_evicted: u64,
+            nr_recently_evicted: u64,
+        }
+        // __NR_cachestat is 451 in both x86_64 syscall_64.tbl and asm-generic/unistd.h (aarch64).
+        const SYS_CACHESTAT: libc::c_long = 451;
+        let range = CachestatRange { off: offset, len };
+        let mut out = Cachestat {
+            nr_cache: 0,
+            nr_dirty: 0,
+            nr_writeback: 0,
+            nr_evicted: 0,
+            nr_recently_evicted: 0,
+        };
+        // SAFETY: `range` and `out` are valid C-layout structs for `cachestat(2)` on this open fd.
+        let ret = unsafe {
+            libc::syscall(SYS_CACHESTAT, fd.as_raw_fd(), &raw const range, &raw mut out, 0usize)
+        };
+        if ret != 0 {
+            let err = io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::ENOSYS) {
+                UNSUPPORTED.store(true, Ordering::Relaxed);
+            }
+            return None;
+        }
+        Some(SlabResidency {
+            cached_pages: out.nr_cache,
+            evicted_pages: out.nr_evicted,
+            recently_evicted_pages: out.nr_recently_evicted,
+        })
+    }
+
+    #[cfg(all(target_os = "linux", not(madsim)))]
+    pub(super) fn cachestat(&self, offset: u64, len: u64) -> Option<SlabResidency> {
+        Self::cachestat_fd(&self.fd, offset, len)
+    }
+
+    /// Queries kernel page-cache residency (`None` on non-Linux hosts or under `madsim`).
+    #[cfg(any(not(target_os = "linux"), madsim))]
+    #[allow(dead_code)]
+    pub(super) fn cachestat_fd(_fd: &OwnedFd, _offset: u64, _len: u64) -> Option<SlabResidency> {
+        None
+    }
+
+    /// Queries kernel page-cache residency (`None` on non-Linux hosts or under `madsim`).
+    #[cfg(any(not(target_os = "linux"), madsim))]
+    #[allow(dead_code)]
+    pub(super) fn cachestat(&self, _offset: u64, _len: u64) -> Option<SlabResidency> {
+        None
+    }
+
+    /// Probes `SYS_cachestat` on a temporary 1-page `memfd` at startup so governed daemons fail
+    /// hard on kernels lacking Linux 6.5+ `cachestat(2)` instead of silently disabling MGLRU
+    /// cold-slab harvesting.
+    #[cfg(all(target_os = "linux", not(madsim)))]
+    pub(super) fn require_cachestat() -> io::Result<()> {
+        let obj = Self::new()?;
+        let ps = super::page_size();
+        obj.grow(ps)?;
+        obj.write_at(0, &[1u8])?;
+        if obj.cachestat(0, ps).is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "host kernel lacks cachestat(2) (Linux 6.5+ required for unified MGLRU slab harvesting)",
+            ));
         }
         Ok(())
     }

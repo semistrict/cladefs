@@ -70,6 +70,7 @@ fn main() {
         std::env::set_var("CLADEFSD_MOUNT_STORES", &cells);
         std::env::set_var("CLADEFSD_PART_CACHE", &part_cache);
         std::env::set_var("CLADEFSD_PART_CACHE_BYTES", (4u64 << 30).to_string());
+        std::env::set_var("CLADEFSD_VM_CGROUP_DELEGATED", "1");
         std::env::set_var(
             "CLADEFS_MASTER_KEY",
             "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",

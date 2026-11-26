@@ -13,8 +13,11 @@
 //!
 //! Its memory, which the sealed extents it caches are kept in, and VMs' DAX windows map read-only,
 //! is a page cache (`cladefs::cladefsd::governor`, TASK-358): as much of the host's as is free,
-//! less a headroom (`CLADEFSD_HEADROOM` bytes, by default a sixteenth of the host's memory, 1 GiB
-//! at least), given back as the host's free memory falls, each tenant kept its share by weight
+//! less a headroom (`CLADEFSD_HEADROOM` bytes, by default a sixteenth of the host's or cgroup's
+//! limit, 1 GiB at least and half the limit at most), never below a shared working-set floor
+//! (`CLADEFSD_MEMORY_FLOOR` bytes, by default an eighth of the limit), shedding derived caches and
+//! idle extents on soft headroom dips and shrinking mapped extents gradually under real kernel
+//! memory pressure while backing off on refault thrashing, each tenant kept its share by weight
 //! (`SetMemoryWeight`). MEMORY_BYTES, if given, fixes it at that instead, ungoverned, as a test's
 //! daemon may have it. A cell's private pages, which copy-on-write DAX gives a VM's writes, are of
 //! the VM's memory, not of it (backlog doc-13). Out of it, or past a limit the control API sets,
@@ -178,6 +181,9 @@ static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 fn main() -> anyhow::Result<()> {
     use anyhow::Context;
     cladefs::cladefsd::logging::to_stderr()?;
+    if std::env::args().nth(1).as_deref() == Some("--setup-host") {
+        return cladefs::cladefsd::governor::setup_host().map_err(anyhow::Error::msg);
+    }
     // cladefs: its large buffers given back as they are freed, before any thread is made
     // (TASK-317).
     cladefs::cladefsd::memory::return_large_allocations();

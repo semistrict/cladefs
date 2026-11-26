@@ -45,16 +45,18 @@ class Examples(unittest.TestCase):
         daemon refused every grant (chown of the tenant's socket to its jails' user: EPERM) and
         every jailed VM process (not its own to signal, Peer::connected)."""
         unit = (EXAMPLES / "cladefsd.service").read_text()
-        caps = {"CAP_CHOWN", "CAP_FOWNER", "CAP_KILL"}
+        caps = {"CAP_CHOWN", "CAP_FOWNER", "CAP_KILL", "CAP_DAC_OVERRIDE"}
         for key in ["AmbientCapabilities", "CapabilityBoundingSet"]:
             line = re.search(rf"^{key}=(.*)$", unit, re.MULTILINE).group(1)
             self.assertEqual(set(line.split()), caps, key)
         self.assertRegex(unit, r"(?m)^User=cladefsd$")
-        # What needs them: the grant's chown, mode and link, and the check of a VM process.
+        # What needs them: the grant's chown, mode and link, the check of a VM process, and
+        # proactive cgroup memory.reclaim on connected VMs.
         grants = (DAEMON / "mod.rs").read_text()
         self.assertIn("std::os::unix::fs::chown(&bound, uid, gid)?;", grants)
         self.assertIn("std::fs::hard_link(&bound, socket)?;", grants)
         self.assertIn("process.signal(0)", (DAEMON / "server.rs").read_text())
+        self.assertIn('dir.join("memory.reclaim")', (DAEMON / "governor.rs").read_text())
 
     def test_the_units_stop_outlasts_its_drain(self):
         unit = (EXAMPLES / "cladefsd.service").read_text()

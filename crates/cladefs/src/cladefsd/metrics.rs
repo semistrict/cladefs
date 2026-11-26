@@ -129,10 +129,15 @@
 //!   files failing, its size and the dirty bytes past which writers wait;
 //!   `cladefsd_page_cache_flush_stalls_total` and `cladefsd_page_cache_flush_stalled_seconds_total`,
 //!   the writers held so and how long; `cladefsd_page_cache_flusher_died`, 1 once its flusher died.
-//! - `cladefsd_memory_full` and `cladefsd_memory_pressure`, 1 while the host's memory is full
-//!   (the daemon making no cell) and while the daemon holds past the governor's allowance,
-//!   evicting; `cladefsd_memory_full_entered_total` and `cladefsd_memory_floor_bytes`
-//!   (`super::governor`).
+//! - `cladefsd_memory_full`, `cladefsd_memory_pressure`, `cladefsd_memory_thrashing`,
+//!   `cladefsd_memory_floor_bytes`, `cladefsd_memory_target_bytes`,
+//!   `cladefsd_memory_refaults_per_second`, `cladefsd_memory_psi_some_avg10_bps`,
+//!   `cladefsd_memory_psi_full_avg10_bps`, `cladefsd_memory_full_entered_total`,
+//!   `cladefsd_memory_refaults_total`, `cladefsd_memory_kernel_cold_harvested_bytes_total`,
+//!   `cladefsd_vm_reclaim_bytes_total`, `cladefsd_vm_reclaim_attempts_total`, and
+//!   `cladefsd_vm_reclaim_errors_total` (`super::governor`, `crate::cache`): also exposed in gRPC
+//!   `GetStatsResponse.gauges` / `counters` so VM orchestrators can read live cache budget and
+//!   backpressure state without scraping HTTP.
 //! - `cladefsd_otel_spans_exported_total`, `cladefsd_otel_spans_dropped_total` and
 //!   `cladefsd_otel_spans_failed_total`: the spans exported over OTLP, dropped (the exporter's
 //!   queue full) and whose export failed (`super::otel::batch`).
@@ -960,21 +965,6 @@ fn render_subsystems(daemon: &Daemon, out: &mut String) {
     let governed = super::governor::governed_on(daemon);
     single(
         out,
-        "cladefsd_memory_full",
-        "gauge",
-        "1 while the host's memory is full: the room for the daemon's under its floor, the \
-         daemon making no cell more.",
-        u8::from(governed.full),
-    );
-    single(
-        out,
-        "cladefsd_memory_pressure",
-        "gauge",
-        "1 while the daemon held past what the governor allows it at its last look, evicting.",
-        u8::from(governed.pressured),
-    );
-    single(
-        out,
         "cladefsd_memory_full_entered_total",
         "counter",
         "Times the host's memory became full.",
@@ -982,10 +972,38 @@ fn render_subsystems(daemon: &Daemon, out: &mut String) {
     );
     single(
         out,
-        "cladefsd_memory_floor_bytes",
-        "gauge",
-        "The least memory the governor leaves the daemon, 0 for a daemon not governed.",
-        governed.floor,
+        "cladefsd_memory_refaults_total",
+        "counter",
+        "Cached extent parts evicted within the refault window that faulted back into memory.",
+        daemon.host.cache().refaults(),
+    );
+    single(
+        out,
+        "cladefsd_memory_kernel_cold_harvested_bytes_total",
+        "counter",
+        "Cached extent bytes harvested via cachestat(2) after MGLRU paged them out to swap.",
+        governed.kernel_cold_harvested_bytes,
+    );
+    single(
+        out,
+        "cladefsd_vm_reclaim_bytes_total",
+        "counter",
+        "Bytes proactively reclaimed from low-PSI connected VM cgroups via memory.reclaim.",
+        governed.vm_reclaim_bytes,
+    );
+    single(
+        out,
+        "cladefsd_vm_reclaim_attempts_total",
+        "counter",
+        "Proactive memory.reclaim writes issued against connected VM cgroups.",
+        governed.vm_reclaim_attempts,
+    );
+    single(
+        out,
+        "cladefsd_vm_reclaim_errors_total",
+        "counter",
+        "Proactive memory.reclaim writes that failed with an error other than EAGAIN.",
+        governed.vm_reclaim_errors,
     );
 
     let (exported, dropped, failed) = super::otel::spans();
@@ -1111,6 +1129,52 @@ pub(super) fn gauges_on(daemon: &Daemon) -> Vec<(&'static str, &'static str, u64
     if let Some(limit) = slabs.total_cap() {
         gauges.push(("memory_limit_bytes", "The limit of every tenant's memory.", limit));
     }
+    let governed = super::governor::governed_on(daemon);
+    gauges.extend([
+        (
+            "memory_full",
+            "1 while the host's memory is full: the room for the daemon's under its floor, the \
+             daemon making no cell more.",
+            u64::from(governed.full),
+        ),
+        (
+            "memory_pressure",
+            "1 while the daemon is under memory pressure (holding past its headroom target, own \
+             cgroup PSI pressured, or actively thrashing).",
+            u64::from(governed.pressured),
+        ),
+        (
+            "memory_thrashing",
+            "1 while the extent cache is actively refault-thrashing (recently evicted parts \
+             faulting back in rapidly).",
+            u64::from(governed.thrashing),
+        ),
+        (
+            "memory_floor_bytes",
+            "The least memory the governor leaves the daemon, 0 for a daemon not governed.",
+            governed.floor,
+        ),
+        (
+            "memory_target_bytes",
+            "The governor's headroom-adjusted memory target, 0 for a daemon not governed.",
+            governed.target,
+        ),
+        (
+            "memory_refaults_per_second",
+            "Extent cache part refaults over the last second.",
+            governed.refaults_per_sec,
+        ),
+        (
+            "memory_psi_some_avg10_bps",
+            "Last observed memory PSI some avg10 in basis points (hundredths of a percent).",
+            governed.psi_some_avg10_bps,
+        ),
+        (
+            "memory_psi_full_avg10_bps",
+            "Last observed memory PSI full avg10 in basis points (hundredths of a percent).",
+            governed.psi_full_avg10_bps,
+        ),
+    ]);
     // cladefs: TASK-94.
     let disk = super::disk::total_on(daemon);
     gauges.push(("disk_bytes", "The host's disk every tenant's cells take.", disk));

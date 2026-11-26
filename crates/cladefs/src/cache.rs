@@ -66,6 +66,21 @@ pub(crate) struct ExtentCache {
     arenas: SharedLock<Mutex<HashSet<ArenaId>>>,
     /// The cache's clock, which counts the extents asked for.
     clock: AtomicU64,
+    /// Monotonic milliseconds advanced by the memory governor using real wall-clock `Instant`
+    /// deltas (`advance_ms`). Used to classify recently governor-evicted parts that fault back in
+    /// within [`REFAULT_WINDOW_MS`] as refaults.
+    clock_ms: AtomicU64,
+    /// Governor-evicted parts that faulted back into memory within [`REFAULT_WINDOW_MS`]
+    /// (thrashing signal for the memory governor; excludes tenant-cap relief and harvest evictions
+    /// so a single tenant cannot poison host-wide thrashing).
+    refaults: AtomicU64,
+    /// Round-robin cursor for budgeted background `cachestat(2)` cold-part scans.
+    #[cfg_attr(any(not(target_os = "linux"), madsim), allow(dead_code))]
+    cold_cursor: AtomicUsize,
+    /// Monotonic counter bumped whenever a part becomes present or a window unmaps an extent, so
+    /// sustained `IdleOnly` governor ticks can skip redundant full-cache scans when nothing
+    /// became idle since the last zero-yield pass.
+    idle_change_seq: AtomicU64,
     /// The number of extents past which the cache next lets go of those over its bound: the bound,
     /// or, if its last pass couldn't get below it, as the windows' mappings hold the extents they
     /// map, an eighth of the bound more than it left (TASK-109.2). Each lookup past the bound
@@ -101,6 +116,10 @@ impl ExtentCache {
             extents: SharedLock::new("extent cache", Mutex::default()),
             arenas: SharedLock::new("extent cache arenas", Mutex::default()),
             clock: AtomicU64::new(0),
+            clock_ms: AtomicU64::new(1),
+            refaults: AtomicU64::new(0),
+            cold_cursor: AtomicUsize::new(0),
+            idle_change_seq: AtomicU64::new(0),
             trim_at: AtomicUsize::new(0),
             most_cached: AtomicUsize::new(1 << 16),
             total_is_the_hosts: std::sync::atomic::AtomicBool::new(false),
@@ -306,7 +325,45 @@ const RETRY_MOST: std::time::Duration = std::time::Duration::from_millis(100);
 /// How many parts after those a reader reading on asks for are read ahead of its requests.
 pub(crate) const PARTS_AHEAD: u64 = 2;
 
+/// How many milliseconds after a governor-driven mapped eviction a page-in of that same part
+/// counts as a refault: 30 seconds.
+pub(crate) const REFAULT_WINDOW_MS: u64 = 30_000;
+
+/// Which cached extents an eviction pass may reclaim.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EvictScope {
+    /// Only unmapped (`!mapped`) extents: reclaims memory with zero VM TLB shootdowns or DAX fault
+    /// storms on live windows.
+    IdleOnly,
+    /// Unmapped extents first, then mapped extents (LRU) and composed window pages, for relief
+    /// or per-tenant limits (does NOT feed host-wide governor thrashing).
+    All,
+    /// Unmapped extents first, then mapped extents (LRU) and composed window pages, driven by the
+    /// host memory governor's `Mapped` shrink (evicted parts feed `refaults()` for thrash backoff).
+    GovernorMapped,
+}
+
 impl ExtentCache {
+    /// Advances the cache's wall-clock millisecond counter used for refault recency.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn advance_ms(&self, delta_ms: u64) -> u64 {
+        self.clock_ms.fetch_add(delta_ms, Ordering::Relaxed).saturating_add(delta_ms)
+    }
+
+    /// Total governor-evicted part refaults observed within [`REFAULT_WINDOW_MS`] of eviction.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn refaults(&self) -> u64 {
+        self.refaults.load(Ordering::Relaxed)
+    }
+
+    /// Monotonic counter bumped whenever a cached part becomes present or a window unmaps an
+    /// extent (used by `IdleOnly` governance to avoid rescanning when no idle extents can exist).
+    #[cfg_attr(not(any(target_os = "linux", madsim)), allow(dead_code))]
+    pub(crate) fn idle_change_seq(&self) -> u64 {
+        self.idle_change_seq.load(Ordering::Relaxed)
+    }
+
     /// Evicts the pages of the cached extents of `arena`, or of every arena, those no window maps
     /// first, then those used longest ago (`CachedExtent::eviction_order`), until `enough` says, of
     /// the bytes evicted so far, that they are, or none is left to evict: memory an arena past its
@@ -319,21 +376,33 @@ impl ExtentCache {
         arena: Option<ArenaId>,
         enough: impl FnMut(u64) -> bool,
     ) -> u64 {
+        self.evict_with_scope(arena, EvictScope::All, enough)
+    }
+
+    /// Evicts cached extents of `arena` (or every arena) restricted to `scope` until `enough`
+    /// returns true or no eligible extent remains. Returns the bytes evicted.
+    pub(crate) fn evict_with_scope(
+        &self,
+        arena: Option<ArenaId>,
+        scope: EvictScope,
+        enough: impl FnMut(u64) -> bool,
+    ) -> u64 {
         let span = trace::Span::start("cache.relief");
         if let Some(arena) = arena {
             span.set_count(trace::ARENA, u64::from(arena.0));
         }
-        let (evicted, extents) = self.evict_in_order(arena, enough);
+        let (evicted, extents) = self.evict_in_order(arena, scope, enough);
         span.set_count(trace::BYTES, evicted);
         span.set_count(trace::EXTENTS, extents);
         evicted
     }
 
-    /// Evicts as [`ExtentCache::evict_least_used`] says: returns the bytes it evicted, and of how
+    /// Evicts as [`ExtentCache::evict_with_scope`] says: returns the bytes it evicted, and of how
     /// many extents.
     fn evict_in_order(
         &self,
         arena: Option<ArenaId>,
+        scope: EvictScope,
         mut enough: impl FnMut(u64) -> bool,
     ) -> (u64, u64) {
         let candidates: Vec<Arc<CachedExtent>> = {
@@ -344,21 +413,29 @@ impl ExtentCache {
                 .collect()
         };
         // Past the cache's lock, as each takes its own; those evicted already, which stay cached
-        // until freed, left out, each pass having gone through them all (TASK-92.33).
+        // until freed, left out, each pass having gone through them all (TASK-92.33). Zero
+        // syscalls on this relief hot path (pure in-memory LRU ordering).
         let mut candidates: Vec<_> = (candidates.into_iter())
-            .filter_map(|extent| Some((extent.eviction_order()?, extent)))
+            .filter_map(|extent| {
+                let order = extent.eviction_order()?;
+                if scope == EvictScope::IdleOnly && order.0 {
+                    return None;
+                }
+                Some((order, extent))
+            })
             .collect();
         candidates.sort_unstable_by_key(|(order, _)| *order);
+        let by_governor = scope == EvictScope::GovernorMapped;
         let (mut evicted, mut extents) = (0, 0);
         for (_, extent) in candidates {
             if enough(evicted) {
                 break;
             }
-            let bytes = extent.evict();
+            let bytes = extent.evict_with_cause(by_governor);
             evicted += bytes;
             extents += u64::from(bytes > 0);
         }
-        if !enough(evicted) {
+        if scope != EvictScope::IdleOnly && !enough(evicted) {
             for window in self.live_windows() {
                 if enough(evicted) {
                     break;
@@ -368,6 +445,41 @@ impl ExtentCache {
             }
         }
         (evicted, extents)
+    }
+
+    /// Budgeted round-robin background scan that harvests individual cached parts Linux MGLRU has
+    /// completely paged out to swap and marked cold (`cached == 0 && evicted > 0 &&
+    /// recently_evicted == 0`) on two consecutive scans. Calls `cachestat(2)` outside any extent
+    /// lock so DAX faults are never blocked, inspects at most `scan_budget` extents per call, and
+    /// does not count harvested parts toward governor refault thrashing.
+    #[cfg_attr(any(not(target_os = "linux"), madsim), allow(dead_code))]
+    pub(crate) fn evict_kernel_cold(&self, scan_budget: usize, max_bytes: u64) -> u64 {
+        if scan_budget == 0 || max_bytes == 0 {
+            return 0;
+        }
+        let all: Vec<Arc<CachedExtent>> = {
+            let extents = self.extents.with(Mutex::lock);
+            extents
+                .values()
+                .filter(|cached| cached.extent.present.load(Ordering::Relaxed) > 0)
+                .map(|cached| cached.extent.clone())
+                .collect()
+        };
+        if all.is_empty() {
+            return 0;
+        }
+        let n = all.len();
+        let take = scan_budget.min(n);
+        let start = self.cold_cursor.fetch_add(take, Ordering::Relaxed) % n;
+        let mut harvested = 0u64;
+        for i in 0..take {
+            if harvested >= max_bytes {
+                break;
+            }
+            let extent = &all[(start + i) % n];
+            harvested += extent.evict_kernel_cold(max_bytes.saturating_sub(harvested));
+        }
+        harvested
     }
 
     /// Gives, once, the relief of arenas under pressure (TASK-50.3) its evictor, which frees parts
@@ -504,6 +616,18 @@ impl ExtentCache {
             }
         }
         (found, moved)
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn insert_for_test(
+        &self,
+        arena: ArenaId,
+        extent: ExtentId,
+        cached: Arc<CachedExtent>,
+    ) {
+        self.extents
+            .with(Mutex::lock)
+            .insert((arena, extent), Cached { extent: cached, holders: Arc::default() });
     }
 
     #[cfg(test)]
@@ -1079,8 +1203,11 @@ impl EvictionToken {
 
 /// A part of a cached extent.
 enum PartSlot {
-    /// Not in memory.
+    /// Never paged in yet.
     Absent,
+    /// Evicted at the given `ExtentCache::clock_ms`; faulting a governor-evicted part back in
+    /// within [`REFAULT_WINDOW_MS`] records a refault for the memory governor.
+    Evicted { at_ms: u64, by_governor: bool },
     /// Being read in, which [`CachedExtent::changed`] tells of the end of.
     Filling,
     /// In memory: its slab, the slot's.
@@ -1129,6 +1256,8 @@ impl Evicted {
 /// A cached extent's parts, and the windows that map them, under its lock.
 struct Parts {
     slots: Vec<PartSlot>,
+    /// Consecutive cold `cachestat(2)` observations per part; reset on install/eviction/activity.
+    cold_strikes: Vec<u8>,
     /// The windows that map it, each once, by its identity ([`window_identity`]).
     windows: HashMap<usize, Weak<Window>>,
     /// The part after the last a page-in asked for: where a reader reading on asks next.
@@ -1184,7 +1313,13 @@ impl CachedExtent {
         let count = pages.checked_sub(1).map_or(0, |last| part_index(last, phase) + 1);
         let slots = std::iter::repeat_with(|| PartSlot::Absent).take(count).collect();
         // A reader from its start reads on.
-        let parts = Parts { slots, windows: HashMap::new(), next: 0, revoked: false };
+        let parts = Parts {
+            slots,
+            cold_strikes: vec![0u8; count],
+            windows: HashMap::new(),
+            next: 0,
+            revoked: false,
+        };
         Self {
             cache: Arc::downgrade(cache),
             slabs: cache.slabs.clone(),
@@ -1227,6 +1362,73 @@ impl CachedExtent {
         let parts = self.parts.with(Mutex::lock);
         let mapped = parts.windows.values().any(|window| window.strong_count() > 0);
         Some((mapped, self.used.load(Ordering::Relaxed)))
+    }
+
+    /// Evicts individual present parts whose backing slabs Linux MGLRU has completely paged out to
+    /// swap and marked cold (`cached_pages == 0 && evicted_pages > 0 && recently_evicted_pages ==
+    /// 0`) on two consecutive scans. All `cachestat(2)` syscalls execute outside `self.parts` so
+    /// DAX faults are never blocked.
+    #[cfg_attr(any(not(target_os = "linux"), madsim), allow(dead_code))]
+    fn evict_kernel_cold(&self, max_bytes: u64) -> u64 {
+        if self.present.load(Ordering::Relaxed) == 0 || max_bytes == 0 {
+            return 0;
+        }
+        let handles: Vec<(usize, std::sync::Arc<std::os::fd::OwnedFd>, u64, u64)> = {
+            let parts = self.parts.with(Mutex::lock);
+            parts
+                .slots
+                .iter()
+                .enumerate()
+                .filter_map(|(part, slot)| {
+                    let PartSlot::Present(slab) = slot else { return None };
+                    let (fd, off, len) = slab.residency_handle();
+                    Some((part, fd, off, len))
+                })
+                .collect()
+        };
+        if handles.is_empty() {
+            return 0;
+        }
+        let mut results = Vec::with_capacity(handles.len());
+        for (part, fd, off, len) in handles {
+            let Some(res) = crate::slabs::cachestat_range(&fd, off, len) else {
+                return 0;
+            };
+            let is_cold =
+                res.cached_pages == 0 && res.evicted_pages > 0 && res.recently_evicted_pages == 0;
+            results.push((part, off, len, is_cold));
+        }
+        let cold_parts: Vec<usize> = {
+            let mut parts = self.parts.with(Mutex::lock);
+            let mut ready = Vec::new();
+            for (part, off, len, is_cold) in results {
+                let Some(PartSlot::Present(slab)) = parts.slots.get(part) else {
+                    continue;
+                };
+                // Ignore stale samples if this slot was evicted and refilled while unlocked.
+                if !slab.same_range(off, len) {
+                    continue;
+                }
+                if is_cold {
+                    parts.cold_strikes[part] = parts.cold_strikes[part].saturating_add(1);
+                    if parts.cold_strikes[part] >= 2 {
+                        parts.cold_strikes[part] = 0;
+                        ready.push(part);
+                    }
+                } else {
+                    parts.cold_strikes[part] = 0;
+                }
+            }
+            ready
+        };
+        let mut harvested = 0u64;
+        for part in cold_parts {
+            if harvested >= max_bytes {
+                break;
+            }
+            harvested += self.evict_pages_with_cause(self.part_pages(part), false);
+        }
+        harvested
     }
 
     /// How many pages it is.
@@ -1316,7 +1518,10 @@ impl CachedExtent {
         (parts.into_iter())
             .filter(|&part| {
                 let slot = &mut table.slots[part];
-                let wanted = matches!(slot, PartSlot::Absent | PartSlot::Failed(_));
+                let wanted = matches!(
+                    slot,
+                    PartSlot::Absent | PartSlot::Evicted { .. } | PartSlot::Failed(_)
+                );
                 if wanted {
                     *slot = PartSlot::Filling;
                 }
@@ -1417,7 +1622,11 @@ impl CachedExtent {
     /// slabs, those staged to VM processes into quarantine (`slabs::quarantine_with`). Returns the
     /// bytes it evicted.
     pub(crate) fn evict(&self) -> u64 {
-        self.evict_pages(0..u64::MAX)
+        self.evict_pages_with_cause(0..u64::MAX, false)
+    }
+
+    fn evict_with_cause(&self, by_governor: bool) -> u64 {
+        self.evict_pages_with_cause(0..u64::MAX, by_governor)
     }
 
     /// cladefs: permanently revokes this cached extent on `cache::forget`, evicting all present
@@ -1446,6 +1655,10 @@ impl CachedExtent {
     /// window set; their slots then absent, and their slabs freed, by this call alone. A part
     /// another eviction is evicting is that one's: this one leaves it.
     fn evict_pages(&self, pages: Range<u64>) -> u64 {
+        self.evict_pages_with_cause(pages, false)
+    }
+
+    fn evict_pages_with_cause(&self, pages: Range<u64>, by_governor: bool) -> u64 {
         let (evictions, windows) = {
             let mut parts = self.parts.with(Mutex::lock);
             let mut evictions = Vec::new();
@@ -1459,6 +1672,7 @@ impl CachedExtent {
                 else {
                     unreachable!("a part present")
                 };
+                parts.cold_strikes[part] = 0;
                 self.present.fetch_sub(1, Ordering::Relaxed);
                 evictions.push(Eviction { part, slab, token });
             }
@@ -1474,6 +1688,8 @@ impl CachedExtent {
             window.unmap_pages_of(identity, &|at| evicted.contains(at));
         }
         {
+            let at_ms =
+                self.cache.upgrade().map_or(1, |cache| cache.clock_ms.load(Ordering::Relaxed));
             let mut parts = self.parts.with(Mutex::lock);
             for eviction in &evictions {
                 let slot = &mut parts.slots[eviction.part];
@@ -1483,7 +1699,7 @@ impl CachedExtent {
                     eviction.part,
                     self.extent
                 );
-                *slot = PartSlot::Absent;
+                *slot = PartSlot::Evicted { at_ms, by_governor };
             }
         }
         self.changed.notify(usize::MAX);
@@ -1536,6 +1752,9 @@ impl CachedExtent {
                 Ok(slab) => {
                     *slot = PartSlot::Present(slab);
                     self.present.fetch_add(1, Ordering::Relaxed);
+                    if let Some(cache) = self.cache.upgrade() {
+                        cache.idle_change_seq.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
                 Err(error) => {
                     // What the read failed with, not its errno alone, which said nothing of why
@@ -1647,6 +1866,17 @@ impl Source for CachedExtent {
                         Some(PartSlot::Present(_)) => Some(Ok(waited)),
                         Some(PartSlot::Failed(errno)) if waited => Some(Err(*errno)),
                         Some(PartSlot::Filling | PartSlot::Evicting(_)) => None,
+                        Some(PartSlot::Evicted { at_ms, by_governor }) => {
+                            let (at_ms, by_governor) = (*at_ms, *by_governor);
+                            if by_governor && let Some(cache) = self.cache.upgrade() {
+                                let now = cache.clock_ms.load(Ordering::Relaxed);
+                                if now.saturating_sub(at_ms) <= REFAULT_WINDOW_MS {
+                                    cache.refaults.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                            reading = self.parts_to_read(&mut table, page);
+                            None
+                        }
                         Some(PartSlot::Absent | PartSlot::Failed(_)) => {
                             reading = self.parts_to_read(&mut table, page);
                             None
@@ -1700,6 +1930,9 @@ impl Source for CachedExtent {
 
     fn unmapped(&self, window: &Window) {
         self.parts.with(Mutex::lock).windows.remove(&window_identity(window));
+        if let Some(cache) = self.cache.upgrade() {
+            cache.idle_change_seq.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     fn origin(&self) -> Origin {
@@ -1965,6 +2198,105 @@ mod full_host {
         });
         host.slabs().set_arena_cap(tenant_id, None);
         drop((dax, window, source, cached, tenant));
+    }
+
+    /// EvictScope::IdleOnly evicts unmapped extents while preserving mapped extents untouched;
+    /// EvictScope::All evicts mapped extents, and faulting an evicted part back in within
+    /// `REFAULT_WINDOW_TICKS` increments `refaults()`, while faulting after the window expires
+    /// does not.
+    #[test]
+    fn idle_only_eviction_preserves_mapped_extents_and_tracks_refaults() {
+        struct Fill(u8);
+        impl Contents for Fill {
+            fn read<'a>(
+                &'a self,
+                _offset: u64,
+                buf: &'a mut [u8],
+            ) -> BoxFuture<'a, std::result::Result<(), anyhow::Error>> {
+                buf.fill(self.0);
+                Box::pin(std::future::ready(Ok(())))
+            }
+        }
+
+        let host = crate::Host::new();
+        let cache = host.cache();
+        let mapped_id = ExtentId { cell: 9001, sequence: 1 };
+        let idle_id = ExtentId { cell: 9001, sequence: 2 };
+        let mapped = Arc::new(CachedExtent::new_on(
+            cache,
+            ArenaId::DEFAULT,
+            mapped_id,
+            Box::new(Fill(0xaa)),
+            extent_frame::PART,
+        ));
+        let idle = Arc::new(CachedExtent::new_on(
+            cache,
+            ArenaId::DEFAULT,
+            idle_id,
+            Box::new(Fill(0xbb)),
+            extent_frame::PART,
+        ));
+        {
+            let mut extents = cache.extents.with(Mutex::lock);
+            extents.insert(
+                (ArenaId::DEFAULT, mapped_id),
+                Cached { extent: mapped.clone(), holders: Arc::default() },
+            );
+            extents.insert(
+                (ArenaId::DEFAULT, idle_id),
+                Cached { extent: idle.clone(), holders: Arc::default() },
+            );
+        }
+
+        let (mut dax, window) =
+            crate::dax::Dax::new_on(&host, ArenaId::DEFAULT, extent_frame::PART, None).unwrap();
+        let source: Arc<dyn Source> = mapped.clone();
+        dax.map(0, &source, 0, extent_frame::PART);
+
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            // Cold first-time page-ins must not count as refaults.
+            mapped.clone().bring_in(0).await.unwrap();
+            idle.clone().bring_in(0).await.unwrap();
+            assert_eq!(cache.refaults(), 0);
+            assert!(mapped.held() > 0 && idle.held() > 0);
+
+            // IdleOnly evicts only the unmapped extent and leaves the mapped extent intact.
+            let evicted_idle = cache.evict_with_scope(None, EvictScope::IdleOnly, |_| false);
+            assert_eq!(evicted_idle, extent_frame::PART);
+            assert_eq!(idle.held(), 0);
+            assert!(mapped.held() > 0, "IdleOnly must not evict mapped extents");
+
+            // EvictScope::All (tenant-cap / relief) must NOT trigger governor refault thrashing.
+            let evicted_relief = cache.evict_with_scope(None, EvictScope::All, |_| false);
+            assert_eq!(evicted_relief, extent_frame::PART);
+            assert_eq!(mapped.held(), 0);
+            mapped.clone().bring_in(0).await.unwrap();
+            assert_eq!(
+                cache.refaults(),
+                0,
+                "non-governor relief eviction must not trigger host-wide thrashing"
+            );
+
+            // EvictScope::GovernorMapped evicts the mapped extent; bringing it back within
+            // REFAULT_WINDOW_MS records a governor refault.
+            let evicted_mapped =
+                cache.evict_with_scope(None, EvictScope::GovernorMapped, |_| false);
+            assert_eq!(evicted_mapped, extent_frame::PART);
+            assert_eq!(mapped.held(), 0);
+            mapped.clone().bring_in(0).await.unwrap();
+            assert_eq!(cache.refaults(), 1, "re-faulting a governor-evicted part must count");
+
+            // Evict again, advance past REFAULT_WINDOW_MS, then fault back in: not a refault.
+            assert_eq!(
+                cache.evict_with_scope(None, EvictScope::GovernorMapped, |_| false),
+                extent_frame::PART
+            );
+            cache.advance_ms(REFAULT_WINDOW_MS + 1);
+            mapped.clone().bring_in(0).await.unwrap();
+            assert_eq!(cache.refaults(), 1, "re-fault past REFAULT_WINDOW_TICKS must not count");
+        });
+        drop((dax, window, source, mapped, idle));
     }
 }
 

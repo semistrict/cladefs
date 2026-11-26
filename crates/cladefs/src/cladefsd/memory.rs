@@ -38,6 +38,10 @@ pub(super) struct State {
     tenant_in_flight: Arc<AtomicU64>,
     /// cladefs: what every tenant's connections have the daemon hold together (board 8465).
     total_in_flight: Arc<InFlight>,
+    /// Tracks a zero-yield `IdleOnly` eviction pass (`(recheck_after, idle_change_seq, bytes)`) so
+    /// sustained `IdleOnly` pressure does not rescan every cached extent every 100 ms when no
+    /// idle extents remain.
+    idle_empty: Mutex<Option<(std::time::Instant, u64, u64)>>,
 }
 
 impl State {
@@ -54,6 +58,7 @@ impl State {
             held_parts: local_cell::HeldParts::new(),
             tenant_in_flight: Arc::new(AtomicU64::new(DEFAULT_TENANT_IN_FLIGHT)),
             total_in_flight: Arc::new(InFlight::total()),
+            idle_empty: Mutex::new(None),
         }
     }
 }
@@ -212,8 +217,32 @@ pub fn governed_bytes() -> u64 {
     governed_bytes_on(Daemon::process())
 }
 
-/// cladefs: `daemon`'s governor's look at the host's memory (TASK-358).
+/// cladefs: `daemon`'s governor's look at the host's memory (TASK-358), reclaiming all eligible
+/// memory down to `allowance`.
+#[cfg(not(madsim))]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) async fn govern_on(daemon: &Daemon, allowance: u64) {
+    govern_with_on(
+        daemon,
+        allowance,
+        super::governor::ReclaimMode::Mapped { max_shrink_bytes: u64::MAX },
+    )
+    .await
+}
+
+/// cladefs: `daemon`'s governor's look at the host's memory under `mode`: always trims derived
+/// caches, spare slabs, and idle (unmapped) DAX extents first; shrinks actively-mapped DAX extents
+/// only under [`super::governor::ReclaimMode::Mapped`] (rate-limited by `max_shrink_bytes`), while
+/// [`super::governor::ReclaimMode::IdleOnly`] caps growth at the remaining mapped working set
+/// without triggering synchronous relief eviction of hot mapped extents.
+pub(super) async fn govern_with_on(
+    daemon: &Daemon,
+    allowance: u64,
+    mode: super::governor::ReclaimMode,
+) {
+    use super::governor::ReclaimMode;
+    use crate::cache::EvictScope;
+
     daemon.memory.governed.store(allowance, Ordering::Relaxed);
     // cladefs: every tenant's bytes in flight within a share of what it allows (board 8465).
     total_in_flight_on(daemon).govern(allowance / GOVERNED_IN_FLIGHT_SHARE);
@@ -261,27 +290,117 @@ pub(super) async fn govern_on(daemon: &Daemon, allowance: u64) {
     if crate::host_cell::decoded_kept_bytes_on(&daemon.host) > room {
         crate::host_cell::evict_decoded_on(&daemon.host, room);
     }
-    let weighted: Vec<(u64, u64)> = {
+
+    if matches!(mode, ReclaimMode::None) || daemon.host.slabs().arenas_bytes() <= allowance {
         let registry = daemon.memory.registry.lock().unwrap();
         registry.apply_total(&daemon.host, allowance);
-        if daemon.host.slabs().arenas_bytes() <= allowance {
-            return;
-        }
+        return;
+    }
+
+    let weighted: Vec<(u64, u64)> = {
+        let registry = daemon.memory.registry.lock().unwrap();
         let mut ids: Vec<u64> = registry.alive().map(|tenant| tenant.id()).collect();
         ids.sort();
         ids.dedup();
         ids.into_iter().map(|id| (id, registry.weight(id))).collect()
     };
-    for (id, share) in super::governor::shares(allowance, &weighted) {
-        if held_by(daemon, id) > share
-            && let Err(err) = shrink_by(daemon, Some(id), share, deadline).await
-            && err != Errno::ENOENT
-        {
-            log::error!("cladefsd: shrinking a tenant's memory to its share: {err}");
+
+    // Always reclaim spare slabs and idle (unmapped) extents first: zero VM TLB shootdowns or DAX
+    // fault storms on active windows. Under sustained `IdleOnly` where the previous pass found no
+    // idle extents and neither cache membership nor resident bytes changed, skip rescanning every
+    // extent for 2 seconds so 100 ms governor ticks stay O(1).
+    daemon.host.slabs().release_spares(None);
+    let before_idle = daemon.host.slabs().arenas_bytes();
+    if before_idle > allowance {
+        let now = std::time::Instant::now();
+        let seq_before = daemon.host.cache().idle_change_seq();
+        let skip_idle_scan = matches!(mode, ReclaimMode::IdleOnly)
+            && daemon.memory.idle_empty.lock().unwrap().is_some_and(|(until, seq, bytes)| {
+                now < until && seq == seq_before && bytes == before_idle
+            });
+        if !skip_idle_scan {
+            shrink_weighted(daemon, &weighted, allowance, EvictScope::IdleOnly, deadline).await;
+            let after_idle = daemon.host.slabs().arenas_bytes();
+            let mut slot = daemon.memory.idle_empty.lock().unwrap();
+            if after_idle >= before_idle && after_idle > allowance {
+                *slot = Some((now + std::time::Duration::from_secs(2), seq_before, after_idle));
+            } else {
+                *slot = None;
+            }
         }
     }
-    if daemon.host.slabs().arenas_bytes() > allowance
-        && let Err(err) = shrink_by(daemon, None, allowance, deadline).await
+
+    let effective_cap = match mode {
+        ReclaimMode::None => allowance,
+        ReclaimMode::IdleOnly => {
+            // Stop growing past the mapped working set that remains, without setting `total_cap`
+            // below resident mapped bytes (which would make `arena-relief-thread` synchronously
+            // evict hot mapped extents on the next page-in).
+            let remaining = daemon.host.slabs().arenas_bytes();
+            remaining.div_ceil(SLAB).saturating_mul(SLAB).max(allowance)
+        }
+        ReclaimMode::Mapped { max_shrink_bytes } => {
+            let current = daemon.host.slabs().arenas_bytes();
+            if current <= allowance {
+                allowance
+            } else {
+                current.saturating_sub(max_shrink_bytes).max(allowance)
+            }
+        }
+    };
+
+    {
+        let registry = daemon.memory.registry.lock().unwrap();
+        daemon.memory.governed.store(effective_cap, Ordering::Relaxed);
+        registry.apply_total(&daemon.host, effective_cap);
+    }
+
+    if let ReclaimMode::Mapped { .. } = mode
+        && daemon.host.slabs().arenas_bytes() > effective_cap
+    {
+        shrink_weighted(daemon, &weighted, effective_cap, EvictScope::GovernorMapped, deadline)
+            .await;
+    }
+}
+
+/// Evicts each tenant down to its weighted share of `target`, then any arena down to `target`,
+/// restricted to `scope`. Caps each tenant's eviction by the remaining global excess above
+/// `target` so multi-tenant weighted passes still honor `Mapped { max_shrink_bytes }` rate limits.
+async fn shrink_weighted(
+    daemon: &Daemon,
+    weighted: &[(u64, u64)],
+    target: u64,
+    scope: crate::cache::EvictScope,
+    deadline: std::time::Instant,
+) {
+    let mut over: Vec<(u64, u64, u64)> = super::governor::shares(target, weighted)
+        .into_iter()
+        .filter_map(|(id, share)| {
+            let held = held_by(daemon, id);
+            held.checked_sub(share).filter(|&over| over > 0).map(|over| (over, id, share))
+        })
+        .collect();
+    // Most over-share tenant yields first; tie-break deterministically by tenant ID.
+    over.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    for (_, id, share) in over {
+        let current_total = daemon.host.slabs().arenas_bytes();
+        let excess = current_total.saturating_sub(target);
+        if excess == 0 {
+            break;
+        }
+        let held = held_by(daemon, id);
+        if held > share {
+            let tenant_target = share.max(held.saturating_sub(excess));
+            if let Err(err) =
+                shrink_scoped_by(daemon, Some(id), tenant_target, scope, deadline).await
+                && err != Errno::ENOENT
+            {
+                log::error!("cladefsd: shrinking a tenant's memory to its share: {err}");
+            }
+        }
+    }
+    if daemon.host.slabs().arenas_bytes() > target
+        && let Err(err) = shrink_scoped_by(daemon, None, target, scope, deadline).await
     {
         log::error!("cladefsd: shrinking the daemon's memory to the host's: {err}");
     }
@@ -341,9 +460,21 @@ async fn shrink_by(
     target: u64,
     deadline: std::time::Instant,
 ) -> Result<u64, Errno> {
+    shrink_scoped_by(daemon, tenant, target, crate::cache::EvictScope::All, deadline).await
+}
+
+/// cladefs: [`shrink_by`] restricted to `scope` (`IdleOnly` or `All`).
+async fn shrink_scoped_by(
+    daemon: &Daemon,
+    tenant: Option<u64>,
+    target: u64,
+    scope: crate::cache::EvictScope,
+    deadline: std::time::Instant,
+) -> Result<u64, Errno> {
     let slabs = daemon.host.slabs();
     let Some(id) = tenant else {
-        evict_until(&daemon.host, None, || slabs.arenas_bytes_in_use() <= target, deadline).await;
+        evict_until(&daemon.host, None, scope, || slabs.arenas_bytes_in_use() <= target, deadline)
+            .await;
         // Then the spare slabs, which its evictions' frees may have kept.
         slabs.release_spares(None);
         return Ok(slabs.arenas_bytes());
@@ -358,23 +489,25 @@ async fn shrink_by(
     let held = || arenas.iter().map(|arena| slabs.arena_bytes(*arena)).sum::<u64>();
     let in_use = || arenas.iter().map(|arena| slabs.arena_bytes_in_use(*arena)).sum::<u64>();
     for arena in &arenas {
-        evict_until(&daemon.host, Some(*arena), || in_use() <= target, deadline).await;
+        evict_until(&daemon.host, Some(*arena), scope, || in_use() <= target, deadline).await;
         slabs.release_spares(Some(*arena));
     }
     Ok(held())
 }
 
-/// cladefs: evicts the pages of `arena`'s cached extents on `host`, until `enough` says so.
+/// cladefs: evicts the pages of `arena`'s cached extents on `host` within `scope`, until `enough`
+/// says so.
 async fn evict_until(
     host: &crate::Host,
     arena: Option<crate::slabs::ArenaId>,
+    scope: crate::cache::EvictScope,
     enough: impl Fn() -> bool,
     deadline: std::time::Instant,
 ) {
     loop {
         let parking = Parking::new();
         let stop = |_: u64| parking.parked() || enough();
-        parking.counting(|| host.cache().evict_least_used(arena, stop));
+        parking.counting(|| host.cache().evict_with_scope(arena, scope, stop));
         if !parking.parked() {
             return;
         }
@@ -835,5 +968,216 @@ mod tests {
         assert_eq!(rep.hot_bytes(), 0);
         // Restore unrestricted allowance for other tests in the process.
         super::govern(u64::MAX).await;
+    }
+
+    /// `govern_with_on` in `IdleOnly` mode evicts idle (unmapped) extents and stops growth by
+    /// capping `total_cap` at the remaining mapped working set without evicting mapped extents;
+    /// `Mapped { max_shrink_bytes }` steps down mapped extents by at most `max_shrink_bytes` per
+    /// pass; and `GetStats` (`stats::take_on`) exposes all governor gauges and counters.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn govern_with_idle_only_holds_mapped_working_set_and_mapped_mode_rate_limits() {
+        use super::super::governor::ReclaimMode;
+        use crate::cache::{CachedExtent, Contents};
+        use crate::dax::{Dax, Source};
+        use crate::pages::ArenaId;
+        use crate::slabs::SLAB;
+        use futures::future::BoxFuture;
+        use std::sync::Arc;
+        use storage_device::ExtentId;
+
+        struct ZeroFill;
+        impl Contents for ZeroFill {
+            fn read<'a>(
+                &'a self,
+                _offset: u64,
+                buf: &'a mut [u8],
+            ) -> BoxFuture<'a, Result<(), anyhow::Error>> {
+                buf.fill(0x5a);
+                Box::pin(std::future::ready(Ok(())))
+            }
+        }
+
+        let daemon = super::Daemon::new();
+        daemon.block_on(async {
+            let cache = daemon.host.cache();
+            let slabs = daemon.host.slabs();
+
+            let baseline = slabs.arenas_bytes();
+            // Populate 3 mapped extents (3 MiB) and 2 idle unmapped extents (2 MiB).
+            let (mut dax, window) =
+                Dax::new_on(&daemon.host, ArenaId::DEFAULT, 3 * SLAB, None).unwrap();
+            let zero_page = slabs.arenas_bytes() - baseline;
+            let mut mapped = Vec::new();
+            for seq in 1..=3u64 {
+                let id = ExtentId { cell: 4242, sequence: seq };
+                let ext = Arc::new(CachedExtent::new_on(
+                    cache,
+                    ArenaId::DEFAULT,
+                    id,
+                    Box::new(ZeroFill),
+                    SLAB,
+                ));
+                cache.insert_for_test(ArenaId::DEFAULT, id, ext.clone());
+                let source: Arc<dyn Source> = ext.clone();
+                dax.map((seq - 1) * SLAB, &source, 0, SLAB);
+                ext.clone().bring_in(0).await.unwrap();
+                mapped.push(ext);
+            }
+            let mut idle = Vec::new();
+            for seq in 4..=5u64 {
+                let id = ExtentId { cell: 4242, sequence: seq };
+                let ext = Arc::new(CachedExtent::new_on(
+                    cache,
+                    ArenaId::DEFAULT,
+                    id,
+                    Box::new(ZeroFill),
+                    SLAB,
+                ));
+                cache.insert_for_test(ArenaId::DEFAULT, id, ext.clone());
+                ext.clone().bring_in(0).await.unwrap();
+                idle.push(ext);
+            }
+            assert_eq!(slabs.arenas_bytes(), baseline + zero_page + 5 * SLAB);
+
+            // IdleOnly with allowance = 1 MiB: evicts the 2 MiB of idle extents, leaves all 3 MiB of
+            // mapped extents resident, and sets total_cap >= remaining mapped bytes (slab-aligned) so
+            // growth stops without thrashing.
+            super::govern_with_on(&daemon, SLAB, ReclaimMode::IdleOnly).await;
+            let mapped_held = baseline + zero_page + 3 * SLAB;
+            assert_eq!(slabs.arenas_bytes(), mapped_held);
+            assert_eq!(slabs.total_cap(), Some(mapped_held.div_ceil(SLAB) * SLAB));
+            assert!(idle.iter().all(|e| e.held() == 0), "idle extents must be evicted");
+            assert!(mapped.iter().all(|e| e.held() > 0), "mapped extents must stay resident");
+
+            // Rate-limited Mapped mode (1 MiB/tick) shrinks mapped extents by 1 MiB per pass, not all
+            // the way to 1 MiB at once.
+            super::govern_with_on(&daemon, SLAB, ReclaimMode::Mapped { max_shrink_bytes: SLAB })
+                .await;
+            assert_eq!(slabs.arenas_bytes(), mapped_held - SLAB);
+            assert_eq!(slabs.total_cap(), Some(mapped_held - SLAB));
+
+            // Second pass steps down another 1 MiB toward the 1 MiB allowance.
+            super::govern_with_on(&daemon, SLAB, ReclaimMode::Mapped { max_shrink_bytes: SLAB })
+                .await;
+            assert_eq!(slabs.arenas_bytes(), mapped_held - 2 * SLAB);
+            assert_eq!(slabs.total_cap(), Some(mapped_held - 2 * SLAB));
+
+            // Re-faulting one of the evicted mapped extents increments refaults, surfaced via GetStats.
+            let evicted = mapped.iter().find(|e| e.held() == 0).expect("an evicted mapped extent");
+            // Lift cap so the refault succeeds without waiting on relief.
+            super::govern_with_on(&daemon, 8 * SLAB, ReclaimMode::None).await;
+            evicted.clone().bring_in(0).await.unwrap();
+            assert_eq!(cache.refaults(), 1);
+
+            let stats =
+                super::super::stats::take_on(&daemon, std::time::Duration::ZERO, false).await;
+            for gauge in [
+                "memory_full",
+                "memory_pressure",
+                "memory_thrashing",
+                "memory_floor_bytes",
+                "memory_target_bytes",
+                "memory_refaults_per_second",
+                "memory_psi_some_avg10_bps",
+                "memory_psi_full_avg10_bps",
+            ] {
+                assert!(
+                    stats.gauges.iter().any(|(name, _)| *name == gauge),
+                    "GetStats missing governor gauge {gauge}"
+                );
+            }
+            assert!(
+                stats.counters.iter().any(|(name, value)| name == "memory_refaults" && *value == 1),
+                "GetStats missing memory_refaults counter"
+            );
+            assert!(
+                stats.counters.iter().any(|(name, _)| name == "memory_full_entered"),
+                "GetStats missing memory_full_entered counter"
+            );
+            drop((dax, window, mapped, idle));
+        });
+    }
+
+    /// Multi-tenant weighted shrinking must honor `Mapped { max_shrink_bytes }`: an over-share
+    /// tenant is shrunk by at most the remaining global excess above `effective_cap`, not all the
+    /// way down to its weighted share in one tick.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn govern_with_weighted_tenants_respects_mapped_rate_limit() {
+        use super::super::governor::ReclaimMode;
+        use crate::cache::{CachedExtent, Contents};
+        use crate::dax::{Dax, Source};
+        use crate::slabs::SLAB;
+        use futures::future::BoxFuture;
+        use std::sync::Arc;
+        use storage_device::ExtentId;
+
+        struct ZeroFill;
+        impl Contents for ZeroFill {
+            fn read<'a>(
+                &'a self,
+                _offset: u64,
+                buf: &'a mut [u8],
+            ) -> BoxFuture<'a, Result<(), anyhow::Error>> {
+                buf.fill(0x5a);
+                Box::pin(std::future::ready(Ok(())))
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = super::Daemon::new();
+        crate::pages::configure_on(&daemon.host, crate::pages::Config::with_memory(16 * SLAB))
+            .unwrap();
+        daemon.block_on(async {
+            let cache = daemon.host.cache();
+            let slabs = daemon.host.slabs();
+
+            let t1 = super::super::server::Tenant::new_on(&daemon, 1, dir.path()).unwrap();
+            let t2 = super::super::server::Tenant::new_on(&daemon, 2, dir.path()).unwrap();
+            let (mut dax1, win1) = Dax::new_on(&daemon.host, t1.arena(), 4 * SLAB, None).unwrap();
+            let (mut dax2, win2) = Dax::new_on(&daemon.host, t2.arena(), 2 * SLAB, None).unwrap();
+            let baseline = slabs.arenas_bytes();
+            let t2_baseline = slabs.arena_bytes(t2.arena());
+
+            // Tenant 1 holds 4 MiB mapped; Tenant 2 holds 1 MiB mapped (total +5 MiB).
+            let mut exts = Vec::new();
+            for seq in 1..=4u64 {
+                let id = ExtentId { cell: 9001, sequence: seq };
+                let ext =
+                    Arc::new(CachedExtent::new_on(cache, t1.arena(), id, Box::new(ZeroFill), SLAB));
+                cache.insert_for_test(t1.arena(), id, ext.clone());
+                let source: Arc<dyn Source> = ext.clone();
+                dax1.map((seq - 1) * SLAB, &source, 0, SLAB);
+                ext.clone().bring_in(0).await.unwrap();
+                exts.push(ext);
+            }
+            {
+                let id = ExtentId { cell: 9002, sequence: 1 };
+                let ext =
+                    Arc::new(CachedExtent::new_on(cache, t2.arena(), id, Box::new(ZeroFill), SLAB));
+                cache.insert_for_test(t2.arena(), id, ext.clone());
+                let source: Arc<dyn Source> = ext.clone();
+                dax2.map(0, &source, 0, SLAB);
+                ext.clone().bring_in(0).await.unwrap();
+                exts.push(ext);
+            }
+            let total_before = slabs.arenas_bytes();
+            assert_eq!(total_before, baseline + 5 * SLAB);
+
+            // Equal weights: effective_cap = total_before - 1 MiB -> Tenant 1's share would be
+            // ~2 MiB (2 MiB below its 4 MiB). Rate limit must cap eviction to 1 MiB total!
+            super::govern_with_on(&daemon, SLAB, ReclaimMode::Mapped { max_shrink_bytes: SLAB })
+                .await;
+            assert_eq!(
+                slabs.arenas_bytes(),
+                total_before - SLAB,
+                "weighted shrink must not exceed max_shrink_bytes in one tick"
+            );
+            // Tenant 1 (over-share) yielded the 1 MiB; Tenant 2 stayed untouched.
+            assert_eq!(slabs.arena_bytes(t2.arena()), t2_baseline + SLAB);
+
+            drop((exts, dax1, win1, dax2, win2, t1, t2));
+        });
     }
 }

@@ -3130,6 +3130,54 @@ impl VmProcess {
     async fn exited(&self) -> std::io::Result<()> {
         match *self {}
     }
+
+    /// Race-free PID of this VM process read from `/proc/self/fdinfo/<pidfd>`. Returns `None` once
+    /// the process has exited (`Pid: 0` or `-1`) or outside Linux.
+    #[cfg(all(target_os = "linux", not(madsim)))]
+    fn pid(&self) -> Option<libc::pid_t> {
+        use std::os::fd::AsRawFd;
+        let pidfd = match self {
+            Self::Pidfd(pidfd) => pidfd,
+            #[cfg(test)]
+            Self::Unkillable => return None,
+        };
+        // Real Linux procfs fdinfo for a connected VM's pidfd, outside the simulation; unreadable
+        // if the process exited or procfs is restricted, so skip it.
+        let fdinfo =
+            std::fs::read_to_string(format!("/proc/self/fdinfo/{}", pidfd.as_raw_fd())).ok()?;
+        let pid_str = fdinfo.lines().find_map(|line| line.strip_prefix("Pid:"))?.trim();
+        // Malformed or negative Pid line (exited pidfd): treat as no live PID.
+        let pid = pid_str.parse::<libc::pid_t>().ok()?;
+        (pid > 0).then_some(pid)
+    }
+}
+
+/// Live unified cgroup v2 relative paths of external VM processes currently connected to `daemon`,
+/// resolved race-free by holding each peer's `SO_PEERPIDFD` open across `/proc/<pid>/cgroup` and
+/// re-checking `fdinfo` `Pid:` afterwards so a recycled PID can never target an unrelated cgroup.
+#[cfg(all(target_os = "linux", not(madsim)))]
+pub(super) fn connected_vm_cgroups(daemon: &Daemon) -> Vec<String> {
+    let peers: Vec<Arc<Peer>> = daemon.vm_peers.lock().unwrap().clone();
+    let mut paths = Vec::new();
+    for peer in peers {
+        let Some(process) = peer.process.as_ref() else { continue };
+        let Some(pid_before) = process.pid() else { continue };
+        // Real Linux procfs cgroup lookup for a connected VM process, outside the simulation;
+        // unreadable if the process exited concurrently, so skip it.
+        let Ok(raw) = std::fs::read_to_string(format!("/proc/{pid_before}/cgroup")) else {
+            continue;
+        };
+        // Re-verify the pidfd still points to the same live PID after reading `/proc/<pid>/cgroup`.
+        if process.pid() != Some(pid_before) {
+            continue;
+        }
+        if let Some(rel) = super::governor::cgroup_v2_path_of(&raw) {
+            paths.push(rel.to_owned());
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    paths
 }
 
 /// cladefs: the process at the other end of `stream`, as a pidfd, unless it is this one: the

@@ -19,10 +19,11 @@ Group=cladefsd
 SupplementaryGroups=kvm
 # Jails run as other users than the daemon's (docs/integrator-guide.md): a grant gives a tenant's
 # socket to its jails' user, then its mode, then links it in place (cladefsd::bind_given: CAP_CHOWN,
-# and CAP_FOWNER for a file no longer its own), and a VM process is served only if the daemon may
-# kill it (Peer::connected's signal 0: CAP_KILL for another user's). Those three, no others.
-AmbientCapabilities=CAP_CHOWN CAP_FOWNER CAP_KILL
-CapabilityBoundingSet=CAP_CHOWN CAP_FOWNER CAP_KILL
+# and CAP_FOWNER for a file no longer its own); a VM process is served only if the daemon may kill
+# it (Peer::connected's signal 0: CAP_KILL for another user's); and unified memory governance writes
+# proactive memory.reclaim to connected VMs' cgroups (CAP_DAC_OVERRIDE). Those four, no others.
+AmbientCapabilities=CAP_CHOWN CAP_FOWNER CAP_KILL CAP_DAC_OVERRIDE
+CapabilityBoundingSet=CAP_CHOWN CAP_FOWNER CAP_KILL CAP_DAC_OVERRIDE
 
 # Its sockets in a directory of its own, which systemd removes as the daemon stops, a crash
 # included: a daemon started over a dead one's sockets refuses them (board 5227). The VM manager
@@ -48,12 +49,23 @@ Environment=CLADEFS_LOG_FORMAT=json
 # The drain's bound, which TimeoutStopSec must exceed.
 Environment=CLADEFSD_DRAIN=60
 
-# Its memory fixed, 64 GiB here, in a cgroup whose limit holds it and the daemon's own heap
-# (cladefsd_process_anon_budget_bytes, which /metrics reports: 8 GiB is this example's guess):
-# under memory.max the governor, which reads the host's free memory and not the cgroup's, would
-# take what the cgroup's OOM killer then stops it for. The cgroup is charged for every VM's cached
-# file pages (docs/operating-a-host.md, "The daemon's memory").
-ExecStart=/usr/local/bin/cladefsd /run/cladefsd/vm.sock 68719476736
+# Governed memory (recommended on VM hosts): omit MEMORY_BYTES so the governor sizes the shared
+# DAX cache dynamically against host MemAvailable and protects at least its floor (1/8 of host RAM
+# or MemoryMax by default, or CLADEFSD_MEMORY_FLOOR). Set MemoryLow= to at least that floor so the
+# kernel protects cladefsd's shared DAX cache working set from global reclaim when sibling VM
+# cgroups grow anonymous RAM. Note: Linux cgroup v2 caps effective memory.low by every ancestor
+# cgroup's memory.low, so MemoryLow= only takes effect if system.slice (or a dedicated top-level
+# Slice=cladefs.slice) also sets MemoryLow= at least as high. The cgroup is charged for every VM's
+# cached file pages (docs/operating-a-host.md, "The daemon's memory").
+# Provision host prerequisites (MGLRU, min_ttl_ms, and zram swap if below floor) as root (`+`)
+# before dropping to User=cladefsd; governed cladefsd fails hard at startup if any prerequisite is
+# missing. Hosts that delegate VM cgroups to User=cladefsd may drop CAP_DAC_OVERRIDE and set
+# Environment=CLADEFSD_VM_CGROUP_DELEGATED=1 instead. To run with a fixed cache size instead of
+# the memory governor, pass MEMORY_BYTES to ExecStart (e.g. `68719476736` with `MemoryMax=72G` for
+# the daemon's heap `cladefsd_process_anon_budget_bytes`) and drop ExecStartPre/CAP_DAC_OVERRIDE.
+ExecStartPre=+/usr/local/bin/cladefsd --setup-host
+ExecStart=/usr/local/bin/cladefsd /run/cladefsd/vm.sock
+MemoryLow=8G
 MemoryMax=72G
 # The kernel's OOM killer takes VMs before it: the daemon's death takes every VM on the host.
 OOMScoreAdjust=-900
@@ -82,10 +94,10 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
-ReadWritePaths=/var/lib/cladefsd /run/cladefsd
+ReadWritePaths=/var/lib/cladefsd /run/cladefsd /sys/fs/cgroup
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
-ProtectControlGroups=yes
+ProtectControlGroups=no
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 RestrictRealtime=yes
 LockPersonality=yes

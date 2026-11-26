@@ -39,6 +39,19 @@ mod sync;
 mod tests;
 
 use arena::{ArenaState, Freed, Refused, Run, Starved, Taken};
+pub use object::SlabResidency;
+/// Verifies at startup that the Linux host kernel supports `cachestat(2)` (Linux 6.5+).
+#[cfg(all(target_os = "linux", not(madsim)))]
+pub(crate) fn require_cachestat() -> std::io::Result<()> {
+    object::Object::require_cachestat()
+}
+
+/// Queries Linux `cachestat(2)` on a previously snapshotted `(fd, offset, len)` range outside any
+/// extent lock.
+#[cfg_attr(any(not(target_os = "linux"), madsim), allow(dead_code))]
+pub(crate) fn cachestat_range(fd: &OwnedFd, offset: u64, len: u64) -> Option<SlabResidency> {
+    object::Object::cachestat_fd(fd, offset, len)
+}
 #[cfg(all(test, feature = "shuttle"))]
 pub(crate) use quarantine::{QuarantineForTest, quarantine_for_test};
 pub use quarantine::{Quarantined, quarantine_with};
@@ -626,6 +639,26 @@ impl PartSlab {
     /// Its length, in bytes.
     pub fn len(&self) -> u64 {
         self.pages() * page_size()
+    }
+
+    /// Kernel page-cache residency of this slab's range via Linux `cachestat(2)`, if supported.
+    pub fn residency(&self) -> Option<SlabResidency> {
+        self.held().arena.object.cachestat(self.location().offset, self.len())
+    }
+
+    /// Cloned handle to `(arena_fd, offset, len)` so callers can invoke [`cachestat_range`]
+    /// without holding any extent lock across the syscall.
+    pub fn residency_handle(&self) -> (Arc<OwnedFd>, u64, u64) {
+        let held = self.held();
+        (Arc::clone(held.arena.object.fd()), Arena::offset(held.run), self.len())
+    }
+
+    /// Whether this slab still occupies the exact `(offset, len)` byte range within its arena
+    /// backing object (used to ignore stale `cachestat(2)` samples after an extent part was
+    /// evicted and refilled while the lock was dropped).
+    #[cfg_attr(any(not(target_os = "linux"), madsim), allow(dead_code))]
+    pub(crate) fn same_range(&self, offset: u64, len: u64) -> bool {
+        Arena::offset(self.held().run) == offset && self.len() == len
     }
 
     /// Whether the page at `at` is one of its.

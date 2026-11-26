@@ -467,6 +467,7 @@ ${cladefsd_run[@]+"${cladefsd_run[@]}"} \
 env CLADEFSD_BUCKET="${CLADEFSD_BUCKET:-file://$bucket_dir}" \
     CLADEFSD_PART_CACHE="${CLADEFSD_PART_CACHE-$cache_dir}" \
     CLADEFSD_TOKEN="${CLADEFSD_TOKEN:-1}" \
+    CLADEFSD_VM_CGROUP_DELEGATED="${CLADEFSD_VM_CGROUP_DELEGATED:-1}" \
     CLADEFSD_STATS="$results/$daemon_file-stats.txt" CLADEFSD_GRPC="$control" \
     FAILPOINTS="${CLADEFS_FAILPOINTS:-}" ${cladefsd_wrap[@]+"${cladefsd_wrap[@]}"} "$cladefsd_bin" "$socket" ${CLADEFSD_MEMORY:+"$CLADEFSD_MEMORY"} \
     > "$results/$daemon_file.log" 2>&1 &

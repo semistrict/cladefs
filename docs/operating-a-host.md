@@ -10,10 +10,16 @@ The VM manager's side, the control API call by call, is `integrator-guide.md`; u
 DAX moves the guests' file pages out of their RAM into
 the daemon's (TASK-50.3). Its physical memory is a page cache, governed
 (TASK-358): as much of the host's memory as is free, less a headroom
-(`CLADEFSD_HEADROOM` bytes, by default a sixteenth of the host's memory, 1 GiB
-at least), given back as the host's free memory falls. `MEMORY_BYTES`, its
-second argument, fixes it at that instead, ungoverned, as a test's daemon may
-have it. Arenas take it in 2 MiB chunks as they need them. The control API limits, at runtime, the memory
+(`CLADEFSD_HEADROOM` bytes, by default a sixteenth of the host's or cgroup's
+limit, 1 GiB at least and half the limit at most), never below a shared working-set
+floor (`CLADEFSD_MEMORY_FLOOR` bytes, by default an eighth of the limit: e.g.
+~3.5 GiB on a 28 GiB host, 8 GiB on a 64 GiB host). On a soft `MemAvailable` dip
+without kernel memory pressure, the governor sheds derived caches, spare slabs,
+and idle (unmapped) extents and stops growing without evicting actively mapped
+DAX extents; it shrinks mapped extents gradually only under own-cgroup limits or
+real Linux PSI memory pressure, and backs off if refault thrashing is detected.
+`MEMORY_BYTES`, its second argument, fixes it at that instead, ungoverned, as a
+test's daemon may have it. Arenas take it in 2 MiB chunks as they need them. The control API limits, at runtime, the memory
 of each tenant and of every tenant together (`SetMemoryLimit`): past a
 tenant's limit, the daemon evicts the clean pages of its extents read longest
 ago; past the total, or out of `MEMORY_BYTES`, any tenant's. With none left to
@@ -407,7 +413,7 @@ is listed in `crates/cladefs/src/cladefsd/metrics.rs`'s module doc):
 | `cladefsd_mount_requests_total`, `cladefsd_mount_request_errors_total`, `cladefsd_mount_attaches_total`, `cladefsd_mount_detaches_total` | Its requests, those answered with an error (but `ENOENT` and `ENOSYS`, a name not there and an operation it has not, which the kernel asks every filesystem), its attaches and detaches. |
 | `cladefsd_page_cache_bytes`, `_dirty_bytes`, `_writeback_bytes`, `_stuck_bytes`, `_limit_bytes`, `_dirty_limit_bytes` | The cells' page cache: held, dirty, being written back, dirty of files whose write-back fails, its size, and the dirty bytes past which writers wait. |
 | `cladefsd_page_cache_flush_stalls_total`, `cladefsd_page_cache_flush_stalled_seconds_total`, `cladefsd_page_cache_flusher_died` | Writers held back at that bound and how long, together: the disk not keeping up; 1 once its flusher died. |
-| `cladefsd_memory_full`, `cladefsd_memory_pressure`, `cladefsd_memory_full_entered_total`, `cladefsd_memory_floor_bytes` | 1 while the host's memory is full (the daemon makes no cell, `CreateCell` failing `ENOMEM`), 1 while the daemon holds past the governor's allowance and evicts; how often it became full; the floor it keeps. |
+| `cladefsd_memory_full`, `cladefsd_memory_pressure`, `cladefsd_memory_thrashing`, `cladefsd_memory_full_entered_total`, `cladefsd_memory_refaults_total`, `cladefsd_memory_refaults_per_second`, `cladefsd_memory_floor_bytes`, `cladefsd_memory_target_bytes`, `cladefsd_memory_psi_some_avg10_bps`, `cladefsd_memory_psi_full_avg10_bps` | 1 while the host's memory is full (the daemon makes no cell, `CreateCell` failing `ENOMEM`), 1 while under memory pressure, 1 while actively refault-thrashing; full-entry and part-refault counters; 1-second refault rate; the protected floor and headroom-adjusted target; and memory PSI averages in basis points. All gauges and counters are also returned by gRPC `GetStats`. |
 | `cladefsd_otel_spans_exported_total`, `cladefsd_otel_spans_dropped_total`, `cladefsd_otel_spans_failed_total` | Spans exported over OTLP, dropped (the exporter's queue, `OTEL_BSP_MAX_QUEUE_SIZE`, full), and whose export failed (`docs/tracing.md`). |
 
 No label holds what a caller names: a method none of the .protos has is `unknown`.
@@ -521,16 +527,28 @@ What it sets, and why:
   three quarters of it over 4 files a connection; it refuses to start under 35,840 (board 8595).
 - `TimeoutStopSec=90` above `CLADEFSD_DRAIN=60`: SIGTERM drains (`docs/upgrading-a-host.md`), and
   systemd's SIGKILL at the stop timeout would cut a longer drain short, its cells not uploaded.
-- `MEMORY_BYTES` fixed (64 GiB in the example) and `MemoryMax` above it by the daemon's own heap,
-  which `cladefsd_process_anon_budget_bytes` reports: the cgroup is charged for every VM's cached
-  file pages (above, The daemon's memory), and the governor, which reads the host's free memory
-  and not the cgroup's, would take what the cgroup's OOM killer then stops it for.
+- `MemoryLow` set to at least the daemon's shared DAX cache floor (by default `1/8` of the host's
+  or cgroup's memory limit, or `CLADEFSD_MEMORY_FLOOR`) so the kernel protects `cladefsd`'s
+  extent cache against global reclaim when sibling VM cgroups allocate anonymous memory (because
+  Linux cgroup v2 caps effective `memory.low` by every ancestor's `memory.low`, also set
+  `MemoryLow` on `system.slice` or place `cladefsd.service` in a dedicated top-level
+  `Slice=cladefs.slice` with `MemoryLow` set); and `MEMORY_BYTES` fixed (64 GiB in the example)
+  with `MemoryMax` above it by the daemon's own heap (`cladefsd_process_anon_budget_bytes`), or
+  governed without `MEMORY_BYTES` (the governor sizes both headroom and floor to `memory.max` when
+  set).
 - `OOMScoreAdjust=-900`: the kernel's OOM killer takes VMs before the daemon, whose death takes
   them all.
-- `CAP_CHOWN`, `CAP_FOWNER` and `CAP_KILL`, and no other capability: jails run as other users than
-  the daemon's, a grant gives each tenant's socket to its jails' user (chown, then its mode and
-  link), and the daemon serves only a VM process it may kill, which another user's is only with
-  `CAP_KILL`. Without them, `Grant` fails `EPERM` and jailed VMs' connections are refused.
+- `CAP_CHOWN`, `CAP_FOWNER`, `CAP_KILL` and `CAP_DAC_OVERRIDE`, and no other capability: jails run
+  as other users than the daemon's, a grant gives each tenant's socket to its jails' user (chown,
+  then its mode and link), the daemon serves only a VM process it may kill (`CAP_KILL`), and the
+  memory governor writes proactive `memory.reclaim` to low-PSI connected VM cgroups discovered from
+  their `SO_PEERPIDFD` (`CAP_DAC_OVERRIDE` with `/sys/fs/cgroup` writable; hosts that delegate VM
+  cgroups to `User=cladefsd` may drop `CAP_DAC_OVERRIDE` and set `CLADEFSD_VM_CGROUP_DELEGATED=1`
+  instead). Governed mode requires Linux 6.5+ `cachestat(2)`, MGLRU enabled, `SwapTotal >= floor`,
+  and writable `/sys/fs/cgroup`, failing hard at startup if any prerequisite is absent;
+  `ExecStartPre=+/usr/local/bin/cladefsd --setup-host` provisions MGLRU, `min_ttl_ms=1000`, and
+  zstd zram swap automatically before dropping privileges. Enable Firecracker virtio-balloon
+  `free_page_reporting` so guests return freed memory to the host.
 - The `kvm` group, for `/dev/userfaultfd` by the udev rule above; the master key as a systemd
   credential (`LoadCredential`, `CLADEFS_MASTER_KEY_FILE=%d/master-key`), the bucket and token in
   an environment file only root reads.

@@ -84,3 +84,14 @@ fn runs_staged_forget_vm_processes_gone() {
     run.stage_to(next);
     assert_eq!(run.staged(), [connected, next]);
 }
+
+#[cfg(all(target_os = "linux", not(madsim)))]
+#[test]
+fn part_slab_residency_reports_cached_pages_via_cachestat() {
+    let run = alloc(ArenaId::DEFAULT, 2, Wait::No).unwrap();
+    let buf = vec![0xABu8; page_size() as usize * 2];
+    run.write(0, &buf).unwrap();
+    let res = run.residency().expect("cachestat(2) supported on Linux 6.5+");
+    assert_eq!(res.cached_pages, 2);
+    assert_eq!(res.evicted_pages, 0);
+}
