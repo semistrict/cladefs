@@ -887,6 +887,7 @@ impl Cladefsd for Control {
         let ImportImageRequest { capacity, image, reference, tenant } = request.into_inner();
         let image = input_path(image)?;
         let reference = Some(reference).filter(|reference| !reference.is_empty());
+        room_for_a_cell(&self.daemon)?;
         let (disk, staging) = self.stage_for(tenant).await?;
         let made =
             match cells::import(&self.daemon, staging.clone(), capacity, image, reference, tenant)
@@ -1845,6 +1846,30 @@ mod tests {
         assert_eq!(refused.message(), "the host's memory is full: the daemon makes no cell more");
         crate::governor::set_full_on(&daemon, false);
         assert!(room_for_a_cell(&daemon).is_ok());
+    }
+
+    /// cladefs: board 11669: `ImportImage` enforces full-host memory admission control
+    /// (`room_for_a_cell`), returning `RESOURCE_EXHAUSTED` with `ENOMEM` when the host is full.
+    #[tokio::test]
+    async fn import_image_is_refused_while_the_hosts_memory_is_full() {
+        let daemon = Daemon::new();
+        crate::governor::set_full_on(&daemon, true);
+        let grants = Arc::new(Grants::new(Arc::clone(&daemon), PathBuf::new()));
+        let control = Control { daemon, grants };
+        let refused = Cladefsd::import_image(
+            &control,
+            Request::new(ImportImageRequest {
+                capacity: 1 << 24,
+                image: "/nonexistent/image".into(),
+                reference: String::new(),
+                tenant: 0,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(refused.code(), Code::ResourceExhausted);
+        assert_eq!(errno(&refused), Some(Errno::ENOMEM));
+        assert_eq!(refused.message(), "the host's memory is full: the daemon makes no cell more");
     }
 
     /// A call of the API whose caller gives up, dropping what awaits its answer, runs to its end,
