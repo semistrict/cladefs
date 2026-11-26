@@ -289,9 +289,20 @@ async fn release_held(held: Arc<HeldCell>) {
 }
 
 /// cladefs: lets `held` go in a task of its own, on `daemon`'s runtime: what lets one go where it
-/// can't await its close, as a drop, or a call that may be cancelled.
+/// can't await its close, as a drop, or a call that may be cancelled. Marks the cell closing
+/// synchronously when unwrapping the last `Arc<OpenCell>` so concurrent openers wait instead of
+/// failing with `EBUSY` before the close task starts (board 11340).
 fn release_held_behind(daemon: &Daemon, held: Arc<HeldCell>) -> tokio::task::JoinHandle<()> {
-    daemon.spawn(release_held(held))
+    if let Some(HeldCell { open_cell, _then }) = Arc::into_inner(held) {
+        let closing = Arc::into_inner(open_cell).inspect(|cell| cell.mark_closing());
+        return daemon.spawn(async move {
+            if let Some(cell) = closing {
+                cell.close().await;
+            }
+            drop(_then);
+        });
+    }
+    daemon.spawn(async {})
 }
 
 impl Drop for Here {
@@ -1628,6 +1639,7 @@ pub(super) fn inspect<T>(
 ) -> T {
     let result = read(&cell);
     if let Some(cell) = Arc::into_inner(cell) {
+        cell.mark_closing();
         drop(daemon.spawn(cell.close()));
     }
     result

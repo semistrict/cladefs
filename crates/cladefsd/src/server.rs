@@ -1532,12 +1532,17 @@ impl Drop for Connection {
             Phase::Writing(hold) => Some((self.tenant.daemon.table.clone(), hold.key().to_owned())),
             Phase::Unopened | Phase::Opening => None,
         };
+        let closing = open_cell.and_then(|open_cell| {
+            if let Some((table, key)) = closed {
+                open_cell.on_close(move || table.closed(&key));
+            }
+            let cell = Arc::into_inner(open_cell)?;
+            cell.mark_closing();
+            Some(cell)
+        });
         drop(self.tenant.daemon.spawn(async move {
-            if let Some(open_cell) = open_cell {
-                if let Some((table, key)) = closed {
-                    open_cell.on_close(move || table.closed(&key));
-                }
-                cladefs_core::open_cell::release(open_cell).await;
+            if let Some(cell) = closing {
+                cell.close().await;
             }
             drop(window);
             drop(phase);

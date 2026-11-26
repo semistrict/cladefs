@@ -423,6 +423,9 @@ fn fetch_errno(error: anyhow::Error) -> Errno {
 /// cell a base is attached to, closes it, awaited, and none closes it in its drop, which blocks.
 pub async fn release(cell: Arc<OpenCell>) {
     if let Some(cell) = Arc::into_inner(cell) {
+        // Mark closing synchronously before awaiting close so a concurrent opener waits for close
+        // instead of observing `claimed[id] == false` and failing with `EBUSY` (board 11340).
+        cell.mark_closing();
         // Boxed: an open cell's close releases its writer and bases, which release theirs.
         Box::pin(cell.close()).await;
     }
@@ -517,16 +520,25 @@ impl Drop for OpenCell {
 }
 
 impl OpenCell {
+    /// cladefs: marks this open cell's directory claim as closing synchronously before spawning or
+    /// awaiting [`OpenCell::close`], closing the window where a concurrent opener (`Here::open`,
+    /// `sync`, `opened_version`) could observe `claimed[id] == false` and fail with `EBUSY`
+    /// (board 11340).
+    pub fn mark_closing(&self) {
+        self.local.closing();
+    }
+
     /// cladefs: closes it as dropping it does, and returns once it is closed: its uploader's
     /// uploads done and stopped (`Uploader::close`), and the open cell closed, which may be opened
     /// again at once (TASK-685.3). Holds no thread while it waits for its uploader, as the daemon
     /// closes its open cells; dropped unclosed, it blocks.
     pub async fn close(mut self) {
+        // Mark closing synchronously before any `.await` so concurrent openers wait (board 11340).
+        self.local.closing();
         // cladefs: its guest's boot, measured and written first.
         if let Some(evidence) = self.evidence.take() {
             evidence.close().await;
         }
-        local_cell::upload::blocking(|| self.local.closing());
         fail::fail_point!("open_cell::closing");
         if let Some(uploader) = self.uploader.take() {
             uploader.close().await;
@@ -1552,10 +1564,11 @@ impl OpenCell {
         window_offset: u64,
     ) -> Result<()> {
         let (cached, within) = self.mapped_of(extent, offset, len, window_offset).await?;
+        let source: Arc<dyn Source> = cached;
         let mut dax = self.dax.lock(&self.halt)?;
         let dax = dax.as_mut().ok_or(Errno::ENOSYS)?;
         if within > 0 {
-            dax.map(window_offset, &cached, offset, within);
+            dax.map(window_offset, &source, offset, within);
         }
         if len > within {
             dax.map_zeros(window_offset + within, len - within);
