@@ -596,8 +596,9 @@ async fn callers_that_go_leave_nothing_half_done() {
     daemon.shutdown().await;
 }
 
-/// On KVM a running machine is snapshotted, restored as a new machine with its guest's state,
-/// suspended and woken; elsewhere those calls are refused with UNIMPLEMENTED.
+/// A machine booting from a cell, as every machine does, is not snapshotted or suspended yet: on
+/// KVM refused with FAILED_PRECONDITION, its versions waiting on board 13994; on
+/// Hypervisor.framework with UNIMPLEMENTED (board 13399). It runs on, as it was.
 #[tokio::test(flavor = "multi_thread")]
 async fn snapshots_restores_and_suspensions() {
     let Some((kernel, initramfs)) = guest() else { return };
@@ -615,53 +616,25 @@ async fn snapshots_restores_and_suspensions() {
 
     let snapshot = proto::SnapshotMachineRequest { name: "tmpl".into(), snapshot: "s1".into() };
     let snapshot = client.snapshot_machine(snapshot).await;
-    if cfg!(target_os = "macos") {
-        assert_eq!(snapshot.unwrap_err().code(), Code::Unimplemented);
-        let suspend =
-            client.suspend_machine(proto::SuspendMachineRequest { name: "tmpl".into() }).await;
-        assert_eq!(suspend.unwrap_err().code(), Code::Unimplemented);
-        daemon.shutdown().await;
-        return;
-    }
-    snapshot.unwrap();
+    let suspend =
+        client.suspend_machine(proto::SuspendMachineRequest { name: "tmpl".into() }).await;
+    // Hypervisor.framework's machines aren't snapshotted (board 13399); KVM's booting from a cell,
+    // as every machine does, not yet: their versions wait on board 13994.
+    let refused =
+        if cfg!(target_os = "macos") { Code::Unimplemented } else { Code::FailedPrecondition };
+    assert_eq!(snapshot.unwrap_err().code(), refused);
+    assert_eq!(suspend.unwrap_err().code(), refused);
     let restore = proto::RestoreMachineRequest {
         snapshot: "s1".into(),
         name: "clone".into(),
-        labels: [("of".to_owned(), "tmpl".to_owned())].into(),
+        labels: Default::default(),
         vsock_listen_ports: vec![],
     };
-    let clone = client.restore_machine(restore).await.unwrap().into_inner().machine.unwrap();
-    assert_eq!(state_of(&clone), proto::MachineState::Running);
-    assert_eq!(clone.spec.unwrap().labels["of"], "tmpl");
-    let (stdout, _, _) = exec(&mut client, "clone", &["cat", "/tmp/prepared"], None).await.unwrap();
-    assert_eq!(stdout, b"yes");
-
-    let watch = proto::WatchMachineRequest { name: "tmpl".into() };
-    let mut watch = client.watch_machine(watch).await.unwrap().into_inner();
-    client.suspend_machine(proto::SuspendMachineRequest { name: "tmpl".into() }).await.unwrap();
-    wait_for_state(&mut watch, proto::MachineState::Suspended).await;
-    // A call on its guest wakes it.
-    let (stdout, _, _) = exec(&mut client, "tmpl", &["echo", "awake"], None).await.unwrap();
-    assert_eq!(stdout, b"awake\n");
-    wait_for_state(&mut watch, proto::MachineState::Running).await;
-    client.suspend_machine(proto::SuspendMachineRequest { name: "tmpl".into() }).await.unwrap();
-    wait_for_state(&mut watch, proto::MachineState::Suspended).await;
-    client.resume_machine(proto::ResumeMachineRequest { name: "tmpl".into() }).await.unwrap();
-    wait_for_state(&mut watch, proto::MachineState::Running).await;
-
-    client.delete_snapshot(proto::DeleteSnapshotRequest { snapshot: "s1".into() }).await.unwrap();
-    let gone = client.delete_snapshot(proto::DeleteSnapshotRequest { snapshot: "s1".into() }).await;
-    assert_eq!(gone.unwrap_err().code(), Code::NotFound);
-    let (stdout, _, _) = exec(&mut client, "clone", &["echo", "lives"], None).await.unwrap();
-    assert_eq!(stdout, b"lives\n", "a clone outlives its snapshot");
-    let busy = client
-        .delete_machine(proto::DeleteMachineRequest { name: "clone".into(), force: false })
-        .await;
-    assert_eq!(busy.unwrap_err().code(), Code::FailedPrecondition);
-    client
-        .delete_machine(proto::DeleteMachineRequest { name: "clone".into(), force: true })
-        .await
-        .unwrap();
+    let restored = client.restore_machine(restore).await;
+    let none = if cfg!(target_os = "macos") { Code::Unimplemented } else { Code::NotFound };
+    assert_eq!(restored.unwrap_err().code(), none, "no snapshot was taken");
+    let (stdout, _, _) = exec(&mut client, "tmpl", &["cat", "/tmp/prepared"], None).await.unwrap();
+    assert_eq!(stdout, b"yes", "it runs on, as it was");
     daemon.shutdown().await;
 }
 

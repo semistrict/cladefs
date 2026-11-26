@@ -537,6 +537,7 @@ impl Machines {
         snapshot: String,
     ) -> Result<(), Status> {
         checks::name("snapshot", &snapshot)?;
+        on_a_cell(entry)?;
         let _turn = entry.turn().await?;
         let running = entry.require_running()?;
         let path = self.snapshot_dir.join(format!("{snapshot}.snap"));
@@ -609,6 +610,7 @@ impl Machines {
     /// Suspends a running machine.
     #[cfg(target_os = "linux")]
     pub(crate) async fn suspend(&self, entry: &Arc<Entry>) -> Result<(), Status> {
+        on_a_cell(entry)?;
         let _turn = entry.turn().await?;
         let running = entry.require_running()?;
         running.vm.suspend(self.suspend_dir.clone()).await
@@ -620,6 +622,21 @@ impl Machines {
         let _turn = entry.turn().await?;
         let running = entry.require_running()?;
         running.vm.resume().await
+    }
+}
+
+/// A machine booting from a cell, as every machine does, isn't snapshotted or suspended yet:
+/// its snapshot is a version of its root's cell and of its memory's, a memory cell, which wait on
+/// board 13994 (libmachine snapshots no extent store device, board 13139).
+#[cfg(target_os = "linux")]
+fn on_a_cell(entry: &Entry) -> Result<(), Status> {
+    match entry.spec.root {
+        Some(_) => Err(Status::failed_precondition(format!(
+            "machine {:?} boots from a cell: machines on cells are not snapshotted or suspended \
+             yet, their root's and memory's versions waiting on board 13994",
+            entry.name
+        ))),
+        None => Ok(()),
     }
 }
 
