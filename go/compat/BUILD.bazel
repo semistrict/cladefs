@@ -14,6 +14,7 @@ go_test(
         "//crates/cladefs/proto/cladefs/mount/v1:mount.proto",
         "//crates/cladefs/proto/cladefs/peer/v1:peer.proto",
         "//crates/cladefs:proto_buf_yaml",
+        "//crates/machined/proto",
         "//go:buf.sh",
         "//go:compat.sh",
         "//go:go.mod",

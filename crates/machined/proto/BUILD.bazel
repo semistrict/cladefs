@@ -1,0 +1,11 @@
+# Copyright 2026 The cladefs Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# machined's API, which go/compat.sh holds to the last build's (board 13744). machined itself is
+# Cargo's alone for now (board 13738).
+filegroup(
+    name = "proto",
+    srcs = glob(["**/*.proto"]) + ["buf.yaml"],
+    visibility = ["//go/compat:__pkg__"],
+)

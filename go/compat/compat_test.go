@@ -4,7 +4,8 @@
 
 // Tests of go/compat.sh, which fails a change of the control and mount APIs that breaks a caller
 // of the last build's (doc-28, board 10056): in a repository of their own holding this tree's
-// crates/cladefs/proto, a commit before and one after.
+// .proto, which go/compat.sh checks (crates/cladefs/proto, crates/machined/proto), a commit before
+// and one after.
 package compat_test
 
 import (
@@ -15,10 +16,11 @@ import (
 	"testing"
 )
 
-// The .proto, relative to this package's directory.
-const protos = "../../crates/cladefs/proto"
+// The directories of .proto go/compat.sh checks, relative to the repository's root: each is in
+// the tests' repositories as in this tree, so that none is new since their base (board 13744).
+var protos = []string{"crates/cladefs/proto", "crates/machined/proto"}
 
-// repo is a repository whose first commit, base, holds this tree's crates/cladefs/proto.
+// repo is a repository whose first commit, base, holds this tree's .proto (protos).
 type repo struct {
 	t    *testing.T
 	dir  string
@@ -30,12 +32,14 @@ func newRepo(t *testing.T) *repo {
 	r.git("init", "-q", "-b", "main")
 	r.git("config", "user.name", "Test")
 	r.git("config", "user.email", "test@example.com")
-	copied := exec.Command("cp", "-R", protos, filepath.Join(r.dir, "crates/cladefs/proto"))
-	if err := os.MkdirAll(filepath.Join(r.dir, "crates/cladefs"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if out, err := copied.CombinedOutput(); err != nil {
-		t.Fatalf("copying the .proto: %v: %s", err, out)
+	for _, dir := range protos {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(r.dir, dir)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		copied := exec.Command("cp", "-R", filepath.Join("../..", dir), filepath.Join(r.dir, dir))
+		if out, err := copied.CombinedOutput(); err != nil {
+			t.Fatalf("copying %s: %v: %s", dir, err, out)
+		}
 	}
 	r.base = r.commit("base")
 	return r
