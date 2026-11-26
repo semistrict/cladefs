@@ -338,6 +338,7 @@ bool cladefs_dax_should_fail_attach(void);
 bool cladefs_dax_should_fail_maps(void);
 bool cladefs_dax_should_fail_map_many(void);
 bool cladefs_dax_should_fail_fallbacks(void);
+bool cladefs_dax_should_fail_rebind_open(void);
 void cladefs_dax_pause_file(enum cladefs_dax_step step, u64 ino);
 void cladefs_dax_delay(void);
 void cladefs_dax_trace(struct cladefs_dax *dax, u32 kind, u64 ino, u64 page, u64 window,

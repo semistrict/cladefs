@@ -409,6 +409,12 @@ impl Filesystem {
     /// while mounted: grows the device and the allocator; or, asked to shrink, shrinks them if the
     /// allocator holds no more than the smaller size, and answers whether it did.
     pub async fn resize(&self) -> Result<(), Error> {
+        // Serialize with freeze/thaw and defer while frozen: thaw schedules and flushes resize once
+        // the filesystem is active again (board 12113).
+        let _guard = self.freeze_lock.lock().await;
+        if self.is_frozen() {
+            return Ok(());
+        }
         let resizer = &self.resizer;
         let Some((capacity, asked)) = resizer.configured() else { return Ok(()) };
         let allocator = self.filesystem.allocator();

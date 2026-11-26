@@ -298,6 +298,10 @@ static long cladefs_dax_map_all(struct cladefs_dax *dax, struct cladefs_dax_rang
 	lockdep_assert_held_write(&range->file->sem);
 	if (!count)
 		return 0;
+	if (rebind && cladefs_dax_should_fail_rebind_open()) {
+		atomic64_inc(&dax->open_maps);
+		return 0;
+	}
 	if (count > 1 && !rebind && cladefs_dax_should_fail_maps()) {
 		rebound = cladefs_dax_map_all(dax, range, maps, 1, rebind);
 		range->unsure = true;
@@ -2034,7 +2038,8 @@ static long cladefs_dax_rebind_ranges(struct cladefs_dax *dax, struct cladefs_da
  * nothing dirty, as after interleave seed 215500's write stopped short, every round rebound none,
  * and a write's or a punch's wait for room failed ENOMEM (TASK-283). How many it rebound.
  */
-static long cladefs_dax_rebind(struct cladefs_dax *dax, struct cladefs_dax_file *file, long target)
+static long cladefs_dax_rebind(struct cladefs_dax *dax, struct cladefs_dax_file *file, long target,
+			       bool seal)
 {
 	struct cladefs_dax_volume *volume;
 	unsigned long open = 0;
@@ -2045,7 +2050,8 @@ static long cladefs_dax_rebind(struct cladefs_dax *dax, struct cladefs_dax_file 
 	rebound = cladefs_dax_rebind_ranges(dax, file, target, &open);
 	/* A volume going (cladefs_dax_remove_volume) stops the worker first. */
 	volume = READ_ONCE(file->volume);
-	if (open && volume && atomic_long_read(&dax->private) > target) {
+	/* Never fsync while frozen (`!seal`): hold_commits and the closed device gate deadlock (board 12113). */
+	if (seal && open && volume && atomic_long_read(&dax->private) > target) {
 		atomic64_inc(&dax->seals_made);
 		err = cladefs_nofs(cladefs_fsync(volume->fs));
 		if (err)
@@ -2159,7 +2165,7 @@ static void cladefs_dax_relieve(struct cladefs_dax *dax, long target, bool write
 	sort(files, nr, sizeof(*files), cladefs_dax_dirtied_before, NULL);
 	for (i = 0; i < nr; i++) {
 		if (atomic_long_read(&dax->private) > target)
-			cladefs_dax_rebind(dax, files[i], target);
+			cladefs_dax_rebind(dax, files[i], target, write);
 		cladefs_dax_put_file(dax, files[i]);
 	}
 	kvfree(files);

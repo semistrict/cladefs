@@ -42,6 +42,203 @@ pub(super) fn test_freeze() {
     assert_eq!(fs::read(path("thawed")).unwrap(), b"writes go on");
 }
 
+/// cladefs: freezing under active concurrent mmap(MAP_SHARED, PROT_WRITE) faults, write(2), and
+/// delayed unlinks settles all DAX dirty pages before closing the device gate (leaving 0 private
+/// and 0 dirty DAX pages when frozen), and a failed MAP_MANY during post-freeze rebind never
+/// deadlocks on cladefs_fsync while frozen (board 12113).
+pub(super) fn test_freeze_under_load(dax: bool) {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    const PAGES: usize = 32;
+    const PAGE: usize = 4096;
+    const LEN: usize = PAGES * PAGE;
+
+    let mapped_path = path("freeze-load-mmap");
+    fs::write(&mapped_path, vec![0x11u8; LEN]).unwrap();
+    if dax {
+        read_in_sealed(&mapped_path);
+    }
+
+    // Shared anonymous page for coordinating the forked mmap writer. The mmap writer runs in a
+    // separate process (its own `mm_struct`) because a thread faulting on a frozen mount holds
+    // `mm->mmap_lock` in `sb_start_pagefault()`, which would block `mmap`-backed allocations in
+    // the freezing process before `FITHAW`.
+    // SAFETY: valid anonymous shared 1-page mapping.
+    let ctrl = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            PAGE,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_SHARED | libc::MAP_ANONYMOUS,
+            -1,
+            0,
+        )
+    };
+    assert_ne!(ctrl, libc::MAP_FAILED, "mmap ctrl: {}", std::io::Error::last_os_error());
+    let child_stop = ctrl as *const AtomicBool;
+    // SAFETY: `ctrl` is zero-initialized, valid, and 4096-byte aligned.
+    unsafe { (*child_stop).store(false, Ordering::Release) };
+
+    let mapped_cstr = CString::new(mapped_path.as_str()).unwrap();
+    // SAFETY: single-threaded at this point; child only uses raw syscalls and `_exit`.
+    let pid = unsafe { libc::fork() };
+    assert!(pid >= 0, "fork: {}", std::io::Error::last_os_error());
+    if pid == 0 {
+        // SAFETY: raw syscalls in freshly forked child; exit via `_exit`.
+        unsafe {
+            let fd = libc::open(mapped_cstr.as_ptr(), libc::O_RDWR);
+            if fd < 0 {
+                libc::_exit(2);
+            }
+            let map = libc::mmap(
+                std::ptr::null_mut(),
+                LEN,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                fd,
+                0,
+            );
+            if map == libc::MAP_FAILED {
+                libc::_exit(3);
+            }
+            let mut round = 0u8;
+            while !(*child_stop).load(Ordering::Acquire) {
+                round = round.wrapping_add(1);
+                for p in 0..PAGES {
+                    std::ptr::write_volatile((map as usize + p * PAGE) as *mut u8, round);
+                }
+            }
+            libc::munmap(map, LEN);
+            libc::close(fd);
+            libc::_exit(0);
+        }
+    }
+
+    struct ChildGuard {
+        pid: libc::pid_t,
+        ctrl: *mut libc::c_void,
+        reaped: bool,
+    }
+    impl ChildGuard {
+        fn stop_and_wait(&mut self) {
+            if self.reaped {
+                return;
+            }
+            // SAFETY: `self.ctrl` points to our shared `AtomicBool`.
+            unsafe { (*(self.ctrl as *const AtomicBool)).store(true, Ordering::Release) };
+            let mut status = 0;
+            // SAFETY: waiting on our own child pid.
+            let waited = unsafe { libc::waitpid(self.pid, &mut status, 0) };
+            self.reaped = true;
+            assert_eq!(waited, self.pid, "waitpid: {}", std::io::Error::last_os_error());
+            assert!(
+                libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
+                "mmap child exited abnormally: status={status:#x}"
+            );
+        }
+    }
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            if !self.reaped {
+                // SAFETY: clean up child on unwind so it does not hold the mount open.
+                unsafe {
+                    (*(self.ctrl as *const AtomicBool)).store(true, Ordering::Release);
+                    libc::kill(self.pid, libc::SIGKILL);
+                    let mut status = 0;
+                    libc::waitpid(self.pid, &mut status, 0);
+                }
+            }
+            // SAFETY: unmapping the 1-page anonymous control region.
+            unsafe { libc::munmap(self.ctrl, PAGE) };
+        }
+    }
+    let mut mmap_child = ChildGuard { pid, ctrl, reaped: false };
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let file_writer = {
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            let mut i = 0u64;
+            while !stop.load(Ordering::Relaxed) {
+                let p = path(&format!("freeze-load-tmp-{}", i % 16));
+                fs::write(&p, format!("round {i}")).unwrap();
+                let _ = fs::remove_file(&p);
+                i += 1;
+            }
+        })
+    };
+
+    // Repeatedly freeze and thaw while active mmap faults, writes, and delayed unlinks race
+    // through SB_FREEZE_WRITE -> SB_FREEZE_PAGEFAULT -> SB_FREEZE_FS.
+    for round in 0..5 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        freeze_at(MNT, FIFREEZE).expect("FIFREEZE under load");
+        if dax {
+            let s = stats();
+            let private = s.get("dax_private_pages").copied().unwrap_or(0);
+            let dirty = s.get("dax_dirty_pages").copied().unwrap_or(0);
+            assert_eq!(
+                (private, dirty),
+                (0, 0),
+                "round {round}: frozen with private={private}, dirty={dirty} pages"
+            );
+        }
+        freeze_at(MNT, FITHAW).expect("FITHAW under load");
+    }
+
+    stop.store(true, Ordering::Relaxed);
+    file_writer.join().unwrap();
+    mmap_child.stop_and_wait();
+
+    // On DAX, if cladefs_dax_frozen's rebind encounters open extents (`open > 0`, simulated via
+    // `dax_fail_rebind_open`), cladefs_dax_rebind must NOT call cladefs_fsync while frozen
+    // (without the `seal` guard, that deadlocks on hold_commits / the closed device gate).
+    if dax {
+        let file = fs::OpenOptions::new().read(true).write(true).open(&mapped_path).unwrap();
+        // SAFETY: valid MAP_SHARED writable mapping of `LEN` bytes on an open file.
+        let ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                LEN,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                file.as_raw_fd(),
+                0,
+            )
+        };
+        assert_ne!(ptr, libc::MAP_FAILED, "mmap: {}", std::io::Error::last_os_error());
+        let addr = ptr as usize;
+        for p in [0usize, 4, 8] {
+            // SAFETY: within `LEN`-byte mapping.
+            unsafe {
+                std::ptr::write_volatile((addr + p * PAGE) as *mut u8, 0x5a);
+            }
+        }
+        let seals_before = stats().get("dax_seals").copied().unwrap_or(0);
+        {
+            let _open = Param::set("dax_fail_rebind_open", "1");
+            freeze_at(MNT, FIFREEZE).expect("FIFREEZE with open-extent rebind");
+            assert_injected("dax_fail_rebind_open");
+        }
+        let after = stats();
+        let seals_after = after.get("dax_seals").copied().unwrap_or(0);
+        assert_eq!(
+            seals_after, seals_before,
+            "cladefs_dax_rebind attempted to seal/fsync while frozen ({seals_before} -> {seals_after})"
+        );
+        freeze_at(MNT, FITHAW).expect("FITHAW after open-extent rebind");
+        // SAFETY: unmapping the `LEN`-byte mapping created above.
+        assert_eq!(unsafe { libc::munmap(ptr, LEN) }, 0, "munmap");
+        drop(file);
+    }
+
+    let _ = fs::remove_file(&mapped_path);
+    for i in 0..16 {
+        let _ = fs::remove_file(path(&format!("freeze-load-tmp-{i}")));
+    }
+}
+
 /// A writer of `data` to the file `name`, which waits, the filesystem frozen (`what` says how):
 /// to be joined once it thaws.
 fn writer_waits(name: &str, data: &'static [u8], what: &str) -> std::thread::JoinHandle<()> {

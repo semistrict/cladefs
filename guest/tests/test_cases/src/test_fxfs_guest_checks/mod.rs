@@ -175,6 +175,7 @@ macro_rules! checks {
             writers_on_a_full_filesystem_share_syncs: All, 30 => test_writers_on_a_full_filesystem_share_syncs;
             a_removed_fill_gives_back_all_its_data: All, 10 => test_a_removed_fill_gives_back_all_its_data;
             freeze: All, 3 => test_freeze;
+            freeze_under_load: All, 10 => test_freeze_under_load(dax);
             failed_thaw_thaws_on_retry: All, 3 => test_failed_thaw_thaws_on_retry;
             read_only_freezes: All, 3 => test_read_only_freezes;
             unmount_after_failed_thaw: All, 5 => test_unmount_after_failed_thaw;

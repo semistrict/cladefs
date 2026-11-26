@@ -61,6 +61,14 @@ static unsigned int cladefs_dax_fail_fallbacks;
 module_param_named(dax_fail_fallbacks, cladefs_dax_fail_fallbacks, uint, 0644);
 MODULE_PARM_DESC(dax_fail_fallbacks, "Fail the next this many MAPs, after a failed MAP_MANY, of pieces after its first (fault injection)");
 
+/*
+ * cladefs: fault injection: simulate an open extent (-EPERM) during the next this many rebinds
+ * (cladefs_dax_map_all), leaving private pages counted in `*open` (board 12113).
+ */
+static unsigned int cladefs_dax_fail_rebind_open;
+module_param_named(dax_fail_rebind_open, cladefs_dax_fail_rebind_open, uint, 0644);
+MODULE_PARM_DESC(dax_fail_rebind_open, "Treat the next this many rebind MAPs as open extents (-EPERM) (fault injection)");
+
 bool cladefs_dax_should_fail_attach(void)
 {
 	return READ_ONCE(cladefs_dax_fail_attach);
@@ -79,6 +87,11 @@ bool cladefs_dax_should_fail_map_many(void)
 bool cladefs_dax_should_fail_fallbacks(void)
 {
 	return cladefs_dax_inject(&cladefs_dax_fail_fallbacks);
+}
+
+bool cladefs_dax_should_fail_rebind_open(void)
+{
+	return cladefs_dax_inject(&cladefs_dax_fail_rebind_open);
 }
 
 /*

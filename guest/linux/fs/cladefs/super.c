@@ -2395,8 +2395,19 @@ static int cladefs_vfs_filesystem_freeze(struct cladefs_vfs_filesystem *filesyst
 	if (cladefs_vfs_filesystem_is_frozen(filesystem) ||
 	    filesystem->volumes_frozen < filesystem->volumes)
 		return 0;
-	if (dax)
+	if (dax) {
 		cladefs_dax_quiesce(dax);
+		/*
+		 * cladefs: settle any DAX dirty pages dirtied after SB_FREEZE_WRITE (e.g. mmap
+		 * write faults before SB_FREEZE_PAGEFAULT, or pages kept dirty after -ENOMEM)
+		 * before cladefs_freeze closes the device gate (board 12113).
+		 */
+		err = cladefs_dax_settle(dax);
+		if (err) {
+			cladefs_dax_thaw(dax);
+			return err;
+		}
+	}
 	err = cladefs_nofs(cladefs_freeze(filesystem->filesystem));
 	if (err) {
 		if (dax)
