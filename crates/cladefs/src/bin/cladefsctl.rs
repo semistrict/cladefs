@@ -7,8 +7,60 @@
 //! them, makes them public bases, and waits for their uploads:
 //!
 //! ```sh
-//! cladefsctl take [--force] DIR CAPACITY CELL [TOKEN]
+//! # Through the daemon (`CLADEFSD_GRPC`, or `--config PATH` naming it): cells by TENANT/CELL.
+//! cladefsctl create [--tenant TENANT] CAPACITY
+//! cladefsctl take [--force] CAPACITY TENANT/CELL [TOKEN]
+//! cladefsctl place [--force] TENANT/CELL TOKEN
+//! cladefsctl sync TENANT/CELL
+//! cladefsctl import [--tenant TENANT] CAPACITY IMAGE [REF]
+//! cladefsctl import-memory [--version] [--tenant TENANT] FILE
+//! cladefsctl fork [--tenant TENANT] TENANT/CELL
+//! cladefsctl fork-version [--ephemeral] [--tenant TENANT] TENANT/CELL VERSION
+//! cladefsctl version TENANT/CELL
+//! cladefsctl versions TENANT/CELL
+//! cladefsctl drop-versions TENANT/CELL VERSION...
+//! cladefsctl share TENANT/CELL VERSION
+//! cladefsctl unshare TENANT/CELL VERSION
+//! cladefsctl delete TENANT/CELL
+//! cladefsctl drop TENANT/CELL
+//! cladefsctl resize TENANT/CELL CAPACITY
+//! cladefsctl public TENANT/CELL
+//! cladefsctl public-attach-only TENANT/CELL
+//! cladefsctl attach TENANT/CELL BASE_TENANT/BASE_CELL
+//! cladefsctl stat TENANT/CELL
+//! cladefsctl stats [--json] [--wait SECONDS] [--leave-out histograms|guests|vms]...
+//! cladefsctl cells [--json]
+//! cladefsctl counters [--json]
+//! cladefsctl disks [--json]
+//! cladefsctl set-disk ID [--cap BYTES|none] [--cache-cap BYTES|none] [--headroom SPEC|none]
+//!     [--dirty-budget BYTES|none] [--placement read_write|drain|read_only]
+//! cladefsctl set-peers [--bucket URL] [ADDRESS...]
+//! cladefsctl migrate TENANT/CELL PEER
+//! cladefsctl hand-over [--token TOKEN] TENANT/CELL
+//! cladefsctl abort-migration TENANT/CELL
+//! cladefsctl memory-limit [--tenant TENANT] BYTES|none
+//! cladefsctl memory-weight TENANT WEIGHT
+//! cladefsctl in-flight [--tenant TENANT] BYTES|default
+//! cladefsctl shrink-memory [--tenant TENANT] TARGET
+//! cladefsctl disk-limit [--tenant TENANT] BYTES|none
+//! cladefsctl disk-weight TENANT WEIGHT
+//! cladefsctl tenant-disk [--tenant TENANT] [--json]
+//! cladefsctl grant TENANT [UID [GID]]
+//! cladefsctl revoke TENANT
+//! cladefsctl shred-cell [--bucket URL] TENANT/CELL
+//! cladefsctl forget-tenant-keys TENANT
+//! cladefsctl shred-tenant [--bucket URL] TENANT
+//! cladefsctl kms reload
+//! cladefsctl decommission-host [--none-ok] INCARNATION
+//! cladefsctl ephemeral-hosts
+//! cladefsctl mount attach TENANT CELL [TOKEN]
+//! cladefsctl mount create TENANT CAPACITY [TOKEN]
+//! cladefsctl mount detach [--force] TENANT CELL
+//! cladefsctl mount list
+//!
+//! # Without the daemon: cells by their directory, DIR, which nothing has open.
 //! cladefsctl create DIR CAPACITY
+//! cladefsctl take [--force] DIR CAPACITY TENANT/CELL [TOKEN]
 //! cladefsctl place [--force] DIR TOKEN
 //! cladefsctl sync DIR
 //! cladefsctl import DIR CAPACITY IMAGE [REF]
@@ -19,45 +71,30 @@
 //! cladefsctl drop-versions DIR VERSION...
 //! cladefsctl share DIR VERSION
 //! cladefsctl unshare DIR VERSION
-//! cladefsctl fork-version CELL VERSION DST
 //! cladefsctl delete DIR
 //! cladefsctl drop DIR
 //! cladefsctl resize DIR CAPACITY
 //! cladefsctl public DIR
+//! cladefsctl public-attach-only DIR
+//! cladefsctl attach DIR BASE_DIR
 //! cladefsctl stat DIR
-//! cladefsctl stats [--json] [--wait SECONDS] [--leave-out histograms|guests|vms]...
-//! cladefsctl cells [--json]
-//! cladefsctl counters [--json]
-//! cladefsctl set-peers [ADDRESS...]
-//! cladefsctl migrate DIR PEER TO
-//! cladefsctl hand-over [--token TOKEN] DIR
-//! cladefsctl abort-migration DIR
-//! cladefsctl memory-limit [--tenant TENANT] BYTES|none
-//! cladefsctl memory-weight TENANT WEIGHT
-//! cladefsctl in-flight [--tenant TENANT] BYTES|default
-//! cladefsctl shrink-memory [--tenant TENANT] TARGET
-//! cladefsctl disk-limit [--tenant TENANT] BYTES|none
-//! cladefsctl disk-weight TENANT WEIGHT
-//! cladefsctl tenant-disk [--tenant TENANT] [--json]
-//! cladefsctl grant TENANT DIR [UID [GID]]
-//! cladefsctl revoke TENANT
-//! cladefsctl shred-cell TENANT/CELL
-//! cladefsctl forget-tenant-keys TENANT
-//! cladefsctl shred-tenant TENANT
-//! cladefsctl kms reload
-//! cladefsctl decommission-host [--none-ok] INCARNATION
-//! cladefsctl ephemeral-hosts
-//! cladefsctl mount attach TENANT CELL [TOKEN]
-//! cladefsctl mount create TENANT CAPACITY [TOKEN]
-//! cladefsctl mount detach [--force] TENANT CELL
-//! cladefsctl mount list
+//! cladefsctl shred-cell TENANT/CELL       # with CLADEFSD_BUCKET, as with --bucket
+//! cladefsctl shred-tenant TENANT          # with CLADEFSD_BUCKET, as with --bucket
+//!
+//! # With or without it: on buckets themselves.
+//! cladefsctl set-peers --bucket URL [ADDRESS...]
+//! cladefsctl shred-cell --bucket URL TENANT/CELL
+//! cladefsctl shred-tenant --bucket URL TENANT
 //! cladefsctl format-bucket URL [DETAILS]
 //! cladefsctl add-bucket ROOT URL [DETAILS]
 //! cladefsctl buckets URL
+//!
 //! cladefsctl --version
 //! ```
 //!
-//! Any command may be preceded by `--timeout SECONDS` (or `CLADEFSCTL_TIMEOUT` set to SECONDS),
+//! Any command may be preceded by `--config PATH` (`-c PATH`, or `CLADEFS_CONFIG` set to PATH), a
+//! TOML file whose settings apply as the environment's would, its daemon's control socket among
+//! them, and by `--timeout SECONDS` (or `CLADEFSCTL_TIMEOUT` set to SECONDS),
 //! which bounds connecting to the daemon and its call as a deadline (board 8585): one that takes
 //! longer fails with `ETIMEDOUT`, the daemon going on with it, which may still complete it, as it
 //! completes every call whether or not its caller waits. No command has one unless given, `sync`,
@@ -73,6 +110,10 @@
 //! change existing cells, which are in the bucket each cell's description names: they need
 //! this host's (`CLADEFSD_BUCKET`) and its placement's fencing token (`CLADEFSD_TOKEN`),
 //! and refuse otherwise (`cladefs::bucket::Host`, TASK-45).
+//!
+//! Below, "the cell at DIR" is the cell a command names: by its directory without the daemon, by
+//! TENANT/CELL through it, which places a new cell's directory itself, of the default tenant's
+//! unless `--tenant` names another.
 //!
 //! `create` makes an empty cell at DIR, of CAPACITY bytes, of a new cell, a new cell's of the
 //! default tenant's (doc-20), its ID its bucket's to give (TASK-364), and prints the cell. `take`
@@ -96,14 +137,17 @@
 //! makes, or `docker save` (whose tarball is one, once extracted), holding the image REF names, or
 //! its only image; or a tar archive of one layer, gzipped or not, as `docker export` makes. Files
 //! keep their owners, permissions, times and extended attributes; see `cladefs::import`. `fork`
-//! copies the cell at SRC to a new cell at DST, of a new cell, which it prints: through the daemon,
-//! live, if a VM has SRC open, once nothing is open on it, as with the guest's filesystem frozen
-//! (fsfreeze), and refused otherwise (TASK-39.3). The new cell is a fork of SRC's in its bucket,
-//! made once SRC's commits are uploaded, holding its extents without uploading them again; DST is a
-//! cell of its own, which reads them there (TASK-165.7). `version` makes a version of the cell of
-//! the cell at DIR, once nothing is open on it: one commit here, uploaded behind, which it prints
-//! the ID of, in hexadecimal. `fork-version` forks the version VERSION of CELL (TENANT/CELL) to
-//! DST, on any host, as many hosts at once as wanted, the version uploaded first. `versions` lists
+//! copies the cell it names (SRC without the daemon) to a new cell (at DST without it; of the
+//! tenant `--tenant` names through it, the cell's own otherwise), which it prints: through the
+//! daemon, live, if a VM has the cell open, once nothing is open on it, as with the guest's
+//! filesystem frozen (fsfreeze), and refused otherwise (TASK-39.3). The new cell is a fork of the
+//! cell's in its bucket, made once its commits are uploaded, holding its extents without uploading
+//! them again; the fork is a cell of its own, which reads them there (TASK-165.7). `version` makes
+//! a version of the cell of the cell at DIR, once nothing is open on it: one commit here, uploaded
+//! behind, which it prints the ID of, in hexadecimal. `fork-version`, through the daemon alone,
+//! forks the version VERSION of the cell TENANT/CELL to a new cell, which it prints, of the tenant
+//! `--tenant` names, the cell's own otherwise, ephemeral with `--ephemeral`, on any host, as many
+//! hosts at once as wanted, the version uploaded first. `versions` lists
 //! the cell's versions, `drop-versions` drops some, what forks of them inherited staying until they
 //! go. `share` shares a version (TASK-395.7): it forks into cells of other tenants' than its own,
 //! as a base image many tenants fork, which a version not shared refuses (`EACCES`); `unshare`
@@ -115,7 +159,10 @@
 //! daemon, a cell its VM has open grows at once, the guest seeing the new size while mounted, and
 //! shrinks if the guest's filesystem agrees, no lower than what it holds; otherwise, it grows, and
 //! does not shrink. `public` makes the cell at DIR a public base, whose pages every tenant's forks
-//! of it share (TASK-43). `stat` prints what the cell at DIR is and holds, one `name value` a line:
+//! of it share (TASK-43); `public-attach-only` makes its branch alone public, not those it
+//! inherited, a base to attach to cells, not to fork (`MakePublic`'s `attach_only`). `attach` attaches the cell BASE_TENANT/BASE_CELL (BASE_DIR without the daemon)
+//! to the cell at DIR, its extents the cell doesn't hold read through to it, read-only
+//! (`AttachBase`). `stat` prints what the cell at DIR is and holds, one `name value` a line:
 //! its cell (base 32), capacity, used and available bytes, and of those used, its own (its cell
 //! wrote them) and inherited (from the cells it was forked from), what billing it alone charges it
 //! and what it shares (TASK-49); how many extents it holds, own and inherited (`own_extents`,
@@ -147,12 +194,17 @@
 //! tenant, or, for `shrink-memory`, the daemon's memory whole. `cells` lists the cells VM processes
 //! have open (`ListCells`), each's `path` and what `StatCell` says of it, by path, under `cells`
 //! (`cells.0.path`). `counters` prints the daemon's counters since it started (`GetCounters`),
-//! with its bucket's under `object_storage`. `set-peers` has the hosts sharing the daemon's bucket
-//! be those at the ADDRESSes, each `HOST:PORT`, none without any (`SetPeers`). `migrate` begins the
-//! live migration of the ephemeral cell at DIR to the daemon whose peer address is PEER, its cell
-//! going at TO there, and prints `migration ID` (`MigrateCell`); `hand-over` hands it over to its
-//! target (`HandOverCell`); `abort-migration` ends its migration, the cell then free to migrate
-//! again (`AbortMigration`). `memory-limit` limits the memory the daemon holds extents' pages in
+//! with its bucket's under `object_storage`. `disks` lists the host's managed disks and their
+//! governance (`ListDisks`); `set-disk` changes disk ID's, at least one flag given
+//! (`SetDiskGovernance`). `set-peers` has the hosts sharing the daemon's bucket be those at the
+//! ADDRESSes, each `HOST:PORT`, none without any (`SetPeers`); with `--bucket URL`, with or without
+//! the daemon, it publishes them to the bucket at URL instead, for every daemon on it to take, and
+//! prints `generation N`, the peer list's new generation. `migrate` begins the live migration of
+//! the cell TENANT/CELL, ephemeral or of the bucket, to the daemon whose peer address is PEER, and
+//! prints `migration ID` (`MigrateCell`); `hand-over` hands the cell over to its migration's
+//! target, a cell of the bucket placed there at the fencing token TOKEN if given
+//! (`HandOverCell`); `abort-migration` ends its
+//! migration, the cell then free to migrate again (`AbortMigration`). `memory-limit` limits the memory the daemon holds extents' pages in
 //! to BYTES, or lifts the limit with `none` (`SetMemoryLimit`); `memory-weight` weighs a tenant's
 //! memory against the others' (`SetMemoryWeight`); `in-flight` sets the bytes in flight a tenant's
 //! connections share, or the default with `default` (`SetTenantInFlight`); `shrink-memory` evicts
@@ -163,11 +215,10 @@
 //!
 //! `grant` and `revoke`, through the daemon alone, are the control API's `Grant` and `Revoke`
 //! (TASK-43.4), for tests and operators (TASK-71): `grant` gives the tenant TENANT, its ID in the
-//! bucket, in base 32 and not 0, the default tenant's (TASK-364), whose cells are in the
-//! directory DIR, a VM socket of its own, `TENANT.sock`, its VM processes naming cells in DIR
-//! alone, of its own cells, the socket given to the user UID and the group GID if named, the
-//! daemon's own otherwise, and prints its path; granting a tenant again, of the same directory,
-//! prints it again. `revoke` takes the tenant TENANT's socket away (base 32): its VM processes
+//! bucket, in base 32 and not 0, the default tenant's (TASK-364), a VM socket of its own,
+//! `TENANT.sock`, its VM processes naming cells in the tenant's directory alone, of its own cells,
+//! the socket given to the user UID and the group GID if named, the daemon's own otherwise, and
+//! prints its path; granting a tenant again prints it again. `revoke` takes the tenant TENANT's socket away (base 32): its VM processes
 //! connected keep their cells, and no more connect.
 //!
 //! `shred-cell` and `forget-tenant-keys`, through the daemon alone, are the control API's
@@ -187,7 +238,9 @@
 //! `shredded_now 1` or `0`. A bucket that keeps object versions keeps the KEK in the object's older
 //! versions until a lifecycle rule expires them. A daemon of another KMS refuses it: destroy the
 //! tenant's KEK there, then `forget-tenant-keys`. Each prints what the daemon forgot, one `name
-//! value` a line.
+//! value` a line. With `--bucket URL`, or without the daemon with `CLADEFSD_BUCKET` naming the
+//! bucket, `shred-cell` and `shred-tenant` shred in the bucket at URL themselves, no daemon
+//! forgetting, and print `keks_removed N` and `shredded_now 1` or `0`.
 //!
 //! `kms reload`, through the daemon alone, is the control API's `ReloadKms` (board 8487, doc-16
 //! What reloads): the daemon reads its KMS's key overrides file (`keys=FILE`) and its master keys
