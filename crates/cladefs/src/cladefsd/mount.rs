@@ -84,6 +84,11 @@ impl Config {
     }
 }
 
+/// The service the mount's reader threads are, as the daemon's log names it when a panic on one
+/// aborts the daemon (board 12443, hotbed question 561).
+#[cfg(not(madsim))]
+const SERVICE: &str = "cladefsd fuse";
+
 /// Per-daemon FUSE mount state, owned by [`Daemon`].
 #[cfg(not(madsim))]
 #[derive(Default)]
@@ -112,7 +117,8 @@ pub(super) fn start_on(daemon: &Daemon, config: &Config, bucket: String) -> Resu
     options
         .allow_other(config.allow_other)
         .threads(MountOptions::default_threads())
-        .queued_bytes_counter(Arc::clone(&daemon.mount.queued_bytes));
+        .queued_bytes_counter(Arc::clone(&daemon.mount.queued_bytes))
+        .supervised(SERVICE);
     let mount = options.mount_cells(&config.mountpoint).map_err(|err| {
         err.context(format!("mounting a directory of cells at {}", config.mountpoint.display()))
     })?;

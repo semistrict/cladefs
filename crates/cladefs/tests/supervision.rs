@@ -173,6 +173,22 @@ fn a_panic_on_any_service_aborts_the_daemon_naming_it() {
             }));
         },
     ));
+    // board 12443: the reader threads of the daemon's FUSE mount of cells, which it makes as it
+    // boots. Before, a panic on one outside a handler ended it alone, and with all gone the mount
+    // hung, its callers with it.
+    let mounting = dir("fuse env");
+    let mountpoint = Detached(mounting.join("mnt"));
+    std::fs::create_dir(&mountpoint.0).unwrap();
+    services.push(Service::starting(
+        "cladefsd fuse",
+        vec![
+            ("CLADEFSD_MOUNT", mountpoint.0.display().to_string()),
+            ("CLADEFSD_MOUNT_STORES", mounting.join("cells").display().to_string()),
+            // Which the mount's Mount service is on: a daemon refuses a mount without it.
+            control(&mounting),
+        ],
+        nothing,
+    ));
     services.push(Service {
         name: "health reporter",
         failpoint: "cladefsd::health_reporter_gone".into(),
@@ -194,5 +210,21 @@ fn a_panic_on_any_service_aborts_the_daemon_naming_it() {
             "{}: {said}",
             service.name
         );
+    }
+}
+
+/// A mount point a test's daemon mounts and dies with, its mount left in the kernel, dead (board
+/// 8537): detached as the test ends, passed or failed, as the next daemon there would, so that
+/// nothing of the test's stays mounted on the host.
+struct Detached(std::path::PathBuf);
+
+impl Drop for Detached {
+    fn drop(&mut self) {
+        let detached = Command::new("fusermount3").args(["-u", "-z", "--"]).arg(&self.0).status();
+        // Said, not asserted: a drop as the test's panic unwinds must not panic again.
+        match detached {
+            Ok(status) if status.success() => {}
+            other => eprintln!("fusermount3 -uz {}: {other:?}", self.0.display()),
+        }
     }
 }

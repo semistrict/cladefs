@@ -13,6 +13,9 @@
 //! Threads of the mount's own each read a request from the device, have the server handle it, and
 //! write its reply, until the filesystem is unmounted, which ends the connection: reads then fail
 //! with `ENODEV`. A handler that panics is answered `EIO`, its thread going on (board 8539). A
+//! panic on a thread itself, outside a handler, ends it alone, unless the mount is a service of
+//! the daemon's ([`MountOptions::supervised`]): there it aborts the daemon, naming the mount, as
+//! with every thread gone the mount would hang, and its callers' calls with it (board 12443). A
 //! request may wait long on its cell, as one waiting on the bucket does, holding its thread: of a
 //! mount of many cells, a tenant's requests take at most all threads but two at once
 //! ([`Admission`]), the rest waiting for one of its own to end, so that the other tenants' cells,
@@ -64,6 +67,7 @@ pub struct MountOptions {
     threads: NonZeroUsize,
     writeback_cache: bool,
     queued_bytes: Option<Arc<AtomicU64>>,
+    supervised: Option<&'static str>,
 }
 
 impl MountOptions {
@@ -74,6 +78,7 @@ impl MountOptions {
             threads: NonZeroUsize::new(8).unwrap(),
             writeback_cache: true,
             queued_bytes: None,
+            supervised: None,
         }
     }
 
@@ -109,6 +114,16 @@ impl MountOptions {
     /// `cladefsd`'s memory governor counts them (board 9850).
     pub(crate) fn queued_bytes_counter(&mut self, counter: Arc<AtomicU64>) -> &mut Self {
         self.queued_bytes = Some(counter);
+        self
+    }
+
+    /// Has each reader thread run as the daemon's service `service`
+    /// ([`crate::cladefsd::supervised`]): a panic on one outside a handler (those run on the
+    /// runtime, answered `EIO`, and those it runs inline, said: a cell's, which halts it) aborts
+    /// the daemon, naming `service`, rather than ending the thread alone, which with every thread
+    /// gone would hang the mount and its callers (board 12443, hotbed question 561).
+    pub(crate) fn supervised(&mut self, service: &'static str) -> &mut Self {
+        self.supervised = Some(service);
         self
     }
 
@@ -190,9 +205,10 @@ impl MountOptions {
                 handle.clone(),
                 in_flight.clone(),
             );
+            let supervised = self.supervised;
             let spawned =
                 std::thread::Builder::new().name(format!("fuse {index}")).spawn(move || {
-                    serve(cloned, server, admission, plain_budget, handle, in_flight);
+                    serve(cloned, server, admission, plain_budget, handle, in_flight, supervised);
                 });
             match spawned {
                 Ok(worker) => served.workers.push(worker),
@@ -315,8 +331,9 @@ struct InFlight {
 
 impl InFlight {
     fn enter(self: &Arc<Self>) -> InFlightGuard {
-        // Relaxed increment: callers already hold an active server reference, and only the 1->0
-        // fetch_sub(AcqRel) and wait_idle's Acquire load synchronize task completion with teardown.
+        // Relaxed, as `Arc::clone`'s increment is: the reader thread entering is joined before
+        // `wait_idle` loads (`Served::join_workers`), so its increment is seen there; the guard's
+        // AcqRel decrement is what orders a task's work before the wait ends.
         self.count.fetch_add(1, Ordering::Relaxed);
         InFlightGuard(Arc::clone(self))
     }
@@ -640,7 +657,8 @@ fn clone_device(master: &File) -> io::Result<File> {
 
 /// Reads the kernel's requests from its cloned `device` until the filesystem is unmounted,
 /// handling fire-and-forget opcodes inline and dispatching all other requests asynchronously onto
-/// `runtime` (board 9850, board 12092).
+/// `runtime` (board 9850, board 12092): as the daemon's service `supervised`, if named, except
+/// while it handles a request inline (board 12443).
 fn serve(
     device: Arc<File>,
     server: Arc<Server>,
@@ -648,7 +666,9 @@ fn serve(
     plain_budget: Arc<PlainBudget>,
     runtime: tokio::runtime::Handle,
     in_flight: Arc<InFlight>,
+    supervised: Option<&'static str>,
 ) {
+    let mut supervising = supervised.map(crate::cladefsd::supervised);
     let mut request = vec![0; REQUEST_ROOM];
     let is_many = server.is_many();
     loop {
@@ -666,11 +686,24 @@ fn serve(
             },
         };
         let slice = &request[..len];
-        if let Some(result) = server.try_handle_inline(slice) {
-            if let Err(error) = result {
+        // A handler, as `answer_async`'s are, of a cell's nodes (a FORGET's letting one go): its
+        // panic is the cell's, which halts it, said here and the thread going on, unsupervised
+        // meanwhile so that it doesn't abort the daemon (board 8539, board 12443). Unwind safe
+        // as `answer_async` says.
+        drop(supervising.take());
+        let inline = std::panic::catch_unwind(AssertUnwindSafe(|| server.try_handle_inline(slice)));
+        supervising = supervised.map(local_cell::shared::Holding::work);
+        match inline {
+            Ok(None) => {}
+            Ok(Some(Ok(()))) => continue,
+            Ok(Some(Err(error))) => {
                 log::error!("fuse: handling inline request: {error:#}");
+                continue;
             }
-            continue;
+            Err(panic) => {
+                log::error!("fuse: handling a request inline panicked: {}", said(&*panic));
+                continue;
+            }
         }
         match server.tenant_of(slice) {
             None => {

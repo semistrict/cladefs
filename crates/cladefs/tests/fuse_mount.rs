@@ -835,6 +835,68 @@ fn handlers_that_panic_are_answered_eio_and_their_workers_serve_on() {
     block_on(mount.join().unwrap().check()).unwrap();
 }
 
+/// Board 12443 (hotbed review 138): the daemon's mount's readers run supervised, a panic on one
+/// aborting the daemon, but what they handle inline, a FORGET letting a cell's node go, is a
+/// cell's handler, as those on the runtime are: one that panics is said, and the daemon and its
+/// mount serve on. Supervised over it, the first FORGET to panic aborted every VM of the host;
+/// before, it ended its reader alone, unsaid.
+#[test]
+fn a_daemons_forget_that_panics_is_said_and_its_mount_serves_on() {
+    /// The mount at its path, which the daemon killed leaves dead: detached as the test ends.
+    struct Detached(PathBuf);
+    impl Drop for Detached {
+        fn drop(&mut self) {
+            let detached =
+                Command::new("fusermount3").args(["-u", "-z", "--"]).arg(&self.0).status();
+            // Said, not asserted: a drop as the test's panic unwinds must not panic again.
+            match detached {
+                Ok(status) if status.success() => {}
+                other => eprintln!("fusermount3 -uz {}: {other:?}", self.0.display()),
+            }
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let (socket, m) = (dir.path().join("control"), Detached(dir.path().join("mnt")));
+    let bucket = dir.path().join("bucket");
+    std::fs::create_dir_all(&bucket).unwrap();
+    std::fs::create_dir_all(&m.0).unwrap();
+    let mut command = cladefsd(&dir.path().join("vm.sock"), &bucket, 1);
+    command
+        .env("CLADEFSD_GRPC", &socket)
+        .env("CLADEFSD_MOUNT", &m.0)
+        .env("CLADEFSD_MOUNT_STORES", dir.path().join("cells"))
+        .env("FAILPOINTS", "fuse::inline=1*panic");
+    let mut child = serving(command, &socket);
+    let (sent, said) = std::sync::mpsc::channel();
+    let stderr = std::io::BufReader::new(child.0.stderr.take().unwrap());
+    std::thread::spawn(move || {
+        for line in stderr.lines().map_while(Result::ok) {
+            // The test gone, nothing listens.
+            drop(sent.send(line));
+        }
+    });
+    let cell = cladefsctl_mount(socket.to_str().unwrap(), &["create", "1", &CELL_SIZE.to_string()]);
+    let at = m.0.join("0000000000001").join(cell.trim());
+    // A file made, then unlinked: the kernel lets its node go, a FORGET.
+    std::fs::write(at.join("file"), "forgotten").unwrap();
+    std::fs::remove_file(at.join("file")).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut lines = Vec::new();
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        match said.recv_timeout(left) {
+            Ok(line) if line.contains("fuse: handling a request inline panicked") => break,
+            Ok(line) => lines.push(line),
+            // Timed out, or the daemon gone, its standard error closed.
+            Err(error) => panic!("no inline request said to panic ({error}): {}", lines.join("\n")),
+        }
+    }
+    assert_eq!(child.0.try_wait().unwrap(), None, "the daemon ended: {}", lines.join("\n"));
+    std::fs::write(at.join("after"), "served on").unwrap();
+    assert_eq!(std::fs::read_to_string(at.join("after")).unwrap(), "served on");
+    assert_eq!(child.0.try_wait().unwrap(), None, "the daemon ended");
+}
+
 /// Board 8539: a tenant whose cells' requests wait, as on a bucket that never answers, holds at
 /// most all the mount's workers but two: another tenant's cell's lookup, and a listing of the
 /// mount's root, are answered meanwhile. Until then the waiting requests of one cell took every

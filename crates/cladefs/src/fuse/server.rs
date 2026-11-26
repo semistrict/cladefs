@@ -911,6 +911,9 @@ impl Server {
         if !matches!(header.opcode, opcode::FORGET | opcode::BATCH_FORGET | opcode::INTERRUPT) {
             return None;
         }
+        // A test's: a handler run inline that panics, which the reader says and serves on past,
+        // its daemon too (board 12443).
+        fail::fail_point!("fuse::inline");
         let body_len = (header.len as usize).checked_sub(size_of::<InHeader>())?;
         let body = rest.get(..body_len)?;
         self.counters.requests.fetch_add(1, Ordering::Relaxed);
