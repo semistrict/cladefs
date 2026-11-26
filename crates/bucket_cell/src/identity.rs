@@ -217,7 +217,7 @@ pub async fn format(bucket: &impl Bucket, details: &Details) -> Result<Identity,
         Some(found) => found,
         None => {
             let made =
-                Identity { format: layout::FORMAT.current, number: ROOT, id: rand::random() };
+                Identity { format: layout::FORMAT.current, number: ROOT, id: bucket.random_u64() };
             match bucket::create(bucket, layout::IDENTITY, layout::encode(&made)).await? {
                 Created::Created(_) => made,
                 // Another formatting's, or addition's, first.
@@ -302,7 +302,7 @@ pub async fn add(
             return Err(Error::Formatted(found.number));
         }
         let number = registry.next()?;
-        let entry = Entry { number, id: rand::random(), details: details.clone() };
+        let entry = Entry { number, id: root.random_u64(), details: details.clone() };
         let mut changed = registry.clone();
         changed.version += 1;
         for root_entry in changed.buckets.iter_mut().filter(|entry| entry.number == ROOT) {

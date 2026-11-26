@@ -479,12 +479,42 @@ def process_wide_static(path, text):
                     "(board 7583, board 10962)")
 
 
-# Each rule, and the mutants of the bugs it is from.# Each rule, and the mutants of the bugs it is from.
+# Crates exercised by the deterministic `local_cell::sim` replay harness (`sim::seeds_replay`).
+SIM_REPLAY_CRATES = ("bucket_cell", "local_cell")
+UNSEEDED_RAND = re.compile(r"\brand::(?:random|thread_rng|rng)\b")
+UNSEEDED_RAND_OK = ("outside the simulation", "shuttle", "not(madsim)")
+
+
+def unseeded_rand(path, text):
+    """Unseeded process RNG (`rand::random` / `rand::thread_rng` / `rand::rng`) in crates run by
+    `local_cell::sim` breaks seed replay (`sim::seeds_replay`, board 12982). Draw deterministic
+    values from `Bucket::random_u64()` or a seeded RNG instead, or explain on the line / comment
+    above why the call is outside the simulation."""
+    posix = path.as_posix()
+    crate = re.search(r"crates/([^/]+)/src/", posix)
+    if crate is None or crate.group(1) not in SIM_REPLAY_CRATES or "/tests/" in posix \
+            or "/src/bin/" in posix or "/sim/" in posix \
+            or posix.endswith(("/tests.rs", "_tests.rs", "/testing.rs")) \
+            or built_only_in(path, TESTS_AND_HARNESSES):
+        return
+    lines = text.splitlines()
+    for number, line in outside_tests(lines, TESTS_AND_HARNESSES):
+        code = line.split("//", 1)[0]
+        hit = UNSEEDED_RAND.search(code)
+        if hit is None or said_above(lines, number, UNSEEDED_RAND_OK):
+            continue
+        yield Match(path, number, "unseeded-rand",
+                    f"`{hit.group(0)}` uses unseeded process RNG inside a simulation crate: use "
+                    "`Bucket::random_u64()` or say why it is outside the simulation (board 12982)")
+
+
+# Each rule, and the mutants of the bugs it is from.
 RULES = [
     (outside_the_seam, []),
     (off_host_fs, []),
     (silent_fallback, []),
     (process_wide_static, []),
+    (unseeded_rand, []),
     (mixed_orderings, [
         "occurrence-happens-relaxed", "occurrence-listens-relaxed", "answers-release-no-capacity",
         "capacities-read-relaxed",

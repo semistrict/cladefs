@@ -562,6 +562,7 @@ fn load_or_create_disk_id(root: &Path) -> io::Result<u64> {
         Err(err) if err.kind() == io::ErrorKind::NotFound => {}
         Err(err) => return Err(err),
     }
+    // Outside the simulation: host-local disk cache identity generated once on a real disk.
     let id = rand::random::<u64>() | 1;
     let tmp = root.join(".disk-id.new");
     let content = format!("{id}\n");

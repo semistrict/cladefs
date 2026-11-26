@@ -395,6 +395,13 @@ pub trait Bucket: BucketSend + BucketSync + 'static {
         None
     }
 
+    /// cladefs: draws a 64-bit random value (board 12982): production buckets use the process
+    /// RNG; `SimBucket` overrides this deterministically so simulation seeds replay identically.
+    fn random_u64(&self) -> u64 {
+        // Outside the simulation: `SimBucket` overrides this with a deterministic PRNG.
+        rand::random()
+    }
+
     /// cladefs: the numbers of every bucket an ephemeral cell's reference may live in, including
     /// any newly recorded in the root bucket's authoritative registry (board 9966, hotbed question
     /// 543). `None` for an unrouted bucket, whose caller reads its own root directly
@@ -403,6 +410,14 @@ pub trait Bucket: BucketSend + BucketSync + 'static {
     fn ephemeral_buckets(
         &self,
     ) -> Option<BucketFuture<'_, Result<std::collections::BTreeSet<u16>, crate::Error>>> {
+        None
+    }
+
+    /// cladefs: reads [`crate::layout::EVENTS`] from the authoritative root bucket (#1 when
+    /// routed, else this bucket; board 11663). `None` for an unrouted bucket, whose caller reads
+    /// [`crate::layout::EVENTS`] directly from `self` (preserving board 5532 local dry-runs).
+    #[cfg(feature = "full")]
+    fn events_object(&self) -> Option<BucketFuture<'_, Result<Option<Object>, crate::Error>>> {
         None
     }
 }

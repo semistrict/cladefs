@@ -139,7 +139,7 @@ pub async fn write(
     units: &[Unit],
     encrypting: impl layout::KeyArg,
 ) -> Result<String, bucket::Error> {
-    let key = layout::evidence(of.origin.parent, of.origin.at, of.tenant, rand::random());
+    let key = layout::evidence(of.origin.parent, of.origin.at, of.tenant, bucket.random_u64());
     let bytes = encode(&key, &units[..units.len().min(MOST_UNITS)], encrypting.as_key());
     bucket.put(&key, bytes.into(), PutMode::Create).await?;
     Ok(key)

@@ -354,7 +354,7 @@ impl Collector {
         };
         #[cfg(not(feature = "full"))]
         let _ = own;
-        if let Some(log) = crate::events::get(bucket).await? {
+        if let Some(log) = crate::events::get_authoritative(bucket).await? {
             let mut merged = (*self.shredded).clone();
             merged.extend(log.shredded_set());
             self.shredded = Arc::new(merged);

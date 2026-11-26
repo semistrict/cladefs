@@ -200,7 +200,7 @@ impl Pin {
         {
             return Ok(None);
         }
-        let run = rand::random();
+        let run = own.random_u64();
         let key = layout::pin(parent, at, run);
         let bytes = layout::encode(&Reference::of(run));
         let sent = Instant::now();

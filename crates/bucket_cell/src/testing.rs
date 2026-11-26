@@ -77,6 +77,9 @@ struct Inner {
     down: BTreeSet<u16>,
     /// cladefs: optional per-object append-part limit (S3 Express `MaxParts`, doc-29).
     max_appends: Option<u32>,
+    /// cladefs: deterministic PRNG state for [`Bucket::random_u64`] so simulation seeds replay
+    /// identically (board 12982).
+    random_state: u64,
 }
 
 /// How a request the simulation completes fails.
@@ -636,8 +639,30 @@ impl Bucket for SimBucket {
         self.inner.lock().unwrap().clock
     }
 
+    fn random_u64(&self) -> u64 {
+        let mut inner = self.inner.lock().unwrap();
+        // SplitMix64 step from deterministic state so every replay of a seed produces the same
+        // run IDs without touching process RNG (board 12982).
+        inner.random_state = inner.random_state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = inner.random_state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+
     fn mirrors(&self) -> Option<&dyn crate::mirror::Here> {
         (self.home != 0 && !self.pinned).then_some(self as &dyn crate::mirror::Here)
+    }
+
+    #[cfg(feature = "full")]
+    fn events_object(
+        &self,
+    ) -> Option<crate::bucket::BucketFuture<'_, Result<Option<Object>, crate::Error>>> {
+        if self.home == 0 || self.pinned || self.home == crate::identity::ROOT {
+            return None;
+        }
+        let root = self.at(crate::identity::ROOT);
+        Some(Box::pin(async move { Ok(crate::bucket::get(&*root, layout::EVENTS).await?) }))
     }
 }
 
@@ -781,6 +806,10 @@ impl Bucket for Direct {
 
     fn now(&self) -> u64 {
         self.0.now()
+    }
+
+    fn random_u64(&self) -> u64 {
+        self.0.random_u64()
     }
 }
 

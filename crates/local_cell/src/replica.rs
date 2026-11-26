@@ -672,6 +672,7 @@ impl<D: Dir> Replicas<D> {
     pub fn open_all(dirs: Vec<D>, most: u64) -> Result<Self, Error> {
         Self::open_all_as(dirs, most, || {
             loop {
+                // Outside the simulation: simulated hosts call `open_all_as` with their seeded RNG.
                 let number: u64 = rand::random();
                 if number != 0 {
                     break number;

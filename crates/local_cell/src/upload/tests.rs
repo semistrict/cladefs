@@ -1187,3 +1187,507 @@ async fn batched_acknowledge_updates_start_file_and_recovers_cleanly() {
     uploader.close().await;
     reopened.close().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn adv_clean_close_skips_checkpoint_for_in_flight_named_version_after_periodic_checkpoint() {
+    use object_store::ObjectStore;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[derive(Debug)]
+    struct GateSegments {
+        inner: Arc<object_store::memory::InMemory>,
+        enabled: Arc<AtomicBool>,
+        seg_a_suffix: String,
+        seg_b_suffix: String,
+        seg_b_started: Arc<tokio::sync::Notify>,
+        release_a: Arc<tokio::sync::Notify>,
+        release_b: Arc<tokio::sync::Notify>,
+        cp_put_done: Arc<tokio::sync::Notify>,
+    }
+
+    impl std::fmt::Display for GateSegments {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "GateSegments")
+        }
+    }
+
+    impl ObjectStore for GateSegments {
+        fn put_opts<'life0, 'life1, 'async_trait>(
+            &'life0 self,
+            location: &'life1 object_store::path::Path,
+            payload: object_store::PutPayload,
+            opts: object_store::PutOptions,
+        ) -> futures::future::BoxFuture<'async_trait, object_store::Result<object_store::PutResult>>
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move {
+                let key = location.as_ref().to_owned();
+                let enabled = self.enabled.load(Ordering::SeqCst);
+                if enabled && key.contains("/segments/") {
+                    if key.ends_with(&self.seg_a_suffix) {
+                        self.release_a.notified().await;
+                    } else if key.ends_with(&self.seg_b_suffix) {
+                        self.seg_b_started.notify_one();
+                        self.release_b.notified().await;
+                    }
+                }
+                let res = self.inner.put_opts(location, payload, opts).await;
+                if enabled && key.contains("/checkpoints/") {
+                    self.cp_put_done.notify_one();
+                }
+                res
+            })
+        }
+
+        fn put_multipart_opts<'life0, 'life1, 'async_trait>(
+            &'life0 self,
+            location: &'life1 object_store::path::Path,
+            opts: object_store::PutMultipartOptions,
+        ) -> futures::future::BoxFuture<
+            'async_trait,
+            object_store::Result<Box<dyn object_store::MultipartUpload>>,
+        >
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            Self: 'async_trait,
+        {
+            self.inner.put_multipart_opts(location, opts)
+        }
+
+        fn get_opts<'life0, 'life1, 'async_trait>(
+            &'life0 self,
+            location: &'life1 object_store::path::Path,
+            options: object_store::GetOptions,
+        ) -> futures::future::BoxFuture<'async_trait, object_store::Result<object_store::GetResult>>
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            Self: 'async_trait,
+        {
+            self.inner.get_opts(location, options)
+        }
+
+        fn delete_stream(
+            &self,
+            locations: futures::stream::BoxStream<
+                'static,
+                object_store::Result<object_store::path::Path>,
+            >,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::path::Path>>
+        {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&object_store::path::Path>,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+        {
+            self.inner.list(prefix)
+        }
+
+        fn list_with_delimiter<'life0, 'life1, 'async_trait>(
+            &'life0 self,
+            prefix: Option<&'life1 object_store::path::Path>,
+        ) -> futures::future::BoxFuture<'async_trait, object_store::Result<object_store::ListResult>>
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            Self: 'async_trait,
+        {
+            self.inner.list_with_delimiter(prefix)
+        }
+
+        fn copy_opts<'life0, 'life1, 'life2, 'async_trait>(
+            &'life0 self,
+            from: &'life1 object_store::path::Path,
+            to: &'life2 object_store::path::Path,
+            options: object_store::CopyOptions,
+        ) -> futures::future::BoxFuture<'async_trait, object_store::Result<()>>
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            'life2: 'async_trait,
+            Self: 'async_trait,
+        {
+            self.inner.copy_opts(from, to, options)
+        }
+    }
+
+    let inner = Arc::new(object_store::memory::InMemory::new());
+    let enabled = Arc::new(AtomicBool::new(false));
+    let seg_b_started = Arc::new(tokio::sync::Notify::new());
+    let release_a = Arc::new(tokio::sync::Notify::new());
+    let release_b = Arc::new(tokio::sync::Notify::new());
+    let cp_put_done = Arc::new(tokio::sync::Notify::new());
+    let store = Arc::new(GateSegments {
+        inner: inner.clone(),
+        enabled: enabled.clone(),
+        seg_a_suffix: format!(".{}", base32_id::Padded(1)),
+        seg_b_suffix: format!(".{}", base32_id::Padded(3)),
+        seg_b_started: seg_b_started.clone(),
+        release_a: release_a.clone(),
+        release_b: release_b.clone(),
+        cp_put_done: cp_put_done.clone(),
+    });
+    let bucket = Arc::new(ObjectBucket::new(store, "").unrouted());
+    let host = Runtime {
+        handle: tokio::runtime::Handle::current(),
+        uploads: Budget::new(Limits::UNBOUNDED),
+        keys: bucket_cell::keys::testing::host(),
+    };
+    let dir = MemDir::new();
+    let description = Description { block_size: BLOCK as u32, capacity: 1 << 30, cell: CELL };
+    LocalCell::make(&dir, description, Some("memory:///adv-v"), None).unwrap();
+    lifecycle::create(&*bucket, CELL, 1).await.unwrap();
+
+    // 1. Initial session: write 1 segment (seg 0) and clean close so cell has an initial checkpoint.
+    let base_opts = Options {
+        interval: Duration::from_secs(3600),
+        upload_closed: true,
+        ack_coalesce: Duration::ZERO,
+        checkpoint_every: 2,
+        checkpoint_min_on_close: 4,
+        relocate: false,
+        ..Options::default()
+    };
+    {
+        let recovering = LocalCell::recover_unmade(dir.clone()).unwrap();
+        let (cell, uploader) = open(
+            recovering,
+            crate::Options::default(),
+            bucket.clone(),
+            (1, base_opts.clone()),
+            &host,
+        )
+        .await
+        .unwrap();
+        cell.made().unwrap();
+        cell.write(ExtentId::new(CELL.id, 1), 0, &[1u8; BLOCK]).await.unwrap();
+        cell.commit(None).await.unwrap();
+        uploader.uploaded(cell.last_commit().unwrap()).await.unwrap();
+        uploader.close().await;
+        cell.close().await.unwrap();
+    }
+    let initial_cp = bucket_cell::head::get(&*bucket, CELL).await.unwrap().unwrap().checkpoint;
+    assert_eq!(initial_cp.map(|(s, _)| s), Some(0));
+
+    // 2. Reopen with gating enabled: Segment A1/A2 (segs 1..=2) and Segment B (seg 3, version 99)
+    // are gathered in flight; periodic checkpoint covers only segs 1..=2 while seg 3 is still in
+    // flight. Clean close must still checkpoint version 99.
+    enabled.store(true, Ordering::SeqCst);
+    let recovering = LocalCell::recover(dir.clone()).unwrap();
+    let opts2 = Options { token: 2, ..base_opts.clone() };
+    let (cell, uploader) =
+        open(recovering, crate::Options::default(), bucket.clone(), (2, opts2), &host)
+            .await
+            .unwrap();
+
+    cell.write(ExtentId::new(CELL.id, 2), 0, &[2u8; BLOCK]).await.unwrap();
+    cell.close_segment().unwrap();
+    cell.commit(None).await.unwrap();
+    cell.write(ExtentId::new(CELL.id, 3), 0, &[3u8; BLOCK]).await.unwrap();
+    cell.close_segment().unwrap();
+    cell.commit(None).await.unwrap();
+    let commit_a = cell.last_commit().unwrap();
+    let commit_b = cell
+        .commit_version(extent_frame::segment::NewVersion { id: 99, keep_last: None }, false)
+        .await
+        .unwrap();
+
+    tokio::time::timeout(Duration::from_secs(5), seg_b_started.notified())
+        .await
+        .expect("segment B did not start uploading");
+    release_a.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), uploader.uploaded(commit_a))
+        .await
+        .expect("segment A did not ack")
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), cp_put_done.notified())
+        .await
+        .expect("periodic checkpoint PUT did not complete");
+
+    release_b.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), uploader.uploaded(commit_b))
+        .await
+        .expect("segment B did not ack")
+        .unwrap();
+    uploader.close().await;
+    cell.close().await.unwrap();
+
+    let head = bucket_cell::head::get(&*bucket, CELL).await.unwrap().unwrap();
+    let ver = head.version(99).expect("version 99 must be in head");
+    let cp_seg = head.checkpoint.expect("checkpoint must exist").0;
+    assert!(
+        cp_seg >= ver.at,
+        "clean close skipped checkpoint for named version 99! version.at={}, head.checkpoint={:?}",
+        ver.at,
+        head.checkpoint
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn adv_clean_close_skips_checkpoint_when_periodic_checkpoint_failed_for_named_version() {
+    use object_store::ObjectStore;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[derive(Debug)]
+    struct FailNextCheckpoint {
+        inner: Arc<object_store::memory::InMemory>,
+        fail_active: Arc<AtomicBool>,
+        failed_notify: Arc<tokio::sync::Notify>,
+    }
+
+    impl std::fmt::Display for FailNextCheckpoint {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "FailNextCheckpoint")
+        }
+    }
+
+    impl ObjectStore for FailNextCheckpoint {
+        fn put_opts<'life0, 'life1, 'async_trait>(
+            &'life0 self,
+            location: &'life1 object_store::path::Path,
+            payload: object_store::PutPayload,
+            opts: object_store::PutOptions,
+        ) -> futures::future::BoxFuture<'async_trait, object_store::Result<object_store::PutResult>>
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move {
+                if location.as_ref().contains("/checkpoints/")
+                    && self.fail_active.load(Ordering::SeqCst)
+                {
+                    self.failed_notify.notify_one();
+                    return Err(object_store::Error::PermissionDenied {
+                        path: location.to_string(),
+                        source: Box::new(std::io::Error::other("transient checkpoint PUT error")),
+                    });
+                }
+                self.inner.put_opts(location, payload, opts).await
+            })
+        }
+
+        fn put_multipart_opts<'life0, 'life1, 'async_trait>(
+            &'life0 self,
+            location: &'life1 object_store::path::Path,
+            opts: object_store::PutMultipartOptions,
+        ) -> futures::future::BoxFuture<
+            'async_trait,
+            object_store::Result<Box<dyn object_store::MultipartUpload>>,
+        >
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            Self: 'async_trait,
+        {
+            self.inner.put_multipart_opts(location, opts)
+        }
+
+        fn get_opts<'life0, 'life1, 'async_trait>(
+            &'life0 self,
+            location: &'life1 object_store::path::Path,
+            options: object_store::GetOptions,
+        ) -> futures::future::BoxFuture<'async_trait, object_store::Result<object_store::GetResult>>
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            Self: 'async_trait,
+        {
+            self.inner.get_opts(location, options)
+        }
+
+        fn delete_stream(
+            &self,
+            locations: futures::stream::BoxStream<
+                'static,
+                object_store::Result<object_store::path::Path>,
+            >,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::path::Path>>
+        {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&object_store::path::Path>,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+        {
+            self.inner.list(prefix)
+        }
+
+        fn list_with_delimiter<'life0, 'life1, 'async_trait>(
+            &'life0 self,
+            prefix: Option<&'life1 object_store::path::Path>,
+        ) -> futures::future::BoxFuture<'async_trait, object_store::Result<object_store::ListResult>>
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            Self: 'async_trait,
+        {
+            self.inner.list_with_delimiter(prefix)
+        }
+
+        fn copy_opts<'life0, 'life1, 'life2, 'async_trait>(
+            &'life0 self,
+            from: &'life1 object_store::path::Path,
+            to: &'life2 object_store::path::Path,
+            options: object_store::CopyOptions,
+        ) -> futures::future::BoxFuture<'async_trait, object_store::Result<()>>
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            'life2: 'async_trait,
+            Self: 'async_trait,
+        {
+            self.inner.copy_opts(from, to, options)
+        }
+    }
+
+    let fail_active = Arc::new(AtomicBool::new(false));
+    let failed_notify = Arc::new(tokio::sync::Notify::new());
+    let store = Arc::new(FailNextCheckpoint {
+        inner: Arc::new(object_store::memory::InMemory::new()),
+        fail_active: fail_active.clone(),
+        failed_notify: failed_notify.clone(),
+    });
+    let bucket = Arc::new(ObjectBucket::new(store, "").unrouted());
+    let host = Runtime {
+        handle: tokio::runtime::Handle::current(),
+        uploads: Budget::new(Limits::UNBOUNDED),
+        keys: bucket_cell::keys::testing::host(),
+    };
+    let dir = MemDir::new();
+    let description = Description { block_size: BLOCK as u32, capacity: 1 << 30, cell: CELL };
+    LocalCell::make(&dir, description, Some("memory:///adv-f"), None).unwrap();
+    lifecycle::create(&*bucket, CELL, 1).await.unwrap();
+
+    let base_opts = Options {
+        interval: Duration::from_secs(3600),
+        upload_closed: true,
+        ack_coalesce: Duration::ZERO,
+        checkpoint_every: 1,
+        checkpoint_min_on_close: 4,
+        relocate: false,
+        ..Options::default()
+    };
+    {
+        let recovering = LocalCell::recover_unmade(dir.clone()).unwrap();
+        let (cell, uploader) = open(
+            recovering,
+            crate::Options::default(),
+            bucket.clone(),
+            (1, base_opts.clone()),
+            &host,
+        )
+        .await
+        .unwrap();
+        cell.made().unwrap();
+        cell.write(ExtentId::new(CELL.id, 1), 0, &[1u8; BLOCK]).await.unwrap();
+        cell.commit(None).await.unwrap();
+        uploader.uploaded(cell.last_commit().unwrap()).await.unwrap();
+        uploader.close().await;
+        cell.close().await.unwrap();
+    }
+
+    fail_active.store(true, Ordering::SeqCst);
+    let recovering = LocalCell::recover(dir.clone()).unwrap();
+    let opts2 = Options { token: 2, ..base_opts.clone() };
+    let (cell, uploader) =
+        open(recovering, crate::Options::default(), bucket.clone(), (2, opts2), &host)
+            .await
+            .unwrap();
+    let commit_v = cell
+        .commit_version(extent_frame::segment::NewVersion { id: 77, keep_last: None }, false)
+        .await
+        .unwrap();
+    uploader.uploaded(commit_v).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), failed_notify.notified())
+        .await
+        .expect("periodic checkpoint PUT was not attempted");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    fail_active.store(false, Ordering::SeqCst);
+    uploader.close().await;
+    cell.close().await.unwrap();
+
+    let head = bucket_cell::head::get(&*bucket, CELL).await.unwrap().unwrap();
+    let ver = head.version(77).expect("version 77 must be in head");
+    let cp_seg = head.checkpoint.expect("checkpoint must exist").0;
+    assert!(
+        cp_seg >= ver.at,
+        "clean close skipped checkpoint after failed periodic checkpoint for named version 77! \
+         version.at={}, head.checkpoint={:?}",
+        ver.at,
+        head.checkpoint
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn adv_clean_close_skips_checkpoint_for_uncheckpointed_named_version_after_reopen() {
+    let base = Options {
+        interval: Duration::from_secs(3600),
+        ack_coalesce: Duration::ZERO,
+        checkpoint_min_on_close: 4,
+        relocate: false,
+        ..Options::default()
+    };
+
+    let doc = Doc27::open(base.clone()).await;
+    doc.segment(1..2, &[]).await;
+    let bucket = doc.bucket.clone();
+    let dir = doc.dir.clone();
+    let host = doc.host.clone();
+    doc.uploader.close().await;
+    doc.cell.close().await.unwrap();
+    drop(doc.cell);
+
+    let reopen = |holder: u64, token: u64| {
+        let dir = dir.clone();
+        let bucket = bucket.clone();
+        let host = host.clone();
+        let opts = Options { token, ..base.clone() };
+        async move {
+            let recovering = LocalCell::recover(dir).unwrap();
+            open(recovering, crate::Options::default(), bucket, (holder, opts), &host)
+                .await
+                .unwrap()
+        }
+    };
+
+    let (cell, uploader) = reopen(2, 6).await;
+    let epoch = cell
+        .commit_version(extent_frame::segment::NewVersion { id: 55, keep_last: None }, false)
+        .await
+        .unwrap();
+    uploader.uploaded(epoch).await.unwrap();
+    let cut = uploader.cut_short();
+    cut();
+    uploader.close().await;
+    cell.close().await.unwrap();
+    drop(cell);
+
+    let (cell, uploader) = reopen(3, 7).await;
+    cell.write(Doc27::extent(10), 0, &[10u8; BLOCK]).await.unwrap();
+    cell.commit(None).await.unwrap();
+    uploader.uploaded(cell.last_commit().unwrap()).await.unwrap();
+    uploader.close().await;
+    cell.close().await.unwrap();
+    drop(cell);
+
+    let head = bucket_cell::head::get(&*bucket, CELL).await.unwrap().unwrap();
+    let ver = head.version(55).expect("version 55 must be in head");
+    let cp_seg = head.checkpoint.expect("checkpoint must exist").0;
+    assert!(
+        cp_seg >= ver.at,
+        "clean close after reopen skipped checkpoint for uncheckpointed named version 55! \
+         version.at={}, head.checkpoint={:?}",
+        ver.at,
+        head.checkpoint
+    );
+}

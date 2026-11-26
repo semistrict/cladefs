@@ -1007,3 +1007,100 @@ fn bucket_b_commands_stay_on_b_and_collect_copies_locally() {
     );
     let _ = url_a;
 }
+
+/// board 11663: `Collector::collect_with_own` on a routed bucket 2+ must read `events` from root
+/// bucket 1 (`events::authority`) and observe `TenantShredded` without pre-populating
+/// `Collector::shredded`, while an unrouted bucket 2 handle (as used by `--dry-run`, board 5532)
+/// stays strictly local to bucket 2 and sends zero requests to bucket 1.
+#[cfg(feature = "testing")]
+#[test]
+fn collect_with_own_on_bucket_2_reads_shredded_tenants_from_root_bucket_1() {
+    use bucket_cell::Bucket as _;
+    use bucket_cell::batch::{Commit, SegmentBuilder};
+    use bucket_cell::collector::Collector;
+    use bucket_cell::events::{self, Publish};
+    use bucket_cell::identity::{self, Details};
+    use bucket_cell::layout::{self, CellId};
+    use bucket_cell::object_bucket::{ObjectBucket, Registered};
+    use bucket_cell::s3_server::{BUCKET, S3Server};
+    use bucket_cell::writer::Writer;
+    use storage_device::ExtentId;
+
+    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let server_a = S3Server::start(None);
+        let server_b = S3Server::start(None);
+        let url_a = format!("s3://{BUCKET}/a-11663");
+        let url_b = format!("s3://{BUCKET}/b-11663");
+        let opts_for = |server: &S3Server| {
+            server
+                .options()
+                .into_iter()
+                .map(|(k, v)| (k.to_ascii_uppercase(), v))
+                .collect::<Vec<_>>()
+        };
+        let a_own = Arc::new(ObjectBucket::new(server_a.objects(), "a-11663"));
+        let b_own = Arc::new(ObjectBucket::new(server_b.objects(), "b-11663"));
+        let details = |url: &str| Details {
+            provider: Some("s3".into()),
+            url: Some(url.to_owned()),
+            ..Details::default()
+        };
+        identity::format(&*a_own, &details(&url_a)).await.unwrap();
+        let (_, registry) =
+            identity::add(&*a_own, &details(&url_a), &*b_own, details(&url_b)).await.unwrap();
+        identity::spread(&registry, &*a_own).await.unwrap();
+        identity::spread(&registry, &*b_own).await.unwrap();
+
+        for (k, v) in opts_for(&server_a) {
+            // SAFETY: nextest runs each test in its own process.
+            unsafe { std::env::set_var(format!("CLADEFSD_BUCKET_1_{k}"), v) };
+        }
+        for (k, v) in opts_for(&server_b) {
+            // SAFETY: nextest runs each test in its own process.
+            unsafe { std::env::set_var(format!("CLADEFSD_BUCKET_2_{k}"), v) };
+        }
+        let resolve = Arc::new(Registered::from_env());
+        let b_routed = Arc::new(ObjectBucket::new(server_b.objects(), "b-11663").routed(resolve));
+
+        // Create a live cell owned by bucket 2 for tenant 7.
+        let tenant = 7;
+        let cell = CellId { tenant, id: (2u64 << 48) | 1 };
+        let kms_b = host_kms(&b_own);
+        bucket_cell::lifecycle::create(&*b_own, cell, 0).await.unwrap();
+        let writer = Writer::open_under(b_own.clone(), cell, (10, 1), &kms_b).await.unwrap();
+        let ext = ExtentId::new(cell.id, writer.chain().next_sequence());
+        let framed = SegmentBuilder::from(Commit {
+            tag: 1,
+            extents: vec![(ext, vec![0x5a; 4096])],
+            ..Commit::default()
+        })
+        .close(&mut writer.chain())
+        .frame(writer.keys().encrypting());
+        let seg = writer.add_segment(framed).unwrap();
+        writer.upload(seg).await.unwrap();
+        writer.acknowledge().await.unwrap();
+        drop(writer);
+
+        // Publish `TenantShredded` ONLY to root bucket 1 (`a_own`); bucket 2 has no `events`.
+        events::publish(&*a_own, Publish::TenantShredded(tenant)).await.unwrap();
+        assert!(events::get(&*b_own).await.unwrap().is_none());
+
+        // Unrouted `b_own` (used by `--dry-run`, board 5532) stays local to bucket 2 and sends
+        // zero requests to bucket 1.
+        let a_before = server_a.requests();
+        assert!(events::get_authoritative(&*b_own).await.unwrap().is_none());
+        assert_eq!(server_a.requests(), a_before, "unrouted events read must not touch bucket 1");
+
+        // Direct `Collector::collect_with_own` on routed bucket 2 observes `TenantShredded` from
+        // root bucket 1 without pre-populating `Collector::shredded` and collects `cell`.
+        let report =
+            Collector::new().collect_with_own(&*b_routed, Some(&*b_own), 99).await.unwrap();
+        assert!(report.deleted > 0, "collector on bucket 2 must collect shredded tenant's cell");
+        let remaining = b_own.list(&cell.prefix()).await.unwrap();
+        assert!(
+            remaining.iter().all(|m| matches!(layout::kind(&m.key), layout::Kind::Head { .. })),
+            "shredded cell data objects in bucket 2 must be deleted; left: {remaining:?}"
+        );
+    });
+}

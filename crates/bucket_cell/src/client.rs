@@ -413,6 +413,7 @@ impl reqwest::dns::Resolve for Shuffled {
             use rand::seq::SliceRandom as _;
             let mut addresses: Vec<std::net::SocketAddr> =
                 tokio::net::lookup_host((name.as_str(), 0)).await?.collect();
+            // Outside the simulation: real HTTP DNS address shuffling for reqwest connections.
             addresses.shuffle(&mut rand::rng());
             Ok(Box::new(addresses.into_iter()) as reqwest::dns::Addrs)
         })

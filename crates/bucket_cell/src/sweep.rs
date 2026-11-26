@@ -557,7 +557,7 @@ impl Sweep {
         }
         let holding = Holding { lease: self.lease, since: Some(since) };
         let collector = Collector::new().holding(holding).budget(budget).shredded(shredded);
-        let holder = rand::random();
+        let holder = bucket.random_u64();
         let started = Instant::now();
         let outcome = match self.mode {
             Mode::Delete => match collector.collect_cell(&counted, cell, holder).await {
@@ -708,6 +708,10 @@ impl<B: Bucket> Bucket for Counted<B> {
         self.bucket.now()
     }
 
+    fn random_u64(&self) -> u64 {
+        self.bucket.random_u64()
+    }
+
     fn pause(&self, failures: u32) -> impl Future<Output = ()> + Send {
         self.bucket.pause(failures)
     }
@@ -718,6 +722,20 @@ impl<B: Bucket> Bucket for Counted<B> {
 
     fn mirrors(&self) -> Option<&dyn crate::mirror::Here> {
         self.bucket.mirrors()
+    }
+
+    fn ephemeral_buckets(
+        &self,
+    ) -> Option<
+        crate::bucket::BucketFuture<'_, Result<std::collections::BTreeSet<u16>, crate::Error>>,
+    > {
+        self.bucket.ephemeral_buckets()
+    }
+
+    fn events_object(
+        &self,
+    ) -> Option<crate::bucket::BucketFuture<'_, Result<Option<Object>, crate::Error>>> {
+        self.bucket.events_object()
     }
 }
 

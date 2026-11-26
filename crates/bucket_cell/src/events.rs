@@ -356,6 +356,19 @@ pub async fn get(bucket: &impl Bucket) -> Result<Option<EventLog>, crate::Error>
     decode(&object.bytes).map(Some)
 }
 
+/// Reads and decodes [`layout::EVENTS`] from the authoritative root bucket (#1 when `bucket` is a
+/// routed bucket for bucket 2+, else `bucket` itself; board 11663).
+pub async fn get_authoritative(bucket: &impl Bucket) -> Result<Option<EventLog>, crate::Error> {
+    #[cfg(feature = "full")]
+    if let Some(fut) = bucket.events_object() {
+        let Some(object) = fut.await? else {
+            return Ok(None);
+        };
+        return decode(&object.bytes).map(Some);
+    }
+    get(bucket).await
+}
+
 /// Publishes `change` to [`layout::EVENTS`] in `bucket` using CAS create/update.
 /// Returns the updated [`EventLog`].
 pub async fn publish(bucket: &impl Bucket, change: Publish) -> Result<EventLog, crate::Error> {

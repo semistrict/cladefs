@@ -320,6 +320,19 @@ impl<B: Bucket> Bucket for RoutedBucket<B> {
         Some(Box::pin(self.ephemeral_buckets()))
     }
 
+    fn events_object(
+        &self,
+    ) -> Option<crate::bucket::BucketFuture<'_, Result<Option<Object>, crate::Error>>> {
+        Some(Box::pin(async move {
+            let auth = crate::events::authority(self).await?;
+            Ok(crate::bucket::get(&*auth, crate::layout::EVENTS).await?)
+        }))
+    }
+
+    fn random_u64(&self) -> u64 {
+        self.home.random_u64()
+    }
+
     async fn get(&self, key: &str) -> Result<Object, Error> {
         // cladefs: the cell's bucket asked only where the mirror copied not what is asked, never
         // as this bucket fails (board 8547): its failure is the read's, asked again as it is.

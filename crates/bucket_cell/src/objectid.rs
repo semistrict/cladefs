@@ -60,6 +60,7 @@ pub fn bucket_of(id: u64) -> u16 {
 /// [`identity::NAMED`], no bucket's number.
 #[cfg(feature = "full")]
 pub fn named() -> u64 {
+    // Outside the simulation: test-only helper for naming a cell ID without an allocator.
     (rand::random::<u64>() >> (u64::BITS - BUCKET_SHIFT)).max(1)
 }
 
@@ -159,9 +160,9 @@ mod alloc {
         number: u16,
     ) -> Result<u64, crate::bucket::Refused> {
         assert!(identity::given(number), "bucket number {number} is no bucket's");
-        let bytes = layout::encode(&BlockTaker::of(rand::random()));
+        let bytes = layout::encode(&BlockTaker::of(bucket.random_u64()));
         loop {
-            let block = u64::from(number) * BUCKET_BLOCKS + rand::random::<u64>() % BUCKET_BLOCKS;
+            let block = u64::from(number) * BUCKET_BLOCKS + bucket.random_u64() % BUCKET_BLOCKS;
             match bucket::create(bucket, &layout::objectid_block(block), bytes.clone()).await? {
                 Created::Created(_) => return Ok(block),
                 // Another's: another block.
