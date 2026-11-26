@@ -246,15 +246,16 @@ class Ci(unittest.TestCase):
 
 
 class Concurrency(unittest.TestCase):
-    """2026-11-15: main's runs go on to their end, the latest push meanwhile waiting in their group's
-    one pending slot; with cancel-in-progress on main, many sessions' pushes cancelled five runs in a
-    row before their slow jobs (the sandboxes' short mode, the workspace part) ended."""
+    """2026-11-15 / 2026-11-26 (18ae87a43, board 13998): one run of a ref at a time, each going
+    on to its end, and every push made meanwhile waiting its turn (`queue: max`), so no push to
+    main is replaced or cancelled before its slow jobs finish."""
 
     def test_main_runs_to_its_end_and_branches_replace_their_older_runs(self):
         text = CI.read_text()
         block = re.search(r"^concurrency:\n((?:  .*\n)+)", text, re.MULTILINE).group(1)
         self.assertEqual(block, "  group: ci-${{ github.ref }}\n"
-                                "  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}\n")
+                                "  cancel-in-progress: false\n"
+                                "  queue: max\n")
 
 
 class Nightly(unittest.TestCase):
