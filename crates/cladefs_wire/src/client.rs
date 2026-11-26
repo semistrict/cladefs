@@ -1594,29 +1594,33 @@ fn fixed_shared_memory(len: u64) -> std::io::Result<std::fs::File> {
     Ok(file)
 }
 
-/// cladefs: [`fixed_shared_memory`] on macOS: a POSIX shared memory object, of a name of this
-/// process's alone, unlinked at once, then sized once and for all.
+/// cladefs: [`fixed_shared_memory`] on macOS: a POSIX shared memory object, of a random name, which
+/// no other process of the user's guesses to open before it is unlinked, at once (made anew if one
+/// was there by it), then sized once and for all.
 #[cfg(not(target_os = "linux"))]
 fn fixed_shared_memory(len: u64) -> std::io::Result<std::fs::File> {
     use std::os::fd::FromRawFd;
-    /// How many this process made, which names each apart from the others.
-    static MADE: AtomicU64 = AtomicU64::new(0);
-    let made = MADE.fetch_add(1, Ordering::Relaxed);
-    // Within macOS's 31 bytes of a name (PSHMNAMLEN).
-    let name = format!("/cladefs-{:x}-{made:x}", std::process::id());
-    let name = std::ffi::CString::new(name).map_err(std::io::Error::other)?;
-    // SAFETY: The name is a C string; the mode an int, as the variadic call takes it. Not
-    // `O_CLOEXEC`, which macOS's `shm_open` refuses (`EINVAL`): set below.
-    let fd = unsafe {
-        libc::shm_open(
-            name.as_ptr(),
-            libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
-            0o600 as libc::c_uint,
-        )
+    let (name, fd) = loop {
+        // Within macOS's 31 bytes of a name (PSHMNAMLEN).
+        let name = format!("/cladefs-{:016x}", rand::random::<u64>());
+        let name = std::ffi::CString::new(name).map_err(std::io::Error::other)?;
+        // SAFETY: The name is a C string; the mode an int, as the variadic call takes it. Not
+        // `O_CLOEXEC`, which macOS's `shm_open` refuses (`EINVAL`): set below.
+        let fd = unsafe {
+            libc::shm_open(
+                name.as_ptr(),
+                libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
+                0o600 as libc::c_uint,
+            )
+        };
+        if fd >= 0 {
+            break (name, fd);
+        }
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() != Some(libc::EEXIST) {
+            return Err(err);
+        }
     };
-    if fd < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
     // SAFETY: Just created, and owned here.
     let file = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) });
     // SAFETY: Sets a flag of the descriptor this process just made.

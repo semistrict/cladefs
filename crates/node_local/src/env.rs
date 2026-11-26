@@ -28,6 +28,13 @@ pub fn var_os(name: impl AsRef<OsStr>) -> Option<OsString> {
             return vars.iter().find(|(k, _)| k == name).map(|(_, value)| value.clone());
         }
     }
+    process_var_os(name)
+}
+
+/// The variable `name` of the process's environment, with the embedder's ([`set_embedded_vars`])
+/// over it: never a simulated node's, for what is read once a process (a compression level).
+pub fn process_var_os(name: impl AsRef<OsStr>) -> Option<OsString> {
+    let name = name.as_ref();
     let embedded = EMBEDDED.read().unwrap();
     match embedded.iter().find(|(k, _)| k == name) {
         Some((_, value)) => Some(value.clone()),

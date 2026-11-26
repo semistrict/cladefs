@@ -46,12 +46,12 @@ fn read_back(client: &CellClient, sequence: u64) {
     assert!(read == written, "extent {sequence} read back other than written");
 }
 
-/// This test's binary run as a VM process of the daemon's, as `how` says to reach it.
-fn vm_process(how: &str) -> std::process::ExitStatus {
+/// This test's binary started as a VM process of the daemon's, as `how` says to reach it.
+fn vm_process(how: &str) -> std::process::Child {
     Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "vm_process_role", "--nocapture"])
         .env(VM_PROCESS, how)
-        .status()
+        .spawn()
         .unwrap()
 }
 
@@ -100,21 +100,24 @@ fn embedded_daemon_serves_cells_in_process_and_to_vm_processes() {
     drop(opened);
 
     // A VM process this process started, over a socket pair it handed it.
+    // Served once started, as its child, not reaped until it is done.
     let (ours, theirs) = UnixStream::pair().unwrap();
-    daemon.serve_vm_process(ours).unwrap();
     let theirs = theirs.into_raw_fd();
     // SAFETY: Clears close-on-exec of a descriptor this process owns, which the child inherits.
     assert_eq!(unsafe { libc_clear_cloexec(theirs) }, 0);
-    let status = vm_process(&format!("fd:{theirs},{},{},2", cell.tenant, cell.id));
-    // SAFETY: This process's end of the child's descriptor, closed now that it exited.
+    let mut child = vm_process(&format!("fd:{theirs},{},{},2", cell.tenant, cell.id));
+    // SAFETY: This process's copy of the child's end, which only the child uses.
     drop(unsafe { std::os::fd::OwnedFd::from_raw_fd(theirs) });
+    daemon.serve_vm_process(ours, child.id()).unwrap();
+    let status = child.wait().unwrap();
     assert!(status.success(), "the VM process over a socket pair: {status}");
     read_back(&daemon.open(cell).unwrap(), 2);
 
     // A VM process connecting to the daemon's socket.
     let socket = dir.path().join("vms.sock");
     daemon.serve_vm_processes(&socket).unwrap();
-    let status = vm_process(&format!("socket:{},{},{},3", socket.display(), cell.tenant, cell.id));
+    let how = format!("socket:{},{},{},3", socket.display(), cell.tenant, cell.id);
+    let status = vm_process(&how).wait().unwrap();
     assert!(status.success(), "the VM process over a socket: {status}");
     read_back(&daemon.open(cell).unwrap(), 3);
 
@@ -123,6 +126,20 @@ fn embedded_daemon_serves_cells_in_process_and_to_vm_processes() {
     assert!(Path::new(&dir.path().join("tenants")).is_dir());
 
     futures::executor::block_on(daemon.stop(Duration::from_secs(30))).unwrap();
+}
+
+/// A boot refused, its configuration naming no disk, returns its error to a caller awaiting it on
+/// its own tokio runtime, which drops none of the daemon's (Codex, hotbed review 151): the process's
+/// daemon is kept, and no other made.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_boot_refused_returns_its_error_on_the_callers_runtime() {
+    if std::env::var_os(VM_PROCESS).is_some() {
+        return;
+    }
+    let refused = Daemon::start(Config::from_toml("").unwrap()).await.map(drop);
+    let refused = refused.unwrap_err().to_string();
+    assert!(refused.contains("[[disks]]"), "{refused}");
+    assert!(Daemon::new().is_err(), "a second daemon in one process");
 }
 
 /// Clears `fd`'s close-on-exec flag.

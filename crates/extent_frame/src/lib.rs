@@ -180,15 +180,17 @@ const LEVEL: i32 = 1;
 /// The zstd level parts are compressed at: `CLADEFS_ZSTD_LEVEL`'s, or [`LEVEL`].
 #[cfg(feature = "crypto")]
 fn level() -> i32 {
-    // The process's environment, read once: the same for every simulated host.
-    static CHOSEN: std::sync::LazyLock<i32> =
-        std::sync::LazyLock::new(|| match std::env::var("CLADEFS_ZSTD_LEVEL") {
-            Ok(level) => {
+    // The process's environment, read once: the same for every simulated host. cladefs: an
+    // embedder's over it (board 13471), given before its daemon boots.
+    static CHOSEN: std::sync::LazyLock<i32> = std::sync::LazyLock::new(|| {
+        match node_local::env::process_var_os("CLADEFS_ZSTD_LEVEL").map(|v| v.into_string()) {
+            Some(Ok(level)) => {
                 level.parse().unwrap_or_else(|_| panic!("CLADEFS_ZSTD_LEVEL is {level:?}"))
             }
             // Unset, or not UTF-8, which no level is: the default.
-            Err(_) => LEVEL,
-        });
+            _ => LEVEL,
+        }
+    });
     *CHOSEN
 }
 

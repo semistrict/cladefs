@@ -25,8 +25,10 @@
 //! on none (`futures::executor::block_on`). A [`CellClient`]'s calls block their thread, as a
 //! device's worker's do.
 //!
-//! One daemon a process: its configuration is the process's (below), and a second
-//! [`Daemon::start`] fails while one runs.
+//! One daemon a process, for the process's life: its configuration is the process's (below); a
+//! second [`Daemon::new`] fails; and it is never dropped, its runtime with it, which no executor's
+//! task could drop. Stopped (drained), or its boot failed, it serves no more, and the process runs
+//! no other.
 //!
 //! cladefs: outside the simulation, whose daemons are booted by it (doc-24).
 
@@ -36,7 +38,6 @@
 
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -132,9 +133,10 @@ fn config_error(why: String) -> Error {
     Error::new(anyhow::anyhow!("libcladefs: {why}"))
 }
 
-/// Whether a daemon runs in this process. The process's: one daemon is embedded in a process,
-/// whose environment its configuration is (`node_local::env::set_embedded_vars`).
-static RUNNING: AtomicBool = AtomicBool::new(false);
+/// The daemon of this process, once made, kept for the process's life. The process's: one daemon
+/// is embedded in a process, whose environment its configuration is
+/// (`node_local::env::set_embedded_vars`), and its runtime is never dropped (see the crate's docs).
+static PROCESS: OnceLock<Daemon> = OnceLock::new();
 
 /// cladefs's extent daemon, embedded in this process (see the crate's docs). Each clone is the
 /// same daemon.
@@ -150,25 +152,21 @@ impl Daemon {
     /// Boots a daemon serving from `config` ([`Daemon::new`], then [`Daemon::boot`]).
     pub async fn start(config: Config) -> Result<Self, Error> {
         let daemon = Self::new()?;
-        match daemon.boot(config).await {
-            Ok(()) => Ok(daemon),
-            Err(err) => {
-                RUNNING.store(false, Ordering::Release);
-                Err(err)
-            }
-        }
+        daemon.boot(config).await?;
+        Ok(daemon)
     }
 
     /// This process's daemon, booted nothing yet ([`Daemon::boot`]): no thread started, so that a
     /// process may block the signals it takes on a thread of its own first, as cladefsd does.
-    /// Fails if one runs in this process already.
+    /// Fails if this process made one already.
     pub fn new() -> Result<Self, Error> {
-        if RUNNING.swap(true, Ordering::AcqRel) {
-            return Err(Error::new(anyhow::anyhow!(
-                "libcladefs: a daemon runs in this process already: one a process"
-            )));
-        }
-        Ok(Self { daemon: cladefsd::Daemon::new(), booted: Arc::default() })
+        let daemon = Self { daemon: cladefsd::Daemon::new(), booted: Arc::default() };
+        PROCESS.set(daemon.clone()).map_err(|_| {
+            Error::new(anyhow::anyhow!(
+                "libcladefs: this process has its daemon already: one a process"
+            ))
+        })?;
+        Ok(daemon)
     }
 
     /// Boots the daemon to serve from `config`: its disks, part cache and bucket opened, its
@@ -195,12 +193,12 @@ impl Daemon {
         self.daemon.run(async move { daemon.boot(&socket, memory).await }).await.map_err(Error::new)
     }
 
-    /// Drains the daemon within `within`: every cell closed, its commits uploaded, no more served.
-    /// What it could not drain in time it names in its error. Another daemon may start after.
+    /// Drains the daemon within `within`: every cell closed, its commits uploaded, no more served,
+    /// as cladefsd drains before it exits. What it could not drain in time it names in its error.
+    /// It serves nothing after, and the process runs no other daemon.
     pub async fn stop(self, within: Duration) -> Result<(), Error> {
         let draining = Arc::clone(&self.daemon);
         let drained = self.daemon.run(async move { draining.drain(within).await }).await;
-        RUNNING.store(false, Ordering::Release);
         drained.map_err(|left| {
             Error::new(anyhow::anyhow!("not drained within {}s: {left}", within.as_secs()))
         })
@@ -248,11 +246,17 @@ impl Daemon {
         self.daemon.serve_vm_socket(socket.as_ref()).map_err(Error::new)
     }
 
-    /// Serves the VM process at the other end of `stream`, an end of a socket pair the process
-    /// handed a VM process it started, as one connecting to [`Daemon::serve_vm_processes`]'s
-    /// socket is served.
-    pub fn serve_vm_process(&self, stream: UnixStream) -> Result<(), Error> {
-        self.daemon.serve_vm_process(stream).map_err(|err| Error::new(anyhow::Error::new(err)))
+    /// Serves the VM process `child` (`std::process::Child::id`) at the other end of `stream`, an
+    /// end of a socket pair this process handed the VM process it started, as one connecting to
+    /// [`Daemon::serve_vm_processes`]'s socket is served: the daemon watches `child`, the process
+    /// the socket says being this one. `child` must not be reaped (`wait`ed for) before its
+    /// connection ends, so that its pid names it alone.
+    pub fn serve_vm_process(&self, stream: UnixStream, child: u32) -> Result<(), Error> {
+        let child =
+            libc::pid_t::try_from(child).map_err(|err| Error::new(anyhow::Error::new(err)))?;
+        self.daemon
+            .serve_vm_process(stream, child)
+            .map_err(|err| Error::new(anyhow::Error::new(err)))
     }
 
     /// Says the daemon boots, its tenants' sockets in `tenants`, if any: refused if it booted

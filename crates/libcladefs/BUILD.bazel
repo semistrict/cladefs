@@ -15,6 +15,7 @@ filegroup(
 )
 
 _ALIASES = {
+    "@crates//:madsim-tokio": "tokio",
     "@crates//:tonic": "tonic",
 }
 

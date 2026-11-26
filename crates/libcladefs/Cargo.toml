@@ -13,6 +13,7 @@ anyhow.workspace = true
 cladefs_core.workspace = true
 cladefs_wire.workspace = true
 cladefsd.workspace = true
+libc.workspace = true
 node_local.workspace = true
 tonic = { package = "madsim-tonic", version = "=0.6.0" }
 
@@ -23,6 +24,7 @@ cladefsd = { workspace = true, features = ["tests-kms"] }
 futures.workspace = true
 libc.workspace = true
 tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [lints]
 workspace = true

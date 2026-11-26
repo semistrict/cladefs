@@ -141,7 +141,7 @@ fn serve_as(
             Ok((stream, _)) => {
                 failing = false;
                 if let Ok(tenant) = tenant() {
-                    drop(start_connection(stream.into(), tenant));
+                    drop(start_connection(stream.into(), tenant, Connector::Socket));
                 }
             }
             Err(err) if err.raw_os_error() == Some(libc::EINVAL) => return,
@@ -214,14 +214,21 @@ impl StopAccepting {
     pub(crate) fn new() -> std::io::Result<Arc<Self>> {
         use std::os::fd::FromRawFd;
         let mut ends = [0; 2];
-        // SAFETY: Makes a pipe, its two descriptors written into `ends`.
-        if unsafe { libc::pipe(ends.as_mut_ptr()) } != 0 {
+        // SAFETY: Makes a pipe, its two descriptors written into `ends`: close-on-exec as they are
+        // made on Linux, so that no VM process started meanwhile inherits them.
+        #[cfg(target_os = "linux")]
+        let made = unsafe { libc::pipe2(ends.as_mut_ptr(), libc::O_CLOEXEC) };
+        // SAFETY: As above; macOS has no pipe2, so close-on-exec set below, a moment after.
+        #[cfg(not(target_os = "linux"))]
+        let made = unsafe { libc::pipe(ends.as_mut_ptr()) };
+        if made != 0 {
             return Err(std::io::Error::last_os_error());
         }
         // SAFETY: Just made, and owned here.
         let (stopped, stop) = unsafe {
             (std::os::fd::OwnedFd::from_raw_fd(ends[0]), std::os::fd::OwnedFd::from_raw_fd(ends[1]))
         };
+        #[cfg(not(target_os = "linux"))]
         for end in &ends {
             // SAFETY: Sets a flag of a descriptor just made, owned above.
             if unsafe { libc::fcntl(*end, libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
@@ -645,7 +652,7 @@ fn reopen_read_only(fd: std::os::fd::BorrowedFd<'_>) -> std::io::Result<std::os:
 /// connections one by one.
 #[cfg(test)]
 pub(crate) fn serve_connection(stream: std::os::unix::net::UnixStream, tenant: Arc<Tenant>) {
-    let _ = start_connection(stream.into(), tenant).recv();
+    let _ = start_connection(stream.into(), tenant, Connector::Socket).recv();
 }
 
 /// cladefs: a connection of this process's own to the daemon, served as a VM process's is, of
@@ -659,20 +666,34 @@ pub(crate) fn connect_in_memory(tenant: Arc<Tenant>) -> std::io::Result<crate::w
     let (daemons, ours) = crate::wire::Stream::pair();
     #[cfg(not(madsim))]
     let (daemons, ours) = std::os::unix::net::UnixStream::pair()?;
-    drop(start_connection(daemons, tenant));
+    drop(start_connection(daemons, tenant, Connector::Socket));
     Ok(ours)
 }
 
-/// cladefs: serves the VM process at the other end of `stream` on `daemon`, of its default tenant,
-/// as one connecting to its socket is ([`serve_on`]), on the daemon's runtime: a socket an
-/// embedding process handed a VM process it started (board 13460).
+/// cladefs: serves the VM process `child` at the other end of `stream` on `daemon`, of its default
+/// tenant, as one connecting to its socket is ([`serve_on`]), on the daemon's runtime: an end of a
+/// socket pair an embedding process handed a VM process it started (board 13460), the child it has
+/// not reaped yet. The socket says the embedding process's own pid (`SO_PEERCRED`, made by it), so
+/// the child is named instead, as the process the daemon watches and may kill.
 #[cfg(not(madsim))]
 pub(crate) fn serve_stream_on(
     daemon: &Arc<Daemon>,
     stream: std::os::unix::net::UnixStream,
+    child: libc::pid_t,
 ) -> Result<(), Errno> {
-    drop(start_connection(stream, default_tenant_on(daemon)?));
+    drop(start_connection(stream, default_tenant_on(daemon)?, Connector::Child(child)));
     Ok(())
+}
+
+/// cladefs: who the VM process at the other end of a connection is, as the daemon learns it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Connector {
+    /// As its socket says (`SO_PEERPIDFD`; macOS's `LOCAL_PEERPID`): one that connected.
+    Socket,
+    /// The child of this process's of the pid, not reaped yet: one handed an end of a socket pair
+    /// (`Daemon::serve_vm_process`).
+    #[cfg(not(madsim))]
+    Child(libc::pid_t),
 }
 
 /// Starts serving the VM process at the other end of `stream`, as [`serve_connection`] does, on
@@ -680,7 +701,11 @@ pub(crate) fn serve_stream_on(
 /// cladefs: one of a tenant past [`MAX_CONNECTIONS`], or past the daemon's most, it closes at once
 /// ([`Counted::new`]).
 /// cladefs: one coming as the daemon drains it closes at once (TASK-141.4).
-fn start_connection(stream: crate::wire::Stream, tenant: Arc<Tenant>) -> mpsc::Receiver<()> {
+fn start_connection(
+    stream: crate::wire::Stream,
+    tenant: Arc<Tenant>,
+    connector: Connector,
+) -> mpsc::Receiver<()> {
     let daemon = Arc::clone(&tenant.daemon);
     let (done, finished) = mpsc::channel();
     let counted = match Counted::new(&tenant) {
@@ -698,7 +723,7 @@ fn start_connection(stream: crate::wire::Stream, tenant: Arc<Tenant>) -> mpsc::R
         return finished;
     };
     daemon.spawn(async move {
-        run_connection(stream, tenant).await;
+        run_connection(stream, tenant, connector).await;
         drop((connected, counted));
         // Its waiter gone: nothing to tell.
         let _ = done.send(());
@@ -719,7 +744,7 @@ pub(super) fn connections() -> usize {
 
 /// Receives the VM process's messages, serving its requests ([`receive`]), until it is gone; then,
 /// once its requests are done, lets its cell go.
-async fn run_connection(stream: crate::wire::Stream, tenant: Arc<Tenant>) {
+async fn run_connection(stream: crate::wire::Stream, tenant: Arc<Tenant>, connector: Connector) {
     let daemon = Arc::clone(&tenant.daemon);
     let sender = match stream.try_clone().and_then(|clone| {
         clone.set_nonblocking(true)?;
@@ -740,7 +765,7 @@ async fn run_connection(stream: crate::wire::Stream, tenant: Arc<Tenant>) {
     };
     // cladefs: one the daemon could not let go of, once it stopped answering, it refuses
     // (TASK-79.9).
-    let peer = match Peer::connected(&daemon, &stream, sender, tenant.id) {
+    let peer = match Peer::connected(&daemon, &stream, connector, sender, tenant.id) {
         Ok(peer) => peer,
         Err(err) => {
             log::error!("cladefsd: refusing a VM process's connection: {err}");
@@ -3215,6 +3240,7 @@ impl Peer {
     fn connected(
         daemon: &Arc<Daemon>,
         stream: &crate::wire::Stream,
+        connector: Connector,
         sender: Arc<AsyncSender>,
         tenant: u64,
     ) -> std::io::Result<Arc<Self>> {
@@ -3228,7 +3254,11 @@ impl Peer {
             // stopped answering would be let go never again, holding the pages freed for good.
             daemon.spawn(crate::run::supervising(WATCHDOG, watch(Arc::downgrade(daemon))));
         });
-        let process = peer_process(stream)?;
+        let process = match connector {
+            Connector::Socket => peer_process(stream)?,
+            #[cfg(not(madsim))]
+            Connector::Child(child) => Some(VmProcess::child(child)?),
+        };
         if let Some(process) = &process {
             // Signal 0, which checks the right to signal it, and sends nothing.
             process.signal(0).map_err(|err| {
@@ -3435,8 +3465,11 @@ impl VmProcess {
         Ok(())
     }
 
-    /// Sends it `signal`, as on Linux: `ESRCH` once it was seen to exit, its pid no longer
-    /// surely its.
+    /// On macOS, checks that this process may signal it, as signal 0 does on Linux, and sends no
+    /// other: a pid names no process surely (no pidfd), its process perhaps exited and reaped and
+    /// the pid another's between a check and the kill, which would end that other. Nothing it maps
+    /// needs it killed on macOS, whose VM processes map no window yet (board 13069); a VM process
+    /// let go there is waited for until it exits (board 13622).
     #[cfg(all(target_os = "macos", not(madsim)))]
     fn signal(&self, signal: libc::c_int) -> std::io::Result<()> {
         use std::os::fd::AsFd;
@@ -3445,14 +3478,42 @@ impl VmProcess {
             #[cfg(test)]
             Self::Unkillable => return Ok(()),
         };
+        if signal != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "macOS names no process surely to kill (board 13622)",
+            ));
+        }
         if readable_now(exits.as_fd())? {
             return Err(std::io::Error::from_raw_os_error(libc::ESRCH));
         }
-        // SAFETY: Signals the process `pid` names, which has not exited (above).
-        if unsafe { libc::kill(pid, signal) } != 0 {
+        // SAFETY: Signal 0 sends nothing: it checks the pid's process may be signalled.
+        if unsafe { libc::kill(pid, 0) } != 0 {
             return Err(std::io::Error::last_os_error());
         }
         Ok(())
+    }
+
+    /// cladefs: the child of this process's of the pid `child`, not reaped yet, so that its pid is
+    /// surely its: a pidfd of it (`pidfd_open`); on macOS, a kqueue watching it exit
+    /// ([`VmProcess::Pid`]).
+    #[cfg(all(target_os = "linux", not(madsim)))]
+    fn child(child: libc::pid_t) -> std::io::Result<Self> {
+        use std::os::fd::FromRawFd;
+        // SAFETY: A plain system call making a descriptor of the process, which it returns.
+        let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, child, 0) };
+        if pidfd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let pidfd = libc::c_int::try_from(pidfd).map_err(std::io::Error::other)?;
+        // SAFETY: A new descriptor, which the call gave this process.
+        Ok(Self::Pidfd(unsafe { std::os::fd::OwnedFd::from_raw_fd(pidfd) }))
+    }
+
+    /// cladefs: [`VmProcess::child`] on macOS.
+    #[cfg(all(target_os = "macos", not(madsim)))]
+    fn child(child: libc::pid_t) -> std::io::Result<Self> {
+        Ok(Self::Pid { pid: child, exits: exits_of(child)? })
     }
 
     /// Returns once it has exited, holding no thread.
@@ -3588,7 +3649,7 @@ fn peer_process(stream: &crate::wire::Stream) -> std::io::Result<Option<VmProces
 /// surely its.
 #[cfg(all(target_os = "macos", not(madsim)))]
 fn peer_process(stream: &crate::wire::Stream) -> std::io::Result<Option<VmProcess>> {
-    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::fd::AsRawFd;
     let mut pid: libc::pid_t = 0;
     let mut len = size_of::<libc::pid_t>() as libc::socklen_t;
     // SAFETY: Reads the peer's pid into `pid`, of `len` bytes.
@@ -3612,6 +3673,14 @@ fn peer_process(stream: &crate::wire::Stream) -> std::io::Result<Option<VmProces
         }
         return Ok(None);
     }
+    Ok(Some(VmProcess::Pid { pid, exits: exits_of(pid)? }))
+}
+
+/// cladefs: a kqueue holding an event once the process `pid` exited (`EVFILT_PROC`, `NOTE_EXIT`),
+/// readable then, as a pidfd is: `ESRCH` if it exited already.
+#[cfg(all(target_os = "macos", not(madsim)))]
+fn exits_of(pid: libc::pid_t) -> std::io::Result<std::os::fd::OwnedFd> {
+    use std::os::fd::{AsRawFd, FromRawFd};
     // SAFETY: Makes a kqueue, owned below.
     let queue = unsafe { libc::kqueue() };
     if queue < 0 {
@@ -3632,7 +3701,7 @@ fn peer_process(stream: &crate::wire::Stream) -> std::io::Result<Option<VmProces
     if added != 0 {
         return Err(std::io::Error::last_os_error());
     }
-    Ok(Some(VmProcess::Pid { pid, exits }))
+    Ok(exits)
 }
 
 /// cladefs: whether `fd` is readable now, without waiting: on macOS, whether a VM process's

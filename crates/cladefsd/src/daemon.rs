@@ -379,15 +379,17 @@ impl Daemon {
         server::connect_in_memory(tenant)
     }
 
-    /// cladefs: serves the VM process at the other end of `stream`, of the default tenant, as one
-    /// connecting to its socket is: a socket the process handed a VM process it started (board
-    /// 13460).
+    /// cladefs: serves the VM process `child` at the other end of `stream`, of the default tenant,
+    /// as one connecting to its socket is: an end of a socket pair this process handed a VM
+    /// process it started, its child, which it must not reap before the connection ends, so that
+    /// its pid names it (board 13460).
     #[cfg(not(madsim))]
     pub fn serve_vm_process(
         self: &Arc<Self>,
         stream: std::os::unix::net::UnixStream,
+        child: libc::pid_t,
     ) -> std::io::Result<()> {
-        server::serve_stream_on(self, stream).map_err(std::io::Error::other)
+        server::serve_stream_on(self, stream, child).map_err(std::io::Error::other)
     }
 
     /// cladefs: serves VM processes connecting to a new socket at `socket`, of the default
