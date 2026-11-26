@@ -344,7 +344,13 @@ async fn shrink_by(
 ) -> Result<u64, Errno> {
     let slabs = daemon.host.slabs();
     let Some(id) = tenant else {
-        evict_until(&daemon.host, None, || slabs.arenas_bytes_in_use() <= target, deadline).await;
+        evict_until(
+            &daemon.host,
+            None,
+            || slabs.arenas_bytes_in_use().saturating_sub(target),
+            deadline,
+        )
+        .await;
         // Then the spare slabs, which its evictions' frees may have kept.
         slabs.release_spares(None);
         return Ok(slabs.arenas_bytes());
@@ -359,25 +365,38 @@ async fn shrink_by(
     let held = || arenas.iter().map(|arena| slabs.arena_bytes(*arena)).sum::<u64>();
     let in_use = || arenas.iter().map(|arena| slabs.arena_bytes_in_use(*arena)).sum::<u64>();
     for arena in &arenas {
-        evict_until(&daemon.host, Some(*arena), || in_use() <= target, deadline).await;
+        evict_until(&daemon.host, Some(*arena), || in_use().saturating_sub(target), deadline).await;
         slabs.release_spares(Some(*arena));
     }
     Ok(held())
 }
 
-/// cladefs: evicts the pages of `arena`'s cached extents on `host`, until `enough` says so.
+/// Maximum bytes [`evict_until`] evicts in one batch before waiting for quarantined unmaps to
+/// acknowledge (board 12315): avoids 1-extent-per-RTT stalls under large governor shrinks while
+/// keeping unmap bursts bounded.
+const MAX_SHRINK_BATCH: u64 = 64 * SLAB;
+
+/// cladefs: evicts the pages of `arena`'s cached extents on `host`, until `deficit` reaches 0
+/// (or nothing remains to evict).
 async fn evict_until(
     host: &crate::Host,
     arena: Option<crate::slabs::ArenaId>,
-    enough: impl Fn() -> bool,
+    deficit: impl Fn() -> u64,
     deadline: std::time::Instant,
 ) {
     loop {
-        let parking = Parking::new();
-        let stop = |_: u64| parking.parked() || enough();
-        parking.counting(|| host.cache().evict_least_used(arena, stop));
-        if !parking.parked() {
+        let want = deficit().min(MAX_SHRINK_BATCH);
+        if want == 0 {
             return;
+        }
+        let parking = Parking::new();
+        let stop = |evicted: u64| evicted >= want || deficit() == 0;
+        let evicted = parking.counting(|| host.cache().evict_least_used(arena, stop));
+        if !parking.parked() {
+            if evicted == 0 || deficit() == 0 {
+                return;
+            }
+            continue;
         }
         // Past it, at once: what is quarantined still, held, the next pass evicts others' for.
         let left = deadline.saturating_duration_since(std::time::Instant::now());
