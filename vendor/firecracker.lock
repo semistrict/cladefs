@@ -926,6 +926,7 @@ dependencies = [
  "log",
  "madsim-tokio",
  "mimalloc",
+ "node_local",
  "object_store",
  "opentelemetry",
  "prost 0.14.4",
@@ -1113,6 +1114,7 @@ dependencies = [
  "http-body",
  "hyper-util",
  "libc",
+ "libcladefs",
  "libmimalloc-sys",
  "local_cell",
  "log",
@@ -1836,6 +1838,7 @@ dependencies = [
  "extent_keys",
  "formats",
  "fprint",
+ "node_local",
  "serde",
  "storage_device",
  "thiserror 2.0.21",
@@ -1859,6 +1862,7 @@ dependencies = [
  "fprint",
  "futures",
  "libc",
+ "node_local",
  "object_store",
  "reqwest",
  "serde",
@@ -2919,6 +2923,19 @@ name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
+
+[[package]]
+name = "libcladefs"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cladefs_core",
+ "cladefs_wire",
+ "cladefsd",
+ "libc",
+ "madsim-tonic",
+ "node_local",
+]
 
 [[package]]
 name = "libloading"
