@@ -222,6 +222,7 @@ _ONE_RUN_TESTS = [
     "range_map_failed_part_way",
     "read_mappings_stay",
     "read_pressure",
+    "slice_regrown_shares_zeros",
 ]
 
 _OTHER_TESTS = [

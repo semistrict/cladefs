@@ -460,6 +460,12 @@ static long cladefs_dax_map_pages(struct cladefs_dax *dax, struct cladefs *fs, s
 	long ret = 0;
 
 	lockdep_assert_held_write(&range->file->sem);
+	/*
+	 * cladefs: a slice's window pages belong to its shared region (cladefs_dax_region_map);
+	 * mapping over them here would overwrite sibling slices (board 2508, TASK-556).
+	 */
+	if (WARN_ON_ONCE(range->region))
+		return -EIO;
 	if (!capacity)
 		return 0;
 	found = cladefs_dax_alloc_extents(dax, capacity);
@@ -1342,7 +1348,17 @@ static int cladefs_dax_drop_pinned(struct inode *inode, pgoff_t first, pgoff_t l
 
 		cladefs_nofs_down_write(&file->sem);
 		xa_for_each_range(&file->ranges, chunk, range, first, last) {
-			if (size >= 0 && range->pages >= cladefs_dax_range_pages(chunk, size))
+			unsigned long need = size >= 0 ? cladefs_dax_range_pages(chunk, size) : 0;
+
+			/*
+			 * cladefs: a slice shrunk to a page-aligned size cleared its tail pages in
+			 * `range->state` without unmapping its shared region (cladefs_dax_resize_end).
+			 * Growing back into any unmapped page of a slice must drop the slice so a
+			 * read never MAPs zeros over the shared region's window (board 2508, TASK-556).
+			 */
+			if (size >= 0 && range->pages >= need &&
+			    (!range->region ||
+			     cladefs_dax_pages_next_unmapped(range->state, 0, need) == need))
 				continue;
 			dirty = cladefs_dax_range_dirty(range);
 			if (dirty || atomic_read(&range->users) || !cladefs_dax_release(inode, range)) {
