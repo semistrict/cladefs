@@ -867,6 +867,10 @@ pub(crate) struct StageCounts {
     /// cladefs: its window's private pages now (backlog doc-13), which the VM process alone knows
     /// of (doc-26).
     pub private: u64,
+    /// cladefs: the runs of pages its window keeps installed at most now, its share of its
+    /// process's windows', as a [`STAGE_COUNTS`] says it in its `id` (board 10098); 0 if it
+    /// doesn't say, as an [`ACK`]'s doesn't, its `id` the stage operation's.
+    pub budget: u64,
 }
 
 impl StageCounts {
@@ -889,6 +893,7 @@ impl StageCounts {
             costs: [body.ops, body.ns, body.overwrites, body.leave_outs],
             installed: u64::from(body.installed),
             private: u64::from(body.private),
+            budget: 0,
         }
     }
 }
@@ -903,7 +908,9 @@ impl Made {
     pub fn encode(&self) -> Header {
         match *self {
             Made::Ack { id, counts } => Header::new(ACK, id).with_body(&counts.to_body()),
-            Made::Counts(counts) => Header::new(STAGE_COUNTS, 0).with_body(&counts.to_body()),
+            Made::Counts(counts) => {
+                Header::new(STAGE_COUNTS, counts.budget).with_body(&counts.to_body())
+            }
             Made::PrivateCounts([runs, pages, ns, requests, request_ns]) => {
                 let body = PrivateCountsBody { runs, pages, ns, requests, request_ns };
                 Header::new(STAGE_PRIVATE_COUNTS, 0).with_body(&body)
@@ -923,7 +930,10 @@ impl Made {
             ACK => {
                 Ok(Made::Ack { id, counts: StageCounts::from_body(message.header.decode_body()?) })
             }
-            STAGE_COUNTS => Ok(Made::Counts(StageCounts::from_body(message.header.decode_body()?))),
+            STAGE_COUNTS => {
+                let counts = StageCounts::from_body(message.header.decode_body()?);
+                Ok(Made::Counts(StageCounts { budget: id, ..counts }))
+            }
             STAGE_PRIVATE_COUNTS => {
                 let PrivateCountsBody { runs, pages, ns, requests, request_ns } =
                     message.header.decode_body()?;
@@ -2178,7 +2188,7 @@ mod tests {
                 .with_flags(CAPACITY_ASK)
                 .with_body(&CapacityBody { capacity: 4096 })
         );
-        let counts = StageCounts { costs: [1, 2, 3, 4], installed: 5, private: 6 };
+        let counts = StageCounts { costs: [1, 2, 3, 4], installed: 5, private: 6, budget: 0 };
         let ack = Made::Ack { id: 4, counts }.encode();
         assert_eq!(
             ack,
@@ -2191,6 +2201,9 @@ mod tests {
                 private: 6,
             })
         );
+        // cladefs: a STAGE_COUNTS says its window's budget in its id (board 10098).
+        let counted = Made::Counts(StageCounts { budget: 7, ..counts }).encode();
+        assert_eq!(counted, Header::new(STAGE_COUNTS, 7).with_body(&ack.body.0));
         let asked = Told::Stats { ask: 6 }.encode();
         assert_eq!(asked, Header::new(STATS_ASK, 0).with_body(&StatsBody { ask: 6 }));
         let private = Made::PrivateCounts([1, 64, 5, 2, 9]).encode();
@@ -2230,8 +2243,10 @@ mod tests {
                 prop_assert_eq!(Told::decode(&told.encode()), Ok(told));
             }
             let low = |word: u64| word & u64::from(u32::MAX);
-            let counts = StageCounts { costs: [a, b, c, d], installed: low(e), private: low(a) };
-            let other = StageCounts { costs: [b, c, d, e], installed: low(a), private: low(b) };
+            let counts =
+                StageCounts { costs: [a, b, c, d], installed: low(e), private: low(a), budget: 0 };
+            let other =
+                StageCounts { costs: [b, c, d, e], installed: low(a), private: low(b), budget: id };
             let made = [
                 Made::Ack { id, counts },
                 Made::Counts(other),
@@ -2420,7 +2435,7 @@ mod tests {
     fn the_wire_is_its_version() {
         /// The version, and the fingerprint of the wire it is. A change to the wire is a new
         /// version, both changed together, never the fingerprint alone.
-        const WIRE: (u64, u64) = (18, 0x978181f01df55f6c);
+        const WIRE: (u64, u64) = (19, 0xefc2d957595fd9d);
         let fingerprint = fingerprint();
         assert_eq!(
             (VERSION, fingerprint),
@@ -2483,8 +2498,8 @@ mod tests {
             header(&mut hashed, told.encode());
         }
         let (counts, other) = (
-            StageCounts { costs: [1, 2, 3, 4], installed: 5, private: 6 },
-            StageCounts { costs: [5, 6, 7, 8], installed: 9, private: 10 },
+            StageCounts { costs: [1, 2, 3, 4], installed: 5, private: 6, budget: 0 },
+            StageCounts { costs: [5, 6, 7, 8], installed: 9, private: 10, budget: 11 },
         );
         let private = Made::PrivateCounts([1, 64, 5, 2, 9]);
         for made in [Made::Ack { id: 2, counts }, Made::Counts(other), private] {

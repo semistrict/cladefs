@@ -1017,6 +1017,64 @@ fn metrics_gauge_each_vm_processs_window_and_host_mappings() {
     assert_eq!(unsafe { libc::munmap(memory.as_ptr().cast(), 4 * ps) }, 0);
 }
 
+/// Board 10098: the metrics show each window's budget as it is now, its share of its VM
+/// process's windows': a window alone the process's whole, 522,240 runs of a host allowing
+/// 1,048,576 mappings; halved as a second window of the process comes, each 261,120; the whole
+/// again as the first goes. Until then a window's budget was what it said making it, the first's
+/// the whole after the second halved it, the second's half after the first went.
+#[test]
+fn metrics_show_each_windows_budget_as_its_process_shares_it() {
+    host();
+    super::server::MAX_MAP_COUNT_GIVEN.set(1 << 20).unwrap();
+    let ps = page_size() as usize;
+    let budget_of = |cell: crate::CellId| -> Option<u64> {
+        let metrics = super::metrics::render();
+        let name = format!("cladefsd_vm_host_mapping_budget{{cell=\"{cell}\"}} ");
+        metrics
+            .lines()
+            .find_map(|line| line.strip_prefix(&name))
+            .map(|value| value.parse().unwrap())
+    };
+    // What the VM processes say reaches the daemon as it reads their connections: within this.
+    let shown = |cell: crate::CellId, budget: u64| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while budget_of(cell) != Some(budget) && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        budget_of(cell)
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (first, first_served) = connect(&dir.path().join("first"), 1 << 24);
+    let (second, second_served) = connect(&dir.path().join("second"), 1 << 24);
+    let vms = super::stats::vms_on(super::Daemon::process());
+    let cells: Vec<_> = vms.iter().map(|vm| vm.cell).collect();
+    let (first_cell, second_cell) = (cells[0], cells[1]);
+    let memories = [memory(2), memory(2)];
+
+    // SAFETY: The memory is the test's, and outlives the cell.
+    unsafe { first.create_dax_window_in_host_memory(memories[0], 2 * ps as u64, None, 1) }.unwrap();
+    assert_eq!(first.window_budget(), Some(522_240));
+    assert_eq!(shown(first_cell, 522_240), Some(522_240), "the first alone");
+
+    // SAFETY: As above.
+    unsafe { second.create_dax_window_in_host_memory(memories[1], 2 * ps as u64, None, 1) }
+        .unwrap();
+    assert_eq!((first.window_budget(), second.window_budget()), (Some(261_120), Some(261_120)));
+    assert_eq!(shown(first_cell, 261_120), Some(261_120), "the first beside the second");
+    assert_eq!(shown(second_cell, 261_120), Some(261_120), "the second beside the first");
+
+    drop(first);
+    first_served.join().unwrap();
+    assert_eq!(shown(second_cell, 522_240), Some(522_240), "the second alone");
+    assert_eq!(second.window_budget(), Some(522_240));
+    drop(second);
+    second_served.join().unwrap();
+    for memory in memories {
+        // SAFETY: Unmaps the memory, which nothing uses any more.
+        assert_eq!(unsafe { libc::munmap(memory.as_ptr().cast(), 2 * ps) }, 0);
+    }
+}
+
 /// cladefs TASK-111.4: the stats hold the daemon's counters and gauges and its build, and each VM
 /// process's, as it answered: one whose guest answers, its guest's stats and build among it, its
 /// counts as of its answer; one with no guest to ask, at once, without; and one whose guest never

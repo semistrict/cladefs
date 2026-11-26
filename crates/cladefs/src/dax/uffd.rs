@@ -221,6 +221,9 @@ pub(crate) struct UffdSecondStage<H: HostMemory = Syscalls> {
     /// mappings, which it is told as windows come and go, under its pages' lock
     /// ([`Mappings::share`]).
     share: AtomicUsize,
+    /// cladefs: what tells of its share once it changed, its VM process's daemon, as the daemon's
+    /// metrics show it (board 10098): told outside the mappings' lock ([`Share::told`]).
+    on_shared: OnceLock<Box<dyn Fn() + Send + Sync>>,
     /// cladefs: the changes that took access away from pages it had installed (TASK-91.16).
     taken: Taken,
     /// cladefs: its window's private memory, if the window copies on write (backlog doc-13): a
@@ -471,6 +474,10 @@ trait Share: Send + Sync {
     /// Its share is `share` from now on: if it keeps more, it leaves out runs, and lifts
     /// restrictions, down to it.
     fn shared(&self, share: usize);
+
+    /// cladefs: its share changed ([`Share::shared`]), told once the mappings' lock is let go: what
+    /// it does may take locks a window's leaving takes after it (board 10098).
+    fn told(&self);
 }
 
 impl Mappings {
@@ -522,6 +529,11 @@ impl Mappings {
             for window in &live {
                 window.shared(share);
             }
+        }
+        // cladefs: each tells of its share as it is now, which another reshare may have changed
+        // since: the last told is the last made (board 10098).
+        for window in &live {
+            window.told();
         }
         drop(live);
     }
@@ -1617,6 +1629,7 @@ impl<H: HostMemory> UffdSecondStage<H> {
             mappings: mappings.clone(),
             // Told its share as it joins, below.
             share: AtomicUsize::new(2),
+            on_shared: OnceLock::new(),
             taken,
             private: OnceLock::new(),
             copies: Default::default(),
@@ -1724,9 +1737,17 @@ impl<H: HostMemory> UffdSecondStage<H> {
 
     /// The runs of pages it keeps installed at most, with the pages a fault restricted: its share
     /// of its process's windows' ([`Mappings`]). cladefs: which its VM process tells the daemon of
-    /// (TASK-111.5), as it is when the window is made.
+    /// (TASK-111.5), as the window is made, and again as it changes ([`Self::on_shared`]).
     pub(crate) fn budget(&self) -> usize {
         self.share.load(Ordering::Relaxed)
+    }
+
+    /// cladefs: has `told` called each time it is told its share anew from now on, as another
+    /// window of its process comes or goes ([`Mappings`]): outside the mappings' lock, and any of
+    /// its own (board 10098). Once.
+    pub(crate) fn on_shared(&self, told: impl Fn() + Send + Sync + 'static) {
+        let set = self.on_shared.set(Box::new(told));
+        assert!(set.is_ok(), "a window's share told of twice over");
     }
 
     /// cladefs: the runs of pages it has installed now, each a mapping of the process's, which
@@ -3716,6 +3737,12 @@ impl<H: HostMemory> Share for UffdSecondStage<H> {
         let mut pages = self.pages.lock().unwrap();
         self.share.store(share, Ordering::Relaxed);
         self.trim(&mut pages, 0, None);
+    }
+
+    fn told(&self) {
+        if let Some(told) = self.on_shared.get() {
+            told();
+        }
     }
 }
 

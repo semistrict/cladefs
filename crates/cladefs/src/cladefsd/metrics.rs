@@ -38,8 +38,9 @@
 //!   `cladefsd_vm_window_private_pages`, its window's, as the gauges above count all windows';
 //!   `cladefsd_vm_host_mappings`, the runs of pages its window's second stage has installed in
 //!   its memory, each a mapping the host's `vm.max_map_count` limits, as it last said with its
-//!   stage operations, and `cladefsd_vm_host_mapping_budget`, the most it keeps, as it said as
-//!   it made its window, from the limit the daemon told it (TASK-172).
+//!   stage operations, and `cladefsd_vm_host_mapping_budget`, the most it keeps, from the limit
+//!   the daemon told it (TASK-172): its share of its VM process's windows', as it last said, again
+//!   as another window of the process comes or goes (board 10098).
 //! - `cladefsd_<counter>_total`: the counters the control API's `GetCounters` reports
 //!   (`crate::stats::Stats::named`, its dashes underscores): maps, faults, page-ins, reads and
 //!   their nanoseconds and bytes; the VM processes' changes to their windows (`stage_ops`) and
@@ -424,7 +425,8 @@ fn render_rest(daemon: &Daemon, mut out: String, mut laps: Laps) -> String {
         ),
         (
             "vm_host_mapping_budget",
-            "The most runs of pages a VM process's window keeps installed, as it said.",
+            "The most runs of pages a VM process's window keeps installed now, its share of the \
+             process's windows', as it last said.",
             |vm| vm.budget,
         ),
     ];
