@@ -272,12 +272,12 @@ jobs:
           sudo chown "$USER" /mnt/tmp
           echo TMPDIR=/mnt/tmp >> "$GITHUB_ENV"
       - name: Build
-        run: cargo nextest run -p cladefs --lib --cargo-profile sim --no-run
+        run: cargo nextest run -p cladefsd --lib --cargo-profile sim --no-run
       - name: The daemon against a degraded bucket, half an hour
         run: |
           mkdir -p hunt
-          cargo nextest run -p cladefs --lib --cargo-profile sim --run-ignored all --no-capture \
-            -E 'test(=cladefsd::tests::soak::a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound)' \
+          cargo nextest run -p cladefsd --lib --cargo-profile sim --run-ignored all --no-capture \
+            -E 'test(=tests::soak::a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound)' \
             > hunt/soak.log 2>&1 || status=$?
           grep -E '^soak: |panicked|PASS|FAIL' hunt/soak.log | tee -a "$GITHUB_STEP_SUMMARY" || true
           exit "${status:-0}"

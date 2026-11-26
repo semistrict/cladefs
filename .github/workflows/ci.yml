@@ -346,11 +346,11 @@ jobs:
       # CPUs to write at the soak's rate, and on its slower runners, a third of them, fell behind,
       # never reaching the lag bound while the bucket failed (board 7056).
       - name: Build
-        run: cargo nextest run -p cladefs --lib --cargo-profile sim --no-run
+        run: cargo nextest run -p cladefsd --lib --cargo-profile sim --no-run
       - name: The daemon against a degraded bucket, five minutes
         run: >-
-          cargo nextest run -p cladefs --lib --cargo-profile sim --run-ignored all --no-capture
-          -E 'test(=cladefsd::tests::soak::a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound)'
+          cargo nextest run -p cladefsd --lib --cargo-profile sim --run-ignored all --no-capture
+          -E 'test(=tests::soak::a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound)'
 
   # board 8605: the dependencies' licences, bans and sources, as deny.toml allows them, of every lock
   # (scripts/audit.sh policy), which only a commit changes: on each push. Their advisories are the

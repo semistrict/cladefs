@@ -33,8 +33,8 @@
 //! `CLADEFS_SOAK_SECS` says how long it runs (default 300 s, CI's; 1,800 or more each night, Hunt's
 //! `soak` job), the phases each a fraction of it. Ignored by the workspace's suite, which it would
 //! outlast, and optimized, as a debug build's daemon falls behind the guests' rate on CI's runners
-//! (board 7056): `cargo nextest run -p cladefs --lib --cargo-profile sim --run-ignored all -E
-//! 'test(=cladefsd::tests::soak::a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound)'`.
+//! (board 7056): `cargo nextest run -p cladefsd --lib --cargo-profile sim --run-ignored all -E
+//! 'test(=tests::soak::a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound)'`.
 //! `crates/cladefs/mutants.sh` puts back TASK-314's dropped failures and TASK-317's copy of each
 //! upload's bytes for each try, and sees this fail.
 
