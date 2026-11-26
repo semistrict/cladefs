@@ -34,14 +34,32 @@ const INIT_MARKER: &str = "libmachine-init: up ";
 /// How long a test waits for a machine to reach a state.
 const STATE_WAIT: Duration = Duration::from_secs(60);
 
-/// The guest's kernel and initramfs, if this host can boot them (else a note).
-fn guest() -> Option<(PathBuf, PathBuf)> {
-    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let (default_dir, default_kernel) = if cfg!(target_os = "linux") {
+/// Whether this host runs VMs (else a note): /dev/kvm, accessible, on Linux;
+/// Hypervisor.framework (`kern.hv_support`) on macOS, which GitHub's macOS runners, themselves
+/// VMs, lack (board 13847).
+fn hypervisor() -> bool {
+    if cfg!(target_os = "linux") {
         if std::fs::OpenOptions::new().read(true).write(true).open("/dev/kvm").is_err() {
             eprintln!("skipping: /dev/kvm is not accessible");
-            return None;
+            return false;
         }
+        return true;
+    }
+    let support = std::process::Command::new("sysctl").args(["-n", "kern.hv_support"]).output();
+    if !support.is_ok_and(|out| out.status.success() && out.stdout.trim_ascii() == b"1") {
+        eprintln!("skipping: this host has no Hypervisor.framework (kern.hv_support)");
+        return false;
+    }
+    true
+}
+
+/// The guest's kernel and initramfs, if this host can boot them (else a note).
+fn guest() -> Option<(PathBuf, PathBuf)> {
+    if !hypervisor() {
+        return None;
+    }
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let (default_dir, default_kernel) = if cfg!(target_os = "linux") {
         (workspace.join("target/guest"), None)
     } else {
         let dir = workspace.join("target/arm64-guest");
@@ -568,7 +586,12 @@ async fn requests_that_mean_nothing_are_refused() {
     let relative = client.write_file(tokio_stream::iter([write])).await.unwrap_err();
     assert_eq!(relative.code(), Code::InvalidArgument);
 
-    // A kernel that won't load: the start fails, the machine STOPPED, saying why.
+    // A kernel that won't load: the start fails, the machine STOPPED, saying why; on a host that
+    // runs VMs, as the start makes one first.
+    if !hypervisor() {
+        daemon.shutdown().await;
+        return;
+    }
     let start = client.start_machine(proto::StartMachineRequest { name: "a".into() }).await;
     let start = start.unwrap_err();
     assert_eq!(start.code(), Code::FailedPrecondition, "{start:?}");
