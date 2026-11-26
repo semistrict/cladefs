@@ -459,7 +459,10 @@ pub fn shared_disk_root() -> anyhow::Result<PathBuf> {
 
 /// The canonical on-disk directory a managed disk rooted at `disk_root` holds for `cell`.
 pub fn cell_disk_path(disk_root: &Path, cell: cladefs::CellId) -> PathBuf {
-    disk_root.join("cells").join(format!("{:016x}", cell.tenant)).join(format!("{:016x}", cell.id))
+    disk_root
+        .join("cells")
+        .join(base32_id::Padded(cell.tenant).to_string())
+        .join(base32_id::Padded(cell.id).to_string())
 }
 
 /// Creates a new Fxfs cell of `capacity` bytes on the daemon at `cladefsd` (default tenant 0) and
