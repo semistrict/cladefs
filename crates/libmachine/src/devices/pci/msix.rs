@@ -13,7 +13,7 @@
 //! vector's pending bit, and when the vector is unmasked the hypervisor
 //! delivers what is pending as the irqfd is assigned again.
 
-use vmm_sys_util::eventfd::{EFD_NONBLOCK, EventFd};
+use crate::sys::{EFD_NONBLOCK, EventFd};
 
 use super::{MsiMessage, PciHost};
 use crate::error::{Error, Result};

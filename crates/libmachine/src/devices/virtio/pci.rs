@@ -28,8 +28,8 @@
 use std::ops::Range;
 use std::sync::Arc;
 
+use crate::sys::{EFD_NONBLOCK, EventFd};
 use vm_memory::GuestMemoryMmap;
-use vmm_sys_util::eventfd::{EFD_NONBLOCK, EventFd};
 
 use super::queue::DeviceQueue;
 use super::{DeviceState, VIRTIO_F_VERSION_1, VIRTIO_RING_F_EVENT_IDX, VirtioDevice};
@@ -917,7 +917,7 @@ mod tests {
     use vm_memory::{Bytes, GuestAddress, MmapRegion};
 
     use super::*;
-    use crate::arch::x86_64::layout::{PCI_MMIO32_ADDR, PCI_MMIO64_ADDR};
+    use crate::arch::layout::{PCI_MMIO32_ADDR, PCI_MMIO64_ADDR};
     use crate::devices::pci::MsiMessage;
     use crate::devices::pci::config;
     use crate::devices::pci::tests::{FakeHost, HostCall};

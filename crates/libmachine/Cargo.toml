@@ -6,25 +6,33 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
-# libmachine runs on x86-64 Linux, with KVM (src/lib.rs); elsewhere it is empty and needs nothing,
-# until its macOS backend (board 13063).
+# libmachine runs on x86-64 Linux, with KVM, and on arm64 macOS, with Hypervisor.framework
+# (src/lib.rs); elsewhere it is empty and needs nothing.
+[target.'cfg(any(all(target_os = "linux", target_arch = "x86_64"), all(target_os = "macos", target_arch = "aarch64")))'.dependencies]
+libc.workspace = true
+libmachine-agent.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+virtio-queue.workspace = true
+vm-memory.workspace = true
+vm-superio.workspace = true
+zerocopy.workspace = true
+
+# KVM, the PC platform and the network, Linux's.
 [target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
 acpi_tables.workspace = true
 kvm-bindings.workspace = true
 kvm-ioctls.workspace = true
-libc.workspace = true
-libmachine-agent.workspace = true
 linux-loader.workspace = true
-sha2.workspace = true
 smoltcp.workspace = true
-socket2.workspace = true
-thiserror.workspace = true
+# Sandbox's (board 13399 brings it to macOS).
 tokio = { workspace = true, features = ["rt", "sync"], optional = true }
-virtio-queue.workspace = true
-vm-memory.workspace = true
-vm-superio.workspace = true
+socket2.workspace = true
 vmm-sys-util.workspace = true
-zerocopy.workspace = true
+
+# The arm64 platform's device tree (board 13063).
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
+vm-fdt.workspace = true
 
 [features]
 # The async high-level API (libmachine::sandbox), on tokio. On by default;
@@ -39,6 +47,11 @@ fuzzing = []
 # The tests' and examples' guest programs, assembled (AGENTS.md: never raw bytes).
 iced-x86 = { version = "1.22.0", default-features = false, features = ["std", "code_asm"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync"] }
+
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dev-dependencies]
+# The arm64 tests' guest programs, assembled at compile time (MPL-2.0).
+dynasm = "5.1.0"
+dynasmrt = "5.1.0"
 
 [lints]
 workspace = true

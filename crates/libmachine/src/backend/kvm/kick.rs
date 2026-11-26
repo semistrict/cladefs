@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Kicking a vCPU thread out of `KVM_RUN` (Linux).
+//! Kicking a vCPU thread out of `KVM_RUN`.
 //!
 //! One real-time signal serves every machine in the process. Its handler
 //! sets KVM's `immediate_exit` in the `kvm_run` of the vCPU that the
@@ -54,32 +54,35 @@ fn install_handler() -> Result<()> {
 }
 
 /// A vCPU thread, which another thread can kick.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct Thread(libc::pthread_t);
+#[derive(Debug, Clone)]
+pub(crate) struct Kicker(libc::pthread_t);
 
-impl PartialEq for Thread {
+/// What a vCPU thread hands the kick: its vCPU's `kvm_run.immediate_exit`.
+pub(crate) type KickTarget = *mut u8;
+
+impl PartialEq for Kicker {
     fn eq(&self, other: &Self) -> bool {
         // SAFETY: pthread_equal only compares the two IDs.
         unsafe { libc::pthread_equal(self.0, other.0) != 0 }
     }
 }
 
-impl Eq for Thread {}
+impl Eq for Kicker {}
 
 // SAFETY: a pthread_t names a thread; it points at nothing this thread owns. musl defines it as a
 // pointer (glibc as an integer), which Rust would keep to the thread that read it, but any thread
 // may pass it to pthread_kill or pthread_equal, the two uses it has here.
-unsafe impl Send for Thread {}
+unsafe impl Send for Kicker {}
 // SAFETY: as above: shared, it is only read, and passed by value.
-unsafe impl Sync for Thread {}
+unsafe impl Sync for Kicker {}
 
-impl Thread {
-    pub(crate) fn current() -> Self {
+impl Kicker {
+    fn current() -> Self {
         // SAFETY: pthread_self has no preconditions.
-        Thread(unsafe { libc::pthread_self() })
+        Kicker(unsafe { libc::pthread_self() })
     }
 
-    pub(crate) fn kick(self) {
+    pub(crate) fn kick(&self) {
         // SAFETY: callers only kick a thread registered as a vCPU thread,
         // which unregisters (under the same lock) before it exits.
         unsafe { libc::pthread_kill(self.0, signal()) };
@@ -90,6 +93,7 @@ impl Thread {
 /// TLS pointer set, until dropped.
 pub(crate) struct VcpuThreadScope {
     old_mask: libc::sigset_t,
+    kicker: Kicker,
 }
 
 impl VcpuThreadScope {
@@ -98,7 +102,7 @@ impl VcpuThreadScope {
     /// `immediate_exit` must point to the `immediate_exit` byte of the
     /// `kvm_run` of the vCPU this thread runs, and stay valid until the
     /// scope is dropped.
-    pub(crate) unsafe fn enter(immediate_exit: *mut u8) -> Result<Self> {
+    pub(crate) unsafe fn enter(immediate_exit: KickTarget) -> Result<Self> {
         install_handler()?;
 
         // SAFETY: plain sigset manipulation on owned values.
@@ -117,8 +121,20 @@ impl VcpuThreadScope {
             old
         };
         IMMEDIATE_EXIT.with(|p| p.set(immediate_exit));
-        Ok(VcpuThreadScope { old_mask })
+        Ok(VcpuThreadScope { old_mask, kicker: Kicker::current() })
     }
+
+    /// What kicks this thread.
+    pub(crate) fn kicker(&self) -> Kicker {
+        self.kicker.clone()
+    }
+}
+
+/// A target for a fake vCPU's thread (tests): a byte of its own, leaked, as the thread may
+/// outlive any owner.
+#[cfg(test)]
+pub(crate) fn fake_target() -> KickTarget {
+    Box::leak(Box::new(0u8))
 }
 
 impl Drop for VcpuThreadScope {

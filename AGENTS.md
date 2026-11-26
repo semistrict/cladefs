@@ -412,6 +412,11 @@ as `TASK-N` (cladefs's own numbers): cite them by board ID.
   `scripts/test.sh`'s `libmachine` part, which provides both, fails on any such note.
 - **Python:** uv for everything (`uv sync`, `uv run pytest`, `uv build --wheel` in
   `crates/libmachine-py`); `uv run` rebuilds the extension when Rust sources change.
+- **macOS (Hypervisor.framework):** `cargo nextest run -p libmachine` on the Mac (the exception
+  above). Every macOS executable is signed with the hypervisor entitlement as it links
+  (`scripts/macos-link.sh`); the arm64 guest (cladefs's kernel, the test initramfs) is Linux's to
+  build: `crates/libmachine/scripts/arm64-guest.sh` builds it on hotbed and fetches it into
+  `target/arm64-guest`. A process has one HVF VM, so the tests take turns.
 - **Tenancy.** One libmachine process may run VMs for several tenants (doc-30, "Security and
   tenancy"), unlike Firecracker's one jailed VM per process: an accepted risk, its callers'
   choice.

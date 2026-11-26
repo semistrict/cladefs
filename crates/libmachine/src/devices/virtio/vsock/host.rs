@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use vmm_sys_util::eventfd::EventFd;
+use crate::sys::EventFd;
 
 use super::packet::{SHUTDOWN_BOTH, SHUTDOWN_RCV, SHUTDOWN_SEND};
 use super::state::{Phase, Poll, State};

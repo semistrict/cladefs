@@ -40,9 +40,9 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
+use crate::sys::EventFd;
 use virtio_queue::DescriptorChain;
 use vm_memory::{Bytes, GuestMemoryMmap};
-use vmm_sys_util::eventfd::EventFd;
 
 use super::queue::{DeviceQueue, WritableBuffer};
 use super::{DeviceState, VirtioDevice, other_version};

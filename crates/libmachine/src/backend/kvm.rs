@@ -4,6 +4,7 @@
 
 //! Linux KVM backend (the production backend).
 
+pub(crate) mod kick;
 pub(crate) mod memory;
 mod snapshot;
 mod suspend;
@@ -116,7 +117,7 @@ impl Vm {
         }
         let vm = kvm.create_vm().map_err(kvm_err("create VM"))?;
 
-        if platform == Platform::Pc {
+        if platform == Platform::Board {
             // KVM's own pages for Intel real-mode emulation, outside RAM.
             vm.set_tss_address(KVM_TSS_ADDR as usize).map_err(kvm_err("set TSS address"))?;
             vm.set_identity_map_address(KVM_IDENTITY_MAP_ADDR)
@@ -186,7 +187,7 @@ impl Vm {
             }
             // Firmware wires the boot CPU's LINT pins; an AP's local APIC is
             // reset by the INIT that starts it, and the guest programs it.
-            if platform == Platform::Pc && vcpu_id == 0 {
+            if platform == Platform::Board && vcpu_id == 0 {
                 wire_lapic_lints(&fd)?;
             }
             if vcpu_id == 0 {
@@ -275,9 +276,9 @@ impl Vcpu {
         self.fd.set_kvm_immediate_exit(0);
     }
 
-    /// The vCPU's `kvm_run.immediate_exit`, for the kick signal handler. Valid
-    /// as long as the vCPU exists (the `kvm_run` mapping does not move).
-    pub(crate) fn immediate_exit_ptr(&mut self) -> *mut u8 {
+    /// What the kick needs to reach this vCPU: its `kvm_run.immediate_exit`, for the kick
+    /// signal handler. Valid as long as the vCPU exists (the `kvm_run` mapping does not move).
+    pub(crate) fn kick_target(&mut self) -> kick::KickTarget {
         std::ptr::addr_of_mut!(self.fd.get_kvm_run().immediate_exit)
     }
 

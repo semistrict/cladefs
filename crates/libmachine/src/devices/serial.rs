@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! COM1: rust-vmm's 16550 UART model, with its interrupt delivered through
-//! a KVM irqfd on the PC platform.
+//! The console: rust-vmm's 16550 UART model, COM1 on a PC with its interrupt delivered through
+//! a KVM irqfd, MMIO on the arm64 board with its interrupt an SPI of the GIC.
 
 use vm_superio::Trigger;
 use vm_superio::serial::NoEvents;
@@ -14,7 +14,10 @@ pub(crate) enum IrqLine {
     None,
     /// An eventfd registered as an irqfd for the UART's GSI.
     #[cfg(target_os = "linux")]
-    EventFd(vmm_sys_util::eventfd::EventFd),
+    EventFd(crate::sys::EventFd),
+    /// An SPI of the VM's GIC, raised as an edge.
+    #[cfg(target_os = "macos")]
+    Spi(std::sync::Arc<crate::backend::hvf::Shared>, u32),
 }
 
 impl Trigger for IrqLine {
@@ -25,6 +28,8 @@ impl Trigger for IrqLine {
             IrqLine::None => Ok(()),
             #[cfg(target_os = "linux")]
             IrqLine::EventFd(evt) => evt.write(1),
+            #[cfg(target_os = "macos")]
+            IrqLine::Spi(vm, intid) => crate::backend::hvf::raise_spi(vm, *intid),
         }
     }
 }

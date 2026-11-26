@@ -5,6 +5,7 @@
 //! Virtio devices (virtio 1.2), all attached over the modern virtio-PCI
 //! transport (doc-30), and the thread that runs their queues.
 
+#[cfg(target_os = "linux")]
 pub(crate) mod net;
 pub(crate) mod pci;
 pub(crate) mod queue;
@@ -18,8 +19,8 @@ pub(crate) mod worker;
 
 use std::sync::Arc;
 
+use crate::sys::EventFd;
 use vm_memory::{GuestMemoryMmap, MmapRegion};
-use vmm_sys_util::eventfd::EventFd;
 
 use queue::DeviceQueue;
 

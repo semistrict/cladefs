@@ -4,8 +4,8 @@
 
 //! libmachine: an embeddable virtual machine monitor.
 //!
-//! It runs on x86-64 Linux, with KVM. Elsewhere the crate is empty, until its backend on macOS's
-//! Hypervisor.framework (board 13063) opens it to arm64.
+//! It runs on x86-64 Linux, with KVM, and on arm64 macOS, with Hypervisor.framework (Apple
+//! Silicon, macOS 15 and later: board 13063). Elsewhere the crate is empty.
 //!
 //! Two kinds of machine:
 //! - [`Machine::boot_linux`] builds a PC (KVM's in-kernel interrupt
@@ -46,9 +46,17 @@
 //!
 //! A machine counts the vCPU exits it takes, by kind
 //! ([`Machine::exit_counts`]), so that tests can bound them.
-#![cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#![cfg(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64")
+))]
+// On macOS, snapshots, suspensions and the network are KVM's still (board 13399): their code
+// builds there, unused.
+#![cfg_attr(
+    target_os = "macos",
+    allow(dead_code, reason = "snapshots, suspensions and the network come to HVF in board 13399")
+)]
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub mod agent;
 mod arch;
 mod backend;
@@ -63,10 +71,10 @@ pub mod net;
 pub mod sandbox;
 #[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
 mod smp_tests;
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod snapshot;
 mod stop;
 mod suspend;
+mod sys;
 mod vcpus;
 
 #[cfg(target_os = "linux")]
@@ -74,15 +82,16 @@ pub use backend::{HostMemory, MemorySlot, MemorySlots};
 pub use cpu::CpuModel;
 #[cfg(target_arch = "x86_64")]
 pub use cpu::CpuidEntry;
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub use devices::virtio::vsock::{
     GuestStopped, Vsock, VsockListener, VsockStream, is_guest_stopped,
 };
 pub use error::{Error, Result};
 pub use exits::ExitCounts;
-pub use machine::{ExitReason, LinuxBoot, Machine, MachineConfig, Registers, Run, Waited};
+#[cfg(target_arch = "x86_64")]
+pub use machine::Registers;
+pub use machine::{ExitReason, LinuxBoot, Machine, MachineConfig, Run, Waited};
 pub use memory::{MemoryLayout, MemoryRegion, RegionKind};
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[cfg(target_os = "linux")]
 pub use snapshot::{FORMAT_VERSION as SNAPSHOT_FORMAT_VERSION, Snapshot};
 pub use stop::StopHandle;
 pub use suspend::Woken;

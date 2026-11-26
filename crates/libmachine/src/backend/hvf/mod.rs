@@ -1,0 +1,792 @@
+// Copyright 2026 The cladefs Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+//! macOS's Hypervisor.framework on Apple Silicon (board 13063): arm64 guests, with the GICv3 the
+//! framework emulates (macOS 15 and later), its MSI frame, and its virtual timers.
+//!
+//! What KVM does in the kernel and the framework doesn't, this backend does in the VMM:
+//!
+//! - **ioeventfds**: a guest's write to a queue's notify address exits to the vCPU, which
+//!   signals the queue's event itself ([`PciHost::register_ioeventfd`]) and goes back in;
+//! - **irqfds**: a thread waits on every interrupt event a device signals and sends the MSI its
+//!   route names to the GIC ([`irqfd`]);
+//! - **PSCI**: a guest's HVC calls to power vCPUs on and off, and the machine off or reset
+//!   ([`psci`]);
+//! - **WFI**, should it exit: the vCPU's thread sleeps until an interrupt is sent to the GIC or
+//!   its virtual timer would fire. With the framework's GIC it does not (no `wait` exit in a
+//!   boot, measured 2026-11-26 on macOS 27): the framework waits inside `hv_vcpu_run`, where an
+//!   SGI from another vCPU reaches it.
+//!
+//! The framework gives a process one VM: one machine runs at a time in a process
+//! ([`Vm::new`] refuses a second). A vCPU belongs to the thread that created it, and every call
+//! about it must come from that thread: a [`Vcpu`] is created on its vCPU thread, on its first
+//! run, and destroyed when that thread exits.
+
+mod ffi;
+pub(crate) mod irqfd;
+pub(crate) mod kick;
+mod psci;
+
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
+use std::time::{Duration, Instant};
+
+use vm_memory::{Bytes, GuestAddress, GuestMemoryBackend, GuestMemoryMmap};
+
+use self::ffi::*;
+use self::kick::CpuSlot;
+use super::{Exit, Platform};
+use crate::arch::aarch64::boot::BootCpu;
+use crate::arch::aarch64::layout::{self, GIC_DIST_ADDR, GIC_MSI_ADDR, GIC_REDIST_ADDR};
+use crate::cpu::CpuModel;
+use crate::devices::pci::{MsiMessage, PciHost};
+use crate::error::{Error, Result};
+use crate::exits::ExitKind;
+use crate::machine::ExitReason;
+use crate::memory::MemoryLayout;
+use crate::sys::EventFd;
+
+/// An error of the framework's, for `op`.
+fn hv_err(op: &'static str, ret: hv_return_t) -> Error {
+    Error::Hypervisor {
+        op,
+        source: std::io::Error::other(format!("Hypervisor.framework error {ret:#x}")),
+    }
+}
+
+/// `ret` as a result.
+fn check(op: &'static str, ret: hv_return_t) -> Result<()> {
+    if ret == HV_SUCCESS { Ok(()) } else { Err(hv_err(op, ret)) }
+}
+
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The process's one VM: held while a [`Vm`] exists.
+static VM_HELD: Mutex<bool> = Mutex::new(false);
+
+/// The GIC the framework emulates, where the map puts it, and the sizes the framework gives it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Gic {
+    pub(crate) dist_size: u64,
+    /// Each vCPU's redistributor.
+    pub(crate) redist_size: u64,
+    pub(crate) msi_size: u64,
+}
+
+/// A VM: its RAM, mapped once, its GIC, and what stands in for KVM's irqfds, ioeventfds and
+/// memory slots.
+pub(crate) struct Vm {
+    // Field order matters for drop: the irqfd thread stops before the VM goes.
+    irqfds: irqfd::Forwarder,
+    shared: Arc<Shared>,
+    mem: GuestMemoryMmap,
+    layout: MemoryLayout,
+    gic: Gic,
+}
+
+/// What the VM's vCPUs and its irqfd thread share.
+pub(crate) struct Shared {
+    /// Each vCPU's slot: how to kick it, wake it, power it on.
+    pub(crate) cpus: Vec<Arc<CpuSlot>>,
+    /// The MSI routes, by GSI.
+    msi_routes: Mutex<BTreeMap<u32, MsiMessage>>,
+    /// Queue notify addresses and the events a write there signals.
+    ioeventfds: RwLock<Vec<(u64, EventFd)>>,
+    /// Device memory mapped into the guest, by slot: (guest address, size).
+    slots: Mutex<BTreeMap<u32, (u64, u64)>>,
+    next_slot: AtomicU32,
+}
+
+impl Shared {
+    /// Wakes every vCPU waiting for an interrupt: one was just sent to the GIC.
+    pub(crate) fn interrupt_sent(&self) {
+        for cpu in &self.cpus {
+            cpu.wake();
+        }
+    }
+
+    /// Sends the MSI `gsi`'s route names, if it has one.
+    pub(crate) fn send_msi(&self, gsi: u32) {
+        let Some(message) = lock(&self.msi_routes).get(&gsi).copied() else {
+            return;
+        };
+        // SAFETY: no pointers; the GIC exists while the VM does.
+        let ret = unsafe { hv_gic_send_msi(message.address, message.data) };
+        debug_assert_eq!(ret, HV_SUCCESS, "send MSI {message:?}");
+        self.interrupt_sent();
+    }
+}
+
+/// Raises SPI `intid` as an edge: the UART's interrupt.
+pub(crate) fn raise_spi(shared: &Shared, intid: u32) -> std::io::Result<()> {
+    // SAFETY: no pointers; the GIC exists while the VM does.
+    let ret = unsafe {
+        let up = hv_gic_set_spi(intid, true);
+        let down = hv_gic_set_spi(intid, false);
+        if up != HV_SUCCESS { up } else { down }
+    };
+    if ret != HV_SUCCESS {
+        return Err(std::io::Error::other(format!("hv_gic_set_spi({intid}): {ret:#x}")));
+    }
+    shared.interrupt_sent();
+    Ok(())
+}
+
+/// Where a new VM's RAM comes from.
+pub(crate) enum Ram {
+    /// Anonymous memory, reading as zeroes.
+    Anonymous,
+}
+
+impl Vm {
+    /// Creates the process's VM, its GIC and its `vcpu_count` vCPUs' slots; the vCPUs themselves
+    /// are created on their threads ([`Vcpu`]). vCPU 0 boots; the others wait for the guest to
+    /// power them on (PSCI CPU_ON).
+    pub(crate) fn new(
+        mem_size: usize,
+        cpu_model: CpuModel,
+        platform: Platform,
+        vcpu_count: u32,
+        ram: Ram,
+    ) -> Result<(Self, Vec<Vcpu>)> {
+        let Ram::Anonymous = ram;
+        if cpu_model != CpuModel::Host {
+            return Err(Error::CpuModel(
+                "on Hypervisor.framework the guest's CPU is the host's (CpuModel::Host)".into(),
+            ));
+        }
+        // A bare machine is the board without its devices: the GIC is there either way.
+        let _ = platform;
+        let mut held = lock(&VM_HELD);
+        if *held {
+            return Err(Error::InvalidConfig(
+                "Hypervisor.framework gives a process one VM, and another machine has it".into(),
+            ));
+        }
+        let max = max_vcpus()?;
+        if vcpu_count > max {
+            return Err(Error::InvalidConfig(format!(
+                "{vcpu_count} vCPUs; this host's Hypervisor.framework and libmachine's map allow \
+                 at most {max}"
+            )));
+        }
+        create_vm()?;
+        // From here the VM exists: a failure destroys it.
+        let made = (|| {
+            let gic = create_gic(vcpu_count)?;
+            let regions: Vec<(GuestAddress, usize)> = layout::ram_regions(mem_size as u64)
+                .into_iter()
+                .map(|(start, size)| (GuestAddress(start), size as usize))
+                .collect();
+            let mem = GuestMemoryMmap::<()>::from_ranges(&regions)
+                .map_err(|e| Error::MemoryAllocation(e.to_string()))?;
+            for &(start, size) in &regions {
+                let host = mem.get_host_address(start)?;
+                // SAFETY: `mem` maps the region and outlives the VM (field order, and vCPUs
+                // keep the mapping: `Vcpu::_mem`).
+                let ret = unsafe {
+                    hv_vm_map(
+                        host.cast(),
+                        start.0,
+                        size,
+                        HV_MEMORY_READ | HV_MEMORY_WRITE | HV_MEMORY_EXEC,
+                    )
+                };
+                check("map guest RAM", ret)?;
+            }
+            Ok((gic, mem))
+        })();
+        let (gic, mem) = match made {
+            Ok(made) => made,
+            Err(e) => {
+                // SAFETY: no vCPU exists yet.
+                unsafe { hv_vm_destroy() };
+                return Err(e);
+            }
+        };
+        *held = true;
+        drop(held);
+
+        let cpus: Vec<Arc<CpuSlot>> =
+            (0..vcpu_count).map(|i| Arc::new(CpuSlot::new(i == 0))).collect();
+        let shared = Arc::new(Shared {
+            cpus,
+            msi_routes: Mutex::default(),
+            ioeventfds: RwLock::default(),
+            slots: Mutex::default(),
+            next_slot: AtomicU32::new(0),
+        });
+        let irqfds = irqfd::Forwarder::spawn(shared.clone())?;
+        let vcpus = (0..vcpu_count)
+            .map(|index| Vcpu {
+                index,
+                shared: shared.clone(),
+                slot: shared.cpus[index as usize].clone(),
+                boot: None,
+                pending_read: None,
+                data: [0; 8],
+                _mem: mem.clone(),
+            })
+            .collect();
+        let layout = layout::memory_layout(mem_size as u64);
+        Ok((Self { irqfds, shared, mem, layout, gic }, vcpus))
+    }
+
+    pub(crate) fn cpu_model(&self) -> CpuModel {
+        CpuModel::Host
+    }
+
+    /// The host's CPU, as the guest sees it: the framework shows the host's, so the
+    /// fingerprint names the host's chip.
+    pub(crate) fn cpu_fingerprint(&self) -> &str {
+        host_fingerprint()
+    }
+
+    pub(crate) fn guest_memory(&self) -> &GuestMemoryMmap {
+        &self.mem
+    }
+
+    pub(crate) fn memory_layout(&self) -> MemoryLayout {
+        self.layout.clone()
+    }
+
+    pub(crate) fn gic(&self) -> Gic {
+        self.gic
+    }
+
+    pub(crate) fn shared(&self) -> &Arc<Shared> {
+        &self.shared
+    }
+
+    pub(crate) fn write_memory(&self, addr: u64, bytes: &[u8]) -> Result<()> {
+        Ok(self.mem.write_slice(bytes, GuestAddress(addr))?)
+    }
+
+    pub(crate) fn read_memory(&self, addr: u64, buf: &mut [u8]) -> Result<()> {
+        Ok(self.mem.read_slice(buf, GuestAddress(addr))?)
+    }
+}
+
+impl Drop for Vm {
+    fn drop(&mut self) {
+        self.irqfds.stop();
+        for (_, (addr, size)) in std::mem::take(&mut *lock(&self.shared.slots)) {
+            // SAFETY: unmaps what map_memory mapped.
+            unsafe { hv_vm_unmap(addr, size as usize) };
+        }
+        // SAFETY: every vCPU was destroyed on its thread, which the machine joined first.
+        let ret = unsafe { hv_vm_destroy() };
+        debug_assert_eq!(ret, HV_SUCCESS, "destroy the VM");
+        *lock(&VM_HELD) = false;
+    }
+}
+
+impl PciHost for Vm {
+    fn set_msi_route(&self, gsi: u32, message: MsiMessage) -> Result<()> {
+        lock(&self.shared.msi_routes).insert(gsi, message);
+        Ok(())
+    }
+
+    fn assign_irqfd(&self, evt: &EventFd, gsi: u32) -> Result<()> {
+        self.irqfds.assign(evt, gsi)
+    }
+
+    fn deassign_irqfd(&self, evt: &EventFd, gsi: u32) -> Result<()> {
+        self.irqfds.deassign(evt, gsi)
+    }
+
+    fn register_ioeventfd(&self, evt: &EventFd, addr: u64) -> Result<()> {
+        let evt = evt
+            .try_clone()
+            .map_err(|source| Error::Hypervisor { op: "clone an ioeventfd", source })?;
+        self.shared.ioeventfds.write().unwrap_or_else(|e| e.into_inner()).push((addr, evt));
+        Ok(())
+    }
+
+    fn unregister_ioeventfd(&self, evt: &EventFd, addr: u64) -> Result<()> {
+        use std::os::fd::AsRawFd;
+        let mut all = self.shared.ioeventfds.write().unwrap_or_else(|e| e.into_inner());
+        all.retain(|(a, e)| !(*a == addr && e.as_raw_fd() == evt.as_raw_fd()));
+        Ok(())
+    }
+
+    unsafe fn map_memory(&self, guest_addr: u64, host_addr: *mut u8, len: u64) -> Result<u32> {
+        // SAFETY: the caller keeps the host memory mapped until the slot is unmapped.
+        let ret = unsafe {
+            hv_vm_map(host_addr.cast(), guest_addr, len as usize, HV_MEMORY_READ | HV_MEMORY_WRITE)
+        };
+        check("map device memory", ret)?;
+        let slot = self.shared.next_slot.fetch_add(1, Ordering::Relaxed);
+        lock(&self.shared.slots).insert(slot, (guest_addr, len));
+        Ok(slot)
+    }
+
+    fn unmap_memory(&self, slot: u32) -> Result<()> {
+        if let Some((addr, len)) = lock(&self.shared.slots).remove(&slot) {
+            // SAFETY: unmaps what map_memory mapped.
+            check("unmap device memory", unsafe { hv_vm_unmap(addr, len as usize) })?;
+        }
+        Ok(())
+    }
+}
+
+fn max_vcpus() -> Result<u32> {
+    let mut max = 0;
+    // SAFETY: writes the count into a live local.
+    check("get the most vCPUs", unsafe { hv_vm_get_max_vcpu_count(&mut max) })?;
+    Ok(max.min(layout::MAX_VCPUS))
+}
+
+/// Creates the process's VM with the map's IPA size and 4 KiB stage 2 pages, where the host
+/// can (macOS 26), so that a DAX window maps the guest's pages one by one.
+fn create_vm() -> Result<()> {
+    let mut max_ipa = 0;
+    // SAFETY: writes the size into a live local.
+    check("get the largest IPA size", unsafe { hv_vm_config_get_max_ipa_size(&mut max_ipa) })?;
+    if max_ipa < layout::IPA_BITS {
+        return Err(Error::InvalidConfig(format!(
+            "this host's VMs have {max_ipa}-bit guest physical addresses; libmachine's map needs {}",
+            layout::IPA_BITS
+        )));
+    }
+    // SAFETY: a new config object, released below.
+    let config = unsafe { hv_vm_config_create() };
+    if config.is_null() {
+        return Err(hv_err("create a VM configuration", -1));
+    }
+    // SAFETY: `config` is live; no other pointers.
+    let ret = unsafe {
+        let ipa = hv_vm_config_set_ipa_size(config, layout::IPA_BITS);
+        if ipa != HV_SUCCESS {
+            ipa
+        } else {
+            let _ = hv_vm_config_set_ipa_granule(config, HV_IPA_GRANULE_4KB);
+            hv_vm_create(config)
+        }
+    };
+    // SAFETY: the VM keeps what it needs of the config.
+    unsafe { os_release(config) };
+    check("create the VM (is the binary signed with com.apple.security.hypervisor?)", ret)
+}
+
+/// Creates the VM's GIC where the map puts it, with its MSI frame.
+fn create_gic(vcpu_count: u32) -> Result<Gic> {
+    let (mut dist, mut redist, mut redist_region, mut msi) = (0usize, 0usize, 0usize, 0usize);
+    let (mut dist_align, mut redist_align, mut msi_align) = (0usize, 0usize, 0usize);
+    let (mut spi_base, mut spi_count) = (0u32, 0u32);
+    // SAFETY: each writes into a live local.
+    unsafe {
+        check("get the GIC distributor's size", hv_gic_get_distributor_size(&mut dist))?;
+        check("get a GIC redistributor's size", hv_gic_get_redistributor_size(&mut redist))?;
+        check(
+            "get the GIC redistributors' size",
+            hv_gic_get_redistributor_region_size(&mut redist_region),
+        )?;
+        check("get the GIC MSI frame's size", hv_gic_get_msi_region_size(&mut msi))?;
+        check(
+            "get the GIC distributor's alignment",
+            hv_gic_get_distributor_base_alignment(&mut dist_align),
+        )?;
+        check(
+            "get the GIC redistributors' alignment",
+            hv_gic_get_redistributor_base_alignment(&mut redist_align),
+        )?;
+        check(
+            "get the GIC MSI frame's alignment",
+            hv_gic_get_msi_region_base_alignment(&mut msi_align),
+        )?;
+        check("get the GIC's SPIs", hv_gic_get_spi_interrupt_range(&mut spi_base, &mut spi_count))?;
+    }
+    let gic = Gic { dist_size: dist as u64, redist_size: redist as u64, msi_size: msi as u64 };
+    let aligned = |addr: u64, align: usize| align == 0 || addr.is_multiple_of(align as u64);
+    // The framework places a redistributor for every vCPU it supports, whatever the VM has.
+    let fits = gic.dist_size <= GIC_MSI_ADDR - GIC_DIST_ADDR
+        && gic.msi_size <= layout::UART_ADDR - GIC_MSI_ADDR
+        && gic.redist_size <= layout::GIC_REDIST_SIZE
+        && redist_region as u64 <= layout::GIC_REDIST_REGION_SIZE
+        && aligned(GIC_DIST_ADDR, dist_align)
+        && aligned(GIC_REDIST_ADDR, redist_align)
+        && aligned(GIC_MSI_ADDR, msi_align)
+        && spi_base <= layout::UART_SPI
+        && layout::MSI_SPI_BASE + layout::MSI_SPI_COUNT <= spi_base + spi_count;
+    if !fits {
+        return Err(Error::InvalidConfig(format!(
+            "this host's GIC ({gic:?}, redistributors {redist_region:#x}, alignments {dist_align:#x} \
+             {redist_align:#x} {msi_align:#x}, SPIs {spi_base}+{spi_count}) does not fit libmachine's \
+             map ({vcpu_count} vCPUs)"
+        )));
+    }
+    // SAFETY: a new config object, released below.
+    let config = unsafe { hv_gic_config_create() };
+    if config.is_null() {
+        return Err(hv_err("create a GIC configuration", -1));
+    }
+    // SAFETY: `config` is live; no other pointers.
+    let ret = unsafe {
+        [
+            hv_gic_config_set_distributor_base(config, GIC_DIST_ADDR),
+            hv_gic_config_set_redistributor_base(config, GIC_REDIST_ADDR),
+            hv_gic_config_set_msi_region_base(config, GIC_MSI_ADDR),
+            hv_gic_config_set_msi_interrupt_range(
+                config,
+                layout::MSI_SPI_BASE,
+                layout::MSI_SPI_COUNT,
+            ),
+        ]
+        .into_iter()
+        .find(|&r| r != HV_SUCCESS)
+        .unwrap_or_else(|| hv_gic_create(config))
+    };
+    // SAFETY: the GIC keeps what it needs of the config.
+    unsafe { os_release(config) };
+    check("create the GIC", ret)?;
+    Ok(gic)
+}
+
+/// The host's chip, as `machdep.cpu.brand_string` names it.
+fn host_fingerprint() -> &'static str {
+    static FINGERPRINT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    FINGERPRINT.get_or_init(|| {
+        let name = c"machdep.cpu.brand_string";
+        let mut buf = [0u8; 128];
+        let mut len = buf.len();
+        // SAFETY: sysctlbyname writes at most `len` bytes into `buf`, and the new length.
+        let ret = unsafe {
+            libc::sysctlbyname(
+                name.as_ptr(),
+                buf.as_mut_ptr().cast(),
+                &mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        let brand = if ret == 0 {
+            String::from_utf8_lossy(&buf[..len]).trim_end_matches('\0').to_owned()
+        } else {
+            "unknown".to_owned()
+        };
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(format!("hvf-arm64:{brand}"));
+        digest.iter().map(|b| format!("{b:02x}")).collect()
+    })
+}
+
+/// An access the guest made that the last exit left unfinished: a load from a device, whose
+/// value the bus put in [`Vcpu::data`], for the register it loads.
+#[derive(Debug, Clone, Copy)]
+struct PendingRead {
+    reg: u32,
+    size: usize,
+    sign_extend: bool,
+    /// A 64-bit register (else a 32-bit one, its top half zeroed).
+    wide: bool,
+}
+
+/// The vCPU this thread owns: created on it, destroyed when it exits.
+struct Owned(hv_vcpu_t, *const hv_vcpu_exit_t);
+
+impl Drop for Owned {
+    fn drop(&mut self) {
+        // SAFETY: this thread created the vCPU, and destroys it as it exits.
+        unsafe { hv_vcpu_destroy(self.0) };
+    }
+}
+
+thread_local! {
+    static OWNED: RefCell<Option<Owned>> = const { RefCell::new(None) };
+}
+
+/// One vCPU of a [`Vm`], created on the thread that runs it, at its first run.
+pub(crate) struct Vcpu {
+    index: u32,
+    shared: Arc<Shared>,
+    slot: Arc<CpuSlot>,
+    /// The state its first run starts it in (vCPU 0's: the kernel's entry).
+    boot: Option<BootCpu>,
+    pending_read: Option<PendingRead>,
+    /// The bytes of the last MMIO exit's access.
+    data: [u8; 8],
+    _mem: GuestMemoryMmap,
+}
+
+impl Vcpu {
+    /// Clears a kick that was handled: the run loop checks why it might stop after this.
+    pub(crate) fn clear_immediate_exit(&mut self) {
+        self.slot.clear_kick();
+    }
+
+    /// Finishes the last exit's access: a load from a device gets its value.
+    pub(crate) fn complete_pending(&mut self) {
+        if let Some(id) = owned() {
+            let _ = self.finish_read(id);
+        }
+    }
+
+    /// What the kick needs to reach this vCPU.
+    pub(crate) fn kick_target(&self) -> Arc<CpuSlot> {
+        self.slot.clone()
+    }
+
+    /// Puts the vCPU in the state a kernel's entry point expects, from its first run.
+    pub(crate) fn set_boot_cpu(&mut self, cpu: &BootCpu) -> Result<()> {
+        self.boot = Some(*cpu);
+        Ok(())
+    }
+
+    /// Runs the guest until an exit the bus handles, or one the backend handled itself
+    /// ([`Exit::Handled`]): a queue notification, a PSCI call, a WFI, a system register.
+    pub(crate) fn run_once(&mut self) -> Result<Exit<'_>> {
+        if self.slot.take_kick() {
+            return Ok(Exit::Interrupted);
+        }
+        let (id, exit) = self.create()?;
+        // A vCPU the guest has not powered on (or has off) waits for CPU_ON.
+        match self.slot.wait_until_on() {
+            kick::Power::Kicked => return Ok(Exit::Interrupted),
+            kick::Power::Start { entry, context } => {
+                // As a CPU coming out of reset: MMU and caches off (PSCI CPU_ON's entry state),
+                // which a vCPU powered off after running has on.
+                // SAFETY: this thread owns the vCPU.
+                check("reset SCTLR_EL1", unsafe {
+                    hv_vcpu_set_sys_reg(id, HV_SYS_REG_SCTLR_EL1, SCTLR_EL1_RESET)
+                })?;
+                set_regs(
+                    id,
+                    &[(HV_REG_PC, entry), (HV_REG_X0, context), (HV_REG_CPSR, PSTATE_EL1H_MASKED)],
+                )?;
+            }
+            kick::Power::On => {}
+        }
+        self.finish_read(id)?;
+        // SAFETY: this thread owns the vCPU.
+        check("run the vCPU", unsafe { hv_vcpu_run(id) })?;
+        // SAFETY: the framework keeps the exit information at `exit` for the vCPU's life, and
+        // writes it only in hv_vcpu_run, on this thread.
+        let exit = unsafe { *exit };
+        match exit.reason {
+            HV_EXIT_REASON_CANCELED => Ok(Exit::Interrupted),
+            HV_EXIT_REASON_EXCEPTION => self.exception(id, &exit.exception),
+            HV_EXIT_REASON_VTIMER_ACTIVATED => {
+                Ok(Exit::Done(ExitReason::Other("the virtual timer fired outside the GIC".into())))
+            }
+            other => Ok(Exit::Done(ExitReason::Other(format!("hv_vcpu_run exit reason {other}")))),
+        }
+    }
+
+    /// This thread's vCPU, created now if it has none yet, in its boot state.
+    fn create(&mut self) -> Result<(hv_vcpu_t, *const hv_vcpu_exit_t)> {
+        if let Some(owned) = OWNED.with(|o| o.borrow().as_ref().map(|o| (o.0, o.1))) {
+            return Ok(owned);
+        }
+        let (mut id, mut exit) = (0, std::ptr::null());
+        // SAFETY: writes the new vCPU's ID and exit pointer into live locals.
+        check("create a vCPU", unsafe {
+            hv_vcpu_create(&mut id, &mut exit, std::ptr::null_mut())
+        })?;
+        OWNED.with(|o| *o.borrow_mut() = Some(Owned(id, exit)));
+        // SAFETY: this thread owns the vCPU.
+        check("set MPIDR_EL1", unsafe {
+            hv_vcpu_set_sys_reg(id, HV_SYS_REG_MPIDR_EL1, mpidr(self.index))
+        })?;
+        if let Some(boot) = self.boot.take() {
+            let mut regs = vec![(HV_REG_PC, boot.pc), (HV_REG_CPSR, PSTATE_EL1H_MASKED)];
+            regs.extend(boot.x.iter().enumerate().map(|(i, &x)| (HV_REG_X0 + i as u32, x)));
+            set_regs(id, &regs)?;
+        }
+        self.slot.created(id);
+        Ok((id, exit))
+    }
+
+    /// Gives a pending load its value and moves past it.
+    fn finish_read(&mut self, id: hv_vcpu_t) -> Result<()> {
+        let Some(read) = self.pending_read.take() else {
+            return Ok(());
+        };
+        let mut value = 0u64;
+        for (i, b) in self.data[..read.size].iter().enumerate() {
+            value |= u64::from(*b) << (8 * i);
+        }
+        if read.sign_extend {
+            let shift = 64 - 8 * read.size as u32;
+            value = ((value << shift) as i64 >> shift) as u64;
+        }
+        if !read.wide {
+            value &= 0xffff_ffff;
+        }
+        if read.reg != 31 {
+            set_regs(id, &[(HV_REG_X0 + read.reg, value)])?;
+        }
+        advance_pc(id)
+    }
+
+    fn exception(&mut self, id: hv_vcpu_t, e: &hv_vcpu_exit_exception_t) -> Result<Exit<'_>> {
+        let syndrome = e.syndrome;
+        let class = (syndrome >> 26) & 0x3f;
+        match class {
+            EC_DATA_ABORT_LOWER => self.data_abort(id, syndrome, e.physical_address),
+            EC_HVC64 => {
+                let x = |i: u32| get_reg(id, HV_REG_X0 + i);
+                let call = psci::Call { function: x(0)? as u32, args: [x(1)?, x(2)?, x(3)?] };
+                match psci::handle(&call, &self.shared.cpus) {
+                    psci::Outcome::Return(value) => {
+                        set_regs(id, &[(HV_REG_X0, value as u64)])?;
+                        Ok(Exit::Handled(ExitKind::Hypercall))
+                    }
+                    psci::Outcome::Off => {
+                        self.slot.power_off();
+                        Ok(Exit::Handled(ExitKind::Hypercall))
+                    }
+                    psci::Outcome::Machine(reason) => Ok(Exit::Done(reason)),
+                }
+            }
+            EC_WFX => {
+                advance_pc(id)?;
+                // WFE (bit 0): a hint, nothing to wait for here.
+                if syndrome & 1 == 0 {
+                    self.slot.wait_for_interrupt(timer_deadline(id)?);
+                }
+                Ok(Exit::Handled(ExitKind::Wait))
+            }
+            EC_SYSREG => {
+                // Read as zero, writes ignored: the registers the framework leaves to the VMM
+                // (debug, OS lock) have nothing behind them here.
+                let read = syndrome & 1 == 1;
+                let rt = ((syndrome >> 5) & 0x1f) as u32;
+                if read && rt != 31 {
+                    set_regs(id, &[(HV_REG_X0 + rt, 0)])?;
+                }
+                advance_pc(id)?;
+                Ok(Exit::Handled(ExitKind::SystemRegister))
+            }
+            _ => Ok(Exit::Done(ExitReason::Other(format!(
+                "exception class {class:#x} (ESR {syndrome:#x}) at guest address {:#x}",
+                e.physical_address
+            )))),
+        }
+    }
+
+    /// A load or store to an address no memory backs: a device's register, or a queue's notify
+    /// address.
+    fn data_abort(&mut self, id: hv_vcpu_t, syndrome: u64, addr: u64) -> Result<Exit<'_>> {
+        // ISV: the syndrome describes the access. Linux's MMIO accessors are single loads and
+        // stores, which it always does.
+        if syndrome & (1 << 24) == 0 {
+            return Ok(Exit::Done(ExitReason::Other(format!(
+                "an MMIO access to {addr:#x} the hypervisor could not decode (ESR {syndrome:#x})"
+            ))));
+        }
+        let size = 1usize << ((syndrome >> 22) & 0x3);
+        let reg = ((syndrome >> 16) & 0x1f) as u32;
+        let write = syndrome & (1 << 6) != 0;
+        if write {
+            let value = if reg == 31 { 0 } else { get_reg(id, HV_REG_X0 + reg)? };
+            self.data[..size].copy_from_slice(&value.to_le_bytes()[..size]);
+            advance_pc(id)?;
+            if self.notify(addr) {
+                return Ok(Exit::Handled(ExitKind::PciBar));
+            }
+            return Ok(Exit::MmioWrite { addr, data: &self.data[..size] });
+        }
+        self.pending_read = Some(PendingRead {
+            reg,
+            size,
+            sign_extend: syndrome & (1 << 21) != 0,
+            wide: syndrome & (1 << 15) != 0,
+        });
+        Ok(Exit::MmioRead { addr, data: &mut self.data[..size] })
+    }
+
+    /// Signals the queue whose notify address `addr` is, if it is one: an ioeventfd.
+    fn notify(&self, addr: u64) -> bool {
+        let all = self.shared.ioeventfds.read().unwrap_or_else(|e| e.into_inner());
+        match all.iter().find(|(a, _)| *a == addr) {
+            Some((_, evt)) => {
+                let _ = evt.write(1);
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+// SAFETY: the exit pointer and the vCPU it belongs to are used only on the thread that created
+// them (`OWNED`); a `Vcpu` moved to another thread creates its own there.
+unsafe impl Send for Vcpu {}
+
+/// The exception classes (ESR_EL2.EC) the backend handles.
+const EC_WFX: u64 = 0x01;
+const EC_HVC64: u64 = 0x16;
+const EC_SYSREG: u64 = 0x18;
+const EC_DATA_ABORT_LOWER: u64 = 0x24;
+
+/// PSTATE at a kernel's entry: EL1 with SP_EL1 (EL1h), debug, SError, IRQ and FIQ masked.
+const PSTATE_EL1H_MASKED: u64 = 0x3c5;
+/// SCTLR_EL1 out of reset: its RES1 bits (29, 28, 23, 22, 20, 11), the MMU and caches off.
+const SCTLR_EL1_RESET: u64 = 0x30d0_0800;
+
+/// The MPIDR_EL1 of vCPU `index`: 16 to a cluster (Aff0), as GICv3's SGIs address them.
+pub(crate) fn mpidr(index: u32) -> u64 {
+    u64::from(index % 16) | (u64::from(index / 16) << 8)
+}
+
+/// This thread's vCPU, if it has created one.
+fn owned() -> Option<hv_vcpu_t> {
+    OWNED.with(|o| o.borrow().as_ref().map(|o| o.0))
+}
+
+fn get_reg(id: hv_vcpu_t, reg: hv_reg_t) -> Result<u64> {
+    let mut value = 0;
+    // SAFETY: this thread owns the vCPU; writes into a live local.
+    check("get a vCPU register", unsafe { hv_vcpu_get_reg(id, reg, &mut value) })?;
+    Ok(value)
+}
+
+fn set_regs(id: hv_vcpu_t, regs: &[(hv_reg_t, u64)]) -> Result<()> {
+    for &(reg, value) in regs {
+        // SAFETY: this thread owns the vCPU.
+        check("set a vCPU register", unsafe { hv_vcpu_set_reg(id, reg, value) })?;
+    }
+    Ok(())
+}
+
+/// Moves past the instruction that exited: every one that exits here is 4 bytes.
+fn advance_pc(id: hv_vcpu_t) -> Result<()> {
+    let pc = get_reg(id, HV_REG_PC)?;
+    set_regs(id, &[(HV_REG_PC, pc + 4)])
+}
+
+/// When the vCPU's virtual timer fires, if it is on and unmasked: how long a WFI may sleep.
+fn timer_deadline(id: hv_vcpu_t) -> Result<Option<Instant>> {
+    let (mut ctl, mut cval, mut offset) = (0u64, 0u64, 0u64);
+    // SAFETY: this thread owns the vCPU; writes into live locals.
+    unsafe {
+        check("get CNTV_CTL_EL0", hv_vcpu_get_sys_reg(id, HV_SYS_REG_CNTV_CTL_EL0, &mut ctl))?;
+        check("get CNTV_CVAL_EL0", hv_vcpu_get_sys_reg(id, HV_SYS_REG_CNTV_CVAL_EL0, &mut cval))?;
+        check("get the vtimer offset", hv_vcpu_get_vtimer_offset(id, &mut offset))?;
+    }
+    // ENABLE set, IMASK clear.
+    if ctl & 0b11 != 0b01 {
+        return Ok(None);
+    }
+    // SAFETY: no arguments.
+    let now = unsafe { mach_absolute_time() }.wrapping_sub(offset);
+    let ticks = cval.saturating_sub(now);
+    Ok(Some(Instant::now() + ticks_to_duration(ticks)))
+}
+
+/// `ticks` of the host's counter as time.
+fn ticks_to_duration(ticks: u64) -> Duration {
+    static TIMEBASE: std::sync::OnceLock<(u64, u64)> = std::sync::OnceLock::new();
+    let &(numer, denom) = TIMEBASE.get_or_init(|| {
+        let mut info = mach_timebase_info_t::default();
+        // SAFETY: writes into a live local.
+        unsafe { mach_timebase_info(&mut info) };
+        (u64::from(info.numer), u64::from(info.denom.max(1)))
+    });
+    Duration::from_nanos((u128::from(ticks) * u128::from(numer) / u128::from(denom)) as u64)
+}

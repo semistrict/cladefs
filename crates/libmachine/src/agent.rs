@@ -446,7 +446,7 @@ impl Agent {
             return Ok(session);
         }
         let mut entropy = vec![0; RESEED_BYTES];
-        crate::devices::virtio::rng::getrandom(&mut entropy);
+        crate::sys::getrandom(&mut entropy);
         let reseed = Frame::Reseed { generation, entropy };
         session.send(what, &reseed)?;
         match session.recv(what)? {

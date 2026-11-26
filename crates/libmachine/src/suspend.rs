@@ -505,7 +505,7 @@ mod ram {
     /// A new file in `dir`, already unlinked: only its mappings keep it.
     fn unnamed_file(dir: &Path) -> std::io::Result<File> {
         let mut nonce = [0u8; 8];
-        crate::devices::virtio::rng::getrandom(&mut nonce);
+        crate::sys::getrandom(&mut nonce);
         let path = dir.join(format!(".libmachine-suspended.{:016x}", u64::from_le_bytes(nonce)));
         let file = std::fs::OpenOptions::new()
             .read(true)

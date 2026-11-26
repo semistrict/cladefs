@@ -29,10 +29,7 @@ use vm_memory::{Bytes, GuestAddress, GuestMemoryMmap};
 use super::gdt::{self, Segment};
 use super::layout::*;
 use crate::error::{Error, Result};
-
-/// The kernel command line libmachine's platform needs, before the caller's:
-/// the console on COM1, and a panic resets the machine instead of hanging.
-pub(crate) const BASE_CMDLINE: &str = "console=ttyS0 panic=-1";
+use crate::machine::BASE_CMDLINE;
 
 const E820_RAM: u32 = 1;
 const E820_RESERVED: u32 = 2;

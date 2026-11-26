@@ -16,9 +16,9 @@ pub(crate) mod msix;
 use std::ops::Range;
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
-use vmm_sys_util::eventfd::EventFd;
+use crate::sys::EventFd;
 
-use crate::arch::x86_64::layout::{
+use crate::arch::layout::{
     PCI_ECAM_ADDR, PCI_ECAM_LAST_BUS, PCI_ECAM_SIZE, PCI_MMIO32_ADDR, PCI_MMIO32_SIZE,
     PCI_MMIO64_ADDR, PCI_MMIO64_SIZE,
 };

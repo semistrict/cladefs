@@ -20,6 +20,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const PAGE_SIZE: usize = 4096;
+/// The kernel command line libmachine starts every board's with: the console on the UART, and a
+/// panic resets the machine (a sandbox never hangs on one).
+pub(crate) const BASE_CMDLINE: &str = "console=ttyS0 panic=-1";
 /// The UART's IIR bit that says no interrupt is pending (16550).
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const UART_NO_INTERRUPT: u8 = 1;
@@ -177,8 +180,7 @@ pub struct Machine {
     /// The UART's output: what [`serial_output`](Machine::serial_output)
     /// returns, and the console.
     serial: serial::SharedOutput,
-    /// The host's end of the vsock device (PC machines).
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    /// The host's end of the vsock device (board machines).
     vsock: Option<crate::Vsock>,
     /// The network's handle, if the machine has one.
     network: Option<crate::net::Network>,
@@ -225,8 +227,7 @@ struct Live {
     // memory BAR) is unmapped while the VM exists.
     vcpus: Vcpus<MachineVcpu>,
     vm: Arc<backend::Vm>,
-    /// The PCI bus and its virtio devices (PC machines), also on `bus`.
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    /// The PCI bus and its virtio devices (board machines), also on `bus`.
     pci: Option<Arc<crate::devices::Pci>>,
     /// The devices vCPU exits reach.
     bus: Arc<Bus>,
@@ -255,13 +256,7 @@ impl Live {
                 exits: exits.clone(),
             })
             .collect();
-        Ok(Self {
-            vcpus: Vcpus::spawn(runners, stop.clone())?,
-            vm,
-            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-            pci: None,
-            bus,
-        })
+        Ok(Self { vcpus: Vcpus::spawn(runners, stop.clone())?, vm, pci: None, bus })
     }
 }
 
@@ -318,8 +313,8 @@ struct MachineVcpu {
 }
 
 impl VcpuLoop for MachineVcpu {
-    fn immediate_exit_ptr(&mut self) -> *mut u8 {
-        self.vcpu.immediate_exit_ptr()
+    fn kick_target(&mut self) -> crate::backend::kick::KickTarget {
+        self.vcpu.kick_target()
     }
 
     fn run(&mut self, ctl: &RunControl<'_>) -> Option<Result<ExitReason>> {
@@ -434,7 +429,7 @@ struct Kept<'a> {
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn write_generation_id(vm: &backend::Vm) -> Result<()> {
     let mut id = [0u8; 16];
-    crate::devices::virtio::rng::getrandom(&mut id);
+    crate::sys::getrandom(&mut id);
     vm.write_memory(crate::arch::x86_64::layout::VMGENID_ADDR, &id)
 }
 
@@ -541,7 +536,6 @@ impl Machine {
             exits,
             doorbell,
             serial,
-            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
             vsock: None,
             network: None,
             #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -621,7 +615,7 @@ impl Machine {
         let (vm, mut vcpus) = backend::Vm::new(
             config.mem_size,
             config.cpu_model,
-            Platform::Pc,
+            Platform::Board,
             config.vcpus,
             backend::Ram::Anonymous,
         )?;
@@ -651,9 +645,9 @@ impl Machine {
         let pc = PcDevices::new(&vm, card, devices, None, Arc::default())?;
         let output = serial::output(config.serial_capture_limit);
         let serial = serial::new(IrqLine::EventFd(pc.uart_irq), output.clone());
-        let bus = Bus::pc(serial, pc.pci.clone());
+        let bus = Bus::board(serial, pc.pci.clone());
         let mut machine =
-            Self::assemble(vm, vcpus, bus, Platform::Pc, config.mem_size, pc.doorbell, output)?;
+            Self::assemble(vm, vcpus, bus, Platform::Board, config.mem_size, pc.doorbell, output)?;
         if let Body::Live(live) = &mut machine.body {
             live.pci = Some(pc.pci);
         }
@@ -661,6 +655,83 @@ impl Machine {
         machine.network = network;
         machine.net_slot = net_slot;
         machine.caller_devices = caller_devices;
+        Ok(machine)
+    }
+
+    /// Creates the arm64 board and loads `boot`'s kernel (an arm64 `Image`) into it, ready to
+    /// [`run`]: `config.vcpus` vCPUs on Hypervisor.framework, its GICv3 and timers, PSCI, a 16550
+    /// as the console, and a PCI bus with a virtio entropy device (virtio-rng) and a virtio-vsock
+    /// device (guest CID 3, the host's end in this process: [`vsock`](Machine::vsock)); the
+    /// device tree describes them all. vCPU 0 starts at the kernel's entry point; the others wait
+    /// for the kernel to power them on (PSCI CPU_ON).
+    ///
+    /// A process has one Hypervisor.framework VM: while this machine exists, making another
+    /// fails. No network yet (board 13063).
+    ///
+    /// [`run`]: Machine::run
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    pub fn boot_linux(config: MachineConfig, boot: &LinuxBoot) -> Result<Self> {
+        use crate::arch::aarch64::{boot as linux, fdt, layout};
+        use crate::devices::virtio::vsock::{GUEST_CID, VsockDevice};
+        use crate::devices::virtio::{VirtioDevice, rng::Rng};
+
+        check_mem_size(config.mem_size)?;
+        check_vcpus(config.vcpus)?;
+        if config.network.is_some() {
+            return Err(Error::InvalidConfig(
+                "machines on Hypervisor.framework have no network yet; network must be None".into(),
+            ));
+        }
+        let (vm, mut vcpus) = backend::Vm::new(
+            config.mem_size,
+            config.cpu_model,
+            Platform::Board,
+            config.vcpus,
+            backend::Ram::Anonymous,
+        )?;
+        let loaded = linux::load(
+            vm.guest_memory(),
+            config.mem_size as u64,
+            &boot.kernel,
+            boot.initrd.as_deref(),
+        )?;
+        let cmdline = match boot.cmdline.as_str() {
+            "" => BASE_CMDLINE.to_owned(),
+            theirs => format!("{BASE_CMDLINE} {theirs}"),
+        };
+        let mut rng_seed = [0u8; 64];
+        crate::sys::getrandom(&mut rng_seed);
+        let gic = vm.gic();
+        let tree = fdt::device_tree(&fdt::Board {
+            vcpus: config.vcpus,
+            mem_size: config.mem_size as u64,
+            cmdline: &cmdline,
+            initrd: loaded.initrd,
+            gic_dist_size: gic.dist_size,
+            gic_msi_size: gic.msi_size,
+            rng_seed,
+        })?;
+        if tree.len() as u64 > linux::FDT_MAX {
+            return Err(Error::InvalidConfig(format!(
+                "the device tree takes {} bytes, past the {} its place holds",
+                tree.len(),
+                linux::FDT_MAX
+            )));
+        }
+        vm.write_memory(loaded.fdt, &tree)?;
+        vcpus[0].set_boot_cpu(&linux::boot_cpu(&loaded))?;
+
+        let (vsock_device, vsock) = VsockDevice::new(GUEST_CID)?;
+        let devices: Vec<Box<dyn VirtioDevice>> = vec![Box::new(Rng), Box::new(vsock_device)];
+        let doorbell: Arc<Doorbell> = Arc::default();
+        let pci = Arc::new(crate::devices::Pci::new(devices, vm.guest_memory(), &vm, &doorbell)?);
+        let output = serial::output(config.serial_capture_limit);
+        let uart = IrqLine::Spi(vm.shared().clone(), layout::UART_SPI);
+        let bus = Bus::board(serial::new(uart, output.clone()), pci.clone());
+        let mut machine =
+            Self::assemble(vm, vcpus, bus, Platform::Board, config.mem_size, doorbell, output)?;
+        machine.live_mut()?.pci = Some(pci);
+        machine.vsock = Some(vsock);
         Ok(machine)
     }
 
@@ -683,7 +754,7 @@ impl Machine {
     /// idle guest.
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     pub fn snapshot(&mut self, path: impl AsRef<std::path::Path>) -> Result<()> {
-        if self.platform != Platform::Pc {
+        if self.platform != Platform::Board {
             return Err(Error::Snapshot(
                 "only PC machines (Machine::boot_linux) can be snapshotted".into(),
             ));
@@ -1131,7 +1202,7 @@ impl Machine {
             true,
         )?;
         let mut machine =
-            Self::from_live(live, Platform::Pc, config.mem_size, stop, exits, doorbell, output);
+            Self::from_live(live, Platform::Board, config.mem_size, stop, exits, doorbell, output);
         machine.vsock = Some(vsock);
         machine.ram_file = Some(crate::suspend::RamFile {
             file: snapshot.file().clone(),
@@ -1163,7 +1234,7 @@ impl Machine {
         let (vm, vcpus) = backend::Vm::new(
             config.mem_size,
             config.cpu_model,
-            Platform::Pc,
+            Platform::Board,
             config.vcpus,
             backend::Ram::Snapshot { file, offsets },
         )?;
@@ -1195,7 +1266,7 @@ impl Machine {
             vm.set_irq_line(GED_IRQ, true)?;
             vm.set_irq_line(GED_IRQ, false)?;
         }
-        let bus = Bus::pc(serial, pc.pci.clone());
+        let bus = Bus::board(serial, pc.pci.clone());
         let mut live = Live::spawn(vm, vcpus, bus, kept.stop, kept.exits)?;
         live.pci = Some(pc.pci);
         if clone {
@@ -1321,6 +1392,7 @@ impl Machine {
 
     /// Points vCPU 0 at `addr` in 16-bit real mode (CS base 0, IP = `addr`).
     /// `addr` must be below 64 KiB.
+    #[cfg(target_arch = "x86_64")]
     pub fn set_entry(&mut self, addr: u64) -> Result<()> {
         if addr > 0xffff {
             return Err(Error::InvalidConfig(format!(
@@ -1328,6 +1400,14 @@ impl Machine {
             )));
         }
         self.live_mut()?.vcpus.get(0).vcpu.set_real_mode_entry(addr)
+    }
+
+    /// Points vCPU 0 at `addr`, at EL1 with its MMU off and interrupts masked, as a kernel's
+    /// entry is.
+    #[cfg(target_arch = "aarch64")]
+    pub fn set_entry(&mut self, addr: u64) -> Result<()> {
+        let cpu = crate::arch::aarch64::boot::BootCpu { pc: addr, x: [0; 4] };
+        self.live_mut()?.vcpus.get(0).vcpu.set_boot_cpu(&cpu)
     }
 
     /// vCPU 0's register state (not while the machine is suspended: they
@@ -1380,19 +1460,17 @@ impl Machine {
         self.live().map(|live| live.vcpus.thread_cpu_times()).unwrap_or_default()
     }
 
-    /// The host's end of the machine's vsock (PC machines only): connect to
+    /// The host's end of the machine's vsock (board machines only): connect to
     /// the guest's ports and accept its connections, from any thread,
     /// including while another is in [`run`](Machine::run), and across
     /// suspensions.
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     pub fn vsock(&self) -> Option<crate::Vsock> {
         self.vsock.clone()
     }
 
     /// The guest agent (`libmachine-agent`) on the machine's vsock, at its
-    /// default port (PC machines only); usable from any thread like
+    /// default port (board machines only); usable from any thread like
     /// [`vsock`](Machine::vsock).
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     pub fn agent(&self) -> Option<crate::agent::Agent> {
         self.vsock.clone().map(crate::agent::Agent::new)
     }

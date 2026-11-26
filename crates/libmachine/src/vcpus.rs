@@ -35,16 +35,16 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 use std::time::Instant;
 
-use crate::backend::kick::VcpuThreadScope;
+use crate::backend::kick::{KickTarget, VcpuThreadScope};
 use crate::error::{Error, Result};
 use crate::machine::ExitReason;
 use crate::stop::StopShared;
 
 /// What a vCPU thread runs.
 pub(crate) trait VcpuLoop: Send + 'static {
-    /// The `immediate_exit` byte that the kick signal sets for this vCPU
-    /// (`backend::kick`). It must stay valid as long as the value lives.
-    fn immediate_exit_ptr(&mut self) -> *mut u8;
+    /// What the kick needs to reach this vCPU (`backend::kick`): on KVM, the `immediate_exit`
+    /// byte the kick signal sets, which must stay valid as long as the value lives.
+    fn kick_target(&mut self) -> KickTarget;
 
     /// Runs the vCPU until it ends the run (`Some(outcome)`), or until
     /// [`RunControl::check`], which it calls before every entry into the
@@ -355,10 +355,10 @@ fn vcpu_thread<V: VcpuLoop>(
     shared: Arc<Shared>,
     ready: mpsc::SyncSender<Result<()>>,
 ) {
-    let immediate_exit = lock(&vcpu).immediate_exit_ptr();
-    // SAFETY: the pointer is this thread's vCPU's, which `vcpu` keeps alive
+    let target = lock(&vcpu).kick_target();
+    // SAFETY: the target is this thread's vCPU's, which `vcpu` keeps alive
     // until after the scope (declared later, dropped first).
-    let scope = unsafe { VcpuThreadScope::enter(immediate_exit) };
+    let scope = unsafe { VcpuThreadScope::enter(target) };
     let _scope = match scope {
         Ok(scope) => scope,
         Err(e) => {
@@ -368,7 +368,7 @@ fn vcpu_thread<V: VcpuLoop>(
     };
     // Dropped before `_scope`: the thread is never kicked once it
     // unregisters.
-    let _registration = shared.stop.register_current_thread();
+    let _registration = shared.stop.register(_scope.kicker());
     let _ = ready.send(Ok(()));
     drop(ready);
 
@@ -432,15 +432,14 @@ mod tests {
     }
 
     struct Fake {
-        kick: Box<u8>,
         script: Arc<Mutex<Script>>,
         /// Runs this vCPU took part in.
         runs: Arc<AtomicU64>,
     }
 
     impl VcpuLoop for Fake {
-        fn immediate_exit_ptr(&mut self) -> *mut u8 {
-            &mut *self.kick
+        fn kick_target(&mut self) -> KickTarget {
+            crate::backend::kick::fake_target()
         }
 
         fn run(&mut self, ctl: &RunControl<'_>) -> Option<Result<ExitReason>> {
@@ -473,9 +472,8 @@ mod tests {
         let stop = Arc::new(StopShared::default());
         let scripts: Vec<_> = (0..n).map(|_| Arc::new(Mutex::new(Script::Spin))).collect();
         let runs: Vec<_> = (0..n).map(|_| Arc::new(AtomicU64::new(0))).collect();
-        let fakes = (0..n)
-            .map(|i| Fake { kick: Box::new(0), script: scripts[i].clone(), runs: runs[i].clone() })
-            .collect();
+        let fakes =
+            (0..n).map(|i| Fake { script: scripts[i].clone(), runs: runs[i].clone() }).collect();
         Machine {
             vcpus: Vcpus::spawn(fakes, stop.clone()).unwrap(),
             scripts,

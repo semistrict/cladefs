@@ -71,30 +71,13 @@ fn fill_random(mem: &GuestMemoryMmap, addr: GuestAddress, len: u32) -> u32 {
     let mut done = 0u32;
     while done < len {
         let n = (len - done).min(buf.len() as u32) as usize;
-        getrandom(&mut buf[..n]);
+        crate::sys::getrandom(&mut buf[..n]);
         if mem.write_slice(&buf[..n], addr.unchecked_add(u64::from(done))).is_err() {
             break;
         }
         done += n as u32;
     }
     done
-}
-
-/// Fills `buf` from the kernel's random number generator.
-pub(crate) fn getrandom(buf: &mut [u8]) {
-    let mut filled = 0;
-    while filled < buf.len() {
-        let rest = &mut buf[filled..];
-        // SAFETY: the kernel writes at most `rest.len()` bytes to `rest`.
-        let n = unsafe { libc::getrandom(rest.as_mut_ptr().cast(), rest.len(), 0) };
-        if n > 0 {
-            filled += n as usize;
-        } else if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
-            // getrandom cannot fail on a booted Linux; never hand out
-            // zeroes as entropy if it somehow does.
-            panic!("getrandom failed: {}", std::io::Error::last_os_error());
-        }
-    }
 }
 
 #[cfg(test)]

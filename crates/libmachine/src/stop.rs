@@ -7,7 +7,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::backend::kick::Thread;
+use crate::backend::kick::Kicker;
 use crate::suspend::Doorbell;
 
 /// Stops a [`Machine`](crate::Machine)'s [`run`](crate::Machine::run) from
@@ -28,7 +28,7 @@ pub(crate) struct StopShared {
     /// The machine's vCPU threads. Each registers when it starts and
     /// unregisters under this lock before it exits, so a thread that has
     /// exited is never kicked.
-    threads: Mutex<Vec<Thread>>,
+    threads: Mutex<Vec<Kicker>>,
     /// A suspended machine waits on it: a stop ends that wait too.
     doorbell: Arc<Doorbell>,
 }
@@ -53,7 +53,7 @@ impl StopShared {
         Self { doorbell, ..Self::default() }
     }
 
-    fn lock_threads(&self) -> std::sync::MutexGuard<'_, Vec<Thread>> {
+    fn lock_threads(&self) -> std::sync::MutexGuard<'_, Vec<Kicker>> {
         self.threads.lock().unwrap_or_else(|e| e.into_inner())
     }
 
@@ -68,24 +68,22 @@ impl StopShared {
         self.requested.store(true, Ordering::SeqCst);
     }
 
-    /// Kicks every vCPU thread out of `KVM_RUN`, or makes its next `KVM_RUN`
-    /// return at once.
+    /// Kicks every vCPU out of the guest, or makes its next entry return at once.
     pub(crate) fn kick_all(&self) {
         for thread in self.lock_threads().iter() {
             thread.kick();
         }
     }
 
-    /// Registers the current thread as one of the machine's vCPU threads
-    /// until the returned guard drops.
-    pub(crate) fn register_current_thread(&self) -> Registration<'_> {
-        let thread = Thread::current();
-        self.lock_threads().push(thread);
-        Registration(self, thread)
+    /// Registers one of the machine's vCPU threads, by what kicks it, until the returned guard
+    /// drops.
+    pub(crate) fn register(&self, kicker: Kicker) -> Registration<'_> {
+        self.lock_threads().push(kicker.clone());
+        Registration(self, kicker)
     }
 }
 
-pub(crate) struct Registration<'a>(&'a StopShared, Thread);
+pub(crate) struct Registration<'a>(&'a StopShared, Kicker);
 
 impl Drop for Registration<'_> {
     fn drop(&mut self) {

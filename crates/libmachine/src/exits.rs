@@ -27,7 +27,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ExitCounts {
-    /// Port I/O to the COM1 UART.
+    /// Accesses to the UART: port I/O to COM1 on a PC, MMIO on the arm64 board.
     pub serial: u64,
     /// Port I/O to the ACPI registers (sleep control and status, reset).
     pub acpi: u64,
@@ -50,6 +50,14 @@ pub struct ExitCounts {
     /// A vCPU waiting for its startup IPI woke (INIT or startup IPI from the
     /// guest): PC machines with several vCPUs, once or twice per AP a boot.
     pub startup: u64,
+    /// A hypercall (HVC) the guest made: PSCI, on the arm64 board.
+    pub hypercall: u64,
+    /// A wait for an interrupt (WFI) that left the guest: the arm64 board on
+    /// Hypervisor.framework, whose vCPU thread then sleeps until one comes.
+    pub wait: u64,
+    /// A system register access the hypervisor left to libmachine (arm64:
+    /// debug and OS lock registers, read as zero).
+    pub system_register: u64,
     /// Anything else: a triple fault, an entry failure, an internal error,
     /// an exit libmachine does not handle, an error from the hypervisor.
     pub other: u64,
@@ -66,9 +74,12 @@ const NAMES: [&str; KINDS] = [
     "halt",
     "interrupted",
     "startup",
+    "hypercall",
+    "wait",
+    "system_register",
     "other",
 ];
-const KINDS: usize = 10;
+const KINDS: usize = 13;
 
 impl ExitCounts {
     /// Every kind's name (the field's) and count, in a fixed order.
@@ -93,6 +104,9 @@ impl ExitCounts {
             self.halt,
             self.interrupted,
             self.startup,
+            self.hypercall,
+            self.wait,
+            self.system_register,
             self.other,
         ]
     }
@@ -108,6 +122,9 @@ impl ExitCounts {
             halt,
             interrupted,
             startup,
+            hypercall,
+            wait,
+            system_register,
             other,
         ] = v;
         Self {
@@ -120,6 +137,9 @@ impl ExitCounts {
             halt,
             interrupted,
             startup,
+            hypercall,
+            wait,
+            system_register,
             other,
         }
     }
@@ -181,6 +201,13 @@ pub(crate) enum ExitKind {
     Halt,
     Interrupted,
     Startup,
+    // Hypervisor.framework's exits: KVM handles these in the kernel.
+    #[cfg_attr(target_os = "linux", allow(dead_code, reason = "HVF's exits"))]
+    Hypercall,
+    #[cfg_attr(target_os = "linux", allow(dead_code, reason = "HVF's exits"))]
+    Wait,
+    #[cfg_attr(target_os = "linux", allow(dead_code, reason = "HVF's exits"))]
+    SystemRegister,
     Other,
 }
 
@@ -217,6 +244,9 @@ mod tests {
         ExitKind::Halt,
         ExitKind::Interrupted,
         ExitKind::Startup,
+        ExitKind::Hypercall,
+        ExitKind::Wait,
+        ExitKind::SystemRegister,
         ExitKind::Other,
     ];
 

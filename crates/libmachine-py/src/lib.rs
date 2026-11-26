@@ -1234,7 +1234,8 @@ impl Machine {
     /// How many vCPU exits of each kind the machine has taken since it was
     /// created, over all its vCPUs: a dict from kind ("serial", "acpi",
     /// "unclaimed_io", "pci_config", "pci_bar", "unclaimed_mmio", "halt",
-    /// "interrupted", "startup", "other") to count.
+    /// "interrupted", "startup", "hypercall", "wait", "system_register",
+    /// "other") to count.
     fn exit_counts<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let counts = PyDict::new(py);
         for (kind, n) in self.inner.exit_counts().kinds() {

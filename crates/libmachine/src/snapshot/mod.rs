@@ -167,7 +167,7 @@ pub(crate) fn write(
         .file_name()
         .ok_or_else(|| Error::InvalidConfig(format!("{} names no file", path.display())))?;
     let mut nonce = [0u8; 8];
-    crate::devices::virtio::rng::getrandom(&mut nonce);
+    crate::sys::getrandom(&mut nonce);
     let temp =
         dir.join(format!(".{}.{:016x}.tmp", name.to_string_lossy(), u64::from_le_bytes(nonce)));
     let written = (|| -> std::io::Result<()> {
@@ -425,5 +425,6 @@ fn not_a_snapshot(path: &Path, why: &str) -> Error {
     Error::Snapshot(format!("{} is not a usable snapshot: {why}", path.display()))
 }
 
-#[cfg(test)]
+// Its tests restore KVM machines.
+#[cfg(all(test, target_os = "linux"))]
 mod tests;

@@ -7,16 +7,12 @@
 pub(crate) mod bus;
 #[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
 pub(crate) mod guest_tests;
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub(crate) mod pci;
 pub(crate) mod serial;
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub(crate) mod virtio;
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub(crate) use pc::Pci;
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod pc {
     use std::sync::{Arc, Mutex};
 
@@ -26,7 +22,7 @@ mod pc {
     use super::virtio::VirtioDevice;
     use super::virtio::pci::VirtioPci;
     use super::virtio::worker::DeviceThread;
-    use crate::arch::x86_64::layout::PCI_MSI_GSI_BASE;
+    use crate::arch::layout::PCI_MSI_GSI_BASE;
     use crate::error::{Error, Result};
 
     /// A PC's PCI bus with its virtio devices, and the thread that runs

@@ -154,6 +154,8 @@ virtio-queue = "0.18.0"
 vm-memory = { version = "0.18.0", features = ["backend-mmap"] }
 vm-superio = "0.8.2"
 vmm-sys-util = "0.15.0"
+# libmachine's arm64 device tree (Apache-2.0 OR BSD-3-Clause).
+vm-fdt = "0.3.0"
 # libmachine's Python bindings (crates/libmachine-py; MIT OR Apache-2.0).
 pyo3 = "0.30.1"
 # The network stack libmachine's guests reach the host through (0BSD): 0.12.0, the release the

@@ -63,6 +63,9 @@ fn every_exit_is_counted_by_its_kind() {
         // Each run ended on the vCPU's own exit: no kick reached KVM_RUN.
         ("interrupted", 0),
         ("startup", 0),
+        ("hypercall", 0),
+        ("wait", 0),
+        ("system_register", 0),
         ("other", 0),
     ];
     assert_eq!(c.kinds(), expected, "{c}");

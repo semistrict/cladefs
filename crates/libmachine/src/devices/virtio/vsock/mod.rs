@@ -18,7 +18,8 @@
 //! section 5.10.3: without VIRTIO_VSOCK_F_STREAM or SEQPACKET negotiated,
 //! stream is implied).
 
-#[cfg(test)]
+// They boot the PC's test guest.
+#[cfg(all(test, target_os = "linux"))]
 mod guest_tests;
 mod host;
 pub(crate) mod packet;
@@ -28,9 +29,9 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::sys::{EFD_NONBLOCK, EventFd};
 use virtio_queue::DescriptorChain;
 use vm_memory::{Bytes, GuestMemoryMmap};
-use vmm_sys_util::eventfd::{EFD_NONBLOCK, EventFd};
 
 use host::Shared;
 pub use host::{Vsock, VsockListener, VsockStream};
@@ -103,7 +104,7 @@ fn wake_fds() -> Result<(EventFd, EventFd)> {
 fn nonzero_random() -> u64 {
     loop {
         let mut b = [0; 8];
-        super::rng::getrandom(&mut b);
+        crate::sys::getrandom(&mut b);
         let n = u64::from_le_bytes(b);
         if n != 0 {
             break n;
@@ -1279,6 +1280,7 @@ mod tests {
     /// suspended (as the device would have put nothing in its queue); a
     /// connect owes it a request and wakes it.
     #[test]
+    #[cfg(target_os = "linux")]
     fn the_watcher_wakes_only_for_what_the_guest_is_owed() {
         use crate::suspend::{Doorbell, Watcher, Woken};
         let (device, vsock) = VsockDevice::new(GUEST_CID).unwrap();

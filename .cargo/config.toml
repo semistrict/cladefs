@@ -26,3 +26,9 @@ CLADEFSD_HEADROOM = { value = "0", force = false }
 # the credentials CLADEFSD_PEER_TLS names, and refuses to start without. A variable set outright
 # keeps its value.
 CLADEFSD_PEER_TLS = { value = "crates/cladefs/tests/peer-tls", relative = true, force = false }
+
+# libmachine: on macOS every executable is signed as it is linked, with the hypervisor entitlement
+# (scripts/macos-link.sh), as Hypervisor.framework requires of a process that makes VMs (board
+# 13063). Not rustflags: nothing compiles again for it, binaries link again.
+[target.aarch64-apple-darwin]
+linker = "scripts/macos-link.sh"

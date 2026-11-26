@@ -8,9 +8,11 @@
 //!
 //! Each device guards its own state: the UART sits behind a mutex, the ACPI
 //! registers have no state, and the PCI bus locks per function (with its
-//! trapped-BAR table behind a read-write lock).
+//! trapped-BAR table behind a read-write lock). On a PC the UART and the ACPI
+//! registers are I/O ports; on the arm64 board the UART is MMIO, and power
+//! goes through PSCI, which the backend handles.
 
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::backend::{self, Exit, Platform};
 use crate::devices::serial::Serial;
@@ -25,33 +27,34 @@ use crate::arch::x86_64::layout::{
 };
 
 /// COM1 and its eight registers.
+#[cfg(target_arch = "x86_64")]
 const COM1: std::ops::Range<u16> = 0x3f8..0x400;
 /// SLP_EN in the sleep control register.
+#[cfg(target_arch = "x86_64")]
 const ACPI_SLP_EN: u8 = 1 << 5;
+/// The UART's eight registers, a byte apart.
+#[cfg(target_arch = "aarch64")]
+const UART: std::ops::Range<u64> = {
+    use crate::arch::aarch64::layout::UART_ADDR;
+    UART_ADDR..UART_ADDR + 8
+};
 
 /// Every device a vCPU exit can reach.
 pub(crate) struct Bus {
     platform: Platform,
     serial: Mutex<Serial>,
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    pci: Option<std::sync::Arc<crate::devices::Pci>>,
+    pci: Option<Arc<crate::devices::Pci>>,
 }
 
 impl Bus {
     /// A bare machine's bus: the UART alone, every other access reported.
     pub(crate) fn bare(serial: Serial) -> Self {
-        Self {
-            platform: Platform::Bare,
-            serial: Mutex::new(serial),
-            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-            pci: None,
-        }
+        Self { platform: Platform::Bare, serial: Mutex::new(serial), pci: None }
     }
 
-    /// A PC's bus: the UART, the ACPI registers and the PCI bus.
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    pub(crate) fn pc(serial: Serial, pci: std::sync::Arc<crate::devices::Pci>) -> Self {
-        Self { platform: Platform::Pc, serial: Mutex::new(serial), pci: Some(pci) }
+    /// The board's bus: the UART, the PCI bus, and on a PC the ACPI registers.
+    pub(crate) fn board(serial: Serial, pci: Arc<crate::devices::Pci>) -> Self {
+        Self { platform: Platform::Board, serial: Mutex::new(serial), pci: Some(pci) }
     }
 
     /// The UART.
@@ -60,10 +63,11 @@ impl Bus {
     }
 
     /// The kind of exit an access to `port` is, by the device at it.
+    #[cfg(target_arch = "x86_64")]
     fn io_kind(&self, port: u16) -> ExitKind {
         if COM1.contains(&port) {
             ExitKind::Serial
-        } else if self.platform == Platform::Pc && is_acpi_port(port) {
+        } else if self.platform == Platform::Board && is_acpi_port(port) {
             ExitKind::Acpi
         } else {
             ExitKind::UnclaimedIo
@@ -73,6 +77,7 @@ impl Bus {
     /// Writes one byte to `port`: COM1, the ACPI registers (on a PC), or
     /// nothing. `Some(reason)` if the write powers the machine off or
     /// resets it.
+    #[cfg(target_arch = "x86_64")]
     fn write_port(&self, port: u16, byte: u8, pc: bool) -> Result<Option<ExitReason>> {
         if COM1.contains(&port) {
             self.serial().write((port - COM1.start) as u8, byte).map_err(|e| {
@@ -91,6 +96,7 @@ impl Bus {
 
     /// Reads one byte from `port`: COM1, the ACPI registers (zero), or, on a
     /// PC, an unclaimed port (all ones, as on hardware).
+    #[cfg(target_arch = "x86_64")]
     fn read_port(&self, port: u16, pc: bool) -> u8 {
         if COM1.contains(&port) {
             self.serial().read((port - COM1.start) as u8)
@@ -113,10 +119,9 @@ impl Bus {
         vm: &backend::Vm,
         counts: &ExitCounters,
     ) -> Result<Option<ExitReason>> {
-        #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
-        let _ = vm;
-        let pc = self.platform == Platform::Pc;
+        let pc = self.platform == Platform::Board;
         match exit {
+            #[cfg(target_arch = "x86_64")]
             Exit::IoOut { port, size, data } => {
                 counts.count(self.io_kind(port));
                 if !pc && !COM1.contains(&port) {
@@ -136,6 +141,7 @@ impl Bus {
                     return Ok(ended);
                 }
             }
+            #[cfg(target_arch = "x86_64")]
             Exit::IoIn { port, size, data } => {
                 counts.count(self.io_kind(port));
                 if !pc && !COM1.contains(&port) {
@@ -148,8 +154,23 @@ impl Bus {
                     }
                 }
             }
+            #[cfg(target_arch = "aarch64")]
+            Exit::MmioWrite { addr, data } if UART.contains(&addr) => {
+                counts.count(ExitKind::Serial);
+                self.serial().write((addr - UART.start) as u8, data[0]).map_err(|e| {
+                    Error::Hypervisor {
+                        op: "raise the UART's interrupt",
+                        source: std::io::Error::other(e.to_string()),
+                    }
+                })?;
+            }
+            #[cfg(target_arch = "aarch64")]
+            Exit::MmioRead { addr, data } if UART.contains(&addr) => {
+                counts.count(ExitKind::Serial);
+                data.fill(0);
+                data[0] = self.serial().read((addr - UART.start) as u8);
+            }
             Exit::MmioWrite { addr, data } => {
-                #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
                 if let Some(pci) = &self.pci {
                     // Copied, so that the device may use the VM (to route an
                     // interrupt, map a BAR) while handling the write.
@@ -172,7 +193,6 @@ impl Bus {
                 }
             }
             Exit::MmioRead { addr, data } => {
-                #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
                 if self.pci.as_ref().is_some_and(|pci| pci.mmio_read(addr, data)) {
                     counts.count(pci_kind(addr));
                     return Ok(None);
@@ -188,6 +208,7 @@ impl Bus {
                 }
             }
             Exit::Interrupted => counts.count(ExitKind::Interrupted),
+            Exit::Handled(kind) => counts.count(kind),
             Exit::Startup => counts.count(ExitKind::Startup),
             Exit::Done(reason) => {
                 counts.count(match reason {
@@ -203,9 +224,8 @@ impl Bus {
 
 /// The kind of an MMIO exit the PCI bus handled: configuration space
 /// (ECAM), else a function's BAR.
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn pci_kind(addr: u64) -> ExitKind {
-    use crate::arch::x86_64::layout::{PCI_ECAM_ADDR, PCI_ECAM_SIZE};
+    use crate::arch::layout::{PCI_ECAM_ADDR, PCI_ECAM_SIZE};
     if (PCI_ECAM_ADDR..PCI_ECAM_ADDR + PCI_ECAM_SIZE).contains(&addr) {
         ExitKind::PciConfig
     } else {
