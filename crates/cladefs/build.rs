@@ -3,16 +3,17 @@
 // found in the LICENSE file.
 
 //! Refuses release builds without frame pointers and compresses debug sections in Linux release
-//! binaries (`cladefsd`, `cladefsctl`, `cladefs-mount`).
+//! binaries (`cladefsd`, `cladefsctl`, `cladefs-mount`), as bucket_cell's `cladefs-gc` does too
+//! ([`release_link`], board 10269, board 12766).
 
 #[path = "build/stamp.rs"]
 #[allow(dead_code)]
 mod stamp;
 
+#[path = "build/release_link.rs"]
+mod release_link;
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     stamp::require_frame_pointers()?;
-    if std::env::var("PROFILE")? == "release" && std::env::var("CARGO_CFG_TARGET_OS")? == "linux" {
-        println!("cargo:rustc-link-arg-bins=-Wl,--compress-debug-sections=zlib");
-    }
-    Ok(())
+    release_link::compress_debug_sections()
 }
