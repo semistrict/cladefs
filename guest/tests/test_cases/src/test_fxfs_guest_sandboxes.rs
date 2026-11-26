@@ -273,7 +273,7 @@ RUN apk add --no-cache postgresql postgresql-contrib git
         name: &'static str,
         daemon: std::process::Child,
         socket: PathBuf,
-        base: PathBuf,
+        base: cladefs::CellId,
     }
 
     /// A VM of the run, by its number: its role, its host, and whether its own cell, if it has
@@ -329,16 +329,14 @@ RUN apk add --no-cache postgresql postgresql-contrib git
         sandbox: &Sandbox,
         mode: &Mode,
     ) -> anyhow::Result<Firecracker> {
-        let dir = &test_setup.tmp_dir;
         let host = &hosts[sandbox.host];
         let name = sandbox.name();
-        let fork = dir.join(format!("{name}.root"));
-        control(&host.socket)?
+        let fork = control(&host.socket)?
             .call(async |client| {
                 client
                     .fork_cell(ForkCellRequest {
-                        from: control_path(&host.base),
-                        to: control_path(&fork),
+                        tenant: host.base.tenant,
+                        cell: host.base.id,
                         ..Default::default()
                     })
                     .await
@@ -349,12 +347,11 @@ RUN apk add --no-cache postgresql postgresql-contrib git
         machine.guest_kernel()?;
         let (root_window, data_window) = mode.windows;
         let root_window = if sandbox.role == Role::Builder { root_window } else { 0 };
-        machine.cell_served("root", &fork, ROOT_CAPACITY, root_window, &host.socket);
+        machine.cell_id_served("root", fork, ROOT_CAPACITY, root_window, &host.socket);
         machine.fxfs_root("root");
         if sandbox.role != Role::Builder {
             let window = if sandbox.dax { data_window } else { 0 };
-            let data = dir.join(format!("{name}.data"));
-            machine.cell_served("extents", &data, DATA_CAPACITY, window, &host.socket);
+            machine.new_cell_served("extents", DATA_CAPACITY, window, &host.socket);
         }
         let mut env = vec![
             ("CLADEFS_SANDBOX_ROLE", sandbox.role.name().to_owned()),
@@ -596,13 +593,11 @@ RUN apk add --no-cache postgresql postgresql-contrib git
                     &env,
                     Some(mode.daemon_memory),
                 )?;
-                let base = dir.join(format!("{name}.base"));
                 let imported = Instant::now();
-                control(&socket)?
+                let base = control(&socket)?
                     .call(async |client| {
                         client
                             .import_image(ImportImageRequest {
-                                path: control_path(&base),
                                 capacity: ROOT_CAPACITY,
                                 image: control_path(&layout),
                                 reference: String::new(),
@@ -772,9 +767,10 @@ RUN apk add --no-cache postgresql postgresql-contrib git
             for entry in std::fs::read_dir(dir)? {
                 let path = entry?.path();
                 let name = path.file_name().unwrap_or_default().to_string_lossy();
-                let bulky =
-                    [".root", ".data", ".base", "-cache"].iter().any(|end| name.ends_with(end))
-                        || ["sandbox-image", "rootfs"].contains(&&*name);
+                let bulky = [".root", ".data", ".base", "-cache", "-disk0"]
+                    .iter()
+                    .any(|end| name.ends_with(end))
+                    || ["sandbox-image", "rootfs"].contains(&&*name);
                 if bulky && path.is_dir() {
                     std::fs::remove_dir_all(&path)
                         .with_context(|| format!("removing {}", path.display()))?;

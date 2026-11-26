@@ -63,8 +63,9 @@ pub(crate) struct Vm {
     pub build: Option<String>,
     /// Its window's second stage, as it said ([`super::wire::STAGE_COUNTS`]).
     pub stage: StageCounts,
-    /// The runs of pages its second stage keeps installed at most, if it said
-    /// ([`super::wire::WINDOW`]).
+    /// The runs of pages its second stage keeps installed at most, if it said: as it made its
+    /// window ([`super::wire::WINDOW`]), or as it last said since ([`super::wire::STAGE_COUNTS`],
+    /// board 10098).
     pub budget: Option<u64>,
     /// Its window's mappings, the daemon's, if it has a window.
     pub window: Option<Live>,
@@ -260,9 +261,13 @@ pub(super) struct Report {
     /// cladefs: and its runs of private pages, and the `PRIVATE`s it served
     /// ([`super::wire::STAGE_PRIVATE_COUNTS`], TASK-164.10).
     private_costs: [AtomicU64; 5],
-    /// Its window's gauges, and the runs of pages its VM process said its second stage keeps
-    /// installed at most, 0 if it didn't ([`super::wire::WINDOW`]), once it has one.
-    window: OnceLock<(Arc<Gauges>, u64)>,
+    /// Its window's gauges, once it has one.
+    window: OnceLock<Arc<Gauges>>,
+    /// The runs of pages its VM process said its window's second stage keeps installed at most, 0
+    /// if it didn't: as it made it ([`super::wire::WINDOW`]), then as it last said
+    /// ([`super::wire::STAGE_COUNTS`]), its share of its process's windows', which another window
+    /// coming or going changes (board 10098).
+    budget: AtomicU64,
     /// The asks for its VM process's stats it has yet to answer ([`super::wire::STATS_ASK`]).
     asked: Mutex<Vec<Asked>>,
 }
@@ -314,6 +319,7 @@ impl Report {
             private: AtomicU64::new(0),
             private_costs: Default::default(),
             window: OnceLock::new(),
+            budget: AtomicU64::new(0),
             asked: Mutex::new(Vec::new()),
         });
         daemon.stats_reports.lock().unwrap().push(Arc::downgrade(&report));
@@ -329,8 +335,9 @@ impl Report {
     /// The connection made its window, whose gauges are `gauges`, its VM process keeping `budget`
     /// runs of pages installed at most, 0 if it didn't say.
     pub fn windowed(&self, gauges: Arc<Gauges>, budget: u64) {
-        let windowed = self.window.set((gauges, budget));
+        let windowed = self.window.set(gauges);
         assert!(windowed.is_ok(), "a connection made a second window");
+        self.budget.store(budget, Ordering::Relaxed);
     }
 
     /// Records the build its VM process says, `commit` ([`super::wire::BUILD`], TASK-111.7):
@@ -359,6 +366,10 @@ impl Report {
         }
         self.installed.store(counts.installed, Ordering::Relaxed);
         self.private.store(counts.private, Ordering::Relaxed);
+        // cladefs: its budget as it is now, if it says (board 10098).
+        if counts.budget != 0 {
+            self.budget.store(counts.budget, Ordering::Relaxed);
+        }
     }
 
     /// cladefs: counts what its VM process says its runs of private pages have cost it so far,
@@ -387,14 +398,16 @@ impl Report {
         let installed = self.installed.load(Ordering::Relaxed);
         let private = self.private.load(Ordering::Relaxed);
         let window = self.window.get();
+        let budget = self.budget.load(Ordering::Relaxed);
         Some(Vm {
             connection: self.id,
             cell: *cell,
             path: path.clone(),
             build: self.build.get().cloned(),
-            stage: StageCounts { costs, installed, private },
-            budget: window.and_then(|(_, budget)| (*budget != 0).then_some(*budget)),
-            window: window.map(|(gauges, _)| gauges.live()),
+            // Its budget [`Vm::budget`]'s.
+            stage: StageCounts { costs, installed, private, budget: 0 },
+            budget: window.and((budget != 0).then_some(budget)),
+            window: window.map(|gauges| gauges.live()),
             answered: None,
             guest: None,
         })

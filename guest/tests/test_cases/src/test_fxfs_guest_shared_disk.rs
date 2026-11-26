@@ -128,10 +128,9 @@ mod host {
         vm: u64,
     ) -> anyhow::Result<Firecracker> {
         let name = format!("vm-{vm}");
-        let cell_dir = test_setup.tmp_dir.join(format!("store-{vm}"));
         let mut machine = Vm::new(2, VM_MEMORY_MIB)?;
         machine.guest_kernel()?;
-        machine.cell_served("extents", &cell_dir, CAPACITY, window, socket);
+        machine.new_cell_served("extents", CAPACITY, window, socket);
         for var in [
             "CLADEFS_SHARED_DISK_LARGE_MIB",
             "CLADEFS_SHARED_DISK_FILES",

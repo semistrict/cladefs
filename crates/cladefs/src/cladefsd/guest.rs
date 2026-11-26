@@ -79,6 +79,18 @@ impl Guest {
         Ok(Opened::decode(&reply.header)?.cell)
     }
 
+    /// Opens an existing managed cell `cell` (hotbed question 547).
+    pub async fn open_cell(&self, cell: crate::CellId) -> Result<u64, Errno> {
+        self.open(Path::new(&cell.to_string()), 0).await
+    }
+
+    /// Creates and opens a new managed cell for `tenant` with `capacity` bytes on a daemon-chosen
+    /// disk (hotbed question 547).
+    pub async fn open_new(&self, tenant: u64, capacity: u64) -> Result<u64, Errno> {
+        let sentinel = crate::CellId { tenant, id: 0 }.to_string();
+        self.open(Path::new(&sentinel), capacity).await
+    }
+
     /// Writes `data` at `offset` in `extent`.
     pub async fn write(&self, extent: ExtentId, offset: u64, data: &[u8]) -> Result<(), Errno> {
         let barriers = WriteBarriers::default();

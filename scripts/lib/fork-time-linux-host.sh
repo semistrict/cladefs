@@ -88,6 +88,7 @@ for pair in "$@"; do
     : > "$out"
     echo "== $label: timing" >&2
     CLADEFSD_BUCKET="file://$dir/bucket/" CLADEFSD_TOKEN=1 \
+        CLADEFSD_ROOTS="$dir/stores" \
         CLADEFSD_PART_CACHE="$dir/cache" CLADEFSD_GRPC="$dir/cladefsd.control" \
         CLADEFSD_STATS="$results/$label-stats.txt" \
         "$bin/cladefsd" "$dir/cladefsd.sock" $(( 8 << 30 )) > "$results/$label-cladefsd.log" 2>&1 &
@@ -107,12 +108,20 @@ for pair in "$@"; do
         end=$(date +%s.%N)
         printf '%s\t%s\t%.3f\n' "$step" "$iteration" "$(echo "$end - $start" | bc)" | tee -a "$out" >&2
     }
-    timed import 0 "$bin/cladefsctl" import "$dir/stores/base" "$capacity" "$layer"
-    timed sync 0 "$bin/cladefsctl" sync "$dir/stores/base"
-    timed stat 0 "$bin/cladefsctl" stat "$dir/stores/base"
+    start=$(date +%s.%N)
+    base_cell=$("$bin/cladefsctl" import "$capacity" "$layer")
+    end=$(date +%s.%N)
+    echo "$base_cell" >> "$results/$label-stat.txt"
+    printf '%s\t%s\t%.3f\n' import 0 "$(echo "$end - $start" | bc)" | tee -a "$out" >&2
+    timed sync 0 "$bin/cladefsctl" sync "$base_cell"
+    timed stat 0 "$bin/cladefsctl" stat "$base_cell"
     for (( i = 1; i <= forks; i++ )); do
-        timed fork "$i" "$bin/cladefsctl" fork "$dir/stores/base" "$dir/stores/fork-$i"
-        timed stat "$i" "$bin/cladefsctl" stat "$dir/stores/fork-$i"
+        start=$(date +%s.%N)
+        fork_cell=$("$bin/cladefsctl" fork "$base_cell")
+        end=$(date +%s.%N)
+        echo "$fork_cell" >> "$results/$label-stat.txt"
+        printf '%s\t%s\t%.3f\n' fork "$i" "$(echo "$end - $start" | bc)" | tee -a "$out" >&2
+        timed stat "$i" "$bin/cladefsctl" stat "$fork_cell"
     done
     kill -TERM "$daemon"
     wait "$daemon" || echo "$label: the daemon exited $?" >&2

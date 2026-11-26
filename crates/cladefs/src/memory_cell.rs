@@ -78,6 +78,32 @@ impl MemoryCell {
         Self::over(daemon.open_memory(cell_dir, capacity(size))?, size)
     }
 
+    /// Opens an existing managed memory cell `cell` served by the daemon listening at `socket`
+    /// (hotbed question 547).
+    pub fn open_cell(socket: &Path, cell: crate::CellId, size: u64) -> Result<Self, Error> {
+        let daemon = DaemonConnection::connect(socket)?;
+        Self::over(daemon.open_memory(&cell.to_string(), capacity(size))?, size)
+    }
+
+    /// Creates and opens a new managed memory cell for `tenant` of `size` bytes on a disk chosen
+    /// by the daemon listening at `socket` (hotbed question 547).
+    pub fn create_cell(socket: &Path, tenant: u64, size: u64) -> Result<Self, Error> {
+        let daemon = DaemonConnection::connect(socket)?;
+        Self::over(daemon.create_memory_cell(tenant, capacity(size))?, size)
+    }
+
+    /// Forks a memory cell version `from` into a new managed memory cell for `tenant` of `size`
+    /// bytes on a disk chosen by the daemon listening at `socket` (hotbed question 547).
+    pub fn open_forked_cell(
+        socket: &Path,
+        tenant: u64,
+        from: CellVersion,
+        size: u64,
+    ) -> Result<Self, Error> {
+        let daemon = DaemonConnection::connect(socket)?;
+        Self::over(daemon.open_forked_cell(tenant, from, capacity(size))?, size)
+    }
+
     /// The memory cell at `cell_dir`, forked from the version `from` of a memory cell if it doesn't
     /// exist: a VM's memory restored from a snapshot, on any host, as its disks are
     /// (docs/integrator-guide.md). `EINVAL` for a memory of another size.
@@ -491,6 +517,9 @@ struct Mapper {
 impl Mapper {
     fn serve(self, asked: mpsc::Receiver<u64>) {
         for node in asked {
+            // cladefs: a bug's panic mapping it, as a test has it (board 9414).
+            #[cfg(test)]
+            fail::fail_point!("memory_cell::mapping");
             let mapped = self.map(node);
             if let Err(error) = &mapped {
                 log::error!("cladefs: mapping node {node} of a memory's window: {error:#}");
@@ -528,6 +557,21 @@ impl Mapper {
         }
         client.prefault(start, len);
         Ok(())
+    }
+}
+
+/// cladefs: a mapper gone, its window's faults gone, or a bug's panic ending its thread (board
+/// 9414): the faults waiting for the nodes it was to map fail (`EIO`), as those after it do,
+/// finding it gone ([`Reach`]). Before, a panic left them waiting for ever, and every fault after
+/// on a node one waited for, their guest's vCPUs with them.
+impl Drop for Mapper {
+    fn drop(&mut self) {
+        // What a panic holding it left: the faults waiting, which go, and nodes mapped, as they
+        // were, a node's bit set once its pages are.
+        self.nodes.state.clear_poison();
+        let mut state = self.nodes.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Each sender dropped, its fault fails.
+        state.waiting.clear();
     }
 }
 
@@ -579,6 +623,35 @@ mod tests {
             .collect();
         assert_eq!(held.len(), 1, "a window's private memory: {held:?}");
         held[0]
+    }
+
+    /// board 9414: the faults waiting for a memory's window's mapper that panicked fail (`EIO`),
+    /// and those after it: before, they waited for ever, their senders kept in the nodes' state.
+    #[test]
+    fn faults_waiting_for_a_mapper_that_panicked_fail() {
+        let scenario = fail::FailScenario::setup();
+        fail::cfg("memory_cell::mapping", "panic").unwrap();
+        let node_bytes = page_size();
+        let nodes = Arc::new(Nodes {
+            node_bytes,
+            size: 4 * node_bytes,
+            naming: Mutex::new(vec![0]),
+            state: Mutex::new(NodesState { mapped: vec![0], waiting: HashMap::new() }),
+        });
+        let (asks, asked) = mpsc::channel();
+        let mapper = Mapper { nodes: nodes.clone(), blocks: Weak::new(), client: Weak::new() };
+        let serving = std::thread::spawn(move || mapper.serve(asked));
+        let reach = Arc::new(Reach { nodes, asks: Mutex::new(asks) });
+        let fault = |offset: u64| {
+            let (done, result) = mpsc::channel();
+            let reaching = reach.reach(offset);
+            std::thread::spawn(move || done.send(futures::executor::block_on(reaching)).unwrap());
+            result.recv_timeout(std::time::Duration::from_secs(10)).expect("the fault waits")
+        };
+        assert_eq!(fault(0), Err(Errno::EIO));
+        assert!(serving.join().is_err(), "the mapper panicked");
+        assert_eq!(fault(node_bytes), Err(Errno::EIO));
+        scenario.teardown();
     }
 
     /// Pauses the mapper after it names and installs a node's pages and before it wakes
@@ -1013,12 +1086,16 @@ mod tests {
         );
 
         // Deleting a standalone ephemeral memory cell succeeds without CLADEFSD_EPHEMERAL.
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(crate::OpenCell::delete_on(crate::Host::process(), &cell_dir, Some(&bucket)))
-            .unwrap();
+        // Wait for the daemon thread's asynchronous close of `reopened` to release the cell
+        // directory claim before deleting directly (board 12317).
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(
+            async {
+                local_cell::unclaimed_on(crate::Host::process().local(), &cell_dir).await.unwrap();
+                crate::OpenCell::delete_on(crate::Host::process(), &cell_dir, Some(&bucket))
+                    .await
+                    .unwrap();
+            },
+        );
         assert!(!cell_dir.exists());
         assert_eq!(
             uploaded_bytes(&bucket),

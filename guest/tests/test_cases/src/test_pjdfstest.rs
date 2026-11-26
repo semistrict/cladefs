@@ -73,10 +73,9 @@ mod host {
             let only_env = CString::new(format!("PJDFSTEST_ONLY={only}"))?;
             let mut vm = Vm::new(2, 1024)?;
             vm.guest_kernel()?;
-            let cell_dir = test_setup.tmp_dir.join("extents");
             let window =
                 if self.dax { crate::common::dax_window(crate::common::Window::Large)? } else { 0 };
-            vm.cell("extents", &cell_dir, 1 << 30, window)?;
+            vm.new_cell("extents", 1 << 30, window)?;
             vm.env(&host_os_env);
             vm.env(&only_env);
             vm.enter(&setup_rootfs(&test_setup)?, &test_setup.test_case)

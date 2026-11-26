@@ -36,7 +36,6 @@ const PORT: u32 = 5050;
 mod host {
     use super::*;
     use cladefs::cladefsd::control::proto::ResizeCellRequest;
-    use cladefs::testing::control_path;
 
     use crate::common::{cladefs_guest_should_run, setup_rootfs};
     use crate::vm::Vm;
@@ -45,11 +44,11 @@ mod host {
     use std::os::unix::net::UnixListener;
     use std::path::Path;
 
-    /// Resizes the cell at `cell_dir` through the daemon at `cladefsd` as the guest asks, at each
+    /// Resizes `cell` through the daemon at `cladefsd` as the guest asks, at each
     /// step, on the connection `listener` takes, and answers with the outcome.
     fn resize_steps(
         listener: UnixListener,
-        cell_dir: &Path,
+        cell: cladefs::CellId,
         cladefsd: &Path,
     ) -> std::io::Result<()> {
         let (stream, _) = listener.accept()?;
@@ -63,8 +62,9 @@ mod host {
                     .call(async |client| {
                         client
                             .resize_cell(ResizeCellRequest {
-                                path: control_path(cell_dir),
-                                capacity: capacity,
+                                tenant: cell.tenant,
+                                cell: cell.id,
+                                capacity,
                             })
                             .await
                     })
@@ -92,22 +92,22 @@ mod host {
         }
 
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
-            let cell_dir = test_setup.tmp_dir.join("extents");
             let root = setup_rootfs(&test_setup)?;
             let cladefsd = std::path::PathBuf::from(
                 std::env::var_os("CLADEFSD").expect("CLADEFSD names the daemon"),
             );
+            let (cell, _) =
+                crate::common::create_shared_cell(&test_setup.tmp_dir, "extents", CAPACITY)?;
             let mut vm = Vm::new(2, 512)?;
             vm.guest_kernel()?;
-            vm.cell("extents", &cell_dir, CAPACITY, 0)?;
+            vm.cell_id("extents", cell, CAPACITY, 0)?;
             // Short, as Unix sockets' paths must be: the test's directory may be deep.
             let uds =
                 std::env::temp_dir().join(format!("cladefs-resize-{}.vsock", std::process::id()));
             let listener = UnixListener::bind(format!("{}_{PORT}", uds.display()))?;
             vm.vsock(&uds);
-            let resizing = cell_dir.clone();
             std::thread::spawn(move || {
-                if let Err(err) = resize_steps(listener, &resizing, &cladefsd) {
+                if let Err(err) = resize_steps(listener, cell, &cladefsd) {
                     eprintln!("resizing: {err}");
                 }
             });
@@ -119,10 +119,10 @@ mod host {
             if output != "OK\n" {
                 return TestOutcome::Fail(format!("expected exactly \"OK\\n\", got {output:?}"));
             }
-            let cell = local_cell::upload::wait_on(cladefs::OpenCell::open(
-                test_setup.tmp_dir.join("extents"),
-            ))
-            .expect("open the extent store");
+            let cell_path = crate::common::shared_cell_path(&test_setup.tmp_dir, "extents")
+                .expect("shared cell path");
+            let cell = local_cell::upload::wait_on(cladefs::OpenCell::open(cell_path))
+                .expect("open the extent store");
             assert_eq!(cell.info().unwrap().capacity, STEPS[1].1);
             TestOutcome::Pass
         }

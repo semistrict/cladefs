@@ -58,10 +58,11 @@ mod host {
         }
 
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
-            let cell_dir = test_setup.tmp_dir.join("extents");
+            let (cell, _) =
+                crate::common::create_shared_cell(&test_setup.tmp_dir, "extents", 64 << 20)?;
             let mut vm = Vm::new(2, 512)?;
             vm.guest_kernel()?;
-            vm.cell("extents", &cell_dir, 64 << 20, 64 << 20)?;
+            vm.cell_id("extents", cell, 64 << 20, 64 << 20)?;
             vm.enter(&setup_rootfs(&test_setup)?, &test_setup.test_case)
         }
 
@@ -71,10 +72,10 @@ mod host {
                 return TestOutcome::Fail(format!("expected exactly \"OK\\n\", got {output:?}"));
             }
             // What the self-test committed is in the cell.
-            let cell = local_cell::upload::wait_on(cladefs::OpenCell::open(
-                test_setup.tmp_dir.join("extents"),
-            ))
-            .expect("open the extent store");
+            let cell_path = crate::common::shared_cell_path(&test_setup.tmp_dir, "extents")
+                .expect("shared cell path");
+            let cell = local_cell::upload::wait_on(cladefs::OpenCell::open(cell_path))
+                .expect("open the extent store");
             assert_eq!(cell.root().unwrap(), ROOT);
             let info = cell.info().unwrap();
             // 34 extents of two blocks written, sequences 0 to 33, of which two were freed: the
@@ -97,10 +98,9 @@ mod host {
         }
 
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
-            let cell_dir = test_setup.tmp_dir.join("extents");
             let mut vm = Vm::new(2, 512)?;
             vm.guest_kernel()?;
-            vm.cell("extents", &cell_dir, 64 << 20, 64 << 20)?;
+            vm.new_cell("extents", 64 << 20, 64 << 20)?;
             let param = format!("virtio_extent.version={}", OTHER_VERSION.1);
             vm.module_param(&std::ffi::CString::new(param)?);
             vm.enter(&setup_rootfs(&test_setup)?, &test_setup.test_case)
@@ -121,10 +121,9 @@ mod host {
         }
 
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
-            let cell_dir = test_setup.tmp_dir.join("extents");
             let mut vm = Vm::new(2, 512)?;
             vm.guest_kernel()?;
-            vm.cell("extents", &cell_dir, 64 << 20, 64 << 20)?;
+            vm.new_cell("extents", 64 << 20, 64 << 20)?;
             let param = format!("virtio_extent.config_fault={}", self.fault);
             vm.module_param(&std::ffi::CString::new(param)?);
             vm.enter(&setup_rootfs(&test_setup)?, &test_setup.test_case)

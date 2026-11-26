@@ -209,6 +209,7 @@ pub(super) fn governed_bytes_on(daemon: &Daemon) -> u64 {
         + daemon.host.local().pages().bytes()
         + local_cell::framing_buffers_bytes()
         + crate::host_cell::decoded_kept_bytes_on(&daemon.host)
+        + super::mount::queued_bytes_on(daemon)
 }
 
 /// cladefs: the memory the process's default daemon's governor governs.
@@ -473,8 +474,14 @@ async fn shrink_scoped_by(
 ) -> Result<u64, Errno> {
     let slabs = daemon.host.slabs();
     let Some(id) = tenant else {
-        evict_until(&daemon.host, None, scope, || slabs.arenas_bytes_in_use() <= target, deadline)
-            .await;
+        evict_until(
+            &daemon.host,
+            None,
+            scope,
+            || slabs.arenas_bytes_in_use().saturating_sub(target),
+            deadline,
+        )
+        .await;
         // Then the spare slabs, which its evictions' frees may have kept.
         slabs.release_spares(None);
         return Ok(slabs.arenas_bytes());
@@ -489,27 +496,46 @@ async fn shrink_scoped_by(
     let held = || arenas.iter().map(|arena| slabs.arena_bytes(*arena)).sum::<u64>();
     let in_use = || arenas.iter().map(|arena| slabs.arena_bytes_in_use(*arena)).sum::<u64>();
     for arena in &arenas {
-        evict_until(&daemon.host, Some(*arena), scope, || in_use() <= target, deadline).await;
+        evict_until(
+            &daemon.host,
+            Some(*arena),
+            scope,
+            || in_use().saturating_sub(target),
+            deadline,
+        )
+        .await;
         slabs.release_spares(Some(*arena));
     }
     Ok(held())
 }
 
-/// cladefs: evicts the pages of `arena`'s cached extents on `host` within `scope`, until `enough`
-/// says so.
+/// Maximum bytes [`evict_until`] evicts in one batch before waiting for quarantined unmaps to
+/// acknowledge (board 12315): avoids 1-extent-per-RTT stalls under large governor shrinks while
+/// keeping unmap bursts bounded.
+const MAX_SHRINK_BATCH: u64 = 64 * SLAB;
+
+/// cladefs: evicts the pages of `arena`'s cached extents on `host` within `scope`, until `deficit`
+/// reaches 0 (or nothing remains to evict).
 async fn evict_until(
     host: &crate::Host,
     arena: Option<crate::slabs::ArenaId>,
     scope: crate::cache::EvictScope,
-    enough: impl Fn() -> bool,
+    deficit: impl Fn() -> u64,
     deadline: std::time::Instant,
 ) {
     loop {
-        let parking = Parking::new();
-        let stop = |_: u64| parking.parked() || enough();
-        parking.counting(|| host.cache().evict_with_scope(arena, scope, stop));
-        if !parking.parked() {
+        let want = deficit().min(MAX_SHRINK_BATCH);
+        if want == 0 {
             return;
+        }
+        let parking = Parking::new();
+        let stop = |evicted: u64| evicted >= want || deficit() == 0;
+        let evicted = parking.counting(|| host.cache().evict_with_scope(arena, scope, stop));
+        if !parking.parked() {
+            if evicted == 0 || deficit() == 0 {
+                return;
+            }
+            continue;
         }
         // Past it, at once: what is quarantined still, held, the next pass evicts others' for.
         let left = deadline.saturating_duration_since(std::time::Instant::now());

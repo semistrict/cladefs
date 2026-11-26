@@ -180,6 +180,27 @@ static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 #[cfg(all(target_os = "linux", not(madsim)))]
 fn main() -> anyhow::Result<()> {
     use anyhow::Context;
+    let raw_args: Vec<String> = std::env::args().skip(1).collect();
+    let config_path: Option<std::path::PathBuf> = match raw_args.as_slice() {
+        [flag, path] if flag == "--config" || flag == "-c" => Some(path.into()),
+        [flag] if flag.starts_with("--config=") => {
+            Some(flag.trim_start_matches("--config=").into())
+        }
+        [] => std::env::var_os(cladefs::config::CONFIG_ENV)
+            .filter(|v| !v.is_empty())
+            .map(std::path::PathBuf::from),
+        _ => None,
+    };
+    let toml_config = match config_path {
+        Some(path) => {
+            let cfg = cladefs::config::Config::from_toml_file(&path).map_err(anyhow::Error::msg)?;
+            cfg.validate_for_daemon().map_err(anyhow::Error::msg)?;
+            // SAFETY: single-threaded startup before any background thread or runtime is spawned.
+            unsafe { cfg.apply_process_env() };
+            Some(cfg)
+        }
+        None => None,
+    };
     cladefs::cladefsd::logging::to_stderr()?;
     if std::env::args().nth(1).as_deref() == Some("--setup-host") {
         return cladefs::cladefsd::governor::setup_host().map_err(anyhow::Error::msg);
@@ -207,13 +228,19 @@ fn main() -> anyhow::Result<()> {
         Tracing::Exported => log::info!("cladefsd: exporting spans over OTLP"),
     }
     cladefs::cladefsd::raise_open_files_limit().context("raising the limit of open files")?;
-    let mut args = std::env::args().skip(1);
-    let socket = args.next().context("usage: cladefsd SOCKET [MEMORY_BYTES]")?;
-    let memory = args.next().map(|memory| memory.parse::<u64>());
-    let memory = memory.transpose().context("MEMORY_BYTES must be a number")?;
-    // cladefs: its boot awaited on the daemon's consolidated runtime at its outermost entry
-    // (doc-24, board 10774).
-    daemon.block_on(daemon.boot(std::path::Path::new(&socket), memory))?;
+    if let Some(cfg) = toml_config {
+        daemon.block_on(daemon.boot_with_config(cfg))?;
+    } else {
+        let mut args = raw_args.into_iter();
+        let socket = args
+            .next()
+            .context("usage: cladefsd --config PATH | cladefsd SOCKET [MEMORY_BYTES]")?;
+        let memory = args.next().map(|memory| memory.parse::<u64>());
+        let memory = memory.transpose().context("MEMORY_BYTES must be a number")?;
+        // cladefs: its boot awaited on the daemon's consolidated runtime at its outermost entry
+        // (doc-24, board 10774).
+        daemon.block_on(daemon.boot(std::path::Path::new(&socket), memory))?;
+    }
     // Serving stops only as the daemon drains, whose thread exits the process once it has
     // (`drain_on_signals`): not here, its cells still closing.
     loop {
@@ -237,11 +264,17 @@ fn drain_on_signals(
         // cladefs: its panic, as its drain's, aborts the daemon, which could drain no more
         // (board 8501).
         let _supervised = cladefs::cladefsd::supervised("cladefsd signal");
+        // cladefs: unable to wait for them, it stops now, saying why (board 9414): its thread
+        // returned, the daemon served on with nothing to drain it, which only SIGKILL then ended,
+        // a crash for every cell, its log saying nothing of why at the time.
         let signal = match signals.wait() {
             Ok(signal) => signal,
             Err(error) => {
-                log::error!("cladefsd: waiting for SIGTERM, SIGINT or SIGHUP: {error}");
-                return;
+                log::error!(
+                    "cladefsd: waiting for SIGTERM, SIGINT or SIGHUP: {error}: aborting, as \
+                     nothing could drain it"
+                );
+                std::process::abort();
             }
         };
         let name = match signal {

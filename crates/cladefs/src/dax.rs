@@ -44,7 +44,7 @@ use local_cell::shared::SharedLock;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Range;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use storage_device::ExtentId;
 
 /// The logical alignment of DAX window `MAP`, `UNMAP`, and `PRIVATE` ranges: the cell's block size
@@ -411,6 +411,9 @@ struct WindowState {
     composed: BTreeMap<u64, ComposedPage>,
     /// Clock incremented whenever a composed host page is installed.
     composed_clock: u64,
+    /// Shared count of `composed.len()` so `Window::evict_composed` can skip locking `state` when
+    /// no composed host pages exist (always true on 4 KiB hosts; board 12315).
+    composed_count: Arc<AtomicUsize>,
     /// cladefs: of a window whose stage copies on write, the runs of bytes (logical-unit aligned),
     /// by start and end, that the host's own changes took away from the stage keeping its private
     /// pages there ([`Private::Keep`]), or untouched sibling sub-pages of a host page removed by a
@@ -502,7 +505,7 @@ impl Drop for WindowState {
 
 impl WindowState {
     /// A window's state, mapping nothing, its gauges among the process's windows' ([`live`]).
-    fn new() -> Self {
+    fn new(composed_count: Arc<AtomicUsize>) -> Self {
         let gauges = Arc::new(Gauges::default());
         WINDOWS.lock().unwrap().push(Arc::downgrade(&gauges));
         Self {
@@ -511,8 +514,15 @@ impl WindowState {
             ptes: BTreeMap::new(),
             composed: BTreeMap::new(),
             composed_clock: 0,
+            composed_count,
             kept: BTreeMap::new(),
             gauges,
+        }
+    }
+
+    fn insert_composed(&mut self, offset: u64, page: ComposedPage) {
+        if self.composed.insert(offset, page).is_none() {
+            self.composed_count.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -585,7 +595,11 @@ impl WindowState {
         if self.ptes.remove(&offset).is_some() {
             self.gauges.pages.fetch_sub(1, Ordering::Relaxed);
         }
-        self.composed.remove(&offset).map(|composed| composed.slab)
+        let slab = self.composed.remove(&offset).map(|composed| composed.slab);
+        if slab.is_some() {
+            self.composed_count.fetch_sub(1, Ordering::Relaxed);
+        }
+        slab
     }
 
     /// The mapping `offset` is in, and its start.
@@ -832,6 +846,8 @@ pub(crate) struct Window {
     /// cladefs: shared with its connection's [`DaxWindow`] and the guest's faults, beyond what
     /// halts its cell: a panic holding it aborts the daemon (`local_cell::shared`, TASK-149.24).
     state: SharedLock<Mutex<WindowState>>,
+    /// Lock-free mirror of `state.composed.len()` so relief avoids locking `state` when empty.
+    composed_count: Arc<AtomicUsize>,
     /// cladefs: whether its second stage copies on write (backlog doc-13, doc-26), as a writer's
     /// does: the guest's `MAP` and `UNMAP` then end the private pages over the whole range they
     /// change ([`Private::End`]), which the window can't tell from the rest.
@@ -865,8 +881,20 @@ impl Window {
             Some(stage) => Translation::Stage(stage),
             None => Translation::Host { base: reserve(None, len).map_err(|_| Errno::ENOMEM)? },
         };
-        let state = SharedLock::new("window", Mutex::new(WindowState::new()));
-        Ok(Self { size, unit, arena, cache, slabs, zeros, translation, state, copying })
+        let composed_count = Arc::new(AtomicUsize::new(0));
+        let state = SharedLock::new("window", Mutex::new(WindowState::new(composed_count.clone())));
+        Ok(Self {
+            size,
+            unit,
+            arena,
+            cache,
+            slabs,
+            zeros,
+            translation,
+            state,
+            composed_count,
+            copying,
+        })
     }
 
     fn size(&self) -> u64 {
@@ -1087,7 +1115,7 @@ impl Window {
         let phys = slab.location();
         state.composed_clock += 1;
         let touch = state.composed_clock;
-        state.composed.insert(offset, ComposedPage { slab, deps, touch });
+        state.insert_composed(offset, ComposedPage { slab, deps, touch });
         state.insert_pte(offset, phys);
         self.map_pages(&[(offset, phys)]);
         Ok(())
@@ -1101,6 +1129,9 @@ impl Window {
         arena: Option<ArenaId>,
         mut enough: impl FnMut(u64) -> bool,
     ) -> u64 {
+        if self.composed_count.load(Ordering::Relaxed) == 0 {
+            return 0;
+        }
         let ps = page_size();
         let (evicted, dropped) = {
             let mut state = self.state.with(Mutex::lock);
@@ -1562,7 +1593,7 @@ impl Window {
                         let phys = slab.location();
                         state.composed_clock += 1;
                         let touch = state.composed_clock;
-                        state.composed.insert(h_page, ComposedPage { slab, deps, touch });
+                        state.insert_composed(h_page, ComposedPage { slab, deps, touch });
                         state.insert_pte(h_page, phys);
                         pages.push((h_page, phys));
                     }
@@ -1742,6 +1773,23 @@ enum ResolveStep {
 
 impl Drop for Window {
     fn drop(&mut self) {
+        // Notify mapped sources that this window is gone so `ExtentCache`'s eviction index
+        // demotes their extents from mapped to unmapped immediately (board 12315).
+        let sources: Vec<Arc<dyn Source>> = {
+            let state = self.state.get_mut().get_mut().unwrap_or_else(|err| err.into_inner());
+            let mut seen = BTreeSet::new();
+            let mut sources = Vec::new();
+            for mapping in std::mem::take(&mut state.mappings).into_values() {
+                if seen.insert(source_identity(&mapping.source)) {
+                    sources.push(mapping.source);
+                }
+            }
+            state.by_source.clear();
+            sources
+        };
+        for source in sources {
+            source.unmapped(self);
+        }
         if let Translation::Host { base } = self.translation {
             // SAFETY: The reservation is the window's own.
             let status = unsafe { libc::munmap(base as *mut libc::c_void, self.size as usize) };

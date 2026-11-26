@@ -393,8 +393,10 @@ fn shrinks_dropped_by_their_callers_stop_waiting() {
     use super::control::proto::ResizeCellRequest;
     host();
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store");
-    let (client, served) = connect(&path, 2 << 20);
+    super::Daemon::process().configure_disks(&[dir.path().join("disk0")]).unwrap();
+    let (client, served) = connect(Path::new("0/0"), 2 << 20);
+    let cell = crate::CellId { tenant: 0, id: client.cell() };
+    let path = super::Daemon::process().cell_path(cell).unwrap();
     let (asks, asked) = std::sync::mpsc::channel();
     client.on_capacity(move |capacity, ask| asks.send((capacity, ask)).unwrap());
     let socket = dir.path().join("control.sock");
@@ -406,8 +408,7 @@ fn shrinks_dropped_by_their_callers_stop_waiting() {
 
     control(async {
         let mut api = super::control::connect(&socket).await.unwrap();
-        let request =
-            ResizeCellRequest { path: path.to_str().unwrap().to_owned(), capacity: 1 << 20 };
+        let request = ResizeCellRequest { tenant: cell.tenant, cell: cell.id, capacity: 1 << 20 };
         let asking = tokio::task::spawn_blocking(move || (asked.recv().unwrap(), asked));
         let asked = tokio::select! {
             shrunk = api.resize_cell(request) => panic!("{shrunk:?}"),
@@ -1014,6 +1015,64 @@ fn metrics_gauge_each_vm_processs_window_and_host_mappings() {
     assert_eq!(super::stats::vms_on(super::Daemon::process()), []);
     // SAFETY: Unmaps the memory, which nothing uses any more.
     assert_eq!(unsafe { libc::munmap(memory.as_ptr().cast(), 4 * ps) }, 0);
+}
+
+/// Board 10098: the metrics show each window's budget as it is now, its share of its VM
+/// process's windows': a window alone the process's whole, 522,240 runs of a host allowing
+/// 1,048,576 mappings; halved as a second window of the process comes, each 261,120; the whole
+/// again as the first goes. Until then a window's budget was what it said making it, the first's
+/// the whole after the second halved it, the second's half after the first went.
+#[test]
+fn metrics_show_each_windows_budget_as_its_process_shares_it() {
+    host();
+    super::server::MAX_MAP_COUNT_GIVEN.set(1 << 20).unwrap();
+    let ps = page_size() as usize;
+    let budget_of = |cell: crate::CellId| -> Option<u64> {
+        let metrics = super::metrics::render();
+        let name = format!("cladefsd_vm_host_mapping_budget{{cell=\"{cell}\"}} ");
+        metrics
+            .lines()
+            .find_map(|line| line.strip_prefix(&name))
+            .map(|value| value.parse().unwrap())
+    };
+    // What the VM processes say reaches the daemon as it reads their connections: within this.
+    let shown = |cell: crate::CellId, budget: u64| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while budget_of(cell) != Some(budget) && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        budget_of(cell)
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (first, first_served) = connect(&dir.path().join("first"), 1 << 24);
+    let (second, second_served) = connect(&dir.path().join("second"), 1 << 24);
+    let vms = super::stats::vms_on(super::Daemon::process());
+    let cells: Vec<_> = vms.iter().map(|vm| vm.cell).collect();
+    let (first_cell, second_cell) = (cells[0], cells[1]);
+    let memories = [memory(2), memory(2)];
+
+    // SAFETY: The memory is the test's, and outlives the cell.
+    unsafe { first.create_dax_window_in_host_memory(memories[0], 2 * ps as u64, None, 1) }.unwrap();
+    assert_eq!(first.window_budget(), Some(522_240));
+    assert_eq!(shown(first_cell, 522_240), Some(522_240), "the first alone");
+
+    // SAFETY: As above.
+    unsafe { second.create_dax_window_in_host_memory(memories[1], 2 * ps as u64, None, 1) }
+        .unwrap();
+    assert_eq!((first.window_budget(), second.window_budget()), (Some(261_120), Some(261_120)));
+    assert_eq!(shown(first_cell, 261_120), Some(261_120), "the first beside the second");
+    assert_eq!(shown(second_cell, 261_120), Some(261_120), "the second beside the first");
+
+    drop(first);
+    first_served.join().unwrap();
+    assert_eq!(shown(second_cell, 522_240), Some(522_240), "the second alone");
+    assert_eq!(second.window_budget(), Some(522_240));
+    drop(second);
+    second_served.join().unwrap();
+    for memory in memories {
+        // SAFETY: Unmaps the memory, which nothing uses any more.
+        assert_eq!(unsafe { libc::munmap(memory.as_ptr().cast(), 2 * ps) }, 0);
+    }
 }
 
 /// cladefs TASK-111.4: the stats hold the daemon's counters and gauges and its build, and each VM
@@ -3351,6 +3410,89 @@ fn metrics_are_there_before_any_cell_opens() {
     assert_eq!(families.len(), count, "a family named twice");
 }
 
+/// Board 10482: the daemon's metrics, once it has served a VM process's requests, its window's
+/// among them, control calls, and a migration with its peer calls (one its peer, speaking no TLS,
+/// fails), parse as a scraper parses Prometheus' text format, strictly
+/// ([`super::metrics::parsed`]), every family among them. Until then its tests matched lines: a
+/// family's HELP said twice, a histogram without `+Inf`, a series said twice, passed them all and
+/// failed the scrape.
+#[test]
+fn the_daemons_metrics_parse_as_a_scraper_parses_them() {
+    use super::control::proto::GetStatsRequest;
+    host();
+    let ps = page_size() as usize;
+    let dir = tempfile::tempdir().unwrap();
+    let root = host_fs::canonicalize(dir.path()).unwrap();
+    let path = root.join("store");
+    let (client, served) = connect(&path, 1 << 24);
+    let memory = memory(2);
+    // SAFETY: The memory is the test's, and outlives the cell.
+    unsafe { client.create_dax_window_in_host_memory(memory, 2 * ps as u64, None, 1) }.unwrap();
+    let extent = ExtentId { cell: client.cell(), sequence: 1 };
+    write(&client, extent, 0, &pattern(6, ps)).unwrap();
+    client.commit(None).unwrap();
+    client.map(extent, 0, ps as u64, 0).unwrap();
+    assert_eq!(read(&client, extent, 0, ps).unwrap(), pattern(6, ps));
+    // Another cell, closed, to migrate.
+    let moving = root.join("moving");
+    let (closed, closed_served) = connect(&moving, 1 << 24);
+    write(&closed, ExtentId { cell: closed.cell(), sequence: 1 }, 0, &pattern(7, ps)).unwrap();
+    closed.commit(None).unwrap();
+    drop(closed);
+    closed_served.join().unwrap();
+
+    let control_socket = root.join("control.sock");
+    let listener = UnixListener::bind(&control_socket).unwrap();
+    let tenants = root.join("tenants");
+    std::fs::create_dir(&tenants).unwrap();
+    std::thread::spawn(move || super::control::serve_control(listener, tenants));
+    let api = crate::testing::Control::connect(&control_socket).unwrap();
+    api.call(async |client| client.get_stats(GetStatsRequest::default()).await).unwrap();
+    // A peer serving gRPC in plaintext, no peer API: each of the migration's calls fails its TLS
+    // handshake at once, its prepare tried thrice, unanswered, then given up and aborted.
+    let peer = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    peer.set_nonblocking(true).unwrap();
+    let address = peer.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async move {
+            let incoming = tokio_stream::wrappers::TcpListenerStream::new(
+                tokio::net::TcpListener::from_std(peer).unwrap(),
+            );
+            let (_, health) = tonic_health::server::health_reporter();
+            tonic::transport::Server::builder()
+                .add_service(health)
+                .serve_with_incoming(incoming)
+                .await
+                .unwrap();
+        })
+    });
+    // As `MigrateCell` begins it, which finds the cell in the daemon's disks, that this one has
+    // none of.
+    let migrated = control(super::migration::migrate_on(super::Daemon::process(), moving, address));
+    assert_eq!(migrated, Err(Errno::ENOTCONN));
+
+    let page = super::metrics::render();
+    let value = |series: &str| {
+        let line = page.lines().find_map(|line| line.strip_prefix(&format!("{series} ")));
+        line.unwrap_or_else(|| panic!("no {series} in {page}")).parse::<u64>().unwrap()
+    };
+    let cell = cell_at(&path);
+    assert_eq!(value(&format!("cladefsd_vm_window_mappings{{cell=\"{cell}\"}}")), 1);
+    assert_eq!(value("cladefsd_migrations_total{outcome=\"aborted\"}"), 1);
+    let prepare = "service=\"cladefs.peer.v1.Peer\",method=\"MigratePrepare\"";
+    assert_eq!(value(&format!("cladefsd_grpc_client_errors_total{{{prepare}}}")), 3);
+    let stats = "service=\"cladefs.cladefsd.v1.Cladefsd\",method=\"GetStats\"";
+    assert_eq!(value(&format!("cladefsd_grpc_server_calls_total{{{stats}}}")), 1);
+    let families = super::metrics::parsed(&page).unwrap_or_else(|err| panic!("{err}: {page}"));
+    let declared = page.lines().filter(|line| line.starts_with("# TYPE ")).count();
+    assert_eq!(families.len(), declared, "{families:?}");
+    drop(client);
+    served.join().unwrap();
+    // SAFETY: Unmaps the memory, which nothing uses any more.
+    assert_eq!(unsafe { libc::munmap(memory.as_ptr().cast(), 2 * ps) }, 0);
+}
+
 /// board 8563: a cell is labelled alike in every family, `TENANT/CELL`, as cells name it: its VM
 /// process's window gauges, its builds, and its uploads', which a query joins on; and not by
 /// connection, whose number made a series of each VM process.
@@ -3382,6 +3524,35 @@ fn a_cells_metrics_name_it_alike_in_every_family() {
     written.join().unwrap();
     // SAFETY: Unmaps the memory, which nothing uses any more.
     assert_eq!(unsafe { libc::munmap(writers.as_ptr().cast(), 2 * ps) }, 0);
+}
+
+/// board 9760: an accept of the control API's that fails as the host may get over (EMFILE, as
+/// with every descriptor open) is tried again after `ACCEPT_AGAIN`, and the call after it served.
+/// Before, tonic passed it over at once, and again at once as long as it failed: a busy loop
+/// holding one of the runtime's threads (92% of a CPU with the descriptors out), nothing saying
+/// why.
+#[tokio::test(flavor = "multi_thread")]
+async fn control_accepts_failing_are_tried_again_after_a_pause() {
+    use futures::StreamExt as _;
+    use tonic_health::pb::{HealthCheckRequest, health_client::HealthClient};
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("control.sock");
+    let tenants = dir.path().join("tenants");
+    std::fs::create_dir(&tenants).unwrap();
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let emfile = || Err(std::io::Error::from_raw_os_error(libc::EMFILE));
+    let incoming = futures::stream::iter([emfile(), emfile()])
+        .chain(tokio_stream::wrappers::UnixListenerStream::new(listener));
+    let began = tokio::time::Instant::now();
+    let daemon = super::Daemon::process().clone();
+    let serving = tokio::spawn(super::control::serve_control_with(daemon, incoming, tenants));
+    let channel = super::control::channel(&socket).await.unwrap();
+    let request = HealthCheckRequest { service: String::new() };
+    HealthClient::new(channel).check(request).await.unwrap();
+    let waited = began.elapsed();
+    assert!(waited >= 2 * super::server::ACCEPT_AGAIN, "served after {waited:?}");
+    serving.abort();
 }
 
 /// TASK-79.35: the daemon goes on accepting VM processes' connections through a failure to accept

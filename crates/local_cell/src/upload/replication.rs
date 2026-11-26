@@ -181,7 +181,7 @@ impl<D: Dir> Uploader<D> {
     /// cladefs: the replication of the cell, as its writer's taking found its head
     /// (doc-21): none for a cell durable off its host once uploaded alone, or not taken yet.
     pub fn replication(&self) -> Option<Replicated> {
-        self.shared.progress.lock().unwrap().taking.and_then(|taking| taking.replication)
+        self.shared.progress().taking.and_then(|taking| taking.replication)
     }
 
     /// cladefs: what wakes those waiting on the uploader, for a replicator to call as more is
@@ -751,8 +751,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
 
     /// cladefs: the head names the writer's configuration `number`, as its status says from now.
     fn configured(&self, number: u64) {
-        if let Some(Taking { replication: Some(replicated), .. }) =
-            self.progress.lock().unwrap().taking.as_mut()
+        if let Some(Taking { replication: Some(replicated), .. }) = self.progress().taking.as_mut()
         {
             replicated.configuration = Some(number);
         }
@@ -761,8 +760,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     /// cladefs: the writer's taking was forced, fewer members fenced than a take needs, and
     /// the bucket holding its commits through epoch `kept`, as its status says from now (TASK-681).
     fn forced_after(&self, kept: u64) {
-        if let Some(Taking { replication: Some(replicated), .. }) =
-            self.progress.lock().unwrap().taking.as_mut()
+        if let Some(Taking { replication: Some(replicated), .. }) = self.progress().taking.as_mut()
         {
             replicated.forced_after = Some(kept);
         }
@@ -777,7 +775,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
 
     /// cladefs: whether the uploader stops, or stopped.
     fn stopping(&self) -> bool {
-        let progress = self.progress.lock().unwrap();
+        let progress = self.progress();
         progress.stop || progress.failed.is_some()
     }
 

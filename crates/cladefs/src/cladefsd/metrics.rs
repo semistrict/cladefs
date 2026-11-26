@@ -38,8 +38,9 @@
 //!   `cladefsd_vm_window_private_pages`, its window's, as the gauges above count all windows';
 //!   `cladefsd_vm_host_mappings`, the runs of pages its window's second stage has installed in
 //!   its memory, each a mapping the host's `vm.max_map_count` limits, as it last said with its
-//!   stage operations, and `cladefsd_vm_host_mapping_budget`, the most it keeps, as it said as
-//!   it made its window, from the limit the daemon told it (TASK-172).
+//!   stage operations, and `cladefsd_vm_host_mapping_budget`, the most it keeps, from the limit
+//!   the daemon told it (TASK-172): its share of its VM process's windows', as it last said, again
+//!   as another window of the process comes or goes (board 10098).
 //! - `cladefsd_<counter>_total`: the counters the control API's `GetCounters` reports
 //!   (`crate::stats::Stats::named`, its dashes underscores): maps, faults, page-ins, reads and
 //!   their nanoseconds and bytes; the VM processes' changes to their windows (`stage_ops`) and
@@ -429,7 +430,8 @@ fn render_rest(daemon: &Daemon, mut out: String, mut laps: Laps) -> String {
         ),
         (
             "vm_host_mapping_budget",
-            "The most runs of pages a VM process's window keeps installed, as it said.",
+            "The most runs of pages a VM process's window keeps installed now, its share of the \
+             process's windows', as it last said.",
             |vm| vm.budget,
         ),
     ];
@@ -1203,10 +1205,44 @@ fn label_value(value: &str) -> String {
     value.replace('\\', r"\\").replace('"', "\\\"").replace('\n', r"\n")
 }
 
+/// cladefs: `page`, a rendering of the metrics, as a scraper parses Prometheus' text format,
+/// strictly (openmetrics-parser's, board 10482): its families' names, or what it found wrong,
+/// which would have the scraper drop the whole scrape: a family's HELP or TYPE said twice, a family
+/// named twice, a sample of a family declared of another type, a histogram without its `+Inf`
+/// bucket, `_count` or `_sum`, a label value badly escaped, a series said twice.
+#[cfg(test)]
+pub(super) fn parsed(page: &str) -> Result<Vec<String>, String> {
+    let exposition =
+        openmetrics_parser::prometheus::parse_prometheus(page).map_err(|err| format!("{err}"))?;
+    let mut families: Vec<String> = exposition.families.into_keys().collect();
+    families.sort_unstable();
+    Ok(families)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
+
+    /// Board 10482: what [`parsed`] finds wrong with a page: a page of the daemon's whole as it
+    /// renders it, but with a family's HELP written twice, or a histogram's `+Inf` bucket left
+    /// out, either of which a scraper refuses, failing the whole scrape.
+    #[test]
+    fn pages_malformed_as_scrapers_refuse_them_are_refused() {
+        let page = render();
+        assert_eq!(parsed(&page).map(|families| families.is_empty()), Ok(false), "{page}");
+
+        let help = page.lines().find(|line| line.starts_with("# HELP ")).unwrap();
+        let twice = page.replacen(help, &format!("{help}\n{help}"), 1);
+        assert_eq!(parsed(&twice), Err("Got two help lines in the same metric family".into()));
+
+        let infinite = |line: &&str| line.contains("_bucket{") && line.contains("le=\"+Inf\"");
+        let inf = page.lines().find(infinite).unwrap();
+        let without: String =
+            page.lines().filter(|line| line != &inf).flat_map(|line| [line, "\n"]).collect();
+        let refused = parsed(&without).unwrap_err();
+        assert!(refused.starts_with("Histograms must have a +INF bucket"), "{refused}: {inf}");
+    }
 
     /// board 8563: a cell's gauges, each as its VM processes said, saturate as they are summed:
     /// two saying budgets of `u64::MAX` and 1, which a hostile VM process may, panicked every

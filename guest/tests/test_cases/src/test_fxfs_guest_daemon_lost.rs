@@ -58,10 +58,8 @@ mod host {
         vm.guest_kernel()?;
         // Both run at once: each boots from an image of its own, which making it remakes.
         vm.root_image(&format!("{name}.rootfs.ext4"));
-        let cell_dir = test_setup.tmp_dir.join(format!("store-{name}"));
-        vm.cell_served(
+        vm.new_cell_served(
             "extents",
-            &cell_dir,
             CAPACITY,
             crate::common::dax_window(crate::common::Window::Large)?,
             cladefsd,

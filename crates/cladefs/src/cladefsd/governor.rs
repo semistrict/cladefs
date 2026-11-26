@@ -1544,14 +1544,9 @@ fn reclaim_connected_vms(
     }
 }
 
-/// cladefs: what the disk governor leaves free of a filesystem, as `CLADEFSD_DISK_HEADROOM` says.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DiskHeadroom {
-    /// So many bytes.
-    Bytes(u64),
-    /// So many hundredths of the filesystem.
-    Percent(u64),
-}
+/// cladefs: what the disk governor leaves free of a filesystem, as `CLADEFSD_DISK_HEADROOM` or
+/// TOML `[disk].headroom` / `[[disks]].headroom` says.
+pub use bucket_cell::host_disk::DiskHeadroom;
 
 /// cladefs: the headroom `CLADEFSD_DISK_HEADROOM` gives, if any: bytes, or `N%` of each
 /// filesystem; refused otherwise, naming the variable.
@@ -1572,11 +1567,7 @@ pub fn disk_headroom_of(value: Option<&str>) -> Result<Option<DiskHeadroom>, Str
 /// for what its cells' commits add unadmitted (TASK-539.15), and a neighbour's (user, 2026-11-18:
 /// 5%, 4 GiB at least).
 pub fn disk_headroom(size: u64, set: Option<DiskHeadroom>) -> u64 {
-    match set {
-        Some(DiskHeadroom::Bytes(bytes)) => bytes,
-        Some(DiskHeadroom::Percent(percent)) => size / 100 * percent,
-        None => (size / 20).max(4 << 30).min(size / 2),
-    }
+    DiskHeadroom::resolve(size, set)
 }
 
 /// cladefs: what the daemon may keep on a disk, holding `held`, its filesystem `free`, `in_flight`

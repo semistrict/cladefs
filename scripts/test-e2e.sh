@@ -440,6 +440,8 @@ cache_dir=
 if [[ -z ${CLADEFSD_PART_CACHE+set} ]]; then
     cache_dir=$(mktemp -d "$results/.cladefsd-cache.XXXXXX")
 fi
+disk_dir=$(mktemp -d "$results/.cladefsd-disk0.XXXXXX")
+chmod 755 "$disk_dir"
 # cladefs: CLADEFSD_MEMORY_MAX runs the daemon in a systemd scope of its own, limited to that
 # many bytes of memory (systemd's MemoryMax, no swap), its cgroup killing it past them, and keeps
 # the most it held, memory.peak, in cladefsd-memory-peak.txt as the run ends: what the daemon's
@@ -465,6 +467,7 @@ cladefsd_stop() {
 }
 ${cladefsd_run[@]+"${cladefsd_run[@]}"} \
 env CLADEFSD_BUCKET="${CLADEFSD_BUCKET:-file://$bucket_dir}" \
+    CLADEFSD_ROOTS="$disk_dir" \
     CLADEFSD_PART_CACHE="${CLADEFSD_PART_CACHE-$cache_dir}" \
     CLADEFSD_TOKEN="${CLADEFSD_TOKEN:-1}" \
     CLADEFSD_VM_CGROUP_DELEGATED="${CLADEFSD_VM_CGROUP_DELEGATED:-1}" \
@@ -472,7 +475,7 @@ env CLADEFSD_BUCKET="${CLADEFSD_BUCKET:-file://$bucket_dir}" \
     FAILPOINTS="${CLADEFS_FAILPOINTS:-}" ${cladefsd_wrap[@]+"${cladefsd_wrap[@]}"} "$cladefsd_bin" "$socket" ${CLADEFSD_MEMORY:+"$CLADEFSD_MEMORY"} \
     > "$results/$daemon_file.log" 2>&1 &
 daemon=$!
-trap 'cladefsd_peak; kill "$daemon" 2> /dev/null; cladefsd_stop; rm -r "$sockets"; [[ -z $bucket_dir ]] || rm -r "$bucket_dir"; [[ -z $cache_dir ]] || rm -r "$cache_dir"' EXIT
+trap 'cladefsd_peak; kill "$daemon" 2> /dev/null; cladefsd_stop; rm -r "$sockets"; [[ -z $bucket_dir ]] || rm -r "$bucket_dir"; [[ -z $cache_dir ]] || rm -r "$cache_dir"; rm -r "$disk_dir"' EXIT
 while [[ ! -S $socket || ! -S $control ]]; do
     if ! kill -0 "$daemon" 2> /dev/null; then
         echo "the extent daemon exited: see $results/$daemon_file.log" >&2
@@ -485,6 +488,7 @@ if [[ -n ${CLADEFS_FIRECRACKER_JAIL:-} ]]; then
     chown "$CLADEFS_JAIL_UID:$CLADEFS_JAIL_GID" "$socket"
 fi
 export CLADEFSD="$socket"
+export CLADEFSD_ROOTS="$disk_dir"
 # cladefs: the daemon's binary, for cases that start daemons of their own.
 export CLADEFSD_BIN="$cladefsd_bin"
 
@@ -518,7 +522,7 @@ done
 # as each case's cells were (TASK-411.15).
 if [[ -n ${CLADEFS_E2E_ENCRYPTED:-} ]] &&
     ! "$runner" encrypted --bucket "${CLADEFSD_BUCKET:-file://$bucket_dir}" \
-        ${cache_dir:+"$cache_dir"} 2> "$results/encrypted.txt"; then
+        "$disk_dir" ${cache_dir:+"$cache_dir"} 2> "$results/encrypted.txt"; then
     echo "the run's bucket or part cache isn't encrypted: see $results/encrypted.txt; the first:" >&2
     sed -n 1,3p "$results/encrypted.txt" >&2
     status=1

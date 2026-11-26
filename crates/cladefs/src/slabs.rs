@@ -274,6 +274,19 @@ pub(super) struct Node {
     /// cladefs: of those, the pages of runs held for a wedged VM process (board 8535): not on their
     /// way, as they come back only once it exits, if ever ([`Quarantined::wedged`]).
     wedged: AtomicU64,
+    /// Pages evicted by relief for `Starved::Total` that are still quarantined and not wedged:
+    /// shared across all arenas so multiple arenas starved at the total cap do not trigger
+    /// redundant eviction passes (board 12315).
+    total_owed: AtomicU64,
+    /// Whether the last `Starved::Total` relief pass freed nothing with nothing returning from
+    /// quarantine: cleared when any slab is freed, a total relief pass frees bytes, or a cap
+    /// changes (board 12315).
+    total_exhausted: AtomicBool,
+    /// Fast-path flag mirroring whether `total_backoff` has an active deadline, so `Arena::free`
+    /// avoids taking `total_backoff`'s mutex on the common unbacked-off path (board 12315).
+    total_backoff_active: AtomicBool,
+    /// Exponential backoff after a 0-byte `Starved::Total` relief pass (board 12315).
+    total_backoff: Mutex<relief::Backoff>,
     /// The most pages they populated together at once, so far.
     peak: AtomicU64,
     /// Whether arenas keep spares.
@@ -316,6 +329,10 @@ impl Node {
             spares: AtomicU64::new(0),
             quarantined: AtomicU64::new(0),
             wedged: AtomicU64::new(0),
+            total_owed: AtomicU64::new(0),
+            total_exhausted: AtomicBool::new(false),
+            total_backoff_active: AtomicBool::new(false),
+            total_backoff: Mutex::new(relief::Backoff::default()),
             peak: AtomicU64::new(0),
             keep_spares: AtomicBool::new(true),
             alloc_failed_no_mem: AtomicBool::new(false),
@@ -413,6 +430,27 @@ impl Node {
     /// Lets allocations that may find room now know.
     pub(super) fn pulse(&self) {
         self.room.pulse();
+    }
+
+    pub(super) fn record_total_empty_backoff(&self, now: std::time::Instant) {
+        let mut backoff = self.total_backoff.lock().unwrap();
+        backoff.record_empty(now);
+        self.total_backoff_active.store(true, Ordering::Release);
+    }
+
+    pub(super) fn clear_total_backoff(&self) {
+        if self.total_backoff_active.load(Ordering::Acquire) {
+            let mut backoff = self.total_backoff.lock().unwrap();
+            backoff.clear();
+            self.total_backoff_active.store(false, Ordering::Release);
+        }
+    }
+
+    pub(super) fn total_backoff_active_at(&self, now: std::time::Instant) -> bool {
+        if !self.total_backoff_active.load(Ordering::Acquire) {
+            return false;
+        }
+        self.total_backoff.lock().unwrap().active(now)
     }
 }
 
@@ -516,6 +554,8 @@ impl Arena {
     /// Frees `run`, which it gave: kept as a spare, or punched, here and now, outside its lock.
     fn free(&self, run: Run) {
         let node = &self.node;
+        node.total_exhausted.store(false, Ordering::Release);
+        node.clear_total_backoff();
         let keep = node.keep_spares.load(Ordering::Relaxed)
             && node.populated.load(Ordering::Relaxed) <= node.limit();
         let freed = {
@@ -896,8 +936,12 @@ impl HostSlabs {
 
 /// A cap changed: no arena is exhausted, and allocations waiting may find room.
 fn caps_changed(node: &Arc<Node>) {
+    node.total_exhausted.store(false, Ordering::Release);
+    node.clear_total_backoff();
     for arena in node.all() {
-        arena.state.lock().unwrap().relief.exhausted = false;
+        let mut state = arena.state.lock().unwrap();
+        state.relief.exhausted = false;
+        state.relief.backoff.clear();
     }
     node.pulse();
 }

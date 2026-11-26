@@ -453,9 +453,7 @@ pub(crate) fn pack_ahead(part: u64, data: Buffer, pending: Pending) {
         }
         waiting.0.push_back((part, data, pending));
         if waiting.1 < PACKING_AHEAD {
-            let spawned =
-                std::thread::Builder::new().name("store packing ahead".into()).spawn(packing);
-            match spawned {
+            match spawn_packer() {
                 Ok(_) => waiting.1 += 1,
                 Err(err) if waiting.1 == 0 => {
                     log::warn!("extent store: a thread to pack parts ahead: {err}");
@@ -472,9 +470,19 @@ pub(crate) fn pack_ahead(part: u64, data: Buffer, pending: Pending) {
     }
 }
 
+/// cladefs: starts a thread packing parts ahead ([`packing`]), which the caller counts.
+#[cfg(not(madsim))]
+fn spawn_packer() -> io::Result<()> {
+    // cladefs: no thread to be had, as under a limit of the process's threads, as a test has it.
+    fail::fail_point!("framing::spawn_packer", |_| Err(io::Error::from_raw_os_error(libc::EAGAIN)));
+    std::thread::Builder::new().name("store packing ahead".into()).spawn(packing)?;
+    Ok(())
+}
+
 /// cladefs: a thread packing parts ahead ([`pack_ahead`]), as they wait, for the process's life.
 #[cfg(not(madsim))]
 fn packing() {
+    let _replaced = Packer;
     lowest_priority();
     let mut packer = PartPacker::new();
     loop {
@@ -487,8 +495,40 @@ fn packing() {
                 waiting = AHEAD.ready.wait(waiting).unwrap();
             }
         };
+        // cladefs: a bug's panic packing the part, as a test has it (board 9414).
+        fail::fail_point!("framing::packing_ahead");
         if pending.wanted() {
             pending.fill(stored(part, data, &mut packer));
+        }
+    }
+}
+
+/// cladefs: a thread packing parts ahead, which only a panic ends: replaced as it ends, counted
+/// among [`PACKING_AHEAD`] still, or, if none can start, counted no more, so that the next part
+/// starts one (board 9414). The part it packed, its `Pending` dropped, its framing packs. Before,
+/// it went counted: two panics, and nothing packed ahead again, the parts waiting held for good,
+/// [`WAITING_MOST`] MiB of them.
+#[cfg(not(madsim))]
+struct Packer;
+
+#[cfg(not(madsim))]
+impl Drop for Packer {
+    fn drop(&mut self) {
+        // Its panic said, as the process's hook says it; whatever lock it held let go of: what the
+        // queue holds is whole at every step.
+        AHEAD.waiting.clear_poison();
+        let mut waiting = AHEAD.waiting.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        log::error!("extent store: a thread packing parts ahead panicked: another in its place");
+        if let Err(err) = spawn_packer() {
+            log::warn!("extent store: a thread to pack parts ahead: {err}");
+            waiting.1 -= 1;
+            // None left to take them, nor to be started by the next part, the queue full: those
+            // waiting skipped, their framings packing them, as when none could start at all.
+            if waiting.1 == 0 {
+                let refused: Vec<_> = waiting.0.drain(..).collect();
+                drop(waiting);
+                refused.into_iter().for_each(|(_, _, pending)| pending.skip());
+            }
         }
     }
 }
@@ -777,6 +817,86 @@ mod tests {
         let mut few = noise(4, 6 * MIB);
         few[..4 * ZERO_BLOCK].fill(0);
         assert!(saves_little(&few), "noise, but for four blocks of zeros");
+    }
+
+    /// board 9414: a thread packing parts ahead that panics is replaced, and parts go on being
+    /// packed ahead: here the first `PACKING_AHEAD` parts taken panic their packers, whichever
+    /// parts they are, and the one part after is held, packed. Before, a packer that panicked
+    /// went, counted still: two, and no part was packed ahead again.
+    #[cfg(not(madsim))]
+    #[test]
+    fn packers_ahead_that_panic_are_replaced() {
+        let scenario = fail::FailScenario::setup();
+        fail::cfg("framing::packing_ahead", &format!("{PACKING_AHEAD}*panic")).unwrap();
+        let held = HeldParts::new();
+        let mut holds = Vec::new();
+        for part in 0..=PACKING_AHEAD as u64 {
+            let (hold, pending) = held.pend();
+            let mut data = Buffer::of(PART as usize);
+            data.copy_from_slice(&text(part, PART as usize));
+            pack_ahead(part, data, pending);
+            holds.push(hold);
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while held.bytes() == 0 {
+            assert!(std::time::Instant::now() < deadline, "nothing packed ahead");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let packed: Vec<_> = holds.into_iter().filter_map(Hold::take).collect();
+        assert_eq!(packed.len(), 1, "parts packed of {}", PACKING_AHEAD + 1);
+        assert!(packed[0].bytes() < PART, "{} bytes", packed[0].bytes());
+        scenario.teardown();
+    }
+
+    /// board 9414's review: packers ahead that panic, none to replace them (no thread to be had),
+    /// leave no part waiting for good: the last one's going skips them, its framing packing it.
+    /// Before, they waited, held, the queue full refusing every part after before it started a
+    /// packer: packing ahead over, `WAITING_MOST` MiB held. Here both packers take their parts
+    /// and panic only once the last part waits behind them, so that only their going sees it.
+    #[cfg(not(madsim))]
+    #[test]
+    fn packers_ahead_that_panic_unreplaced_leave_no_part_waiting() {
+        use std::sync::atomic::AtomicUsize;
+        let scenario = fail::FailScenario::setup();
+        let queued = Arc::new((Mutex::new(false), Condvar::new()));
+        let taken = Arc::new(AtomicUsize::new(0));
+        let waiting = queued.clone();
+        fail::cfg_callback("framing::packing_ahead", move || {
+            let (queued, ready) = &*waiting;
+            let mut all = queued.lock().unwrap();
+            while !*all {
+                all = ready.wait(all).unwrap();
+            }
+            drop(all);
+            if taken.fetch_add(1, Ordering::SeqCst) < PACKING_AHEAD {
+                panic!("a bug packing a part ahead, as the test has it");
+            }
+        })
+        .unwrap();
+        // The first packers start; none after.
+        fail::cfg("framing::spawn_packer", &format!("{PACKING_AHEAD}*off->return")).unwrap();
+        let held = HeldParts::new();
+        let mut holds = Vec::new();
+        for part in 0..=PACKING_AHEAD as u64 {
+            let (hold, pending) = held.pend();
+            let mut data = Buffer::of(PART as usize);
+            data.copy_from_slice(&text(part, PART as usize));
+            pack_ahead(part, data, pending);
+            holds.push(hold);
+        }
+        assert_eq!(AHEAD.waiting.lock().unwrap().1, PACKING_AHEAD, "packers started");
+        *queued.0.lock().unwrap() = true;
+        queued.1.notify_all();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while held.counts().skipped_parts == 0 {
+            assert!(std::time::Instant::now() < deadline, "a part waits for a packer for good");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(held.counts().skipped_parts, 1);
+        let ahead = AHEAD.waiting.lock().unwrap();
+        assert_eq!((ahead.0.len(), ahead.1), (0, 0), "parts waiting, packers counted");
+        drop(ahead);
+        scenario.teardown();
     }
 
     /// `len` bytes that compress, of `seed`'s: letters at random, sixteen of them.

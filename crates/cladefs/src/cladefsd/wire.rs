@@ -582,7 +582,9 @@ const _: () = {
 /// ephemeral cells (rootfs at committed epoch, memory cells in place); [`OpenedBody`] carries
 /// `tenant` and `flags` ([`OPENED_EPHEMERAL`]); [`ForkedBody`] carries `committed` and `flags`
 /// ([`FORKED_EPHEMERAL`]) for local-only quiesced ephemeral snapshots.
-pub(crate) const VERSION: u64 = 18;
+/// Version 19: a [`STAGE_COUNTS`]'s `id` is its window's budget now, said again as it changes
+/// (board 10098).
+pub(crate) const VERSION: u64 = 19;
 
 /// cladefs: a flag of any request, which says the guest request it is a call for, the guest's
 /// number of it (`crate::request`, TASK-260): little-endian, not 0, in the first
@@ -693,7 +695,10 @@ pub(crate) const MAX_WINDOW: u64 = crate::protocol::MAX_WINDOW;
 /// low 32 bits, which [`WINDOW`]'s `args[2]` bounds (TASK-111.5), and its window's private pages,
 /// its high 32 (doc-26): said with each [`ACK`]; otherwise once
 /// [`STAGE_COUNTS_EVERY`] has passed since it last said, as it makes them; before each [`STATS`];
-/// and as it closes the connection. Nothing replies.
+/// and as it closes the connection. Nothing replies. cladefs: its `id` is the runs of pages its
+/// window keeps installed at most now, its share of its process's windows', which [`WINDOW`]'s
+/// `args[2]` said as it was made, 0 before it has one; said again at once as another window of its
+/// process comes or goes, changing it (board 10098).
 pub(crate) const STAGE_COUNTS: u32 = 27;
 /// cladefs: the VM process's build, the commit it was built of ([`crate::BUILD_COMMIT`]), the
 /// payload, [`MAX_BUILD`] bytes at most, of letters, digits, `.`, `_` and `-`: which the daemon's

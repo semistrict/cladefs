@@ -84,7 +84,6 @@ mod host {
         CellKind, CreateCellRequest, DeleteCellRequest, ForkCellRequest, GetCountersRequest,
         MakeVersionRequest, ShrinkMemoryRequest, StatCellRequest, SyncCellRequest,
     };
-    use cladefs::testing::control_path;
     use std::ffi::OsStr;
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixListener;
@@ -148,11 +147,9 @@ mod host {
             let control = crate::common::control(&socket)?;
 
             // 1. Create a base Fxfs cell, make a version, sync, and fork ephemerally.
-            let base_store = dir.join("base-store");
             let base = control.call(async |client| {
                 client
                     .create_cell(CreateCellRequest {
-                        path: control_path(&base_store),
                         capacity: CAPACITY,
                         kind: CellKind::Fxfs.into(),
                         ..Default::default()
@@ -162,20 +159,19 @@ mod host {
             let base_ver = control.call(async |client| {
                 client
                     .make_version(MakeVersionRequest {
-                        path: control_path(&base_store),
+                        tenant: base.tenant,
+                        cell: base.cell,
                         keep_last: 0,
                     })
                     .await
             })?;
             control.call(async |client| {
-                client.sync_cell(SyncCellRequest { path: control_path(&base_store) }).await
+                client.sync_cell(SyncCellRequest { tenant: base.tenant, cell: base.cell }).await
             })?;
 
-            let eph_root = dir.join("ephemeral-root");
             let forked = control.call(async |client| {
                 client
                     .fork_cell(ForkCellRequest {
-                        to: control_path(&eph_root),
                         tenant: base.tenant,
                         cell: base.cell,
                         version: base_ver.version,
@@ -185,6 +181,8 @@ mod host {
                     .await
             })?;
             ensure!(forked.cell != 0, "ephemeral fork returned zero cell");
+            let eph_root_id = cladefs::CellId { tenant: forked.tenant, id: forked.cell };
+            let eph_root_name = eph_root_id.to_string();
 
             // Record baseline bucket uploads after the ephemeral fork's reference is in place.
             let baseline_uploads = uploaded_bytes(&control)?;
@@ -194,9 +192,9 @@ mod host {
             let listen_boot = listen(&uds_boot)?;
             let mut vm = Vm::new(2, RAM_MIB)?;
             vm.guest_kernel()?;
-            vm.cell_served(
+            vm.cell_id_served(
                 "extents",
-                &eph_root,
+                eph_root_id,
                 CAPACITY,
                 crate::common::dax_window(crate::common::Window::Large)?,
                 &socket,
@@ -214,7 +212,6 @@ mod host {
             // 3. Suspend VM #1 into an ephemeral memory cell + local ephemeral rootfs checkpoint.
             boot_fc.request("PATCH", "/vm", &serde_json::json!({ "state": "Paused" }))?;
             let snap1 = dir.join("snap1.state");
-            let eph_mem = dir.join("ephemeral-mem");
             let s1: MemoryCellSnapshot = boot_fc.request_json(
                 "PUT",
                 "/snapshot/create",
@@ -222,7 +219,7 @@ mod host {
                     "snapshot_type": "Full",
                     "snapshot_path": snap1,
                     "memory_cell": {
-                        "path_on_host": eph_mem,
+                        "path_on_host": "0/0",
                         "cladefsd_socket": socket,
                         "ephemeral": true,
                     },
@@ -232,14 +229,20 @@ mod host {
                 s1.ephemeral && s1.version == 0 && s1.cell != 0,
                 "unexpected ephemeral snapshot 1: {s1:?}"
             );
+            let eph_mem_id = cladefs::CellId { tenant: s1.tenant, id: s1.cell };
+            let eph_mem_name = eph_mem_id.to_string();
             drop(boot_stream);
             boot_fc.kill()?;
 
             let root_stat = control.call(async |client| {
-                client.stat_cell(StatCellRequest { path: control_path(&eph_root) }).await
+                client
+                    .stat_cell(StatCellRequest { tenant: eph_root_id.tenant, cell: eph_root_id.id })
+                    .await
             })?;
             let mem_stat = control.call(async |client| {
-                client.stat_cell(StatCellRequest { path: control_path(&eph_mem) }).await
+                client
+                    .stat_cell(StatCellRequest { tenant: eph_mem_id.tenant, cell: eph_mem_id.id })
+                    .await
             })?;
             ensure!(root_stat.ephemeral && !root_stat.uploading, "root_stat={root_stat:?}");
             ensure!(mem_stat.ephemeral && !mem_stat.uploading, "mem_stat={mem_stat:?}");
@@ -269,7 +272,7 @@ mod host {
                     "snapshot_path": snap1,
                     "mem_backend": {
                         "backend_type": "Cell",
-                        "backend_path": eph_mem,
+                        "backend_path": eph_mem_name,
                     },
                     "memory_cell": {
                         "tenant": s1.tenant,
@@ -281,7 +284,7 @@ mod host {
                     "vsock_override": { "uds_path": uds_r1 },
                     "cladefs_overrides": [{
                         "id": "extents",
-                        "path_on_host": eph_root,
+                        "path_on_host": eph_root_name,
                         "cladefsd_socket": socket,
                     }],
                 }),
@@ -325,7 +328,7 @@ mod host {
                     "snapshot_path": snap1,
                     "mem_backend": {
                         "backend_type": "Cell",
-                        "backend_path": eph_mem,
+                        "backend_path": eph_mem_name,
                     },
                     "memory_cell": {
                         "tenant": s1.tenant,
@@ -336,7 +339,7 @@ mod host {
                     "resume_vm": true,
                     "cladefs_overrides": [{
                         "id": "extents",
-                        "path_on_host": eph_root,
+                        "path_on_host": eph_root_name,
                         "cladefsd_socket": socket,
                     }],
                 }),
@@ -364,7 +367,7 @@ mod host {
                     "snapshot_path": snap2,
                     "mem_backend": {
                         "backend_type": "Cell",
-                        "backend_path": eph_mem,
+                        "backend_path": eph_mem_name,
                     },
                     "memory_cell": {
                         "cladefsd_socket": socket,
@@ -374,7 +377,7 @@ mod host {
                     "vsock_override": { "uds_path": uds_r2 },
                     "cladefs_overrides": [{
                         "id": "extents",
-                        "path_on_host": eph_root,
+                        "path_on_host": eph_root_name,
                         "cladefsd_socket": socket,
                     }],
                 }),
@@ -385,13 +388,47 @@ mod host {
 
             // 8. Delete both ephemeral cells and confirm zero bucket uploads throughout.
             control.call(async |client| {
-                client.delete_cell(DeleteCellRequest { path: control_path(&eph_root) }).await
+                client
+                    .delete_cell(DeleteCellRequest {
+                        tenant: eph_root_id.tenant,
+                        cell: eph_root_id.id,
+                    })
+                    .await
             })?;
             control.call(async |client| {
-                client.delete_cell(DeleteCellRequest { path: control_path(&eph_mem) }).await
+                client
+                    .delete_cell(DeleteCellRequest {
+                        tenant: eph_mem_id.tenant,
+                        cell: eph_mem_id.id,
+                    })
+                    .await
             })?;
-            ensure!(!eph_root.exists(), "ephemeral rootfs directory not deleted");
-            ensure!(!eph_mem.exists(), "ephemeral memory directory not deleted");
+            ensure!(
+                control
+                    .call(async |client| {
+                        client
+                            .stat_cell(StatCellRequest {
+                                tenant: eph_root_id.tenant,
+                                cell: eph_root_id.id,
+                            })
+                            .await
+                    })
+                    .is_err(),
+                "ephemeral rootfs cell still present after delete"
+            );
+            ensure!(
+                control
+                    .call(async |client| {
+                        client
+                            .stat_cell(StatCellRequest {
+                                tenant: eph_mem_id.tenant,
+                                cell: eph_mem_id.id,
+                            })
+                            .await
+                    })
+                    .is_err(),
+                "ephemeral memory cell still present after delete"
+            );
             ensure!(
                 uploaded_bytes(&control)? == baseline_uploads,
                 "ephemeral lifecycle uploaded bytes to bucket"

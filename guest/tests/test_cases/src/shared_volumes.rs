@@ -26,7 +26,6 @@ pub mod host {
         AttachBaseRequest, ForkCellRequest, MakePublicRequest,
     };
     use cladefs::testing::Control;
-    use cladefs::testing::control_path;
     use cladefs::{Image, Storage};
     use futures::executor::block_on;
     use fxfs_automount::upcall::{Answer, Newest};
@@ -38,21 +37,35 @@ pub mod host {
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
 
-    /// Makes the publisher's cell at `path`: its default volume, and the volume it publishes.
-    pub fn format(path: &Path, capacity: u64) -> anyhow::Result<()> {
-        format_with(path, capacity, &[VOLUME])
+    /// Creates and formats a publisher cell on `cladefsd` (backed by `disk_root`) with its default
+    /// volume and the volume it publishes.
+    pub fn format(
+        cladefsd: &Path,
+        disk_root: &Path,
+        capacity: u64,
+    ) -> anyhow::Result<cladefs::CellId> {
+        format_with(cladefsd, disk_root, capacity, &[VOLUME])
     }
 
-    /// Makes the publisher's cell at `path`: its default volume, and `volumes`.
-    pub fn format_with(path: &Path, capacity: u64, volumes: &[&str]) -> anyhow::Result<()> {
+    /// Creates and formats a publisher cell on `cladefsd` (backed by `disk_root`) with its default
+    /// volume and `volumes`.
+    pub fn format_with(
+        cladefsd: &Path,
+        disk_root: &Path,
+        capacity: u64,
+        volumes: &[&str],
+    ) -> anyhow::Result<cladefs::CellId> {
+        let cell = crate::common::create_cell(cladefsd, capacity)?;
+        let path = crate::common::cell_disk_path(disk_root, cell);
         block_on(async {
-            let image = Image::format(Storage::create(path, capacity).await?).await?;
+            let image = Image::format(Storage::open(&path).await?).await?;
             for volume in ["default"].iter().chain(volumes) {
                 image.create_volume(volume).await?.unmount().await?;
             }
             image.close().await?;
-            Ok(())
-        })
+            Ok::<_, anyhow::Error>(())
+        })?;
+        Ok(cell)
     }
 
     /// A manifest from `stream`, its size first.
@@ -73,25 +86,24 @@ pub mod host {
     /// A published generation: a fork of the publisher's cell, and the manifest of its volume.
     #[derive(Clone)]
     pub struct Generation {
-        path: PathBuf,
+        cell: cladefs::CellId,
         manifest: Vec<u8>,
     }
 
-    /// The next generation of the publisher talking on `stream`, whose cell is at `publisher`, at
-    /// `path`: public, and the publisher told that it is forked.
+    /// The next generation of the publisher talking on `stream`, whose cell is `publisher`:
+    /// public, and the publisher told that it is forked.
     pub fn next_generation(
         stream: &mut UnixStream,
         control: &Control,
-        publisher: &Path,
-        path: PathBuf,
+        publisher: cladefs::CellId,
     ) -> anyhow::Result<Generation> {
         let manifest = receive(stream)?;
-        control
+        let cell = control
             .call(async |client| {
                 client
                     .fork_cell(ForkCellRequest {
-                        from: control_path(publisher),
-                        to: control_path(&path),
+                        tenant: publisher.tenant,
+                        cell: publisher.id,
                         ..Default::default()
                     })
                     .await
@@ -100,20 +112,24 @@ pub mod host {
         control
             .call(async |client| {
                 client
-                    .make_public(MakePublicRequest { path: control_path(&path), attach_only: true })
+                    .make_public(MakePublicRequest {
+                        tenant: cell.tenant,
+                        cell: cell.id,
+                        attach_only: true,
+                    })
                     .await
             })
             .map(drop)?;
         stream.write_all(b"forked\n")?;
-        Ok(Generation { path, manifest })
+        Ok(Generation { cell, manifest })
     }
 
-    /// Attaches the `generations` the consumer on `stream`, whose cell is at `consumer`, asks for,
+    /// Attaches the `generations` the consumer on `stream`, whose cell is `consumer`, asks for,
     /// by number, each time it does, and gives it their manifests, until it hangs up.
     pub fn attach_generations(
         stream: UnixStream,
         control: &Control,
-        consumer: &Path,
+        consumer: cladefs::CellId,
         generations: &[Generation],
     ) -> anyhow::Result<()> {
         let mut answers = stream.try_clone()?;
@@ -123,8 +139,10 @@ pub mod host {
                 .call(async |client| {
                     client
                         .attach_base(AttachBaseRequest {
-                            path: control_path(consumer),
-                            base: control_path(&generation.path),
+                            tenant: consumer.tenant,
+                            cell: consumer.id,
+                            base_tenant: generation.cell.tenant,
+                            base_cell: generation.cell.id,
                         })
                         .await
                 })
@@ -149,7 +167,7 @@ pub mod host {
     /// A [`Manager`]'s answers, for one VM's cell, through the daemon's control API.
     struct Answering {
         control: Control,
-        cell_dir: PathBuf,
+        cell: cladefs::CellId,
         names: BTreeMap<String, Generation>,
         newest: BTreeMap<String, String>,
         asked: Arc<Mutex<BTreeMap<String, usize>>>,
@@ -171,8 +189,10 @@ pub mod host {
                 .call(async |client| {
                     client
                         .attach_base(AttachBaseRequest {
-                            path: control_path(&self.cell_dir),
-                            base: control_path(&generation.path),
+                            tenant: self.cell.tenant,
+                            cell: self.cell.id,
+                            base_tenant: generation.cell.tenant,
+                            base_cell: generation.cell.id,
                         })
                         .await
                 })
@@ -201,18 +221,22 @@ pub mod host {
             Self { cladefsd, names, newest, asked: Default::default() }
         }
 
-        /// Answers, on a thread of its own, the asks of the VM of `role`, on the cell at
-        /// `cell_dir`, at the vsock port they ask at: listening before it boots.
-        pub fn serve(&self, role: &str, cell_dir: &Path) -> anyhow::Result<()> {
+        /// Answers, on a thread of its own, the asks of the VM of `role`, on `cell`, at the vsock
+        /// port they ask at: listening before it boots.
+        pub fn serve(&self, role: &str, cell: cladefs::CellId) -> anyhow::Result<()> {
             let path = Vms::vsock_port(role, fxfs_automount::PORT);
-            self.serve_at(UnixListener::bind(path)?, cell_dir)
+            self.serve_at(UnixListener::bind(path)?, cell)
         }
 
         /// Answers, as [`Manager::serve`], the asks that come to `listener`.
-        pub fn serve_at(&self, listener: UnixListener, cell_dir: &Path) -> anyhow::Result<()> {
+        pub fn serve_at(
+            &self,
+            listener: UnixListener,
+            cell: cladefs::CellId,
+        ) -> anyhow::Result<()> {
             let mut answering = Answering {
                 control: crate::common::control(&self.cladefsd)?,
-                cell_dir: cell_dir.to_owned(),
+                cell,
                 names: self.names.clone(),
                 newest: self.newest.clone(),
                 asked: self.asked.clone(),
@@ -275,16 +299,16 @@ pub mod host {
             Self { test_setup, root, cpus, memory_mib, capacity, window, cladefsd, memory, booted }
         }
 
-        /// A VM of the guest's `role`, on the cell at `cell_dir`, and the host's end of the
+        /// A VM of the guest's `role`, on `cell`, and the host's end of the
         /// connection it opens, if `talks`.
         pub fn run(
             &self,
             role: &str,
-            cell_dir: &Path,
+            cell: cladefs::CellId,
             talks: bool,
         ) -> anyhow::Result<(Running, Option<UnixStream>)> {
             self.boot(role, talks, |vm| {
-                vm.cell_served("extents", cell_dir, self.capacity, self.window, &self.cladefsd);
+                vm.cell_id_served("extents", cell, self.capacity, self.window, &self.cladefsd);
                 Ok(())
             })
         }
@@ -332,17 +356,17 @@ pub mod host {
             PathBuf::from(format!("{}_{port}", Requests::uds_of(&Self::vsock_name(role)).display()))
         }
 
-        /// A VM of `role` on the cell at `cell_dir`, run to its end: a consumer of `generations`.
+        /// A VM of `role` on `cell`, run to its end: a consumer of `generations`.
         pub fn run_consumer(
             &self,
             role: &str,
-            cell_dir: &Path,
+            cell: cladefs::CellId,
             control: &Control,
             generations: &[Generation],
         ) -> anyhow::Result<()> {
-            let (vm, stream) = self.run(role, cell_dir, true)?;
+            let (vm, stream) = self.run(role, cell, true)?;
             let stream = stream.context("the consumer's connection")?;
-            attach_generations(stream, control, cell_dir, generations)?;
+            attach_generations(stream, control, cell, generations)?;
             vm.wait()
         }
     }

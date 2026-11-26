@@ -180,9 +180,8 @@ struct DiskFlusher {
     /// Writers currently waiting in [`PageCache::throttle_for`] on this disk.
     #[cfg(test)]
     waiters: AtomicU64,
-    /// Weak handle to the virtual [`HostDisk`] when `DiskKey::Virtual`, so its flusher exits once
-    /// the disk is dropped rather than leaking threads.
-    #[cfg(not(madsim))]
+    /// Weak handle to the [`HostDisk`] for this flusher (used both to reap virtual flushers once
+    /// dropped and to read any explicit per-disk `dirty_budget` override).
     disk: Option<Weak<bucket_cell::host_disk::HostDisk>>,
 }
 
@@ -341,14 +340,9 @@ impl PageCache {
         }
         let flusher = Arc::new(DiskFlusher {
             open_files: AtomicU64::new(u64::from(bind_file)),
-            #[cfg(not(madsim))]
-            disk: matches!(disk_key, DiskKey::Virtual(_))
-                .then(|| disk.map(Arc::downgrade))
-                .flatten(),
+            disk: disk.map(Arc::downgrade),
             ..DiskFlusher::default()
         });
-        #[cfg(madsim)]
-        let _ = disk;
         flushers.insert(disk_key, flusher.clone());
         if bind_file {
             self.active_disks.fetch_add(1, Ordering::AcqRel);
@@ -419,6 +413,29 @@ impl PageCache {
 
     fn hard(&self) -> u64 {
         self.hard.load(Ordering::Relaxed)
+    }
+
+    /// Per-disk background flush threshold: honors an explicit per-disk `dirty_budget` on
+    /// `flusher`'s [`HostDisk`] (half the dirty hard budget) or divides [`PageCache::background`]
+    /// across active disks (board 11939).
+    fn disk_background_for(&self, flusher: &DiskFlusher) -> u64 {
+        if let Some(budget) =
+            flusher.disk.as_ref().and_then(Weak::upgrade).and_then(|d| d.dirty_budget())
+        {
+            return (budget / 2).max(1);
+        }
+        self.disk_background()
+    }
+
+    /// Per-disk dirty hard ceiling: honors an explicit per-disk `dirty_budget` on `flusher`'s
+    /// [`HostDisk`] or divides [`PageCache::hard`] across active disks (board 11939).
+    fn disk_hard_for(&self, flusher: &DiskFlusher) -> u64 {
+        if let Some(budget) =
+            flusher.disk.as_ref().and_then(Weak::upgrade).and_then(|d| d.dirty_budget())
+        {
+            return budget;
+        }
+        self.disk_hard()
     }
 
     /// Per-disk background flush threshold: divides [`PageCache::background`] across active disks
@@ -550,9 +567,11 @@ impl PageCache {
         failing: impl Fn() -> Option<io::Error>,
     ) -> io::Result<()> {
         let current = || match flusher {
-            Some(f) => {
-                (f.dirty.load(Ordering::Relaxed), f.stuck.load(Ordering::Relaxed), self.disk_hard())
-            }
+            Some(f) => (
+                f.dirty.load(Ordering::Relaxed),
+                f.stuck.load(Ordering::Relaxed),
+                self.disk_hard_for(f),
+            ),
             None => (
                 self.dirty.load(Ordering::Relaxed),
                 self.stuck.load(Ordering::Relaxed),
@@ -625,7 +644,7 @@ impl PageCache {
     /// [`Options::most`].
     fn dirtied_on(&self, flusher: Option<&DiskFlusher>) {
         if let Some(flusher) = flusher {
-            if flusher.dirty.load(Ordering::Relaxed) > self.disk_background() {
+            if flusher.dirty.load(Ordering::Relaxed) > self.disk_background_for(flusher) {
                 flusher.wake();
             }
         } else if self.dirty.load(Ordering::Relaxed) > self.background() {
@@ -693,7 +712,7 @@ impl PageCache {
                 continue;
             }
             let Some(dirtied) = file.dirtied() else { continue };
-            let over = flusher.dirty.load(Ordering::Relaxed) > self.disk_background();
+            let over = flusher.dirty.load(Ordering::Relaxed) > self.disk_background_for(flusher);
             if !over && now.duration_since(dirtied) < self.options.expire {
                 break;
             }

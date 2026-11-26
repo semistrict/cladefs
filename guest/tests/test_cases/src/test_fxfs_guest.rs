@@ -407,21 +407,6 @@ mod host {
         }
 
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
-            let path = test_setup.tmp_dir.join("extents");
-            if self.mode == Mode::HostFormats {
-                block_on(async {
-                    let fs = Filesystem::format(Storage::create(&path, CAPACITY).await?).await?;
-                    let owner = Owner { uid: 0, gid: 0 };
-                    let (hello, _) = fs.root().create(b"hello", 0o644, owner).await?;
-                    hello.write(0, HELLO).await?;
-                    let (dir, _) = fs.root().mkdir(b"dir", 0o750, owner).await?;
-                    let (file, _) = dir.create(b"nested", 0o600, owner).await?;
-                    file.write(0, &nested()).await?;
-                    fs.close().await?;
-                    anyhow::Ok(())
-                })?;
-            }
-
             let mut vm = Vm::new(2, 512)?;
             vm.guest_kernel()?;
             let window = match self.dax {
@@ -434,10 +419,27 @@ mod host {
                 let socket =
                     std::env::temp_dir().join(format!("cladefs-crash-{}.sock", std::process::id()));
                 let daemon = spawn_daemon(&test_setup, &socket, "cladefsd", &[], None)?;
-                vm.cell_served("extents", &path, CAPACITY, window, &socket);
+                let cell = crate::common::create_cell(&socket, CAPACITY)?;
+                crate::common::save_cell_id(&test_setup.tmp_dir, "extents", cell)?;
+                vm.cell_id_served("extents", cell, CAPACITY, window, &socket);
                 Some(daemon)
             } else {
-                vm.cell("extents", &path, CAPACITY, window)?;
+                let (cell, path) =
+                    crate::common::create_shared_cell(&test_setup.tmp_dir, "extents", CAPACITY)?;
+                if self.mode == Mode::HostFormats {
+                    block_on(async {
+                        let fs = Filesystem::format(Storage::open(&path).await?).await?;
+                        let owner = Owner { uid: 0, gid: 0 };
+                        let (hello, _) = fs.root().create(b"hello", 0o644, owner).await?;
+                        hello.write(0, HELLO).await?;
+                        let (dir, _) = fs.root().mkdir(b"dir", 0o750, owner).await?;
+                        let (file, _) = dir.create(b"nested", 0o600, owner).await?;
+                        file.write(0, &nested()).await?;
+                        fs.close().await?;
+                        anyhow::Ok(())
+                    })?;
+                }
+                vm.cell_id("extents", cell, CAPACITY, window)?;
                 None
             };
             if self.mode == Mode::Crash {
@@ -468,7 +470,17 @@ mod host {
         fn check(self: Box<Self>, stdout: Vec<u8>, test_setup: TestSetup) -> TestOutcome {
             // cladefs: as the guest wrote it, a stop's kernel lines in its midst gone (GCE r248).
             let output = crate::vm::without_kernel_lines(&String::from_utf8(stdout).unwrap());
-            let path = test_setup.tmp_dir.join("extents");
+            let path = if self.daemon_killed {
+                let cell =
+                    crate::common::load_cell_id(&test_setup.tmp_dir, "extents").expect("cell id");
+                crate::common::cell_disk_path(
+                    &crate::common::disk_root_for(&test_setup.tmp_dir, "cladefsd"),
+                    cell,
+                )
+            } else {
+                crate::common::shared_cell_path(&test_setup.tmp_dir, "extents")
+                    .expect("shared cell path")
+            };
             // cladefs: the writers' calls failed, some of them, as their allocations did; the cell
             // holds every file whose fsync returned, whole (TASK-44.10).
             if self.mode == Mode::Faults {
@@ -506,8 +518,7 @@ mod host {
                     };
                     assert_eq!(output.lines().last(), Some(stray), "the stray access returned");
                     let socket = std::env::var_os("CLADEFSD").unwrap();
-                    let other = test_setup.tmp_dir.join("after-the-stray");
-                    cladefs::cladefsd::CellClient::connect(socket, other, 1 << 24).unwrap();
+                    cladefs::cladefsd::CellClient::connect_new(socket, 0, 1 << 24).unwrap();
                 }
                 if self.daemon_killed {
                     crate::common::say_daemon_stats(&test_setup, "cladefsd");

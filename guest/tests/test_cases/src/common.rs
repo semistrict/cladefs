@@ -379,6 +379,11 @@ pub fn spawn_daemon(
     if let Some(stats) = stats_file(given, &test_setup.tmp_dir, name) {
         command.env("CLADEFSD_STATS", stats);
     }
+    if !env.iter().any(|(var, _)| *var == "CLADEFSD_ROOTS") {
+        let disk_root = disk_root_for(&test_setup.tmp_dir, name);
+        fs::create_dir_all(&disk_root)?;
+        command.env("CLADEFSD_ROOTS", &disk_root);
+    }
     let daemon = command.envs(env.iter().copied()).stderr(log).spawn()?;
     test_setup.register_cleanup_pid(daemon.id());
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -437,6 +442,73 @@ pub fn give_to_the_jail(socket: &Path) -> anyhow::Result<()> {
 /// [`spawn_daemon`] place it.
 pub fn control(socket: &Path) -> Result<cladefs::testing::Control, cladefs::Error> {
     cladefs::testing::Control::connect(socket.with_extension("control"))
+}
+
+/// The managed disk root [`spawn_daemon`] creates for daemon `name` under `dir`.
+pub fn disk_root_for(dir: &Path, name: &str) -> PathBuf {
+    dir.join(format!("{name}-disk0"))
+}
+
+/// The first managed disk root configured for the run's shared extent daemon (`CLADEFSD_ROOTS`).
+pub fn shared_disk_root() -> anyhow::Result<PathBuf> {
+    let raw = std::env::var_os("CLADEFSD_ROOTS").context("CLADEFSD_ROOTS not set")?;
+    std::env::split_paths(&raw)
+        .find(|p| !p.as_os_str().is_empty())
+        .context("CLADEFSD_ROOTS is empty")
+}
+
+/// The canonical on-disk directory a managed disk rooted at `disk_root` holds for `cell`.
+pub fn cell_disk_path(disk_root: &Path, cell: cladefs::CellId) -> PathBuf {
+    disk_root.join("cells").join(format!("{:016x}", cell.tenant)).join(format!("{:016x}", cell.id))
+}
+
+/// Creates a new Fxfs cell of `capacity` bytes on the daemon at `cladefsd` (default tenant 0) and
+/// returns its assigned [`cladefs::CellId`].
+pub fn create_cell(cladefsd: &Path, capacity: u64) -> anyhow::Result<cladefs::CellId> {
+    use cladefs::cladefsd::control::proto::{CellKind, CreateCellRequest};
+    let response = control(cladefsd)?.call(async |client| {
+        client
+            .create_cell(CreateCellRequest {
+                capacity,
+                kind: CellKind::Fxfs.into(),
+                ..Default::default()
+            })
+            .await
+    })?;
+    Ok(cladefs::CellId { tenant: response.tenant, id: response.cell })
+}
+
+/// Creates a new Fxfs cell of `capacity` bytes on the shared `CLADEFSD` daemon, saves its cell ID
+/// under `dir/<name>.cell`, and returns `(cell_id, canonical_on_disk_path)`.
+pub fn create_shared_cell(
+    dir: &Path,
+    name: &str,
+    capacity: u64,
+) -> anyhow::Result<(cladefs::CellId, PathBuf)> {
+    let cladefsd = PathBuf::from(std::env::var_os("CLADEFSD").context("CLADEFSD not set")?);
+    let cell = create_cell(&cladefsd, capacity)?;
+    save_cell_id(dir, name, cell)?;
+    let path = cell_disk_path(&shared_disk_root()?, cell);
+    Ok((cell, path))
+}
+
+/// Persists `cell` under `dir/<name>.cell` so `Test::check` can locate the cell on disk.
+pub fn save_cell_id(dir: &Path, name: &str, cell: cladefs::CellId) -> anyhow::Result<()> {
+    fs::write(dir.join(format!("{name}.cell")), cell.to_string())
+        .with_context(|| format!("writing {name}.cell"))
+}
+
+/// Reads a cell ID previously persisted by [`save_cell_id`].
+pub fn load_cell_id(dir: &Path, name: &str) -> anyhow::Result<cladefs::CellId> {
+    let path = dir.join(format!("{name}.cell"));
+    let text = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    text.trim().parse().map_err(|err: String| anyhow::anyhow!("{}: {err}", path.display()))
+}
+
+/// Locates the canonical on-disk path for a cell previously persisted via [`save_cell_id`] on the
+/// run's shared `CLADEFSD` daemon.
+pub fn shared_cell_path(dir: &Path, name: &str) -> anyhow::Result<PathBuf> {
+    Ok(cell_disk_path(&shared_disk_root()?, load_cell_id(dir, name)?))
 }
 
 /// Copies the extent store at `from` to `to`, as [`copy_dir`] does, once no process has it open:

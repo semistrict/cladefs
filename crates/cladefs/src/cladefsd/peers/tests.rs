@@ -894,7 +894,7 @@ async fn accepts_failing_are_tried_again_after_a_pause() {
     let failed = Arc::new(std::sync::OnceLock::new());
     let start = tokio::time::Instant::now();
     let incoming = futures::stream::iter([failing(libc::EMFILE), failing(libc::ENFILE), Ok(1)]);
-    let mut accepted = Box::pin(accepting(incoming, failed.clone()));
+    let mut accepted = Box::pin(super::super::run::accepting("a peer's", incoming, failed.clone()));
     assert_eq!(accepted.next().await.unwrap().unwrap(), 1);
     let waited = start.elapsed();
     assert!(waited >= 2 * super::super::server::ACCEPT_AGAIN, "{waited:?}");
@@ -902,7 +902,7 @@ async fn accepts_failing_are_tried_again_after_a_pause() {
     let start = tokio::time::Instant::now();
     let aborted = Err(Error::from(ErrorKind::ConnectionAborted));
     let incoming = futures::stream::iter([aborted, Ok(2), failing(libc::EBADF), Ok(3)]);
-    let mut accepted = Box::pin(accepting(incoming, failed.clone()));
+    let mut accepted = Box::pin(super::super::run::accepting("a peer's", incoming, failed.clone()));
     assert_eq!(accepted.next().await.unwrap().unwrap(), 2);
     let waited = start.elapsed();
     assert!(waited < super::super::server::ACCEPT_AGAIN, "{waited:?}");

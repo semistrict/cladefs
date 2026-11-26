@@ -14,8 +14,7 @@ use cladefs::cladefsd::control::proto::{
     ForkCellRequest, MakeVersionRequest, SetPeersRequest, StatCellRequest, SyncCellRequest,
 };
 use cladefs::testing::Control;
-use cladefs::testing::control_path;
-use cladefs::{CellClient, ExtentId, VolatileSlice, VolatileSliceMut};
+use cladefs::{CellClient, CellId, ExtentId, VolatileSlice, VolatileSliceMut};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
@@ -45,6 +44,8 @@ struct Daemon {
 /// A daemon serving in `dir`, keeping its cells in the file bucket at `bucket`, and its
 /// part cache in `dir`; serving its peers at `peers`' first address, and asking them all, if given.
 fn daemon(dir: &Path, bucket: &Path, peers: Option<&[String]>) -> Daemon {
+    let disk = dir.join("disk0");
+    std::fs::create_dir_all(&disk).unwrap();
     let (vms, control, stats) =
         (dir.join("cladefsd.sock"), dir.join("control.sock"), dir.join("stats"));
     let mut command = Command::new(env!("CARGO_BIN_EXE_cladefsd"));
@@ -52,6 +53,7 @@ fn daemon(dir: &Path, bucket: &Path, peers: Option<&[String]>) -> Daemon {
         .arg(&vms)
         .env("CLADEFSD_BUCKET", format!("file://{}/", bucket.display()))
         .env("CLADEFSD_TOKEN", "1")
+        .env("CLADEFSD_ROOTS", &disk)
         .env("CLADEFSD_PART_CACHE", dir.join("cache"))
         .env("CLADEFSD_STATS", &stats)
         .env("CLADEFSD_GRPC", &control);
@@ -133,8 +135,7 @@ fn run(peered: bool) -> (u64, u64, u64, u64) {
     let first = daemon(&hosts[0], &bucket, peered.then_some(&first_peers[..]));
     let second = daemon(&hosts[1], &bucket, peered.then_some(&second_peers[..]));
 
-    let base = hosts[0].join("base");
-    let client = CellClient::connect(&first.vms, &base, CAPACITY).unwrap();
+    let client = CellClient::connect_new(&first.vms, 0, CAPACITY).unwrap();
     let cell = client.cell();
     for sequence in 1..=EXTENTS {
         let extent = ExtentId { cell, sequence };
@@ -144,47 +145,36 @@ fn run(peered: bool) -> (u64, u64, u64, u64) {
     drop(client);
     first
         .control
-        .call(async |client| client.sync_cell(SyncCellRequest { path: control_path(&base) }).await)
+        .call(async |client| client.sync_cell(SyncCellRequest { tenant: 0, cell }).await)
         .map(drop)
         .unwrap();
     let version = first
         .control
         .call(async |client| {
-            client
-                .make_version(MakeVersionRequest { path: control_path(&base), keep_last: 0 })
-                .await
+            client.make_version(MakeVersionRequest { tenant: 0, cell, keep_last: 0 }).await
         })
         .map(|response| response.version)
         .unwrap();
     first
         .control
-        .call(async |client| client.sync_cell(SyncCellRequest { path: control_path(&base) }).await)
+        .call(async |client| client.sync_cell(SyncCellRequest { tenant: 0, cell }).await)
         .map(drop)
         .unwrap();
     let stated = first
         .control
-        .call(async |client| client.stat_cell(StatCellRequest { path: control_path(&base) }).await)
+        .call(async |client| client.stat_cell(StatCellRequest { tenant: 0, cell }).await)
         .unwrap();
     let from = cladefs::CellVersion { tenant: stated.tenant, cell: stated.cell, version };
 
-    let fork = hosts[1].join("fork");
-    second
+    let forked = second
         .control
         .call(async |client| {
             let cladefs::CellVersion { tenant, cell, version } = from;
-            client
-                .fork_cell(ForkCellRequest {
-                    to: control_path(&fork),
-                    tenant,
-                    cell,
-                    version,
-                    ..Default::default()
-                })
-                .await
+            client.fork_cell(ForkCellRequest { tenant, cell, version, ..Default::default() }).await
         })
-        .map(|response| cladefs::CellId { tenant: response.tenant, id: response.cell })
+        .map(|response| CellId { tenant: response.tenant, id: response.cell })
         .unwrap();
-    let client = CellClient::connect(&second.vms, &fork, CAPACITY).unwrap();
+    let client = CellClient::connect_cell(&second.vms, forked).unwrap();
     for sequence in 1..=EXTENTS {
         let mut read = vec![0; EXTENT];
         let extent = ExtentId { cell, sequence };

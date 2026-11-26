@@ -1189,8 +1189,176 @@ compile_error!(
 #[global_allocator]
 static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+#[derive(Default, serde::Deserialize)]
+struct TomlFile {
+    #[serde(default)]
+    bucket: TomlBucket,
+    #[serde(default)]
+    buckets: BTreeMap<u16, BTreeMap<String, String>>,
+    #[serde(default)]
+    kms: TomlKms,
+    #[serde(default)]
+    gc: TomlGc,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct TomlBucket {
+    #[serde(default)]
+    url: Option<String>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct TomlKms {
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    master_key: Option<String>,
+    #[serde(default)]
+    master_key_file: Option<PathBuf>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct TomlGc {
+    #[serde(default)]
+    bucket: Option<String>,
+    #[serde(default)]
+    every_secs: Option<u64>,
+    #[serde(default)]
+    at_once: Option<usize>,
+    #[serde(default)]
+    lease_secs: Option<u64>,
+    #[serde(default)]
+    metrics_file: Option<PathBuf>,
+    #[serde(default)]
+    max_delete_objects: Option<u64>,
+    #[serde(default)]
+    max_delete_bytes: Option<u64>,
+    #[serde(default)]
+    max_requests_per_second: Option<f64>,
+    #[serde(default)]
+    max_refused_passes: Option<usize>,
+}
+
+/// Loads `--config PATH` / `-c PATH` / `CLADEFS_CONFIG` if specified, applies KMS/bucket
+/// overrides before threads start, and returns the remaining CLI args with TOML defaults filled in.
+fn load_toml_args(raw: Vec<String>) -> Result<Vec<String>, String> {
+    let mut rest = Vec::with_capacity(raw.len());
+    let mut config_path: Option<PathBuf> = None;
+    let mut it = raw.into_iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--config" | "-c" => {
+                let p = it.next().ok_or_else(|| "--config requires a file path".to_owned())?;
+                config_path = Some(PathBuf::from(p));
+            }
+            s if s.starts_with("--config=") => {
+                config_path = Some(PathBuf::from(s.trim_start_matches("--config=")));
+            }
+            _ => rest.push(arg),
+        }
+    }
+    if config_path.is_none() {
+        config_path =
+            std::env::var_os("CLADEFS_CONFIG").filter(|v| !v.is_empty()).map(PathBuf::from);
+    }
+    let Some(path) = config_path else {
+        return Ok(rest);
+    };
+    let text = std::fs::read_to_string(&path)
+        .map_err(|err| format!("reading config {}: {err}", path.display()))?;
+    let cfg: TomlFile =
+        toml::from_str(&text).map_err(|err| format!("parsing config {}: {err}", path.display()))?;
+    // SAFETY: called at process startup in `main` before any threads or Tokio runtime are spawned.
+    let set = |k: &str, v: &str| unsafe { std::env::set_var(k, v) };
+    if let Some(url) = &cfg.kms.url {
+        set("CLADEFS_KMS", url);
+    }
+    if let Some(key) = &cfg.kms.master_key {
+        set("CLADEFS_MASTER_KEY", key);
+    }
+    if let Some(file) = &cfg.kms.master_key_file {
+        set("CLADEFS_MASTER_KEY_FILE", &file.to_string_lossy());
+    }
+    for (num, vars) in &cfg.buckets {
+        for (k, v) in vars {
+            set(&format!("CLADEFSD_BUCKET_{num}_{}", k.to_ascii_uppercase()), v);
+        }
+    }
+    let has_url = rest.first().is_some_and(|a| !a.starts_with("--"));
+    let mut effective = Vec::new();
+    if !has_url {
+        let url = cfg.gc.bucket.or(cfg.bucket.url).ok_or_else(|| {
+            format!("config {} sets neither gc.bucket nor bucket.url", path.display())
+        })?;
+        effective.push(url);
+    } else {
+        effective.push(rest.remove(0));
+    }
+    let is_special = rest.first().is_some_and(|f| {
+        matches!(
+            f.as_str(),
+            "--cells" | "--delete-cell" | "--delete-tenant" | "--usage" | "--rotate-master-key"
+        )
+    });
+    if !is_special {
+        let has_flag = |name: &str| rest.iter().any(|a| a == name);
+        if let Some(every) = cfg.gc.every_secs
+            && !has_flag("--every")
+            && !has_flag("--dry-run")
+        {
+            effective.push("--every".into());
+            effective.push(every.to_string());
+        }
+        if let Some(at_once) = cfg.gc.at_once
+            && !has_flag("--at-once")
+        {
+            effective.push("--at-once".into());
+            effective.push(at_once.to_string());
+        }
+        if let Some(lease) = cfg.gc.lease_secs
+            && !has_flag("--lease")
+        {
+            effective.push("--lease".into());
+            effective.push(lease.to_string());
+        }
+        if let Some(metrics) = &cfg.gc.metrics_file
+            && !has_flag("--metrics")
+        {
+            effective.push("--metrics".into());
+            effective.push(metrics.to_string_lossy().into_owned());
+        }
+        if let Some(max_obj) = cfg.gc.max_delete_objects
+            && !has_flag("--max-delete-objects")
+        {
+            effective.push("--max-delete-objects".into());
+            effective.push(max_obj.to_string());
+        }
+        if let Some(max_bytes) = cfg.gc.max_delete_bytes
+            && !has_flag("--max-delete-bytes")
+        {
+            effective.push("--max-delete-bytes".into());
+            effective.push(max_bytes.to_string());
+        }
+        if let Some(rps) = cfg.gc.max_requests_per_second
+            && !has_flag("--max-requests-per-second")
+        {
+            effective.push("--max-requests-per-second".into());
+            effective.push(rps.to_string());
+        }
+        if let Some(refused) = cfg.gc.max_refused_passes
+            && !has_flag("--max-refused-passes")
+        {
+            effective.push("--max-refused-passes".into());
+            effective.push(refused.to_string());
+        }
+    }
+    effective.extend(rest);
+    Ok(effective)
+}
+
 fn main() -> Result<(), String> {
-    let Args { url, command } = parse(std::env::args().skip(1))?;
+    let args = load_toml_args(std::env::args().skip(1).collect())?;
+    let Args { url, command } = parse(args.into_iter())?;
     // cladefs: before any thread starts, which would take them else (board 8513). Nothing asks
     // the others' stops: SIGTERM and SIGINT end them as ever, as they hold no lease.
     let stop = match &command {

@@ -200,13 +200,24 @@ static void cladefs_dax_count(struct cladefs_dax *dax, struct cladefs_dax_file *
  * cladefs: has the budget's worker run a round (cladefs_dax_work), which writes back and rebinds as the
  * private pages near private_max: and write back whatever is dirty, if `clean`, as a window whose
  * ranges are all dirty has nothing to reclaim. Not while it stops. It only queues the round.
+ *
+ * The round is queued under the lock cladefs_dax_stop says that the worker stops under, read
+ * again there: a kick that read it before a stop, and queued the round after the stop's
+ * cancel_work_sync, had the worker run on a filesystem unmounting or frozen (board 10373). A
+ * pause point between the two reads (CLADEFS_DAX_STEP_KICK), where a kicker beside a stop may be
+ * held up.
  */
 void cladefs_dax_kick(struct cladefs_dax *dax, bool clean)
 {
 	if (clean)
 		atomic_set(&dax->clean, 1);
-	if (!READ_ONCE(dax->stopping))
+	if (READ_ONCE(dax->stopping))
+		return;
+	cladefs_dax_pause_file(CLADEFS_DAX_STEP_KICK, 0);
+	mutex_lock(&dax->kick_lock);
+	if (!dax->stopping)
 		queue_work(dax->wq, &dax->work);
+	mutex_unlock(&dax->kick_lock);
 }
 
 /*
@@ -3218,6 +3229,7 @@ struct cladefs_dax *cladefs_dax_create(struct cladefs_filesystem *filesystem)
 	}
 	/* cladefs: the budget's worker, and the slice of the budget an iomap takes (doc-13). */
 	INIT_WORK(&dax->work, cladefs_dax_work);
+	mutex_init(&dax->kick_lock);
 	init_waitqueue_head(&dax->budget_wait);
 	dax->private_max = min_t(u64, cladefs_device_private_max(dev), LONG_MAX);
 	dax->iomap_pages = clamp_t(unsigned long, dax->private_max / 8, 1, CLADEFS_DAX_PRIVATE_PAGES);
@@ -3317,7 +3329,10 @@ int cladefs_dax_settle(struct cladefs_dax *dax)
  */
 void cladefs_dax_stop(struct cladefs_dax *dax)
 {
+	/* cladefs: under the kicks' lock, so that none queues a round once it is set (board 10373). */
+	mutex_lock(&dax->kick_lock);
 	WRITE_ONCE(dax->stopping, true);
+	mutex_unlock(&dax->kick_lock);
 	cancel_work_sync(&dax->work);
 }
 
@@ -3326,7 +3341,9 @@ void cladefs_dax_start(struct cladefs_dax *dax)
 {
 	if (cladefs_is_frozen(dax->filesystem))
 		return;
+	mutex_lock(&dax->kick_lock);
 	WRITE_ONCE(dax->stopping, false);
+	mutex_unlock(&dax->kick_lock);
 	cladefs_dax_kick(dax, false);
 }
 

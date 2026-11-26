@@ -597,6 +597,11 @@ fn write_staged_durably(staged: &Path, path: &Path, bytes: &[u8]) -> Result<(), 
     host_fs::rename(staged, path)
         .with_context(|| format!("renaming {} to {}", staged.display(), path.display()))?;
     let Some(parent) = path.parent() else { bail!("{} has no directory", path.display()) };
+    // An acceptance renamed into place, its directory not synced: a power cut may lose it, so a
+    // migration's target writes it again before it notes the cell taken (board 10705).
+    fail::fail_point!("ephemeral_host::accepted_renamed", parent.ends_with(ACCEPTED), |_| {
+        Err(anyhow::anyhow!("syncing {}: failpoint accepted_renamed", parent.display()))
+    });
     host_fs::File::open(parent)
         .and_then(|dir| dir.sync_all())
         .with_context(|| format!("syncing directory {}", parent.display()))?;

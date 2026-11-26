@@ -122,6 +122,7 @@ pub mod bucket;
 mod cache;
 #[cfg(any(target_os = "linux", madsim))]
 pub mod cladefsd;
+pub mod config;
 mod dax;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod ephemeral_host;

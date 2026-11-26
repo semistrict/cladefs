@@ -89,6 +89,7 @@ async fn boot(host: u8, root: &Path, bucket: Arc<RoutedBucket>, kept: Kept) {
         ("CLADEFSD_TOKEN", host.to_string()),
         ("CLADEFSD_GRPC", control(host).to_string()),
         ("CLADEFSD_TENANTS", tenants),
+        ("CLADEFSD_ROOTS", root.display().to_string()),
     ];
     if let Some(count) = kept.peers {
         let peers: Vec<String> = (1..=count).map(|host| peer(host).to_string()).collect();
@@ -268,27 +269,23 @@ fn manager() -> madsim::runtime::NodeHandle {
 #[madsim::test]
 async fn two_daemons_boot_as_hosts_and_one_takes_the_others_cell() {
     let (bucket, _) = world();
-    let (_nodes, roots) = hosts(2, &bucket);
+    let (_nodes, _roots) = hosts(2, &bucket);
     let client = manager();
-    let (first, second) = (roots[0].join("store"), roots[1].join("store"));
     client
         .spawn(async move {
             let mut one = connect(1).await;
             let made = one
                 .create_cell(CreateCellRequest {
-                    path: first.display().to_string(),
                     capacity: 64 << 20,
                     ..CreateCellRequest::default()
                 })
                 .await
                 .unwrap()
                 .into_inner();
-            let path = first.display().to_string();
-            one.sync_cell(SyncCellRequest { path: path.clone() }).await.unwrap();
+            one.sync_cell(SyncCellRequest { tenant: made.tenant, cell: made.cell }).await.unwrap();
             let mut two = connect(2).await;
             let taken = two
                 .create_cell(CreateCellRequest {
-                    path: second.display().to_string(),
                     capacity: 64 << 20,
                     token: Some(2),
                     tenant: made.tenant,
@@ -299,7 +296,7 @@ async fn two_daemons_boot_as_hosts_and_one_takes_the_others_cell() {
                 .unwrap()
                 .into_inner();
             assert_eq!((taken.tenant, taken.cell), (made.tenant, made.cell));
-            let stat = two.stat_cell(StatCellRequest { path: second.display().to_string() });
+            let stat = two.stat_cell(StatCellRequest { tenant: made.tenant, cell: made.cell });
             assert_eq!(stat.await.unwrap().into_inner().capacity, 64 << 20);
         })
         .await
@@ -316,7 +313,7 @@ async fn an_image_imported_through_the_control_api_reads_back() {
     use cladefs::import::testing::{Entry, Kind, layer};
     const HOSTNAME: &[u8] = b"simulated\n";
     let (bucket, _) = world();
-    let (nodes, roots) = hosts(1, &bucket);
+    let (nodes, _roots) = hosts(1, &bucket);
     // The image, on the daemon's host, as its caller has it there: outside its disk (host_fs), as
     // the import reads it, on the real host's, in a directory of its own.
     let images = tempfile::tempdir().unwrap();
@@ -327,26 +324,30 @@ async fn an_image_imported_through_the_control_api_reads_back() {
         Entry::new("bin/sh", Kind::Symlink("busybox")),
     ];
     std::fs::write(&image, layer(&entries).unwrap()).unwrap();
-    let cell = roots[0].join("store");
-    let path = cell.display().to_string();
-    manager()
+    let made_id = manager()
         .spawn(async move {
             let mut one = connect(1).await;
-            let made = one.import_image(ImportImageRequest {
-                path: path.clone(),
-                capacity: 64 << 20,
-                image: image.display().to_string(),
-                ..ImportImageRequest::default()
-            });
-            assert_ne!(made.await.unwrap().into_inner().cell, 0);
-            let stat = one.stat_cell(StatCellRequest { path });
+            let made = one
+                .import_image(ImportImageRequest {
+                    capacity: 64 << 20,
+                    image: image.display().to_string(),
+                    ..ImportImageRequest::default()
+                })
+                .await
+                .unwrap()
+                .into_inner();
+            assert_ne!(made.cell, 0);
+            let stat = one.stat_cell(StatCellRequest { tenant: made.tenant, cell: made.cell });
             assert_eq!(stat.await.unwrap().into_inner().capacity, 64 << 20);
+            cladefs::CellId { tenant: made.tenant, id: made.cell }
         })
         .await
         .unwrap();
     let (hostname, target) = nodes[0]
         .spawn(async move {
             let daemon = current_daemon().expect("node 0 daemon");
+            let cell =
+                host_fs::may_block(|| daemon.cell_path(made_id)).expect("imported cell path");
             let storage = cladefs::Storage::open_on(daemon.host(), &cell).await.unwrap();
             let fs = cladefs::Filesystem::mount(storage).await.unwrap();
             let (etc, _) = fs.root().lookup(b"etc").await.unwrap();
@@ -372,14 +373,13 @@ async fn an_image_imported_through_the_control_api_reads_back() {
 #[madsim::test]
 async fn a_guests_commit_uploaded_on_one_host_reads_back_on_another() {
     let (bucket, _) = world();
-    let (nodes, roots) = hosts(2, &bucket);
-    let (first, second) = (roots[0].join("store"), roots[1].join("store"));
+    let (nodes, _roots) = hosts(2, &bucket);
     let block: Vec<u8> = (0..4096u32).map(|at| (at * 7 % 251) as u8).collect();
     let written = block.clone();
     let cell = nodes[0]
         .spawn(async move {
             let guest = guest().await;
-            let cell = guest.open(&first, 64 << 20).await.unwrap();
+            let cell = guest.open_new(0, 64 << 20).await.unwrap();
             let extent = cladefs::ExtentId { cell, sequence: 1 };
             guest.write(extent, 0, &written).await.unwrap();
             guest.commit(cladefs::Commit::Uploaded).await.unwrap();
@@ -392,7 +392,6 @@ async fn a_guests_commit_uploaded_on_one_host_reads_back_on_another() {
         .spawn(async move {
             let mut two = connect(2).await;
             let taking = CreateCellRequest {
-                path: second.display().to_string(),
                 capacity: 64 << 20,
                 token: Some(2),
                 cell,
@@ -412,11 +411,13 @@ async fn a_guests_commit_uploaded_on_one_host_reads_back_on_another() {
         })
         .await
         .unwrap();
-    let second = roots[1].join("store");
     let read = nodes[1]
         .spawn(async move {
             let guest = guest().await;
-            assert_eq!(guest.open(&second, 64 << 20).await.unwrap(), cell);
+            assert_eq!(
+                guest.open_cell(cladefs::CellId { tenant: 0, id: cell }).await.unwrap(),
+                cell
+            );
             let extent = cladefs::ExtentId { cell, sequence: 1 };
             guest.read(extent, 0, 4096).await.unwrap()
         })
@@ -430,12 +431,11 @@ async fn a_guests_commit_uploaded_on_one_host_reads_back_on_another() {
 #[madsim::test]
 async fn a_hosts_drain_waits_for_its_own_work_alone() {
     let (bucket, _) = world();
-    let (nodes, roots) = hosts(2, &bucket);
-    let cell = roots[1].join("cell");
+    let (nodes, _roots) = hosts(2, &bucket);
     let (opened, open) = futures::channel::oneshot::channel();
     let held = nodes[1].spawn(async move {
         let guest = guest().await;
-        guest.open(&cell, 64 << 20).await.unwrap();
+        guest.open_new(0, 64 << 20).await.unwrap();
         opened.send(()).unwrap();
         std::future::pending::<()>().await;
         guest.close();
@@ -483,38 +483,44 @@ fn block_of(round: u64, sequence: u64) -> Vec<u8> {
     (0..4096u64).map(|at| ((round * 31 + sequence * 7 + at) % 251) as u8).collect()
 }
 
-/// Waits for `path`'s commits on `host` to be uploaded to the bucket when `told.syncing` holds
+/// Waits for `cell`'s commits on `host` to be uploaded to the bucket when `told.syncing` holds
 /// (board 6699).
-async fn confirm_uploaded(host: u8, path: &Path, told: &Told) -> bool {
+async fn confirm_uploaded(host: u8, cell: u64, told: &Told) -> bool {
     if !told.syncing {
         return true;
     }
     let Ok(mut daemon) = cladefs::cladefsd::control::connect(control(host)).await else {
         return false;
     };
-    daemon.sync_cell(SyncCellRequest { path: path.display().to_string() }).await.is_ok()
+    daemon.sync_cell(SyncCellRequest { tenant: 0, cell }).await.is_ok()
 }
 
-/// A writer guest's round on its host: opens the cell directory at `path`, of `cell` if given
-/// (taken there already), and writes blocks from its cell's next sequence on, each committed
-/// uploaded and noted in `told` once the daemon says so, `writes` of them, or until a write or
-/// commit fails, as a writer fenced does; and, if `told` says writers do, makes a version after a
-/// commit, as the seed says, noted there with what was told uploaded before once a commit after it
-/// is told uploaded, and frees a block told uploaded ([`free_one`]). The cell's ID; or none, if its open was refused, as a later placement's
-/// taking, before it opened, has it refused (`ESTALE`).
+/// A writer guest's round on its host: opens `existing` if given (taken there already) or makes a
+/// new cell, and writes blocks from its cell's next sequence on, each committed uploaded and noted
+/// in `told` once the daemon says so, `writes` of them, or until a write or commit fails, as a
+/// writer fenced does; and, if `told` says writers do, makes a version after a commit, as the seed
+/// says, noted there with what was told uploaded before once a commit after it is told uploaded,
+/// and frees a block told uploaded ([`free_one`]). The cell's ID; or none, if its open was
+/// refused, as a later placement's taking, before it opened, has it refused (`ESTALE`).
 async fn write_round(
     host: u8,
-    path: PathBuf,
+    existing: Option<u64>,
     round: u64,
     writes: u64,
     told: Arc<Told>,
 ) -> Option<u64> {
     use madsim::rand::Rng as _;
     let guest = guest().await;
-    let cell = match guest.open(&path, 64 << 20).await {
+    let opened = match existing {
+        Some(cell) => guest.open_cell(cladefs::CellId { tenant: 0, id: cell }).await,
+        None => guest.open_new(0, 64 << 20).await,
+    };
+    let cell = match opened {
         Ok(cell) => cell,
         Err(errno) => {
-            log::info!("round {round}: opening {path:?}: {errno:?}, a later placement's taking");
+            log::info!(
+                "round {round}: opening {existing:?}: {errno:?}, a later placement's taking"
+            );
             return None;
         }
     };
@@ -530,7 +536,7 @@ async fn write_round(
         if guest.commit(cladefs::Commit::Uploaded).await.is_err() {
             break;
         }
-        if !confirm_uploaded(host, &path, &told).await {
+        if !confirm_uploaded(host, cell, &told).await {
             break;
         }
         told.uploaded.lock().unwrap().insert(sequence, block);
@@ -544,7 +550,7 @@ async fn write_round(
         }
         if told.freeing
             && madsim::rand::thread_rng().gen_bool(0.3)
-            && !free_one(host, &path, &guest, cell, &told).await
+            && !free_one(host, &guest, cell, &told).await
         {
             break;
         }
@@ -552,7 +558,7 @@ async fn write_round(
     // Its last versions uploaded, if its writes went on to the end.
     if !made.is_empty()
         && guest.commit(cladefs::Commit::Uploaded).await.is_ok()
-        && confirm_uploaded(host, &path, &told).await
+        && confirm_uploaded(host, cell, &told).await
     {
         told.versions.lock().unwrap().append(&mut made);
     }
@@ -566,7 +572,6 @@ async fn write_round(
 /// told done.
 async fn free_one(
     host: u8,
-    path: &Path,
     guest: &cladefs::cladefsd::guest::Guest,
     cell: u64,
     told: &Told,
@@ -584,7 +589,7 @@ async fn free_one(
     let extent = cladefs::ExtentId { cell, sequence };
     if guest.free(extent).await.is_err()
         || guest.commit(cladefs::Commit::Uploaded).await.is_err()
-        || !confirm_uploaded(host, path, told).await
+        || !confirm_uploaded(host, cell, told).await
     {
         return false;
     }
@@ -592,13 +597,13 @@ async fn free_one(
     true
 }
 
-/// Takes `cell` into the cell directory at `path` on host `host`, at placement `token`, forced if `force`
-/// (doc-21: going on with the members that answer, fewer than a take needs), as the VM manager
-/// does, trying again while the bucket refuses, as a manager would.
-async fn take(host: u8, path: &Path, cell: u64, token: u64, force: bool) {
+/// Takes `cell` onto host `host`, at placement `token`, forced if `force` (doc-21: going on with
+/// the members that answer, fewer than a take needs), as the VM manager does, dropping any stale
+/// local copy first and trying again while the bucket refuses.
+async fn take(host: u8, cell: u64, token: u64, force: bool) {
+    use cladefs::cladefsd::control::proto::DropCellRequest;
     let mut daemon = connect(host).await;
     let taking = CreateCellRequest {
-        path: path.display().to_string(),
         capacity: 64 << 20,
         token: Some(token),
         cell,
@@ -608,6 +613,11 @@ async fn take(host: u8, path: &Path, cell: u64, token: u64, force: bool) {
     for _ in 0..200 {
         match daemon.create_cell(taking.clone()).await {
             Ok(_) => return,
+            Err(status) if status.code() == tonic::Code::AlreadyExists => {
+                // Drop stale local copy from an earlier round on this host before re-taking.
+                let _ = daemon.drop_cell(DropCellRequest { tenant: 0, cell }).await;
+                madsim::time::sleep(Duration::from_millis(200)).await;
+            }
             Err(status) => {
                 eprintln!(
                     "host {host} taking cell {cell}: {:?} {}",
@@ -863,12 +873,11 @@ needs!(forking_needs_references, references, Profile::BASES);
 #[cfg(not(target_os = "macos"))]
 needs!(forking_needs_references_relisted, references_relisted, Profile::BASES);
 
-/// Makes a cell replicated at f 1 (doc-21) in the cell directory at `path` on host `host`, at
-/// placement `token`, trying again while the bucket refuses: its ID.
-async fn create_replicated(host: u8, path: &Path, token: u64) -> u64 {
+/// Makes a cell replicated at f 1 (doc-21) on host `host`, at placement `token`, trying again
+/// while the bucket refuses: its ID.
+async fn create_replicated(host: u8, token: u64) -> u64 {
     let mut daemon = connect(host).await;
     let creating = CreateCellRequest {
-        path: path.display().to_string(),
         capacity: 64 << 20,
         token: Some(token),
         replicas: Some(1),
@@ -898,21 +907,18 @@ async fn members_removed_from_the_peers_are_replaced_at_once() {
     const WRITES: u64 = 4;
     let (bucket, faults) = world();
     faults.set(bucket_cell::faults::Odds::NONE);
-    let (nodes, roots) = hosts_keeping(4, &bucket, Kept::replicas(4));
+    let (nodes, _roots) = hosts_keeping(4, &bucket, Kept::replicas(4));
     let handle = madsim::runtime::Handle::current();
     let manager = manager();
-    let path = roots[0].join("store");
-    let at = path.clone();
-    let cell = manager.spawn(async move { create_replicated(1, &at, 10).await }).await.unwrap();
+    let cell = manager.spawn(async move { create_replicated(1, 10).await }).await.unwrap();
     let id = bucket_cell::layout::CellId { tenant: 0, id: cell };
     // The writer: its commits told replicated (`Commit::Uploaded` returns once they are, doc-21),
     // a round before the peers change, one after.
     let (ready, mut readied) = tokio::sync::mpsc::channel::<()>(1);
     let (go, mut going) = tokio::sync::mpsc::channel::<()>(1);
-    let at = path.clone();
     let writer = nodes[0].spawn(async move {
         let guest = guest().await;
-        let cell = guest.open(&at, 64 << 20).await.unwrap();
+        let cell = guest.open_cell(cladefs::CellId { tenant: 0, id: cell }).await.unwrap();
         let mut told = Blocks::new();
         for round in 0..2 {
             let first = guest.next_sequence().await.unwrap();
@@ -943,13 +949,9 @@ async fn members_removed_from_the_peers_are_replaced_at_once() {
     assert_eq!(named.len(), 3, "{named:?}");
     assert_eq!(named[0], peer(1).to_string());
     let removed = named[1].clone();
-    let at = path.clone();
-    let stat = move || {
-        let path = at.display().to_string();
-        async move {
-            let mut daemon = connect(1).await;
-            daemon.stat_cell(StatCellRequest { path }).await.unwrap().into_inner()
-        }
+    let stat = move || async move {
+        let mut daemon = connect(1).await;
+        daemon.stat_cell(StatCellRequest { tenant: 0, cell }).await.unwrap().into_inner()
     };
     // Its host up still, the member is removed from the writer's host's peers.
     let peers: Vec<String> = (1..=4).map(|host| peer(host).to_string()).collect();
@@ -960,7 +962,7 @@ async fn members_removed_from_the_peers_are_replaced_at_once() {
         daemon.set_peers(SetPeersRequest { addresses: told }).await.unwrap();
     });
     set.await.unwrap();
-    let watching = stat.clone();
+    let watching = stat;
     let replaced = manager.spawn(async move {
         let started = madsim::time::Instant::now();
         loop {
@@ -987,7 +989,7 @@ async fn members_removed_from_the_peers_are_replaced_at_once() {
         daemon.set_peers(SetPeersRequest { addresses: kept }).await.unwrap();
     });
     set.await.unwrap();
-    let watching = stat.clone();
+    let watching = stat;
     let left = manager.spawn(async move {
         for _ in 0..30 {
             let status = watching().await;
@@ -1004,11 +1006,9 @@ async fn members_removed_from_the_peers_are_replaced_at_once() {
     node_local::kill(nodes[0].id()).await;
     let host: u8 =
         removed.trim_end_matches(&format!(":{PEERS}")).rsplit('.').next().unwrap().parse().unwrap();
-    let taken = roots[usize::from(host) - 1].join("taken");
-    let at = taken.clone();
-    manager.spawn(async move { take(host, &at, cell, 20, false).await }).await.unwrap();
+    manager.spawn(async move { take(host, cell, 20, false).await }).await.unwrap();
     let node = handle.get_node(nodes[usize::from(host) - 1].id()).unwrap();
-    let lost = node.spawn(lost_in(taken, cell, told, Blocks::new())).await.unwrap();
+    let lost = node.spawn(lost_in(cell, cell, told, Blocks::new())).await.unwrap();
     assert_eq!(lost, Vec::<u64>::new(), "blocks told replicated lost");
 }
 
@@ -1022,19 +1022,16 @@ async fn restarted_replica_member_admits_commits_during_bucket_outage() {
     const WRITES: u64 = 4;
     let (bucket, faults) = world();
     faults.set(bucket_cell::faults::Odds::NONE);
-    let (nodes, roots) = hosts_keeping(3, &bucket, Kept::replicas(3));
+    let (nodes, _roots) = hosts_keeping(3, &bucket, Kept::replicas(3));
     let handle = madsim::runtime::Handle::current();
     let manager = manager();
-    let path = roots[0].join("store");
-    let at = path.clone();
-    let cell = manager.spawn(async move { create_replicated(1, &at, 10).await }).await.unwrap();
+    let cell = manager.spawn(async move { create_replicated(1, 10).await }).await.unwrap();
 
     let (ready, mut readied) = tokio::sync::mpsc::channel::<()>(1);
     let (go, mut going) = tokio::sync::mpsc::channel::<()>(1);
-    let at = path.clone();
     let writer = nodes[0].spawn(async move {
         let guest = guest().await;
-        let cell = guest.open(&at, 64 << 20).await.unwrap();
+        let cell = guest.open_cell(cladefs::CellId { tenant: 0, id: cell }).await.unwrap();
         let mut told = Blocks::new();
         for round in 0..2 {
             let first = guest.next_sequence().await.unwrap();
@@ -1079,11 +1076,9 @@ async fn restarted_replica_member_admits_commits_during_bucket_outage() {
     faults.set(bucket_cell::faults::Odds::NONE);
     node_local::restart(nodes[2].id()).await;
     let _ = manager.spawn(async move { connect(3).await }).await.unwrap();
-    let taken = roots[1].join("taken");
-    let at = taken.clone();
-    manager.spawn(async move { take(2, &at, cell, 20, false).await }).await.unwrap();
+    manager.spawn(async move { take(2, cell, 20, false).await }).await.unwrap();
     let node = handle.get_node(nodes[1].id()).unwrap();
-    let lost = node.spawn(lost_in(taken, cell, told, Blocks::new())).await.unwrap();
+    let lost = node.spawn(lost_in(cell, cell, told, Blocks::new())).await.unwrap();
     assert_eq!(lost, Vec::<u64>::new(), "blocks told replicated during outage lost");
 }
 
@@ -1200,21 +1195,21 @@ impl Profile {
     }
 }
 
-/// Reads the blocks of `told`, `cell`'s, in the cell directory at `path` on this host, which a guest opens,
+/// Reads the blocks of `told`, `extent_cell`'s, in `opened_cell` on this host, which a guest opens,
 /// and those of `freed`: those of `told` lost, or read other than they were written, and those of
 /// `freed` read as they were written, by their sequences.
-async fn lost_in(path: PathBuf, cell: u64, told: Blocks, freed: Blocks) -> Vec<u64> {
+async fn lost_in(opened_cell: u64, extent_cell: u64, told: Blocks, freed: Blocks) -> Vec<u64> {
     let guest = guest().await;
-    guest.open(&path, 64 << 20).await.unwrap();
+    guest.open_cell(cladefs::CellId { tenant: 0, id: opened_cell }).await.unwrap();
     let mut lost = Vec::new();
     for (&sequence, block) in &told {
-        let extent = cladefs::ExtentId { cell, sequence };
+        let extent = cladefs::ExtentId { cell: extent_cell, sequence };
         if guest.read(extent, 0, 4096).await.as_ref().ok() != Some(block) {
             lost.push(sequence);
         }
     }
     for (&sequence, block) in &freed {
-        let extent = cladefs::ExtentId { cell, sequence };
+        let extent = cladefs::ExtentId { cell: extent_cell, sequence };
         if guest.read(extent, 0, 4096).await.as_ref().ok() == Some(block) {
             lost.push(sequence);
         }
@@ -1223,19 +1218,14 @@ async fn lost_in(path: PathBuf, cell: u64, told: Blocks, freed: Blocks) -> Vec<u
     lost
 }
 
-/// Forks version `version` of `cell` into the cell directory at `path` on host `host`, as the VM
-/// manager does, trying again while the bucket refuses.
-async fn fork_version(host: u8, path: &Path, cell: u64, version: u64) {
+/// Forks version `version` of `cell` on host `host`, as the VM manager does, trying again while
+/// the bucket refuses: returns the forked cell's ID.
+async fn fork_version(host: u8, cell: u64, version: u64) -> u64 {
     let mut daemon = connect(host).await;
-    let forking = ForkCellRequest {
-        to: path.display().to_string(),
-        version,
-        cell,
-        ..ForkCellRequest::default()
-    };
+    let forking = ForkCellRequest { version, cell, ..ForkCellRequest::default() };
     for _ in 0..200 {
         match daemon.fork_cell(forking.clone()).await {
-            Ok(_) => return,
+            Ok(forked) => return forked.into_inner().cell,
             Err(status) => {
                 eprintln!(
                     "host {host} forking version {version}: {:?} {}",
@@ -1251,34 +1241,34 @@ async fn fork_version(host: u8, path: &Path, cell: u64, version: u64) {
 
 /// A fork of a base's version, the base deleted since: where it is, and what it inherits.
 struct Inherited {
-    /// The host its cell directory is on.
+    /// The host its cell is on.
     host: usize,
-    /// Its cell directory there.
-    path: PathBuf,
+    /// Its cell ID there.
+    cell: u64,
     /// Its base's cell, whose extent it inherits.
     base: u64,
     /// The block that extent holds.
     block: Vec<u8>,
 }
 
-/// Bases' round `round` (doc-18, doc-20): on host `source`'s node `node`, a base made at `base`, a
-/// block committed uploaded, a version made of it, uploaded; that version forked on host `target`
-/// at `child`; then the base deleted, its version with it but for what the fork inherits, as a VM
-/// image is deleted under the VMs restored from it. The fork, if it was told made: the base's
-/// deletion may fail, which leaves the base as it was.
+/// Bases' round `round` (doc-18, doc-20): on host `source`'s node `node`, a base made, a block
+/// committed uploaded, a version made of it, uploaded; that version forked on host `target`; then
+/// the base deleted, its version with it but for what the fork inherits, as a VM image is deleted
+/// under the VMs restored from it. The fork, if it was told made: the base's deletion may fail,
+/// which leaves the base as it was.
 async fn base_round(
     round: u64,
     node: madsim::runtime::NodeHandle,
     manager: &madsim::runtime::NodeHandle,
-    (source, base): (u8, PathBuf),
-    (target, child): (u8, PathBuf),
+    source: u8,
+    target: u8,
 ) -> Option<Inherited> {
     use cladefs::cladefsd::control::proto::DeleteCellRequest;
     let block = block_of(1000 + round, 1);
-    let (making, written) = (base.clone(), block.clone());
+    let written = block.clone();
     let made = node.spawn(async move {
         let guest = guest().await;
-        let cell = guest.open(&making, 64 << 20).await.ok()?;
+        let cell = guest.open_new(0, 64 << 20).await.ok()?;
         let extent = cladefs::ExtentId { cell, sequence: 1 };
         guest.write(extent, 0, &written).await.ok()?;
         guest.commit(cladefs::Commit::Uploaded).await.ok()?;
@@ -1290,33 +1280,34 @@ async fn base_round(
         log::info!("round {round}: a base not made");
         return None;
     };
-    let to = child.display().to_string();
     let forked = manager.spawn(async move {
-        let path = base.display().to_string();
-        let syncing = || {
-            let path = path.clone();
-            async move { connect(source).await.sync_cell(SyncCellRequest { path }).await }
+        let syncing = || async move {
+            connect(source).await.sync_cell(SyncCellRequest { tenant: 0, cell }).await
         };
         calling(source, syncing).await?;
-        calling(target, || {
-            let request = ForkCellRequest { to: to.clone(), version, cell, ..Default::default() };
+        let child = calling(target, || {
+            let request = ForkCellRequest { version, cell, ..Default::default() };
             async move { connect(target).await.fork_cell(request).await }
         })
-        .await?;
-        let deleting = || {
-            let path = path.clone();
-            async move { connect(source).await.delete_cell(DeleteCellRequest { path }).await }
+        .await?
+        .into_inner()
+        .cell;
+        let deleting = || async move {
+            connect(source).await.delete_cell(DeleteCellRequest { tenant: 0, cell }).await
         };
         if let Err(errno) = calling(source, deleting).await {
             log::info!("round {round}: base {cell} not deleted: {errno:?}");
         }
-        Ok::<_, cladefs::Errno>(())
+        Ok::<_, cladefs::Errno>(child)
     });
-    if let Err(errno) = forked.await.unwrap() {
-        log::info!("round {round}: base {cell}'s version not forked: {errno:?}");
-        return None;
-    }
-    Some(Inherited { host: usize::from(target) - 1, path: child, base: cell, block })
+    let child = match forked.await.unwrap() {
+        Ok(child) => child,
+        Err(errno) => {
+            log::info!("round {round}: base {cell}'s version not forked: {errno:?}");
+            return None;
+        }
+    };
+    Some(Inherited { host: usize::from(target) - 1, cell: child, base: cell, block })
 }
 
 /// The collector's node, which passes over the hosts' bucket, `bucket`, as `cladefs-gc` does, under
@@ -1472,7 +1463,7 @@ async fn attrition(profile: Profile) -> Result<(), String> {
     let Profile { kept, net, loss, versions, disk, forced, peers, drains, frees, bases, .. } =
         profile;
     let (bucket, faults) = world();
-    let (nodes, roots) = hosts_keeping(3, &bucket, kept);
+    let (nodes, _roots) = hosts_keeping(3, &bucket, kept);
     let handle = madsim::runtime::Handle::current();
     let told = Arc::new(Told {
         versioning: versions,
@@ -1481,14 +1472,12 @@ async fn attrition(profile: Profile) -> Result<(), String> {
         ..Told::default()
     });
     let manager = manager();
-    let path = |round: u64, host: usize| roots[host].join(format!("store{round}"));
     let mut cell = None;
     // A replicated cell, made by the manager as a guest's open makes none: the first round's
     // writer opens it.
     let mut made = false;
     if kept.replicas {
-        let at = path(0, 0);
-        let making = async move { create_replicated(1, &at, 10).await };
+        let making = async move { create_replicated(1, 10).await };
         cell = Some(manager.spawn(making).await.unwrap());
         made = true;
     }
@@ -1558,24 +1547,22 @@ async fn attrition(profile: Profile) -> Result<(), String> {
             meanwhile.extend(reshuffle_peers(&manager, 3));
         }
         let host = (round % 3) as usize;
-        let at = path(round, host);
         if let Some(cell) = cell
             && !std::mem::take(&mut made)
         {
-            let at = at.clone();
             let force = held.is_some();
-            let taking = async move { take(host as u8 + 1, &at, cell, round + 10, force).await };
+            let taking = async move { take(host as u8 + 1, cell, round + 10, force).await };
             manager.spawn(taking).await.unwrap();
         }
         restart(held.take().into_iter().collect()).await;
         // Its bases' round once every host is up: a host held down is no base's.
         if bases {
             let (source, target) = (host, (host + 1) % 3);
-            let base = (source as u8 + 1, roots[source].join(format!("base{round}")));
-            let child = (target as u8 + 1, roots[target].join(format!("child{round}")));
-            inherited.extend(base_round(round, node(source), &manager, base, child).await);
+            inherited.extend(
+                base_round(round, node(source), &manager, source as u8 + 1, target as u8 + 1).await,
+            );
         }
-        let writing = write_round(host as u8 + 1, at, round, WRITES, told.clone());
+        let writing = write_round(host as u8 + 1, cell, round, WRITES, told.clone());
         let mut written = node(host).spawn(writing);
         // As the seed says: the writer done; or the next round taking the cell as it writes; or
         // its host killed as it writes, drained first now and then, started again a while after,
@@ -1640,9 +1627,7 @@ async fn attrition(profile: Profile) -> Result<(), String> {
         Ok::<_, cladefs::Errno>(())
     });
     healing.await.unwrap().map_err(|errno| format!("lifting the limits: {errno:?}"))?;
-    let last = path(ROUNDS, 0);
-    let at = last.clone();
-    manager.spawn(async move { take(1, &at, cell, ROUNDS + 10, false).await }).await.unwrap();
+    manager.spawn(async move { take(1, cell, ROUNDS + 10, false).await }).await.unwrap();
     // The collector's last passes, one after the other.
     if let (Some(collector), Some(passes)) = (&collector, passes) {
         passes.abort();
@@ -1664,7 +1649,7 @@ async fn attrition(profile: Profile) -> Result<(), String> {
     }
     let sequences: Vec<u64> = uploaded.keys().copied().collect();
     let freed_sequences: Vec<u64> = freed.keys().copied().collect();
-    let lost = node(0).spawn(lost_in(last, cell, uploaded, freed)).await.unwrap();
+    let lost = node(0).spawn(lost_in(cell, cell, uploaded, freed)).await.unwrap();
     if !lost.is_empty() {
         return Err(format!(
             "blocks told uploaded lost or other, or told freed read back: {lost:?} of \
@@ -1676,10 +1661,9 @@ async fn attrition(profile: Profile) -> Result<(), String> {
     if versions {
         eprintln!("versions made, each forked and read: {}", made.len());
     }
-    for (at, (version, before)) in made.into_iter().enumerate() {
-        let fork = roots[0].join(format!("fork{at}"));
-        let to = fork.clone();
-        manager.spawn(async move { fork_version(1, &to, cell, version).await }).await.unwrap();
+    for (version, before) in made {
+        let fork =
+            manager.spawn(async move { fork_version(1, cell, version).await }).await.unwrap();
         let sequences: Vec<u64> = before.keys().copied().collect();
         let lost = node(0).spawn(lost_in(fork, cell, before, Blocks::new())).await.unwrap();
         if !lost.is_empty() {
@@ -1693,13 +1677,12 @@ async fn attrition(profile: Profile) -> Result<(), String> {
     if bases {
         eprintln!("forks of bases deleted, each read: {}", inherited.len());
     }
-    for Inherited { host, path, base, block } in inherited {
+    for Inherited { host, cell: fork_cell, base, block } in inherited {
         let read =
-            read_on(|| node(host), path.clone(), cladefs::ExtentId { cell: base, sequence: 1 })
-                .await;
+            read_on(|| node(host), fork_cell, cladefs::ExtentId { cell: base, sequence: 1 }).await;
         if read.as_ref().ok() != Some(&block) {
             return Err(format!(
-                "the fork at {path:?} of base {base}, deleted, read its block otherwise: {:?}",
+                "the fork {fork_cell} of base {base}, deleted, read its block otherwise: {:?}",
                 read.map(|read| read.len())
             ));
         }
@@ -1741,21 +1724,20 @@ async fn ephemeral_cells_survive_aborted_migrations() {
     }
 }
 
-/// The first block of `extent` of the cell at `path`, read by a guest on `host`, as a guest started
-/// again does if its host is: a host whose daemon's boot fails, its disk failing as the seed says,
-/// is started again, and a guest of it ends with it (board 7050). `host` gives its node anew each
-/// try: a node's handle is of the node as it was, which a start again replaces, and a task spawned
+/// The first block of `extent` of `cell`, read by a guest on `host`, as a guest started again does
+/// if its host is: a host whose daemon's boot fails, its disk failing as the seed says, is started
+/// again, and a guest of it ends with it (board 7050). `host` gives its node anew each try: a
+/// node's handle is of the node as it was, which a start again replaces, and a task spawned
 /// through the old one is cancelled at once.
 async fn read_on(
     host: impl Fn() -> madsim::runtime::NodeHandle,
-    path: PathBuf,
+    cell: u64,
     extent: cladefs::ExtentId,
 ) -> Result<Vec<u8>, cladefs::Errno> {
     for _ in 0..100 {
-        let reading = path.clone();
         let read = host().spawn(async move {
             let guest = guest().await;
-            guest.open(&reading, 64 << 20).await?;
+            guest.open_cell(cladefs::CellId { tenant: 0, id: cell }).await?;
             let read = guest.read(extent, 0, 4096).await;
             guest.close();
             read
@@ -1795,20 +1777,17 @@ where
     panic!("host {host} never answered")
 }
 
-/// An ephemeral cell forked at `at` on host 1, `host`, its root `root`, of a version of a base there
-/// whose block it inherits (`block_of(99, 1)`), its calls from `manager`: the base's cell, and the
-/// ephemeral one's.
+/// An ephemeral cell forked on host 1, `host`, of a version of a base there whose block it
+/// inherits (`block_of(99, 1)`), its calls from `manager`: the base's cell, and the ephemeral
+/// one's.
 async fn fork_ephemeral(
     host: &madsim::runtime::NodeHandle,
     manager: &madsim::runtime::NodeHandle,
-    root: &Path,
-    at: &Path,
 ) -> Result<(u64, u64), String> {
-    let base = root.join("base");
     let (parent, version) = host
         .spawn(async move {
             let guest = guest().await;
-            let cell = guest.open(&base, 64 << 20).await.unwrap();
+            let cell = guest.open_new(0, 64 << 20).await.unwrap();
             let extent = cladefs::ExtentId { cell, sequence: 1 };
             guest.write(extent, 0, &block_of(99, 1)).await.unwrap();
             guest.commit(cladefs::Commit::Uploaded).await.unwrap();
@@ -1818,24 +1797,19 @@ async fn fork_ephemeral(
         })
         .await
         .unwrap();
-    let to = at.display().to_string();
-    let base = root.join("base").display().to_string();
     let forked = manager.spawn(async move {
         // The version uploaded first, which a fork of it reads in the bucket.
-        let syncing = || {
-            let path = base.clone();
-            async move { connect(1).await.sync_cell(SyncCellRequest { path }).await }
+        let syncing = || async move {
+            connect(1).await.sync_cell(SyncCellRequest { tenant: 0, cell: parent }).await
         };
         calling(1, syncing).await.unwrap();
-        let stating = || {
-            let path = base.clone();
-            async move { connect(1).await.stat_cell(StatCellRequest { path }).await }
+        let stating = || async move {
+            connect(1).await.stat_cell(StatCellRequest { tenant: 0, cell: parent }).await
         };
         let stated = calling(1, stating).await.unwrap().into_inner();
         assert_eq!(stated.cell, parent);
         calling(1, || {
             let request = ForkCellRequest {
-                to: to.clone(),
                 version,
                 tenant: stated.tenant,
                 cell: stated.cell,
@@ -1874,15 +1848,14 @@ async fn hand_overs_to_wedged_targets_end_within_their_bound() {
     let handle = madsim::runtime::Handle::current();
     let node = |host: usize| handle.get_node(nodes[host].id()).unwrap();
     let manager = manager();
-    let (here, there) = (roots[0].join("guest-cell"), roots[1].join("guest-cell"));
-    let (_, child) = fork_ephemeral(&node(0), &manager, &roots[0], &here).await.unwrap();
+    let (_, child) = fork_ephemeral(&node(0), &manager).await.unwrap();
+    let child_id = cladefs::CellId { tenant: 0, id: child };
     // Blocks committed, the last a commit after `segment_age` (60 s), which closes the segment
     // holding them; framed on a thread of its own, it is a kept segment, which the rounds send.
-    let writing = here.clone();
-    let files = node(0)
+    let (here, files) = node(0)
         .spawn(async move {
             let guest = guest().await;
-            let cell = guest.open(&writing, 64 << 20).await.unwrap();
+            let cell = guest.open_cell(child_id).await.unwrap();
             for sequence in 1..=BLOCKS {
                 if sequence == BLOCKS {
                     madsim::time::sleep(Duration::from_secs(61)).await;
@@ -1892,6 +1865,8 @@ async fn hand_overs_to_wedged_targets_end_within_their_bound() {
                 guest.commit(cladefs::Commit::Local).await.unwrap();
             }
             guest.close();
+            let writing =
+                host_fs::may_block(|| current_daemon().unwrap().cell_path(child_id)).unwrap();
             let listed = || {
                 host_fs::may_block(|| {
                     let mut files = Vec::new();
@@ -1915,7 +1890,8 @@ async fn hand_overs_to_wedged_targets_end_within_their_bound() {
                 }
                 madsim::time::sleep(Duration::from_secs(1)).await;
             }
-            listed()
+            let files = listed();
+            (writing, files)
         })
         .await
         .unwrap();
@@ -1924,53 +1900,40 @@ async fn hand_overs_to_wedged_targets_end_within_their_bound() {
     assert!(kept, "no kept segment for the rounds to send: {files:?}");
 
     fail::cfg("migration::file_unanswered", "return").unwrap();
-    let migrate = {
-        let (path, to) = (here.display().to_string(), there.display().to_string());
-        move || {
-            let request = MigrateCellRequest {
-                path: path.clone(),
-                peer: peer(2).to_string(),
-                to: to.clone(),
-            };
-            async move { connect(1).await.migrate_cell(request).await.map(drop) }
-        }
+    let migrate = move || {
+        let request = MigrateCellRequest { tenant: 0, cell: child, peer: peer(2).to_string() };
+        async move { connect(1).await.migrate_cell(request).await.map(drop) }
     };
     manager.spawn(migrate()).await.unwrap().unwrap();
     // The rounds' first request of the kept segment sent, and unanswered.
     madsim::time::sleep(Duration::from_secs(2)).await;
-    let path = here.display().to_string();
     let hand_over = move || {
-        let request = HandOverCellRequest { path: path.clone(), token: None };
+        let request = HandOverCellRequest { tenant: 0, cell: child, token: None };
         async move { connect(1).await.hand_over_cell(request).await.map(drop) }
     };
-    let timed = manager.spawn({
-        let hand_over = hand_over.clone();
-        async move {
-            let started = madsim::time::Instant::now();
-            let answered = hand_over().await.map_err(|status| errno(&status));
-            (answered, started.elapsed())
-        }
+    let timed = manager.spawn(async move {
+        let started = madsim::time::Instant::now();
+        let answered = hand_over().await.map_err(|status| errno(&status));
+        (answered, started.elapsed())
     });
     let (answered, took) = timed.await.unwrap();
     fail::remove("migration::file_unanswered");
     assert_eq!(answered, Err(Some(Errno::ENOTCONN)));
     assert!(took >= PIECE_BOUND && took < PIECE_BOUND + Duration::from_secs(5), "{took:?}");
     // Given up still: it opens not.
-    let opening = here.clone();
     let opened =
-        node(0).spawn(async move { guest().await.open(&opening, 64 << 20).await }).await.unwrap();
+        node(0).spawn(async move { guest().await.open_cell(child_id).await }).await.unwrap();
     assert_eq!(opened, Err(Errno::EBUSY));
 
-    let path = here.display().to_string();
     let aborted = manager.spawn(async move {
-        let request = AbortMigrationRequest { path };
+        let request = AbortMigrationRequest { tenant: 0, cell: child };
         connect(1).await.abort_migration(request).await.map(drop).map_err(|status| errno(&status))
     });
     assert_eq!(aborted.await.unwrap(), Err(Some(Errno::EAGAIN)), "the cell served here again");
-    let read_all = |host: usize, at: PathBuf| {
+    let read_all = |host: usize| {
         node(host).spawn(async move {
             let guest = guest().await;
-            let cell = guest.open(&at, 64 << 20).await.unwrap();
+            let cell = guest.open_cell(child_id).await.unwrap();
             let mut read = Vec::new();
             for sequence in 1..=BLOCKS {
                 let extent = cladefs::ExtentId { cell, sequence };
@@ -1981,15 +1944,16 @@ async fn hand_overs_to_wedged_targets_end_within_their_bound() {
         })
     };
     let written: Vec<Vec<u8>> = (1..=BLOCKS).map(|sequence| block_of(1, sequence)).collect();
-    assert_eq!(read_all(0, here.clone()).await.unwrap(), (child, written.clone()));
-    let target_root = roots[1].clone();
+    assert_eq!(read_all(0).await.unwrap(), (child, written.clone()));
+    let target_tenant0 = roots[1].join("cells").join(base32_id::Padded(0).to_string());
+    let child_name = base32_id::Padded(child).to_string();
     let left = node(1)
         .spawn(async move {
             host_fs::may_block(|| {
-                let found = host_fs::read_dir(&target_root).unwrap();
+                let Ok(found) = host_fs::read_dir(&target_tenant0) else { return Vec::new() };
                 let names =
                     found.map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned());
-                names.filter(|name| name.contains("guest-cell")).collect::<Vec<_>>()
+                names.filter(|name| name.contains(&child_name)).collect::<Vec<_>>()
             })
         })
         .await
@@ -1998,7 +1962,7 @@ async fn hand_overs_to_wedged_targets_end_within_their_bound() {
 
     manager.spawn(migrate()).await.unwrap().unwrap();
     manager.spawn(hand_over()).await.unwrap().unwrap();
-    assert_eq!(read_all(1, there).await.unwrap(), (child, written));
+    assert_eq!(read_all(1).await.unwrap(), (child, written));
 }
 
 /// The ephemeral attrition profile, as [`ephemeral_cells_survive_crashes_and_migrations`] says,
@@ -2026,16 +1990,17 @@ async fn ephemeral_attrition(disk: bool, aborts: bool) -> Result<(), String> {
         }
     };
 
-    let path = |host: usize, round: u64| roots[host].join(format!("ephemeral{round}"));
-    let (mut host, mut at) = (0usize, path(0, 0));
-    let (parent, child) = fork_ephemeral(&node(0), &manager, &roots[0], &at).await?;
+    let mut host = 0usize;
+    let (parent, child) = fork_ephemeral(&node(0), &manager).await?;
 
     let told = Arc::new(Told::default());
     if disk {
         host_fs::faults::set(DISK_FAULTS);
     }
+    // Migrations prepared, and those that moved the cell.
+    let (mut tried, mut handed) = (0u32, 0u32);
     for round in 0..ROUNDS {
-        let writing = write_round(host as u8 + 1, at.clone(), round, WRITES, told.clone());
+        let writing = write_round(host as u8 + 1, Some(child), round, WRITES, told.clone());
         let mut written = node(host).spawn(writing);
         let wait = Duration::from_millis(madsim::rand::thread_rng().gen_range(0..2000));
         if madsim::time::timeout(wait, &mut written).await.is_err() {
@@ -2052,12 +2017,13 @@ async fn ephemeral_attrition(disk: bool, aborts: bool) -> Result<(), String> {
         }
         // Migrated live to the next host, that host killed before the hand-over now and then.
         let target = (host + 1) % 3;
-        let (from, there) = (at.display().to_string(), path(target, round + 1));
-        let to = there.display().to_string();
         let source = host as u8 + 1;
         let migrating = manager.spawn(async move {
-            let request =
-                MigrateCellRequest { path: from, peer: peer(source % 3 + 1).to_string(), to };
+            let request = MigrateCellRequest {
+                tenant: 0,
+                cell: child,
+                peer: peer(source % 3 + 1).to_string(),
+            };
             calling(source, || {
                 let request = request.clone();
                 async move { connect(source).await.migrate_cell(request).await }
@@ -2067,6 +2033,7 @@ async fn ephemeral_attrition(disk: bool, aborts: bool) -> Result<(), String> {
         if migrating.await.unwrap().is_err() {
             continue;
         }
+        tried += 1;
         madsim::time::sleep(Duration::from_millis(madsim::rand::thread_rng().gen_range(0..1000)))
             .await;
         if madsim::rand::thread_rng().gen_bool(0.3) {
@@ -2078,12 +2045,11 @@ async fn ephemeral_attrition(disk: bool, aborts: bool) -> Result<(), String> {
         // `aborts`, so that the other profiles' seeds draw as they did.
         if aborts && madsim::rand::thread_rng().gen_bool(0.5) {
             let tried = madsim::rand::thread_rng().gen_bool(0.5);
-            let from = at.display().to_string();
             let ending = manager.spawn(async move {
                 let tried = match tried {
                     false => None,
                     true => {
-                        let request = HandOverCellRequest { path: from.clone(), token: None };
+                        let request = HandOverCellRequest { tenant: 0, cell: child, token: None };
                         let answered = connect(source).await.hand_over_cell(request).await;
                         Some(
                             answered
@@ -2093,7 +2059,7 @@ async fn ephemeral_attrition(disk: bool, aborts: bool) -> Result<(), String> {
                     }
                 };
                 let aborted = calling(source, || {
-                    let request = AbortMigrationRequest { path: from.clone() };
+                    let request = AbortMigrationRequest { tenant: 0, cell: child };
                     async move { connect(source).await.abort_migration(request).await }
                 })
                 .await;
@@ -2115,21 +2081,24 @@ async fn ephemeral_attrition(disk: bool, aborts: bool) -> Result<(), String> {
                 ended => return Err(format!("round {round}: ending the migration: {ended:?}")),
             };
             if moved {
-                (host, at) = (target, there);
+                handed += 1;
+                host = target;
             }
             log::info!("round {round}: the migration aborted, the cell on host {}", host + 1);
             continue;
         }
-        let from = at.display().to_string();
         let handing = manager.spawn(async move {
             calling(source, || {
-                let request = HandOverCellRequest { path: from.clone(), token: None };
+                let request = HandOverCellRequest { tenant: 0, cell: child, token: None };
                 async move { connect(source).await.hand_over_cell(request).await }
             })
             .await
         });
         match handing.await.unwrap() {
-            Ok(_) => (host, at) = (target, there),
+            Ok(_) => {
+                handed += 1;
+                host = target;
+            }
             Err(cladefs::Errno::EAGAIN) => log::info!("round {round}: the hand-over refused"),
             Err(errno) => return Err(format!("round {round}: handing over: {errno:?}")),
         }
@@ -2143,15 +2112,42 @@ async fn ephemeral_attrition(disk: bool, aborts: bool) -> Result<(), String> {
         // default, its reaper looking a quarter of that apart (specs/ephemeral, `TargetAbort`).
         madsim::time::sleep(Duration::from_secs(300 + 75 + 30)).await;
     }
+    // Board 9292: migrated once more, the faults healed, it is handed over: a build whose targets
+    // refused every migration (a check refusing every prepare, formats never matching) kept the
+    // cell on host 1 throughout, and every round above went on as if refused rightly. No draw of
+    // the seed's here, so that the rounds above draw as they did.
+    let (target, source) = ((host + 1) % 3, host as u8 + 1);
+    let migrated = manager.spawn(async move {
+        let request =
+            MigrateCellRequest { tenant: 0, cell: child, peer: peer(source % 3 + 1).to_string() };
+        calling(source, || {
+            let request = request.clone();
+            async move { connect(source).await.migrate_cell(request).await }
+        })
+        .await?;
+        calling(source, || {
+            let request = HandOverCellRequest { tenant: 0, cell: child, token: None };
+            async move { connect(source).await.hand_over_cell(request).await }
+        })
+        .await
+    });
+    if let Err(errno) = migrated.await.unwrap() {
+        return Err(format!(
+            "the faults healed, the cell's migration from host {source} failed: {errno:?}, {handed} of \
+             {tried} hand-overs accepted before"
+        ));
+    }
+    host = target;
+    eprintln!("hand-overs accepted: {handed} of {tried}, then the last");
     let expected = told.uploaded.lock().unwrap().clone();
     // Read on its host, again if the host's node starts anew meanwhile, as one whose boot failed on
     // a disk fault does, 1 to 10 s after (board 5721): the read's task goes with it, cancelled.
     let mut read = None;
     for _ in 0..10 {
-        let (reading, expected) = (at.clone(), expected.clone());
+        let expected = expected.clone();
         let reading = node(host).spawn(async move {
             let guest = guest().await;
-            let cell = guest.open(&reading, 64 << 20).await.unwrap();
+            let cell = guest.open_cell(cladefs::CellId { tenant: 0, id: child }).await.unwrap();
             let inherited = cladefs::ExtentId { cell: parent, sequence: 1 };
             let inherited = guest.read(inherited, 0, 4096).await;
             let mut read = Vec::new();

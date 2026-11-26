@@ -124,6 +124,9 @@ pub(super) struct Relief {
     /// process they were staged to has made the changes taking them away: room on its way, which
     /// its next pass waits for rather than evict more for it (TASK-161).
     pub owed: u64,
+    /// Exponential backoff after a 0-byte relief pass for this arena's own cap, preventing
+    /// `arena-relief-thread` from spinning when nothing is evictable (board 12315).
+    pub backoff: super::relief::Backoff,
 }
 
 /// An arena's slots, and what holds it to them, under its lock.
@@ -301,6 +304,7 @@ impl ArenaState {
     /// until it is ([`ArenaState::punched`]).
     pub(super) fn free(&mut self, run: Run, keep: bool) -> Freed {
         self.relief.exhausted = false;
+        self.relief.backoff.clear();
         let slot = &mut self.slots[run.slab as usize];
         if run.pages == self.pps {
             assert!(matches!(slot, Slot::Whole), "slab {} freed, not whole", run.slab);

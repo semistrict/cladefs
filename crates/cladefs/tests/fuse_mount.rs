@@ -20,7 +20,6 @@
 
 use cladefs::cladefsd::control::proto::ForkCellRequest;
 use cladefs::fuse::MountOptions;
-use cladefs::testing::control_path;
 use cladefs::{Filesystem, SetAttr, Storage};
 use futures::executor::block_on;
 use std::ffi::CString;
@@ -759,24 +758,37 @@ fn a_daemon_mounting_no_cells_serves_no_mount_calls() {
 #[test]
 fn a_cell_mounted_is_the_mounts_alone() {
     let dir = tempfile::tempdir().unwrap();
-    let (child, socket, m) = cladefsd_mounting(dir.path(), &dir.path().join("bucket"), 1);
+    let bucket = dir.path().join("bucket");
+    let disk0 = dir.path().join("disk0");
+    let cells_dir = disk0.join("cells");
+    let m = dir.path().join("mnt");
+    let socket = dir.path().join("control");
+    std::fs::create_dir_all(&bucket).unwrap();
+    std::fs::create_dir_all(&disk0).unwrap();
+    std::fs::create_dir_all(&m).unwrap();
+    let mut command = cladefsd(&dir.path().join("vm.sock"), &bucket, 1);
+    command
+        .env("CLADEFSD_GRPC", &socket)
+        .env("CLADEFSD_ROOTS", &disk0)
+        .env("CLADEFSD_MOUNT", &m)
+        .env("CLADEFSD_MOUNT_STORES", &cells_dir);
+    let child = serving(command, &socket);
     let socket = socket.to_str().unwrap();
     let created = cladefsctl_mount(socket, &["create", "1", &CELL_SIZE.to_string()]);
     let cell = created.lines().next().unwrap().to_owned();
-    let cell_dir = dir.path().join("cells").join("0000000000001").join(&cell);
+    let cell_id = base32_id::parse(&cell).unwrap();
 
     let started = std::time::Instant::now();
-    let vm = cladefs::CellClient::connect(dir.path().join("vm.sock"), &cell_dir, CELL_SIZE);
+    let vm = cladefs::CellClient::connect_cell(
+        dir.path().join("vm.sock"),
+        cladefs::CellId { tenant: 1, id: cell_id },
+    );
     assert_eq!(vm.err().and_then(|err| err.errno()), Some(cladefs::Errno::EBUSY));
     let control = cladefs::testing::Control::connect(socket).unwrap();
     let forked = control
         .call(async |client| {
             client
-                .fork_cell(ForkCellRequest {
-                    from: control_path(&cell_dir),
-                    to: control_path(&dir.path().join("fork")),
-                    ..Default::default()
-                })
+                .fork_cell(ForkCellRequest { tenant: 1, cell: cell_id, ..Default::default() })
                 .await
         })
         .map(|response| cladefs::CellId { tenant: response.tenant, id: response.cell });
@@ -788,11 +800,7 @@ fn a_cell_mounted_is_the_mounts_alone() {
     control
         .call(async |client| {
             client
-                .fork_cell(ForkCellRequest {
-                    from: control_path(&cell_dir),
-                    to: control_path(&dir.path().join("fork")),
-                    ..Default::default()
-                })
+                .fork_cell(ForkCellRequest { tenant: 1, cell: cell_id, ..Default::default() })
                 .await
         })
         .map(|response| cladefs::CellId { tenant: response.tenant, id: response.cell })
@@ -900,6 +908,140 @@ fn one_tenant_waiting_holds_no_other_tenants_requests() {
     assert_eq!(answered, Ok((Some(libc::ENOENT), vec!["fast".to_owned(), "slow".to_owned()])));
     assert_eq!(held_then, 6, "the most of slow's requests in service");
     assert_eq!(still, vec![Some(libc::ENOENT); 16]);
+    mount.unmount(true).unwrap();
+    mount.join().unwrap();
+}
+
+/// Board 9850: stalling one tenant with more than 64 MiB of concurrent 1 MiB writes in flight
+/// must not prevent another tenant's lookup or the mount root's listing from answering within a
+/// second, and excess writes past the 64 MiB per-tenant queue are rejected with `EAGAIN` so daemon
+/// memory stays bounded (review 131).
+#[test]
+fn a_tenant_stalled_past_64_mib_of_writes_holds_no_other_tenant() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Condvar, Mutex};
+    type Held = Arc<(Mutex<(usize, bool)>, Condvar)>;
+    struct LetGo(Held);
+    impl Drop for LetGo {
+        fn drop(&mut self) {
+            let (state, changed) = &*self.0;
+            state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).1 = true;
+            changed.notify_all();
+            fail::remove("fuse::tenant::slow");
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let m = dir.path().join(".gvfs");
+    std::fs::create_dir(&m).unwrap();
+    // Unprivileged `fusermount3` caps `WRITEBACK_CACHE`/`ASYNC_DIO` background requests at
+    // `max_user_bgreq = 12` (12 MiB << 64 MiB). Mount writethrough here so the kernel submits
+    // synchronous foreground 1 MiB `FUSE_WRITE` requests directly through `/dev/fuse` and
+    // genuinely overflows the 64 MiB per-tenant waiting queue.
+    let mut opts = MountOptions::new();
+    opts.writeback_cache(false);
+    let mount = opts.mount_cells(&m).unwrap();
+    for (name, cell) in [("slow/a", "a"), ("fast/b", "b")] {
+        let fs = format(&dir.path().join(cell));
+        block_on(mount.server().attach(name, std::future::ready(Ok(fs)))).unwrap();
+    }
+    // Perform a 1-byte warmup write on each file while writethrough is active so the kernel sets
+    // `S_NOSEC` on every inode before the failpoint is armed; then each thread's 1 MiB write sends
+    // a 1 MiB `FUSE_WRITE` directly.
+    let files: Vec<_> = (0..76)
+        .map(|n| {
+            let p = m.join("slow/a").join(format!("w-{n}"));
+            let mut f = std::fs::File::create(&p).unwrap();
+            f.write_all(b"x").unwrap();
+            f.seek(std::io::SeekFrom::Start(0)).unwrap();
+            f
+        })
+        .collect();
+    std::fs::metadata(m.join("fast/b")).unwrap();
+
+    let held: Held = Arc::new((Mutex::new((0usize, false)), Condvar::new()));
+    let holding = held.clone();
+    fail::cfg_callback("fuse::tenant::slow", move || {
+        let (state, changed) = &*holding;
+        let mut state = state.lock().unwrap();
+        state.0 += 1;
+        changed.notify_all();
+        while !state.1 {
+            state = changed.wait(state).unwrap();
+        }
+    })
+    .unwrap();
+    let let_go = LetGo(held.clone());
+    let rejected = Arc::new(AtomicUsize::new(0));
+    let payload = Arc::new(vec![0xab_u8; 1 << 20]);
+    let writers: Vec<_> = files
+        .into_iter()
+        .map(|mut file| {
+            let buf = payload.clone();
+            let rejected = rejected.clone();
+            let held = held.clone();
+            std::thread::spawn(move || {
+                let res = file.write_all(&buf);
+                if let Err(ref err) = res
+                    && err.raw_os_error() == Some(libc::EAGAIN)
+                {
+                    rejected.fetch_add(1, Ordering::Relaxed);
+                    held.1.notify_all();
+                }
+                res
+            })
+        })
+        .collect();
+    // Wait until all 6 active tasks are held AND at least one writer past the 64 MiB waiting queue
+    // has been rejected with `EAGAIN` (proving the queue filled and overflowed without unbounded
+    // allocation or worker starvation).
+    {
+        let (state, changed) = &*held;
+        let state = state.lock().unwrap();
+        let timeout = std::time::Duration::from_secs(30);
+        let (state, _) = changed
+            .wait_timeout_while(state, timeout, |state| {
+                state.0 < 6 || rejected.load(Ordering::Relaxed) == 0
+            })
+            .unwrap();
+        let count = state.0;
+        drop(state);
+        let retained = mount.queued_bytes();
+        assert_eq!(count, 6, "stalled tenant must stay capped at most=6 active tasks");
+        assert!(
+            rejected.load(Ordering::Relaxed) >= 1,
+            "expected excess writes past 64 MiB queue to be rejected with EAGAIN (retained={retained} bytes)"
+        );
+        // Kept request memory must stay bounded at <= (6 active + 64 queued) * ~1 MiB.
+        assert!(
+            retained >= (64 << 20) && retained <= (72 << 20),
+            "expected retained bytes in 64..=72 MiB, got {retained}"
+        );
+    }
+
+    let (sent, answered) = std::sync::mpsc::channel();
+    let listing = m.clone();
+    std::thread::spawn(move || {
+        let fast = std::fs::metadata(listing.join("fast/b/missing")).unwrap_err().raw_os_error();
+        sent.send((fast, names(&listing))).unwrap();
+    });
+    let answered = answered.recv_timeout(std::time::Duration::from_secs(1));
+    drop(let_go);
+    let (mut ok_count, mut eagain_count) = (0usize, 0usize);
+    for w in writers {
+        match w.join().unwrap() {
+            Ok(()) => ok_count += 1,
+            Err(err) if err.raw_os_error() == Some(libc::EAGAIN) => eagain_count += 1,
+            Err(err) => panic!("unexpected writer error: {err}"),
+        }
+    }
+    // Each 1 MiB FUSE_WRITE carries 80 bytes of InHeader + WriteIn (1,048,656 bytes), so 63 fit
+    // in the 64 MiB waiting queue alongside the 6 active tasks (69 total) and the rest get EAGAIN.
+    assert!(
+        ok_count >= 69,
+        "expected at least 6 active + 63 queued writes to succeed, got {ok_count}"
+    );
+    assert!(eagain_count >= 1, "expected overflow writes to fail with EAGAIN, got {eagain_count}");
+    assert_eq!(answered, Ok((Some(libc::ENOENT), vec!["fast".to_owned(), "slow".to_owned()])));
     mount.unmount(true).unwrap();
     mount.join().unwrap();
 }
@@ -1026,17 +1168,18 @@ fn ephemeral_cells_attach_to_fuse_without_uploading_to_the_bucket() {
     let dir = tempfile::tempdir().unwrap();
     let bucket = dir.path().join("bucket");
     let ephemeral = dir.path().join("ephemeral");
-    let cells_dir = dir.path().join("cells");
-    let ws_dir = dir.path().join("ws");
+    let disk0 = dir.path().join("disk0");
+    let cells_dir = disk0.join("cells");
     let m = dir.path().join(".gvfs");
     let socket = dir.path().join("control");
     std::fs::create_dir_all(&ephemeral).unwrap();
-    std::fs::create_dir_all(&ws_dir).unwrap();
+    std::fs::create_dir_all(&disk0).unwrap();
     std::fs::create_dir_all(&m).unwrap();
 
     let mut command = cladefsd(&dir.path().join("vm.sock"), &bucket, 1);
     command
         .env("CLADEFSD_GRPC", &socket)
+        .env("CLADEFSD_ROOTS", &disk0)
         .env("CLADEFSD_MOUNT", &m)
         .env("CLADEFSD_MOUNT_STORES", &cells_dir)
         .env("CLADEFSD_EPHEMERAL", &ephemeral);
@@ -1051,13 +1194,13 @@ fn ephemeral_cells_attach_to_fuse_without_uploading_to_the_bucket() {
     std::fs::write(base_mount.join("base.txt"), b"from-base").unwrap();
     cladefsctl_mount(sock_s, &["detach", "1", &base_cell_b32]);
 
-    let base_store = cells_dir.join("0000000000001").join(&base_cell_b32);
     let control = cladefs::testing::Control::connect(sock_s).unwrap();
     let version = control
         .call(async |client| {
             client
                 .make_version(MakeVersionRequest {
-                    path: control_path(&base_store),
+                    tenant: 1,
+                    cell: base_cell_id,
                     ..Default::default()
                 })
                 .await
@@ -1066,17 +1209,15 @@ fn ephemeral_cells_attach_to_fuse_without_uploading_to_the_bucket() {
         .version;
     control
         .call(async |client| {
-            client.sync_cell(SyncCellRequest { path: control_path(&base_store) }).await
+            client.sync_cell(SyncCellRequest { tenant: 1, cell: base_cell_id }).await
         })
         .unwrap();
 
     // 2. Fork an ephemeral workspace cell from the base version.
-    let eph_path = ws_dir.join("ws-eph-1");
     let forked = control
         .call(async |client| {
             client
                 .fork_cell(ForkCellRequest {
-                    to: control_path(&eph_path),
                     tenant: 1,
                     cell: base_cell_id,
                     version,
@@ -1087,6 +1228,7 @@ fn ephemeral_cells_attach_to_fuse_without_uploading_to_the_bucket() {
         })
         .unwrap();
     let eph_cell_b32 = base32_id::Padded(forked.cell).to_string();
+    let eph_path = cells_dir.join("0000000000001").join(&eph_cell_b32);
 
     // 3. Attach the ephemeral cell to the FUSE mount, read inherited data, and write new data.
     cladefsctl_mount(sock_s, &["attach", "1", &eph_cell_b32]);
@@ -1094,9 +1236,9 @@ fn ephemeral_cells_attach_to_fuse_without_uploading_to_the_bucket() {
     assert_eq!(std::fs::read(eph_mount.join("base.txt")).unwrap(), b"from-base");
     std::fs::write(eph_mount.join("scratch.txt"), b"host-local-only").unwrap();
 
-    // While attached, DeleteCell on the ephemeral cell directory must fail EBUSY (held by mount).
+    // While attached, DeleteCell on the ephemeral cell must fail EBUSY (held by mount).
     let busy = control.call(async |client| {
-        client.delete_cell(DeleteCellRequest { path: control_path(&eph_path) }).await
+        client.delete_cell(DeleteCellRequest { tenant: 1, cell: forked.cell }).await
     });
     assert_eq!(busy.err().and_then(|err| err.errno()), Some(cladefs::Errno::EBUSY));
 
@@ -1118,7 +1260,7 @@ fn ephemeral_cells_attach_to_fuse_without_uploading_to_the_bucket() {
     cladefsctl_mount(sock_s, &["detach", "1", &eph_cell_b32]);
     control
         .call(async |client| {
-            client.delete_cell(DeleteCellRequest { path: control_path(&eph_path) }).await
+            client.delete_cell(DeleteCellRequest { tenant: 1, cell: forked.cell }).await
         })
         .unwrap();
     assert!(!eph_path.exists());
@@ -1130,7 +1272,6 @@ fn ephemeral_cells_attach_to_fuse_without_uploading_to_the_bucket() {
     let invalid_create = control.call(async |client| {
         client
             .create_cell(CreateCellRequest {
-                path: control_path(&ws_dir.join("bad-interval")),
                 capacity: 64 << 20,
                 tenant: 1,
                 upload_interval_ms: Some(0),
@@ -1143,7 +1284,6 @@ fn ephemeral_cells_attach_to_fuse_without_uploading_to_the_bucket() {
         .call(async |client| {
             client
                 .create_cell(CreateCellRequest {
-                    path: control_path(&ws_dir.join("custom-interval")),
                     capacity: 64 << 20,
                     tenant: 1,
                     upload_interval_ms: Some(15_000),
@@ -1155,11 +1295,7 @@ fn ephemeral_cells_attach_to_fuse_without_uploading_to_the_bucket() {
     assert_ne!(ok_create.cell, 0);
     control
         .call(async |client| {
-            client
-                .delete_cell(DeleteCellRequest {
-                    path: control_path(&ws_dir.join("custom-interval")),
-                })
-                .await
+            client.delete_cell(DeleteCellRequest { tenant: 1, cell: ok_create.cell }).await
         })
         .unwrap();
 

@@ -185,6 +185,13 @@ impl Local {
                 source: format!("{found:?} is not {:?}", version.e_tag).into(),
             });
         }
+        // Checked, not yet published, the lock held: where a test holds a write (board 9578),
+        // awaiting, as a write in flight awaits its blocking publication, so that whatever could
+        // drop it there, a caller or a runtime shutting down, would.
+        fail::fail_point!("local::update_checked");
+        while held() {
+            yield_now().await;
+        }
         let opts = PutOptions { mode: PutMode::Overwrite, ..opts };
         self.files.put_opts(location, payload, opts).await
     }
@@ -249,6 +256,27 @@ fn take_lock(path: &std::path::Path) -> Result<std::fs::File> {
         Ok(file)
     };
     take().map_err(|source| generic(format!("locking {}: {source}", path.display())))
+}
+
+/// Whether a test holds an update past its check (failpoint `local::update_held` returning, board
+/// 9578): never, without failpoints.
+fn held() -> bool {
+    fail::fail_point!("local::update_held", |_| true);
+    false
+}
+
+/// Returns once, after letting whatever polls it run something else: a runtime's other tasks, or
+/// its shutdown.
+async fn yield_now() {
+    let mut yielded = false;
+    futures::future::poll_fn(|cx| {
+        if std::mem::replace(&mut yielded, true) {
+            return std::task::Poll::Ready(());
+        }
+        cx.waker().wake_by_ref();
+        std::task::Poll::Pending
+    })
+    .await
 }
 
 /// The bucket's failure, saying `why`.
@@ -566,5 +594,69 @@ mod tests {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
         });
+    }
+
+    /// Board 9578 (hotbed reviews 49, 51): an update held after its e-tag check, before it is
+    /// published, awaiting (failpoints `local::update_checked`, `local::update_held`), keeps its
+    /// directory's lock while its caller gives up on it and its runtime shuts down on another
+    /// thread: another process's `try_lock` of the lock fails, and its overwrite waits, until the
+    /// held write ends; that overwrite, made after it, is what the object holds. A lock owned by
+    /// a task of the runtime, which its shutdown drops at the await (hotbed review 51), fails it,
+    /// as one owned by the caller does.
+    #[test]
+    fn writes_held_past_their_check_keep_the_lock_as_their_runtime_shuts_down() {
+        use std::sync::{Mutex, mpsc};
+        use std::time::Duration;
+        let scenario = fail::FailScenario::setup();
+        let dir = tempfile::tempdir().unwrap();
+        let key = "held/object";
+        let runtime = || {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .unwrap()
+        };
+        let (shut_down, other) = (runtime(), runtime());
+        let version =
+            other.block_on(file(dir.path()).put(key, vec![1].into(), PutMode::Create)).unwrap();
+        // The update tells it reached its check's end, then awaits there until told to go on.
+        let (reached, held) = mpsc::channel();
+        let reached = Mutex::new(reached);
+        fail::cfg_callback("local::update_checked", move || {
+            reached.lock().unwrap().send(()).unwrap()
+        })
+        .unwrap();
+        fail::cfg("local::update_held", "return").unwrap();
+        let bucket = file(dir.path());
+        let giving_up = shut_down
+            .spawn(async move { bucket.put(key, vec![2].into(), PutMode::Update(version)).await });
+        held.recv().unwrap();
+        giving_up.abort();
+        let shutting_down = std::thread::spawn(move || drop(shut_down));
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(dir.path().join(lock_of(key)))
+            .unwrap();
+        let path = dir.path().to_owned();
+        let overwriting = std::thread::spawn(move || {
+            let bucket = file(&path);
+            other.block_on(bucket.put(key, vec![3].into(), PutMode::Overwrite)).unwrap();
+            other.block_on(bucket.get(key)).unwrap().bytes
+        });
+        // Long enough for the caller's abort, the runtime's shutdown and the overwrite to let the
+        // lock go, or write, were they to: nothing shows they did not.
+        std::thread::sleep(Duration::from_millis(200));
+        let tried = lock.try_lock();
+        assert!(matches!(tried, Err(std::fs::TryLockError::WouldBlock)), "locked: {tried:?}");
+        assert!(!shutting_down.is_finished(), "the runtime shut down with its write held");
+        assert!(!overwriting.is_finished(), "overwritten while the update held the lock");
+        fail::cfg("local::update_held", "off").unwrap();
+        shutting_down.join().unwrap();
+        assert_eq!(overwriting.join().unwrap(), [3]);
+        lock.try_lock().unwrap();
+        scenario.teardown();
     }
 }

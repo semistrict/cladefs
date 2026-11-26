@@ -263,11 +263,6 @@ impl Memory {
 /// 16 GiB holding 497 with 3.9 GiB to spare (board 7084).
 pub(super) const MAX_CONNECTIONS: usize = 4096;
 
-/// cladefs: how many of the daemon's open files a connection takes, as [`most_connections`]
-/// counts them (board 8465): its socket, the socket again for its sender, its VM process's pidfd,
-/// and one for what its cell opens beside the cells of others.
-const FILES_PER_CONNECTION: usize = 4;
-
 /// cladefs: how many connections each tenant alive keeps, whatever the others have (board 8465): a
 /// tenant with fewer is refused none while the daemon has room for any, however many the others
 /// have taken; those past it take what all of them leave. A VM restored from a zygote has two
@@ -275,10 +270,15 @@ const FILES_PER_CONNECTION: usize = 4;
 const RESERVED_CONNECTIONS: usize = 64;
 
 /// cladefs: the most connections the daemon serves at once, every tenant's together (board 8465):
-/// what its open files leave, [`FILES_PER_CONNECTION`] each, a quarter of its limit kept for the
-/// rest (its cells' files, its part cache, its control API). Past it, an accept that failed for
-/// files held every tenant's new VM processes, retried every [`ACCEPT_AGAIN`], whichever tenant had
-/// taken them.
+/// what its open files leave, each connection's at their most, a quarter of its limit kept for the
+/// rest (its own, its part cache's, its control API's and the cells it opens for it, its peers').
+/// A connection's files are its cell's, which it opens one of at most, at their most
+/// (`super::cell_open_files`, board 9975): its segments' and extents', its sockets and its VM
+/// process's pidfd. Before, 4 a connection, as if its cell's were the rest's: one tenant's cells
+/// took every file the daemon had far below the cap, 18 connections of 56 at a limit of 300, and
+/// another tenant's VM processes, within their reserved share, failed to connect (`EMFILE`), as
+/// their cells would have to open. Past it, an accept that failed for files held every tenant's
+/// new VM processes, retried every [`ACCEPT_AGAIN`], whichever tenant had taken them.
 fn most_connections() -> usize {
     let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
     // SAFETY: Reads the process's limit into `limit`.
@@ -290,23 +290,27 @@ fn most_connections() -> usize {
     }
     // Unlimited, RLIM_INFINITY, as many as a usize counts.
     let files = usize::try_from(limit.rlim_cur).unwrap_or(usize::MAX);
-    (files - files / 4) / FILES_PER_CONNECTION
+    // A few hundred files: as many as a usize counts.
+    let per_connection = usize::try_from(super::cell_open_files()).unwrap_or(usize::MAX);
+    (files - files / 4) / per_connection
 }
 
 /// cladefs: the connections the daemon serves at once, of the most ([`most_connections`]), and how
 /// many each tenant keeps ([`RESERVED_CONNECTIONS`]): as a test gives them, if it does.
 fn connection_limits() -> (usize, usize) {
     #[cfg(test)]
-    if let Some(&given) = CONNECTION_LIMITS_GIVEN.get() {
-        return given;
+    if let Some(&(most, reserved)) = CONNECTION_LIMITS_GIVEN.get() {
+        return (most.unwrap_or_else(most_connections), reserved);
     }
     (most_connections(), RESERVED_CONNECTIONS)
 }
 
 /// cladefs: the limits of connections in a test, in place of the daemon's ([`connection_limits`]):
-/// the process's, a test's, which runs in a process of its own.
+/// the most the daemon serves, or, if none, what the process's limit of open files leaves
+/// ([`most_connections`]); and how many each tenant keeps. The process's, a test's, which runs in
+/// a process of its own.
 #[cfg(test)]
-pub(super) static CONNECTION_LIMITS_GIVEN: OnceLock<(usize, usize)> = OnceLock::new();
+pub(super) static CONNECTION_LIMITS_GIVEN: OnceLock<(Option<usize>, usize)> = OnceLock::new();
 
 /// cladefs: a tenant's connection counted among its connections, and every tenant's on its daemon,
 /// until dropped.
@@ -1663,9 +1667,21 @@ impl Connection {
         }
     }
 
-    /// Whether it may name the cell at `path`: `EACCES` unless the cell is where its tenant's
-    /// VM processes name cells (TASK-43.4).
+    /// Whether it may name the cell at `path`: when a managed [`DiskPool`] is active, `path` must
+    /// be a `TENANT/CELL` cell ID (raw host paths are refused with `EINVAL`), and granted tenants
+    /// may only address cells of their own tenant (`EACCES`). Without a `DiskPool` (standalone unit
+    /// tests), falls back to directory containment (`self.tenant.holds`).
     fn authorize(&self, path: &Path) -> Result<(), Errno> {
+        if self.daemon().disk_pool().is_some() {
+            let cell_str = path.to_str().ok_or(Errno::EINVAL)?;
+            let cell = cell_str.parse::<crate::CellId>().map_err(|_| Errno::EINVAL)?;
+            if let Some(granted) = self.tenant.granted() {
+                if cell.tenant != granted {
+                    return Err(Errno::EACCES);
+                }
+            }
+            return Ok(());
+        }
         self.tenant.holds(path)
     }
 
@@ -2011,14 +2027,185 @@ impl Connection {
     /// if it is shared (`EACCES`, TASK-395.7).
     async fn open(&self, path: &Path, how: codec::Opening) -> Result<(crate::CellId, bool), Errno> {
         let opening = self.opening()?;
-        let hold =
-            cells::hold_to_write(self.daemon(), &cell_dir_key(path), self.this.clone()).await?;
+        let (resolved, effective_how, named_cell) = if let Some(pool) = self.daemon().disk_pool() {
+            let req_str = path.to_str().ok_or(Errno::EINVAL)?;
+            let req_cell: crate::CellId = req_str.parse().map_err(|_| Errno::EINVAL)?;
+            let effective_tenant = self.tenant.granted().unwrap_or(req_cell.tenant);
+            if req_cell.id != 0 {
+                let pool = Arc::clone(pool);
+                let found =
+                    cells::blocking(move || pool.find_cell(req_cell).ok_or(Errno::ENOENT)).await?;
+                (found, how, None)
+            } else {
+                let daemon = self.daemon();
+                let disk = pool.pick_disk()?;
+                match how {
+                    codec::Opening::Existing
+                    | codec::Opening::LocalEphemeral { .. }
+                    | codec::Opening::ExistingEphemeralMemory { .. } => {
+                        return Err(Errno::EINVAL);
+                    }
+                    codec::Opening::Create(_, _) => {
+                        // Allocate the cell ID up front so `open_held` creates and takes the cell
+                        // directly at its canonical `<disk>/cells/<TENANT>/<CELL>` path in a
+                        // single taking (epoch = 1) with no staging rename.
+                        let bucket = super::storage::daemon_bucket_on(daemon)?;
+                        let cell = crate::host_cell::new_cell(&*bucket, effective_tenant)
+                            .await
+                            .map_err(|_| Errno::EIO)?;
+                        let disk_prep = Arc::clone(&disk);
+                        let final_path = cells::blocking(move || {
+                            drop(super::disks::DiskPool::ensure_tenant_dir(
+                                &disk_prep,
+                                cell.tenant,
+                            )?);
+                            Ok(super::disks::DiskPool::cell_path(&disk_prep, cell))
+                        })
+                        .await?;
+                        (final_path, how, Some(cell))
+                    }
+                    codec::Opening::CreateEphemeral(capacity, kind) => {
+                        let disk_for_stage = Arc::clone(&disk);
+                        let staging = cells::blocking(move || {
+                            super::disks::DiskPool::staging_path(&disk_for_stage, effective_tenant)
+                        })
+                        .await?;
+                        let made = cells::create(
+                            daemon,
+                            staging.clone(),
+                            capacity,
+                            crate::CellId { tenant: effective_tenant, id: 0 },
+                            (None, kind, None, None, false, None, true),
+                        )
+                        .await;
+                        let made = match made {
+                            Ok(made) => made,
+                            Err(err) => {
+                                let cleanup = staging.clone();
+                                let local = Arc::clone(daemon.host.local());
+                                // Best-effort cleanup of failed staging dir; primary error wins.
+                                let _ = cells::blocking(move || {
+                                    if host_fs::exists(&cleanup) {
+                                        // Best-effort cleanup of failed staging dir; primary error wins.
+                                        let _ = local_cell::remove_cell_dir_on(&local, &cleanup);
+                                    }
+                                    Ok(())
+                                })
+                                .await;
+                                return Err(err);
+                            }
+                        };
+                        let pool_commit = Arc::clone(pool);
+                        let disk_commit = Arc::clone(&disk);
+                        let staging_commit = staging.clone();
+                        let final_path = match cells::blocking(move || {
+                            pool_commit.commit_staged(&disk_commit, made, &staging_commit)
+                        })
+                        .await
+                        {
+                            Ok(final_path) => final_path,
+                            Err(err) => {
+                                let cleanup = staging;
+                                let local = Arc::clone(daemon.host.local());
+                                // Best-effort cleanup of failed staging dir; primary error wins.
+                                let _ = cells::blocking(move || {
+                                    if host_fs::exists(&cleanup) {
+                                        // Best-effort cleanup of failed staging dir; primary error wins.
+                                        let _ = local_cell::remove_cell_dir_on(&local, &cleanup);
+                                    }
+                                    Ok(())
+                                })
+                                .await;
+                                return Err(err);
+                            }
+                        };
+                        (final_path, codec::Opening::Existing, None)
+                    }
+                    codec::Opening::ForkOf { tenant, cell, version, capacity } => {
+                        let disk_for_stage = Arc::clone(&disk);
+                        let staging = cells::blocking(move || {
+                            super::disks::DiskPool::staging_path(&disk_for_stage, effective_tenant)
+                        })
+                        .await?;
+                        let forked = (crate::CellId { tenant, id: cell }, version);
+                        let made = match cells::fork_version(
+                            daemon,
+                            forked,
+                            capacity,
+                            (&staging, Some(effective_tenant)),
+                        )
+                        .await
+                        {
+                            Ok(()) => {
+                                let read = staging.clone();
+                                cells::blocking(move || {
+                                    local_cell::host_cell(&read).map_err(|_| Errno::EIO)
+                                })
+                                .await
+                            }
+                            Err(err) => Err(err),
+                        };
+                        let made = match made {
+                            Ok(made) => made,
+                            Err(err) => {
+                                let cleanup = staging.clone();
+                                let local = Arc::clone(daemon.host.local());
+                                // Best-effort cleanup of failed staging dir; returning primary error.
+                                let _ = cells::blocking(move || {
+                                    if host_fs::exists(&cleanup) {
+                                        // Best-effort cleanup of failed staging dir; primary error wins.
+                                        let _ = local_cell::remove_cell_dir_on(&local, &cleanup);
+                                    }
+                                    Ok(())
+                                })
+                                .await;
+                                return Err(err);
+                            }
+                        };
+                        let pool_commit = Arc::clone(pool);
+                        let disk_commit = Arc::clone(&disk);
+                        let staging_commit = staging.clone();
+                        let final_path = match cells::blocking(move || {
+                            pool_commit.commit_staged(&disk_commit, made, &staging_commit)
+                        })
+                        .await
+                        {
+                            Ok(final_path) => final_path,
+                            Err(err) => {
+                                let cleanup = staging;
+                                let local = Arc::clone(daemon.host.local());
+                                // Best-effort cleanup of failed staging dir; returning primary error.
+                                let _ = cells::blocking(move || {
+                                    if host_fs::exists(&cleanup) {
+                                        // Best-effort cleanup of failed staging dir; primary error wins.
+                                        let _ = local_cell::remove_cell_dir_on(&local, &cleanup);
+                                    }
+                                    Ok(())
+                                })
+                                .await;
+                                return Err(err);
+                            }
+                        };
+                        (final_path, codec::Opening::Existing, None)
+                    }
+                }
+            }
+        } else {
+            (path.to_owned(), how, None)
+        };
+        let hold = cells::hold_to_write(self.daemon(), &cell_dir_key(&resolved), self.this.clone())
+            .await?;
         // cladefs: nor one of another tenant's cells (TASK-364).
-        self.tenant.reaches(path)?;
+        self.tenant.reaches(&resolved)?;
         // cladefs: a cell it makes, within its disk and its tenant's limits, as its making admits
         // it (doc-22).
         // Closed before its hold lets its path go, if it fails here.
-        let open_cell = self.open_held(path, &hold, &how).await?;
+        let open_cell = self.open_held(&resolved, &hold, &effective_how, named_cell).await?;
+        if let Some(pool) = self.daemon().disk_pool()
+            && let Some(cell) = named_cell
+        {
+            pool.register_cell(cell, resolved.clone());
+        }
         let flushed = open_cell.clone();
         let flushing_daemon = Arc::clone(self.daemon());
         self.start_behind(move |stopped| flush_behind(flushing_daemon, flushed, stopped));
@@ -2029,7 +2216,7 @@ impl Connection {
         if let Some(cut_short) = open_cell.cut_short() {
             hold.when_wanted(cut_short);
         }
-        opening.opened(path, open_cell, hold);
+        opening.opened(&resolved, open_cell, hold);
         Ok((cell, ephemeral))
     }
 
@@ -2040,6 +2227,7 @@ impl Connection {
         path: &Path,
         hold: &cells::Hold,
         how: &codec::Opening,
+        named_cell: Option<crate::CellId>,
     ) -> Result<Arc<OpenCell>, Errno> {
         let daemon = self.daemon();
         let arena = self.arena();
@@ -2089,6 +2277,7 @@ impl Connection {
                     capacity: *capacity,
                     kind: *kind,
                     tenant: self.tenant.id,
+                    cell: named_cell,
                     ephemeral: false,
                 };
                 Arc::new(open_cell_at(daemon, path, Some(new), Some(arena)).await?)
@@ -2099,6 +2288,7 @@ impl Connection {
                     capacity: *capacity,
                     kind: *kind,
                     tenant: self.tenant.id,
+                    cell: None,
                     ephemeral: true,
                 };
                 let open_cell = Arc::new(open_cell_at(daemon, path, Some(new), Some(arena)).await?);
@@ -2899,7 +3089,9 @@ impl Peer {
             // Process-wide registration for slabs::quarantine_with.
             static QUARANTINED: std::sync::Once = std::sync::Once::new();
             QUARANTINED.call_once(|| crate::slabs::quarantine_with(quarantine));
-            daemon.spawn(watch(Arc::downgrade(daemon)));
+            // cladefs: supervised, its panic aborting the daemon (board 9414): VM processes that
+            // stopped answering would be let go never again, holding the pages freed for good.
+            daemon.spawn(super::run::supervising(WATCHDOG, watch(Arc::downgrade(daemon))));
         });
         let process = peer_process(stream)?;
         if let Some(process) = &process {
@@ -3463,6 +3655,10 @@ pub(super) fn most_queued() -> u64 {
 /// cladefs: lets the VM processes on `daemon` that stopped answering go ([`Peer::unresponsive`]),
 /// or reading what the daemon sends them ([`AsyncSender::stalled`], board 8459), looking every
 /// [`WATCH_EVERY`], for as long as `daemon` lives.
+/// cladefs: what the VM processes' watchdog ([`watch`]) is called, as a panic in it names it
+/// (board 9414).
+const WATCHDOG: &str = "cladefsd watchdog";
+
 async fn watch(daemon: Weak<Daemon>) {
     let mut every = tokio::time::interval(WATCH_EVERY);
     loop {

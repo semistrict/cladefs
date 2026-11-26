@@ -64,6 +64,9 @@ private = { ignore = true }
 # OSI licence: rustls-platform-verifier's fallback roots (hotbed question 511).
 exceptions = [
     { crate = "webpki-root-certs", allow = ["CDLA-Permissive-2.0"] },
+    # cladefs: openmetrics-parser, a test's alone, in no binary: the daemon's /metrics parsed as a
+    # scraper parses it (board 10482, hotbed question 552).
+    { crate = "openmetrics-parser", allow = ["LGPL-3.0"] },
 ]
 
 [bans]

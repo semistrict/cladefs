@@ -18,11 +18,13 @@ follows from that.
 
 ## Per-host setup
 
-1. Start `cladefsd` with `CLADEFSD_GRPC` naming its control socket. Keep that socket away
-   from jails. It can do everything, so it is mode 0600, the daemon's user's, whatever the umask
-   (TASK-159): run the VM manager as that user, or as root.
-2. For each tenant, call `Grant` with the tenant's ID, the directory of its cell directories, and its
-   jails' uid and gid. It returns the path of a socket.
+1. Start `cladefsd --config /etc/cladefs/cladefs.toml` (see `docs/cladefs.example.toml`) with one
+   or more `[[disks]]` entries and `[daemon].control_socket` naming its control socket. Keep the
+   control socket away from jails. It can do everything, so it is mode 0600, the daemon's user's,
+   whatever the umask (TASK-159): run the VM manager as that user, or as root.
+2. For each tenant, call `Grant(tenant, uid, gid)` — no host directories are specified; `cladefsd`
+   automatically scopes the tenant across its managed `[[disks]]` pool. It returns the path of a
+   socket.
 3. Bind-mount **that socket alone** into the tenant's jails. Never mount the daemon's default VM
    socket into a jail: it can take any cell by its ID.
 4. Run jails with Firecracker's jailer, as a uid other than the daemon's. The default VM socket is
@@ -30,6 +32,18 @@ follows from that.
 5. Start Firecracker with `--enable-pci`, on x86-64 and aarch64 alike: the extent device attaches
    over virtio-PCI alone, its DAX window a BAR of its own, and a VM with it on MMIO does not start
    (TASK-273).
+
+Callers never choose host directories or paths. Every control RPC (`CreateCell`, `ForkCell`,
+`ImportImage`, `ImportMemory`, `StatCell`, `SyncCell`, `ResizeCell`, `DeleteCell`, `DropCell`,
+`PlaceCell`, `MakePublic`, `MakeVersion`, `ListVersions`, `DropVersions`, `ShareVersion`,
+`AttachBase`, `MigrateCell`, `HandOverCell`, `AbortMigration`) addresses cells by `(tenant, cell)`
+alone. On the VM socket (`OPEN`), Firecracker passes `"TENANT/CELL"` (in Crockford base 32) to open
+an existing cell, or `"TENANT/0"` / `"0/0"` to let the daemon create or fork a new cell on the best
+managed disk. Raw host paths are refused with `EINVAL`.
+
+Use `ListDisks` and `SetDiskGovernance` (or `cladefsctl disks` / `cladefsctl set-disk`) to inspect
+disk health/capacities and adjust per-disk caps, headroom, dirty budgets, or placement modes
+(`read_write`, `drain`, `read_only`) at runtime.
 
 Grants don't survive a restart of the daemon. After one, call `Grant` again, and bind-mount the new
 socket.
@@ -71,22 +85,19 @@ In `cladefs_overrides`:
 
 | Field | Value |
 |---|---|
-| `path_on_host` | The VM's cell directory, in the tenant's directory |
+| `path_on_host` | `"<TENANT>/0"` (or `"0/0"` on a granted tenant's socket) to fork into a new daemon-placed cell, or `"<TENANT>/<CELL>"` to reopen an existing cell |
 | `cladefsd_socket` | The tenant's socket, as the jail sees it |
 
 Do this as often as you like, on any host, at the same time. Each restore makes a new cell for the
-VM; the daemon opens the version once on a host for all the restores of it there.
+VM on a managed disk chosen by the daemon; the daemon opens the version once on a host for all the
+restores of it there.
 
-Name a `path_on_host` where no cell directory is yet: the restore forks the version there. A cell
-directory already there is opened only if it holds exactly what the version does: the cell the
-snapshot was taken of, if its VM wrote nothing after the snapshot, or the fork an earlier restore
-of this snapshot made there, if that VM wrote nothing. Any other cell there, such as the
-snapshotted VM's own cell once it resumed and wrote on, fails the restore with `EEXIST` and is
-left as it is: its guest, running from the snapshot's memory, would corrupt it (TASK-194). Without
-`cladefs_overrides`, `path_on_host` is the snapshotted VM's own cell directory.
+Without `cladefs_overrides`, `path_on_host` is the snapshotted VM's own `"TENANT/CELL"` ID, which
+resumes that cell in place (failing with `EEXIST` if the cell diverged after the snapshot).
 
 A VM's memory restored from a memory cell names the version in `memory_cell`'s `tenant`, `cell`
-and `version`, as the disk's are named in the snapshot file.
+and `version`, as the disk's are named in the snapshot file, with `mem_backend.backend_path = "0/0"`
+(or `"<TENANT>/0"`).
 
 ### Memory cells: snapshotting and restoring without local memory files
 
@@ -99,19 +110,19 @@ There are two ways to create a snapshot's memory cell version:
 1. **Directly from Firecracker (`PUT /snapshot/create`, preferred):** pass `memory_cell` in place of
    `mem_file_path` — no local memory file is written:
    - **Cold-booted (or File/Uffd-restored) VM:** pass
-     `"memory_cell": { "path_on_host": "<dir>", "cladefsd_socket": "<tenant.sock>" }`. Firecracker
+     `"memory_cell": { "path_on_host": "0/0", "cladefsd_socket": "<tenant.sock>" }`. Firecracker
      scans resident pages via `mincore` (skipping untouched anonymous RAM), writes non-zero pages,
      commits, and makes a version.
    - **VM already restored from a memory cell (`MemBackendType::Cell`):** pass `"memory_cell": {}`
      (omit both fields). Firecracker writes only the window's private pages into the VM's forked
      memory cell, commits, reclaims them back to the newly committed extents, and makes a version.
    - On success, `PUT /snapshot/create` returns `200 OK` with JSON
-     `{"tenant": <u64>, "cell": <u64>, "version": <u64>}`. Call `SyncCell(<mem_cell_dir>)` before
+     `{"tenant": <u64>, "cell": <u64>, "version": <u64>}`. Call `SyncCell(tenant, cell)` before
      restoring on another host.
 2. **Importing an existing Firecracker memory file (`ImportMemory` / `cladefsctl import-memory`):**
-   call `ImportMemory(path, file, tenant, make_version=true)` over the control API (or
-   `cladefsctl import-memory --version DIR FILE`). Zero pages are discarded as holes; call
-   `SyncCell` before cross-host restore.
+   call `ImportMemory(file, tenant, make_version=true)` over the control API (or
+   `cladefsctl import-memory --version FILE`). Zero pages are discarded as holes; call
+   `SyncCell(tenant, cell)` before cross-host restore.
 
 To restore with KVM dirty-page tracking (for live migration pre-copy), set `"track_dirty_pages": true`
 in `PUT /snapshot/load` alongside `mem_backend.backend_type = "Cell"`: KVM tracks guest stores
@@ -189,33 +200,33 @@ mTLS (`CLADEFSD_PEER_ADDRESS` / `CLADEFSD_PEER_TLS`), using `MigrateCell`, `Hand
 For a **bucket-backed cell**, only data not yet acknowledged in the bucket is transferred over peer
 mTLS, avoiding any bucket upload wait during the VM pause:
 
-1. **Configure target roots:** start the target `cladefsd` with `CLADEFSD_ROOTS` (or
-   `CLADEFSD_EPHEMERAL_CELLS`) containing the destination directory; `to` must lie inside one of
-   those roots. `CLADEFSD_EPHEMERAL` is not required for bucket-backed migrations.
-2. **Pre-copy while the VM runs:** call `MigrateCell(path, peer, to)` on the source daemon. The
+1. **Configure target disks:** start the target `cladefsd` with one or more `[[disks]]` entries in
+   its TOML config (or legacy `CLADEFSD_ROOTS`). The target daemon chooses the destination disk
+   automatically. `CLADEFSD_EPHEMERAL` is not required for bucket-backed migrations.
+2. **Pre-copy while the VM runs:** call `MigrateCell(tenant, cell, peer)` on the source daemon. The
    source's uploader keeps uploading finalized segments to the bucket in parallel, while migration
    rounds stream only unacknowledged finalized `segments/` over peer mTLS (skipping any that finish
    uploading before being sent).
 3. **Pause and hand over:** pause/stop the source VM so its connection to `cladefsd` closes, then
-   call `HandOverCell(path, token=<new_fencing_token>)` on the source daemon:
+   call `HandOverCell(tenant, cell, token=<new_fencing_token>)` on the source daemon:
    - The source cuts its uploader short immediately without draining pending bucket uploads, waits
      for its local close to finish flushing dirty pages, writes the durable `migrating` marker, and
      sends only the remaining unuploaded tail (open segment, standalone extents, WAL, logs, store
      metadata, and any unsent finalized segments).
    - The target prunes any pre-copied segments already uploaded on the source, places the cell at
-     `token` (if provided), renames it into place, and takes its head in the bucket (one head CAS
-     for `f = 0` cells; replicated `f >= 1` cells also fence and re-seed their replica
-     configuration) before immediately closing with `cut_short` so no bucket data uploads block the
-     pause.
+     `token` (if provided), renames it into place on its chosen disk, and takes its head in the
+     bucket (one head CAS for `f = 0` cells; replicated `f >= 1` cells also fence and re-seed their
+     replica configuration) before immediately closing with `cut_short` so no bucket data uploads
+     block the pause.
    - Once accepted, the source deletes its local cell directory (leaving the cell intact in the
-     bucket) and returns `OK`. Start/resume the VM on the target against `to`; the target's
-     uploader uploads the transferred tail to the bucket in the background.
-4. **Abort / recovery:** call `AbortMigration(path)` to cancel before hand-over (the source's
-   uploader resumes normal drain-on-stop) or to resolve an uncertain hand-over. If the target
-   refuses (`EAGAIN`, e.g. a stale fencing `token`) or restarts before taking the bucket head, the
-   source removes its `migrating` marker and resumes serving locally; if the target restarted after
-   taking the bucket head at `token`, retrying `HandOverCell` / `AbortMigration` reconciles against
-   the bucket head and cleans up the source directory.
+     bucket) and returns `OK`. Start/resume the VM on the target referencing `"TENANT/CELL"`; the
+     target's uploader uploads the transferred tail to the bucket in the background.
+4. **Abort / recovery:** call `AbortMigration(tenant, cell)` to cancel before hand-over (the
+   source's uploader resumes normal drain-on-stop) or to resolve an uncertain hand-over. If the
+   target refuses (`EAGAIN`, e.g. a stale fencing `token`) or restarts before taking the bucket head,
+   the source removes its `migrating` marker and resumes serving locally; if the target restarted
+   after taking the bucket head at `token`, retrying `HandOverCell` / `AbortMigration` reconciles
+   against the bucket head and cleans up the source directory.
 
 ### 3. When the snapshot is finished with, everywhere
 
@@ -261,15 +272,16 @@ then fork the version, as a snapshot's is restored:
 
 ```
 # On the base's host, once nothing has it open:
-version = MakeVersion(<base>).version
-SyncCell(<base>)
+version = MakeVersion(tenant, cell).version
+SyncCell(tenant, cell)
 # Then, as often as you like, on every host at the same time:
-ForkCell(to = <VM's cell>, version, tenant, cell)
+ForkCell(from_tenant=tenant, from_cell=cell, version=version)
 ```
 
 The base stays writable on its host. What it writes after reaches no fork of the version: make a new
 version to pass that on. `DropVersions` drops it everywhere, and the forks keep what they inherited.
-`cladefsctl version DIR` and `cladefsctl fork-version CELL VERSION DST` do the same from a shell.
+`cladefsctl version TENANT/CELL` and `cladefsctl fork-version TENANT/CELL VERSION` do the same from a
+shell.
 
 ## Limits
 

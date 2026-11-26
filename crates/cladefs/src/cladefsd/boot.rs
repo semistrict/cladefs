@@ -53,6 +53,28 @@ pub(super) async fn boot_daemon(
     super::server::require_peer_pidfds()?;
     local_cell::upload::blocking(|| super::server::resolve_roots_on(daemon))
         .map_err(anyhow::Error::msg)?;
+    if daemon.disk_pool.get().is_none() {
+        let legacy_roots: Option<Vec<std::path::PathBuf>> = if let Ok(Some(roots)) =
+            daemon.roots.get().cloned().unwrap_or(Ok(None))
+            && !roots.is_empty()
+        {
+            Some(roots.to_vec())
+        } else if set_os("CLADEFSD_EPHEMERAL_CELLS").is_some() {
+            let roots = local_cell::upload::blocking(super::migration::target::cells_roots)
+                .map_err(anyhow::Error::msg)?;
+            Some(roots)
+        } else {
+            None
+        };
+        if let Some(roots) = legacy_roots {
+            let pool = local_cell::upload::blocking(|| {
+                super::disks::DiskPool::from_roots(daemon.host.bucket_host(), &roots)
+            })
+            .map_err(anyhow::Error::msg)?;
+            // OnceLock: keeps any pool already configured before boot_daemon ran.
+            let _ = daemon.disk_pool.set(Arc::new(pool));
+        }
+    }
     local_cell::upload::blocking(|| super::storage::open_part_cache(daemon))
         .map_err(anyhow::Error::msg)?;
     // cladefs: its appendable zonal fast WAL bucket, if configured: opened and append-probed at
@@ -163,6 +185,146 @@ pub(super) async fn boot_daemon(
     // Its VM processes, on a thread of their own, until it drains.
     // cladefs: outside the simulation: the VM socket, the simulation's guests calling the
     // requests' handling in the process (doc-24).
+    #[cfg(not(madsim))]
+    {
+        let serving = Arc::clone(daemon);
+        super::run::thread("cladefsd vms", move || super::server::serve_on(&serving, listener))?;
+    }
+    #[cfg(madsim)]
+    daemon.serving.send_replace(true);
+    Ok(())
+}
+
+/// Boots `daemon` from a validated TOML [`crate::config::Config`] (hotbed question 547): opens its
+/// managed [`super::disks::DiskPool`], part-cache shards, per-disk governor, peers/replicas,
+/// optional FUSE mount, control API, HTTP metrics/z-pages, and VM socket.
+pub(super) async fn boot_with_config(
+    daemon: &Arc<Daemon>,
+    config: crate::config::Config,
+) -> anyhow::Result<()> {
+    config.validate_for_daemon().map_err(anyhow::Error::msg)?;
+    let socket =
+        config.daemon.vm_socket.clone().context("daemon.vm_socket is required in TOML config")?;
+    let host = crate::bucket::Host::from_env().map_err(anyhow::Error::msg)?;
+    crate::bucket::require_kms_on(&daemon.host).map_err(anyhow::Error::msg)?;
+    #[cfg(not(madsim))]
+    super::require_open_files()?;
+    super::server::require_peer_pidfds()?;
+
+    let enable_part_cache = config.disk.part_cache;
+    let enable_replicas = config.peers.replicas;
+    let disk_entries = config.disks.clone();
+    let disk_defaults = config.disk.clone();
+    let pool = Arc::new(
+        local_cell::upload::blocking(|| {
+            super::disks::DiskPool::open(
+                daemon.host.bucket_host(),
+                &disk_entries,
+                &disk_defaults,
+                enable_part_cache,
+                enable_replicas,
+            )
+        })
+        .map_err(anyhow::Error::msg)?,
+    );
+    let reaped = local_cell::upload::blocking(|| pool.reap_staging());
+    if reaped > 0 {
+        log::info!("cladefsd: removed {reaped} leftover staging cell directories");
+    }
+    let cell_roots: Arc<[std::path::PathBuf]> = pool.cell_roots().into();
+    // OnceLock: boot_with_config initializes roots once for this Daemon instance.
+    let _ = daemon.roots.set(Ok(Some(cell_roots)));
+    // OnceLock: boot_with_config initializes disk_pool once for this Daemon instance.
+    let _ = daemon.disk_pool.set(Arc::clone(&pool));
+
+    if enable_part_cache {
+        let cache_dirs = pool.part_cache_dirs();
+        let cache_cap = config.disk.cache_cap.map_or(u64::MAX, |b| b.bytes());
+        local_cell::upload::blocking(|| {
+            super::storage::open_part_cache_with(daemon, &cache_dirs, cache_cap)
+        })
+        .map_err(anyhow::Error::msg)?;
+    }
+    super::storage::open_fast_wal(daemon).await.map_err(anyhow::Error::msg)?;
+
+    super::reads::configure_on(daemon).map_err(anyhow::Error::msg)?;
+    super::replace_after().map_err(anyhow::Error::msg)?;
+    let disk_cfg = super::disk::DiskConfig::from_toml(&config.disk);
+    super::disk::start_on(daemon, disk_cfg).map_err(anyhow::Error::msg)?;
+    super::migration::idle().map_err(anyhow::Error::msg)?;
+
+    if let Some(dir) = &config.disk.ephemeral_journal {
+        let ephemeral =
+            local_cell::upload::blocking(|| crate::ephemeral_host::open_on(&daemon.host, dir))?;
+        let let_go = super::migration::let_go_handed_over_on(daemon, &ephemeral).await?;
+        log::info!("cladefsd: let go of {let_go} ephemeral cells handed over");
+        let retired = ephemeral.retire_stale().await?;
+        log::info!("cladefsd: retired {retired} references of ephemeral cells held no more");
+    }
+
+    let reaped_staging =
+        local_cell::upload::blocking(|| super::migration::target::reap_orphaned_staging_on(daemon));
+    if reaped_staging > 0 {
+        log::info!("cladefsd: removed {reaped_staging} orphaned migration staging directories");
+    }
+
+    if let Some(address) = &config.peers.address {
+        let listening = listen(address).with_context(|| format!("serving peers at {address}"))?;
+        super::peers::start_on(daemon, address, listening, &config.peers.peers)
+            .await
+            .map_err(anyhow::Error::msg)?;
+    }
+
+    super::events::start_on(daemon)?;
+
+    if let Some(upload_mem) = config.bucket.upload_memory {
+        crate::bucket::set_upload_memory_on(&daemon.host, upload_mem.bytes())
+            .map_err(anyhow::Error::msg)?;
+    }
+
+    if let Some(memory) = config.memory.bytes {
+        crate::pages::configure_on(
+            &daemon.host,
+            crate::pages::Config::with_memory(memory.bytes()),
+        )?;
+    } else {
+        anyhow::ensure!(!cfg!(madsim), "a simulated host is given its memory");
+        let memory = super::governor::memory_bytes().map_err(anyhow::Error::msg)?;
+        crate::pages::configure_on(&daemon.host, crate::pages::Config::with_memory(memory))?;
+        super::governor::start_on(daemon).map_err(anyhow::Error::msg)?;
+    }
+
+    if let Some(mount_cfg) = &config.mount {
+        anyhow::ensure!(
+            config.daemon.control_socket.is_some(),
+            "mount is configured, but daemon.control_socket is unset"
+        );
+        let mount = super::mount::Config {
+            mountpoint: mount_cfg.mountpoint.clone(),
+            cell_dirs: pool.cell_roots(),
+            allow_other: mount_cfg.allow_other,
+        };
+        super::mount::start_on(daemon, &mount, host.bucket)?;
+    }
+
+    if let Some(control) = &config.daemon.control_socket {
+        let tenants = match &config.daemon.tenants_dir {
+            Some(dir) => dir.clone(),
+            None => control.with_file_name("tenants"),
+        };
+        local_cell::upload::blocking(|| host_fs::create_dir_all_durably(&tenants))
+            .with_context(|| format!("making {}", tenants.display()))?;
+        serve_control(daemon, control.as_os_str(), tenants)?;
+    }
+
+    #[cfg(not(madsim))]
+    super::http::start_on(daemon)?;
+
+    #[cfg(not(madsim))]
+    let listener = super::bind_owner_only(&socket)
+        .with_context(|| format!("listening at {}", socket.display()))?;
+    #[cfg(madsim)]
+    let _ = socket;
     #[cfg(not(madsim))]
     {
         let serving = Arc::clone(daemon);

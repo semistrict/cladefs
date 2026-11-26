@@ -584,6 +584,54 @@ async fn uploaders_that_panic_fail_their_waiters_and_stop() {
     scenario.teardown();
 }
 
+/// board 9412: a panic on another thread holding an uploader's progress, as a bug's under it,
+/// fails the uploader, naming it, for every user of the progress after: a commit waiting for its
+/// upload fails, its failure and its uploads are read, and it closes, or drops, and stops. Before,
+/// each of them found the lock poisoned and panicked in turn: a waiter instead of failing, and a
+/// drop unwinding already aborted the process.
+#[tokio::test(flavor = "multi_thread")]
+async fn uploaders_whose_progress_a_panic_poisoned_fail_and_stop() {
+    let host = Runtime {
+        handle: tokio::runtime::Handle::current(),
+        uploads: Budget::new(Limits::UNBOUNDED),
+        keys: bucket_cell::keys::testing::host(),
+    };
+    let poisoned = "a panic left its progress as it held it";
+    for dropped in [false, true] {
+        let bucket = Arc::new(
+            ObjectBucket::new(Arc::new(object_store::memory::InMemory::new()), "").unrouted(),
+        );
+        let dir = MemDir::new();
+        let description = Description { block_size: 4096, capacity: 1 << 30, cell: CELL };
+        LocalCell::make(&dir, description, Some("memory:///poisoned"), None).unwrap();
+        lifecycle::create(&*bucket, CELL, 1).await.unwrap();
+        let recovering = LocalCell::recover_unmade(dir).unwrap();
+        let options = (1, Options { interval: Duration::from_secs(3600), ..Options::default() });
+        let (cell, uploader) =
+            open(recovering, crate::Options::default(), bucket, options, &host).await.unwrap();
+        cell.made().unwrap();
+        let shared = uploader.shared.clone();
+        let panicked = std::thread::spawn(move || {
+            let _progress = shared.progress.lock();
+            panic!("a bug holding the uploader's progress");
+        });
+        assert!(panicked.join().is_err());
+        cell.write(ExtentId::new(CELL.id, 1), 0, &[1; 4096]).await.unwrap();
+        cell.commit(None).await.unwrap();
+        let waited = uploader.uploaded(cell.last_commit().unwrap()).await;
+        assert_eq!(format!("{:#}", waited.unwrap_err()), poisoned);
+        assert_eq!(
+            uploader.failed().map(|failed| format!("{failed:#}")).as_deref(),
+            Some(poisoned)
+        );
+        assert_eq!(uploader.last_uploaded(), 0);
+        match dropped {
+            false => uploader.close().await,
+            true => tokio::task::spawn_blocking(move || drop(uploader)).await.unwrap(),
+        }
+    }
+}
+
 /// TASK-690: a cell's uploader swaps its cell's head no faster than a bucket of GCS's object
 /// store takes it, however fast the cell commits: a guest waiting for each commit's upload,
 /// then one closing segment after segment. Each swap names all uploaded since the last, the

@@ -955,6 +955,24 @@ impl Node {
         Ok(data.len())
     }
 
+    /// Reads up to `len` bytes from this file at `offset` into a single `Vec<u8>` whose first
+    /// `prefix` bytes are zeroed for a framing header (such as FUSE's `OutHeader`), avoiding
+    /// intermediate allocations and copies (board 12092).
+    pub(crate) async fn read_prefixed(
+        &self,
+        offset: u64,
+        len: usize,
+        prefix: usize,
+    ) -> Result<Vec<u8>> {
+        let volume = self.file()?;
+        let ino = self.ino();
+        volume
+            .run(move |fxfs| async move {
+                fxfs.read_prefixed(ino, offset, len, prefix).await.map_err(errno)
+            })
+            .await
+    }
+
     /// Writes `data` to this file at `offset`, extending it if that is past its end, and returns
     /// how much was written.
     pub async fn write(&self, offset: u64, data: &[u8]) -> Result<usize> {

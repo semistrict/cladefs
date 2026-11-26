@@ -222,22 +222,21 @@ pub(crate) mod host {
             oci_layout(&layout, "cladefs/root:docker", &[root_layer(dir, buildx)?])?;
             // By the daemon, built for release, as cladefsctl imports: this harness's debug build
             // takes minutes over Docker's binaries.
-            let cell_dir = dir.join("root");
             let capacity = if self.build { BUILD_CAPACITY } else { CAPACITY };
             let cladefsd = std::env::var_os("CLADEFSD").context("CLADEFSD not set")?;
             let request = ImportImageRequest {
-                path: control_path(&cell_dir),
                 capacity,
                 image: control_path(&layout),
                 reference: String::new(),
                 tenant: 0,
             };
-            control(Path::new(&cladefsd))?
-                .call(async |client| client.import_image(request).await)?;
+            let cell = control(Path::new(&cladefsd))?
+                .call(async |client| client.import_image(request).await)
+                .map(|r| cladefs::CellId { tenant: r.tenant, id: r.cell })?;
 
             let mut vm = if self.build { Vm::new(BUILD_VCPUS, 2048)? } else { Vm::new(2, 2048)? };
             vm.guest_kernel()?;
-            vm.cell("root", &cell_dir, capacity, crate::common::dax_window(WINDOW)?)?;
+            vm.cell_id("root", cell, capacity, crate::common::dax_window(WINDOW)?)?;
             vm.fxfs_root("root");
             if self.build {
                 for name in [BUILDS, BUILD_MIB] {

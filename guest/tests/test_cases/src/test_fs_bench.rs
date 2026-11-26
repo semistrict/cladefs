@@ -156,7 +156,6 @@ const SOURCE_TARBALL: &str = "/opt/lua-5.4.7.tar.gz";
 mod host {
     use super::*;
     use cladefs::cladefsd::control::proto::{ForkCellRequest, GetCountersRequest};
-    use cladefs::testing::control_path;
 
     use crate::common::{cladefs_guest_should_run, setup_rootfs};
     use crate::loop_device::LoopIo;
@@ -323,77 +322,68 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
                 return run_images(test_setup);
             }
             let cladefsd = PathBuf::from(std::env::var_os("CLADEFSD").context("CLADEFSD")?);
-            // Under `extents`, which what keeps a run's results leaves out (bench-linux-host.sh).
-            let cells_dir = test_setup.tmp_dir.join("extents");
-            std::fs::create_dir_all(&cells_dir)?;
-            let base = cells_dir.join("base");
-            role(test_setup, "base", &base, &cladefsd, None)?;
+            let base = crate::common::create_cell(&cladefsd, IMAGE_SIZE)?;
+            let base_spec = base.to_string();
+            role(test_setup, "base", Path::new(&base_spec), &cladefsd, None)?;
             let iterations = iterations().unwrap_or(1);
             // The version the forks are of, if they are of one (predicted).
             let version = match backend {
                 Backend::FxfsGuestDaxForkPredicted => {
-                    Some(opened(&cladefsd, &base)?.make_version()?)
+                    Some(opened(&cladefsd, base)?.make_version()?)
                 }
                 _ => None,
             };
-            let fork_to = |fork: &Path| -> anyhow::Result<()> {
+            let fork_on = |target_socket: &Path| -> anyhow::Result<cladefs::CellId> {
                 match version {
-                    Some(version) => {
-                        crate::common::control(&cladefsd)?
-                            .call(async |client| {
-                                let cladefs::CellVersion { tenant, cell, version } = version;
-                                client
-                                    .fork_cell(ForkCellRequest {
-                                        to: control_path(fork),
-                                        tenant,
-                                        cell,
-                                        version,
-                                        ..Default::default()
-                                    })
-                                    .await
-                            })
-                            .map(|response| cladefs::CellId {
-                                tenant: response.tenant,
-                                id: response.cell,
-                            })?;
-                    }
-                    None => drop(
-                        crate::common::control(&cladefsd)?
-                            .call(async |client| {
-                                client
-                                    .fork_cell(ForkCellRequest {
-                                        from: control_path(&base),
-                                        to: control_path(fork),
-                                        ..Default::default()
-                                    })
-                                    .await
-                            })
-                            .map(|response| cladefs::CellId {
-                                tenant: response.tenant,
-                                id: response.cell,
-                            })
-                            .context("forking the base")?,
-                    ),
+                    Some(version) => crate::common::control(target_socket)?
+                        .call(async |client| {
+                            let cladefs::CellVersion { tenant, cell, version } = version;
+                            client
+                                .fork_cell(ForkCellRequest {
+                                    tenant,
+                                    cell,
+                                    version,
+                                    ..Default::default()
+                                })
+                                .await
+                        })
+                        .map(|response| cladefs::CellId {
+                            tenant: response.tenant,
+                            id: response.cell,
+                        })
+                        .context("forking the base version"),
+                    None => crate::common::control(target_socket)?
+                        .call(async |client| {
+                            client
+                                .fork_cell(ForkCellRequest {
+                                    tenant: base.tenant,
+                                    cell: base.id,
+                                    ..Default::default()
+                                })
+                                .await
+                        })
+                        .map(|response| cladefs::CellId {
+                            tenant: response.tenant,
+                            id: response.cell,
+                        })
+                        .context("forking the base"),
                 }
-                Ok(())
             };
             if backend == Backend::FxfsGuestDaxForkPredicted {
                 // A fork, before the iterations, whose boot is the version's evidence: its output
                 // is not the case's.
-                let fork = cells_dir.join("fork-recorded");
-                fork_to(&fork)?;
                 let sockets = tempfile::Builder::new().prefix("cladefs-fork").tempdir()?;
                 let (socket, mut daemon) = daemon(test_setup, sockets.path(), iterations)?;
+                let fork = fork_on(&socket)?;
+                let fork_spec = fork.to_string();
                 let output = std::fs::File::create(test_setup.tmp_dir.join("recorded-fork.txt"))?;
-                role(test_setup, "fork", &fork, &socket, Some(output))?;
+                role(test_setup, "fork", Path::new(&fork_spec), &socket, Some(output))?;
                 // Written as the daemon closes the fork's cell, once it has seen its VM go.
-                drop(opened(&socket, &fork)?);
+                drop(opened(&socket, fork)?);
                 daemon.kill()?;
                 daemon.wait()?;
             }
             for i in 0..iterations {
-                let fork = cells_dir.join(format!("fork-{i}"));
-                fork_to(&fork)?;
                 // A socket's path is short: the daemon's directory is a temporary one of its own.
                 let sockets = tempfile::Builder::new().prefix("cladefs-fork").tempdir()?;
                 let (socket, daemon) = match backend {
@@ -403,13 +393,34 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
                     }
                     _ => (cladefsd.clone(), None),
                 };
+                let fork = if matches!(backend, Backend::FxfsGuestDaxForkCold) {
+                    // Cold daemon has its own disk pool; make a version on base's daemon if needed
+                    // or fork the base cell from the bucket via version.
+                    let ver = opened(&cladefsd, base)?.make_version()?;
+                    crate::common::control(&socket)?
+                        .call(async |client| {
+                            client
+                                .fork_cell(ForkCellRequest {
+                                    tenant: ver.tenant,
+                                    cell: ver.cell,
+                                    version: ver.version,
+                                    ..Default::default()
+                                })
+                                .await
+                        })
+                        .map(|r| cladefs::CellId { tenant: r.tenant, id: r.cell })
+                        .context("forking the base on cold daemon")?
+                } else {
+                    fork_on(&socket)?
+                };
+                let fork_spec = fork.to_string();
                 let daemon_stats = crate::common::control(&socket)?;
                 let counters = || {
                     daemon_stats
                         .call(async |client| client.get_counters(GetCountersRequest {}).await)
                 };
                 let before = counters()?;
-                role(test_setup, "fork", &fork, &socket, None)?;
+                role(test_setup, "fork", Path::new(&fork_spec), &socket, None)?;
                 let after = counters()?;
                 macro_rules! report {
                     ($($field:ident),+ $(,)?) => {
@@ -501,12 +512,12 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
             Ok(())
         }
 
-        /// The cell at `cell_dir`, which the daemon at `cladefsd` serves: once the daemon has seen
+        /// `cell`, which the daemon at `cladefsd` serves: once the daemon has seen
         /// the VM that had it open go.
-        fn opened(cladefsd: &Path, cell_dir: &Path) -> anyhow::Result<cladefs::CellClient> {
+        fn opened(cladefsd: &Path, cell: cladefs::CellId) -> anyhow::Result<cladefs::CellClient> {
             let deadline = Instant::now() + Duration::from_secs(30);
             loop {
-                match cladefs::CellClient::connect(cladefsd, cell_dir, IMAGE_SIZE) {
+                match cladefs::CellClient::connect_cell(cladefsd, cell) {
                     Ok(client) => return Ok(client),
                     Err(err)
                         if Instant::now() < deadline
@@ -687,13 +698,12 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
             let device = match self.backend {
                 Backend::FxfsGuest | Backend::FxfsGuestDax | Backend::FxfsGuestDaxUnsafe => {
                     // A new cell, which the guest's Fxfs formats as it mounts it.
-                    let cell_dir = test_setup.tmp_dir.join("extents");
                     let window = if self.backend == Backend::FxfsGuest {
                         0
                     } else {
                         crate::common::dax_window(crate::common::Window::Large)?
                     };
-                    vm.cell("bench", &cell_dir, IMAGE_SIZE, window)?;
+                    vm.new_cell("bench", IMAGE_SIZE, window)?;
                     if self.backend == Backend::FxfsGuestDaxUnsafe {
                         vm.cell_unsafe();
                     }

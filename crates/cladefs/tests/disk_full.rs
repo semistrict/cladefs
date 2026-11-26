@@ -19,7 +19,7 @@ mod common;
 
 use cladefs::cladefsd::disk::{DiskConfig, start};
 use cladefs::cladefsd::governor::{DiskHeadroom, INTERVAL};
-use cladefs::{CellClient, Errno, ExtentId, VolatileSlice};
+use cladefs::{CellClient, CellId, Errno, ExtentId, VolatileSlice};
 use common::daemon::Daemon;
 use std::os::fd::AsRawFd as _;
 use std::os::unix::fs::MetadataExt as _;
@@ -125,16 +125,14 @@ fn a_full_disk_refuses_guests_alone_and_the_cache_gives_way_first() {
     }
     // Its governor first, leaving this test's headroom: the daemon's own start changes nothing.
     start(DiskConfig { headroom: Some(DiskHeadroom::Bytes(HEADROOM)), fixed: None }).unwrap();
-    let mut daemon = Daemon::new(dir.path());
-    let tenant = root.join("tenant");
-    std::fs::create_dir(&tenant).unwrap();
-    let socket = daemon.grant(1, &tenant, None).unwrap();
+    let mut daemon = Daemon::with_disks(dir.path(), &[root.clone()]);
+    let socket = daemon.grant(1, None).unwrap();
     let dev = std::fs::metadata(&root).unwrap().dev() as libc::dev_t;
     let device = format!("{{device=\"{}:{}\"}}", libc::major(dev), libc::minor(dev));
 
     // What the bucket has of a base, 600 MiB, adopted by the part cache as it uploads.
-    let base = tenant.join("base");
-    let vm = CellClient::connect(&socket, &base, CAPACITY).unwrap();
+    let vm = CellClient::connect_new(&socket, 1, CAPACITY).unwrap();
+    let base = CellId { tenant: 1, id: vm.cell() };
     // Committed as a guest's filesystem commits, every 16 MiB: what is written and not committed
     // is admitted with what its commit may copy of it, six times more (doc-22's reserve).
     for sequence in 1..=600 {
@@ -145,7 +143,7 @@ fn a_full_disk_refuses_guests_alone_and_the_cache_gives_way_first() {
     }
     vm.commit(None).unwrap();
     drop(vm);
-    daemon.sync(&base).unwrap();
+    daemon.sync(base).unwrap();
     until("the cache holding the base", || metric("cladefsd_part_cache_bytes") >= 500 * MIB);
     // On a disk of its own, nothing but the daemon's: what it holds of others, its metadata.
     let other = metric(&format!("cladefsd_host_disk_other_bytes{device}"));
@@ -177,8 +175,7 @@ fn a_full_disk_refuses_guests_alone_and_the_cache_gives_way_first() {
     // The bucket out of reach: a VM writes until refused, committing as it goes, as a guest's
     // fsyncs do, ordered: a commit waiting for its upload would wait for the bucket.
     std::fs::write(&faults, "failing=unavailable").unwrap();
-    let cell_dir = tenant.join("vm");
-    let vm = CellClient::connect(&socket, &cell_dir, CAPACITY).unwrap();
+    let vm = CellClient::connect_new(&socket, 1, CAPACITY).unwrap();
     let mut written = 0;
     let (refused, cache) = loop {
         match write(&vm, 1 + written, 1000 + written) {

@@ -48,18 +48,18 @@ mod host {
             let dir = &test_setup.tmp_dir;
             let cladefsd: PathBuf =
                 std::env::var_os("CLADEFSD").context("CLADEFSD not set")?.into();
+            let disk_root = crate::common::shared_disk_root()?;
             let control = control(&cladefsd)?;
             let root = setup_rootfs(test_setup)?;
             let vms = Vms::new(test_setup, root, cladefsd.clone(), CAPACITY, 0);
-            let (publisher, consumer) = (dir.join("publisher"), dir.join("consumer"));
-            format_with(&publisher, CAPACITY, &["repo", "upstream"])?;
+            let publisher = format_with(&cladefsd, &disk_root, CAPACITY, &["repo", "upstream"])?;
+            let consumer = crate::common::create_cell(&cladefsd, CAPACITY)?;
 
-            let (vm, stream) = vms.run("publisher", &publisher, true)?;
+            let (vm, stream) = vms.run("publisher", publisher, true)?;
             let mut stream = stream.context("the publisher's connection")?;
             let mut generations = Vec::new();
             for name in ["repo", "repo-g1", "upstream"] {
-                let path = dir.join(format!("generation-{name}"));
-                generations.push((name, next_generation(&mut stream, &control, &publisher, path)?));
+                generations.push((name, next_generation(&mut stream, &control, publisher)?));
             }
             vm.wait()?;
 
@@ -68,20 +68,20 @@ mod host {
             let manager = Manager::new(cladefsd, names.collect(), newest);
 
             // The consumer, until it is frozen, snapshotted, and restored.
-            manager.serve("consumer", &consumer)?;
-            let (vm, stream) = vms.run("consumer", &consumer, true)?;
+            manager.serve("consumer", consumer)?;
+            let (vm, stream) = vms.run("consumer", consumer, true)?;
             let mut said = String::new();
             BufReader::new(stream.context("the consumer's connection")?).read_line(&mut said)?;
             anyhow::ensure!(said == "frozen\n", "the consumer said {said:?}");
             let (snapshot, memory) = (dir.join("snapshot"), dir.join("memory"));
             vm.snapshot(&snapshot, &memory)?;
-            manager.serve("restored", &consumer)?;
+            manager.serve("restored", consumer)?;
             let (vm, mut stream) = vms.restore("restored", &snapshot, &memory)?;
             stream.write_all(b"restored\n")?;
             vm.wait()?;
 
-            manager.serve("rebooted", &consumer)?;
-            vms.run("rebooted", &consumer, false)?.0.wait()?;
+            manager.serve("rebooted", consumer)?;
+            vms.run("rebooted", consumer, false)?.0.wait()?;
 
             let asked = manager.asked();
             let expected = [

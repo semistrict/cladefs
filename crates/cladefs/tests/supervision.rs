@@ -12,7 +12,6 @@
 #![cfg(target_os = "linux")]
 
 use cladefs::cladefsd::control::proto::GrantRequest;
-use cladefs::testing::control_path;
 use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
 use std::path::Path;
 use std::process::{Command, ExitStatus};
@@ -54,13 +53,16 @@ fn free_address() -> String {
 fn panicking(dir: &Path, service: &Service) -> (ExitStatus, String) {
     let socket = dir.join("cladefsd.sock");
     let bucket = dir.join("bucket");
+    let disk = dir.join("disk0");
     std::fs::create_dir(&bucket).unwrap();
+    std::fs::create_dir(&disk).unwrap();
     let log = dir.join("log");
     let mut command = Command::new(env!("CARGO_BIN_EXE_cladefsd"));
     command
         .arg(&socket)
         .env("CLADEFSD_BUCKET", format!("file://{}", bucket.display()))
         .env("CLADEFSD_TOKEN", "1")
+        .env("CLADEFSD_ROOTS", &disk)
         .env("FAILPOINTS", format!("{}=panic", service.failpoint))
         .envs(service.env.iter().map(|(name, value)| (name, value)))
         .stderr(std::fs::File::create(&log).unwrap());
@@ -118,11 +120,7 @@ fn a_panic_on_any_service_aborts_the_daemon_naming_it() {
         ("cladefsd stats", vec![], |dir: &Path| {
             // Its first cell has the daemon make its bucket, whose requests the stats watch: the
             // daemon aborting meanwhile, the opening fails, which is what is looked for.
-            drop(cladefs::CellClient::connect(
-                dir.join("cladefsd.sock"),
-                dir.join("cell"),
-                1 << 28,
-            ));
+            drop(cladefs::CellClient::connect_new(dir.join("cladefsd.sock"), 0, 1 << 28));
         }),
     ];
     let mut services: Vec<Service> =
@@ -136,29 +134,40 @@ fn a_panic_on_any_service_aborts_the_daemon_naming_it() {
         ],
         nothing,
     ));
+    // board 9414: the replica directory's sweep and the reaping of migrations abandoned, on the
+    // bucket runtime, which serving peers starts; and the VM processes' watchdog, which the first
+    // VM process to connect starts.
+    let replicated = dir("replicas env");
+    let serving_peers = |replicas: bool| {
+        let mut env = vec![
+            ("CLADEFSD_PEER_ADDRESS", free_address()),
+            ("CLADEFSD_PART_CACHE", replicated.join("cache").display().to_string()),
+        ];
+        if replicas {
+            env.push(("CLADEFSD_REPLICAS", replicated.join("replicas").display().to_string()));
+        }
+        env
+    };
+    services.push(Service::starting("cladefsd sweep", serving_peers(true), nothing));
+    services.push(Service::starting("cladefsd reap", serving_peers(false), nothing));
+    services.push(Service::starting("cladefsd watchdog", vec![], |dir: &Path| {
+        // Its first VM process starts it: the daemon aborting meanwhile, the opening fails, which
+        // is what is looked for.
+        drop(cladefs::CellClient::connect(dir.join("cladefsd.sock"), dir.join("cell"), 1 << 28));
+    }));
     let controlled = dir("control env");
     services.push(Service::starting("cladefsd ctl", vec![control(&controlled)], nothing));
     services.push(Service::starting(
         "cladefsd tenant",
         vec![control(&controlled)],
         |dir: &Path| {
-            let tenant = dir.join("acme");
-            std::fs::create_dir(&tenant).unwrap();
             let client = cladefs::testing::Control::connect(dir.join("control.sock"));
             // The daemon aborting as the tenant's thread starts, the grant fails, which is what is
             // looked for.
             drop(client.map(|client| {
                 client
                     .call(async |client| {
-                        client
-                            .grant(GrantRequest {
-                                tenant: 1,
-                                dir: control_path(&tenant),
-                                dirs: Vec::new(),
-                                uid: None,
-                                gid: None,
-                            })
-                            .await
+                        client.grant(GrantRequest { tenant: 1, uid: None, gid: None }).await
                     })
                     .map(|response| std::path::PathBuf::from(response.socket))
             }));

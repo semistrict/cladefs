@@ -39,12 +39,167 @@ use bucket_cell::trace;
 use futures::future::BoxFuture;
 use local_cell::shared::SharedLock;
 use local_cell::{HostDir, LocalCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::Range;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use storage_device::ExtentId;
 use storage_device::NoExtent;
+
+/// Ordering key for a resident cached extent in [`EvictionIndex`] (board 12315): unmapped extents
+/// before mapped (`CachedExtent::eviction_order`), then least-recently-used (`CachedExtent::used`),
+/// tie-broken by each `CachedExtent`'s unique `eviction_id`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct EvictionKey {
+    mapped: bool,
+    used: u64,
+    id: u64,
+}
+
+struct EvictionEntry {
+    key: EvictionKey,
+    arena: ArenaId,
+    /// Held weakly so [`ExtentCache::entries`] and [`let_go_least_used`] still observe
+    /// `Arc::strong_count == 1` for idle cached extents.
+    extent: Weak<CachedExtent>,
+}
+
+/// Ordered index of resident (`present > 0`) cached extents for O(log N) relief eviction
+/// (board 12315). Protected by a pure leaf lock (`ExtentCache::eviction`) that never acquires any
+/// other lock and never drops an `Arc<CachedExtent>` while held.
+///
+/// `CachedExtent::used()` stays lock-free (two relaxed atomics); `pop_next` lazily re-keys an
+/// extent if its `used` timestamp advanced since it was indexed (bounded to at most one re-key per
+/// extent per pop via the entry `cutoff` clock).
+#[derive(Default)]
+struct EvictionIndex {
+    global: BTreeSet<EvictionKey>,
+    by_arena: HashMap<ArenaId, BTreeSet<EvictionKey>>,
+    entries: HashMap<u64, EvictionEntry>,
+}
+
+impl EvictionIndex {
+    fn upsert(
+        &mut self,
+        id: u64,
+        arena: ArenaId,
+        mapped: bool,
+        used: u64,
+        extent: Weak<CachedExtent>,
+    ) {
+        let key = EvictionKey { mapped, used, id };
+        if let Some(old) = self.entries.get_mut(&id) {
+            if old.key == key && old.arena == arena {
+                old.extent = extent;
+                return;
+            }
+            self.global.remove(&old.key);
+            if let Some(set) = self.by_arena.get_mut(&old.arena) {
+                set.remove(&old.key);
+                if set.is_empty() {
+                    self.by_arena.remove(&old.arena);
+                }
+            }
+            old.key = key;
+            old.arena = arena;
+            old.extent = extent;
+        } else {
+            self.entries.insert(id, EvictionEntry { key, arena, extent });
+        }
+        self.global.insert(key);
+        self.by_arena.entry(arena).or_default().insert(key);
+    }
+
+    fn set_mapped(&mut self, id: u64, mapped: bool, used: u64) {
+        let Some(entry) = self.entries.get_mut(&id) else { return };
+        let key = EvictionKey { mapped, used, id };
+        if entry.key == key {
+            return;
+        }
+        self.global.remove(&entry.key);
+        if let Some(set) = self.by_arena.get_mut(&entry.arena) {
+            set.remove(&entry.key);
+            set.insert(key);
+        }
+        entry.key = key;
+        self.global.insert(key);
+    }
+
+    fn remove(&mut self, id: u64) {
+        let Some(entry) = self.entries.remove(&id) else { return };
+        self.global.remove(&entry.key);
+        if let Some(set) = self.by_arena.get_mut(&entry.arena) {
+            set.remove(&entry.key);
+            if set.is_empty() {
+                self.by_arena.remove(&entry.arena);
+            }
+        }
+    }
+
+    /// Pops the next eviction candidate in `(mapped, used)` order for `arena` (or any arena when
+    /// `None`). Any upgraded `Arc<CachedExtent>` that is discarded (already evicted or lazily
+    /// re-keyed) is pushed to `deferred_drops` so the caller drops it *after* releasing the
+    /// index lock, preserving leaf-lock ordering and preventing `CachedExtent::drop` recursion.
+    fn pop_next(
+        &mut self,
+        arena: Option<ArenaId>,
+        idle_only: bool,
+        cutoff: u64,
+        deferred_drops: &mut Vec<Arc<CachedExtent>>,
+    ) -> Option<Arc<CachedExtent>> {
+        loop {
+            let key = match arena {
+                Some(arena) => *self.by_arena.get(&arena)?.first()?,
+                None => *self.global.first()?,
+            };
+            if idle_only && key.mapped {
+                return None;
+            }
+            let Some(entry) = self.entries.get(&key.id) else {
+                self.global.remove(&key);
+                if let Some(arena) = arena
+                    && let Some(set) = self.by_arena.get_mut(&arena)
+                {
+                    set.remove(&key);
+                    if set.is_empty() {
+                        self.by_arena.remove(&arena);
+                    }
+                }
+                continue;
+            };
+            let entry_arena = entry.arena;
+            let Some(extent) = entry.extent.upgrade() else {
+                self.remove(key.id);
+                continue;
+            };
+            if extent.present.load(Ordering::Relaxed) == 0 {
+                self.remove(key.id);
+                deferred_drops.push(extent);
+                continue;
+            }
+            let actual_mapped = extent.mapped.load(Ordering::Relaxed);
+            let actual_used = extent.used.load(Ordering::Relaxed);
+            let needs_rekey = (!key.mapped && actual_mapped)
+                || (actual_mapped == key.mapped && actual_used > key.used && key.used < cutoff);
+            if needs_rekey {
+                let new_key = EvictionKey { mapped: actual_mapped, used: actual_used, id: key.id };
+                self.global.remove(&key);
+                if let Some(set) = self.by_arena.get_mut(&entry_arena) {
+                    set.remove(&key);
+                    set.insert(new_key);
+                }
+                self.global.insert(new_key);
+                if let Some(entry) = self.entries.get_mut(&key.id) {
+                    entry.key = new_key;
+                }
+                deferred_drops.push(extent);
+                continue;
+            }
+            self.remove(key.id);
+            return Some(extent);
+        }
+    }
+}
 
 /// Explicit per-host cache of sealed extents (see the module docs, board 10962): its pager's
 /// threads, which read their pages from the cells, and the extents, by arena and ID.
@@ -61,6 +216,11 @@ pub(crate) struct ExtentCache {
     /// By the arena their pages are of (TASK-43), and their IDs. Every tenant's, which a panic
     /// holding aborts the daemon (`local_cell::shared`, TASK-149.24); as do the others here.
     extents: SharedLock<Mutex<HashMap<(ArenaId, ExtentId), Cached>>>,
+    /// Ordered index of resident extents (`present > 0`) for O(log N) relief eviction without
+    /// scanning or locking every cached extent (board 12315). Pure leaf lock.
+    eviction: SharedLock<Mutex<EvictionIndex>>,
+    /// Monotonic unique ID per `CachedExtent` instance in [`Self::eviction`].
+    next_eviction_id: AtomicU64,
     /// The arenas but the default that extents were cached of, to look for an extent's copy in,
     /// taken after `extents` (TASK-234).
     arenas: SharedLock<Mutex<HashSet<ArenaId>>>,
@@ -114,6 +274,8 @@ impl ExtentCache {
             slabs,
             pager: OnceLock::new(),
             extents: SharedLock::new("extent cache", Mutex::default()),
+            eviction: SharedLock::new("extent cache eviction", Mutex::default()),
+            next_eviction_id: AtomicU64::new(1),
             arenas: SharedLock::new("extent cache arenas", Mutex::default()),
             clock: AtomicU64::new(0),
             clock_ms: AtomicU64::new(1),
@@ -397,40 +559,56 @@ impl ExtentCache {
         evicted
     }
 
+    fn eviction_upsert(
+        &self,
+        id: u64,
+        arena: ArenaId,
+        mapped: bool,
+        used: u64,
+        extent: Weak<CachedExtent>,
+    ) {
+        self.eviction.with(Mutex::lock).upsert(id, arena, mapped, used, extent);
+    }
+
+    fn eviction_set_mapped(&self, id: u64, mapped: bool, used: u64) {
+        self.eviction.with(Mutex::lock).set_mapped(id, mapped, used);
+    }
+
+    fn eviction_remove(&self, id: u64) {
+        self.eviction.with(Mutex::lock).remove(id);
+    }
+
+    fn pop_eviction_candidate(
+        &self,
+        arena: Option<ArenaId>,
+        idle_only: bool,
+    ) -> Option<Arc<CachedExtent>> {
+        let cutoff = self.clock.load(Ordering::Relaxed);
+        let mut deferred_drops = Vec::new();
+        let candidate = {
+            let mut index = self.eviction.with(Mutex::lock);
+            index.pop_next(arena, idle_only, cutoff, &mut deferred_drops)
+        };
+        drop(deferred_drops);
+        candidate
+    }
+
     /// Evicts as [`ExtentCache::evict_with_scope`] says: returns the bytes it evicted, and of how
-    /// many extents.
+    /// many extents. Pops resident candidates in O(log N) from [`Self::eviction`] instead of
+    /// cloning, locking, and sorting every cached extent (board 12315).
     fn evict_in_order(
         &self,
         arena: Option<ArenaId>,
         scope: EvictScope,
         mut enough: impl FnMut(u64) -> bool,
     ) -> (u64, u64) {
-        let candidates: Vec<Arc<CachedExtent>> = {
-            let extents = self.extents.with(Mutex::lock);
-            (extents.iter())
-                .filter(|((of, _), _)| arena.is_none_or(|arena| *of == arena))
-                .map(|(_, cached)| cached.extent.clone())
-                .collect()
-        };
-        // Past the cache's lock, as each takes its own; those evicted already, which stay cached
-        // until freed, left out, each pass having gone through them all (TASK-92.33). Zero
-        // syscalls on this relief hot path (pure in-memory LRU ordering).
-        let mut candidates: Vec<_> = (candidates.into_iter())
-            .filter_map(|extent| {
-                let order = extent.eviction_order()?;
-                if scope == EvictScope::IdleOnly && order.0 {
-                    return None;
-                }
-                Some((order, extent))
-            })
-            .collect();
-        candidates.sort_unstable_by_key(|(order, _)| *order);
+        let idle_only = scope == EvictScope::IdleOnly;
         let by_governor = scope == EvictScope::GovernorMapped;
         let (mut evicted, mut extents) = (0, 0);
-        for (_, extent) in candidates {
-            if enough(evicted) {
+        while !enough(evicted) {
+            let Some(extent) = self.pop_eviction_candidate(arena, idle_only) else {
                 break;
-            }
+            };
             let bytes = extent.evict_with_cause(by_governor);
             evicted += bytes;
             extents += u64::from(bytes > 0);
@@ -1285,6 +1463,7 @@ fn window_identity(window: &Window) -> usize {
 pub(crate) struct CachedExtent {
     cache: Weak<ExtentCache>,
     slabs: Arc<slabs::HostSlabs>,
+    eviction_id: u64,
     arena: ArenaId,
     extent: ExtentId,
     contents: Box<dyn Contents>,
@@ -1292,11 +1471,22 @@ pub(crate) struct CachedExtent {
     parts: SharedLock<Mutex<Parts>>,
     /// How many of its parts are in memory, which relief asks of every extent cached (TASK-92.33).
     present: AtomicUsize,
+    /// Whether any live window currently maps this extent, updated under `parts` so
+    /// [`EvictionIndex::pop_next`] can verify mapped status without taking `parts` (board 12315).
+    mapped: AtomicBool,
     /// When it was last asked for or faulted on, by `ExtentCache::clock`: those longest ago are
     /// evicted first (TASK-50.3, TASK-92.32).
     used: AtomicU64,
     /// Notified as parts come in, fail to, or go.
     changed: event_listener::Event,
+}
+
+impl Drop for CachedExtent {
+    fn drop(&mut self) {
+        if let Some(cache) = self.cache.upgrade() {
+            cache.eviction_remove(self.eviction_id);
+        }
+    }
 }
 
 impl CachedExtent {
@@ -1320,15 +1510,18 @@ impl CachedExtent {
             next: 0,
             revoked: false,
         };
+        let eviction_id = cache.next_eviction_id.fetch_add(1, Ordering::Relaxed);
         Self {
             cache: Arc::downgrade(cache),
             slabs: cache.slabs.clone(),
+            eviction_id,
             arena,
             extent,
             contents,
             len,
             parts: SharedLock::new("cached extent parts", Mutex::new(parts)),
             present: AtomicUsize::new(0),
+            mapped: AtomicBool::new(false),
             used: AtomicU64::new(0),
             changed: event_listener::Event::new(),
         }
@@ -1355,6 +1548,7 @@ impl CachedExtent {
     /// When relief evicts it, those first that sort first: whether a window maps it, as what
     /// guests keep mapped they may use without a sign, and an eviction takes from all of them,
     /// then when it was last used. `None` with nothing in memory to evict.
+    #[cfg(test)]
     pub(crate) fn eviction_order(&self) -> Option<(bool, u64)> {
         if self.present.load(Ordering::Relaxed) == 0 {
             return None;
@@ -1677,6 +1871,21 @@ impl CachedExtent {
                 evictions.push(Eviction { part, slab, token });
             }
             parts.windows.retain(|_, window| window.strong_count() > 0);
+            let mapped = !parts.windows.is_empty();
+            let was_mapped = self.mapped.swap(mapped, Ordering::Relaxed);
+            if !evictions.is_empty() && self.present.load(Ordering::Relaxed) == 0 {
+                if let Some(cache) = self.cache.upgrade() {
+                    cache.eviction_remove(self.eviction_id);
+                }
+            } else if was_mapped != mapped && self.present.load(Ordering::Relaxed) > 0 {
+                if let Some(cache) = self.cache.upgrade() {
+                    cache.eviction_set_mapped(
+                        self.eviction_id,
+                        mapped,
+                        self.used.load(Ordering::Relaxed),
+                    );
+                }
+            }
             (evictions, parts.windows.values().filter_map(Weak::upgrade).collect::<Vec<_>>())
         };
         if evictions.is_empty() {
@@ -1751,9 +1960,23 @@ impl CachedExtent {
             match read {
                 Ok(slab) => {
                     *slot = PartSlot::Present(slab);
-                    self.present.fetch_add(1, Ordering::Relaxed);
-                    if let Some(cache) = self.cache.upgrade() {
+                    let upgraded = self.cache.upgrade();
+                    if let Some(cache) = &upgraded {
                         cache.idle_change_seq.fetch_add(1, Ordering::Relaxed);
+                    }
+                    if self.present.fetch_add(1, Ordering::Relaxed) == 0 {
+                        table.windows.retain(|_, window| window.strong_count() > 0);
+                        let mapped = !table.windows.is_empty();
+                        self.mapped.store(mapped, Ordering::Relaxed);
+                        if let Some(cache) = upgraded {
+                            cache.eviction_upsert(
+                                self.eviction_id,
+                                self.arena,
+                                mapped,
+                                self.used.load(Ordering::Relaxed),
+                                Arc::downgrade(&self),
+                            );
+                        }
                     }
                 }
                 Err(error) => {
@@ -1926,12 +2149,29 @@ impl Source for CachedExtent {
     fn mapped(&self, window: &Arc<Window>) {
         let mut table = self.parts.with(Mutex::lock);
         table.windows.insert(window_identity(window), Arc::downgrade(window));
+        if !self.mapped.swap(true, Ordering::Relaxed)
+            && self.present.load(Ordering::Relaxed) > 0
+            && let Some(cache) = self.cache.upgrade()
+        {
+            cache.eviction_set_mapped(self.eviction_id, true, self.used.load(Ordering::Relaxed));
+        }
     }
 
     fn unmapped(&self, window: &Window) {
-        self.parts.with(Mutex::lock).windows.remove(&window_identity(window));
+        let mut table = self.parts.with(Mutex::lock);
+        table.windows.remove(&window_identity(window));
+        table.windows.retain(|_, window| window.strong_count() > 0);
+        let mapped = !table.windows.is_empty();
+        let flipped = self.mapped.swap(mapped, Ordering::Relaxed) != mapped;
         if let Some(cache) = self.cache.upgrade() {
             cache.idle_change_seq.fetch_add(1, Ordering::Relaxed);
+            if flipped && self.present.load(Ordering::Relaxed) > 0 {
+                cache.eviction_set_mapped(
+                    self.eviction_id,
+                    mapped,
+                    self.used.load(Ordering::Relaxed),
+                );
+            }
         }
     }
 
@@ -2201,9 +2441,9 @@ mod full_host {
     }
 
     /// EvictScope::IdleOnly evicts unmapped extents while preserving mapped extents untouched;
-    /// EvictScope::All evicts mapped extents, and faulting an evicted part back in within
-    /// `REFAULT_WINDOW_TICKS` increments `refaults()`, while faulting after the window expires
-    /// does not.
+    /// EvictScope::All evicts mapped extents without triggering host-wide thrashing;
+    /// EvictScope::GovernorMapped evicts mapped extents and counts refaults within
+    /// `REFAULT_WINDOW_MS`.
     #[test]
     fn idle_only_eviction_preserves_mapped_extents_and_tracks_refaults() {
         struct Fill(u8);
@@ -2294,9 +2534,186 @@ mod full_host {
             );
             cache.advance_ms(REFAULT_WINDOW_MS + 1);
             mapped.clone().bring_in(0).await.unwrap();
-            assert_eq!(cache.refaults(), 1, "re-fault past REFAULT_WINDOW_TICKS must not count");
+            assert_eq!(cache.refaults(), 1, "re-fault past REFAULT_WINDOW_MS must not count");
         });
         drop((dax, window, source, mapped, idle));
+    }
+
+    /// Board 12315: `EvictionIndex` preserves exact `(mapped, used)` eviction order across
+    /// multiple arenas, lock-free `used()` re-touches (lazy re-keying), partial evictions, and
+    /// `Window::drop` demoting extents from mapped to unmapped.
+    #[test]
+    fn eviction_index_preserves_order_across_arenas_reuses_and_dropped_windows() {
+        struct Fill(u8);
+        impl Contents for Fill {
+            fn read<'a>(
+                &'a self,
+                _offset: u64,
+                buf: &'a mut [u8],
+            ) -> BoxFuture<'a, std::result::Result<(), anyhow::Error>> {
+                buf.fill(self.0);
+                Box::pin(std::future::ready(Ok(())))
+            }
+        }
+
+        let ps = page_size();
+        let host = crate::Host::new();
+        let cache = host.cache();
+        let arena_a = host.slabs().create_arena().unwrap();
+        let arena_b = host.slabs().create_arena().unwrap();
+
+        let make = |arena: ArenaId, seq: u64| {
+            let id = ExtentId { cell: 12315, sequence: seq };
+            let extent =
+                Arc::new(CachedExtent::new_on(cache, arena, id, Box::new(Fill(seq as u8)), ps));
+            cache
+                .extents
+                .with(Mutex::lock)
+                .insert((arena, id), Cached { extent: extent.clone(), holders: Arc::default() });
+            extent
+        };
+
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            // Create 6 extents in arena_a and 4 in arena_b, bringing them in order.
+            let mut a: Vec<Arc<CachedExtent>> = Vec::new();
+            for seq in 1..=6 {
+                let ext = make(arena_a, seq);
+                ext.clone().bring_in(0).await.unwrap();
+                a.push(ext);
+            }
+            let mut b: Vec<Arc<CachedExtent>> = Vec::new();
+            for seq in 101..=104 {
+                let ext = make(arena_b, seq);
+                ext.clone().bring_in(0).await.unwrap();
+                b.push(ext);
+            }
+
+            // Map a[0], a[1], b[0] in window_keep, and a[2] in window_drop.
+            let (mut dax_keep, win_keep) =
+                crate::dax::Dax::with_stage_and_unit_on(&host, arena_a, 4 * ps, ps, None, false)
+                    .unwrap();
+            let (mut dax_drop, win_drop) =
+                crate::dax::Dax::with_stage_and_unit_on(&host, arena_a, 2 * ps, ps, None, false)
+                    .unwrap();
+            let s_a0: Arc<dyn Source> = a[0].clone();
+            let s_a1: Arc<dyn Source> = a[1].clone();
+            let s_a2: Arc<dyn Source> = a[2].clone();
+            let s_b0: Arc<dyn Source> = b[0].clone();
+            dax_keep.map(0, &s_a0, 0, ps);
+            dax_keep.map(ps, &s_a1, 0, ps);
+            dax_keep.map(2 * ps, &s_b0, 0, ps);
+            dax_drop.map(0, &s_a2, 0, ps);
+
+            // Drop `window_drop` without explicit unmap: `Window::drop` must demote `a[2]` back to
+            // unmapped so it sorts ahead of mapped extents.
+            drop((dax_drop, win_drop));
+            assert_eq!(a[2].eviction_order().map(|(m, _)| m), Some(false));
+
+            // Re-touch oldest unmapped `a[3]` and `a[2]` via lock-free `used()` so `a[4]` becomes
+            // the oldest unmapped in arena_a, and re-touch `a[0]` so `a[1]` is older mapped.
+            a[3].used();
+            a[2].used();
+            a[0].used();
+
+            // Verify arena-scoped eviction on arena_a follows exact `eviction_order()` oracle:
+            // unmapped: a[4], a[5], a[3], a[2]; then mapped: a[1], a[0].
+            let expected_a = [4usize, 5, 3, 2, 1, 0];
+            for idx in expected_a {
+                let oracle_min = a
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, e)| Some((e.eviction_order()?, i)))
+                    .min_by_key(|(order, _)| *order)
+                    .map(|(_, i)| i);
+                assert_eq!(oracle_min, Some(idx));
+                let evicted = cache.evict_least_used(Some(arena_a), |bytes| bytes >= ps);
+                assert_eq!(evicted, ps);
+                assert_eq!(a[idx].held(), 0, "expected a[{idx}] to be evicted next");
+                // arena_b must be untouched by arena_a-scoped eviction.
+                assert!(b.iter().all(|e| e.held() > 0), "arena_b evicted during arena_a relief");
+            }
+            assert_eq!(cache.evict_least_used(Some(arena_a), |_| false), 0);
+
+            // Re-bring a[0] (mapped) and touch b[1] (unmapped) so global eviction evicts
+            // unmapped b[2], b[3], b[1] first, then mapped b[0], a[0].
+            a[0].clone().bring_in(0).await.unwrap();
+            b[1].used();
+            let all: Vec<(&str, &Arc<CachedExtent>)> =
+                vec![("b2", &b[2]), ("b3", &b[3]), ("b1", &b[1]), ("b0", &b[0]), ("a0", &a[0])];
+            for (name, ext) in all {
+                let evicted = cache.evict_least_used(None, |bytes| bytes >= ps);
+                assert_eq!(evicted, ps);
+                assert_eq!(ext.held(), 0, "expected {name} to be evicted next globally");
+            }
+            assert_eq!(cache.evict_least_used(None, |_| false), 0);
+            drop((dax_keep, win_keep));
+        });
+    }
+
+    /// Board 12315: microbenchmark of `ExtentCache::evict_least_used` scaling at high extent
+    /// counts (run on Linux via `hotbed run --bench -- cargo test --release -p cladefs --lib
+    /// cache::full_host::bench_evict_least_used_scaling -- --ignored --nocapture`).
+    #[test]
+    #[ignore = "benchmark run explicitly via hotbed run --bench"]
+    fn bench_evict_least_used_scaling() {
+        struct Zero;
+        impl Contents for Zero {
+            fn read<'a>(
+                &'a self,
+                _offset: u64,
+                buf: &'a mut [u8],
+            ) -> BoxFuture<'a, std::result::Result<(), anyhow::Error>> {
+                buf.fill(0);
+                Box::pin(std::future::ready(Ok(())))
+            }
+        }
+
+        let ps = page_size();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        for total_extents in [2_000usize, 10_000, 50_000] {
+            let host = crate::Host::new();
+            let cache = host.cache();
+            let arenas: Vec<_> = (0..8).map(|_| host.slabs().create_arena().unwrap()).collect();
+            let resident_count = (total_extents / 2).min(10_000);
+            let mut extents = Vec::with_capacity(total_extents);
+            for i in 0..total_extents {
+                let arena = arenas[i % arenas.len()];
+                let id = ExtentId { cell: 99, sequence: i as u64 + 1 };
+                let ext = Arc::new(CachedExtent::new_on(cache, arena, id, Box::new(Zero), ps));
+                cache
+                    .extents
+                    .with(Mutex::lock)
+                    .insert((arena, id), Cached { extent: ext.clone(), holders: Arc::default() });
+                extents.push(ext);
+            }
+            runtime.block_on(async {
+                for ext in &extents[..resident_count] {
+                    ext.clone().bring_in(0).await.unwrap();
+                }
+            });
+            // Touch every 5th resident extent to exercise lazy re-keying too.
+            for ext in extents[..resident_count].iter().step_by(5) {
+                ext.used();
+            }
+            let passes = 200u64;
+            let per_pass = 4 * ps;
+            let started = std::time::Instant::now();
+            let mut total_evicted = 0u64;
+            for _ in 0..passes {
+                total_evicted += cache.evict_least_used(None, |bytes| bytes >= per_pass);
+            }
+            let elapsed = started.elapsed();
+            let us_per_pass = elapsed.as_secs_f64() * 1e6 / passes as f64;
+            println!(
+                "total_extents={total_extents} resident={resident_count} passes={passes} \
+                 evicted_bytes={total_evicted} total_ms={:.2} us_per_pass={us_per_pass:.2}",
+                elapsed.as_secs_f64() * 1e3
+            );
+            assert_eq!(total_evicted, passes * per_pass);
+            // Clean up before next iteration.
+            cache.evict_least_used(None, |_| false);
+        }
     }
 }
 
@@ -2431,5 +2848,82 @@ mod shuttle_tests {
             .run(evictions_race_page_ins_and_maps);
         Runner::new(PctScheduler::new(3, runs(100)), config())
             .run(evictions_race_page_ins_and_maps);
+    }
+
+    /// Board 12315: concurrent `ExtentCache::evict_least_used` racing page-ins, window
+    /// map/unmap, and lock-free `used()` touches must never deadlock, never free a slab still
+    /// mapped in the second stage, and never lose a resident extent from `EvictionIndex`.
+    fn evict_least_used_races_page_ins_maps_and_touches() {
+        let part = extent_frame::PART;
+        let stage = Arc::new(Recording::default());
+        *STAGE.lock().unwrap() = Some(stage.clone());
+        let cache = crate::Host::process().cache();
+        let extents: Vec<Arc<CachedExtent>> = (0..3u64)
+            .map(|seq| {
+                let id = ExtentId { cell: 12315, sequence: seq + 1 };
+                Arc::new(CachedExtent::new(ArenaId::DEFAULT, id, Box::new(Numbered), 2 * part))
+            })
+            .collect();
+        let (mut dax, window) = Dax::new(6 * part, Some(stage.clone())).unwrap();
+        for (i, ext) in extents.iter().enumerate() {
+            let source: Arc<dyn Source> = ext.clone();
+            dax.map(i as u64 * 2 * part, &source, 0, 2 * part);
+        }
+        // Fault part 0 of extents 0 and 1 so EvictionIndex is populated before racing.
+        future::block_on(window.fault(0, Access::Read)).unwrap();
+        future::block_on(window.fault(2 * part, Access::Read)).unwrap();
+
+        let evictor = thread::spawn(move || {
+            let cache = crate::Host::process().cache();
+            cache.evict_least_used(Some(ArenaId::DEFAULT), |bytes| bytes >= part);
+            cache.evict_least_used(None, |bytes| bytes >= part);
+        });
+        let faulting = window.clone();
+        let faulter = thread::spawn(move || {
+            // `part` races with `dax.unmap(0, 2 * part)` on `mapper`, so `ENOENT` is valid if
+            // unmap wins first; `3 * part` and `4 * part` remain mapped throughout.
+            match future::block_on(faulting.fault(part, Access::Read)) {
+                Ok(()) | Err(crate::Errno::ENOENT) => {}
+                Err(err) => panic!("unexpected fault error at part: {err}"),
+            }
+            future::block_on(faulting.fault(3 * part, Access::Read)).unwrap();
+            future::block_on(faulting.fault(4 * part, Access::Read)).unwrap();
+        });
+        let touch_exts = extents.clone();
+        let toucher = thread::spawn(move || {
+            for ext in &touch_exts {
+                ext.used();
+                thread::yield_now();
+            }
+        });
+        let ext2: Arc<dyn Source> = extents[2].clone();
+        let mapper = thread::spawn(move || {
+            dax.unmap(0, 2 * part);
+            dax.map(4 * part, &ext2, 0, 2 * part);
+            dax
+        });
+
+        evictor.join().unwrap();
+        faulter.join().unwrap();
+        toucher.join().unwrap();
+        let mut dax = mapper.join().unwrap();
+
+        // Drain everything via `evict_least_used`: no resident part may be lost from EvictionIndex.
+        cache.evict_least_used(None, |_| false);
+        for (i, ext) in extents.iter().enumerate() {
+            assert_eq!(ext.held(), 0, "extent {i} still held pages after full evict_least_used");
+        }
+        dax.unmap(0, 6 * part);
+        drop((dax, window, extents));
+        STAGE.lock().unwrap().take();
+    }
+
+    #[test]
+    fn evict_least_used_races_page_ins_maps_and_touches_in_any_order() {
+        let _quarantine = checking_quarantine();
+        Runner::new(RandomScheduler::new(runs(100)), config())
+            .run(evict_least_used_races_page_ins_maps_and_touches);
+        Runner::new(PctScheduler::new(3, runs(100)), config())
+            .run(evict_least_used_races_page_ins_maps_and_touches);
     }
 }

@@ -69,10 +69,8 @@ mod host {
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
     use anyhow::{Context, bail, ensure};
     use cladefs::cladefsd::control::proto::{
-        CellKind, CreateCellRequest, DeleteCellRequest, ForkCellRequest, StatCellRequest,
-        SyncCellRequest,
+        CellKind, CreateCellRequest, DeleteCellRequest, ForkCellRequest, SyncCellRequest,
     };
-    use cladefs::testing::control_path;
     use serde::{Deserialize, Serialize};
     use std::collections::{BTreeMap, BTreeSet};
     use std::ffi::CString;
@@ -204,14 +202,6 @@ mod host {
                 socket: sockets.join("cladefsd.sock"),
                 gc: gc.into(),
             })
-        }
-
-        fn base(&self) -> PathBuf {
-            self.cell_dirs.join("base")
-        }
-
-        fn slot(&self, slot: usize) -> PathBuf {
-            self.cell_dirs.join(format!("slot-{slot}"))
         }
     }
 
@@ -416,6 +406,7 @@ mod host {
             let env = [
                 ("CLADEFSD_BUCKET", self.paths.bucket.as_ref()),
                 ("CLADEFSD_TOKEN", token.as_ref()),
+                ("CLADEFSD_ROOTS", self.paths.cell_dirs.as_os_str()),
                 ("CLADEFSD_PART_CACHE", self.paths.cache.as_os_str()),
                 ("CLADEFS_BUCKET_LATENCY_MS", latency.as_ref()),
                 ("FAILPOINTS", failpoints.as_ref()),
@@ -456,13 +447,18 @@ mod host {
                 .collect()
         }
 
-        /// Boots a VM named `name` on the cell at `cell_dir`, its guest told `env`.
-        fn boot(&self, name: &str, cell_dir: &Path, env: &[String]) -> anyhow::Result<Firecracker> {
+        /// Boots a VM named `name` on `cell`, its guest told `env`.
+        fn boot(
+            &self,
+            name: &str,
+            cell: cladefs::CellId,
+            env: &[String],
+        ) -> anyhow::Result<Firecracker> {
             let mut vm = Vm::new(VCPUS, MEMORY_MIB)?;
             vm.guest_kernel()?;
-            vm.cell_served(
+            vm.cell_id_served(
                 TAG,
-                cell_dir,
+                cell,
                 CAPACITY,
                 crate::common::dax_window(WINDOW)?,
                 &self.paths.socket,
@@ -525,9 +521,9 @@ mod host {
         /// Makes the base: its filesystem, its files and pgbench's database, on a cell of its
         /// own, which every slot's cell is forked from.
         fn make_base(&mut self) -> anyhow::Result<()> {
-            let base = self.paths.base();
+            let cell = crate::common::create_cell(&self.paths.socket, CAPACITY)?;
             let env = [format!("{ROLE}=base"), format!("{BASE_SEED}={}", self.ledger.seed)];
-            let mut vm = self.boot("base", &base, &env)?;
+            let mut vm = self.boot("base", cell, &env)?;
             let deadline = Instant::now() + BASE;
             while vm.running()? {
                 ensure!(Instant::now() < deadline, "the base's VM ran past {BASE:?}");
@@ -542,14 +538,9 @@ mod host {
             let control = control(&self.paths.socket)?;
             control
                 .call(async |client| {
-                    client.sync_cell(SyncCellRequest { path: control_path(&base) }).await
+                    client.sync_cell(SyncCellRequest { tenant: cell.tenant, cell: cell.id }).await
                 })
                 .map(drop)?;
-            let cell = control
-                .call(async |client| {
-                    client.stat_cell(StatCellRequest { path: control_path(&base) }).await
-                })
-                .map(|response| cladefs::CellId { tenant: response.tenant, id: response.cell })?;
             self.ledger.base = Some(cell);
             self.say(format_args!("the base made: cell {cell}"));
             Ok(())
@@ -559,14 +550,16 @@ mod host {
         /// deleting its old one, cell and all.
         fn fork_slots(&mut self) -> anyhow::Result<()> {
             let control = control(&self.paths.socket)?;
+            let base = self.ledger.base.context("no base")?;
             for slot in 0..SLOTS {
-                let path = self.paths.slot(slot);
                 let state = &mut self.ledger.slots[slot];
-                if self.plan.slots[slot].refork && state.cell.is_some() {
+                if self.plan.slots[slot].refork
+                    && let Some(old) = state.cell
+                {
                     control
                         .call(async |client| {
                             client
-                                .delete_cell(DeleteCellRequest { path: control_path(&path) })
+                                .delete_cell(DeleteCellRequest { tenant: old.tenant, cell: old.id })
                                 .await
                         })
                         .map(drop)
@@ -578,8 +571,8 @@ mod host {
                         .call(async |client| {
                             client
                                 .fork_cell(ForkCellRequest {
-                                    from: control_path(&self.paths.base()),
-                                    to: control_path(&path),
+                                    tenant: base.tenant,
+                                    cell: base.id,
                                     ..Default::default()
                                 })
                                 .await
@@ -603,6 +596,7 @@ mod host {
         fn boot_load(&self, slot: usize, boot: u32, secs: u64) -> anyhow::Result<Boot> {
             let load = self.plan.slots[slot].load;
             let state = &self.ledger.slots[slot];
+            let cell = state.cell.context("a slot with no cell")?;
             let name = format!("s{slot}-b{boot}");
             let mut env = vec![
                 format!("{ROLE}=load"),
@@ -617,7 +611,7 @@ mod host {
             if let Some(run) = &run {
                 env.push(format!("{RUN}={run}"));
             }
-            let firecracker = self.boot(&name, &self.paths.slot(slot), &env)?;
+            let firecracker = self.boot(&name, cell, &env)?;
             Ok(Boot {
                 slot,
                 name,
@@ -758,11 +752,10 @@ mod host {
                     .call(async |client| {
                         client
                             .create_cell(CreateCellRequest {
-                                path: control_path(&self.paths.base()),
                                 capacity: CAPACITY,
                                 tenant: base.tenant,
                                 cell: base.id,
-                                token: token,
+                                token,
                                 force: false,
                                 kind: CellKind::Fxfs.into(),
                                 ..Default::default()
@@ -779,11 +772,10 @@ mod host {
                         .call(async |client| {
                             client
                                 .create_cell(CreateCellRequest {
-                                    path: control_path(&self.paths.slot(slot)),
                                     capacity: CAPACITY,
                                     tenant: cell.tenant,
                                     cell: cell.id,
-                                    token: token,
+                                    token,
                                     force: false,
                                     kind: CellKind::Fxfs.into(),
                                     ..Default::default()
@@ -846,12 +838,13 @@ mod host {
             let mut checking = Vec::new();
             for slot in 0..SLOTS {
                 let name = format!("check-s{slot}");
+                let cell = self.ledger.slots[slot].cell.context("a slot with no cell")?;
                 let env = [
                     format!("{ROLE}=check"),
                     format!("{SLOT}={slot}"),
                     format!("{BASE_SEED}={}", self.ledger.seed),
                 ];
-                checking.push((name.clone(), self.boot(&name, &self.paths.slot(slot), &env)?));
+                checking.push((name.clone(), self.boot(&name, cell, &env)?));
             }
             let deadline = Instant::now() + CHECK;
             for (slot, (name, mut vm)) in checking.into_iter().enumerate() {

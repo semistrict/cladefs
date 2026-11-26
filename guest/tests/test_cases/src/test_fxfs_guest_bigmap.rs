@@ -38,7 +38,6 @@ mod host {
     use crate::vm::{Firecracker, Vm};
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
     use cladefs::cladefsd::control::proto::ForkCellRequest;
-    use cladefs::testing::control_path;
     use std::ffi::{CString, OsStr};
     use std::path::Path;
 
@@ -60,18 +59,18 @@ mod host {
         Ok(u32::try_from(setting("CLADEFS_BIGMAP_MEMORY_MIB", 1024)?)?)
     }
 
-    /// A VM, its guest in role `role` (`base` or `map`), on the cell at `cell_dir`, of `capacity`
+    /// A VM, its guest in role `role` (`base` or `map`), on `cell`, of `capacity`
     /// bytes, which the daemon at `cladefsd` serves, with a DAX window of `window` bytes if not 0.
     fn machine(
         role: &str,
-        cell_dir: &Path,
+        cell: cladefs::CellId,
         cladefsd: &Path,
         capacity: u64,
         window: u64,
     ) -> anyhow::Result<Vm> {
         let mut vm = Vm::new(2, memory()?)?;
         vm.guest_kernel()?;
-        vm.cell_served("extents", cell_dir, capacity, window, cladefsd);
+        vm.cell_id_served("extents", cell, capacity, window, cladefsd);
         vm.env(&CString::new(format!("CLADEFS_BIGMAP_ROLE={role}"))?);
         vm.env(&CString::new(format!("CLADEFS_BIGMAP_BYTES={}", file_bytes()?))?);
         for var in ["CLADEFS_BIGMAP_READ_SECS", "CLADEFS_BIGMAP_WRITE_PERCENT"] {
@@ -105,7 +104,6 @@ mod host {
         /// to measure after each step, until its last, a daemon of the case's own serving both.
         fn run(&self, test_setup: &TestSetup) -> anyhow::Result<()> {
             let root = setup_rootfs(test_setup)?;
-            let dir = &test_setup.tmp_dir;
             let bytes = file_bytes()?;
             // Its socket's path short, as Unix sockets' must be; its metrics, which say what its
             // memory holds.
@@ -120,15 +118,14 @@ mod host {
                 crate::common::spawn_daemon(test_setup, &socket, "cladefsd", &env, memory)?;
             // The file, what the fork writes again of it, and room.
             let capacity = 2 * bytes + (4 << 30);
-            let base = dir.join("base");
-            wait(boot(test_setup, &root, "base", machine("base", &base, &socket, capacity, 0)?)?)?;
-            let fork = dir.join("fork");
-            crate::common::control(&socket)?
+            let base = crate::common::create_cell(&socket, capacity)?;
+            wait(boot(test_setup, &root, "base", machine("base", base, &socket, capacity, 0)?)?)?;
+            let fork = crate::common::control(&socket)?
                 .call(async |client| {
                     client
                         .fork_cell(ForkCellRequest {
-                            from: control_path(&base),
-                            to: control_path(&fork),
+                            tenant: base.tenant,
+                            cell: base.id,
                             ..Default::default()
                         })
                         .await
@@ -136,7 +133,7 @@ mod host {
                 .map(|response| cladefs::CellId { tenant: response.tenant, id: response.cell })?;
             // Room for the file twice over, which window reclaim then needn't take back.
             let window = if self.dax { 2 * bytes } else { 0 };
-            let mut machine = machine("map", &fork, &socket, capacity, window)?;
+            let mut machine = machine("map", fork, &socket, capacity, window)?;
             let requests = Requests::new("map")?;
             machine.vsock(requests.uds());
             let host = HostMemory::new(daemon.id(), metrics);

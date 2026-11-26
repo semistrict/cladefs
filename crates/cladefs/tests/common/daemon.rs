@@ -7,55 +7,85 @@
 use cladefs::cladefsd::control::proto::cladefsd_client::CladefsdClient;
 use cladefs::cladefsd::control::proto::*;
 use cladefs::cladefsd::control::{connect, errno};
-use cladefs::cladefsd::{serve, serve_control};
-use cladefs::{CellClient, Errno, ExtentId, VolatileSlice};
+use cladefs::{CellClient, CellId, Errno, ExtentId, VolatileSlice};
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tonic::Code;
 use tonic::transport::Channel;
 
 /// A daemon serving in `dir`: its VM socket's path, and a client of its control API, which
 /// `runtime` runs.
 pub struct Daemon {
+    pub inner: Arc<cladefs::cladefsd::Daemon>,
     pub vms: PathBuf,
     pub client: CladefsdClient<Channel>,
     pub runtime: tokio::runtime::Runtime,
 }
 
 impl Daemon {
+    /// Starts the process's default daemon in `dir` with a single managed disk (`dir/disk0`).
     pub fn new(dir: &Path) -> Self {
+        Self::with_disks(dir, &[dir.join("disk0")])
+    }
+
+    /// Starts the process's default daemon in `dir` managing the disk roots `disks`.
+    pub fn with_disks(dir: &Path, disks: &[PathBuf]) -> Self {
         super::host();
+        let inner = Arc::clone(cladefs::cladefsd::Daemon::process());
+        Self::start_inner(inner, dir, disks)
+    }
+
+    /// Starts an isolated daemon instance in `dir` with its own managed disk (`dir/disk0`),
+    /// `CellTable`, and `Grants`, while sharing [`cladefs::Host::process`] (and thus the
+    /// in-process `memory://` bucket and extent cache) with other daemons in the same test.
+    pub fn isolated(dir: &Path) -> Self {
+        super::host();
+        let inner = cladefs::cladefsd::Daemon::with_host(Arc::clone(cladefs::Host::process()));
+        Self::start_inner(inner, dir, &[dir.join("disk0")])
+    }
+
+    fn start_inner(inner: Arc<cladefs::cladefsd::Daemon>, dir: &Path, disks: &[PathBuf]) -> Self {
+        inner.configure_disks(disks).unwrap();
         // Its disks governed, as a host's daemon's are, leaving a test's headroom (doc-22).
         let headroom = Some(cladefs::cladefsd::governor::DiskHeadroom::Bytes(64 << 20));
-        let disks = cladefs::cladefsd::disk::DiskConfig { headroom, fixed: None };
-        cladefs::cladefsd::disk::start(disks).unwrap();
+        let disk_cfg = cladefs::cladefsd::disk::DiskConfig { headroom, fixed: None };
+        inner.start_disk_governor(disk_cfg).unwrap();
         let (vms, control) = (dir.join("vms.sock"), dir.join("control.sock"));
         let listener = UnixListener::bind(&vms).unwrap();
-        std::thread::spawn(move || serve(listener));
+        let serving = Arc::clone(&inner);
+        std::thread::spawn(move || serving.serve(listener));
         let listener = UnixListener::bind(&control).unwrap();
         let tenants = dir.join("tenants");
         std::fs::create_dir(&tenants).unwrap();
-        std::thread::spawn(move || serve_control(listener, tenants));
+        let controlling = Arc::clone(&inner);
+        std::thread::spawn(move || controlling.serve_control(listener, tenants));
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let client = runtime.block_on(connect(&control)).unwrap();
-        Self { vms, client, runtime }
+        Self { inner, vms, client, runtime }
     }
 
-    /// A VM process's cell at `path`, created with `capacity` bytes if it doesn't exist.
-    pub fn open(&self, path: &Path, capacity: u64) -> CellClient {
-        CellClient::connect(&self.vms, path, capacity).unwrap()
+    /// Returns the daemon-owned on-disk directory for `cell` (for white-box tests).
+    pub fn cell_path(&self, cell: CellId) -> PathBuf {
+        self.inner.cell_path(cell).unwrap_or_else(|| panic!("cell {cell} not found in DiskPool"))
     }
 
-    /// Makes a cell at `path` as `cell`, an Fxfs cell: a new cell if its ID is 0, a new cell
-    /// there if its ID is (TASK-364).
-    pub fn create(
-        &mut self,
-        path: &Path,
-        cell: cladefs::CellId,
-        token: Option<u64>,
-    ) -> Result<cladefs::CellId, tonic::Status> {
+    /// Opens an existing managed cell `cell` over the daemon's default VM socket.
+    pub fn open(&self, cell: CellId) -> CellClient {
+        CellClient::connect_cell(&self.vms, cell).unwrap()
+    }
+
+    /// Creates and opens a new managed cell for `tenant` with `capacity` bytes on a daemon-chosen
+    /// disk over the daemon's default VM socket.
+    pub fn open_new(&self, tenant: u64, capacity: u64) -> (CellId, CellClient) {
+        let client = CellClient::connect_new(&self.vms, tenant, capacity).unwrap();
+        (CellId { tenant, id: client.cell() }, client)
+    }
+
+    /// Makes a new cell (if `cell.id == 0`) or takes an existing cell from the bucket on a
+    /// daemon-chosen disk (TASK-364, hotbed question 547).
+    pub fn create(&mut self, cell: CellId, token: Option<u64>) -> Result<CellId, tonic::Status> {
         let request = CreateCellRequest {
-            path: name(path),
             capacity: CAPACITY,
             token,
             tenant: cell.tenant,
@@ -64,153 +94,146 @@ impl Daemon {
             ..CreateCellRequest::default()
         };
         let response = self.runtime.block_on(self.client.create_cell(request))?.into_inner();
-        Ok(cladefs::CellId { tenant: response.tenant, id: response.cell })
+        Ok(CellId { tenant: response.tenant, id: response.cell })
     }
 
-    /// The ID of the cell at `path`, as StatCell says it (TASK-364).
-    pub fn cell(&mut self, path: &Path) -> Result<cladefs::CellId, tonic::Status> {
-        let stat = self.stat(path)?;
-        Ok(cladefs::CellId { tenant: stat.tenant, id: stat.cell })
-    }
-
-    pub fn stat(&mut self, path: &Path) -> Result<StatCellResponse, tonic::Status> {
-        let request = StatCellRequest { path: name(path) };
+    pub fn stat(&mut self, cell: CellId) -> Result<StatCellResponse, tonic::Status> {
+        let request = StatCellRequest { tenant: cell.tenant, cell: cell.id };
         Ok(self.runtime.block_on(self.client.stat_cell(request))?.into_inner())
     }
 
-    /// StatCell of the cell at `path` once it says no VM process has it open: the daemon lets it go
-    /// once it finds its VM process's connection gone, on its own side, after that end is shut
-    /// down, not with it (board 5885). Fails if it is open still ten seconds on.
-    pub fn wait_closed(&mut self, path: &Path) -> StatCellResponse {
-        self.stat_once_closed(path).unwrap()
+    /// StatCell of `cell` once it says no VM process has it open: the daemon lets it go once it
+    /// finds its VM process's connection gone, on its own side, after that end is shut down, not
+    /// with it (board 5885). Fails if it is open still ten seconds on.
+    pub fn wait_closed(&mut self, cell: CellId) -> StatCellResponse {
+        self.stat_once_closed(cell).unwrap()
     }
 
-    /// StatCell of the cell at `path`, as [`Daemon::wait_closed`] waits for it, or its failure: a
-    /// cell whose keys are forgotten is stated while it is open, and refused once closed (board
-    /// 8282).
-    pub fn stat_once_closed(&mut self, path: &Path) -> Result<StatCellResponse, tonic::Status> {
+    /// StatCell of `cell`, as [`Daemon::wait_closed`] waits for it, or its failure: a cell whose
+    /// keys are forgotten is stated while it is open, and refused once closed (board 8282).
+    pub fn stat_once_closed(&mut self, cell: CellId) -> Result<StatCellResponse, tonic::Status> {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
-            let stat = self.stat(path);
+            let stat = self.stat(cell);
             if !stat.as_ref().is_ok_and(|stat| stat.open) {
                 return stat;
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "{} still open ten seconds after its VM process went",
-                path.display()
+                "{cell} still open ten seconds after its VM process went"
             );
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
     }
 
-    /// Forks the cell at `from` to `to` (ForkCell).
-    pub fn fork(&mut self, from: &Path, to: &Path) -> Result<cladefs::CellId, tonic::Status> {
-        let request = ForkCellRequest { from: name(from), to: name(to), ..Default::default() };
+    /// Forks `from` onto a daemon-chosen disk (`ForkCell`), optionally into `target_tenant`.
+    pub fn fork(
+        &mut self,
+        from: CellId,
+        target_tenant: Option<u64>,
+    ) -> Result<CellId, tonic::Status> {
+        let request = ForkCellRequest {
+            tenant: from.tenant,
+            cell: from.id,
+            target_tenant,
+            ..Default::default()
+        };
         let response = self.runtime.block_on(self.client.fork_cell(request))?.into_inner();
-        Ok(cladefs::CellId { tenant: response.tenant, id: response.cell })
+        Ok(CellId { tenant: response.tenant, id: response.cell })
     }
 
-    /// Makes a version of the cell at `from` (MakeVersion), and returns it.
-    pub fn version(&mut self, from: &Path) -> Result<cladefs::CellVersion, tonic::Status> {
-        let request = MakeVersionRequest { path: name(from), keep_last: 0 };
+    /// Makes a version of `from` (`MakeVersion`), and returns it.
+    pub fn version(&mut self, from: CellId) -> Result<cladefs::CellVersion, tonic::Status> {
+        let request = MakeVersionRequest { tenant: from.tenant, cell: from.id, keep_last: 0 };
         let version = self.runtime.block_on(self.client.make_version(request))?.into_inner();
-        let cell = self.cell(from)?;
-        Ok(cladefs::CellVersion { tenant: cell.tenant, cell: cell.id, version: version.version })
+        Ok(cladefs::CellVersion { tenant: from.tenant, cell: from.id, version: version.version })
     }
 
-    /// Forks the version `from` to `to`, on this host, whichever made it (ForkCell's `version`).
+    /// Forks the version `from` onto a daemon-chosen disk, optionally into `target_tenant`.
     pub fn fork_version(
         &mut self,
         from: cladefs::CellVersion,
-        to: &Path,
-    ) -> Result<cladefs::CellId, tonic::Status> {
+        target_tenant: Option<u64>,
+    ) -> Result<CellId, tonic::Status> {
         let cladefs::CellVersion { tenant, cell, version } = from;
-        let request = ForkCellRequest { to: name(to), version, tenant, cell, ..Default::default() };
+        let request =
+            ForkCellRequest { version, tenant, cell, target_tenant, ..Default::default() };
         let response = self.runtime.block_on(self.client.fork_cell(request))?.into_inner();
-        Ok(cladefs::CellId { tenant: response.tenant, id: response.cell })
+        Ok(CellId { tenant: response.tenant, id: response.cell })
     }
 
-    /// Drops the versions `versions` of the cell at `path` (DropVersions).
-    pub fn drop_versions(&mut self, path: &Path, versions: &[u64]) -> Result<(), tonic::Status> {
-        let request = DropVersionsRequest { path: name(path), versions: versions.to_vec() };
+    /// Drops the versions `versions` of `cell` (`DropVersions`).
+    pub fn drop_versions(&mut self, cell: CellId, versions: &[u64]) -> Result<(), tonic::Status> {
+        let request =
+            DropVersionsRequest { tenant: cell.tenant, cell: cell.id, versions: versions.to_vec() };
         self.runtime.block_on(self.client.drop_versions(request)).map(drop)
     }
 
-    pub fn resize(&mut self, path: &Path, capacity: u64) -> Result<(), tonic::Status> {
-        let request = ResizeCellRequest { path: name(path), capacity };
+    pub fn resize(&mut self, cell: CellId, capacity: u64) -> Result<(), tonic::Status> {
+        let request = ResizeCellRequest { tenant: cell.tenant, cell: cell.id, capacity };
         self.runtime.block_on(self.client.resize_cell(request)).map(drop)
     }
 
-    pub fn place(&mut self, path: &Path, token: u64) -> Result<(), tonic::Status> {
-        let request = PlaceCellRequest { path: name(path), token, force: false };
+    pub fn place(&mut self, cell: CellId, token: u64) -> Result<(), tonic::Status> {
+        let request = PlaceCellRequest { tenant: cell.tenant, cell: cell.id, token, force: false };
         self.runtime.block_on(self.client.place_cell(request)).map(drop)
     }
 
-    /// Places the cell at `path` at `token`'s placement, its takings forced (TASK-681).
-    pub fn place_forced(&mut self, path: &Path, token: u64) -> Result<(), tonic::Status> {
-        let request = PlaceCellRequest { path: name(path), token, force: true };
+    /// Places `cell` at `token`'s placement, its takings forced (TASK-681).
+    pub fn place_forced(&mut self, cell: CellId, token: u64) -> Result<(), tonic::Status> {
+        let request = PlaceCellRequest { tenant: cell.tenant, cell: cell.id, token, force: true };
         self.runtime.block_on(self.client.place_cell(request)).map(drop)
     }
 
-    /// Shares the version `version` of the cell at `path`, or no longer
-    /// (ShareVersion, TASK-395.7).
-    pub fn share(&mut self, path: &Path, version: u64, shared: bool) -> Result<(), tonic::Status> {
-        let request = ShareVersionRequest { path: name(path), version, shared };
+    /// Shares the version `version` of `cell`, or no longer (`ShareVersion`, TASK-395.7).
+    pub fn share(&mut self, cell: CellId, version: u64, shared: bool) -> Result<(), tonic::Status> {
+        let request = ShareVersionRequest { tenant: cell.tenant, cell: cell.id, version, shared };
         self.runtime.block_on(self.client.share_version(request)).map(drop)
     }
 
-    pub fn make_public(&mut self, path: &Path) -> Result<(), tonic::Status> {
-        let request = MakePublicRequest { path: name(path), attach_only: false };
+    pub fn make_public(&mut self, cell: CellId) -> Result<(), tonic::Status> {
+        let request = MakePublicRequest { tenant: cell.tenant, cell: cell.id, attach_only: false };
         self.runtime.block_on(self.client.make_public(request)).map(drop)
     }
 
-    pub fn sync(&mut self, path: &Path) -> Result<(), tonic::Status> {
-        let request = SyncCellRequest { path: name(path) };
+    pub fn sync(&mut self, cell: CellId) -> Result<(), tonic::Status> {
+        let request = SyncCellRequest { tenant: cell.tenant, cell: cell.id };
         self.runtime.block_on(self.client.sync_cell(request)).map(drop)
     }
 
-    pub fn delete(&mut self, path: &Path) -> Result<(), tonic::Status> {
-        let request = DeleteCellRequest { path: name(path) };
+    pub fn delete(&mut self, cell: CellId) -> Result<(), tonic::Status> {
+        let request = DeleteCellRequest { tenant: cell.tenant, cell: cell.id };
         self.runtime.block_on(self.client.delete_cell(request)).map(drop)
     }
 
-    pub fn drop_cell(&mut self, path: &Path) -> Result<(), tonic::Status> {
-        let request = DropCellRequest { path: name(path) };
+    pub fn drop_cell(&mut self, cell: CellId) -> Result<(), tonic::Status> {
+        let request = DropCellRequest { tenant: cell.tenant, cell: cell.id };
         self.runtime.block_on(self.client.drop_cell(request)).map(drop)
     }
 
-    pub fn import(&mut self, path: &Path, image: &Path) -> Result<cladefs::CellId, tonic::Status> {
+    pub fn import(&mut self, tenant: u64, image: &Path) -> Result<CellId, tonic::Status> {
         let request = ImportImageRequest {
-            path: name(path),
             capacity: CAPACITY,
             image: name(image),
             reference: String::new(),
-            tenant: 0,
+            tenant,
         };
         let response = self.runtime.block_on(self.client.import_image(request))?.into_inner();
-        Ok(cladefs::CellId { tenant: response.tenant, id: response.cell })
+        Ok(CellId { tenant: response.tenant, id: response.cell })
     }
 
-    /// Grants the tenant of the ID `tenant` in the bucket (TASK-364), whose cells are in `dir`,
-    /// its socket, given to `uid`, if named.
-    pub fn grant(
-        &mut self,
-        tenant: u64,
-        dir: &Path,
-        uid: Option<u32>,
-    ) -> Result<PathBuf, tonic::Status> {
-        self.grant_to(tenant, dir, (uid, None))
+    /// Grants `tenant` its VM socket, given to `uid`, if named.
+    pub fn grant(&mut self, tenant: u64, uid: Option<u32>) -> Result<PathBuf, tonic::Status> {
+        self.grant_to(tenant, (uid, None))
     }
 
     /// Grants as [`Daemon::grant`] does, the socket given to the uid and gid `to` names.
     pub fn grant_to(
         &mut self,
         tenant: u64,
-        dir: &Path,
         (uid, gid): (Option<u32>, Option<u32>),
     ) -> Result<PathBuf, tonic::Status> {
-        let request = GrantRequest { tenant, dir: name(dir), dirs: Vec::new(), uid, gid };
+        let request = GrantRequest { tenant, uid, gid };
         Ok(self.runtime.block_on(self.client.grant(request))?.into_inner().socket.into())
     }
 
@@ -219,14 +242,29 @@ impl Daemon {
         self.runtime.block_on(self.client.revoke(request)).map(drop)
     }
 
-    /// The cells the daemon serves, by their paths, in order.
-    pub fn list(&mut self) -> Vec<(PathBuf, StatCellResponse)> {
+    /// The cells the daemon serves, by their `(tenant, cell)` IDs, in order.
+    pub fn list(&mut self) -> Vec<(CellId, StatCellResponse)> {
         let listed = self.runtime.block_on(self.client.list_cells(ListCellsRequest {}));
         let mut cells: Vec<_> = (listed.unwrap().into_inner().stores.into_iter())
-            .map(|cell| (PathBuf::from(cell.path), cell.stat.unwrap()))
+            .map(|cell| (CellId { tenant: cell.tenant, id: cell.cell }, cell.stat.unwrap()))
             .collect();
-        cells.sort_by(|a, b| a.0.cmp(&b.0));
+        cells.sort_by_key(|(id, _)| (id.tenant, id.id));
         cells
+    }
+
+    /// Lists all managed disks and their live governance state.
+    pub fn list_disks(&mut self) -> Result<Vec<DiskInfo>, tonic::Status> {
+        let response =
+            self.runtime.block_on(self.client.list_disks(ListDisksRequest {}))?.into_inner();
+        Ok(response.disks)
+    }
+
+    /// Updates live governance on one managed disk.
+    pub fn set_disk_governance(
+        &mut self,
+        request: SetDiskGovernanceRequest,
+    ) -> Result<(), tonic::Status> {
+        self.runtime.block_on(self.client.set_disk_governance(request)).map(drop)
     }
 
     /// Limits the memory of `tenant`, or of every tenant, to `bytes`, or lifts the limit.
@@ -285,7 +323,7 @@ impl Daemon {
 }
 
 /// A cell to make anew: of a new cell of the default tenant's, a new ID there (TASK-364).
-pub const NEW: cladefs::CellId = cladefs::CellId { tenant: 0, id: 0 };
+pub const NEW: CellId = CellId { tenant: 0, id: 0 };
 
 pub const CAPACITY: u64 = 1 << 26;
 

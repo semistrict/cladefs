@@ -1,0 +1,94 @@
+# Example cladefs.toml — unified TOML configuration for cladefsd, cladefsctl,
+# cladefs-mount, and cladefs-gc.
+#
+# Run with:
+#   cladefsd --config /etc/cladefs/cladefs.toml
+#   cladefsctl --config /etc/cladefs/cladefs.toml list
+#   cladefs-gc --config /etc/cladefs/cladefs.toml
+
+[daemon]
+vm_socket = "/run/cladefsd/vm.sock"
+control_socket = "/run/cladefsd/control.sock"
+tenants_dir = "/run/cladefsd/tenants"
+token = 1
+drain_secs = 60
+
+[bucket]
+url = "s3://my-cladefs-bucket/prod"
+upload_memory = "512MiB"
+
+# Optional per-bucket overrides (replaces CLADEFSD_BUCKET_<N>_*):
+# [buckets.2]
+# AWS_REGION = "eu-west-1"
+# CLADEFS_KMS = "aws-kms://eu-west-1"
+
+[kms]
+url = "aws-kms://us-east-1"
+# Or bucket KMS with a local master key file:
+# master_key_file = "/etc/cladefs/master.key"
+
+[memory]
+# Omit `bytes` to govern dynamically from free host/cgroup memory.
+# bytes = "32GiB"
+headroom = "2GiB"
+floor = "512MiB"
+
+[disk]
+# Optional aggregate cap across all disks (apportioned proportionally by each disk's effective cap).
+# cap = "2TiB"
+# Default per-disk headroom ("N%" or bytes; default max(5%, 4GiB)).
+headroom = "5%"
+# Optional aggregate part-cache cap across all shards.
+# cache_cap = "1TiB"
+# Optional default per-disk PageCache dirty-page hard ceiling.
+# dirty_budget = "128MiB"
+# Small metadata journal for ephemeral cells (if using ephemeral forks).
+ephemeral_journal = "/var/lib/cladefsd/ephemeral"
+part_cache = true
+
+# Managed JBOD disks. cladefsd owns cells/, part-cache/, and replicas/ inside each path
+# and automatically places cells on the healthiest ReadWrite disk with the most spare space.
+[[disks]]
+id = "nvme0-os"
+path = "/mnt/fxdax-scratch/cladefsd"
+cap = "500GiB"
+headroom = "10%"
+cache_cap = "200GiB"
+dirty_budget = "128MiB"
+replicas = true
+placement = "read_write"
+
+[[disks]]
+id = "nvme1-scratch"
+path = "/mnt/fxdax-scratch-nvme1/cladefsd"
+cap = "1.5TiB"
+headroom = "5%"
+replicas = true
+placement = "read_write"
+
+[peers]
+address = "10.0.0.1:9185"
+peers = ["10.0.0.2:9185", "10.0.0.3:9185"]
+tls_dir = "/etc/cladefs/peer-tls"
+replicas = true
+replace_after_secs = 30
+migration_idle_secs = 300
+
+# Optional host FUSE mount served by cladefsd on the same control socket:
+# [mount]
+# mountpoint = "/mnt/cladefs"
+# allow_other = false
+
+[telemetry]
+metrics = "127.0.0.1:9184"
+zpages = "127.0.0.1:9184"
+log_level = "info"
+log_format = "text"
+
+[ctl]
+timeout_secs = 60
+
+[gc]
+every_secs = 300
+at_once = 16
+lease_secs = 600

@@ -5,6 +5,40 @@ bucket and the placement it must be given, encryption, and what a VM process's e
 The VM manager's side, the control API call by call, is `integrator-guide.md`; upgrades are
 `upgrading-a-host.md`; how the daemon works is `architecture.md`.
 
+## Configuration (TOML)
+
+`cladefsd`, `cladefs-gc`, `cladefsctl`, and `cladefs-mount` read a single TOML configuration file
+via `--config PATH` / `-c PATH` or `CLADEFS_CONFIG=PATH`. See
+[`docs/cladefs.example.toml`](cladefs.example.toml) for every section and option.
+
+```sh
+cladefsd --config /etc/cladefs/cladefs.toml
+cladefsctl --config /etc/cladefs/cladefs.toml disks
+cladefs-gc --config /etc/cladefs/cladefs.toml
+```
+
+In a TOML config, `[[disks]]` declares the host's managed disk pool:
+
+```toml
+[[disks]]
+id = "nvme0"
+path = "/mnt/nvme0/cladefs"
+cap_bytes = "1TiB"           # optional hard byte cap on this disk
+headroom = "5%"              # bytes or percentage kept free (overrides [disk].headroom)
+cache_cap_bytes = "512GiB"   # optional cap on this disk's part-cache shard
+dirty_budget_bytes = "256MiB"# optional per-disk cell page-cache dirty budget
+placement = "read_write"     # read_write | drain | read_only
+```
+
+`cladefsd` owns the on-disk layout under each disk root (`<path>/cells/<TENANT>/<CELL>`,
+`<path>/part-cache/`, `<path>/replicas/`) and chooses which disk holds each new cell based on
+placement mode, health state, and remaining spare capacity. Callers never pass host filesystem paths
+to control RPCs (`CreateCell`, `ForkCell`, `ImportImage`, `Grant`, `MigrateCell`, etc.) — every cell
+is addressed by `(tenant, cell)` alone.
+
+Legacy `CLADEFSD_*` environment variables remain supported for compatibility and override TOML
+settings only when no `--config` file is passed.
+
 ## The daemon's memory
 
 DAX moves the guests' file pages out of their RAM into
@@ -75,23 +109,36 @@ at once, and each tenant's writes are refused past its share, by its weight
 Past the allowance, writes are refused with `ENOSPC`, which the guest sees as a
 full disk; the daemon and every cell go on.
 
-### Multi-disk JBOD hosts
+### Multi-disk JBOD hosts and per-disk governance
 
-Every local-SSD path in `cladefsd` accepts colon-separated directories across independent
-filesystems (one per NVMe drive, no RAID0 required):
+Declare each independent NVMe filesystem as a `[[disks]]` entry in the TOML config (no RAID0
+required). Each disk gets:
 
-- `CLADEFSD_PART_CACHE=/mnt/nvme0/cladefsd/part-cache:/mnt/nvme1/cladefsd/part-cache` (or glob)
-- `CLADEFSD_REPLICAS=/mnt/nvme0/cladefsd/replicas:/mnt/nvme1/cladefsd/replicas` (composite
-  incarnation over all shards; wiping any one disk rotates it cleanly)
-- `CLADEFSD_ROOTS=/mnt/nvme0/cladefsd/cells:/mnt/nvme1/cladefsd/cells`
-- `CLADEFSD_EPHEMERAL_CELLS=/mnt/nvme0/cladefsd/ephemeral-cells:/mnt/nvme1/cladefsd/ephemeral-cells`
-- `CLADEFSD_MOUNT_STORES=/mnt/nvme0/cladefsd/mount-stores:/mnt/nvme1/cladefsd/mount-stores`
-- `GrantRequest.dirs` (and `cladefsctl grant TENANT /d0:/d1`) grants a tenant multiple JBOD
-  directories under one aggregate `SetDiskLimit` and per-disk `SetDiskWeight` shares.
-- `CLADEFSD_EPHEMERAL` stays a single small metadata journal directory (tens of KiB).
+- **Automatic placement & layout:** `<path>/cells/<TENANT>/<CELL>`, `<path>/part-cache/`, and
+  `<path>/replicas/` (unless overridden in `[cache]` / `[peers]`).
+- **Per-disk hard caps & headroom:** `cap_bytes` caps total cladefs footprint + part cache on that
+  disk; `headroom` overrides the global `[disk].headroom` per disk; when `[disk].max_bytes`
+  (`CLADEFSD_DISK_BYTES`) is set without per-disk caps, the global cap is apportioned across disks
+  proportionally to each disk's effective capacity (`apportion_cap`).
+- **Per-disk part-cache cap & weighting:** `cache_cap_bytes` caps the part-cache shard on that disk;
+  shards are weighted by effective capacity (`min(fs_size, cap_bytes)`), and `drain` / `read_only`
+  disks stop accepting new part-cache fills while continuing to serve hits.
+- **Per-disk dirty-page budget & flusher:** `dirty_budget_bytes` caps dirty `PageCache` pages on
+  that disk's dedicated `DiskFlusher` thread.
+- **Placement modes & runtime health:** `placement` is `read_write` (new cells + writes + fills),
+  `drain` (no new cells or fills; existing cells still writable), or `read_only` (writes refused
+  with `ENOSPC`; reads continue). Runtime I/O health (`online` / `suspect` / `offline` / `returning`)
+  tracks consecutive I/O failures and isolates failing drives automatically.
+- **Runtime control & metrics:** inspect disks with `cladefsctl disks` (`ListDisks`) and adjust
+  caps, headroom, dirty budget, or placement at runtime with `cladefsctl set-disk ID ...`
+  (`SetDiskGovernance`). `/metrics` exposes `cladefsd_host_disk_cap_bytes`,
+  `cladefsd_host_disk_cache_cap_bytes`, `cladefsd_host_disk_state`, and
+  `cladefsd_host_disk_placement` alongside the existing per-disk footprint/allowance gauges.
 
-Each host disk gets its own cell page-cache flusher thread, independent disk governor allowance,
-and independent `cladefsd_host_disk_*` and `cladefsd_part_cache_shard_state` metrics.
+Without a TOML config, legacy `CLADEFSD_ROOTS` / `CLADEFSD_PART_CACHE` / `CLADEFSD_REPLICAS` /
+`CLADEFSD_EPHEMERAL_CELLS` / `CLADEFSD_MOUNT_STORES` accept colon-separated directories across
+independent filesystems. `CLADEFSD_EPHEMERAL` stays a single small metadata journal directory (tens
+of KiB).
 
 Each write is admitted by its cell before it takes any of the disk: what it
 writes, and what the cell's own work may still add for it, its commit copying
@@ -434,6 +481,67 @@ SIGINT and SIGHUP each drain the daemon (`CLADEFSD_DRAIN`) and end it: Ctrl-C in
 its terminal or ssh session closing, no longer kills it with every cell crashed (board 8567). A
 second signal while it drains changes nothing; SIGKILL ends it at once.
 
+## cladefsctl: the control API from a shell
+
+`cladefsctl`, with `CLADEFSD_GRPC` naming the daemon's control socket, calls its control API
+(`integrator-guide.md` has it call by call; `cladefsctl`'s header, `crates/cladefs/src/bin/cladefsctl.rs`,
+every command). Besides the cells' commands (`create`, `take`, `fork`, `stat`, ...), these are
+for operators and scripts, through the daemon alone, each the call of the same name (as its usage
+prints them); each prints
+what its call answers, one `name value` a line, or one JSON object with `--json` where it takes
+it (board 8585). TENANT is in base 32; `--tenant` names one, its absence every tenant, or, for
+`shrink-memory`, the daemon's memory whole.
+
+| Command | Call | What |
+|---|---|---|
+| `stats [--json] [--wait SECONDS] [--leave-out histograms\|guests\|vms]...` | `GetStats` | What the daemon, its VM processes and their guests counted; `--wait` waits for the VM processes' answers SECONDS at most (2 unless given, 60 at most); `--leave-out` leaves out the guests' histograms, their stats, or the VM processes |
+| `cells [--json]` | `ListCells` | The cells VM processes have open, each's `path` and what `StatCell` says of it |
+| `counters [--json]` | `GetCounters` | The daemon's counters since it started, its bucket's under `object_storage` |
+| `set-peers [ADDRESS...]` | `SetPeers` | The hosts sharing its bucket, each `HOST:PORT`; none without any |
+| `migrate TENANT/CELL PEER` | `MigrateCell` | Begins the live migration of the cell to the daemon at peer address PEER; prints `migration ID` |
+| `hand-over [--token TOKEN] TENANT/CELL` | `HandOverCell` | Hands the cell over to its migration's target |
+| `abort-migration TENANT/CELL` | `AbortMigration` | Ends the cell's migration, the cell free to migrate again |
+| `memory-limit [--tenant TENANT] BYTES\|none` | `SetMemoryLimit` | Limits the memory extents' pages are held in, or lifts the limit |
+| `memory-weight TENANT WEIGHT` | `SetMemoryWeight` | Weighs a tenant's memory against the others' |
+| `in-flight [--tenant TENANT] BYTES\|default` | `SetTenantInFlight` | The bytes in flight a tenant's connections share, or the default |
+| `shrink-memory [--tenant TENANT] TARGET` | `ShrinkMemory` | Evicts pages down to TARGET bytes; prints `bytes`, what is held then |
+| `disk-limit [--tenant TENANT] BYTES\|none` | `SetDiskLimit` | Limits the disk, or lifts the limit |
+| `disk-weight TENANT WEIGHT` | `SetDiskWeight` | Weighs a tenant's disk against the others' |
+| `tenant-disk [--tenant TENANT] [--json]` | `GetTenantDisk` | Prints `bytes`, `limit_bytes` (null without one) and `reserved_bytes` |
+
+**Bounding a call.** Any command may be preceded by `--timeout SECONDS`, or run with
+`CLADEFSCTL_TIMEOUT=SECONDS`, which bounds connecting to the daemon and its call as one deadline:
+past it the command fails with `ETIMEDOUT`, and the daemon goes on with the call, which it may
+still complete, as it completes every call whether or not its caller waits. No command has one
+unless given: `sync`, `import` and `fork` take minutes, others as long as their cells or VMs take.
+It bounds the control API's calls alone, not `mount`'s, nor what `cladefsctl` does without the
+daemon.
+
+**Answers are 64 MiB at most** (`control::MAX_MESSAGE_BYTES`, board 8581). A call whose answer
+grows with the host refuses one past it with `RESOURCE_EXHAUSTED` (`EMSGSIZE`), saying its size
+and what to ask instead: `GetStats` (`stats`) of a host of many VMs, to leave the guests'
+histograms, their stats or the VM processes out (`--leave-out`), the daemon's own stats alone at
+the least; `ListCells` (`cells`), to `StatCell` each cell; `ListVersions`, to drop versions;
+`ListEphemeralHosts`, to decommission hosts gone for good.
+
+## What the daemon refuses to start without
+
+What only failed once it served, the daemon refuses as it starts, saying why (boards 8533,
+8595), so that the host's setup gets fixed:
+
+- **Linux 6.5 or later.** The daemon knows the process at the other end of a VM socket by the
+  socket's pidfd (`SO_PEERPIDFD`, 6.5), and kills that process when it stops acknowledging the
+  daemon's changes to its window. On an older kernel it refuses to start: the pid of the process
+  that connected, opened after the fact, may be another process's by then, which it would kill.
+  `architecture.md` lists the rest of what it needs of the kernel.
+- **35,840 open files** (`RLIMIT_NOFILE`: its own 1,024, and 136 for each of 256 cells): the
+  systemd unit's `LimitNOFILE` (below, Running under systemd).
+- **Every `CLADEFSD_ROOTS` directory there**, and a directory: one missing is refused as it
+  starts, rather than every cell under it later.
+- **A part cache it can open**: every `CLADEFSD_PART_CACHE` shard there, not locked by another
+  daemon, and on a filesystem that bypasses the page cache (`O_DIRECT`), whether or not the daemon
+  has peers.
+
 ## Access to userfaultfd
 
 On Linux, DAX windows take KVM's faults through userfaultfd, which needs
@@ -503,8 +611,11 @@ on `target_env = "musl"` (hotbed question 533):
   `/z/pprof` unwind the daemon's stacks by, and the build refuses a release without them
   (`crates/cladefs/build/stamp.rs`, board 8597). A build that needs flags of its own adds that one.
 - The release profile (root `Cargo.toml`) keeps line tables, so that `/z/pprof`
-  name each frame's file and line (the binary ~280 MB, ~41 MB stripped), unwinds panics, as a
-  cell's halt needs, and checks arithmetic for overflow, as every test's build does.
+  name each frame's file and line, unwinds panics, as a cell's halt needs, and checks arithmetic
+  for overflow, as every test's build does. `cladefsd`, `cladefsctl` and `cladefs-mount` link with
+  those debug sections zlib-compressed (`crates/cladefs/build.rs`, board 10269), which `/z/pprof`
+  reads as it is: `cladefsd` 105 MB, 293 MB uncompressed, 61 MB stripped (aarch64, measured
+  2026-11-25).
 
 Telling it is right: `cladefsctl --version`, and `cladefsd_build_info{commit}` once it runs, name
 the commit it was built of, with no `-dirty` (the stamp follows every crate's files and the lock,

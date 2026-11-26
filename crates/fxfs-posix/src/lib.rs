@@ -883,15 +883,20 @@ impl<P: Platform> Fxfs<P> {
         let start = block_size.align_down(offset);
         let chunk = block_size.align_up((end - start).min(CHUNK)).ok_or(FxfsError::TooBig)?;
         let mut buf = file.allocate_buffer(chunk as usize).await;
-        let (mut part, mut part_at, mut at) = (0, 0, start);
+        let (mut part, mut part_at, mut at, mut copied) = (0, 0, start, 0usize);
         while at < end {
             let read = file.read_aligned(at, buf.as_mut()).await?;
             if read == 0 {
                 break;
             }
+            let chunk_end = at + read as u64;
+            if chunk_end <= offset {
+                break;
+            }
             // What of the chunk read is the caller's: from `offset` on, up to `end`.
             let mut from = (offset.max(at) - at) as usize;
-            let to = (end.min(at + read as u64) - at) as usize;
+            let to = (end.min(chunk_end) - at) as usize;
+            copied += to - from;
             while from < to {
                 let dest = &mut parts[part][part_at..];
                 let n = dest.len().min(to - from);
@@ -901,9 +906,58 @@ impl<P: Platform> Fxfs<P> {
                     (part, part_at) = (part + 1, 0);
                 }
             }
-            at += read as u64;
+            if read < buf.len() {
+                break;
+            }
+            at = chunk_end;
         }
-        Ok((at.min(end) - offset) as usize)
+        Ok(copied)
+    }
+
+    /// Reads up to `len` bytes of the file `ino` from `offset` into a single buffer whose first
+    /// `prefix` bytes are zeroed for a caller's framing header (such as FUSE's `OutHeader`), sized
+    /// to the file's remaining bytes rather than `len` so readahead past EOF allocates nothing
+    /// extra and no payload bytes are pre-zeroed or copied twice (board 12092).
+    pub async fn read_prefixed(
+        &self,
+        ino: u64,
+        offset: u64,
+        len: usize,
+        prefix: usize,
+    ) -> Result<Vec<u8>, Error> {
+        const CHUNK: u64 = 1 << 20;
+        let file = self.file(ino).await?;
+        let end = file.get_size().min(offset.saturating_add(len as u64));
+        if offset >= end {
+            return Ok(vec![0; prefix]);
+        }
+        let to_read = (end - offset) as usize;
+        let capacity = prefix.checked_add(to_read).ok_or(FxfsError::TooBig)?;
+        let mut out = Vec::with_capacity(capacity);
+        out.resize(prefix, 0);
+        let block_size = file.block_size();
+        let start = block_size.align_down(offset);
+        let chunk = block_size.align_up((end - start).min(CHUNK)).ok_or(FxfsError::TooBig)?;
+        let mut buf = file.allocate_buffer(chunk as usize).await;
+        let mut at = start;
+        while at < end {
+            let read = file.read_aligned(at, buf.as_mut()).await?;
+            if read == 0 {
+                break;
+            }
+            let chunk_end = at + read as u64;
+            if chunk_end <= offset {
+                break;
+            }
+            let from = (offset.max(at) - at) as usize;
+            let to = (end.min(chunk_end) - at) as usize;
+            out.extend_from_slice(buf.subslice(from..to).as_slice());
+            if read < buf.len() {
+                break;
+            }
+            at = chunk_end;
+        }
+        Ok(out)
     }
 
     /// Writes `data` to the file `ino` at `offset`, growing the file if it ends before the data

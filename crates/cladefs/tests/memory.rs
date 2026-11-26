@@ -14,7 +14,7 @@ mod common;
 
 use cladefs::cladefsd::metrics::render;
 use cladefs::slabs::SLAB;
-use cladefs::{CellClient, Errno, ExtentId, VolatileSlice};
+use cladefs::{CellClient, CellId, Errno, ExtentId, VolatileSlice};
 use common::daemon::{CAPACITY, Daemon, failure};
 use common::{memory, pattern, read_window};
 use tonic::Code;
@@ -109,12 +109,11 @@ fn assert_within(name: &str, limit: u64) {
 fn tenants_past_their_limits_evict_then_refuse() {
     let dir = tempfile::tempdir().unwrap();
     let mut daemon = Daemon::new(dir.path());
-    let acme = dir.path().join("acme");
-    std::fs::create_dir(&acme).unwrap();
     // Limited before it is granted, as it is made.
     daemon.set_memory_limit(Some(0xac), Some(2 * CHUNK)).unwrap();
-    let socket = daemon.grant(0xac, &acme, None).unwrap();
-    let vm = CellClient::connect(&socket, acme.join("vm"), CAPACITY).unwrap();
+    let socket = daemon.grant(0xac, None).unwrap();
+    let vm = CellClient::connect_new(&socket, 0xac, CAPACITY).unwrap();
+    let cell = CellId { tenant: 0xac, id: vm.cell() };
     read_through(&vm);
 
     let tenant = "{tenant=\"5c\"}";
@@ -127,7 +126,7 @@ fn tenants_past_their_limits_evict_then_refuse() {
     // The default tenant has no limit of its own: every tenant's is its.
     let refused = daemon.set_memory_limit(Some(0), Some(2 * CHUNK));
     assert_eq!(failure(refused), (Code::InvalidArgument, Errno::EINVAL));
-    assert_eq!(daemon.stat(&acme.join("vm")).unwrap().open, true);
+    assert_eq!(daemon.stat(cell).unwrap().open, true);
 }
 
 /// VMs of the daemon's own socket, and of tenants, read past the limit of every tenant's memory
@@ -138,12 +137,10 @@ fn the_daemon_past_its_limit_evicts_any_tenants_pages() {
     let mut daemon = Daemon::new(dir.path());
     daemon.set_memory_limit(None, Some(4 * CHUNK)).unwrap();
     assert_eq!(metric("cladefsd_memory_limit_bytes"), 4 * CHUNK);
-    let acme = dir.path().join("acme");
-    std::fs::create_dir(&acme).unwrap();
-    let socket = daemon.grant(1, &acme, None).unwrap();
-    let theirs = CellClient::connect(&socket, acme.join("vm"), CAPACITY).unwrap();
+    let socket = daemon.grant(1, None).unwrap();
+    let theirs = CellClient::connect_new(&socket, 1, CAPACITY).unwrap();
     read_through(&theirs);
-    let ours = daemon.open(&dir.path().join("vm"), CAPACITY);
+    let (_, ours) = daemon.open_new(0, CAPACITY);
     read_through(&ours);
     assert_within("cladefsd_memory_bytes", 4 * CHUNK);
 

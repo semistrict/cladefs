@@ -72,6 +72,33 @@ impl CellClient {
         DaemonConnection::connect(socket)?.open(cell_dir, capacity)
     }
 
+    /// Opens an existing managed cell `cell` served by the daemon listening at `socket`
+    /// ([`DaemonConnection::open_cell`], hotbed question 547).
+    pub fn connect_cell(socket: impl AsRef<Path>, cell: crate::CellId) -> Result<Self, Error> {
+        DaemonConnection::connect(socket)?.open_cell(cell)
+    }
+
+    /// Creates and opens a new managed cell for `tenant` with `capacity` bytes on a disk chosen by
+    /// the daemon listening at `socket` ([`DaemonConnection::create_cell`], hotbed question 547).
+    pub fn connect_new(
+        socket: impl AsRef<Path>,
+        tenant: u64,
+        capacity: u64,
+    ) -> Result<Self, Error> {
+        DaemonConnection::connect(socket)?.create_cell(tenant, capacity)
+    }
+
+    /// Forks version `from` into a new managed cell for `tenant` on a disk chosen by the daemon
+    /// listening at `socket` ([`DaemonConnection::open_forked_cell`], hotbed question 547).
+    pub fn connect_forked_cell(
+        socket: impl AsRef<Path>,
+        tenant: u64,
+        from: CellVersion,
+        capacity: u64,
+    ) -> Result<Self, Error> {
+        DaemonConnection::connect(socket)?.open_forked_cell(tenant, from, capacity)
+    }
+
     /// The cell at `cell_dir` that the daemon listening at `socket` serves, forked from the version
     /// `from` if it doesn't exist ([`DaemonConnection::open_forked`]).
     pub fn connect_forked(
@@ -676,9 +703,20 @@ impl CellClient {
         self.client.stage.set(stage.clone()).map_err(|_| Error::new(Errno::EEXIST))?;
         // cladefs: and the runs of pages it keeps installed, which the daemon's metrics show
         // (TASK-111.5): its share of this process's windows' as it is made, which another window
-        // made later lowers (board 8493).
+        // coming or going changes (board 8493), said again then, below.
         let budget = stage.budget() as u64;
         self.client.request_blocking(&Request::Window { size, copying: true, budget })?;
+        // cladefs: and again as another window of its process comes or goes, changing it, which
+        // the daemon's metrics show as it is (board 10098): and once now, as it is now, which a
+        // window that came and went since may have changed and changed back, the daemon keeping
+        // WINDOW's, served apart, after a STAGE_COUNTS between (hotbed review 133).
+        let client = Arc::downgrade(&self.client);
+        stage.on_shared(move || {
+            if let Some(client) = client.upgrade() {
+                client.tell_budget();
+            }
+        });
+        self.client.tell_budget();
         self.copying.store(true, Ordering::Release);
         let faults_of = Arc::new(DaemonFaults { client: self.client.clone(), size, unmapped });
         self.window_faults.set(faults_of.clone()).map_err(|_| Error::new(Errno::EEXIST))?;
@@ -743,6 +781,49 @@ impl DaemonConnection {
     /// The cell at `cell_dir`, created with `capacity` bytes if it doesn't exist.
     pub fn open(self, cell_dir: impl AsRef<Path>, capacity: u64) -> Result<CellClient, Error> {
         self.opening(cell_dir.as_ref(), Opening::Create(capacity, Kind::Fxfs))
+    }
+
+    /// Opens an existing managed cell `cell` by its `(tenant, cell)` ID without passing a host
+    /// directory (hotbed question 547).
+    pub fn open_cell(self, cell: crate::CellId) -> Result<CellClient, Error> {
+        self.opening(Path::new(&cell.to_string()), Opening::Existing)
+    }
+
+    /// Creates and opens a new managed Fxfs cell for `tenant` with `capacity` bytes on a disk
+    /// chosen automatically by the daemon (hotbed question 547).
+    pub fn create_cell(self, tenant: u64, capacity: u64) -> Result<CellClient, Error> {
+        let target = crate::CellId { tenant, id: 0 }.to_string();
+        self.opening(Path::new(&target), Opening::Create(capacity, Kind::Fxfs))
+    }
+
+    /// Creates and opens a new managed SQLite cell for `tenant` with `capacity` bytes on a disk
+    /// chosen automatically by the daemon (hotbed question 547).
+    pub fn create_sqlite_cell(self, tenant: u64, capacity: u64) -> Result<CellClient, Error> {
+        let target = crate::CellId { tenant, id: 0 }.to_string();
+        self.opening(Path::new(&target), Opening::Create(capacity, Kind::Sqlite))
+    }
+
+    /// Creates and opens a new managed memory cell for `tenant` with `capacity` bytes on a disk
+    /// chosen automatically by the daemon (hotbed question 547).
+    pub fn create_memory_cell(self, tenant: u64, capacity: u64) -> Result<CellClient, Error> {
+        let target = crate::CellId { tenant, id: 0 }.to_string();
+        self.opening(Path::new(&target), Opening::Create(capacity, Kind::Memory))
+    }
+
+    /// Forks version `from` into a new managed cell for `tenant` on a disk chosen automatically by
+    /// the daemon (hotbed question 547).
+    pub fn open_forked_cell(
+        self,
+        tenant: u64,
+        from: CellVersion,
+        capacity: u64,
+    ) -> Result<CellClient, Error> {
+        let target = crate::CellId { tenant, id: 0 }.to_string();
+        let CellVersion { tenant: from_tenant, cell, version } = from;
+        self.opening(
+            Path::new(&target),
+            Opening::ForkOf { tenant: from_tenant, cell, version, capacity },
+        )
     }
 
     /// cladefs: the cell at `cell_dir`, as [`DaemonConnection::open`] has it, made, if it doesn't
@@ -914,6 +995,9 @@ struct Client {
     /// cladefs: what making the stage operations cost this process, which it tells the daemon
     /// (TASK-91.16).
     stage_counts: StageCosts,
+    /// cladefs: held while a [`STAGE_COUNTS`] is made and sent, by whatever thread: the last sent
+    /// says its window's budget as it was last set (board 10098).
+    telling: Mutex<()>,
     /// What the daemon's changes of the cell's capacity go to
     /// ([`CellClient::on_capacity`]).
     capacity: OnceLock<Box<dyn Fn(u64, bool) + Send + Sync>>,
@@ -936,6 +1020,7 @@ impl Client {
             room: std::sync::Condvar::new(),
             stage: OnceLock::new(),
             stage_counts: StageCosts::default(),
+            telling: Mutex::new(()),
             capacity: OnceLock::new(),
             stats_asked: OnceLock::new(),
             closing: Default::default(),
@@ -1153,13 +1238,14 @@ impl Client {
                 break;
             }
             let tell = if stage.op.taking() {
-                Made::Ack { id: stage.id, counts: self.stage_counts() }
+                let ack = Made::Ack { id: stage.id, counts: self.stage_counts() };
+                self.sender.send(ack.encode(), &[], &[])
             } else if told.elapsed() >= STAGE_COUNTS_EVERY {
-                Made::Counts(self.stage_counts())
+                self.tell_counts()
             } else {
                 continue;
             };
-            if let Err(err) = self.sender.send(tell.encode(), &[], &[]) {
+            if let Err(err) = tell {
                 log::error!("telling the extent daemon of the window's changes made: {err}");
                 break;
             }
@@ -1198,18 +1284,14 @@ impl Client {
     /// cladefs: tells the daemon what the stage operations made so far cost, if any were made
     /// ([`STAGE_COUNTS`]), and its runs of private pages, if any ([`STAGE_PRIVATE_COUNTS`]).
     fn tell_stage_counts(&self) {
-        let counts = self.stage_counts();
-        if counts.costs[0] == 0 {
+        if self.stage_counts().costs[0] == 0 {
             return;
         }
         let private = self.stage_counts.private(self.stage.get());
-        let told =
-            (self.sender.send(Made::Counts(counts).encode(), &[], &[])).and_then(
-                |()| match private[0] {
-                    0 => Ok(()),
-                    _ => self.sender.send(Made::PrivateCounts(private).encode(), &[], &[]),
-                },
-            );
+        let told = self.tell_counts().and_then(|()| match private[0] {
+            0 => Ok(()),
+            _ => self.sender.send(Made::PrivateCounts(private).encode(), &[], &[]),
+        });
         // A daemon gone counts nothing more.
         if let Err(err) = told
             && !self.lost.happened()
@@ -1227,15 +1309,37 @@ impl Client {
         let [overwritten, left_out] = stage.map_or([0; 2], |stage| stage.taken());
         let installed = stage.map_or(0, |stage| stage.installed());
         let private = stage.map_or(0, |stage| stage.private_pages());
-        StageCounts { costs: [ops, ns, overwritten, left_out], installed, private }
+        let budget = stage.map_or(0, |stage| stage.budget() as u64);
+        StageCounts { costs: [ops, ns, overwritten, left_out], installed, private, budget }
+    }
+
+    /// cladefs: tells the daemon what the window's second stage is now ([`STAGE_COUNTS`]), its
+    /// budget among it: the last told, of every thread's, as it is last.
+    fn tell_counts(&self) -> std::io::Result<()> {
+        let _telling = self.telling.lock().unwrap();
+        self.sender.send(Made::Counts(self.stage_counts()).encode(), &[], &[])
+    }
+
+    /// cladefs: tells the daemon its window's budget as it is now, which another window of its
+    /// process coming or going changed (board 10098).
+    fn tell_budget(&self) {
+        // Closing, it tells nothing more: its socket is shut down (hotbed review 133).
+        if self.closing.load(Ordering::Acquire) {
+            return;
+        }
+        // A daemon gone shows nothing more.
+        if let Err(err) = self.tell_counts()
+            && !self.lost.happened()
+        {
+            log::warn!("telling the extent daemon the window's budget: {err}");
+        }
     }
 
     /// cladefs: answers the daemon's ask `ask` for stats ([`STATS`]), with the guest's, `guest`, if
     /// any: its stage counts said first ([`STAGE_COUNTS`]), so that the daemon has them as of the
     /// answer, which it receives after them (TASK-111.4).
     fn answer_stats(&self, ask: u64, guest: Option<&str>) -> BoxFuture<'static, Reply> {
-        let counts = Made::Counts(self.stage_counts()).encode();
-        if let Err(err) = self.sender.send(counts, &[], &[]) {
+        if let Err(err) = self.tell_counts() {
             log::warn!("telling the extent daemon the window's counts: {err}");
         }
         self.request(&Request::Stats { ask, guest })

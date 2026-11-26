@@ -727,11 +727,16 @@ fn windows_holding_private_pages_take_no_snapshot() {
 #[test]
 fn maps_many_in_one_request() {
     const EXTENTS: u64 = 64;
+    // The host's pages the test touches, as many on any page size: EXTENTS + 1 extents of a page
+    // each in the cell, and windows' pages up to 102 (board 9977: a cell of 1 MiB fit 64 + 1
+    // extents of 4 KiB pages, not of 16 KiB ones).
+    const PAGES: u64 = 128;
+    let ps = cladefs::pages::page_size();
+    let size = (PAGES * ps).next_multiple_of(2 << 20);
     let dir = daemon();
     let lost: virtio_extent::OnLost = Arc::new(|| panic!("the daemon went"));
     let vm = Arc::new(FakeVm::default());
-    let config =
-        Config { capacity: 4 << 20, dax_window_size: Some(4 << 20), ..config(&dir, "store") };
+    let config = Config { capacity: size, dax_window_size: Some(size), ..config(&dir, "store") };
     let mut device = Device::new(config, 1, vm.clone(), lost).unwrap();
     device.activate(device.features(), Arc::new(Counted::default())).unwrap();
     let base = vm.host.load(Ordering::Relaxed) as *const u8;
@@ -739,7 +744,6 @@ fn maps_many_in_one_request() {
     let mut space = [0u8; size_of::<ConfigSpace>()];
     device.read_config(0, &mut space);
     let cell = u64::from_le(ConfigSpace::read_from_bytes(&space).unwrap().cell);
-    let ps = cladefs::pages::page_size();
     let id = |sequence: u64| ExtentIdLe { cell: cell.to_le(), sequence: sequence.to_le() };
 
     for sequence in 1..=EXTENTS {
@@ -793,7 +797,9 @@ fn maps_many_in_one_request() {
 
     // Verify mapped extents and zeros actually read back from the DAX window.
     let read_page = |page: u64| -> Vec<u8> {
-        // SAFETY: `base` is the device's live 4 MiB DAX window mapping, and `page * ps + ps <= 4 MiB`.
+        assert!(page < PAGES, "page {page} past the window's {PAGES}");
+        // SAFETY: `base` is the device's live DAX window mapping, of `size >= PAGES * ps` bytes,
+        // and `page * ps + ps <= PAGES * ps`.
         unsafe { std::slice::from_raw_parts(base.add((page * ps) as usize), ps as usize).to_vec() }
     };
     assert_eq!(read_page(0), vec![1u8; ps as usize]);
