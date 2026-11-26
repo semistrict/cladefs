@@ -448,7 +448,14 @@ impl Memory {
     /// ([`HostRing::forget`]). GETs in flight finish as they would. Returns how many tails and
     /// parts it dropped.
     pub fn forget_kept(&self, scope: keys::Scope) -> usize {
-        let of = |key: &str| layout::cell_of(key).is_some_and(|cell| scope.covers(cell));
+        self.forget_kept_where(|cell| scope.covers(cell))
+    }
+
+    /// cladefs: drops cached object tails and unpacked parts for every cell matching `matches`
+    /// (board 11667: scoped multi-bucket per-KMS revocation). Returns how many tails and parts it
+    /// dropped.
+    pub fn forget_kept_where(&self, matches: impl Fn(layout::CellId) -> bool) -> usize {
+        let of = |key: &str| layout::cell_of(key).is_some_and(&matches);
         let tails = {
             let mut tails = self.tails.lock().unwrap();
             let doomed: Vec<String> = tails.kept.keys().filter(|key| of(key)).cloned().collect();

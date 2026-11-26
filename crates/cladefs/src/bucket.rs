@@ -461,13 +461,9 @@ fn on_kms_revoked_on(
     let stores = crate::halt::halt_cells_on(host, matches, Errno::EACCES, &halted);
     crate::fuse::server::forget_cells(matches);
     let (bytes, extents) = host.cache().forget(matches);
-    let (rings, kept) = if all_buckets {
-        let scope = keys::Scope::Tenant(tenant);
-        let state = host.bucket_state();
-        (state.memory.keys().forget(scope), state.memory.forget_kept(scope))
-    } else {
-        (0, 0)
-    };
+    let state = host.bucket_state();
+    let (rings, kept) =
+        (state.memory.keys().forget_where(matches), state.memory.forget_kept_where(matches));
     if stores > 0 || bytes > 0 || rings > 0 || kept > 0 {
         log::warn!(
             "cladefs: tenant {tenant}'s KMS revoked keys ({why}): halted {stores} stores, \
@@ -4795,5 +4791,92 @@ mod tests {
             .unwrap();
         assert_eq!(buf, data);
         open_cell.close().await;
+    }
+
+    /// board 11667: when a per-bucket KMS revokes a tenant on a subset of buckets (`!all_buckets`),
+    /// `on_kms_revoked_on` must evict cached `HostRing` DEKs and `fetch::Memory` plaintext tails
+    /// and unpacked parts for the revoked tenant's cells in the affected bucket(s) while leaving
+    /// unaffected buckets' rings and cached plaintext intact.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn per_bucket_kms_revocation_evicts_rings_and_kept_plaintext_for_affected_bucket_only() {
+        use bucket_cell::Bucket as _;
+        use bucket_cell::bucket::PutMode;
+        use bucket_cell::fetch::{Budget, Fetcher, Limits, Priority};
+        use bucket_cell::keys::{Ring, Scope};
+        use bucket_cell::layout::{self, CellId, Chain, Contents, KeyArg as _, Location, Segment};
+        use bucket_cell::object_bucket::ObjectBucket;
+        use bucket_cell::s3_server::S3Server;
+        use extent_frame::Secret;
+        use std::collections::BTreeSet;
+        use storage_device::ExtentId;
+
+        let host = crate::Host::new();
+        let state = host.bucket_state();
+        let server = S3Server::start(None);
+        let bucket = Arc::new(ObjectBucket::new(server.objects(), "rev-11667"));
+        let tenant = 7u64;
+        let c1 = CellId { tenant, id: (1u64 << 48) | 1 };
+        let c2 = CellId { tenant, id: (2u64 << 48) | 2 };
+        let r1 = Ring::writing_under(c1, Secret::random());
+        let r2 = Ring::writing_under(c2, Secret::random());
+        let _h1 = state.memory.keys().hold(r1.clone());
+        let _h2 = state.memory.keys().hold(r2.clone());
+
+        // Write and fetch one encrypted segment for each cell through `state.memory` (with a part
+        // cache attached so `fetch::Memory` caches both `tails` and `recent` unpacked parts).
+        let cache_dir = tempfile::tempdir().unwrap();
+        let cache_path = cache_dir.path().to_path_buf();
+        let cache = Arc::new(
+            local_cell::upload::blocking(move || {
+                bucket_cell::cache::Cache::open(&cache_path, 16 << 20)
+            })
+            .unwrap(),
+        );
+        let fetcher = Fetcher::new(
+            bucket.clone(),
+            Budget::new(Limits::UNBOUNDED),
+            state.memory.clone(),
+            Some(cache),
+        );
+        for (cell, ring) in [(c1, &r1), (c2, &r2)] {
+            let ext = ExtentId::new(cell.id, 1);
+            let payload = vec![0x5a; 4096];
+            let contents =
+                Contents { extents: vec![(ext, 0, payload.len() as u64)], ..Contents::default() };
+            let footer = Chain::new(cell, 1, 0, 0).close(contents);
+            let encoded =
+                Segment { data: payload.clone(), footer }.encode(ring.encrypting().as_key());
+            let key = layout::segment(cell, 1, 1);
+            bucket.put(&key, encoded.into(), PutMode::Create).await.unwrap();
+            let loc = Location { key, offset: 0, len: payload.len() as u64 };
+            let read =
+                fetcher.read(ext, &loc, 0, payload.len() as u64, Priority::Demand).await.unwrap();
+            assert_eq!(read, payload);
+        }
+        assert!(state.memory.tails_bytes() > 0 && state.memory.recent_bytes() > 0);
+
+        // Revoke tenant 7 ONLY on bucket 1 (`!all_buckets`).
+        super::on_kms_revoked_on(&host, tenant, &BTreeSet::from([1]), "revoked in bucket 1");
+
+        assert!(r1.is_revoked(), "bucket 1 ring must be revoked in place");
+        assert!(
+            !state.memory.keys().ring().cells().contains(&c1.id),
+            "bucket 1 cell DEK must be dropped from HostRing union"
+        );
+        assert_eq!(
+            state.memory.forget_kept(Scope::Cell(c1)),
+            0,
+            "bucket 1 cell tails and unpacked plaintext parts must already be evicted"
+        );
+
+        assert!(!r2.is_revoked(), "unaffected bucket 2 ring must remain valid");
+        assert!(
+            state.memory.keys().ring().cells().contains(&c2.id),
+            "unaffected bucket 2 cell DEK must stay in HostRing union"
+        );
+        assert!(
+            state.memory.forget_kept(Scope::Cell(c2)) > 0,
+            "unaffected bucket 2 cached tails/parts must remain until explicitly forgotten"
+        );
     }
 }

@@ -536,10 +536,17 @@ impl HostRing {
     /// of cells of the scope among them, as a fork of another tenant's keeps what it inherited.
     /// Returns how many it forgot.
     pub fn forget(&self, scope: Scope) -> usize {
+        self.forget_where(|owner| scope.covers(owner))
+    }
+
+    /// Forgets the rings of every cell matching `matches`, revoking them in place and removing
+    /// them from the fetchers' union (board 11667: scoped multi-bucket per-KMS revocation).
+    /// Returns how many it forgot.
+    pub fn forget_where(&self, matches: impl Fn(CellId) -> bool) -> usize {
         let mut held = self.held.lock().unwrap();
         let before = held.rings.len();
         held.rings.retain(|_, ring| {
-            if ring.owner.is_some_and(|owner| scope.covers(owner)) {
+            if ring.owner.is_some_and(&matches) {
                 ring.revoke();
                 false
             } else {
@@ -1020,8 +1027,10 @@ impl CachingKms {
             .filter(|(_, (of, _))| of == key)
             .map(|(bucket, _)| *bucket)
             .collect();
+        let all_buckets = buckets.is_empty() || buckets.contains(&crate::identity::NAMED);
         self.takings.lock().unwrap().entries.retain(|(cell, _), _| {
-            cell.tenant != tenant || !buckets.contains(&crate::objectid::bucket_of(cell.id))
+            cell.tenant != tenant
+                || (!all_buckets && !buckets.contains(&crate::objectid::bucket_of(cell.id)))
         });
         let callback = self.on_revoked.lock().unwrap().clone();
         if let Some(callback) = callback {
