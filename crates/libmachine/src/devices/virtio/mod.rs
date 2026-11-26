@@ -7,7 +7,6 @@
 
 pub(crate) mod balloon;
 pub(crate) mod extent;
-#[cfg(target_os = "linux")]
 pub(crate) mod net;
 pub(crate) mod pci;
 pub(crate) mod queue;

@@ -55,11 +55,11 @@
     all(target_os = "linux", target_arch = "x86_64"),
     all(target_os = "macos", target_arch = "aarch64")
 ))]
-// On macOS, snapshots, suspensions and the network are KVM's still (board 13399): their code
-// builds there, unused.
+// On macOS, snapshots and suspensions are KVM's still (board 13399): their code builds there,
+// unused.
 #![cfg_attr(
     target_os = "macos",
-    allow(dead_code, reason = "snapshots, suspensions and the network come to HVF in board 13399")
+    allow(dead_code, reason = "snapshots and suspensions come to HVF in board 13399")
 )]
 
 pub mod agent;

@@ -344,6 +344,46 @@ async fn a_balloon_gives_memory_back() {
     daemon.shutdown().await;
 }
 
+/// A machine's network (board 14131, on Hypervisor.framework too): its guest reaches a host
+/// listener its egress rules allow, through its gateway, which stands for the host's loopback,
+/// and is refused one they don't.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_machine_reaches_what_its_network_allows() {
+    let Some((kernel, initramfs)) = guest() else { return };
+    let daemon = Daemon::start_guest(&kernel, &initramfs).await;
+    let mut client = daemon.client.clone();
+    let allowed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = allowed.local_addr().unwrap().port();
+    let denied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let denied_port = denied.local_addr().unwrap().port();
+    let rule = proto::EgressRule {
+        action: proto::EgressAction::Allow.into(),
+        host: "127.0.0.1".into(),
+        first_port: u32::from(port),
+        last_port: u32::from(port),
+    };
+    let spec = proto::MachineSpec {
+        network: Some(proto::Network { egress: vec![rule], ..Default::default() }),
+        ..daemon.spec("quiet libmachine_action=agent").await
+    };
+    create(&mut client, "n", spec).await;
+    client.start_machine(proto::StartMachineRequest { name: "n".into() }).await.unwrap();
+    let served = std::thread::spawn(move || {
+        let (mut conn, _) = allowed.accept().unwrap();
+        let mut got = String::new();
+        conn.read_to_string(&mut got).unwrap();
+        got
+    });
+    let send = format!("echo hello from the guest | nc 10.0.2.1 {port}");
+    let (_, err, exit) = exec(&mut client, "n", &["sh", "-c", &send], None).await.unwrap();
+    assert_eq!(exit, proto::exec_exit::Status::Code(0), "{}", String::from_utf8_lossy(&err));
+    assert_eq!(served.join().unwrap(), "hello from the guest\n");
+    let refused = format!("nc 10.0.2.1 {denied_port} </dev/null");
+    let (_, _, exit) = exec(&mut client, "n", &["sh", "-c", &refused], None).await.unwrap();
+    assert_eq!(exit, proto::exec_exit::Status::Code(1), "a port its rules don't allow");
+    daemon.shutdown().await;
+}
+
 /// Each machine runs in a helper process of its own (board 13460): several at once, on
 /// Hypervisor.framework too; one whose helper dies ends with that said, while machined and the
 /// others run on.
@@ -711,9 +751,7 @@ async fn requests_that_mean_nothing_are_refused() {
         }),
         ..boot("kernel")
     };
-    let bad_rule_code =
-        if cfg!(target_os = "linux") { Code::InvalidArgument } else { Code::Unimplemented };
-    refused.push(("a port past 65535", create("a", bad_rule).await, bad_rule_code));
+    refused.push(("a port past 65535", create("a", bad_rule).await, Code::InvalidArgument));
     refused.push(("made", create("a", boot("kernel")).await, Code::Ok));
     refused.push(("a name taken", create("a", boot("kernel")).await, Code::AlreadyExists));
     let refusals: Vec<_> = refused

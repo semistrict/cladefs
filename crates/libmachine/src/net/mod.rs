@@ -39,15 +39,13 @@
 
 mod decide;
 mod dns;
-#[cfg(all(target_os = "linux", any(test, feature = "fuzzing")))]
+#[cfg(any(test, feature = "fuzzing"))]
 #[doc(hidden)]
 pub mod fuzz;
-#[cfg(target_os = "linux")]
 pub(crate) mod host;
 mod hosts;
 mod log;
 mod policy;
-#[cfg(target_os = "linux")]
 pub(crate) mod stack;
 
 use std::net::Ipv4Addr;

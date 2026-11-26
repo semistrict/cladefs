@@ -16,7 +16,6 @@ use libmachine::{CellId, ExtentCell, ExtentStore, LinuxBoot, MachineConfig};
 use tonic::Status;
 
 use crate::proto;
-use crate::vmm;
 
 /// The longest name of a machine or snapshot.
 const MAX_NAME: usize = 63;
@@ -223,11 +222,6 @@ fn root(spec: &proto::MachineSpec) -> Result<ExtentStore, Status> {
 
 /// A machine's network: its egress rules, as libmachine's policy.
 fn network(network: &proto::Network) -> Result<NetworkConfig, Status> {
-    if !vmm::NETWORK {
-        return Err(Status::unimplemented(
-            "machines on Hypervisor.framework have no network yet (board 13399)",
-        ));
-    }
     if !network.port_forwards.is_empty() {
         return Err(Status::unimplemented(
             "port forwards wait on libmachine's network taking inbound connections (board 13486)",

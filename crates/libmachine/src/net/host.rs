@@ -30,10 +30,9 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
+use crate::sys::{EFD_NONBLOCK, EventFd, Polled, Poller};
 use smoltcp::time::Instant;
 use socket2::{Domain, SockRef, Socket, Type};
-use vmm_sys_util::epoll::{ControlOperation, Epoll, EpollEvent, EventSet};
-use vmm_sys_util::eventfd::{EFD_NONBLOCK, EventFd};
 
 use super::Shared;
 use super::decide::{ConnectionRequest, Decider};
@@ -170,7 +169,7 @@ impl DeciderThread {
 /// lookups and decisions never answer.
 #[derive(Default)]
 pub(crate) struct RealStreams {
-    epoll: Option<Epoll>,
+    epoll: Option<Poller>,
     lookups: Option<(Sender<Lookup>, Arc<EventFd>)>,
     decisions: Option<(Sender<Decided>, Arc<EventFd>)>,
     /// Started at the first question.
@@ -260,13 +259,7 @@ impl RealStreams {
     /// Watches host connection `id` in the network thread's epoll.
     fn watch(&self, id: u64, stream: &TcpStream) -> io::Result<()> {
         if let Some(epoll) = &self.epoll {
-            let events =
-                EventSet::IN | EventSet::OUT | EventSet::READ_HANG_UP | EventSet::EDGE_TRIGGERED;
-            epoll.ctl(
-                ControlOperation::Add,
-                stream.as_raw_fd(),
-                EpollEvent::new(events, CONN_BASE + id),
-            )?;
+            epoll.add_streams(stream.as_raw_fd(), CONN_BASE + id)?;
         }
         Ok(())
     }
@@ -315,16 +308,8 @@ fn lookup(name: &str) -> std::result::Result<Vec<Ipv4Addr>, LookupError> {
 /// A random seed for smoltcp's TCP sequence numbers and ports.
 fn random_seed() -> u64 {
     let mut seed = [0u8; 8];
-    // SAFETY: the kernel writes at most 8 bytes to `seed`. If it fails
-    // (it cannot on a booted Linux), the seed is the time.
-    let n = unsafe { libc::getrandom(seed.as_mut_ptr().cast(), seed.len(), 0) };
-    if n == 8 {
-        u64::from_ne_bytes(seed)
-    } else {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos() as u64)
-    }
+    crate::sys::getrandom(&mut seed);
+    u64::from_ne_bytes(seed)
 }
 
 /// A saved stack to start a network thread from, and the host streams
@@ -363,7 +348,7 @@ impl NetThread {
         shared: Arc<Shared>,
         restore: Option<Restore>,
     ) -> Result<Self> {
-        let epoll = Epoll::new().map_err(io_err("create the network thread's epoll"))?;
+        let epoll = Poller::new().map_err(io_err("create the network thread's poller"))?;
         let stop =
             EventFd::new(EFD_NONBLOCK).map_err(io_err("create the network's stop eventfd"))?;
         let lookup_wake = Arc::new(
@@ -378,9 +363,7 @@ impl NetThread {
             (lookup_wake.as_raw_fd(), LOOKUP),
             (decide_wake.as_raw_fd(), DECIDE),
         ] {
-            epoll
-                .ctl(ControlOperation::Add, fd, EpollEvent::new(EventSet::IN, token))
-                .map_err(io_err("watch the network's eventfds"))?;
+            epoll.add_reads(fd, token).map_err(io_err("watch the network's eventfds"))?;
         }
         let (tx, rx) = mpsc::channel();
         let (decided_tx, decided_rx) = mpsc::channel();
@@ -579,26 +562,33 @@ fn unread(stream: &TcpStream) -> Option<u32> {
     (rc == 0).then(|| u32::try_from(n).unwrap_or(0))
 }
 
-/// Whether the connection is closed in the kernel (TCP_CLOSE: reset, or
-/// closed both ways), from TCP_INFO, which changes nothing (unlike
+/// Whether the connection is closed in the kernel (reset, or closed both ways), from its TCP
+/// state (Linux's TCP_INFO, macOS's TCP_CONNECTION_INFO), which changes nothing (unlike
 /// SO_ERROR, which takes the error away from the stack that will need it).
 fn reset(stream: &TcpStream) -> bool {
-    const TCP_CLOSE: u8 = 7;
-    // SAFETY: an all-zero tcp_info is valid, and getsockopt fills at most
-    // `len` bytes of it.
-    let mut info: libc::tcp_info = unsafe { std::mem::zeroed() };
-    let mut len = std::mem::size_of::<libc::tcp_info>() as libc::socklen_t;
+    #[cfg(target_os = "linux")]
+    type Info = libc::tcp_info;
+    #[cfg(target_os = "macos")]
+    type Info = libc::tcp_connection_info;
+    // Linux's TCP_CLOSE, macOS's TCPS_CLOSED.
+    #[cfg(target_os = "linux")]
+    let (option, closed) = (libc::TCP_INFO, 7u8);
+    #[cfg(target_os = "macos")]
+    let (option, closed) = (libc::TCP_CONNECTION_INFO, 0u8);
+    // SAFETY: an all-zero info is valid, and getsockopt fills at most `len` bytes of it.
+    let mut info: Info = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<Info>() as libc::socklen_t;
     // SAFETY: as above, on an open socket.
     let rc = unsafe {
         libc::getsockopt(
             stream.as_raw_fd(),
             libc::IPPROTO_TCP,
-            libc::TCP_INFO,
+            option,
             (&raw mut info).cast(),
             &mut len,
         )
     };
-    rc == 0 && info.tcpi_state == TCP_CLOSE
+    rc == 0 && info.tcpi_state == closed
 }
 
 /// The answers that come back to the network thread from other threads.
@@ -624,7 +614,7 @@ fn run(
 }
 
 fn serve(link: &Link, stack: &mut Stack<RealStreams>, now: &dyn Fn() -> Instant, wakes: &Wakes) {
-    let mut events = vec![EpollEvent::default(); 64];
+    let mut events: Vec<Polled> = Vec::with_capacity(64);
     loop {
         // While frames wait for room on the link, nothing can go out, and
         // the device's wakeup (or the host's) is what to wait for:
@@ -637,14 +627,12 @@ fn serve(link: &Link, stack: &mut Stack<RealStreams>, now: &dyn Fn() -> Instant,
         let Some(epoll) = stack.host().epoll.as_ref() else {
             return;
         };
-        let n = match epoll.wait(timeout, &mut events) {
-            Ok(n) => n,
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => 0,
-            Err(_) => return,
-        };
+        if epoll.wait(timeout, &mut events).is_err() {
+            return;
+        }
         stack.set_now(now());
-        for event in &events[..n] {
-            match event.data() {
+        for event in &events {
+            match event.token {
                 STOP => return,
                 WAKE => {
                     let _ = link.stack_wake.read();
@@ -662,15 +650,12 @@ fn serve(link: &Link, stack: &mut Stack<RealStreams>, now: &dyn Fn() -> Instant,
                     }
                 }
                 token => {
-                    let set = event.event_set();
                     stack.host_event(
                         token - CONN_BASE,
                         Ready {
-                            readable: set.contains(EventSet::IN),
-                            writable: set.contains(EventSet::OUT),
-                            closed: set.intersects(
-                                EventSet::ERROR | EventSet::HANG_UP | EventSet::READ_HANG_UP,
-                            ),
+                            readable: event.readable,
+                            writable: event.writable,
+                            closed: event.closed,
                         },
                     );
                 }

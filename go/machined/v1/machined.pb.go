@@ -467,7 +467,7 @@ func (x *Boot) GetCommandLine() string {
 // stack, in machined, which makes the guest's TCP connections from the host where the egress
 // rules allow (doc-30, "Host I/O"). The guest is 10.0.2.2/30, its gateway and DNS server
 // 10.0.2.1, which stands for the host's loopback too; the guest's kernel needs `ip=` on its
-// command line (libmachine's README). UNIMPLEMENTED on macOS until board 13399.
+// command line, which libmachine puts there.
 type Network struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The guest's outbound connections, checked against these in order, the first that matches

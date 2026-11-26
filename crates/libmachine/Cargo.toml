@@ -17,6 +17,9 @@ libc.workspace = true
 libcladefs = { path = "../libcladefs" }
 libmachine-agent.workspace = true
 sha2.workspace = true
+# The network's userspace stack and its host sockets (board 14131: on both platforms).
+smoltcp.workspace = true
+socket2.workspace = true
 thiserror.workspace = true
 virtio-queue.workspace = true
 virtio_extent = { path = "../virtio_extent" }
@@ -24,16 +27,14 @@ vm-memory.workspace = true
 vm-superio.workspace = true
 zerocopy.workspace = true
 
-# KVM, the PC platform and the network, Linux's.
+# KVM and the PC platform, Linux's.
 [target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
 acpi_tables.workspace = true
 kvm-bindings.workspace = true
 kvm-ioctls.workspace = true
 linux-loader.workspace = true
-smoltcp.workspace = true
 # Sandbox's (board 13399 brings it to macOS).
 tokio = { workspace = true, features = ["rt", "sync"], optional = true }
-socket2.workspace = true
 vmm-sys-util.workspace = true
 
 # The arm64 platform's device tree (board 13063).

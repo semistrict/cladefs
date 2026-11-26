@@ -40,7 +40,7 @@ pub struct MachineConfig {
     /// Each runs on a host thread of its own. A bare machine
     /// ([`Machine::new`]) has exactly one.
     pub vcpus: u32,
-    /// The guest's network (PC machines only): a virtio-net card whose
+    /// The guest's network (board machines, on KVM and Hypervisor.framework): a virtio-net card whose
     /// other end is a userspace network stack in this process, its
     /// connections made from the host where the policy allows
     /// ([`crate::net`]). None, the default, gives no network card at all.
@@ -919,11 +919,8 @@ impl Machine {
 
         check_mem_size(config.mem_size)?;
         check_vcpus(config.vcpus)?;
-        if config.network.is_some() {
-            return Err(Error::InvalidConfig(
-                "machines on Hypervisor.framework have no network yet; network must be None".into(),
-            ));
-        }
+        let network =
+            config.network.as_ref().map(|n| crate::net::Network::new(n.clone())).transpose()?;
         let (vm, mut vcpus) = backend::Vm::with_el2(
             config.mem_size,
             config.cpu_model,
@@ -938,9 +935,14 @@ impl Machine {
             &boot.kernel,
             boot.initrd.as_deref(),
         )?;
+        // Ours first, so that the caller's can override it.
+        let ours = match network {
+            Some(_) => format!("{BASE_CMDLINE} {}", crate::net::kernel_ip_param()),
+            None => BASE_CMDLINE.to_owned(),
+        };
         let cmdline = match boot.cmdline.as_str() {
-            "" => BASE_CMDLINE.to_owned(),
-            theirs => format!("{BASE_CMDLINE} {theirs}"),
+            "" => ours,
+            theirs => format!("{ours} {theirs}"),
         };
         let mut rng_seed = [0u8; 64];
         crate::sys::getrandom(&mut rng_seed);
@@ -973,6 +975,11 @@ impl Machine {
         let balloon = balloon_device(&config, &vm, &mut devices)?;
         let (vsock_device, vsock) = VsockDevice::new(GUEST_CID)?;
         devices.extend([Box::new(Rng) as Box<dyn VirtioDevice>, Box::new(vsock_device)]);
+        if let Some(network) = &network {
+            use crate::devices::virtio::net::NetDevice;
+            let slot = crate::net::host::NetSlot::default();
+            devices.push(Box::new(NetDevice::new(network.shared(), slot)?));
+        }
         let pci =
             Arc::new(crate::devices::Pci::new(devices, vm.guest_memory(), &vm, &doorbell, bars)?);
         let output = serial::output(config.serial_capture_limit);
@@ -990,6 +997,7 @@ impl Machine {
         )?;
         machine.live_mut()?.pci = Some(pci);
         machine.balloon = balloon;
+        machine.network = network;
         machine.vsock = Some(vsock);
         Ok(machine)
     }

@@ -181,3 +181,172 @@ pub(crate) fn getrandom(buf: &mut [u8]) {
         }
     }
 }
+
+/// What a [`Poller`] found ready.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Polled {
+    pub(crate) token: u64,
+    pub(crate) readable: bool,
+    pub(crate) writable: bool,
+    /// Its peer hung up, or it failed.
+    pub(crate) closed: bool,
+}
+
+/// A set of file descriptors one thread waits on, each with a token: epoll on Linux, kqueue on
+/// macOS. A descriptor is watched for reads ([`Poller::add_reads`], level-triggered: an event's
+/// pipe or eventfd, read till empty when woken), or for reads, writes and hang-ups edge-triggered
+/// ([`Poller::add_streams`]: a socket, its readiness taken till `WouldBlock`).
+pub(crate) struct Poller {
+    fd: std::os::fd::OwnedFd,
+}
+
+impl Poller {
+    pub(crate) fn new() -> io::Result<Self> {
+        use std::os::fd::FromRawFd as _;
+        #[cfg(target_os = "linux")]
+        // SAFETY: a plain system call.
+        let fd = unsafe { libc::epoll_create1(libc::EPOLL_CLOEXEC) };
+        #[cfg(target_os = "macos")]
+        // SAFETY: a plain system call.
+        let fd = unsafe { libc::kqueue() };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: a new descriptor, owned from here.
+        Ok(Self { fd: unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) } })
+    }
+
+    /// Watches `fd` for reads, level-triggered, as `token`.
+    pub(crate) fn add_reads(&self, fd: RawFd, token: u64) -> io::Result<()> {
+        self.add(fd, token, false)
+    }
+
+    /// Watches `fd` for reads, writes and hang-ups, edge-triggered, as `token`.
+    pub(crate) fn add_streams(&self, fd: RawFd, token: u64) -> io::Result<()> {
+        self.add(fd, token, true)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn add(&self, fd: RawFd, token: u64, stream: bool) -> io::Result<()> {
+        use std::os::fd::AsRawFd as _;
+        let events = if stream {
+            libc::EPOLLIN | libc::EPOLLOUT | libc::EPOLLRDHUP | libc::EPOLLET
+        } else {
+            libc::EPOLLIN
+        };
+        let mut event = libc::epoll_event { events: events as u32, u64: token };
+        // SAFETY: `event` is a valid epoll_event.
+        let done = unsafe {
+            libc::epoll_ctl(self.fd.as_raw_fd(), libc::EPOLL_CTL_ADD, fd, &raw mut event)
+        };
+        if done == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn add(&self, fd: RawFd, token: u64, stream: bool) -> io::Result<()> {
+        use std::os::fd::AsRawFd as _;
+        let change = |filter| libc::kevent {
+            ident: fd as libc::uintptr_t,
+            filter,
+            flags: libc::EV_ADD | if stream { libc::EV_CLEAR } else { 0 },
+            fflags: 0,
+            data: 0,
+            udata: token as *mut libc::c_void,
+        };
+        let changes: Vec<libc::kevent> = if stream {
+            vec![change(libc::EVFILT_READ), change(libc::EVFILT_WRITE)]
+        } else {
+            vec![change(libc::EVFILT_READ)]
+        };
+        // SAFETY: `changes` are valid kevents; no events are asked back.
+        let done = unsafe {
+            libc::kevent(
+                self.fd.as_raw_fd(),
+                changes.as_ptr(),
+                changes.len() as libc::c_int,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null(),
+            )
+        };
+        if done < 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
+    }
+
+    /// Waits at most `timeout_ms` (-1: forever) for what is ready, into `out` (emptied first),
+    /// one entry a token. An interrupted wait returns nothing.
+    pub(crate) fn wait(&self, timeout_ms: i32, out: &mut Vec<Polled>) -> io::Result<()> {
+        out.clear();
+        match self.wait_raw(timeout_ms, out) {
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => Ok(()),
+            done => done,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn wait_raw(&self, timeout_ms: i32, out: &mut Vec<Polled>) -> io::Result<()> {
+        use std::os::fd::AsRawFd as _;
+        let mut events = [libc::epoll_event { events: 0, u64: 0 }; 64];
+        // SAFETY: `events` has room for 64.
+        let n =
+            unsafe { libc::epoll_wait(self.fd.as_raw_fd(), events.as_mut_ptr(), 64, timeout_ms) };
+        if n < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        for event in &events[..n as usize] {
+            let set = event.events as i32;
+            out.push(Polled {
+                token: event.u64,
+                readable: set & libc::EPOLLIN != 0,
+                writable: set & libc::EPOLLOUT != 0,
+                closed: set & (libc::EPOLLERR | libc::EPOLLHUP | libc::EPOLLRDHUP) != 0,
+            });
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn wait_raw(&self, timeout_ms: i32, out: &mut Vec<Polled>) -> io::Result<()> {
+        use std::os::fd::AsRawFd as _;
+        // SAFETY: zeroed kevents are valid, to be filled.
+        let mut events: [libc::kevent; 64] = unsafe { std::mem::zeroed() };
+        let timeout = (timeout_ms >= 0).then(|| libc::timespec {
+            tv_sec: libc::time_t::from(timeout_ms / 1000),
+            tv_nsec: libc::c_long::from(timeout_ms % 1000) * 1_000_000,
+        });
+        let timeout_ptr = timeout.as_ref().map_or(std::ptr::null(), |t| t as *const _);
+        // SAFETY: `events` has room for 64; no changes are given.
+        let n = unsafe {
+            libc::kevent(
+                self.fd.as_raw_fd(),
+                std::ptr::null(),
+                0,
+                events.as_mut_ptr(),
+                64,
+                timeout_ptr,
+            )
+        };
+        if n < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        for event in &events[..n as usize] {
+            let token = event.udata as u64;
+            let index = match out.iter().position(|p| p.token == token) {
+                Some(index) => index,
+                None => {
+                    out.push(Polled { token, ..Polled::default() });
+                    out.len() - 1
+                }
+            };
+            let polled = &mut out[index];
+            match event.filter {
+                libc::EVFILT_READ => polled.readable = true,
+                libc::EVFILT_WRITE => polled.writable = true,
+                _ => {}
+            }
+            if event.flags & (libc::EV_EOF | libc::EV_ERROR) != 0 {
+                polled.closed = true;
+            }
+        }
+        Ok(())
+    }
+}

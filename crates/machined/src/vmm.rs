@@ -32,9 +32,6 @@ use crate::helper::wire::{self, Event, How, Request, event, request};
 /// An answer of the helper's: a balloon's state, answering a Balloon request.
 type Answered = Result<Option<crate::proto::BalloonStatus>, Status>;
 
-/// Whether machines here can have a network: on KVM alone (board 13399).
-pub(crate) const NETWORK: bool = cfg!(target_os = "linux");
-
 /// The largest file read from a guest through its agent: what a guest sends is untrusted.
 pub(crate) const MAX_FILE: usize = 64 << 20;
 

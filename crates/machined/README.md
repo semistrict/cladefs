@@ -44,8 +44,8 @@ machine (FAILED, saying how its process ended) while machined and the others run
 end with machined. `Machine.pid` is a running machine's helper.
 
 On macOS `machined-vm` must be signed with the hypervisor entitlement, as every macOS executable
-of this workspace is as it links (`scripts/macos-link.sh`). There, machines have no network and
-can't be snapshotted or suspended yet (board 13399: UNIMPLEMENTED).
+of this workspace is as it links (`scripts/macos-link.sh`). There, machines can't be snapshotted
+or suspended yet (board 13399: UNIMPLEMENTED).
 
 ## Who may call it
 
@@ -131,6 +131,6 @@ hotbed places on machined's runtime.
 
 hotbed's worker runs each workspace as a Firecracker VM today (`internal/vm` in hotbed); machined
 is to run them on a Mac. Beyond what machined offers: a
-network on Hypervisor.framework (board 13399), port forwards into the guest (board 13486), and machines that
+port forwards into the guest (board 13486), and machines that
 outlive a machined restart (board 13492). hotbed's guestd boots from a read-only tools disk under
 Firecracker; under machined it comes in the initramfs (`Boot.initramfs`).
