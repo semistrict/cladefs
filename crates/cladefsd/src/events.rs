@@ -46,7 +46,7 @@ const RECONCILE_CELL_TIMEOUT: Duration = Duration::from_millis(150);
 const RECONCILE_CONCURRENCY: usize = 16;
 
 /// Starts the process default daemon's background `events` poller.
-#[cfg(all(target_os = "linux", not(madsim)))]
+#[cfg(not(madsim))]
 pub fn start() -> anyhow::Result<()> {
     start_on(Daemon::process())
 }

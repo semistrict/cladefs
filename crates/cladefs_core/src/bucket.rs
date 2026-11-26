@@ -892,7 +892,6 @@ impl Unreached {
 }
 
 /// cladefs: how many open cells' uploaders run on `host`, as it changes (TASK-141.4).
-#[cfg(any(target_os = "linux", madsim))]
 pub fn uploaders_on(host: &crate::Host) -> tokio::sync::watch::Receiver<usize> {
     local_cell::upload::uploaders_on(host.local())
 }

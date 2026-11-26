@@ -56,6 +56,7 @@ pub(super) fn configure_on(daemon: &Daemon) -> Result<(), String> {
 /// cladefs: [`configure_on`] for the process's default daemon (tests).
 #[cfg(not(madsim))]
 #[cfg(test)]
+#[cfg(target_os = "linux")]
 pub(super) fn configure() -> Result<(), String> {
     configure_on(Daemon::process())
 }

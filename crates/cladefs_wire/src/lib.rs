@@ -6,20 +6,14 @@
 
 #![deny(clippy::undocumented_unsafe_blocks)]
 
-#[cfg(target_os = "linux")]
 pub mod client;
-#[cfg(any(target_os = "linux", madsim))]
 pub mod codec;
-#[cfg(target_os = "linux")]
 pub mod device;
-#[cfg(any(target_os = "linux", madsim))]
 pub mod in_flight;
+// cladefs: a VM's memory as a cell, restored as the cell's window: userfaultfd's, Linux's.
 #[cfg(target_os = "linux")]
 pub mod memory_cell;
-#[cfg(any(target_os = "linux", madsim))]
 pub mod wire;
 
-#[cfg(target_os = "linux")]
 pub use client::{CellClient, DaemonConnection, Unmapped, spawn_on_replies};
-#[cfg(target_os = "linux")]
 pub use device::DaemonDevice;

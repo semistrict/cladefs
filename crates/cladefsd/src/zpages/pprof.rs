@@ -188,6 +188,8 @@ mod tests {
     /// gave the thread a fifth of a CPU-second, about 20 samples, by its own CPU clock: a loaded
     /// host gave it next to none once, and the profile was empty (board 2924). A profile that
     /// misses a thread that ran fails.
+    // cladefs: a thread's CPU clock (`pthread_getcpuclockid`), which macOS has not.
+    #[cfg(target_os = "linux")]
     #[test]
     fn profiles_say_what_ran() {
         #[inline(never)]

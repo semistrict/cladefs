@@ -66,8 +66,8 @@ pub struct Daemon {
     pub(super) fast_wal: Mutex<Option<Option<(local_cell::fast_wal::FastWalConfig, u64)>>>,
     /// The daemon's part cache, opened once from `CLADEFSD_PART_CACHE`.
     pub(super) part_cache: Mutex<Option<Option<Arc<Cache>>>>,
-    /// Listening VM socket FDs shut down on drain.
-    pub(super) accepting: Mutex<Vec<std::os::fd::RawFd>>,
+    /// Listening VM socket FDs, and what stops their accepts, stopped on drain.
+    pub(super) accepting: Mutex<Vec<(std::os::fd::RawFd, Arc<server::StopAccepting>)>>,
     /// Total active VM connections across all tenants.
     pub(super) connected: Mutex<usize>,
     /// Default tenant, created on first VM connection to the daemon's own socket.
@@ -114,8 +114,8 @@ pub struct Daemon {
     pub(super) process: Mutex<process::State>,
     /// Pages dirtied writing the periodic stats file (`CLADEFSD_STATS`).
     pub(super) stats_written: AtomicU64,
-    /// FUSE mount state (outside `madsim`).
-    #[cfg(not(madsim))]
+    /// FUSE mount state (Linux's, outside `madsim`).
+    #[cfg(all(target_os = "linux", not(madsim)))]
     pub(super) mount: crate::mount::State,
     /// Number of times `kept_or_open` opened a version/kept cell store (TASK-549, board 2494).
     #[cfg(test)]
@@ -168,7 +168,7 @@ impl Daemon {
             stats_reports: Mutex::new(Vec::new()),
             process: process::State::new(),
             stats_written: AtomicU64::new(0),
-            #[cfg(not(madsim))]
+            #[cfg(all(target_os = "linux", not(madsim)))]
             mount: crate::mount::State::default(),
             #[cfg(test)]
             kept_opens: AtomicU64::new(0),
@@ -223,6 +223,24 @@ impl Daemon {
         }
     }
 
+    /// cladefs: runs `future` on this daemon's runtime, which the returned future waits for,
+    /// on whatever executor, or none (`futures::executor::block_on`): what a process embedding the
+    /// daemon awaits of it from its own runtime, where [`Daemon::block_on`] would panic (board
+    /// 13471). A panic of `future`'s is the caller's again.
+    #[cfg(not(madsim))]
+    pub async fn run<F>(&self, future: F) -> F::Output
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        match self.spawn(future).await {
+            Ok(output) => output,
+            Err(failed) if failed.is_panic() => std::panic::resume_unwind(failed.into_panic()),
+            // Cancelled: only the runtime's going cancels it, which only the daemon's does.
+            Err(failed) => panic!("the daemon's runtime went, running a caller's work: {failed}"),
+        }
+    }
+
     /// Spawns `future` on this daemon's runtime (outside `madsim`) or on the current `madsim`
     /// node's runtime (under `madsim`).
     pub(super) fn spawn<F>(&self, future: F) -> tokio::task::JoinHandle<F::Output>
@@ -270,7 +288,8 @@ impl Daemon {
 
     /// Checks whether the daemon's [`crate::disks::DiskPool`] (if configured) currently has a
     /// writable disk that accepts new cells (`ENOSPC` if all disks are draining/read-only/full).
-    #[cfg(not(madsim))]
+    // cladefs: the FUSE mount's (`fuse_control`): Linux's.
+    #[cfg(all(target_os = "linux", not(madsim)))]
     pub(crate) fn check_disk_placement(&self) -> Result<(), cladefs_core::Errno> {
         if let Some(pool) = self.disk_pool.get() {
             drop(pool.pick_disk()?);
@@ -281,7 +300,8 @@ impl Daemon {
     /// Resolves `cell`'s existing path in [`crate::disks::DiskPool`], or picks an eligible
     /// `ReadWrite` disk and prepares `<disk>/cells/<TENANT>/<CELL>`. Returns `Ok(None)` when no
     /// managed disk pool is configured (standalone `cladefs-mount`).
-    #[cfg(not(madsim))]
+    // cladefs: the FUSE mount's (`fuse_control`): Linux's.
+    #[cfg(all(target_os = "linux", not(madsim)))]
     pub(crate) fn resolve_or_pick_cell_path(
         &self,
         cell: cladefs_core::CellId,
@@ -298,7 +318,8 @@ impl Daemon {
     }
 
     /// Registers `cell` at `path` in this daemon's [`crate::disks::DiskPool`], if configured.
-    #[cfg(not(madsim))]
+    // cladefs: the FUSE mount's (`fuse_control`): Linux's.
+    #[cfg(all(target_os = "linux", not(madsim)))]
     pub(crate) fn register_cell_path(&self, cell: cladefs_core::CellId, path: PathBuf) {
         if let Some(pool) = self.disk_pool.get() {
             pool.register_cell(cell, path);
@@ -326,18 +347,75 @@ impl Daemon {
     }
 
     /// Boots this daemon serving VM processes at `socket`, with `memory` bytes fixed or governed.
-    #[cfg(any(target_os = "linux", madsim))]
     pub async fn boot(self: &Arc<Self>, socket: &Path, memory: Option<u64>) -> anyhow::Result<()> {
         crate::boot::boot_daemon(self, socket, memory).await
     }
 
     /// Boots this daemon from a validated TOML [`crate::config::Config`] (hotbed question 547).
-    #[cfg(any(target_os = "linux", madsim))]
     pub async fn boot_with_config(
         self: &Arc<Self>,
         config: cladefs_core::config::Config,
     ) -> anyhow::Result<()> {
         crate::boot::boot_with_config(self, config).await
+    }
+
+    /// cladefs: boots this daemon from a validated [`cladefs_core::config::Config`], embedded in
+    /// this process (libcladefs, board 13471): as [`Daemon::boot_with_config`], but serving VM
+    /// processes at `daemon.vm_socket` only if it names one; the process connects its own devices
+    /// ([`Daemon::connect_in_process`]) and hands it others ([`Daemon::serve_vm_process`]).
+    pub async fn boot_embedded(
+        self: &Arc<Self>,
+        config: cladefs_core::config::Config,
+    ) -> anyhow::Result<()> {
+        crate::boot::boot_embedded(self, config).await
+    }
+
+    /// cladefs: a connection of this process's own to the daemon, of its default tenant, served
+    /// as a VM process's is: an end of an anonymous socket pair, which a
+    /// [`crate::DaemonConnection`] opens a cell over (board 13471).
+    #[cfg(not(madsim))]
+    pub fn connect_in_process(self: &Arc<Self>) -> std::io::Result<std::os::unix::net::UnixStream> {
+        let tenant = server::default_tenant_on(self).map_err(std::io::Error::other)?;
+        server::connect_in_memory(tenant)
+    }
+
+    /// cladefs: serves the VM process at the other end of `stream`, of the default tenant, as one
+    /// connecting to its socket is: a socket the process handed a VM process it started (board
+    /// 13460).
+    #[cfg(not(madsim))]
+    pub fn serve_vm_process(
+        self: &Arc<Self>,
+        stream: std::os::unix::net::UnixStream,
+    ) -> std::io::Result<()> {
+        server::serve_stream_on(self, stream).map_err(std::io::Error::other)
+    }
+
+    /// cladefs: serves VM processes connecting to a new socket at `socket`, of the default
+    /// tenant, which only this process's user may connect to (TASK-155), on a thread of its own,
+    /// until the daemon drains: as cladefsd serves its VM socket.
+    #[cfg(not(madsim))]
+    pub fn serve_vm_socket(self: &Arc<Self>, socket: &Path) -> anyhow::Result<()> {
+        use anyhow::Context;
+        let listener = crate::bind_owner_only(socket)
+            .with_context(|| format!("listening at {}", socket.display()))?;
+        let serving = Arc::clone(self);
+        crate::run::thread("cladefsd vms", move || server::serve_on(&serving, listener))?;
+        Ok(())
+    }
+
+    /// cladefs: the daemon's control API, its services (Cladefsd, health, its FUSE mount's
+    /// Mount), for a process embedding it to serve on an endpoint of its own; the sockets of the
+    /// tenants it grants in the directory `tenants`, made if it isn't there (board 13471).
+    #[cfg(not(madsim))]
+    pub async fn control_routes(
+        self: &Arc<Self>,
+        tenants: PathBuf,
+    ) -> anyhow::Result<tonic::service::Routes> {
+        use anyhow::Context;
+        let made = tenants.clone();
+        local_cell::upload::blocking(move || host_fs::create_dir_all_durably(&made))
+            .with_context(|| format!("making {}", tenants.display()))?;
+        Ok(control::routes(Arc::clone(self), tenants).await)
     }
 
     /// Drains this daemon within `within`.
@@ -356,7 +434,10 @@ impl Daemon {
         listener: std::os::unix::net::UnixListener,
         tenant: Arc<server::Tenant>,
     ) {
-        server::serve_tenant_on(self, listener, tenant);
+        match server::StopAccepting::new() {
+            Ok(stop) => server::serve_tenant_on(self, listener, tenant, stop),
+            Err(err) => log::error!("cladefsd: serving a tenant's VM socket: {err}: serving none"),
+        }
     }
 
     /// Serves the control API on `listener` for this daemon (outside `madsim`).

@@ -8,7 +8,8 @@
 //! The daemon serves on threads of this process: its control socket, and a VM socket, whose
 //! connections, VM processes here, have cells open.
 
-#![cfg(target_os = "linux")]
+// cladefs: the daemon's, on Linux and macOS (board 13065).
+#![cfg(not(madsim))]
 
 mod common;
 
@@ -1002,6 +1003,7 @@ fn cells_are_made_replicated_through_the_control_api() {
 /// What a guest of today says of its stats, as its Fxfs and its driver write them: its device's
 /// and its window's requests timed (a count, nanoseconds, a histogram of 24 buckets each), and the
 /// rest of its counters, some 50 lines and 12 histograms in all.
+#[cfg(target_os = "linux")]
 fn todays_guest() -> String {
     let mut text = String::new();
     for (n, timed) in ["device_reads", "device_writes", "device_commits", "seal_waits", "seals"]
@@ -1024,6 +1026,7 @@ fn todays_guest() -> String {
 
 /// What a guest says of its stats near the most it may (`MAX_STATS`, 64 KiB): 2,000 counters, and
 /// 100 histograms of 24 buckets.
+#[cfg(target_os = "linux")]
 fn full_guest() -> String {
     let mut text = String::new();
     for n in 0..2_000 {
@@ -1043,6 +1046,7 @@ fn full_guest() -> String {
 /// a guest says some 40 KiB (40,568), as the .proto says. Past the most the daemon sends, here lowered to 2 MiB, it is
 /// refused, RESOURCE_EXHAUSTED (EMSGSIZE), saying what to leave out, until enough is.
 #[test]
+#[cfg(target_os = "linux")]
 fn stats_of_many_vms_are_taken_and_bounded() {
     use std::sync::Arc;
     const VMS: usize = 120;
@@ -1127,6 +1131,7 @@ fn stats_of_many_vms_are_taken_and_bounded() {
 /// without touching `MemoryCell::import` in Rust: zero pages stored as holes, contents read back
 /// intact through a fork, and bad files / missing files refused.
 #[test]
+#[cfg(target_os = "linux")]
 fn memory_cells_through_the_control_api() {
     // SAFETY: nextest runs each test in a process of its own, whose other threads don't read the
     // environment yet.
@@ -1568,6 +1573,7 @@ fn disk_pool_governs_multiple_disks_placement_and_caps() {
 /// multiple `[[disks]]`, enforces per-disk caps and placement modes on startup, and exposes them
 /// through `ListDisks`.
 #[test]
+#[cfg(target_os = "linux")]
 fn cladefsd_boots_from_toml_config_with_per_disk_governance() {
     use std::process::Command;
     use std::time::{Duration, Instant};

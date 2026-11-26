@@ -4,7 +4,8 @@
 
 //! A restored VM's bucket page-in and the request that waited for it are exported together.
 
-#![cfg(target_os = "linux")]
+// cladefs: the daemon's, on Linux and macOS (board 13065).
+#![cfg(not(madsim))]
 
 mod common;
 

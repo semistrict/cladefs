@@ -75,7 +75,6 @@ pub async fn make_base(
 }
 
 /// cladefs: makes a base at `path` on `host`, its cell kept as `keeping` says (TASK-237).
-#[cfg_attr(not(any(target_os = "linux", madsim)), allow(dead_code))]
 pub async fn make_base_keeping_on(
     host: &std::sync::Arc<cladefs_core::Host>,
     path: impl AsRef<Path>,
@@ -108,7 +107,6 @@ pub async fn import_memory(
 /// cladefs: makes a memory cell at `path` on `host` as [`import_memory`] does, of `tenant`'s, kept
 /// as `keeping` says (board 11222); when `ephemeral` is true, creates a standalone host-local
 /// ephemeral memory cell with zero bucket uploads (`make_version` must be false).
-#[cfg_attr(not(any(target_os = "linux", madsim)), allow(dead_code))]
 pub async fn import_memory_keeping_on(
     host: &std::sync::Arc<cladefs_core::Host>,
     path: &Path,

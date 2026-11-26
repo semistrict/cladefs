@@ -175,8 +175,9 @@ jobs:
   # scripts/test.sh's parts as a Mac runs them: what cladefs compiles for macOS alone, and its tests,
   # ran on laptops alone, so a regression there landed green (TASK-149.20.2): the slabs' arenas'
   # files (doc-26), extent_store's syncs (F_FULLFSYNC), extent_bucket's cache, cladefs's storage I/O; and the
-  # daemon's build under madsim, which runs on Macs too, its default 20 seeds (board 2912). The
-  # guest's, the VMM's and the daemon's own are Linux's.
+  # daemon's build under madsim, which runs on Macs too, its default 20 seeds (board 2912); and the
+  # daemon itself, embedded (libcladefs) and as cladefsd, its client and their tests but those of
+  # Linux's features (board 13065). The guest's and the VMM's are Linux's.
   macos:
     name: macos (${{ matrix.parts }})
     needs: firecracker-lock

@@ -9,7 +9,8 @@
 //! as opening a cell another process has open does (`local_cell::Dir::take`), rather than
 //! recover the cell from under it.
 
-#![cfg(target_os = "linux")]
+// cladefs: the daemon's, on Linux and macOS (board 13065).
+#![cfg(not(madsim))]
 
 use cladefs::{CellClient, ExtentId, OpenCell, VolatileSlice, VolatileSliceMut};
 use std::path::{Path, PathBuf};

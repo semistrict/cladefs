@@ -1133,7 +1133,8 @@ fn members_are_reached_on_one_connection_whatever_the_cells() {
 /// cladefs: the tests' peer credentials, known to all, never a host's (`tests/peer-tls`): the
 /// hosts' CA's, and another's.
 fn fixtures(other: bool) -> std::path::PathBuf {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/peer-tls");
+    // cladefs: the fixtures stayed in crates/cladefs as crates/cladefs split (board 13065).
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../cladefs/tests/peer-tls");
     if other { dir.join("other") } else { dir }
 }
 

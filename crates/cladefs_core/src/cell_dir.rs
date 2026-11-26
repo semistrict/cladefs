@@ -19,7 +19,6 @@
 use crate::error::{Errno, Result};
 use base32_id::{Padded, Short};
 use local_cell::{Dir as _, File as _};
-#[cfg(any(target_os = "linux", madsim, test))]
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::io;
@@ -304,7 +303,6 @@ pub fn inherit_attached_on(
 
 /// What a cell given up to a migration says of it, in its marker (`cladefsd::migration`): what
 /// asking the target again takes, after a restart too.
-#[cfg(any(target_os = "linux", madsim, test))]
 #[derive(Clone, Debug)]
 pub struct Marker {
     pub migration: u64,
@@ -315,7 +313,6 @@ pub struct Marker {
 
 /// A marker as its file holds it, in JSON: its version, of cladefs's records in a cell directory
 /// ([`FORMAT`], doc-28), then the marker's fields, none other.
-#[cfg(any(target_os = "linux", madsim, test))]
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MarkerFile {
@@ -326,7 +323,6 @@ struct MarkerFile {
     token: u64,
 }
 
-#[cfg(any(target_os = "linux", madsim, test))]
 impl Marker {
     /// Its file's bytes.
     pub fn bytes(&self) -> Vec<u8> {

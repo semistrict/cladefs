@@ -12,16 +12,22 @@ use crate::codec::{
 };
 use crate::wire::*;
 use bucket_cell::cell::Kind;
+#[cfg(target_os = "linux")]
+use cladefs_core::Prefault;
+#[cfg(target_os = "linux")]
 use cladefs_core::dax::Faults;
-use cladefs_core::dax::uffd::{FaultThread, UffdSecondStage};
+#[cfg(target_os = "linux")]
+use cladefs_core::dax::uffd::{FaultThread, UffdSecondStage as WindowStage};
 use cladefs_core::error::{Errno, Error, Result};
 use cladefs_core::hearing::Occurrence;
 use cladefs_core::{
-    CellId, CellSnapshot, CellVersion, Commit, ExtentId, ExtentInfo, MappingContents, Prefault,
-    SecondStage, VolatileSlice, VolatileSliceMut, WindowMapping, WriteBarriers,
+    CellId, CellSnapshot, CellVersion, Commit, ExtentId, ExtentInfo, MappingContents, SecondStage,
+    VolatileSlice, VolatileSliceMut, WindowMapping, WriteBarriers,
 };
 use futures::channel::oneshot;
 use futures::future::BoxFuture;
+#[cfg(not(target_os = "linux"))]
+use no_window::{NoFaultThread as FaultThread, NoStage as WindowStage};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::os::fd::{AsFd, OwnedFd};
@@ -54,6 +60,7 @@ pub struct CellClient {
     /// says ([`Opened`]), which its window budgets its own by, sharing them with this process's
     /// other windows, its other cells' (`dax::uffd::Mappings`, board 8493): this process, in a jail
     /// without /proc, can't read it (TASK-172).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code, reason = "a window's: Linux's"))]
     max_map_count: Option<u64>,
 }
 
@@ -651,6 +658,7 @@ impl CellClient {
     ///
     /// The memory must be a page-aligned mapping that nothing else in the process uses, and that
     /// outlives the cell.
+    #[cfg(target_os = "linux")]
     pub unsafe fn create_dax_window_in_host_memory(
         &self,
         base: NonNull<u8>,
@@ -670,6 +678,7 @@ impl CellClient {
     /// # Safety
     ///
     /// As [`Self::create_dax_window_in_host_memory`]'s.
+    #[cfg(target_os = "linux")]
     pub unsafe fn create_memory_window_in_host_memory(
         &self,
         base: NonNull<u8>,
@@ -688,6 +697,7 @@ impl CellClient {
     /// # Safety
     ///
     /// As [`Self::create_dax_window_in_host_memory`]'s.
+    #[cfg(target_os = "linux")]
     unsafe fn create_window(
         &self,
         base: NonNull<u8>,
@@ -710,7 +720,7 @@ impl CellClient {
         let phys = cladefs_core::dax::uffd::Memories::Given(memories);
         // SAFETY: As the caller promises.
         let stage = unsafe {
-            UffdSecondStage::new(base.as_ptr() as usize, size, phys, prefault, self.max_map_count)
+            WindowStage::new(base.as_ptr() as usize, size, phys, prefault, self.max_map_count)
         }?;
         stage.copy_on_write(private_max)?;
         // cladefs: a VM's memory's window, every write a guest's (TASK-456.3).
@@ -1011,7 +1021,7 @@ struct Client {
     /// cladefs: signaled as replies come, making room for requests ([`Waiting::has_room`]), to
     /// those waiting for it ([`Waiting::for_room`]).
     room: std::sync::Condvar,
-    stage: OnceLock<Arc<UffdSecondStage>>,
+    stage: OnceLock<Arc<WindowStage>>,
     /// cladefs: what making the stage operations cost this process, which it tells the daemon
     /// (TASK-91.16).
     stage_counts: StageCosts,
@@ -1034,7 +1044,7 @@ impl Client {
     /// A client of the daemon at the other end of `stream`, receiving on a thread of its own.
     fn start(stream: UnixStream) -> std::io::Result<Arc<Self>> {
         let client = Arc::new(Self {
-            sender: Sender::new(stream.try_clone()?),
+            sender: Sender::new(stream.try_clone()?)?,
             next: AtomicU64::new(1),
             waiting: Mutex::new(Some(Waiting::default())),
             room: std::sync::Condvar::new(),
@@ -1295,6 +1305,11 @@ impl Client {
         // The requests waiting fail, as do those made from now on.
         self.waiting.lock().unwrap().take();
         self.room.notify_all();
+        // cladefs: and a send under way, waiting for room in the socket, fails too: its end shut
+        // down here, as the daemon's shutting down its own fails no send on macOS (a BSD's), where
+        // it waited for good, a daemon that let the VM process go reading nothing more (board
+        // 13065). On Linux the daemon's shutdown failed it already.
+        self.sender.shutdown();
         // Where a test has what the failing requests do come before the rest of the connection's
         // end (TASK-231, TASK-232).
         fail::fail_point!("client::requests_failed");
@@ -1341,6 +1356,7 @@ impl Client {
 
     /// cladefs: tells the daemon its window's budget as it is now, which another window of its
     /// process coming or going changed (board 10098).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code, reason = "a window's: Linux's"))]
     fn tell_budget(&self) {
         // Closing, it tells nothing more: its socket is shut down (hotbed review 133).
         if self.closing.load(Ordering::Acquire) {
@@ -1449,7 +1465,7 @@ impl StageCosts {
 
     /// The runs of private pages `stage` made, if any, and the `PRIVATE`s served, as
     /// [`STAGE_PRIVATE_COUNTS`] says them.
-    fn private(&self, stage: Option<&Arc<UffdSecondStage>>) -> PrivateCosts {
+    fn private(&self, stage: Option<&Arc<WindowStage>>) -> PrivateCosts {
         let load = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
         let [runs, pages, ns] = stage.map_or([0; 3], |stage| stage.private_costs());
         [runs, pages, ns, load(&self.private_requests), load(&self.private_request_ns)]
@@ -1497,33 +1513,10 @@ impl Transfer {
         Self::SLOT * Self::SLOTS
     }
 
-    /// A transfer area, mapped, and its memory, sealed at its size.
+    /// A transfer area, mapped, and its memory, fixed at its size ([`fixed_shared_memory`]).
     fn make() -> std::io::Result<(Self, std::fs::File)> {
         let len = Self::SLOT * Self::SLOTS;
-        // SAFETY: The name is a C string.
-        let fd = unsafe {
-            libc::memfd_create(
-                c"cladefs-transfer".as_ptr(),
-                libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
-            )
-        };
-        if fd < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        // SAFETY: Just created, and owned here.
-        let fd = unsafe { <OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(fd) };
-        let file = std::fs::File::from(fd);
-        file.set_len(len as u64)?;
-        // Sealed at its size: the daemon maps it only so, as it would fault past a new end.
-        // cladefs: not against more seals, as the daemon seals it against writes once it mapped it
-        // (TASK-547).
-        let seals = libc::F_SEAL_SHRINK | libc::F_SEAL_GROW;
-        // SAFETY: Seals the descriptor's memory, which this process made.
-        if unsafe { libc::fcntl(std::os::fd::AsRawFd::as_raw_fd(&file), libc::F_ADD_SEALS, seals) }
-            != 0
-        {
-            return Err(std::io::Error::last_os_error());
-        }
+        let file = fixed_shared_memory(len as u64)?;
         // SAFETY: Maps the shared memory, of its size.
         let addr = unsafe {
             libc::mmap(
@@ -1568,6 +1561,74 @@ impl Transfer {
         }
         Some(Slot(Arc::new(TakenSlot { transfer: transfer.clone(), index })))
     }
+}
+
+/// cladefs: shared memory of `len` bytes, which no process can shrink, as a transfer area's must
+/// not, as the daemon maps it only so and would fault past a new end. On Linux, a memfd sealed at
+/// its size: not against more seals, as the daemon seals it against writes once it mapped it
+/// (TASK-547). On macOS, which has no memfd nor seals, a POSIX shared memory object, unlinked as
+/// it is made: the kernel resizes one never again once it is sized, which the daemon checks
+/// (`server::seals`, board 13065, hotbed question 566).
+#[cfg(target_os = "linux")]
+fn fixed_shared_memory(len: u64) -> std::io::Result<std::fs::File> {
+    // SAFETY: The name is a C string.
+    let fd = unsafe {
+        libc::memfd_create(
+            c"cladefs-transfer".as_ptr(),
+            libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: Just created, and owned here.
+    let fd = unsafe { <OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(fd) };
+    let file = std::fs::File::from(fd);
+    file.set_len(len)?;
+    let seals = libc::F_SEAL_SHRINK | libc::F_SEAL_GROW;
+    // SAFETY: Seals the descriptor's memory, which this process made.
+    if unsafe { libc::fcntl(std::os::fd::AsRawFd::as_raw_fd(&file), libc::F_ADD_SEALS, seals) } != 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(file)
+}
+
+/// cladefs: [`fixed_shared_memory`] on macOS: a POSIX shared memory object, of a name of this
+/// process's alone, unlinked at once, then sized once and for all.
+#[cfg(not(target_os = "linux"))]
+fn fixed_shared_memory(len: u64) -> std::io::Result<std::fs::File> {
+    use std::os::fd::FromRawFd;
+    /// How many this process made, which names each apart from the others.
+    static MADE: AtomicU64 = AtomicU64::new(0);
+    let made = MADE.fetch_add(1, Ordering::Relaxed);
+    // Within macOS's 31 bytes of a name (PSHMNAMLEN).
+    let name = format!("/cladefs-{:x}-{made:x}", std::process::id());
+    let name = std::ffi::CString::new(name).map_err(std::io::Error::other)?;
+    // SAFETY: The name is a C string; the mode an int, as the variadic call takes it. Not
+    // `O_CLOEXEC`, which macOS's `shm_open` refuses (`EINVAL`): set below.
+    let fd = unsafe {
+        libc::shm_open(
+            name.as_ptr(),
+            libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
+            0o600 as libc::c_uint,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: Just created, and owned here.
+    let file = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) });
+    // SAFETY: Sets a flag of the descriptor this process just made.
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: Unlinks the name just made, whose object `file` keeps.
+    if unsafe { libc::shm_unlink(name.as_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    file.set_len(len)?;
+    Ok(file)
 }
 
 impl Drop for Transfer {
@@ -1643,6 +1704,7 @@ impl Drop for TakenSlot {
 }
 
 /// The window's faults, which the daemon resolves.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code, reason = "a window's: Linux's"))]
 struct DaemonFaults {
     client: Arc<Client>,
     size: u64,
@@ -1661,6 +1723,7 @@ pub trait Unmapped: Send + Sync {
 }
 
 impl DaemonFaults {
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code, reason = "a window's: Linux's"))]
     fn fault_with(&self, fault: Fault) -> BoxFuture<'_, Result<()>> {
         let Some(unmapped) = &self.unmapped else {
             let reply = self.client.request(&Request::Fault(fault));
@@ -1674,6 +1737,7 @@ impl DaemonFaults {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Faults for DaemonFaults {
     fn size(&self) -> u64 {
         self.size
@@ -1689,5 +1753,74 @@ impl Faults for DaemonFaults {
 
     fn lost(&self) -> bool {
         self.client.lost.happened()
+    }
+}
+
+/// cladefs: a VM process's window on macOS, where it has none: the VMM there is its window's second
+/// stage itself (Hypervisor.framework, board 13069), not this process's userfaultfd's. Its stage
+/// and fault thread are never made ([`CellClient`] makes no window there), so they hold no value:
+/// every use of one is a `match` of nothing, and a client without a window does what it does
+/// without one on Linux.
+#[cfg(not(target_os = "linux"))]
+mod no_window {
+    use super::DaemonFaults;
+    use cladefs_core::dax::{Anew, Private};
+    use cladefs_core::error::{Errno, Result};
+    use cladefs_core::pages::PhysLocation;
+
+    /// A window's second stage that is never made.
+    pub(super) enum NoStage {}
+
+    /// A thread serving a window's faults that is never started.
+    pub(super) enum NoFaultThread {}
+
+    impl NoStage {
+        pub(super) async fn make_private(
+            &self,
+            _: &DaemonFaults,
+            _: u64,
+            _: u64,
+        ) -> Result<(), Errno> {
+            match *self {}
+        }
+        pub(super) fn private_runs(&self) -> Result<Vec<std::ops::Range<u64>>> {
+            match *self {}
+        }
+        pub(super) fn private_pages(&self) -> u64 {
+            match *self {}
+        }
+        pub(super) fn private_costs(&self) -> [u64; 3] {
+            match *self {}
+        }
+        pub(super) fn prefault(&self, _: u64, _: u64) {
+            match *self {}
+        }
+        pub(super) fn budget(&self) -> usize {
+            match *self {}
+        }
+        pub(super) fn size(&self) -> u64 {
+            match *self {}
+        }
+        pub(super) fn taken(&self) -> [u64; 2] {
+            match *self {}
+        }
+        pub(super) fn installed(&self) -> u64 {
+            match *self {}
+        }
+        pub(super) fn release(&self) {
+            match *self {}
+        }
+    }
+
+    impl cladefs_core::SecondStage for NoStage {
+        fn map(&self, _: u64, _: PhysLocation, _: u64) {
+            match *self {}
+        }
+        fn unmap(&self, _: u64, _: u64, _: Private) {
+            match *self {}
+        }
+        fn remap(&self, _: u64, _: u64, _: Private, _: &[Anew]) {
+            match *self {}
+        }
     }
 }

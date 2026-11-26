@@ -96,13 +96,10 @@ pub(super) async fn serve_control_async(
 }
 
 /// cladefs: serves the control API for `daemon`, as [`serve_control_async`] does, to the
-/// connections `incoming` accepts: through `super::run::accepting`, an accept failing as the host
+/// connections `incoming` accepts: through `crate::run::accepting`, an accept failing as the host
 /// may get over tried again after a pause, logged once (board 9760), where tonic passed each
 /// over at once, a busy loop holding one of the runtime's threads while the descriptors stayed
-/// short; one of the listener's own ends it, returned.
-/// cladefs: and the Mount service of the daemon's FUSE mount of cells, if it has one
-/// ([`super::mount`], TASK-475.2): its calls, counted and refused as the daemon drains as the
-/// API's are; without a mount, they fail `UNIMPLEMENTED`.
+/// short; one of the listener's own ends it, returned. Its services are [`routes`]'.
 #[cfg(not(madsim))]
 pub(super) async fn serve_control_with(
     daemon: Arc<Daemon>,
@@ -112,13 +109,27 @@ pub(super) async fn serve_control_with(
     + 'static,
     tenants: PathBuf,
 ) -> std::io::Result<()> {
+    let routes = routes(daemon, tenants).await;
+    let failed = Arc::new(std::sync::OnceLock::new());
+    let incoming = crate::run::accepting("a control API caller's", incoming, failed.clone());
+    let served =
+        tonic::transport::Server::builder().add_routes(routes).serve_with_incoming(incoming).await;
+    crate::run::accepted_until("the control API's listener", served, failed)
+}
+
+/// cladefs: the control API's services for `daemon`, the sockets of the tenants it grants in the
+/// directory `tenants`: Cladefsd, tonic's health service, its status reported as the daemon
+/// serves VM processes or stops, and the Mount service of the daemon's FUSE mount of cells, if it
+/// has one ([`crate::mount`], TASK-475.2), whose calls, without a mount, fail `UNIMPLEMENTED`.
+/// Each call counted and refused as the daemon drains. What cladefsd serves on its control socket
+/// ([`serve_control_with`]), and an embedder on an endpoint of its own (libcladefs, board 13471).
+#[cfg(not(madsim))]
+pub(crate) async fn routes(daemon: Arc<Daemon>, tenants: PathBuf) -> tonic::service::Routes {
     let control = Control {
         daemon: Arc::clone(&daemon),
         grants: Arc::new(Grants::new(Arc::clone(&daemon), tenants)),
     };
     let (reporter, health) = tonic_health::server::health_reporter();
-    let failed = Arc::new(std::sync::OnceLock::new());
-    let incoming = crate::run::accepting("a control API caller's", incoming, failed.clone());
     // Its first status reported before it serves: the reporter starts with the server's, "",
     // SERVING, which a check served before a task of its own reported otherwise saw.
     let mut serving = daemon.serving.subscribe();
@@ -144,10 +155,7 @@ pub(super) async fn serve_control_with(
         }
     });
     daemon.control_serving.store(true, std::sync::atomic::Ordering::Release);
-    let mount =
-        crate::mount::service_on(&daemon).map(|mount| Served::new(Drained::new(&daemon, mount)));
-    let served = tonic::transport::Server::builder()
-        .add_service(health)
+    let routes = tonic::service::Routes::new(health)
         // cladefs: no answer encoded past MAX_MESSAGE_BYTES (board 8581): what grows refuses
         // first, saying what to leave out (`bounded`); any other, OUT_OF_RANGE, tonic's. Its
         // calls counted and traced, refusals as the daemon drains among them (board 8565,
@@ -155,12 +163,14 @@ pub(super) async fn serve_control_with(
         .add_service(Served::new(Drained::new(
             &daemon,
             CladefsdServer::new(control).max_encoding_message_size(MAX_MESSAGE_BYTES),
-        )))
-        // cladefs: its FUSE mount's, if it mounts cells (TASK-475.2).
-        .add_optional_service(mount)
-        .serve_with_incoming(incoming)
-        .await;
-    crate::run::accepted_until("the control API's listener", served, failed)
+        )));
+    // cladefs: its FUSE mount's, if it mounts cells (TASK-475.2): Linux's.
+    #[cfg(target_os = "linux")]
+    let routes = match crate::mount::service_on(&daemon) {
+        Some(mount) => routes.add_service(Served::new(Drained::new(&daemon, mount))),
+        None => routes,
+    };
+    routes
 }
 
 /// cladefs: serves `daemon`'s control API, as [`serve_control`] does, on the simulated network at

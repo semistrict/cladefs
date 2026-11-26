@@ -6,8 +6,6 @@
 //! window, soft-dip idle-only protection, rate-limited cold mapped shrink, refault thrash backoff,
 //! and own-cgroup OOM guard.
 
-#![cfg(any(target_os = "linux", madsim))]
-
 use cladefs::cladefsd::governor::{
     HostMemory, INTERVAL, MAPPED_SHRINK_MAX, MAPPED_SHRINK_MIN, MemoryPressure, MemorySample,
     PolicyState, REFAULT_THRASH_ENTER, REFAULT_THRASH_EXIT, ReclaimMode, RefaultWindow,

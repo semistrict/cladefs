@@ -8,7 +8,8 @@
 //! daemon goes on, and other tenants' writes do; what leaves the disk lets the tenant write again.
 //! Its metrics show each tenant's disk by its ID.
 
-#![cfg(target_os = "linux")]
+// cladefs: the daemon's, on Linux and macOS (board 13065).
+#![cfg(not(madsim))]
 
 mod common;
 

@@ -213,9 +213,23 @@ pub(super) async fn boot_with_config(
     daemon: &Arc<Daemon>,
     config: cladefs_core::config::Config,
 ) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        config.daemon.vm_socket.is_some(),
+        "daemon.vm_socket is required in TOML config"
+    );
+    boot_embedded(daemon, config).await
+}
+
+/// cladefs: boots `daemon` as [`boot_with_config`] does, embedded in a process of another's
+/// (libcladefs, board 13471): a VM socket only if `daemon.vm_socket` names one, the process
+/// serving VM processes in its own ways otherwise (`Daemon::connect_in_process`,
+/// `Daemon::serve_vm_process`), and serving from its boot on.
+pub(super) async fn boot_embedded(
+    daemon: &Arc<Daemon>,
+    config: cladefs_core::config::Config,
+) -> anyhow::Result<()> {
     config.validate_for_daemon().map_err(anyhow::Error::msg)?;
-    let socket =
-        config.daemon.vm_socket.clone().context("daemon.vm_socket is required in TOML config")?;
+    let socket = config.daemon.vm_socket.clone();
     let host = cladefs_core::bucket::Host::from_env().map_err(anyhow::Error::msg)?;
     cladefs_core::bucket::require_kms_on(&daemon.host).map_err(anyhow::Error::msg)?;
     #[cfg(not(madsim))]
@@ -335,18 +349,13 @@ pub(super) async fn boot_with_config(
     #[cfg(not(madsim))]
     crate::http::start_on(daemon)?;
 
-    #[cfg(not(madsim))]
-    let listener = crate::bind_owner_only(&socket)
-        .with_context(|| format!("listening at {}", socket.display()))?;
-    #[cfg(madsim)]
-    let _ = socket;
-    #[cfg(not(madsim))]
-    {
-        let serving = Arc::clone(daemon);
-        crate::run::thread("cladefsd vms", move || crate::server::serve_on(&serving, listener))?;
+    match socket {
+        // cladefs: under madsim, which has no Unix sockets, its guests connect in memory.
+        Some(socket) if !cfg!(madsim) => daemon.serve_vm_socket(&socket)?,
+        _ => {
+            daemon.serving.send_replace(true);
+        }
     }
-    #[cfg(madsim)]
-    daemon.serving.send_replace(true);
     Ok(())
 }
 

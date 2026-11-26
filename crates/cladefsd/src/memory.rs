@@ -1024,6 +1024,7 @@ pub(super) fn in_flight_of_a_tenant(daemon: &Daemon) -> InFlight {
 #[cfg(test)]
 mod tests {
     /// The process's anonymous memory resident, in bytes, as /proc says.
+    #[cfg(target_os = "linux")]
     fn anonymous() -> u64 {
         let status = std::fs::read_to_string("/proc/self/status").unwrap();
         let line = status.lines().find_map(|line| line.strip_prefix("RssAnon:")).unwrap();

@@ -751,8 +751,10 @@ pub fn stream_bytes(header: &Header) -> u64 {
 }
 
 /// cladefs: the most bytes a path a request names has, as [`path`] takes it: shorter than
-/// `PATH_MAX`.
-const MOST_PATH: u64 = libc::PATH_MAX as u64 - 1;
+/// Linux's `PATH_MAX`, on every host, so that the wire is one on Linux and macOS (whose
+/// `PATH_MAX` is 1024: a longer path decodes there, then fails to open, `ENAMETOOLONG`; board
+/// 13065).
+const MOST_PATH: u64 = 4096 - 1;
 
 /// cladefs: the most bytes of payload a message of `header` carries, as its kind and flags decode
 /// one, [`REQUEST_BYTES`] more if it says its guest request (board 8459): of the header alone, as
@@ -804,7 +806,6 @@ pub fn guest_request(message: &Message) -> Result<(Option<NonZeroU64>, &[u8]), E
 
 /// cladefs: the bytes a [`REQUEST`] says the guest request `guest` in (TASK-260): a VM process's
 /// client's, Linux's alone.
-#[cfg(target_os = "linux")]
 pub fn request_bytes(guest: NonZeroU64) -> [u8; REQUEST_BYTES] {
     guest.get().to_le_bytes()
 }
@@ -817,7 +818,7 @@ fn path(bytes: &[u8]) -> Result<PathBuf, Errno> {
     }
     // cladefs: no longer than a path is, before it is copied: a payload of up to MAX_PAYLOAD
     // bytes would be held twice, its copy uncounted (TASK-614).
-    if bytes.len() >= libc::PATH_MAX as usize {
+    if bytes.len() as u64 > MOST_PATH {
         return Err(Errno::ENAMETOOLONG);
     }
     Ok(PathBuf::from(std::ffi::OsStr::from_bytes(bytes)))
@@ -884,7 +885,6 @@ pub struct StageCounts {
 }
 
 impl StageCounts {
-    #[cfg(target_os = "linux")]
     fn to_body(self) -> StageCountsBody {
         let [ops, ns, overwrites, leave_outs] = self.costs;
         StageCountsBody {
@@ -914,7 +914,6 @@ impl StageCounts {
 pub type PrivateCosts = [u64; 5];
 
 impl Made {
-    #[cfg(target_os = "linux")]
     pub fn encode(&self) -> Header {
         match *self {
             Made::Ack { id, counts } => Header::new(ACK, id).with_body(&counts.to_body()),

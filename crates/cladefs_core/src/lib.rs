@@ -47,7 +47,6 @@ pub mod protocol;
 pub mod request;
 #[cfg(all(test, feature = "shuttle"))]
 mod shuttle_testing;
-#[cfg(target_os = "linux")]
 pub mod signals;
 pub mod slabs;
 #[cfg(target_os = "linux")]
@@ -60,7 +59,6 @@ pub mod test_checkpoints;
 pub mod test_data;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
-#[cfg(target_os = "linux")]
 pub mod thread;
 
 pub use bucket_cell::layout::CellId;

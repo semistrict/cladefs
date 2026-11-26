@@ -93,22 +93,16 @@
 #[global_allocator]
 static ALLOCATOR: cladefs_core::heap::Bounded = cladefs_core::heap::Bounded;
 
-#[cfg(any(target_os = "linux", madsim))]
 mod boot;
 pub mod cells;
-// cladefs: a VM process's, whose memory and faults are Linux's (memfd, userfaultfd): no simulated
-// host has one, its guests calling it in memory (`guest`, board 2912).
-#[cfg(target_os = "linux")]
 pub use cladefs_wire::client;
 pub use cladefs_wire::codec;
 pub mod control;
 mod daemon;
-#[cfg(target_os = "linux")]
 pub use cladefs_wire::device;
 pub mod disk;
 pub mod disks;
 pub mod drain;
-#[cfg(any(target_os = "linux", madsim))]
 pub mod events;
 pub mod governor;
 mod grants;
@@ -147,12 +141,10 @@ use std::sync::Arc;
 #[cfg(all(target_os = "linux", not(madsim)))]
 pub use boot::boot;
 pub use cells::replace_after;
-#[cfg(target_os = "linux")]
 pub use client::{CellClient, DaemonConnection, Unmapped, spawn_on_replies};
 #[cfg(not(madsim))]
 pub use control::serve_control;
 pub use daemon::Daemon;
-#[cfg(target_os = "linux")]
 pub use device::DaemonDevice;
 pub use http::Pages;
 #[cfg(not(madsim))]
@@ -195,11 +187,16 @@ pub async fn stop_serving() {
 }
 
 /// cladefs: shuts `listener`, a listening socket's descriptor, down, which takes no more
-/// connections: its accepts fail with `EINVAL`, those of every descriptor of it, which stop serving
-/// it (`server::serve_as`), and connecting to it is refused. As a tenant's grant is revoked, and
-/// the daemon drains.
+/// connections: on Linux, its accepts fail with `EINVAL`, those of every descriptor of it, which
+/// stop serving it (`server::serve_as`), and connecting to it is refused. As a tenant's grant is
+/// revoked, and the daemon drains (`server::StopAccepting`).
 pub(crate) fn shut_down(listener: std::os::fd::BorrowedFd<'_>) {
     use std::os::fd::AsRawFd;
+    // cladefs: macOS shuts no listener down (`ENOTCONN`): its accepts stop otherwise
+    // (`server::StopAccepting`, board 13065).
+    if cfg!(not(target_os = "linux")) {
+        return;
+    }
     // SAFETY: A plain system call on a descriptor borrowed, open.
     if unsafe { libc::shutdown(listener.as_raw_fd(), libc::SHUT_RDWR) } != 0 {
         log::warn!(
@@ -276,12 +273,40 @@ pub fn raise_open_files_limit() -> std::io::Result<()> {
         if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) != 0 {
             return Err(std::io::Error::last_os_error());
         }
-        limit.rlim_cur = limit.rlim_max;
+        limit.rlim_cur = most_open_files(limit.rlim_max)?;
         if libc::setrlimit(libc::RLIMIT_NOFILE, &limit) != 0 {
             return Err(std::io::Error::last_os_error());
         }
     }
     Ok(())
+}
+
+/// cladefs: the most open files a process may set its limit to, given its hard limit `hard`:
+/// that, on Linux; on macOS, whose hard limit is often unlimited, at most the kernel's most a
+/// process (`kern.maxfilesperproc`), past which `setrlimit` refuses (board 13065).
+fn most_open_files(hard: libc::rlim_t) -> std::io::Result<libc::rlim_t> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut most: libc::c_int = 0;
+        let mut len = size_of::<libc::c_int>();
+        // SAFETY: Reads an int-sized sysctl into `most`, of `len` bytes.
+        let read = unsafe {
+            libc::sysctlbyname(
+                c"kern.maxfilesperproc".as_ptr(),
+                (&raw mut most).cast(),
+                &mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if read != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let most = libc::rlim_t::try_from(most).map_err(std::io::Error::other)?;
+        return Ok(hard.min(most));
+    }
+    #[cfg(not(target_os = "macos"))]
+    Ok(hard)
 }
 
 /// cladefs: the cells a daemon has room to keep open at least, their files at their most (board
@@ -318,7 +343,7 @@ pub fn open_files_floor() -> u64 {
 
 /// cladefs: refuses a limit of open files under [`open_files_floor`], naming it (board 8595): the
 /// soft limit, which `raise_open_files_limit` raises to the hard one before the daemon boots.
-#[cfg(all(target_os = "linux", not(madsim)))]
+#[cfg(not(madsim))]
 fn require_open_files() -> anyhow::Result<()> {
     let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
     // SAFETY: A plain system call writing the process's limit into `limit`.
@@ -331,7 +356,7 @@ fn require_open_files() -> anyhow::Result<()> {
         limit.rlim_cur >= floor,
         "RLIMIT_NOFILE: the limit of open files is {}, under the {floor} the extent daemon needs to \
          start ({OWN_OPEN_FILES} of its own, and room for {FLOOR_CELLS} cells' files): raise its \
-         hard limit (LimitNOFILE= of its systemd unit, or ulimit -Hn)",
+         hard limit (LimitNOFILE= of its systemd unit, or ulimit -Hn; on macOS, kern.maxfilesperproc too)",
         limit.rlim_cur
     );
     Ok(())

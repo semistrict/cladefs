@@ -491,7 +491,6 @@ impl ExtentCache {
 
     /// Monotonic counter bumped whenever a cached part becomes present or a window unmaps an
     /// extent (used by `IdleOnly` governance to avoid rescanning when no idle extents can exist).
-    #[cfg_attr(not(any(target_os = "linux", madsim)), allow(dead_code))]
     pub fn idle_change_seq(&self) -> u64 {
         self.idle_change_seq.load(Ordering::Relaxed)
     }

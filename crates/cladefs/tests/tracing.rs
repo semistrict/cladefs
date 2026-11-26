@@ -12,7 +12,8 @@
 //! its collector fails to answer; and a control call's W3C trace context the parent of the daemon's
 //! span of it.
 
-#![cfg(target_os = "linux")]
+// cladefs: the daemon's, on Linux and macOS (board 13065).
+#![cfg(not(madsim))]
 
 use cladefs::{CellClient, ExtentId, OpenCell, VolatileSlice};
 use std::collections::BTreeSet;
@@ -72,6 +73,7 @@ fn collector_over(
 
 /// cladefs: the TLS of a collector of the tests' own CA (`tests/otlp-tls`), for `localhost` and
 /// `127.0.0.1`.
+#[cfg(target_os = "linux")]
 fn collector_tls() -> Arc<rustls::ServerConfig> {
     use rustls::pki_types::pem::PemObject as _;
     use rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -248,6 +250,8 @@ fn the_daemon_exports_nothing_with_traces_off() {
 /// cladefs: board 8569: an `https://` collector takes the daemon's spans, its certificate of a CA
 /// `SSL_CERT_FILE` names: the exporter's TLS is the feature this crate names, which before came
 /// only from another crate's turning reqwest's on.
+// cladefs: macOS's verifier refuses the tests' certificate (board 13592).
+#[cfg(target_os = "linux")]
 #[test]
 fn the_daemon_exports_its_spans_over_https() {
     let dir = tempfile::tempdir().unwrap();

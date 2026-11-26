@@ -7,7 +7,8 @@
 //! uploaded, as a host upgrading its daemon needs. Before, the daemon exited at once, its cell as
 //! a crash leaves it: an ordered commit made just before not uploaded, nor perhaps durable.
 
-#![cfg(target_os = "linux")]
+// cladefs: the daemon's binary, on Linux and macOS (board 13065).
+#![cfg(not(madsim))]
 
 use cladefs::{CellClient, ExtentId, OpenCell, VolatileSlice, VolatileSliceMut};
 use std::path::{Path, PathBuf};

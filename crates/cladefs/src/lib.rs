@@ -12,16 +12,16 @@ compile_error!(
     "cladefs's `tests-kms` in a release build, whose hosts would encrypt under KEKs known to all:      build a package alone (`-p PACKAGE`), not across the workspace, whose dev-dependencies turn      it on (TASK-411.28)"
 );
 
+#[cfg(target_os = "linux")]
+pub use cladefs_core::stacks;
 pub use cladefs_core::{
     BUILD_COMMIT, bucket, config, faults, host, pages, protocol, request, slabs, stats,
 };
-#[cfg(target_os = "linux")]
-pub use cladefs_core::{signals, stacks, thread};
+pub use cladefs_core::{signals, thread};
 pub use cladefs_fs::import;
 #[cfg(target_os = "linux")]
 pub use cladefs_wire::memory_cell;
 
-#[cfg(any(target_os = "linux", madsim))]
 pub use cladefsd;
 
 /// FUSE filesystem server and (on Linux) multi-cell mount control API.
@@ -54,5 +54,4 @@ pub use cladefs_fs::{
     Attr, Compactions, DirEntry, FileType, Filesystem, Inode, Node, Options, Owner, RenameFlags,
     SetAttr, SetTime, StatFs, Storage, TreeCompactions, XattrMode,
 };
-#[cfg(target_os = "linux")]
 pub use cladefs_wire::{CellClient, DaemonConnection, DaemonDevice, Unmapped};

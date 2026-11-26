@@ -19,17 +19,11 @@
 //! version, so none is optional: a refusal of one fails the connection.
 
 use std::io;
-use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
-use std::sync::Mutex;
-// cladefs: a Unix stream's, Linux's alone: the VM process's half, as its client is
-// (`super::client`), and the daemon's outside the simulation, whose guests' connections are in
-// memory, macOS's included (board 2912).
-#[cfg(target_os = "linux")]
 use std::io::{Read, Write};
-#[cfg(target_os = "linux")]
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
-#[cfg(target_os = "linux")]
 use std::os::unix::net::UnixStream;
+use std::sync::Mutex;
 
 /// cladefs: a VM process's connection in memory, under madsim (doc-24).
 #[cfg(madsim)]
@@ -75,6 +69,7 @@ impl Socket {
     fn writing(stream: Stream) -> io::Result<Self> {
         #[cfg(not(madsim))]
         {
+            no_sigpipe(&stream)?;
             // SAFETY: `stream` is moved into `AsyncFd` and owns the socket descriptor, so it stays
             // valid and open until `AsyncFd` drops and deregisters it before closing `stream`.
             let fd = unsafe {
@@ -747,7 +742,6 @@ pub const STATS: u32 = 31;
 pub const STATS_GUEST: u32 = 1 << 0;
 /// cladefs: the most bytes of a guest's stats a [`STATS`] carries, many times what the guest's
 /// Fxfs says (a few KiB).
-#[cfg(any(target_os = "linux", test))]
 pub const MAX_STATS: usize = cladefs_core::protocol::MAX_STATS;
 /// cladefs: maps each mapping the payload holds, as a reply to [`MAPPINGS`] has them, in order,
 /// each as [`MAP`] would, in one change of the window: the first that fails fails the request,
@@ -764,7 +758,6 @@ pub const MAP_MANY: u32 = 32;
 pub const STAGE_PRIVATE_COUNTS: u32 = 33;
 /// cladefs: how long a VM process's stage operations go uncounted at most while it makes them
 /// ([`STAGE_COUNTS`]): within a sample of the daemon's stats file (`CLADEFSD_STATS`).
-#[cfg(target_os = "linux")]
 pub const STAGE_COUNTS_EVERY: std::time::Duration = std::time::Duration::from_millis(500);
 
 pub const OPEN_CREATE: u32 = 1 << 0;
@@ -905,11 +898,13 @@ pub struct Message {
 
 /// The sending half of a VM process's connection, which any of its threads sends whole messages
 /// through, each waiting for room as the socket fills: the daemon's is an [`AsyncSender`].
-/// cladefs: Linux's alone, as its client is.
-#[cfg(target_os = "linux")]
-pub struct Sender(Mutex<SenderInner>);
+pub struct Sender {
+    inner: Mutex<SenderInner>,
+    /// cladefs: its stream's descriptor, which [`Sender::shutdown`] shuts down without the lock a
+    /// send waiting for room in the socket holds: the stream's, open as long as this is.
+    raw: RawFd,
+}
 
-#[cfg(target_os = "linux")]
 struct SenderInner {
     stream: UnixStream,
     /// Bounded scratch buffer for streaming volatile write payloads without gathering multi-MiB
@@ -918,13 +913,13 @@ struct SenderInner {
 }
 
 /// The most bytes [`Sender::send_stream`] copies at once from guest memory into the socket.
-#[cfg(target_os = "linux")]
 const STREAM_CHUNK: usize = 64 << 10;
 
-#[cfg(target_os = "linux")]
 impl Sender {
-    pub fn new(stream: UnixStream) -> Self {
-        Self(Mutex::new(SenderInner { stream, scratch: Vec::new() }))
+    pub fn new(stream: UnixStream) -> io::Result<Self> {
+        no_sigpipe(&stream)?;
+        let raw = stream.as_raw_fd();
+        Ok(Self { inner: Mutex::new(SenderInner { stream, scratch: Vec::new() }), raw })
     }
 
     /// Sends `header`, with `payload` as its payload, and `fds`, at most [`MAX_FDS`].
@@ -960,7 +955,7 @@ impl Sender {
         let suffix_len: u64 = suffix.iter().map(|part| part.len() as u64).sum();
         header.len = prefix_len + stream_len + suffix_len;
         header.fds = fds.len() as u32;
-        let mut inner = self.0.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap();
         let SenderInner { stream, scratch } = &mut *inner;
         let header_bytes = header.as_bytes();
         // The daemon's connections are non-blocking, for their receivers (TASK-34): a full one is
@@ -996,10 +991,12 @@ impl Sender {
         Ok(())
     }
 
-    /// Shuts the connection down, which ends its receiver's messages.
+    /// Shuts the connection down, which ends its receiver's messages; cladefs: and fails a send
+    /// waiting for room in the socket, whose lock it doesn't wait for.
     pub fn shutdown(&self) {
-        // Shut down already, or never connected: nothing more to end.
-        let _ = self.0.lock().unwrap().stream.shutdown(std::net::Shutdown::Both);
+        // SAFETY: A plain system call on the stream's descriptor, open as long as `self` is.
+        // Shut down already, or never connected (`ENOTCONN`): nothing more to end.
+        let _ = unsafe { libc::shutdown(self.raw, libc::SHUT_RDWR) };
     }
 }
 
@@ -1315,7 +1312,7 @@ impl Drop for AsyncSender {
 
 /// Whether the other end of the stream `fd` hung up, though its receiving end may not have read so
 /// yet. cladefs: a Unix stream's, outside the simulation, whose connections are in memory.
-#[cfg(not(madsim))]
+#[cfg(all(target_os = "linux", not(madsim)))]
 pub fn hung_up(fd: BorrowedFd<'_>) -> bool {
     let mut poll = libc::pollfd { fd: fd.as_raw_fd(), events: libc::POLLRDHUP, revents: 0 };
     // SAFETY: Polls a descriptor the caller keeps open, without waiting.
@@ -1323,8 +1320,116 @@ pub fn hung_up(fd: BorrowedFd<'_>) -> bool {
     ready > 0 && poll.revents & (libc::POLLRDHUP | libc::POLLHUP | libc::POLLERR) != 0
 }
 
-/// Waits until `stream` takes more bytes.
+/// Whether the other end of the stream `fd` hung up, as on Linux: macOS has no `POLLRDHUP`, but
+/// its kqueue says the end of what the other end sends (`EV_EOF` of a read filter), whatever
+/// this end has not read yet.
+#[cfg(all(target_os = "macos", not(madsim)))]
+pub fn hung_up(fd: BorrowedFd<'_>) -> bool {
+    // SAFETY: Makes a kqueue, owned below.
+    let queue = unsafe { libc::kqueue() };
+    if queue < 0 {
+        log::warn!(
+            "cladefsd: asking whether a connection hung up: kqueue: {}",
+            io::Error::last_os_error()
+        );
+        return false;
+    }
+    // SAFETY: Just made, and owned here.
+    let queue = unsafe { OwnedFd::from_raw_fd(queue) };
+    // SAFETY: A zeroed kevent is a valid empty one.
+    let mut change: libc::kevent = unsafe { std::mem::zeroed() };
+    change.ident = fd.as_raw_fd() as libc::uintptr_t;
+    change.filter = libc::EVFILT_READ;
+    change.flags = libc::EV_ADD;
+    // SAFETY: As above.
+    let mut event: libc::kevent = unsafe { std::mem::zeroed() };
+    let now = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: Registers `fd`, which the caller keeps open, and reads at most one event, without
+    // waiting.
+    let ready = unsafe { libc::kevent(queue.as_raw_fd(), &change, 1, &mut event, 1, &now) };
+    if ready < 0 {
+        log::warn!(
+            "cladefsd: asking whether a connection hung up: kevent: {}",
+            io::Error::last_os_error()
+        );
+        return false;
+    }
+    ready > 0 && event.flags & (libc::EV_EOF | libc::EV_ERROR) != 0
+}
+
+/// cladefs: what every `sendmsg` of a connection's asks: that a connection whose other end went
+/// fail it (`EPIPE`) rather than signal the process (`SIGPIPE`), which ends one that doesn't
+/// ignore it; on macOS, which has no such flag, the socket says so once ([`no_sigpipe`]).
 #[cfg(target_os = "linux")]
+const SEND_FLAGS: libc::c_int = libc::MSG_NOSIGNAL;
+#[cfg(not(target_os = "linux"))]
+const SEND_FLAGS: libc::c_int = 0;
+
+/// cladefs: what every `recvmsg` of a connection's asks: its descriptors close-on-exec as they
+/// come, on Linux; on macOS each once it came ([`receive_with_fds`]).
+#[cfg(target_os = "linux")]
+const RECEIVE_FLAGS: libc::c_int = libc::MSG_CMSG_CLOEXEC;
+#[cfg(not(target_os = "linux"))]
+const RECEIVE_FLAGS: libc::c_int = 0;
+
+/// cladefs: what a connection's socket is given once, as its sending half is made: on macOS,
+/// that its writes to a connection whose other end went fail (`EPIPE`) rather than signal the
+/// process (`SIGPIPE`, `SO_NOSIGPIPE`), which on Linux each write's flag asks ([`SEND_FLAGS`]);
+/// and buffers as large as Linux gives a Unix stream by default (`net.core.wmem_default`), where
+/// macOS gives it 8 KiB each way (`net.local.stream.sendspace`), in which a run of a window's
+/// stage operations, or a burst of requests, waits for every few messages (board 13065).
+fn no_sigpipe(stream: &impl AsFd) -> io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let set = |option: libc::c_int, value: libc::c_int| {
+            // SAFETY: Sets an option of a socket the caller keeps open, from an int on the stack.
+            let set = unsafe {
+                libc::setsockopt(
+                    stream.as_fd().as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    option,
+                    (&raw const value).cast(),
+                    size_of::<libc::c_int>() as libc::socklen_t,
+                )
+            };
+            if set != 0 {
+                let err = io::Error::last_os_error();
+                // macOS refuses a socket's options once its other end went (`EINVAL`).
+                #[cfg(not(madsim))]
+                if err.raw_os_error() == Some(libc::EINVAL) && hung_up(stream.as_fd()) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::ConnectionAborted,
+                        "its other end went",
+                    ));
+                }
+                return Err(err);
+            }
+            Ok(())
+        };
+        set(libc::SO_NOSIGPIPE, 1)?;
+        set(libc::SO_SNDBUF, SOCKET_BUFFER)?;
+        set(libc::SO_RCVBUF, SOCKET_BUFFER)?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = stream;
+    Ok(())
+}
+
+/// cladefs: the bytes of each of a connection's socket's buffers on macOS ([`no_sigpipe`]).
+#[cfg(target_os = "macos")]
+const SOCKET_BUFFER: libc::c_int = 256 << 10;
+
+/// cladefs: has the descriptor `fd`, just received, close on exec (macOS: [`receive_with_fds`]).
+#[cfg(not(target_os = "linux"))]
+fn close_on_exec(fd: RawFd) -> io::Result<()> {
+    // SAFETY: Sets a flag of a descriptor this process owns.
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Waits until `stream` takes more bytes.
 fn wait_writable(stream: &UnixStream) -> io::Result<()> {
     let mut poll = libc::pollfd { fd: stream.as_raw_fd(), events: libc::POLLOUT, revents: 0 };
     loop {
@@ -1340,7 +1445,6 @@ fn wait_writable(stream: &UnixStream) -> io::Result<()> {
 }
 
 /// Writes all of `bytes` to `stream`, blocking or not, waiting for room as it fills.
-#[cfg(target_os = "linux")]
 fn write_all(stream: &UnixStream, mut bytes: &[u8]) -> io::Result<()> {
     while !bytes.is_empty() {
         match (&*stream).write(bytes) {
@@ -1355,14 +1459,12 @@ fn write_all(stream: &UnixStream, mut bytes: &[u8]) -> io::Result<()> {
 }
 
 /// Sends what of `bytes` one `sendmsg` does, with `fds`: how many bytes it sent, at least one.
-#[cfg(target_os = "linux")]
 fn send_with_fds(stream: &UnixStream, bytes: &[u8], fds: &[BorrowedFd<'_>]) -> io::Result<usize> {
     send_parts(stream, &[bytes], fds)
 }
 
 /// Sends what of `parts`, in order, one `sendmsg` does, with `fds`: how many bytes it sent, at
 /// least one.
-#[cfg(target_os = "linux")]
 fn send_parts(stream: &UnixStream, parts: &[&[u8]], fds: &[BorrowedFd<'_>]) -> io::Result<usize> {
     let mut iov: Vec<libc::iovec> = (parts.iter())
         .map(|part| libc::iovec { iov_base: part.as_ptr() as *mut _, iov_len: part.len() })
@@ -1392,7 +1494,7 @@ fn send_parts(stream: &UnixStream, parts: &[&[u8]], fds: &[BorrowedFd<'_>]) -> i
     }
     loop {
         // SAFETY: `msg` points at live buffers for the call.
-        let sent = unsafe { libc::sendmsg(stream.as_raw_fd(), &msg, libc::MSG_NOSIGNAL) };
+        let sent = unsafe { libc::sendmsg(stream.as_raw_fd(), &msg, SEND_FLAGS) };
         if sent >= 0 {
             return Ok(sent as usize);
         }
@@ -1407,9 +1509,7 @@ fn send_parts(stream: &UnixStream, parts: &[&[u8]], fds: &[BorrowedFd<'_>]) -> i
 /// reads what the socket holds, many messages at once, rather than a message's header and payload
 /// each a read (TASK-91.16): a VM process's stage operations come in runs, a window change's
 /// together. The descriptors that come with what it reads it keeps, in order, for the messages
-/// that say they carry them ([`Header::fds`]). cladefs: a VM process's, Linux's alone, as its client
-/// is (`super::client`).
-#[cfg(target_os = "linux")]
+/// that say they carry them ([`Header::fds`]).
 pub struct Receiver {
     stream: UnixStream,
     /// What it read and has not received yet: `buffer[start..end]`.
@@ -1421,10 +1521,8 @@ pub struct Receiver {
 }
 
 /// cladefs: the bytes a [`Receiver`] reads at most at once.
-#[cfg(target_os = "linux")]
 const RECEIVE_BYTES: usize = 64 << 10;
 
-#[cfg(target_os = "linux")]
 impl Receiver {
     pub fn new(stream: UnixStream) -> Self {
         let buffer = vec![0; RECEIVE_BYTES].into_boxed_slice();
@@ -1571,8 +1669,9 @@ impl AsyncReceiver {
 }
 
 /// Receives what of `bytes` one `recvmsg` does, and the descriptors that came with them.
-/// cladefs: Linux's (`MSG_CMSG_CLOEXEC`), as a Unix stream's VM process is.
-#[cfg(target_os = "linux")]
+/// cladefs: each close-on-exec: as it comes on Linux (`MSG_CMSG_CLOEXEC`); on macOS, which has no
+/// such flag, once it came, a moment in which a thread of this process's forking and executing
+/// another program would leak it to that program.
 fn receive_with_fds(
     stream: &UnixStream,
     bytes: &mut [u8],
@@ -1591,7 +1690,7 @@ fn receive_with_fds(
     let received = loop {
         // SAFETY: `msg` points at live buffers for the call.
         let received =
-            unsafe { libc::recvmsg(stream.as_raw_fd(), &mut msg, libc::MSG_CMSG_CLOEXEC | flags) };
+            unsafe { libc::recvmsg(stream.as_raw_fd(), &mut msg, RECEIVE_FLAGS | flags) };
         if received >= 0 {
             break received as usize;
         }
@@ -1612,6 +1711,8 @@ fn receive_with_fds(
                 for index in 0..count {
                     let raw = std::ptr::read_unaligned(data.add(index));
                     fds.push(OwnedFd::from_raw_fd(raw));
+                    #[cfg(not(target_os = "linux"))]
+                    close_on_exec(raw)?;
                 }
             }
             cmsg = libc::CMSG_NXTHDR(&msg, cmsg);
@@ -1624,8 +1725,9 @@ fn receive_with_fds(
 #[cfg(test)]
 pub fn pair() -> ((Sender, Receiver), (Sender, Receiver)) {
     let (a, b) = UnixStream::pair().unwrap();
-    let ends =
-        |stream: UnixStream| (Sender::new(stream.try_clone().unwrap()), Receiver::new(stream));
+    let ends = |stream: UnixStream| {
+        (Sender::new(stream.try_clone().unwrap()).unwrap(), Receiver::new(stream))
+    };
     (ends(a), ends(b))
 }
 
@@ -1750,7 +1852,7 @@ mod tests {
         wire_bytes.extend_from_slice(&payload);
         let writer = std::thread::spawn(move || {
             for chunk in wire_bytes.chunks(17) {
-                write_all(&sender.0.lock().unwrap().stream, chunk).unwrap();
+                write_all(&sender.inner.lock().unwrap().stream, chunk).unwrap();
             }
         });
         let received = receiver.receive(|| 0).unwrap().unwrap();

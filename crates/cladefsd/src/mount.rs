@@ -16,19 +16,19 @@
 //! serving VMs; its cells close as it drains.
 //!
 //! cladefs: under madsim, a simulated host mounts nothing, FUSE being outside the simulation
-//! (doc-24): [`start`] refuses, and [`close`] has nothing to close, on macOS too, whose FUSE is
-//! not Linux's (board 2912).
+//! (doc-24): [`start`] refuses, and [`close`] has nothing to close; on macOS too, whose FUSE is
+//! not Linux's (board 2912, board 13065).
 
 use crate::Daemon;
-#[cfg(not(madsim))]
+#[cfg(all(target_os = "linux", not(madsim)))]
 use crate::fuse_control::{self as control, CellSource};
 use cladefs_core::error::Error;
-#[cfg(not(madsim))]
+#[cfg(all(target_os = "linux", not(madsim)))]
 use cladefs_fs::fuse::{CellsMount, MountOptions};
 use std::path::PathBuf;
-#[cfg(not(madsim))]
+#[cfg(all(target_os = "linux", not(madsim)))]
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-#[cfg(not(madsim))]
+#[cfg(all(target_os = "linux", not(madsim)))]
 use std::sync::{Arc, Mutex};
 
 /// Where the daemon mounts its cells, and keeps their cell directories.
@@ -86,11 +86,11 @@ impl Config {
 
 /// The service the mount's reader threads are, as the daemon's log names it when a panic on one
 /// aborts the daemon (board 12443, hotbed question 561).
-#[cfg(not(madsim))]
+#[cfg(all(target_os = "linux", not(madsim)))]
 const SERVICE: &str = "cladefsd fuse";
 
 /// Per-daemon FUSE mount state, owned by [`Daemon`].
-#[cfg(not(madsim))]
+#[cfg(all(target_os = "linux", not(madsim)))]
 #[derive(Default)]
 pub(super) struct State {
     /// The mount, and where its cells come from: from [`start_on`] until [`close_on`] takes it.
@@ -106,7 +106,7 @@ pub(super) struct State {
 
 /// Mounts `daemon`'s directory of cells as `config` says, its cells taken from the bucket at
 /// `bucket`, the host's: before the control API serves, whose Mount service it is ([`service_on`]).
-#[cfg(not(madsim))]
+#[cfg(all(target_os = "linux", not(madsim)))]
 pub(super) fn start_on(daemon: &Daemon, config: &Config, bucket: String) -> Result<(), Error> {
     for dir in &config.cell_dirs {
         std::fs::create_dir_all(dir).map_err(|err| {
@@ -136,14 +136,14 @@ pub(super) fn start_on(daemon: &Daemon, config: &Config, bucket: String) -> Resu
 }
 
 /// Mounts the process's default daemon's directory of cells.
-#[cfg(not(madsim))]
+#[cfg(all(target_os = "linux", not(madsim)))]
 pub fn start(config: &Config, bucket: String) -> Result<(), Error> {
     start_on(Daemon::process(), config, bucket)
 }
 
 /// The Mount service of `daemon`'s mount, if it has one ([`start_on`]). cladefs: none under madsim,
 /// FUSE being outside the simulation (doc-24).
-#[cfg(not(madsim))]
+#[cfg(all(target_os = "linux", not(madsim)))]
 pub(super) fn service_on(
     daemon: &Arc<Daemon>,
 ) -> Option<
@@ -155,27 +155,28 @@ pub(super) fn service_on(
 }
 
 /// cladefs: under madsim, refused: a simulated host mounts no cells, FUSE being outside the
-/// simulation (doc-24).
-#[cfg(madsim)]
+/// simulation (doc-24); nor on macOS, whose FUSE is not Linux's (board 13065).
+#[cfg(any(madsim, not(target_os = "linux")))]
 pub(super) fn start_on(_daemon: &Daemon, config: &Config, _: String) -> Result<(), Error> {
-    Err(Error::new(anyhow::anyhow!(
-        "a simulated host mounts no cells at {}: FUSE is outside the simulation",
-        config.mountpoint.display()
-    )))
+    let why = match cfg!(madsim) {
+        true => "FUSE is outside the simulation",
+        false => "the daemon's FUSE mount is Linux's",
+    };
+    Err(Error::new(anyhow::anyhow!("mounting no cells at {}: {why}", config.mountpoint.display())))
 }
 
 /// cladefs: what `daemon`'s mount of cells holds and did, for its metrics (board 8565): its cells
 /// attached, those being detached, and its server's counts; nothing, all 0, without a mount, or
 /// once it closed, as under madsim, where a simulated host mounts none.
 pub(super) fn counts_on(daemon: &Daemon) -> (usize, usize, cladefs_fs::fuse::Counts) {
-    #[cfg(not(madsim))]
+    #[cfg(all(target_os = "linux", not(madsim)))]
     if let Some((mount, _)) = daemon.mount.mount.lock().unwrap().as_ref() {
         let server = mount.server();
         let attached = server.attached();
         let detaching = attached.iter().filter(|cell| cell.detaching).count();
         return (attached.len() - detaching, detaching, server.counts());
     }
-    #[cfg(madsim)]
+    #[cfg(any(madsim, not(target_os = "linux")))]
     let _ = daemon;
     (0, 0, cladefs_fs::fuse::Counts::default())
 }
@@ -191,9 +192,9 @@ pub(super) fn has_attached_on(daemon: &Daemon) -> bool {
 
 /// Bytes of FUSE requests currently queued in per-tenant admission on `daemon` (board 9850).
 pub(super) fn queued_bytes_on(daemon: &Daemon) -> u64 {
-    #[cfg(not(madsim))]
+    #[cfg(all(target_os = "linux", not(madsim)))]
     return daemon.mount.queued_bytes.load(Ordering::Relaxed);
-    #[cfg(madsim)]
+    #[cfg(any(madsim, not(target_os = "linux")))]
     {
         let _ = daemon;
         0
@@ -203,10 +204,10 @@ pub(super) fn queued_bytes_on(daemon: &Daemon) -> u64 {
 /// Whether `daemon` mounted its cells and has not closed them, as [`close_on`] does, or failed to:
 /// what a drain past its bound left.
 pub(super) fn left_on(daemon: &Daemon) -> bool {
-    #[cfg(not(madsim))]
+    #[cfg(all(target_os = "linux", not(madsim)))]
     return daemon.mount.mounted.load(Ordering::Acquire)
         && !daemon.mount.closed.load(Ordering::Acquire);
-    #[cfg(madsim)]
+    #[cfg(any(madsim, not(target_os = "linux")))]
     {
         let _ = daemon;
         false
@@ -216,7 +217,7 @@ pub(super) fn left_on(daemon: &Daemon) -> bool {
 /// Closes `daemon`'s mount, if it has one, as it drains: unmounted lazily, so at once from its
 /// mount point, and once nothing uses it, its cells written back and closed. Holds
 /// no thread of the runtime while it waits.
-#[cfg(not(madsim))]
+#[cfg(all(target_os = "linux", not(madsim)))]
 pub(super) async fn close_on(daemon: &Daemon) -> Result<(), Error> {
     let Some((mount, _)) = daemon.mount.mount.lock().unwrap().take() else { return Ok(()) };
     let mountpoint = mount.mountpoint().to_owned();
@@ -236,7 +237,7 @@ pub(super) async fn close_on(daemon: &Daemon) -> Result<(), Error> {
 }
 
 /// cladefs: under madsim, nothing to close: a simulated host mounts no cells ([`start_on`]).
-#[cfg(madsim)]
+#[cfg(any(madsim, not(target_os = "linux")))]
 pub(super) async fn close_on(_daemon: &Daemon) -> Result<(), Error> {
     Ok(())
 }

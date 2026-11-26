@@ -52,7 +52,11 @@ const FLUSH_EVERY: std::time::Duration = std::time::Duration::from_millis(50);
 pub(super) fn serve_on(daemon: &Arc<Daemon>, listener: UnixListener) {
     let _serving = crate::Serving::begin(daemon);
     let serving = Arc::clone(daemon);
-    serve_as(daemon, listener, move || default_tenant_on(&serving));
+    let stop = match StopAccepting::new() {
+        Ok(stop) => stop,
+        Err(err) => return log::error!("cladefsd: serving a VM socket: {err}: serving none"),
+    };
+    serve_as(daemon, listener, stop, move || default_tenant_on(&serving));
 }
 
 /// Serves the VM processes that connect to `listener` on the process's default daemon
@@ -64,15 +68,23 @@ pub fn serve(listener: UnixListener) {
 
 /// Serves the VM processes of `tenant` that connect to `listener` on `daemon`, as [`serve_on`]
 /// does (TASK-43): until its grant is revoked, which shuts the listener down.
-pub(super) fn serve_tenant_on(daemon: &Arc<Daemon>, listener: UnixListener, tenant: Arc<Tenant>) {
-    serve_as(daemon, listener, move || Ok(tenant.clone()));
+pub(super) fn serve_tenant_on(
+    daemon: &Arc<Daemon>,
+    listener: UnixListener,
+    tenant: Arc<Tenant>,
+    stop: Arc<StopAccepting>,
+) {
+    serve_as(daemon, listener, stop, move || Ok(tenant.clone()));
 }
 
 /// Serves the VM processes of `tenant` that connect to `listener` on the process's default daemon
 /// ([`serve_tenant_on`]).
 #[cfg(not(madsim))]
 pub fn serve_tenant(listener: UnixListener, tenant: Arc<Tenant>) {
-    serve_tenant_on(&tenant.daemon.clone(), listener, tenant);
+    match StopAccepting::new() {
+        Ok(stop) => serve_tenant_on(&tenant.daemon.clone(), listener, tenant, stop),
+        Err(err) => log::error!("cladefsd: serving a tenant's VM socket: {err}: serving none"),
+    }
 }
 
 /// cladefs: how many mappings the host lets a process make, which the reply to an `OPEN` tells the
@@ -99,20 +111,32 @@ pub(super) static MAX_MAP_COUNT_GIVEN: std::sync::OnceLock<u64> = std::sync::Onc
 pub(super) const ACCEPT_AGAIN: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Serves the VM processes of the tenant `tenant` gives, as each connects, that connect to
-/// `listener`, until it listens no more, shut down (`EINVAL`): one whose tenant it fails to give,
-/// logged, it closes. An accept that fails otherwise, as with as many files open as the
-/// daemon may, is tried again after [`ACCEPT_AGAIN`], and its connection served then: given up on,
-/// it would leave every VM process that connects to it unserved, a tenant's socket bound still
-/// (TASK-79.35).
+/// `listener`, until it listens no more, shut down (`EINVAL`), or `stop` is said: one whose
+/// tenant it fails to give, logged, it closes. An accept that fails otherwise, as with as many
+/// files open as the daemon may, is tried again after [`ACCEPT_AGAIN`], and its connection served
+/// then: given up on, it would leave every VM process that connects to it unserved, a tenant's
+/// socket bound still (TASK-79.35).
 fn serve_as(
     daemon: &Arc<Daemon>,
     listener: UnixListener,
+    stop: Arc<StopAccepting>,
     tenant: impl Fn() -> Result<Arc<Tenant>, Errno>,
 ) {
-    // cladefs: until the daemon drains, which shuts it down (TASK-141.4); dropped before it.
-    let _accepting = Accepting::new(daemon, &listener);
+    // cladefs: until the daemon drains, which stops it (TASK-141.4); dropped before it.
+    let _accepting = Accepting::new(daemon, &listener, &stop);
+    if let Err(err) = listener.set_nonblocking(true) {
+        return log::error!("cladefsd: serving a VM socket: {err}: serving none");
+    }
     let mut failing = false;
     loop {
+        match stop.accepting(&listener) {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(err) => {
+                log::error!("cladefsd: waiting for a VM process's connection: {err}: serving none");
+                return;
+            }
+        }
         match listener.accept() {
             Ok((stream, _)) => {
                 failing = false;
@@ -121,6 +145,8 @@ fn serve_as(
                 }
             }
             Err(err) if err.raw_os_error() == Some(libc::EINVAL) => return,
+            // Another descriptor's accept took it, or none was there: waited for again.
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
             // That connection's, gone before it was accepted.
             Err(err) if err.kind() == std::io::ErrorKind::ConnectionAborted => {}
             Err(err) => {
@@ -137,38 +163,103 @@ fn serve_as(
 }
 
 /// cladefs: a VM socket's listener served, in `daemon.accepting` until dropped, before the
-/// listener is: shut down at once if the daemon drains, as it may have as it came.
+/// listener is: stopped at once if the daemon drains, as it may have as it came.
 struct Accepting {
     daemon: Arc<Daemon>,
     fd: std::os::fd::RawFd,
 }
 
 impl Accepting {
-    fn new(daemon: &Arc<Daemon>, listener: &UnixListener) -> Self {
+    fn new(daemon: &Arc<Daemon>, listener: &UnixListener, stop: &Arc<StopAccepting>) -> Self {
         use std::os::fd::AsRawFd;
         let mut accepting = daemon.accepting.lock().unwrap();
         if crate::drain::draining(daemon) {
-            crate::shut_down(listener.as_fd());
+            stop.stop(listener.as_fd());
         }
         let fd = listener.as_raw_fd();
-        accepting.push(fd);
+        accepting.push((fd, Arc::clone(stop)));
         Self { daemon: Arc::clone(daemon), fd }
     }
 }
 
 impl Drop for Accepting {
     fn drop(&mut self) {
-        self.daemon.accepting.lock().unwrap().retain(|fd| *fd != self.fd);
+        self.daemon.accepting.lock().unwrap().retain(|(fd, _)| *fd != self.fd);
     }
 }
 
 /// cladefs: has every VM socket served on `daemon` take no more connections, as the daemon drains
-/// (TASK-141.4): their listeners shut down, their accepts failing (`EINVAL`), and connecting
-/// refused.
+/// (TASK-141.4): their accepts stopped ([`StopAccepting`]), and connecting refused.
 pub(super) fn stop_accepting(daemon: &Daemon) {
-    for &fd in daemon.accepting.lock().unwrap().iter() {
+    for (fd, stop) in daemon.accepting.lock().unwrap().iter() {
         // SAFETY: Its listener lives while it is there: its `Accepting` takes it out first.
-        crate::shut_down(unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) });
+        stop.stop(unsafe { std::os::fd::BorrowedFd::borrow_raw(*fd) });
+    }
+}
+
+/// cladefs: what stops a VM socket's accepts ([`serve_as`]), as a tenant's grant is revoked and
+/// the daemon drains: its listener shut down, which on Linux fails every accept of it (`EINVAL`)
+/// and refuses a connection at once; and a pipe written, which the accepting thread waits on
+/// beside the listener, which wakes it on macOS too, whose `shutdown(2)` of a listener does
+/// nothing (`ENOTCONN`): the thread returns, its listener closed, and a connection refused then
+/// (board 13065).
+pub(crate) struct StopAccepting {
+    /// The pipe's ends: readable once stopped.
+    stopped: std::os::fd::OwnedFd,
+    stop: std::os::fd::OwnedFd,
+}
+
+impl StopAccepting {
+    /// A stop, not said yet.
+    pub(crate) fn new() -> std::io::Result<Arc<Self>> {
+        use std::os::fd::FromRawFd;
+        let mut ends = [0; 2];
+        // SAFETY: Makes a pipe, its two descriptors written into `ends`.
+        if unsafe { libc::pipe(ends.as_mut_ptr()) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: Just made, and owned here.
+        let (stopped, stop) = unsafe {
+            (std::os::fd::OwnedFd::from_raw_fd(ends[0]), std::os::fd::OwnedFd::from_raw_fd(ends[1]))
+        };
+        for end in &ends {
+            // SAFETY: Sets a flag of a descriptor just made, owned above.
+            if unsafe { libc::fcntl(*end, libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+        Ok(Arc::new(Self { stopped, stop }))
+    }
+
+    /// Stops the accepts of `listener`, a descriptor of the socket they accept on.
+    pub(crate) fn stop(&self, listener: std::os::fd::BorrowedFd<'_>) {
+        use std::os::fd::AsRawFd;
+        crate::shut_down(listener);
+        // SAFETY: Writes a byte to the pipe's end this owns. Full, it was written before: stopped.
+        if unsafe { libc::write(self.stop.as_raw_fd(), [1u8].as_ptr().cast(), 1) } < 0 {
+            let err = std::io::Error::last_os_error();
+            log::warn!("cladefsd: stopping a VM socket's accepts: {err}");
+        }
+    }
+
+    /// Waits until `listener` has a connection to accept, or is shut down: `true`; or until
+    /// stopped: `false`.
+    fn accepting(&self, listener: &UnixListener) -> std::io::Result<bool> {
+        use std::os::fd::AsRawFd;
+        let mut polled = [
+            libc::pollfd { fd: listener.as_raw_fd(), events: libc::POLLIN, revents: 0 },
+            libc::pollfd { fd: self.stopped.as_raw_fd(), events: libc::POLLIN, revents: 0 },
+        ];
+        loop {
+            // SAFETY: Polls descriptors the caller and this keep open, until one is ready.
+            if unsafe { libc::poll(polled.as_mut_ptr(), 2, -1) } >= 0 {
+                return Ok(polled[1].revents == 0);
+            }
+            let err = std::io::Error::last_os_error();
+            if err.kind() != std::io::ErrorKind::Interrupted {
+                return Err(err);
+            }
+        }
     }
 }
 
@@ -270,7 +361,7 @@ pub(super) const MAX_CONNECTIONS: usize = 4096;
 /// tenant with fewer is refused none while the daemon has room for any, however many the others
 /// have taken; those past it take what all of them leave. A VM restored from a zygote has two
 /// (hotbed question 483).
-const RESERVED_CONNECTIONS: usize = 64;
+pub(super) const RESERVED_CONNECTIONS: usize = 64;
 
 /// cladefs: the most connections the daemon serves at once, every tenant's together (board 8465):
 /// what its open files leave, each connection's at their most, a quarter of its limit kept for the
@@ -539,10 +630,11 @@ fn reopen_read_only(fd: std::os::fd::BorrowedFd<'_>) -> std::io::Result<std::os:
     Ok(unsafe { <std::os::fd::OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(raw) })
 }
 
-/// cladefs: `fd` again, on macOS, where the daemon builds under madsim alone (board 2912): an
-/// arena's object there is a file unlinked as it is made (`slabs`), and so can't be opened anew,
-/// read-only or not. Writable, then; but no process maps it: a simulated guest is in the
-/// simulation's process, and maps nothing it is handed.
+/// cladefs: `fd` again, on macOS: an arena's object there is a file unlinked as it is made
+/// (`slabs`), and so can't be opened anew, read-only or not. Writable, then: a simulated guest is
+/// in the simulation's process, and maps nothing it is handed; but a VM process connecting on
+/// macOS could write the pages it is handed (board 13541), which none maps until its window does
+/// (board 13069).
 #[cfg(not(target_os = "linux"))]
 fn reopen_read_only(fd: std::os::fd::BorrowedFd<'_>) -> std::io::Result<std::os::fd::OwnedFd> {
     fd.try_clone_to_owned()
@@ -556,13 +648,31 @@ pub(crate) fn serve_connection(stream: std::os::unix::net::UnixStream, tenant: A
     let _ = start_connection(stream.into(), tenant).recv();
 }
 
-/// cladefs: a connection of a simulated guest's to the daemon, in memory, served as a VM process's
-/// is, of `tenant`'s: the guest's end (doc-24, TASK-685.6). Under madsim, which has no VM socket.
-#[cfg(madsim)]
-pub(crate) fn connect_in_memory(tenant: Arc<Tenant>) -> crate::wire::Stream {
-    let (daemons, guests) = crate::wire::Stream::pair();
+/// cladefs: a connection of this process's own to the daemon, served as a VM process's is, of
+/// `tenant`'s: its end. Under madsim, in memory, a simulated guest's (doc-24, TASK-685.6), as the
+/// simulation has no Unix sockets; outside it, an end of an anonymous socket pair, which no other
+/// process reaches (no listener, no path), and through which the daemon's descriptors pass as
+/// through a VM process's socket: a device of a process embedding the daemon (libcladefs, board
+/// 13471, hotbed question 565).
+pub(crate) fn connect_in_memory(tenant: Arc<Tenant>) -> std::io::Result<crate::wire::Stream> {
+    #[cfg(madsim)]
+    let (daemons, ours) = crate::wire::Stream::pair();
+    #[cfg(not(madsim))]
+    let (daemons, ours) = std::os::unix::net::UnixStream::pair()?;
     drop(start_connection(daemons, tenant));
-    guests
+    Ok(ours)
+}
+
+/// cladefs: serves the VM process at the other end of `stream` on `daemon`, of its default tenant,
+/// as one connecting to its socket is ([`serve_on`]), on the daemon's runtime: a socket an
+/// embedding process handed a VM process it started (board 13460).
+#[cfg(not(madsim))]
+pub(crate) fn serve_stream_on(
+    daemon: &Arc<Daemon>,
+    stream: std::os::unix::net::UnixStream,
+) -> Result<(), Errno> {
+    drop(start_connection(stream, default_tenant_on(daemon)?));
+    Ok(())
 }
 
 /// Starts serving the VM process at the other end of `stream`, as [`serve_connection`] does, on
@@ -617,6 +727,12 @@ async fn run_connection(stream: crate::wire::Stream, tenant: Arc<Tenant>) {
         AsyncSender::counting(clone, tenant.in_flight().clone())
     }) {
         Ok(sender) => Arc::new(sender),
+        // cladefs: a VM process gone as it connected, which macOS says making its sender (board
+        // 13065): nothing to serve.
+        Err(err) if err.kind() == std::io::ErrorKind::ConnectionAborted => {
+            log::info!("cladefsd: a VM process went as it connected: {err}");
+            return;
+        }
         Err(err) => {
             log::error!("cladefsd: cloning a connection: {err}");
             return;
@@ -2360,6 +2476,7 @@ impl Connection {
 
     /// How many of its requests it received and has not answered.
     #[cfg(test)]
+    #[cfg(target_os = "linux")]
     pub(super) fn unanswered(&self) -> usize {
         self.requests.with(Mutex::lock).in_flight()
     }
@@ -2569,7 +2686,6 @@ impl TransferArea {
     /// transfer-area I/O makes no `lseek(SEEK_HOLE)` syscalls.
     #[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
     fn written(&self, offset: usize, len: usize) -> Result<bool, Errno> {
-        use std::os::fd::AsRawFd;
         let page = usize::try_from(cladefs_core::pages::page_size()).map_err(|_| Errno::EINVAL)?;
         if page == 0 {
             return Err(Errno::EINVAL);
@@ -2587,12 +2703,10 @@ impl TransferArea {
         TRANSFER_SEEK_HOLES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let seek_at = miss.checked_mul(page).ok_or(Errno::EINVAL)?;
         let seek_at = libc::off_t::try_from(seek_at).map_err(|_| Errno::EINVAL)?;
-        // SAFETY: Seeks in a descriptor of its own.
-        let hole = unsafe { libc::lseek(self.memory.as_raw_fd(), seek_at, libc::SEEK_HOLE) };
-        if hole < 0 {
-            log::warn!("cladefsd: a transfer area's holes: {}", std::io::Error::last_os_error());
-            return Err(Errno::EINVAL);
-        }
+        let hole = seals::first_hole(self.memory.as_fd(), seek_at).map_err(|err| {
+            log::warn!("cladefsd: a transfer area's holes: {err}");
+            Errno::EINVAL
+        })?;
         let hole_pages = usize::try_from(hole)
             .map_err(|_| Errno::EINVAL)?
             .checked_div(page)
@@ -2633,8 +2747,10 @@ impl TransferArea {
     }
 }
 
-/// cladefs: a transfer area's seals, Linux's (memfd): macOS, where the simulation runs too, has
-/// none, so a transfer area is refused there, as no simulated guest makes one (board 2912).
+/// cladefs: a transfer area's seals, Linux's (memfd). macOS has none, but a POSIX shared memory
+/// object there, which the VM process makes its area of, is never resized once sized: that is its
+/// seal against shrinking; and as macOS punches no holes in one, no seal against writes is needed
+/// there, nor does [`TransferArea::written`] ask after holes (board 13065, hotbed question 566).
 mod seals {
     use std::os::fd::BorrowedFd;
 
@@ -2659,14 +2775,57 @@ mod seals {
         Ok(())
     }
 
+    /// Whether the memory `fd` is fixed at a size: on macOS, whether it is a POSIX shared memory
+    /// object (`fstat` gives it no file type), sized (`st_size`, which the kernel then keeps).
     #[cfg(not(target_os = "linux"))]
-    pub(super) fn against_shrinking(_: BorrowedFd<'_>) -> bool {
-        false
+    pub(super) fn against_shrinking(fd: BorrowedFd<'_>) -> bool {
+        use std::os::fd::AsRawFd;
+        // SAFETY: A stat buffer the call fills.
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: Reads the status of a descriptor the caller keeps open.
+        if unsafe { libc::fstat(fd.as_raw_fd(), &mut stat) } != 0 {
+            return false;
+        }
+        stat.st_mode & libc::S_IFMT == 0 && stat.st_size > 0
     }
 
+    /// On macOS, nothing to seal: no hole is punched in a POSIX shared memory object.
     #[cfg(not(target_os = "linux"))]
     pub(super) fn against_writes(_: BorrowedFd<'_>) -> std::io::Result<()> {
-        Err(std::io::ErrorKind::Unsupported.into())
+        Ok(())
+    }
+
+    /// The offset of the first hole of the memory `memory` at or after `at`, as `SEEK_HOLE`
+    /// says: where the VM process wrote nothing yet.
+    #[cfg(target_os = "linux")]
+    pub(super) fn first_hole(
+        memory: BorrowedFd<'_>,
+        at: libc::off_t,
+    ) -> std::io::Result<libc::off_t> {
+        use std::os::fd::AsRawFd;
+        // SAFETY: Seeks in a descriptor the caller keeps, of its own.
+        let hole = unsafe { libc::lseek(memory.as_raw_fd(), at, libc::SEEK_HOLE) };
+        if hole < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(hole)
+    }
+
+    /// On macOS, the end of `memory`: a POSIX shared memory object has no holes to tell of, its
+    /// pages charged to no process that faults them, as Linux's shmem's are (TASK-547).
+    #[cfg(not(target_os = "linux"))]
+    pub(super) fn first_hole(
+        memory: BorrowedFd<'_>,
+        _: libc::off_t,
+    ) -> std::io::Result<libc::off_t> {
+        use std::os::fd::AsRawFd;
+        // SAFETY: A stat buffer the call fills.
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: Reads the status of a descriptor the caller keeps open.
+        if unsafe { libc::fstat(memory.as_raw_fd(), &mut stat) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(stat.st_size)
     }
 }
 
@@ -3222,12 +3381,20 @@ pub(super) fn wedged() -> u64 {
     wedged_on(Daemon::process())
 }
 
-/// cladefs: a VM process, other than this one, as a pidfd. Under madsim, none: a simulated
-/// guest is in the simulation's process ([`peer_process`]), so the type has no values, and a
-/// simulated host, macOS's too, has no pidfds (doc-24, board 2912).
+/// cladefs: a VM process, other than this one, as a pidfd; on macOS, which has none, as its pid
+/// and a kqueue watching it exit, made as it connected (board 13065, hotbed question 567). Under
+/// madsim, none: a simulated guest is in the simulation's process ([`peer_process`]), so the type
+/// has no values (doc-24, board 2912).
 #[cfg(not(madsim))]
 enum VmProcess {
+    #[cfg(target_os = "linux")]
     Pidfd(std::os::fd::OwnedFd),
+    /// cladefs: its pid, and a kqueue holding an event once it exited (`EVFILT_PROC`,
+    /// `NOTE_EXIT`), readable then, as a pidfd is. Signalled only while that holds none: a pid
+    /// is another process's only once the one it named exited and its parent reaped it, and the
+    /// VM processes an embedder starts are its own children (board 13460).
+    #[cfg(target_os = "macos")]
+    Pid { pid: libc::pid_t, exits: std::os::fd::OwnedFd },
     /// cladefs: in a test, this process, as one that never exits, however it is killed: as one in
     /// uninterruptible sleep, or a frozen cgroup, which no test can make (board 8535,
     /// [`UNKILLABLE`]).
@@ -3244,7 +3411,7 @@ pub(super) static UNKILLABLE: AtomicBool = AtomicBool::new(false);
 
 impl VmProcess {
     /// Sends it `signal`: 0 sends none, but checks that this process may signal it.
-    #[cfg(not(madsim))]
+    #[cfg(all(target_os = "linux", not(madsim)))]
     fn signal(&self, signal: libc::c_int) -> std::io::Result<()> {
         use std::os::fd::AsRawFd;
         let pidfd = match self {
@@ -3268,16 +3435,40 @@ impl VmProcess {
         Ok(())
     }
 
+    /// Sends it `signal`, as on Linux: `ESRCH` once it was seen to exit, its pid no longer
+    /// surely its.
+    #[cfg(all(target_os = "macos", not(madsim)))]
+    fn signal(&self, signal: libc::c_int) -> std::io::Result<()> {
+        use std::os::fd::AsFd;
+        let (pid, exits) = match self {
+            Self::Pid { pid, exits } => (*pid, exits),
+            #[cfg(test)]
+            Self::Unkillable => return Ok(()),
+        };
+        if readable_now(exits.as_fd())? {
+            return Err(std::io::Error::from_raw_os_error(libc::ESRCH));
+        }
+        // SAFETY: Signals the process `pid` names, which has not exited (above).
+        if unsafe { libc::kill(pid, signal) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
     /// Returns once it has exited, holding no thread.
     #[cfg(not(madsim))]
     async fn exited(&self) -> std::io::Result<()> {
         use std::os::fd::AsFd;
         let pidfd = match self {
+            #[cfg(target_os = "linux")]
             Self::Pidfd(pidfd) => pidfd,
+            #[cfg(target_os = "macos")]
+            Self::Pid { exits, .. } => exits,
             #[cfg(test)]
             Self::Unkillable => return std::future::pending().await,
         };
-        // A pidfd is readable once its process has exited.
+        // A pidfd is readable once its process has exited; on macOS, its kqueue, once it holds
+        // the exit's event.
         // SAFETY: `pidfd` is an `OwnedFd` owned by `self` and outlives `exited`, so the descriptor
         // stays valid and open until `AsyncFd` drops and deregisters it from the reactor.
         let exited = unsafe {
@@ -3361,7 +3552,7 @@ fn peer_process(_: &crate::wire::Stream) -> std::io::Result<Option<VmProcess>> {
     Ok(None)
 }
 
-#[cfg(not(madsim))]
+#[cfg(all(target_os = "linux", not(madsim)))]
 fn peer_process(stream: &crate::wire::Stream) -> std::io::Result<Option<VmProcess>> {
     use std::os::fd::AsRawFd;
     let fd = stream.as_raw_fd();
@@ -3391,9 +3582,75 @@ fn peer_process(stream: &crate::wire::Stream) -> std::io::Result<Option<VmProces
     Ok(Some(VmProcess::Pidfd(peer_pidfd(stream.as_fd())?)))
 }
 
+/// cladefs: the process at the other end of `stream`, unless it is this one, as on Linux: on
+/// macOS, its pid (`LOCAL_PEERPID`), watched at once for its exit by a kqueue of its own
+/// ([`VmProcess::Pid`]). One that exited already (`ESRCH`) is refused, as its pid is no longer
+/// surely its.
+#[cfg(all(target_os = "macos", not(madsim)))]
+fn peer_process(stream: &crate::wire::Stream) -> std::io::Result<Option<VmProcess>> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    let mut pid: libc::pid_t = 0;
+    let mut len = size_of::<libc::pid_t>() as libc::socklen_t;
+    // SAFETY: Reads the peer's pid into `pid`, of `len` bytes.
+    let read = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_LOCAL,
+            libc::LOCAL_PEERPID,
+            (&raw mut pid).cast(),
+            &mut len,
+        )
+    };
+    if read != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if pid == std::process::id() as libc::pid_t {
+        // cladefs: or, as a test asks, one that never exits (board 8535).
+        #[cfg(test)]
+        if UNKILLABLE.load(Ordering::Relaxed) {
+            return Ok(Some(VmProcess::Unkillable));
+        }
+        return Ok(None);
+    }
+    // SAFETY: Makes a kqueue, owned below.
+    let queue = unsafe { libc::kqueue() };
+    if queue < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: Just made, and owned here.
+    let exits = unsafe { std::os::fd::OwnedFd::from_raw_fd(queue) };
+    // SAFETY: A zeroed kevent is a valid empty one.
+    let mut change: libc::kevent = unsafe { std::mem::zeroed() };
+    change.ident = pid as libc::uintptr_t;
+    change.filter = libc::EVFILT_PROC;
+    change.flags = libc::EV_ADD | libc::EV_ONESHOT;
+    change.fflags = libc::NOTE_EXIT;
+    // SAFETY: Registers the process `pid` with the kqueue, waiting for nothing.
+    let added = unsafe {
+        libc::kevent(exits.as_raw_fd(), &change, 1, std::ptr::null_mut(), 0, std::ptr::null())
+    };
+    if added != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(Some(VmProcess::Pid { pid, exits }))
+}
+
+/// cladefs: whether `fd` is readable now, without waiting: on macOS, whether a VM process's
+/// kqueue holds its exit ([`VmProcess::Pid`]).
+#[cfg(all(target_os = "macos", not(madsim)))]
+fn readable_now(fd: std::os::fd::BorrowedFd<'_>) -> std::io::Result<bool> {
+    use std::os::fd::AsRawFd;
+    let mut poll = libc::pollfd { fd: fd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+    // SAFETY: Polls a descriptor the caller keeps open, without waiting.
+    match unsafe { libc::poll(&mut poll, 1, 0) } {
+        ready if ready < 0 => Err(std::io::Error::last_os_error()),
+        ready => Ok(ready > 0),
+    }
+}
+
 /// cladefs: the pidfd of the process at the other end of the Unix socket `socket`
 /// (`SO_PEERPIDFD`): `ENOPROTOOPT` said as needing Linux 6.5 (board 8533).
-#[cfg(not(madsim))]
+#[cfg(all(target_os = "linux", not(madsim)))]
 fn peer_pidfd(socket: std::os::fd::BorrowedFd<'_>) -> std::io::Result<std::os::fd::OwnedFd> {
     use std::os::fd::{AsRawFd, FromRawFd};
     let mut pidfd: libc::c_int = -1;
@@ -3429,9 +3686,10 @@ fn peer_pidfd(socket: std::os::fd::BorrowedFd<'_>) -> std::io::Result<std::os::f
 /// (`SO_PEERPIDFD`, Linux 6.5), as the daemon needs to serve VM processes ([`peer_process`]): asked
 /// once, as it starts, of a pair of sockets of its own, so that a daemon on an older kernel refuses
 /// to start, naming the version, rather than refuse every VM process (board 8533). Under madsim,
-/// whose guests are in the simulation's process, nothing to ask.
+/// whose guests are in the simulation's process, nothing to ask; nor on macOS, which says a peer's
+/// pid always (`LOCAL_PEERPID`, [`VmProcess::Pid`]).
 pub(super) fn require_peer_pidfds() -> std::io::Result<()> {
-    #[cfg(not(madsim))]
+    #[cfg(all(target_os = "linux", not(madsim)))]
     {
         let (ours, _theirs) = std::os::unix::net::UnixStream::pair()?;
         drop(peer_pidfd(ours.as_fd())?);
@@ -3639,6 +3897,7 @@ impl Parking {
 /// The most bytes the daemon has queued for a VM process connected, which its socket has not
 /// taken.
 #[cfg(all(test, not(madsim)))]
+#[cfg(target_os = "linux")]
 pub(super) fn most_queued() -> u64 {
     Daemon::process()
         .vm_peers

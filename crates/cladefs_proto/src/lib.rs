@@ -7,25 +7,21 @@
 #![allow(clippy::all)]
 
 /// Control API (`cladefs.cladefsd.v1`).
-#[cfg(any(target_os = "linux", madsim))]
 pub mod cladefsd_v1 {
     tonic::include_proto!("cladefs.cladefsd.v1");
 }
 
 /// Daemon-to-daemon peer API (`cladefs.peer.v1`).
-#[cfg(any(target_os = "linux", madsim))]
 pub mod peer_v1 {
     tonic::include_proto!("cladefs.peer.v1");
 }
 
 /// Multi-cell FUSE mount control API (`cladefs.mount.v1`).
-#[cfg(any(target_os = "linux", madsim))]
 pub mod mount_v1 {
     tonic::include_proto!("cladefs.mount.v1");
 }
 
 /// Static descriptors of every gRPC service and method defined in cladefs's `.proto` files.
-#[cfg(any(target_os = "linux", madsim))]
 pub mod services {
     /// A gRPC service of the daemon's `.protos`: its full name (`PACKAGE.SERVICE`) and its
     /// methods, each by path (`/PACKAGE.SERVICE/METHOD`).

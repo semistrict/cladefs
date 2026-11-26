@@ -10,7 +10,7 @@
 use crate::Daemon;
 #[cfg(test)]
 use crate::server::key_in_dir;
-use crate::server::{Tenant, serve_tenant_on};
+use crate::server::{StopAccepting, Tenant, serve_tenant_on};
 use cladefs_core::Errno;
 use std::collections::HashMap;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
@@ -29,8 +29,9 @@ pub(super) struct Grants {
 struct Granted {
     tenant: Arc<Tenant>,
     socket: PathBuf,
-    /// The socket's listener, which a revoke shuts down, so that its thread stops accepting.
+    /// The socket's listener, which a revoke stops accepting on ([`StopAccepting`]).
     listener: UnixListener,
+    stop: Arc<StopAccepting>,
 }
 
 impl Grants {
@@ -91,12 +92,13 @@ impl Grants {
         remove_stale(&socket)?;
         // Its mode and owner from the moment it is there, not the umask's until given (TASK-159).
         let listener = crate::bind_given(&socket, MODE, Some(uid), Some(gid)).map_err(errno)?;
+        let stop = StopAccepting::new().map_err(errno)?;
         let served = listener.try_clone().map_err(errno).and_then(|accepting| {
             let daemon = Arc::clone(&self.daemon);
-            let serving = tenant.clone();
+            let (serving, stopping) = (tenant.clone(), Arc::clone(&stop));
             // cladefs: outside the simulation: a tenant's VM socket (doc-24).
             crate::run::thread("cladefsd tenant", move || {
-                serve_tenant_on(&daemon, accepting, serving)
+                serve_tenant_on(&daemon, accepting, serving, stopping)
             })
             .map_err(errno)
         });
@@ -106,7 +108,7 @@ impl Grants {
             let _ = std::fs::remove_file(&socket);
             return Err(errno);
         }
-        let grant = Granted { tenant, socket: socket.clone(), listener };
+        let grant = Granted { tenant, socket: socket.clone(), listener, stop };
         granted.insert(id, grant);
         Ok(socket)
     }
@@ -155,8 +157,8 @@ impl Grants {
             log::warn!("cladefsd: removing {}: {err}", grant.socket.display());
         }
         drop(granted);
-        // Its thread's accept fails with `EINVAL`, and it stops.
-        crate::shut_down(std::os::fd::AsFd::as_fd(&grant.listener));
+        // Its thread stops accepting, and returns.
+        grant.stop.stop(std::os::fd::AsFd::as_fd(&grant.listener));
         Ok(())
     }
 }

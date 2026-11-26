@@ -6,7 +6,8 @@
 //! hold, read-only, through its one device, as a stopped cell's next VM does, and a fork's, and a
 //! tenant reaches no other tenant's.
 
-#![cfg(target_os = "linux")]
+// cladefs: the daemon's, on Linux and macOS (board 13065).
+#![cfg(not(madsim))]
 
 mod common;
 

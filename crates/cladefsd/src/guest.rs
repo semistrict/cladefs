@@ -33,11 +33,11 @@ impl Guest {
     /// A guest of `daemon`, of its default tenant, its connection served as a VM process's is.
     pub fn connect(daemon: &Arc<Daemon>) -> Result<Self, Errno> {
         let tenant = crate::server::default_tenant_on(daemon)?;
-        let stream = crate::server::connect_in_memory(tenant);
         let failed = |err: std::io::Error| {
             log::error!("a simulated guest's connection: {err}");
             Errno::EIO
         };
+        let stream = crate::server::connect_in_memory(tenant).map_err(failed)?;
         let sender =
             Arc::new(AsyncSender::new(stream.try_clone().map_err(failed)?).map_err(failed)?);
         let receiver = AsyncReceiver::new(stream).map_err(failed)?;

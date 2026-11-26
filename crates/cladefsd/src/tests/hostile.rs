@@ -1649,7 +1649,7 @@ fn run_hostile(
     start: Arc<std::sync::Barrier>,
 ) -> Seen {
     let stream = UnixStream::connect(&socket).unwrap();
-    let sender = Arc::new(Sender::new(stream.try_clone().unwrap()));
+    let sender = Arc::new(Sender::new(stream.try_clone().unwrap()).unwrap());
     let receiver = Receiver::new(stream.try_clone().unwrap());
     let shared = Arc::new(Shared::default());
     let receiving = {

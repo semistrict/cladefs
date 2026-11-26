@@ -5,7 +5,8 @@
 //! TASK-260: a read for a guest request of what only object storage holds logs the requests
 //! it makes of the bucket, on the bucket runtime, with the guest request.
 
-#![cfg(target_os = "linux")]
+// cladefs: the daemon's, on Linux and macOS (board 13065).
+#![cfg(not(madsim))]
 
 use bucket_cell::object_bucket::ObjectBucket;
 use cladefs::request::{RequestId, within};

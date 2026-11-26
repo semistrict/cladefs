@@ -56,8 +56,6 @@ tokio.workspace = true
 toml.workspace = true
 url.workspace = true
 zerocopy.workspace = true
-
-[target.'cfg(any(target_os = "linux", madsim))'.dependencies]
 cladefsd.workspace = true
 prost = "0.14.4"
 tonic = { package = "madsim-tonic", version = "=0.6.0", features = ["tls-aws-lc"] }
@@ -89,8 +87,6 @@ opentelemetry_sdk = { version = "0.33.1", default-features = false, features = [
 proptest.workspace = true
 rustls = { version = "0.23.46", default-features = false, features = ["aws-lc-rs", "std"] }
 tempfile.workspace = true
-
-[target.'cfg(any(target_os = "linux", madsim))'.dev-dependencies]
 cladefsd = { workspace = true, features = ["failpoints", "testing", "tests-kms"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]

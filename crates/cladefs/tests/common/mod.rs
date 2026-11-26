@@ -7,7 +7,7 @@
 
 #![allow(dead_code)]
 
-#[cfg(target_os = "linux")]
+#[cfg(not(madsim))]
 pub mod daemon;
 
 /// Makes this process a host of the multi-node system, as an extent daemon's must be: its cells'
@@ -24,6 +24,7 @@ pub fn host() {
     }
 }
 
+#[cfg(target_os = "linux")]
 use cladefs::{CellClient, ExtentId, VolatileSlice};
 use std::os::fd::{AsRawFd, BorrowedFd};
 
@@ -96,6 +97,7 @@ pub fn read_window(at: *const u8, len: usize) -> Vec<u8> {
 
 /// Writes `bytes` as an extent of `client`, commits, and reads it through a window, which caches
 /// its pages in the daemon's memory.
+#[cfg(target_os = "linux")]
 pub fn cache(client: &CellClient, bytes: &[u8]) {
     let extent = ExtentId { cell: client.cell(), sequence: 1 };
     client.write(extent, 0, &[VolatileSlice::from(bytes)]).unwrap();

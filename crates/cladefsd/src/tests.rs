@@ -11,6 +11,7 @@ use cladefs_core::{
 };
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
+#[cfg(target_os = "linux")]
 use std::ptr::NonNull;
 use std::thread::JoinHandle;
 
@@ -64,6 +65,7 @@ fn read(client: &CellClient, extent: ExtentId, offset: u64, len: usize) -> Resul
 }
 
 /// `pages` pages of anonymous memory, for a window.
+#[cfg(target_os = "linux")]
 fn memory(pages: usize) -> NonNull<u8> {
     // SAFETY: Maps anonymous memory, which the test owns.
     let memory = unsafe {
@@ -82,6 +84,7 @@ fn memory(pages: usize) -> NonNull<u8> {
 
 /// The file and offset this process maps the page at `addr` from, as /proc/self/maps has them:
 /// the device and inode, and the offset.
+#[cfg(target_os = "linux")]
 fn mapped_from(addr: usize) -> (String, u64) {
     let maps = std::fs::read_to_string("/proc/self/maps").unwrap();
     for line in maps.lines() {
@@ -98,9 +101,11 @@ fn mapped_from(addr: usize) -> (String, u64) {
 }
 
 /// How /proc/self/maps names anonymous memory's file: none.
+#[cfg(target_os = "linux")]
 const ANONYMOUS: &str = "00:00 0";
 
 /// The protection this process maps the page at `addr` with, as /proc/self/maps has it: "r-xp".
+#[cfg(target_os = "linux")]
 fn protection_of(addr: usize) -> String {
     let maps = std::fs::read_to_string("/proc/self/maps").unwrap();
     for line in maps.lines() {
@@ -120,6 +125,7 @@ fn protection_of(addr: usize) -> String {
 /// connection's window takes its memory over: a device reset and activated again, failing before
 /// its new window was made, once left its guest the pages of other VMs.
 #[test]
+#[cfg(target_os = "linux")]
 fn windows_let_go_of_the_daemons_pages_as_their_connection_goes() {
     host();
     let ps = page_size() as usize;
@@ -158,6 +164,7 @@ fn windows_let_go_of_the_daemons_pages_as_their_connection_goes() {
 /// 1,048,576, allows 522,240. The daemon here says 300,000, which neither /proc nor the default is:
 /// 4,096 of them kept for the process's others, half the rest.
 #[test]
+#[cfg(target_os = "linux")]
 fn windows_budget_by_the_mappings_the_daemon_says_the_host_allows() {
     host();
     crate::server::MAX_MAP_COUNT_GIVEN.set(300_000).unwrap();
@@ -524,6 +531,7 @@ fn a_dropped_read_keeps_its_transfer_slot_until_answered() {
 /// The daemon refuses a transfer area it could fault on, one not sealed against shrinking, and
 /// ranges past the end of the one it has.
 #[test]
+#[cfg(target_os = "linux")]
 fn transfer_areas_are_checked() {
     use crate::wire::{
         Header, READ, READ_TRANSFER, ReadBody, TRANSFER, TransferBody, WRITE, WRITE_TRANSFER,
@@ -668,6 +676,7 @@ fn blocking_calls_where_replies_arrive_fail() {
 
 /// A byte of a pipe's read into the page at `addr`, as the kernel writes it, faulting for writing
 /// as KVM does for a vCPU: `Err` with the errno it failed with.
+#[cfg(target_os = "linux")]
 fn kernel_write(addr: usize) -> Result<(), i32> {
     let mut pipe = [0; 2];
     // SAFETY: Makes a pipe, writes a byte to it, and reads one into `addr`, closing it after.
@@ -691,6 +700,7 @@ fn kernel_write(addr: usize) -> Result<(), i32> {
 /// within the bound (`ENOMEM` past it, `EINVAL` where nothing is mapped). A snapshot's fork is
 /// refused while the window has private pages (`EBUSY`).
 #[test]
+#[cfg(target_os = "linux")]
 fn windows_copy_on_write_in_the_vm_process() {
     host();
     let ps = page_size() as usize;
@@ -756,6 +766,7 @@ fn windows_copy_on_write_in_the_vm_process() {
 
 /// A byte at `addr` written to a pipe, the kernel reading it, faulting for reading as KVM does for
 /// a vCPU's load: `Err` with the errno it failed with.
+#[cfg(target_os = "linux")]
 fn kernel_read(addr: usize) -> Result<(), i32> {
     let mut pipe = [0; 2];
     // SAFETY: Makes a pipe, writes the byte at `addr` to it, and closes it.
@@ -779,6 +790,7 @@ fn kernel_read(addr: usize) -> Result<(), i32> {
 /// and r622 failed a dozen times, exited, failed again, for as long as the case ran, as an exit
 /// ended its run of failures.
 #[test]
+#[cfg(target_os = "linux")]
 fn a_stray_access_stays_refused_and_is_given_up_on() {
     use cladefs_core::{AccessFailures, FailingRun, Failure};
     host();
@@ -845,6 +857,7 @@ fn a_stray_access_stays_refused_and_is_given_up_on() {
 /// kept them, and the first worker's write made its page private (GCE r691). A run of failures is
 /// by the test's clock, a microsecond a failure: a loaded host may take a run's 10 ms between two.
 #[test]
+#[cfg(target_os = "linux")]
 fn a_guest_write_after_a_workers_write_waits_for_one_lift() {
     use cladefs_core::{AccessFailures, Failure};
     host();
@@ -915,6 +928,7 @@ fn a_guest_write_after_a_workers_write_waits_for_one_lift() {
 /// mappings: a sealed extent's, the cached extent its mappings hold (pinned), its page faulted in,
 /// then mapped at once again; and unmapped, the cached extent nothing holds (idle).
 #[test]
+#[cfg(target_os = "linux")]
 fn metrics_gauge_the_extent_cache_and_the_windows_mappings() {
     host();
     let ps = page_size() as usize;
@@ -964,6 +978,7 @@ fn metrics_gauge_the_extent_cache_and_the_windows_mappings() {
 /// cell (board 8563), and the runs of pages its second stage has installed, as it last said, against the most it keeps, as it said
 /// making its window.
 #[test]
+#[cfg(target_os = "linux")]
 fn metrics_gauge_each_vm_processs_window_and_host_mappings() {
     host();
     let ps = page_size() as usize;
@@ -1027,6 +1042,7 @@ fn metrics_gauge_each_vm_processs_window_and_host_mappings() {
 /// again as the first goes. Until then a window's budget was what it said making it, the first's
 /// the whole after the second halved it, the second's half after the first went.
 #[test]
+#[cfg(target_os = "linux")]
 fn metrics_show_each_windows_budget_as_its_process_shares_it() {
     host();
     crate::server::MAX_MAP_COUNT_GIVEN.set(1 << 20).unwrap();
@@ -1085,6 +1101,7 @@ fn metrics_show_each_windows_budget_as_its_process_shares_it() {
 /// answers, as the daemon has it once the wait is over. An answer to an ask answers those before
 /// it.
 #[test]
+#[cfg(target_os = "linux")]
 fn stats_hold_the_daemons_vm_processes_and_guests() {
     host();
     let ps = page_size() as usize;
@@ -1196,12 +1213,16 @@ fn take_stats(wait: std::time::Duration) -> JoinHandle<crate::stats::HostStats> 
 /// and, if set, that it runs on once it has, until its input closes.
 const CHILD_SOCKET: &str = "CLADEFSD_TEST_SOCKET";
 const CHILD_CELL_DIR: &str = "CLADEFSD_TEST_STORE";
+#[cfg(target_os = "linux")]
 const CHILD_EXTENT: &str = "CLADEFSD_TEST_EXTENT";
+#[cfg(target_os = "linux")]
 const CHILD_RUNS_ON: &str = "CLADEFSD_TEST_RUNS_ON";
+#[cfg(target_os = "linux")]
 const CHILD_CLOSES: &str = "CLADEFSD_TEST_CLOSES";
 
 /// Opens the cell at `cell_dir` through the daemon at `socket`, once the daemon has seen a
 /// connection that had it open go.
+#[cfg(target_os = "linux")]
 fn connect_once_free(socket: &Path, cell_dir: &Path) -> CellClient {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
@@ -1220,6 +1241,7 @@ fn connect_once_free(socket: &Path, cell_dir: &Path) -> CellClient {
 /// Maps `extent`'s first page into a new window of the cell at `cell_dir` the daemon at `socket`
 /// serves, checks it holds the pattern written, and returns the cell, mapping it still, and the
 /// page's address.
+#[cfg(target_os = "linux")]
 fn map_first_page(socket: &Path, cell_dir: &Path, extent: ExtentId) -> (CellClient, usize) {
     let ps = page_size() as usize;
     let client = connect_once_free(socket, cell_dir);
@@ -1240,6 +1262,7 @@ fn map_first_page(socket: &Path, cell_dir: &Path, extent: ExtentId) -> (CellClie
 /// its input closes.
 #[test]
 #[ignore = "run by two_processes_map_the_same_pages"]
+#[cfg(target_os = "linux")]
 fn child_maps_an_extent() {
     let (Ok(socket), Ok(cell_dir), Ok(extent)) =
         (std::env::var(CHILD_SOCKET), std::env::var(CHILD_CELL_DIR), std::env::var(CHILD_EXTENT))
@@ -1267,6 +1290,7 @@ fn child_maps_an_extent() {
 /// Two VM processes, each of a cell forked from one, mapping one extent of it at once map the
 /// same pages: the daemon's, which cache it once.
 #[tokio::test(flavor = "multi_thread")]
+#[cfg(target_os = "linux")]
 async fn two_processes_map_the_same_pages() {
     host();
     let ps = page_size() as usize;
@@ -1321,6 +1345,7 @@ async fn two_processes_map_the_same_pages() {
 }
 /// The connection a VM process of [`vm_processes_tell_the_daemon_what_their_windows_cost`] is
 /// given: its descriptor's number.
+#[cfg(target_os = "linux")]
 const CHILD_CONNECTION: &str = "CLADEFSD_TEST_CONNECTION";
 
 /// A VM process, for [`vm_processes_tell_the_daemon_what_their_windows_cost`]: changes its window
@@ -1328,6 +1353,7 @@ const CHILD_CONNECTION: &str = "CLADEFSD_TEST_CONNECTION";
 /// and closes its cell; then prints what they cost it.
 #[test]
 #[ignore = "run by vm_processes_tell_the_daemon_what_their_windows_cost"]
+#[cfg(target_os = "linux")]
 fn child_changes_its_window() {
     let (Ok(connection), Ok(cell_dir)) =
         (std::env::var(CHILD_CONNECTION), std::env::var(CHILD_CELL_DIR))
@@ -1373,6 +1399,7 @@ fn child_changes_its_window() {
 /// daemon counts as its own (`Stats::stage_ops`): as they tell it, all of it once they close
 /// their cells. A VM process is another process, whose own counters the daemon never sees.
 #[test]
+#[cfg(target_os = "linux")]
 fn vm_processes_tell_the_daemon_what_their_windows_cost() {
     use std::os::fd::AsRawFd;
     host();
@@ -1443,8 +1470,10 @@ fn within<T: Send + 'static>(
 }
 
 /// A child process, killed and reaped once dropped, as a test that fails leaves it.
+#[cfg(target_os = "linux")]
 struct Reaped(std::process::Child);
 
+#[cfg(target_os = "linux")]
 impl Drop for Reaped {
     fn drop(&mut self) {
         let _ = self.0.kill();
@@ -1457,6 +1486,7 @@ impl Drop for Reaped {
 /// the low word it is: as a kernel without what the call asks for, or a daemon without the right
 /// to it, answers, for tests of the daemon on such hosts. For as long as the process lives, which
 /// nextest gives each test of its own.
+#[cfg(target_os = "linux")]
 fn refuse_system_call(call: libc::c_long, args: &[(usize, u32)], errno: u16) {
     use libc::{BPF_ABS, BPF_JEQ, BPF_JMP, BPF_K, BPF_LD, BPF_RET, BPF_W, sock_filter};
     #[cfg(target_arch = "x86_64")]
@@ -1508,6 +1538,7 @@ fn refuse_system_call(call: libc::c_long, args: &[(usize, u32)], errno: u16) {
 
 /// Stops `child` as SIGSTOP does, and waits until it has: the signal is sent before its threads
 /// stop, and one still running answers what its caller takes to go unanswered (TASK-134).
+#[cfg(target_os = "linux")]
 fn freeze(child: &std::process::Child) {
     let pid = child.id() as libc::pid_t;
     // SAFETY: Signals the child this test made.
@@ -1538,6 +1569,7 @@ fn page_is_held(arena: cladefs_core::pages::ArenaId, offset: u64) -> bool {
 /// faults on them are served; and once it has acknowledged nothing it was sent for a while, the
 /// daemon kills it, and lets its cell go. The page it maps, evicted, is no other's until then: not
 /// free, but the quarantine's, until it has exited; free once it has.
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 async fn frozen_vm_processes_hold_nothing_up() {
     frozen_vm_processes_are_killed().await;
@@ -1547,6 +1579,7 @@ async fn frozen_vm_processes_hold_nothing_up() {
 /// here, the daemon's start refuses, naming the version: it opened a VM process by the pid that
 /// connected, which another process may have taken by then, the one it would kill (TASK-79.9).
 #[test]
+#[cfg(target_os = "linux")]
 fn kernels_without_peer_pidfds_are_refused() {
     crate::server::require_peer_pidfds().unwrap();
     let (level, option) = (libc::SOL_SOCKET as u32, libc::SO_PEERPIDFD as u32);
@@ -1559,6 +1592,7 @@ fn kernels_without_peer_pidfds_are_refused() {
 
 /// A cell of a tenant's, whose extent's page a VM process, a child, and this one map, and what
 /// the child printed.
+#[cfg(target_os = "linux")]
 struct TwoVmProcesses {
     dir: tempfile::TempDir,
     tenant: std::sync::Arc<crate::server::Tenant>,
@@ -1573,6 +1607,7 @@ struct TwoVmProcesses {
 }
 
 /// [`TwoVmProcesses`], of a tenant, its child with `env` set too.
+#[cfg(target_os = "linux")]
 async fn two_vm_processes(env: &[&str]) -> TwoVmProcesses {
     use std::io::BufRead as _;
     host();
@@ -1624,6 +1659,7 @@ async fn two_vm_processes(env: &[&str]) -> TwoVmProcesses {
 }
 
 /// What [`frozen_vm_processes_hold_nothing_up`] shows.
+#[cfg(target_os = "linux")]
 async fn frozen_vm_processes_are_killed() {
     use std::os::unix::process::ExitStatusExt as _;
     let ps = page_size() as usize;
@@ -1669,6 +1705,7 @@ async fn frozen_vm_processes_are_killed() {
 /// still, as nothing took it away: the page, evicted, is no other's until it is gone, which the
 /// daemon sees to, killing it, and lets its cell go once it has exited.
 #[tokio::test(flavor = "multi_thread")]
+#[cfg(target_os = "linux")]
 async fn vm_processes_that_close_their_connections_keep_their_pages_until_gone() {
     use std::os::unix::process::ExitStatusExt as _;
     let ps = page_size() as usize;
@@ -1729,8 +1766,10 @@ fn child_leaves_its_socket_to_a_child() {
 }
 
 /// A process this test has no child's handle of, killed once dropped.
+#[cfg(target_os = "linux")]
 struct KilledOnDrop(libc::pid_t);
 
+#[cfg(target_os = "linux")]
 impl Drop for KilledOnDrop {
     fn drop(&mut self) {
         // SAFETY: Signals the process this test's child left.
@@ -1741,6 +1780,7 @@ impl Drop for KilledOnDrop {
 /// TASK-79.101: a VM process that exits leaving its socket to a child of its own is gone, though
 /// the socket's other end lives on: its cell is another's to open.
 #[test]
+#[cfg(target_os = "linux")]
 fn vm_processes_that_leave_their_sockets_to_children_are_gone() {
     use std::io::BufRead as _;
     host();
@@ -1787,6 +1827,7 @@ fn child_opens_a_cell() {
 /// refuses as it connects: one that stopped answering it could not let go of, and the pages it may
 /// reach, freed, would wait for it for good.
 #[test]
+#[cfg(target_os = "linux")]
 fn vm_processes_the_daemon_may_not_kill_are_refused() {
     refuse_system_call(libc::SYS_pidfd_send_signal, &[], libc::EPERM as u16);
     host();
@@ -1812,6 +1853,7 @@ fn vm_processes_the_daemon_may_not_kill_are_refused() {
 /// extent is paged in once, for both windows and the fork's READ, which reads nothing from the
 /// cell (TASK-32).
 #[test]
+#[cfg(target_os = "linux")]
 fn the_daemon_forks_cells_it_serves() {
     host();
     let ps = page_size() as usize;
@@ -1847,6 +1889,7 @@ fn the_daemon_forks_cells_it_serves() {
 /// the snapshot each open a fork of their own of that version, holding what it held, whose windows
 /// map what the snapshot's recorded, mapped again; and a version a connection has open is busy.
 #[test]
+#[cfg(target_os = "linux")]
 fn snapshots_restore_into_forks_of_their_version() {
     host();
     let ps = page_size() as usize;
@@ -1938,6 +1981,7 @@ fn snapshots_restore_into_forks_of_their_version() {
 /// Restored both ways, each window reads what the snapshot's did; the MAPs' restore and the
 /// `MAP_MANY`'s are timed, for the task's notes.
 #[test]
+#[cfg(target_os = "linux")]
 fn snapshots_map_their_windows_again_in_one_request() {
     const PAGES: usize = 1024;
     host();
@@ -2051,6 +2095,7 @@ fn snapshots_map_their_windows_again_in_one_request() {
 /// holds their bytes; and restored, its window reads what the guest stored, mapped again in one
 /// request.
 #[test]
+#[cfg(target_os = "linux")]
 fn snapshots_after_private_pages_are_rebound_restore_their_bytes() {
     const PAGES: usize = 8;
     host();
@@ -2202,6 +2247,7 @@ fn daemons_with_roots_serve_no_cells_outside_them() {
 /// again; a fork of it reads its pages and stores only those it writes, each page of the parent
 /// it leaves as it was, and its holes nothing.
 #[test]
+#[cfg(target_os = "linux")]
 fn memory_cells_commit_pages_and_holes_and_forks_store_only_their_own() {
     use cladefs_wire::memory_cell::MemoryCell;
     host();
@@ -2257,6 +2303,7 @@ fn memory_cells_commit_pages_and_holes_and_forks_store_only_their_own() {
 /// in an extent its root names, closes and opens again, as often as it is closed, holding what
 /// that commit made.
 #[test]
+#[cfg(target_os = "linux")]
 fn a_memory_cell_opens_again_after_a_commit_freeing_many_extents() {
     use cladefs_wire::memory_cell::MemoryCell;
     host();
@@ -2294,6 +2341,7 @@ fn a_memory_cell_opens_again_after_a_commit_freeing_many_extents() {
 /// a write of the guest's makes a page private in its window alone, the other's still the shared
 /// page; the windows' private pages reserve nothing in the daemon.
 #[test]
+#[cfg(target_os = "linux")]
 fn memory_windows_map_what_faults_reach_and_share_their_pages() {
     use cladefs_wire::memory_cell::MemoryCell;
     host();
@@ -2360,6 +2408,7 @@ fn memory_windows_map_what_faults_reach_and_share_their_pages() {
 
 /// `pages` pages of anonymous memory the test owns, reserving none: what a VMM maps a guest's
 /// memory as.
+#[cfg(target_os = "linux")]
 fn memory_noreserve(pages: usize) -> NonNull<u8> {
     // SAFETY: Maps anonymous memory, which the test owns.
     let memory = unsafe {
@@ -2480,6 +2529,7 @@ async fn fenced_cells_answer_ordered_commits_erofs() {
 
 /// A transfer area of `len` bytes, its first half written as the slots a VM process used, given
 /// to a daemon serving a connection of its cell: the area's memory and mapping, and the connection.
+#[cfg(target_os = "linux")]
 struct ServedArea {
     _dir: tempfile::TempDir,
     file: std::fs::File,
@@ -2491,6 +2541,7 @@ struct ServedArea {
     cell: u64,
 }
 
+#[cfg(target_os = "linux")]
 impl ServedArea {
     fn new(len: usize) -> Self {
         use crate::wire::*;
@@ -2576,6 +2627,7 @@ impl ServedArea {
 /// A read into bytes of it the VM process never wrote, which the daemon would fault in itself, is
 /// refused; one into bytes it wrote is served.
 #[test]
+#[cfg(target_os = "linux")]
 fn transfer_areas_are_their_vm_processes_memory() {
     use crate::wire::*;
     use std::os::fd::AsRawFd;
@@ -2641,6 +2693,7 @@ fn transfer_areas_are_their_vm_processes_memory() {
 /// zram takes it (`--run-ignored all`).
 #[test]
 #[ignore = "needs a host that pages shared memory out to swap: ubu1's zram, not CI's runners"]
+#[cfg(target_os = "linux")]
 fn transfer_areas_written_and_swapped_out_are_read_into() {
     let len = 1 << 20;
     let mut area = ServedArea::new(len);
@@ -2748,6 +2801,7 @@ async fn control_takes_cells_at_the_placements_given() {
 /// cladefs: a tenant's arena, and the extents cached in it, go with the tenant, once its grant and
 /// its VM processes have (TASK-43.4).
 #[test]
+#[cfg(target_os = "linux")]
 fn tenants_arenas_go_with_them() {
     host();
     let ps = page_size() as usize;
@@ -2808,12 +2862,14 @@ fn writers_that_go_with_writes_uncommitted_leave_their_last_commit() {
 /// What this process holds, as Linux counts it: the daemon's threads (but for its clients'), its
 /// open files, and its resident memory.
 #[derive(Debug, Clone, Copy)]
+#[cfg(target_os = "linux")]
 struct Held {
     threads: usize,
     files: usize,
     resident: u64,
 }
 
+#[cfg(target_os = "linux")]
 impl Held {
     fn now() -> Self {
         let threads = thread_comms().filter(|comm| comm != "cladefsd client").count();
@@ -2831,6 +2887,7 @@ impl Held {
 /// This process's open files, by what each is, its digits each `N`, so that the files of each fork
 /// count as one kind: what a test of how many files forks hold says it found. One closed between
 /// the listing of `/proc/self/fd` and its reading is gone, and holds nothing.
+#[cfg(target_os = "linux")]
 fn files_by_kind() -> std::collections::BTreeMap<String, usize> {
     let mut kinds = std::collections::BTreeMap::new();
     for fd in std::fs::read_dir("/proc/self/fd").unwrap() {
@@ -2853,6 +2910,7 @@ fn files_by_kind() -> std::collections::BTreeMap<String, usize> {
 /// `/proc/self/task` and the read of its name, as an idle blocking thread of the daemon's runtimes
 /// does, is gone, and holds nothing: its name not found, or, as it exits, its process no more
 /// (`ESRCH`), as for the threads a cell's flush syncs its files on (`local_cell`'s `AT_ONCE`).
+#[cfg(target_os = "linux")]
 fn thread_comms() -> impl Iterator<Item = String> {
     std::fs::read_dir("/proc/self/task").unwrap().filter_map(|task| {
         match std::fs::read_to_string(task.unwrap().path().join("comm")) {
@@ -2865,6 +2923,7 @@ fn thread_comms() -> impl Iterator<Item = String> {
 }
 
 /// This process's threads, by name, and how many of each.
+#[cfg(target_os = "linux")]
 fn thread_names() -> std::collections::BTreeMap<String, usize> {
     let mut names = std::collections::BTreeMap::new();
     for comm in thread_comms() {
@@ -2879,6 +2938,7 @@ fn thread_names() -> std::collections::BTreeMap<String, usize> {
 #[test]
 #[ignore = "board 10671: each fork holds 11 files, past the 10 this bounds: its directory twice, \
             DiskDir's handle and the dup its flock holds (local_cell::dir::try_take_from_others)"]
+#[cfg(target_os = "linux")]
 fn serves_hundreds_of_forks_of_a_base() {
     const FORKS: usize = 300;
     const EXTENTS: u64 = 64;
@@ -3008,6 +3068,7 @@ async fn forks_opening_reads_nothing_more_of_a_larger_base() {
 /// reported. The cells are on
 /// a disk, in `/var/tmp`, as a host's are: `/tmp` may be memory (tmpfs), whose syncs cost nothing.
 #[test]
+#[cfg(target_os = "linux")]
 fn hundreds_of_writers_flush_on_threads_they_share() {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -3431,6 +3492,7 @@ fn metrics_are_there_before_any_cell_opens() {
 /// family's HELP said twice, a histogram without `+Inf`, a series said twice, passed them all and
 /// failed the scrape.
 #[test]
+#[cfg(target_os = "linux")]
 fn the_daemons_metrics_parse_as_a_scraper_parses_them() {
     use crate::control::proto::GetStatsRequest;
     host();
@@ -3511,6 +3573,7 @@ fn the_daemons_metrics_parse_as_a_scraper_parses_them() {
 /// process's window gauges, its builds, and its uploads', which a query joins on; and not by
 /// connection, whose number made a series of each VM process.
 #[test]
+#[cfg(target_os = "linux")]
 fn a_cells_metrics_name_it_alike_in_every_family() {
     host();
     let ps = page_size() as usize;
@@ -3575,6 +3638,7 @@ async fn control_accepts_failing_are_tried_again_after_a_pause() {
 /// TASK-79.35: the daemon goes on accepting VM processes' connections through a failure to accept
 /// one, as with as many files open as it may (EMFILE): it accepts them once files close.
 #[test]
+#[cfg(target_os = "linux")]
 fn the_daemon_accepts_on_after_failing_to() {
     host();
     let dir = tempfile::tempdir().unwrap();
@@ -3662,6 +3726,8 @@ async fn requests_attach_nothing() {
 /// doc-26: a VM process is handed its tenant's arena and the default one read-only: it copies its
 /// guest's writes into memory of its own, and writes no page the daemon's cache holds.
 #[test]
+// cladefs: on macOS its arenas are files unlinked as they are made, handed writable (board 13541).
+#[cfg(target_os = "linux")]
 fn vm_processes_are_handed_their_memory_read_only() {
     use crate::wire::*;
     host();
@@ -3670,8 +3736,10 @@ fn vm_processes_are_handed_their_memory_read_only() {
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
     let stream = UnixStream::connect(&socket).unwrap();
-    let (sender, mut receiver) =
-        (Sender::new(stream.try_clone().unwrap()), Receiver::new(stream.try_clone().unwrap()));
+    let (sender, mut receiver) = (
+        Sender::new(stream.try_clone().unwrap()).unwrap(),
+        Receiver::new(stream.try_clone().unwrap()),
+    );
     let open = Header::new(OPEN, 1)
         .with_body(&OpenBody { capacity: 1 << 24, version: VERSION, ..Default::default() })
         .with_flags(OPEN_CREATE);
@@ -3693,6 +3761,7 @@ fn vm_processes_are_handed_their_memory_read_only() {
 /// to a page the load's fault named with the rest of its part, its VM process copies itself, which
 /// the daemon never hears of (doc-26).
 #[test]
+#[cfg(target_os = "linux")]
 fn a_vms_reads_are_traced() {
     host();
     let traces = tempfile::tempdir().unwrap();
@@ -3756,6 +3825,7 @@ fn a_vms_reads_are_traced() {
 /// by `READ` alike, as the version's read evidence of its tenant's, written as its cell closes,
 /// before another connection opens it again.
 #[test]
+#[cfg(target_os = "linux")]
 fn a_restored_vms_reads_are_its_versions_evidence() {
     host();
     let ps = page_size() as usize;
@@ -4060,6 +4130,7 @@ async fn cells_synced_here_are_closed_before_they_are_let_go() {
 }
 
 /// A memory object of `len` bytes, as a daemon hands its VM processes its arenas.
+#[cfg(target_os = "linux")]
 fn memfd(len: u64) -> std::fs::File {
     // SAFETY: The name is a C string.
     let fd = unsafe { libc::memfd_create(c"memory".as_ptr(), libc::MFD_CLOEXEC) };
@@ -4072,11 +4143,21 @@ fn memfd(len: u64) -> std::fs::File {
     file
 }
 
+/// A memory object of `len` bytes, as [`memfd`] is on Linux: on macOS, which has no memfd, a file
+/// unlinked as it is made, as the daemon's arenas there are (`slabs`).
+#[cfg(not(target_os = "linux"))]
+fn memfd(len: u64) -> std::fs::File {
+    let file = tempfile::tempfile().unwrap();
+    file.set_len(len).unwrap();
+    file
+}
+
 /// TASK-79.43: a window's mappings, a snapshot's, more of them than one message's most bytes of
 /// payload hold, arrive whole: a daemon's reply holds as many as a window of its size can have,
 /// which its VM process takes. Here a daemon of the test's answers the cell's opening, its
 /// window's, and its mappings', a page each, past `MAX_PAYLOAD`.
 #[test]
+#[cfg(target_os = "linux")]
 fn window_mappings_past_a_messages_payload_arrive() {
     use crate::wire::*;
     use std::os::fd::AsFd;
@@ -4086,7 +4167,7 @@ fn window_mappings_past_a_messages_payload_arrive() {
     let (stream, daemon) = UnixStream::pair().unwrap();
     let answering = std::thread::spawn(move || {
         let (sender, mut receiver) =
-            (Sender::new(daemon.try_clone().unwrap()), Receiver::new(daemon));
+            (Sender::new(daemon.try_clone().unwrap()).unwrap(), Receiver::new(daemon));
         let (own, public) = (memfd(ps), memfd(ps));
         while let Ok(Some(request)) = receiver.receive(|| 0) {
             let mut reply = Header::new(REPLY, request.header.id);
@@ -4152,7 +4233,7 @@ fn requests_failed_by_the_daemons_going_find_it_gone() {
     let (stream, daemon) = UnixStream::pair().unwrap();
     let answering = std::thread::spawn(move || {
         let (sender, mut receiver) =
-            (Sender::new(daemon.try_clone().unwrap()), Receiver::new(daemon));
+            (Sender::new(daemon.try_clone().unwrap()).unwrap(), Receiver::new(daemon));
         let (own, public) = (memfd(ps), memfd(ps));
         while let Ok(Some(request)) = receiver.receive(|| 0) {
             let mut reply = Header::new(REPLY, request.header.id);
@@ -4224,8 +4305,10 @@ fn raw_connection(
 ) -> (crate::wire::Sender, crate::wire::Receiver, UnixStream, u64) {
     use crate::wire::*;
     let stream = UnixStream::connect(socket).unwrap();
-    let (sender, mut receiver) =
-        (Sender::new(stream.try_clone().unwrap()), Receiver::new(stream.try_clone().unwrap()));
+    let (sender, mut receiver) = (
+        Sender::new(stream.try_clone().unwrap()).unwrap(),
+        Receiver::new(stream.try_clone().unwrap()),
+    );
     let open = Header::new(OPEN, 1)
         .with_body(&OpenBody { capacity, version: VERSION, ..Default::default() })
         .with_flags(OPEN_CREATE);
@@ -4264,15 +4347,42 @@ fn shut(error: &std::io::Error) -> bool {
 /// [`send_until_let_go`]'s may (TASK-240).
 fn assert_let_go(sender: &crate::wire::Sender, stream: &UnixStream, within: std::time::Duration) {
     use crate::wire::{Header, INFO};
+    assert_hung_up(stream, within);
+    // cladefs: on macOS (a BSD), the daemon's shutting its end down fails no send of the VM
+    // process's, which goes into the socket's buffer, read by none; the VM process sees the
+    // daemon hang up, as above, and its client shuts its own end down then (`client`, board
+    // 13065).
+    #[cfg(target_os = "linux")]
+    {
+        let sent = sender.send(Header::new(INFO, u64::MAX), &[], &[]);
+        assert!(sent.as_ref().is_err_and(shut), "sent once let go: {sent:?}");
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (sender, Header::new(INFO, u64::MAX));
+}
+
+/// Asserts the daemon at the other end of `stream` hangs up within `within`, though this end may
+/// not have read what it sent: `POLLRDHUP` on Linux; on macOS, which has none, the stream
+/// readable within `within`, then its kqueue's end of what the daemon sends (`wire::hung_up`).
+pub(super) fn assert_hung_up(stream: &UnixStream, within: std::time::Duration) {
     use std::os::fd::AsRawFd;
-    let mut hung_up = libc::pollfd { fd: stream.as_raw_fd(), events: libc::POLLRDHUP, revents: 0 };
+    #[cfg(target_os = "linux")]
+    let events = libc::POLLRDHUP;
+    #[cfg(not(target_os = "linux"))]
+    let events = libc::POLLIN;
+    let mut hung_up = libc::pollfd { fd: stream.as_raw_fd(), events, revents: 0 };
     let within = libc::c_int::try_from(within.as_millis()).unwrap();
     // SAFETY: Polls the stream, which the caller keeps open, for `within` at most.
     let ready = unsafe { libc::poll(&mut hung_up, 1, within) };
     assert_eq!(ready, 1, "the daemon holds what the VM process leaves unread");
+    #[cfg(target_os = "linux")]
     assert_ne!(hung_up.revents & libc::POLLRDHUP, 0, "{:#x}", hung_up.revents);
-    let sent = sender.send(Header::new(INFO, u64::MAX), &[], &[]);
-    assert!(sent.as_ref().is_err_and(shut), "sent once let go: {sent:?}");
+    #[cfg(not(target_os = "linux"))]
+    {
+        use std::os::fd::AsFd;
+        let hung = crate::wire::hung_up(stream.as_fd());
+        assert!(hung, "readable, but not hung up: {:#x}", hung_up.revents);
+    }
 }
 
 /// How many bytes `stream` has received that are not read yet.
@@ -4485,7 +4595,7 @@ fn connections_open_one_cell_at_a_time() {
     let held = table().hold(&key, None).unwrap();
 
     let stream = UnixStream::connect(&socket).unwrap();
-    let sender = Sender::new(stream.try_clone().unwrap());
+    let sender = Sender::new(stream.try_clone().unwrap()).unwrap();
     let mut receiver = Receiver::new(stream.try_clone().unwrap());
     let open = |id| {
         Header::new(OPEN, id)
@@ -4522,6 +4632,11 @@ fn tenants_connections_are_bounded() {
     use std::io::Read as _;
     host();
     crate::raise_open_files_limit().unwrap();
+    // cladefs: the daemon's most connections past the tenant's, whatever the host's limit of open
+    // files gives it: macOS's (`kern.maxfilesperproc`) gave it 1016, a tenant's 4096 never
+    // reached (board 13065).
+    let given = (Some(2 * crate::server::MAX_CONNECTIONS), crate::server::RESERVED_CONNECTIONS);
+    crate::server::CONNECTION_LIMITS_GIVEN.set(given).unwrap();
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("cladefsd.sock");
     let listener = UnixListener::bind(&socket).unwrap();
@@ -4532,10 +4647,9 @@ fn tenants_connections_are_bounded() {
     let first =
         CellClient::over(ours, &dir.path().join("first"), Opening::Create(1 << 20, Kind::Fxfs));
     let first = first.unwrap();
-    let connected: Vec<UnixStream> = (1..crate::server::MAX_CONNECTIONS)
-        .map(|_| UnixStream::connect(&socket).unwrap())
-        .collect();
-    let past = UnixStream::connect(&socket).unwrap();
+    let connected: Vec<UnixStream> =
+        (1..crate::server::MAX_CONNECTIONS).map(|_| connect_queued(&socket)).collect();
+    let past = connect_queued(&socket);
     let closed = within(std::time::Duration::from_secs(10), move || {
         (&past).read(&mut [0]).map_err(|err| err.kind())
     });
@@ -4546,6 +4660,20 @@ fn tenants_connections_are_bounded() {
     let opened = CellClient::connect(&socket, dir.path().join("store"), 1 << 20);
     assert_eq!(opened.map(drop).map_err(|error| error.errno()), Ok(()), "no connection served");
     drop(connected);
+}
+
+/// A connection to the listener at `socket`, once its queue of connections not accepted yet has
+/// room: macOS refuses one past it (`ECONNREFUSED`, its `kern.ipc.somaxconn` of 128), where
+/// Linux holds it until the queue has room.
+fn connect_queued(socket: &Path) -> UnixStream {
+    loop {
+        match UnixStream::connect(socket) {
+            Err(err) if err.kind() == std::io::ErrorKind::ConnectionRefused => {
+                std::thread::yield_now();
+            }
+            connected => return connected.unwrap(),
+        }
+    }
 }
 
 /// TASK-79.84: a VM restored from a snapshot to where a fork of its version was left unmade, its
@@ -5105,7 +5233,7 @@ fn daemons_of_other_wire_versions_are_refused() {
     let (stream, daemon) = UnixStream::pair().unwrap();
     let answering = std::thread::spawn(move || {
         let (sender, mut receiver) =
-            (Sender::new(daemon.try_clone().unwrap()), Receiver::new(daemon));
+            (Sender::new(daemon.try_clone().unwrap()).unwrap(), Receiver::new(daemon));
         let (own, public) = (memfd(ps), memfd(ps));
         let mut served = Vec::new();
         while let Ok(Some(request)) = receiver.receive(|| 0) {
@@ -5158,8 +5286,10 @@ fn vm_processes_of_other_wire_versions_are_refused() {
     let path = dir.path().join("store");
     let (stream, server) = UnixStream::pair().unwrap();
     let served = std::thread::spawn(move || serve_connection(server, default_tenant().unwrap()));
-    let (sender, mut receiver) =
-        (Sender::new(stream.try_clone().unwrap()), Receiver::new(stream.try_clone().unwrap()));
+    let (sender, mut receiver) = (
+        Sender::new(stream.try_clone().unwrap()).unwrap(),
+        Receiver::new(stream.try_clone().unwrap()),
+    );
     let named = std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str());
     for (id, other) in [(1, 0), (2, VERSION + 1), (3, u64::MAX)] {
         // Flags this version doesn't know, as another's OPEN may have.
@@ -5195,7 +5325,7 @@ fn openings_fail_on_refusals_of_what_they_ask() {
         let (stream, daemon) = UnixStream::pair().unwrap();
         let answering = std::thread::spawn(move || {
             let (sender, mut receiver) =
-                (Sender::new(daemon.try_clone().unwrap()), Receiver::new(daemon));
+                (Sender::new(daemon.try_clone().unwrap()).unwrap(), Receiver::new(daemon));
             let (own, public) = (memfd(ps), memfd(ps));
             let mut served = Vec::new();
             while let Ok(Some(request)) = receiver.receive(|| 0) {
@@ -5345,10 +5475,12 @@ impl GatedReads {
     }
 
     /// Holds the reads from now on, if `held`, or lets them go.
+    #[cfg(target_os = "linux")]
     fn hold(&self, held: bool) {
         self.held.send_replace(held);
     }
 
+    #[cfg(target_os = "linux")]
     fn waiting(&self) -> usize {
         self.waiting.load(std::sync::atomic::Ordering::Relaxed)
     }
@@ -5443,6 +5575,7 @@ impl object_store::ObjectStore for GatedReads {
 /// `INFO` is answered meanwhile. Each held a thread of the daemon's and one of those 8 while it
 /// waited, as for a part from GCS, 30-100 ms, and the requests after them waited their turn.
 #[tokio::test(flavor = "multi_thread")]
+#[cfg(target_os = "linux")]
 async fn faults_waiting_for_object_storage_hold_up_no_request() {
     use std::sync::Arc;
     const FAULTS: usize = 12;
@@ -6492,6 +6625,7 @@ fn window_mappings_are_answered_beside_the_stream_data_in_flight() {
 
 /// How a [`whatever_a_vm_process_says_harms_no_other`] sequence ends.
 #[derive(Debug, Clone, Copy)]
+#[cfg(target_os = "linux")]
 enum LastWords {
     /// Closes the connection between messages.
     Nothing,
@@ -6512,6 +6646,7 @@ enum LastWords {
 /// copies on write too, which its VM process makes its own copies in (doc-26).
 /// Seeded by proptest, which says the sequence if one fails.
 #[test]
+#[cfg(target_os = "linux")]
 fn whatever_a_vm_process_says_harms_no_other() {
     use crate::wire::*;
     use proptest::prelude::*;
@@ -6755,7 +6890,7 @@ fn whatever_a_vm_process_says_harms_no_other() {
                 raw_connection(&socket, &path, 1 << 24)
             } else {
                 let stream = UnixStream::connect(&socket).unwrap();
-                let sending = Sender::new(stream.try_clone().unwrap());
+                let sending = Sender::new(stream.try_clone().unwrap()).unwrap();
                 (sending, Receiver::new(stream.try_clone().unwrap()), stream, 0)
             };
             // The cells it may hold once done: those it opened, had it none.
@@ -6969,6 +7104,7 @@ fn a_panic_holding_a_cells_lock_halts_it_alone() {
 /// The locks shared beyond one cell a VM process's requests take ([`child_panics_holding`]): the
 /// extent cache's and its extents', a window's and its change's, its connection's, and those of
 /// `local_cell`'s cell, which the cells a base is attached to share (TASK-149.24).
+#[cfg(target_os = "linux")]
 const SHARED_LOCKS: &[&str] = &[
     "extent cache",
     "cached extent holders",
@@ -6985,6 +7121,7 @@ const SHARED_LOCKS: &[&str] = &[
 ];
 
 /// What [`child_panics_holding`] panics holding, as its parent says.
+#[cfg(target_os = "linux")]
 const PANIC_HOLDING: &str = "CLADEFSD_TEST_PANIC_HOLDING";
 
 /// Run by [`a_panic_holding_a_shared_lock_stops_the_daemon`], in a process of its own: a daemon,
@@ -6993,6 +7130,7 @@ const PANIC_HOLDING: &str = "CLADEFSD_TEST_PANIC_HOLDING";
 /// names as it is next taken. It says if it got to the end.
 #[test]
 #[ignore = "run by a_panic_holding_a_shared_lock_stops_the_daemon, in a process of its own"]
+#[cfg(target_os = "linux")]
 fn child_panics_holding() {
     let Ok(lock) = std::env::var(PANIC_HOLDING) else { return };
     // Its abort is what its parent looks for, no crash to keep: no core dump, which a host's
@@ -7026,6 +7164,7 @@ fn child_panics_holding() {
 /// its cell, while the lock's poison, or what it guards half changed, reaches every user after,
 /// nor an abort from a drop panicking as it unwinds.
 #[test]
+#[cfg(target_os = "linux")]
 fn a_panic_holding_a_shared_lock_stops_the_daemon() {
     use std::os::unix::process::ExitStatusExt;
     for lock in SHARED_LOCKS {
@@ -7246,6 +7385,7 @@ fn imports_read_what_they_made_from_the_hosts_cache() {
 }
 
 /// TASK-149.17: a compromised VM process beside other tenants, checked against invariants.
+#[cfg(target_os = "linux")]
 mod hostile;
 
 /// TASK-258: the daemon's spans, exported.
@@ -7259,6 +7399,7 @@ mod soak;
 /// `WRITE` of a flag no write knows, or deferred, as a `PRIVATE` the window refuses; and a call for
 /// none names none.
 #[test]
+#[cfg(target_os = "linux")]
 fn calls_for_guest_requests_are_logged_with_them() {
     use crate::wire::{Header, WRITE, WriteBody};
     use cladefs_core::request::{RequestId, within_now};
@@ -7392,6 +7533,7 @@ fn version_cell(version: cladefs_core::CellVersion) -> cladefs_core::CellId {
 /// TASK-522: a request submitted to an empty pool gets a failure if the host
 /// refuses to start its worker, even when no more requests come in.
 #[test]
+#[cfg(target_os = "linux")]
 fn first_request_completes_when_worker_creation_fails() {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
     let pool = Box::leak(Box::new(crate::pool::Pool::new("spawn refused", 1)));
@@ -7406,6 +7548,7 @@ fn first_request_completes_when_worker_creation_fails() {
 /// TASK-520: failed write-back must leave a completed admission charged. The
 /// dirty data is still in the cache and will cost disk blocks when it is written.
 #[test]
+#[cfg(target_os = "linux")]
 fn failed_writeback_preserves_disk_admission() {
     use local_cell::{Dir, File};
     use std::os::fd::AsRawFd;
@@ -7506,6 +7649,7 @@ fn measure_disk_recounts_with_resident_pages() {
 /// Gives the test control over when this thread's next unlink enters the
 /// filesystem. Only the revoke thread installs the filter, so a simultaneous
 /// grant is free to remove a stale socket and bind its replacement.
+#[cfg(target_os = "linux")]
 fn pause_socket_unlink() -> std::os::fd::OwnedFd {
     use std::os::fd::FromRawFd;
     let load_nr = libc::sock_filter {
@@ -7551,6 +7695,7 @@ fn pause_socket_unlink() -> std::os::fd::OwnedFd {
 /// an overlapping revoke finishes. Pause the old unlink in the kernel and
 /// let the regrant finish first if the locking permits it.
 #[test]
+#[cfg(target_os = "linux")]
 fn a_racing_revoke_preserves_the_regranted_socket() {
     use std::os::fd::AsRawFd;
     use std::sync::{Arc, mpsc};
@@ -7694,6 +7839,7 @@ fn ephemeral_cells_fork_from_versions_and_retire_their_references() {
 /// to start again, rather than serve its cells over references retired. GetStats says the
 /// serving daemon's incarnation.
 #[test]
+#[cfg(target_os = "linux")]
 fn hosts_are_decommissioned_through_the_control_api() {
     use crate::control::proto::{
         DecommissionHostRequest, EphemeralHost, GetStatsRequest, ListEphemeralHostsRequest,
@@ -8046,7 +8192,7 @@ fn large_writes_waiting_for_replies_do_not_gather_unbounded_payloads() {
 
     let ps = page_size();
     let (stream, mut daemon) = UnixStream::pair().unwrap();
-    let sender = Sender::new(daemon.try_clone().unwrap());
+    let sender = Sender::new(daemon.try_clone().unwrap()).unwrap();
     let (all_window_received, window_received) = mpsc::channel();
     let (release_replies, replies_released) = mpsc::channel();
     let drained = Arc::new(AtomicUsize::new(0));

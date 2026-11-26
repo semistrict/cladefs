@@ -247,7 +247,6 @@ pub fn buckets_opened_on(host: &crate::Host) -> Vec<String> {
 }
 
 /// cladefs: what the decoded states of the cells `host`'s buckets keep hold.
-#[cfg(any(target_os = "linux", madsim, test))]
 pub fn decoded_held_on(host: &crate::Host) -> bucket_cell::recovery::Held {
     let buckets = host.host_cells().buckets.lock().unwrap();
     (buckets.values())
@@ -258,7 +257,6 @@ pub fn decoded_held_on(host: &crate::Host) -> bucket_cell::recovery::Held {
 
 /// cladefs: estimated bytes of idle decoded states retained strongly across `host`'s buckets
 /// (board 11554).
-#[cfg(any(target_os = "linux", madsim, test))]
 pub fn decoded_kept_bytes_on(host: &crate::Host) -> u64 {
     let buckets = host.host_cells().buckets.lock().unwrap();
     (buckets.values())
@@ -269,7 +267,6 @@ pub fn decoded_kept_bytes_on(host: &crate::Host) -> u64 {
 
 /// cladefs: evicts strong idle decoded states across `host`'s buckets until at most `target` bytes
 /// remain, returning the total bytes evicted (board 11554).
-#[cfg(any(target_os = "linux", madsim, test))]
 pub fn evict_decoded_on(host: &crate::Host, target: u64) -> u64 {
     let buckets: Vec<Arc<RoutedBucket>> =
         host.host_cells().buckets.lock().unwrap().values().cloned().collect();
@@ -790,7 +787,6 @@ pub fn versions_made() -> usize {
 }
 
 /// cladefs: where the cell `host` made the version `version` of `cell` of is, if it did.
-#[cfg(any(target_os = "linux", madsim))]
 pub fn version_made_of_on(host: &crate::Host, cell: CellId, version: u64) -> Option<PathBuf> {
     host.host_cells().versions_made.lock().unwrap().get(&(cell, version)).cloned()
 }

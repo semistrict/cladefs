@@ -277,12 +277,37 @@ pub fn line() -> String {
 
 /// The process's anonymous and shared memory resident, in bytes, as /proc/self/status says them
 /// (`RssAnon`, `RssShmem`): 0 of what it doesn't say.
+#[cfg(not(target_os = "macos"))]
 fn resident() -> (u64, u64) {
     let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
     (kib_of(&status, "RssAnon:") << 10, kib_of(&status, "RssShmem:") << 10)
 }
 
+/// The process's anonymous memory, in bytes, on macOS, which has no /proc: its physical footprint
+/// (`proc_pid_rusage`'s `ri_phys_footprint`), the memory the kernel charges it, its private pages
+/// resident and compressed; and no shared memory apart, macOS counting none (board 13065). 0, logged,
+/// if it can't be read.
+#[cfg(target_os = "macos")]
+fn resident() -> (u64, u64) {
+    // SAFETY: A buffer the call fills.
+    let mut info: libc::rusage_info_v2 = unsafe { std::mem::zeroed() };
+    // SAFETY: Fills `info`, of the flavour it is, of this process.
+    let read = unsafe {
+        libc::proc_pid_rusage(
+            std::process::id() as libc::c_int,
+            libc::RUSAGE_INFO_V2,
+            (&raw mut info).cast(),
+        )
+    };
+    if read != 0 {
+        log::warn!("cladefsd: the process's footprint: {}", std::io::Error::last_os_error());
+        return (0, 0);
+    }
+    (info.ri_phys_footprint, 0)
+}
+
 /// The KiB `status`, as /proc/PID/status has it, says of `field`: 0 if it doesn't.
+#[cfg(not(target_os = "macos"))]
 fn kib_of(status: &str, field: &str) -> u64 {
     // Not a number: none counted, as a kernel without the field counts.
     (status.lines())
