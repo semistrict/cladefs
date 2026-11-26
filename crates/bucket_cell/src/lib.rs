@@ -478,6 +478,11 @@ pub struct Rules {
     /// members hold commits told replicated, and the next take, elsewhere, loses them.
     /// TLA+: `specs/replication/mutations/InstallMembersOnly.cfg`.
     pub installs_own: bool,
+    /// cladefs: the collector keeps large own-extents of a live cell's active fast WAL epoch
+    /// (`head.fast_wal.active.epoch`) at or past `head.end`, even after a takeover bumped
+    /// `head.epoch` past it, until the taker flushes the fast WAL and switches `active` (doc-29).
+    /// TLA+: `specs/fast-wal/mutations/GcDeletesWalExtents.cfg`.
+    pub protect_wal_epoch: bool,
 }
 
 impl Rules {
@@ -504,6 +509,7 @@ impl Rules {
         versions_carried: true,
         versions_acked: true,
         installs_own: true,
+        protect_wal_epoch: true,
     };
 }
 

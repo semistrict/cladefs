@@ -748,6 +748,21 @@ fn decode_zstd_pure(packed: &[u8], out: &mut [u8]) -> Result<(), Corrupt> {
     Ok(())
 }
 
+/// Decompresses a zstd frame into `out` reusing a per-thread `ZSTD_DCtx` so each part unpack
+/// avoids allocating and freeing a ~130 KiB decompression context (board 12313).
+#[cfg(feature = "crypto")]
+fn decompress_zstd(packed: &[u8], out: &mut [u8]) -> std::io::Result<usize> {
+    thread_local! {
+        // Per thread scratch ZSTD_DCtx holding no host or cell state; safe to share across
+        // simulated hosts on one thread.
+        static DECOMPRESSOR: std::cell::RefCell<zstd::bulk::Decompressor<'static>> =
+            std::cell::RefCell::new(
+                zstd::bulk::Decompressor::new().expect("zstd makes a decompressor"),
+            );
+    }
+    DECOMPRESSOR.with(|cell| cell.borrow_mut().decompress_to_buffer(packed, out))
+}
+
 /// Decodes `packed`, a part's packed bytes, opened if it was encrypted, stored `encoding`, into
 /// `out`, which is as long as the part.
 fn decode(encoding: Encoding, packed: &[u8], out: &mut [u8]) -> Result<(), Corrupt> {
@@ -757,7 +772,7 @@ fn decode(encoding: Encoding, packed: &[u8], out: &mut [u8]) -> Result<(), Corru
         Encoding::Zstd => {
             #[cfg(feature = "crypto")]
             {
-                let unpacked = zstd::bulk::decompress_to_buffer(packed, out)
+                let unpacked = decompress_zstd(packed, out)
                     .map_err(|err| corrupt(format_args!("part, by zstd: {err}")))?;
                 if unpacked != out.len() {
                     return Err(corrupt("compressed part, of the wrong length"));
@@ -852,18 +867,18 @@ impl Part {
         Ok(decode(self.stored.encoding, packed, out)?)
     }
 
-    /// It, unpacked from `stored`, its stored bytes and any after them, checked against its CRC,
-    /// and opened, if encrypted, in a copy of them.
-    pub fn unpack(&self, stored: &[u8]) -> Result<Vec<u8>, Error> {
-        let mut out = vec![0; self.len() as usize];
+    /// Unpacks it from `stored`, its stored bytes and any after them, checked against its CRC,
+    /// and opened, if encrypted, into `out`, which must be as long as the part (board 12313).
+    pub fn unpack_copy_into(&self, stored: &[u8], out: &mut [u8]) -> Result<(), Error> {
+        debug_assert_eq!(out.len(), self.len() as usize);
         let checked = self.stored.check(stored)?;
         match (&self.opening, self.stored.encoding) {
-            (Opening::Unchecked(_), encoding) => decode(encoding, checked, &mut out)?,
+            (Opening::Unchecked(_), encoding) => decode(encoding, checked, out)?,
             // cladefs: checked where it is, then unpacked (TASK-411.3).
             #[cfg(feature = "crypto")]
             (Opening::Open(key), encoding) if key.keyed == Keyed::Authenticated => {
                 key.check_part(self.index, encoding, self.len(), checked, &self.tag)?;
-                decode(encoding, checked, &mut out)?;
+                decode(encoding, checked, out)?;
             }
             // Opened where it is unpacked to.
             (_, Encoding::Raw) => {
@@ -871,14 +886,22 @@ impl Part {
                     return Err(corrupt("raw part, of the wrong length").into());
                 }
                 out.copy_from_slice(checked);
-                self.open_in_place(&mut out)?;
+                self.open_in_place(out)?;
             }
             (_, Encoding::Zstd) => {
                 let mut packed = checked.to_vec();
                 self.open_in_place(&mut packed)?;
-                decode(Encoding::Zstd, &packed, &mut out)?;
+                decode(Encoding::Zstd, &packed, out)?;
             }
         }
+        Ok(())
+    }
+
+    /// It, unpacked from `stored`, its stored bytes and any after them, checked against its CRC,
+    /// and opened, if encrypted, in a copy of them.
+    pub fn unpack(&self, stored: &[u8]) -> Result<Vec<u8>, Error> {
+        let mut out = vec![0; self.len() as usize];
+        self.unpack_copy_into(stored, &mut out)?;
         Ok(out)
     }
 }
@@ -2874,5 +2897,17 @@ mod tests {
                 data: format!("{} bytes, CRC32C {:#010x}", data.len(), crc(&data)),
             })
         }
+    }
+
+    /// board 12313: the per-thread zstd decompressor recovers cleanly after a corrupt frame and
+    /// decodes subsequent valid parts on the same thread.
+    #[test]
+    fn thread_local_decompressor_recovers_after_corrupt_frame() {
+        let data = vec![0xab; 16 * 1024];
+        let mut out = vec![0u8; data.len()];
+        assert!(decode(Encoding::Zstd, b"not a valid zstd frame", &mut out).is_err());
+        let compressed = zstd::bulk::compress(&data, 1).unwrap();
+        decode(Encoding::Zstd, &compressed, &mut out).unwrap();
+        assert_eq!(out, data);
     }
 }

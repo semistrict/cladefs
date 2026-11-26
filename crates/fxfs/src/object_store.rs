@@ -37,7 +37,9 @@ mod tree;
 pub(crate) mod tree_cache;
 pub mod volume;
 
-pub use data_object_handle::{DataObjectHandle, DirectWriter, ExtentAccess, FileExtent};
+pub use data_object_handle::{
+    DataObjectHandle, DirectWriter, ExtentAccess, FileExtent, WriteAttrs,
+};
 pub use directory::Directory;
 pub use object_record::{ChildValue, ObjectDescriptor, PosixAttributes, SpecialFile, Timestamp};
 pub use store_object_handle::{

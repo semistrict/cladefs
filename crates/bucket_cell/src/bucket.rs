@@ -325,6 +325,23 @@ pub trait Bucket: BucketSend + BucketSync + 'static {
         mode: PutMode,
     ) -> impl Future<Output = Result<Version, Error>> + BucketSend;
 
+    /// cladefs: appends `bytes` to `key` at exact byte `offset` (doc-29): `offset == 0` creates
+    /// the object if absent (failing with [`Error::Precondition`] or [`Error::AlreadyExists`] if
+    /// present), and `offset > 0` appends at `offset` (`x-amz-write-offset-bytes` on S3 Express
+    /// One Zone, `x-goog-write-offset` on GCS Rapid Storage), failing with [`Error::Precondition`]
+    /// if the object is absent, its current length differs from `offset`, or the append-part limit
+    /// was reached. Returns the new object size in bytes. Backends that cannot enforce offset
+    /// preconditions return [`Error::Unsupported`].
+    fn append(
+        &self,
+        key: &str,
+        offset: u64,
+        bytes: Bytes,
+    ) -> impl Future<Output = Result<u64, Error>> + Send {
+        let _ = (key, offset, bytes);
+        std::future::ready(Err(Error::Unsupported))
+    }
+
     /// Deletes the object at `key`. Deleting none is no error.
     fn delete(&self, key: &str) -> impl Future<Output = Result<(), Error>> + BucketSend;
 
@@ -375,6 +392,17 @@ pub trait Bucket: BucketSend + BucketSync + 'static {
     /// see them ([`crate::mirror::Here`], TASK-633.8), if it routes requests to other buckets: a
     /// host's routed bucket does, and the simulation's of many.
     fn mirrors(&self) -> Option<&dyn crate::mirror::Here> {
+        None
+    }
+
+    /// cladefs: the numbers of every bucket an ephemeral cell's reference may live in, including
+    /// any newly recorded in the root bucket's authoritative registry (board 9966, hotbed question
+    /// 543). `None` for an unrouted bucket, whose caller reads its own root directly
+    /// ([`crate::lifecycle::ephemeral_buckets`]).
+    #[cfg(feature = "full")]
+    fn ephemeral_buckets(
+        &self,
+    ) -> Option<BucketFuture<'_, Result<std::collections::BTreeSet<u16>, crate::Error>>> {
         None
     }
 }
@@ -545,7 +573,7 @@ pub(crate) fn under(objects: &std::collections::BTreeMap<String, Meta>, prefix: 
         .collect()
 }
 
-pub(crate) async fn list(bucket: &impl Bucket, prefix: &str) -> Result<Vec<Meta>, Refused> {
+pub async fn list(bucket: &impl Bucket, prefix: &str) -> Result<Vec<Meta>, Refused> {
     let mut failures = 0;
     loop {
         match bucket.list(prefix).await {
@@ -726,7 +754,7 @@ async fn landed(
 
 /// cladefs: what the backend says of the object at `key`, if any, its HEADs retried while they
 /// fail; refused, [`Refused`].
-pub(crate) async fn head(bucket: &impl Bucket, key: &str) -> Result<Option<Meta>, Refused> {
+pub async fn head(bucket: &impl Bucket, key: &str) -> Result<Option<Meta>, Refused> {
     let mut failures = 0;
     loop {
         match bucket.head(key).await {
@@ -767,6 +795,148 @@ pub(crate) async fn update(
             Err(error) => failed(bucket, &mut failures, error, key).await?,
         }
     }
+}
+
+/// What [`append`] found (doc-29).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Appended {
+    /// The append succeeded (or had already landed when retried after a lost response): the new
+    /// object size in bytes is `offset + bytes.len()`.
+    Appended(u64),
+    /// The backend rejected the offset precondition (object already exists at offset 0, current
+    /// length != offset, object missing at offset > 0, or part limit reached).
+    Precondition,
+}
+
+/// cladefs: appends `bytes` to `key` at exact byte `offset` (doc-29), retrying transient failures
+/// ([`Error::Unavailable`], [`Error::Expired`]). Never falls back to an unconditioned write:
+/// [`Error::Unsupported`] is returned as [`Refusal::Request`].
+pub async fn append(
+    bucket: &impl Bucket,
+    key: &str,
+    offset: u64,
+    bytes: Bytes,
+) -> Result<Appended, Refused> {
+    let mut failures = 0;
+    loop {
+        match bucket.append(key, offset, bytes.clone()).await {
+            Ok(new_len) => return Ok(Appended::Appended(new_len)),
+            Err(Error::Precondition | Error::AlreadyExists) => return Ok(Appended::Precondition),
+            Err(Error::Unsupported) => return Err(Refused::of(key, Refusal::Request)),
+            Err(error) => failed(bucket, &mut failures, error, key).await?,
+        }
+    }
+}
+
+/// cladefs: overwrites `key` with `bytes`, retrying transient failures (doc-29 tombstones,
+/// [`crate::head`]).
+pub async fn overwrite(bucket: &impl Bucket, key: &str, bytes: Bytes) -> Result<Version, Refused> {
+    let mut failures = 0;
+    loop {
+        match bucket.put(key, bytes.clone(), PutMode::Overwrite).await {
+            Ok(version) => return Ok(version),
+            Err(error) => failed(bucket, &mut failures, error, key).await?,
+        }
+    }
+}
+
+/// cladefs: verifies that `bucket` enforces offset-checked appends (`Bucket::append`) before a
+/// daemon relies on it as a fast WAL store (doc-29). Fails hard if the backend rejects appends as
+/// unsupported or ignores offset preconditions (no silent fallback).
+pub async fn probe_append(bucket: &impl Bucket, nonce: u64) -> Result<(), String> {
+    let mut failures = 0u32;
+    loop {
+        let key =
+            format!("probe/append-{}", base32_id::Padded(nonce.wrapping_add(failures.into())));
+        let result = probe_append_once(bucket, &key).await;
+        // Best-effort cleanup of probe object regardless of outcome.
+        let _ = bucket.delete(&key).await;
+        match result {
+            Ok(()) => return Ok(()),
+            Err(ProbeAppendErr::Transient) => {
+                failures = failures.saturating_add(1);
+                if failures >= 8 {
+                    return Err(format!(
+                        "fast WAL bucket probe at {key} failed after {failures} transient errors"
+                    ));
+                }
+                bucket.pause(failures).await;
+            }
+            Err(ProbeAppendErr::Fatal(why)) => return Err(why),
+        }
+    }
+}
+
+enum ProbeAppendErr {
+    Transient,
+    Fatal(String),
+}
+
+async fn probe_append_once(bucket: &impl Bucket, key: &str) -> Result<(), ProbeAppendErr> {
+    let classify = |step: &str, err: Error| match err {
+        Error::Unavailable | Error::Expired => ProbeAppendErr::Transient,
+        other => ProbeAppendErr::Fatal(format!("fast WAL probe ({step}) at {key}: {other}")),
+    };
+    let len = bucket
+        .append(key, 0, Bytes::from_static(b"hello"))
+        .await
+        .map_err(|err| classify("create at offset 0", err))?;
+    if len != 5 {
+        return Err(ProbeAppendErr::Fatal(format!(
+            "fast WAL probe at {key}: create at offset 0 returned len {len}, expected 5"
+        )));
+    }
+    match bucket.append(key, 0, Bytes::from_static(b"again")).await {
+        Err(Error::Precondition | Error::AlreadyExists) => {}
+        Err(err) => return Err(classify("duplicate create at offset 0", err)),
+        Ok(got) => {
+            return Err(ProbeAppendErr::Fatal(format!(
+                "fast WAL bucket does not enforce offset-0 exclusivity at {key}: got len {got}"
+            )));
+        }
+    }
+    for wrong in [3u64, 99u64] {
+        match bucket.append(key, wrong, Bytes::from_static(b"bad")).await {
+            Err(Error::Precondition) => {}
+            Err(err) => return Err(classify("wrong-offset append", err)),
+            Ok(got) => {
+                return Err(ProbeAppendErr::Fatal(format!(
+                    "fast WAL bucket ignored write offset {wrong} at {key}: got len {got}"
+                )));
+            }
+        }
+    }
+    let len = bucket
+        .append(key, 5, Bytes::from_static(b" world"))
+        .await
+        .map_err(|err| classify("append at offset 5", err))?;
+    if len != 11 {
+        return Err(ProbeAppendErr::Fatal(format!(
+            "fast WAL probe at {key}: append at offset 5 returned len {len}, expected 11"
+        )));
+    }
+    let got = bucket.get(key).await.map_err(|err| classify("read back", err))?;
+    if got.bytes != b"hello world" {
+        return Err(ProbeAppendErr::Fatal(format!(
+            "fast WAL probe at {key}: read back {:?}, expected b\"hello world\"",
+            got.bytes
+        )));
+    }
+    // Overwrite with 16-byte tombstone and verify stale offset 11 is rejected.
+    bucket
+        .put(key, Bytes::from_static(b"CLADEFS_FENCED!\n"), PutMode::Overwrite)
+        .await
+        .map_err(|err| classify("tombstone overwrite", err))?;
+    match bucket.append(key, 11, Bytes::from_static(b"zombie")).await {
+        Err(Error::Precondition) => {}
+        Err(err) => return Err(classify("stale append after tombstone", err)),
+        Ok(got) => {
+            return Err(ProbeAppendErr::Fatal(format!(
+                "fast WAL bucket accepted stale append after tombstone at {key}: got len {got}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// cladefs: what every bucket must do, which cells rely on (TASK-165.1), with objects under

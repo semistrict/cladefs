@@ -16,6 +16,16 @@ fn every_frozen_version_is_read() {
     formats::golden::check::<Files>(env!("CARGO_MANIFEST_DIR"));
 }
 
+#[test]
+fn v18_local_checkpoint_rest_converts_to_forked_v19() {
+    let cases = formats::golden::cases(FORMAT, env!("CARGO_MANIFEST_DIR"), 18);
+    let (_, bytes) = cases
+        .iter()
+        .find(|(name, _)| name == "local-checkpoint-rest")
+        .expect("v18 corpus has local-checkpoint-rest");
+    crate::cell::ephemeral::rest_read(bytes).expect("v18 local-checkpoint-rest decodes into v19");
+}
+
 struct Files;
 
 /// A description naming everything a description names.
@@ -56,32 +66,32 @@ impl formats::golden::Family for Files {
             ("wal", crate::wal::golden::start()),
             ("log", crate::wal::golden::log()),
             ("local-checkpoint-rest", crate::cell::ephemeral::golden_rest()),
+            ("local-checkpoint-rest-root", crate::cell::ephemeral::golden_rest_root()),
             ("ephemeral-keys", crate::upload::golden_keys()),
         ]
     }
 
     fn written(version: u32, case: &str, bytes: &[u8]) -> Result<String, String> {
-        // Version 18's decoders are this build's.
-        if version != 18 {
+        if !matches!(version, 18 | 19) {
             return Err(format!("no decoder of version {version}"));
         }
-        Self::read_as(case, bytes)
+        Self::read_written(version, case, bytes)
     }
 
     fn read(case: &str, bytes: &[u8]) -> Result<(), String> {
-        Self::read_as(case, bytes).map(drop)
+        Self::read_current(case, bytes)
     }
 
-    fn fingerprint(_: u32) -> Option<String> {
-        let rest = crate::cell::ephemeral::rest_fingerprint();
+    fn fingerprint(version: u32) -> Option<String> {
+        let rest = crate::cell::ephemeral::rest_fingerprint(version)?;
         let keys = crate::upload::keys_fingerprint();
         Some(format!("{}\n{rest}\n{keys}\n", crate::wal::golden::fingerprint()))
     }
 }
 
 impl Files {
-    /// `bytes` read as the file `case` names, by this build's readers, as their `{:#?}`.
-    fn read_as(case: &str, bytes: &[u8]) -> Result<String, String> {
+    /// `bytes` decoded as `version` wrote `case`, as its `{:#?}`.
+    fn read_written(version: u32, case: &str, bytes: &[u8]) -> Result<String, String> {
         let said = match case {
             "description" | "description-least" => {
                 let text = std::str::from_utf8(bytes).map_err(|err| err.to_string())?;
@@ -89,10 +99,30 @@ impl Files {
             }
             "wal" => crate::wal::golden::start_said(bytes),
             "log" => crate::wal::golden::log_said(bytes),
-            "local-checkpoint-rest" => crate::cell::ephemeral::rest_said(bytes),
+            "local-checkpoint-rest" | "local-checkpoint-rest-root" => {
+                crate::cell::ephemeral::rest_written(version, bytes)
+            }
             "ephemeral-keys" => crate::upload::keys_said(bytes),
             _ => return Err(format!("no file {case}")),
         };
         said.map_err(|err| format!("{err:#}"))
+    }
+
+    /// `bytes` read by this build's current reader for `case`.
+    fn read_current(case: &str, bytes: &[u8]) -> Result<(), String> {
+        let res = match case {
+            "description" | "description-least" => {
+                let text = std::str::from_utf8(bytes).map_err(|err| err.to_string())?;
+                CellFile::parse(text).map(drop)
+            }
+            "wal" => crate::wal::golden::start_said(bytes).map(drop),
+            "log" => crate::wal::golden::log_said(bytes).map(drop),
+            "local-checkpoint-rest" | "local-checkpoint-rest-root" => {
+                crate::cell::ephemeral::rest_read(bytes)
+            }
+            "ephemeral-keys" => crate::upload::keys_said(bytes).map(drop),
+            _ => return Err(format!("no file {case}")),
+        };
+        res.map_err(|err| format!("{err:#}"))
     }
 }

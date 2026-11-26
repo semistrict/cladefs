@@ -115,11 +115,17 @@ pub const FRAMING: u64 = {
     2 * (segment + extent) + extent + 2 * chunk
 };
 
-/// What the host's fetches hold at once, at most: the GETs of extents' data in flight
-/// (`crate::bucket::BUDGET`, 64 MiB), the objects' tails kept (`bucket_cell::fetch`'s `TAILS`,
-/// 64 MiB) and the parts fetched last (its `RECENT`, 64 MiB), each bounded for the host, however
-/// many of its cells read (TASK-92.21, TASK-92.22).
-pub const FETCHES: u64 = 3 * (64 << 20);
+/// What the host's fetches hold at once besides `PartMemory`: the GETs of extents' data in flight
+/// (`crate::bucket::BUDGET`, 64 MiB) and the objects' tails kept (`bucket_cell::fetch`'s `TAILS`,
+/// 64 MiB).
+const FETCHES_FIXED: u64 = 2 * (64 << 20);
+
+/// What the host's fetches hold at once, at most, under the default `RECENT` bound: GETs in flight
+/// (64 MiB), objects' tails kept (64 MiB), and parts fetched last (`RECENT`, 64 MiB), each bounded
+/// for the host, however many of its cells read (TASK-92.21, TASK-92.22). When the governor scales
+/// `PartMemory` above `RECENT` for FUSE mounts (board 12313), [`AnonBudget::fetches`] counts
+/// `recent_peak().max(RECENT)` alongside `FETCHES_FIXED`, as `held` and `pages` count their peaks.
+pub const FETCHES: u64 = FETCHES_FIXED + bucket_cell::fetch::RECENT;
 
 /// What the page-ins' buffers hold at once, at most: a part's (a slab, 1 MiB) for each of the
 /// pager's threads reading a part from a cell, and as many kept for the next (`cache::buffers`);
@@ -171,10 +177,12 @@ fn budget(daemon: &Daemon, state: &mut State) -> AnonBudget {
         state.writers.max((super::cells::open_count(daemon) + attached + detaching) as u64);
     state.in_flight = state.in_flight.max(super::memory::in_flight_held_on(daemon));
     state.extents = state.extents.max(extents_held_on(daemon));
+    let recent =
+        crate::bucket::memory_on(&daemon.host).recent_peak().max(bucket_cell::fetch::RECENT);
     AnonBudget {
         uploads: crate::bucket::upload_memory_on(&daemon.host).budget,
         framings: state.writers * FRAMING,
-        fetches: FETCHES,
+        fetches: FETCHES_FIXED + recent,
         in_flight: state.in_flight,
         held: super::memory::held_parts_on(daemon).counts().peak,
         pages: daemon.host.local().pages().usage().peak,

@@ -462,22 +462,48 @@ pub(crate) fn saying(errno: Errno, message: String) -> Status {
     status
 }
 
-/// cladefs: the replication CreateCell's `replicas` and `fsync` ask for (doc-21, TASK-537.3.1):
-/// none, `replicas` unset, which keeps what the cell's head says; refused (`EINVAL`) past
-/// `bucket_cell::layout::MAX_F`, with an fsync level and no `replicas`, or waiting for copies an f
-/// of 0 never makes.
-fn wish(replicas: Option<u32>, fsync: i32) -> Result<Option<bucket_cell::layout::Wish>, Status> {
+/// cladefs: the replication and/or Fast WAL mode CreateCell's `replicas`, `fast_wal`, and `fsync`
+/// ask for (doc-21, doc-29, TASK-537.3.1): refused (`EINVAL`) if `replicas >= 1` and `fast_wal ==
+/// Some(true)` are combined, if `replicas` is past `bucket_cell::layout::MAX_F`, if `fsync` names
+/// a level its mode cannot satisfy, or if `fsync` is set without `replicas` or `fast_wal`.
+#[allow(clippy::type_complexity)]
+fn durability_mode(
+    replicas: Option<u32>,
+    fast_wal: Option<bool>,
+    fsync: i32,
+) -> Result<(Option<bucket_cell::layout::Wish>, Option<Option<bucket_cell::layout::Fsync>>), Status>
+{
     use bucket_cell::layout::{Fsync, Wish};
     #[allow(deprecated)]
     let (fsync, local) = match FsyncLevel::try_from(fsync) {
         Ok(FsyncLevel::Ordered) => (Fsync::Ordered, false),
         Ok(FsyncLevel::Local) => (Fsync::Ordered, true),
         Ok(FsyncLevel::Replicated) => (Fsync::Replicated, false),
+        Ok(FsyncLevel::FastWal) => (Fsync::FastWal, false),
         Err(_) => return Err(status(Errno::EINVAL)),
+    };
+    if fast_wal == Some(true) {
+        if replicas.is_some_and(|r| r >= 1) || local || fsync == Fsync::Replicated {
+            return Err(status(Errno::EINVAL));
+        }
+        let replication = match replicas {
+            Some(0) => Some(Wish::new(0, Fsync::Ordered).ok_or_else(|| status(Errno::EINVAL))?),
+            Some(_) => return Err(status(Errno::EINVAL)),
+            None => None,
+        };
+        return Ok((replication, Some(Some(fsync))));
+    }
+    if fsync == Fsync::FastWal {
+        return Err(status(Errno::EINVAL));
+    }
+    let fast_wal = match fast_wal {
+        Some(false) => Some(None),
+        None => None,
+        Some(true) => unreachable!(),
     };
     let Some(replicas) = replicas else {
         if !local && fsync == Fsync::Ordered {
-            return Ok(None);
+            return Ok((None, fast_wal));
         }
         return Err(status(Errno::EINVAL));
     };
@@ -488,7 +514,7 @@ fn wish(replicas: Option<u32>, fsync: i32) -> Result<Option<bucket_cell::layout:
             "cladefsd: FSYNC_LEVEL_LOCAL is deprecated and removed; using FSYNC_LEVEL_ORDERED"
         );
     }
-    Ok(Some(wish))
+    Ok((Some(wish), fast_wal))
 }
 
 /// What StatCell's FsyncLevel is of `fsync`.
@@ -496,12 +522,14 @@ fn fsync_level(fsync: bucket_cell::layout::Fsync) -> FsyncLevel {
     match fsync {
         bucket_cell::layout::Fsync::Ordered => FsyncLevel::Ordered,
         bucket_cell::layout::Fsync::Replicated => FsyncLevel::Replicated,
+        bucket_cell::layout::Fsync::FastWal => FsyncLevel::FastWal,
     }
 }
 
 /// The reply to a call that did, or failed with an errno.
 /// What StatCell says of a cell that is and holds `state`.
 fn stat_response(state: cells::CellState) -> StatCellResponse {
+    let uploading = state.upload.is_some();
     let upload = state.upload.unwrap_or(local_cell::upload::UploadStatus {
         taking: None,
         uploaded: 0,
@@ -509,6 +537,7 @@ fn stat_response(state: cells::CellState) -> StatCellResponse {
         oldest_pending: None,
         stalls: 0,
         replication: None,
+        fast_wal: None,
     });
     let millis = |time: std::time::SystemTime| {
         time.duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_millis() as u64)
@@ -517,6 +546,17 @@ fn stat_response(state: cells::CellState) -> StatCellResponse {
         since.elapsed().map_or(0, |waited| waited.as_millis() as u64)
     };
     let replicated = upload.taking.and_then(|taking| taking.replication);
+    let fast_wal_fsync = upload.taking.and_then(|taking| taking.fast_wal);
+    let fsync = if let Some(fsync) = fast_wal_fsync {
+        fsync_level(fsync)
+    } else {
+        replicated.map_or(FsyncLevel::Ordered, |replicated| fsync_level(replicated.fsync))
+    };
+    let fast_wal_active = fast_wal_fsync.is_some() || upload.fast_wal.is_some();
+    let (fast_wal_bucket, fast_wal_degraded) = match upload.fast_wal {
+        Some(fw) => (fw.bucket, fw.degraded),
+        None => (String::new(), false),
+    };
     StatCellResponse {
         tenant: state.cell.tenant,
         cell: state.cell.id,
@@ -530,7 +570,7 @@ fn stat_response(state: cells::CellState) -> StatCellResponse {
         own_extents: state.holding.extents.own,
         inherited_extents: state.holding.extents.inherited,
         committed: state.committed,
-        uploading: state.upload.is_some(),
+        uploading,
         taken_token: upload.taking.map_or(0, |taking| taking.token),
         taken_epoch: upload.taking.map_or(0, |taking| taking.epoch),
         taken_unix_ms: upload.taking.map_or(0, |taking| millis(taking.taken)),
@@ -538,13 +578,16 @@ fn stat_response(state: cells::CellState) -> StatCellResponse {
         pending_upload_bytes: upload.pending_bytes,
         oldest_pending_ms: upload.oldest_pending.map_or(0, waited),
         replicas: replicated.map_or(0, |replicated| u32::from(replicated.f)),
-        fsync: replicated.map_or(FsyncLevel::Ordered, |replicated| fsync_level(replicated.fsync))
-            as i32,
+        fsync: fsync as i32,
         configuration: replicated.and_then(|replicated| replicated.configuration).unwrap_or(0),
         degraded: upload.replication.is_some_and(|replication| replication.degraded),
         members_up: upload.replication.map_or(0, |replication| replication.members_up),
         active_replicas: upload.replication.map_or(0, |replication| u32::from(replication.f)),
         forced_after: replicated.and_then(|replicated| replicated.forced_after),
+        fast_wal: fast_wal_active,
+        fast_wal_bucket,
+        fast_wal_degraded,
+        ephemeral: state.ephemeral,
     }
 }
 
@@ -694,11 +737,24 @@ impl Cladefsd for Control {
             fsync,
             force,
             upload_interval_ms,
+            fast_wal,
+            ephemeral,
         } = request.into_inner();
+        if ephemeral
+            && (cell != 0
+                || token.is_some()
+                || replicas.is_some()
+                || fast_wal.is_some()
+                || fsync != FsyncLevel::Ordered as i32
+                || force
+                || upload_interval_ms.is_some())
+        {
+            return Err(status(Errno::EINVAL));
+        }
         let upload_interval =
             cells::parse_upload_interval_ms(upload_interval_ms).map_err(status)?;
         room_for_a_cell(&self.daemon)?;
-        let replication = wish(replicas, fsync)?;
+        let (replication, fast_wal) = durability_mode(replicas, fast_wal, fsync)?;
         // cladefs: a replicated cell's members are the daemon's peers, in their replica
         // directories (doc-21): without them, refused before anything is made.
         if replication.is_some_and(|wish| wish.f >= 1)
@@ -710,6 +766,19 @@ impl Cladefsd for Control {
                  (peers.address, peers.addresses, peers.replicas)"
                     .to_owned(),
             ));
+        }
+        // cladefs: a fast WAL cell needs a configured appendable zonal bucket (doc-29):
+        // refused before anything is made.
+        if fast_wal.is_some_and(|fw| fw.is_some()) {
+            let configured = storage::fast_wal_config(&self.daemon).map_err(status)?;
+            if configured.is_none() {
+                return Err(saying(
+                    Errno::ENOTSUP,
+                    "a fast WAL cell needs the daemon's appendable zonal bucket \
+                     (CLADEFSD_FAST_WAL_BUCKET)"
+                        .to_owned(),
+                ));
+            }
         }
         let kind = match CellKind::try_from(kind) {
             Ok(CellKind::Fxfs) => Kind::Fxfs,
@@ -750,7 +819,7 @@ impl Cladefsd for Control {
                 final_path.clone(),
                 capacity,
                 target_id,
-                (token, kind, replication, force, upload_interval),
+                (token, kind, replication, fast_wal, force, upload_interval, false),
             )
             .await
             .map_err(status)?;
@@ -763,7 +832,7 @@ impl Cladefsd for Control {
             staging.clone(),
             capacity,
             crate::CellId { tenant, id: 0 },
-            (token, kind, replication, force, upload_interval),
+            (token, kind, replication, fast_wal, force, upload_interval, ephemeral),
         )
         .await
         {
@@ -803,20 +872,29 @@ impl Cladefsd for Control {
         &self,
         request: Request<ImportMemoryRequest>,
     ) -> Result<Response<ImportMemoryResponse>, Status> {
-        let ImportMemoryRequest { file, tenant, make_version } = request.into_inner();
+        let ImportMemoryRequest { file, tenant, make_version, ephemeral } = request.into_inner();
         let file = input_path(file)?;
+        if ephemeral && make_version {
+            return Err(status(Errno::EINVAL));
+        }
         room_for_a_cell(&self.daemon)?;
         let (disk, staging) = self.stage_for(tenant).await?;
-        let (made, version) =
-            match cells::import_memory(&self.daemon, staging.clone(), file, tenant, make_version)
-                .await
-            {
-                Ok(imported) => imported,
-                Err(err) => {
-                    cleanup_staging(&self.daemon, staging).await;
-                    return Err(status(err));
-                }
-            };
+        let (made, version) = match cells::import_memory(
+            &self.daemon,
+            staging.clone(),
+            file,
+            tenant,
+            make_version,
+            ephemeral,
+        )
+        .await
+        {
+            Ok(imported) => imported,
+            Err(err) => {
+                cleanup_staging(&self.daemon, staging).await;
+                return Err(status(err));
+            }
+        };
         let final_path = self.commit_staged(disk, made, staging).await?;
         if let Some(ver) = version {
             let named = std::collections::BTreeSet::from([ver]);

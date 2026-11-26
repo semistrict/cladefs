@@ -38,6 +38,13 @@ if [[ ${listed[*]} != scripts ]]; then
     measurement_refuses "scripts/test.sh's parts ${listed[*]}"
 fi
 
+# The madsim build's RUSTFLAGS: RUSTFLAGS replaces .cargo/config.toml's target rustflags, so keep
+# lld on Linux arm64 (x86_64-unknown-linux-gnu already defaults to rustc's bundled rust-lld).
+madsim_rustflags="--cfg madsim"
+if [[ $(uname -sm) == "Linux aarch64" ]]; then
+    madsim_rustflags+=" -Clink-arg=-fuse-ld=lld"
+fi
+
 # Clippy's rules the code keeps (clippy.toml): no blocking call in async code unless allowed, with
 # why (TASK-44.20); and the compiler's warnings, as errors, the Shuttle builds' too (below), whose
 # code no other build compiles: one went unread in a run's output, a drop of a usize (TASK-287).
@@ -77,7 +84,7 @@ if part clippy; then
     # The madsim build's (doc-24): the simulated crates and their tests under madsim, built as the
     # madsim part builds them, whose code no other build compiles either: its warnings, 13 on
     # Linux, went unseen there behind a `cargo check` (board 5652).
-    env RUSTFLAGS="--cfg madsim" CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$root/target}/madsim" \
+    env RUSTFLAGS="$madsim_rustflags" CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$root/target}/madsim" \
         cargo clippy --locked --manifest-path "$root/Cargo.toml" --no-deps -p node_local -p host_fs \
         -p bucket_cell -p local_cell -p cladefs --lib --test madsim -- "${cladefs_lints[@]}"
 fi
@@ -105,7 +112,7 @@ fi
 # other tests are tokio's and std's, which madsim has no stand-ins for: they run in the workspace
 # part.
 if part madsim; then
-    madsim=(env RUSTFLAGS="--cfg madsim" CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$root/target}/madsim")
+    madsim=(env RUSTFLAGS="$madsim_rustflags" CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$root/target}/madsim")
     "${madsim[@]}" cargo check --locked --manifest-path "$root/Cargo.toml" -p node_local \
         -p host_fs -p bucket_cell -p local_cell -p cladefs
     # Each test over CLADEFS_MADSIM_SEEDS seeds, 20 unless said, from MADSIM_TEST_SEED's, 1 unless

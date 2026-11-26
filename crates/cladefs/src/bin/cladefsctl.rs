@@ -1329,7 +1329,12 @@ mod cli {
                     println!("{}", cladefs::CellId { tenant: made.tenant, id: made.cell });
                 }
                 Self::ImportMemory { tenant, file, make_version, .. } => {
-                    let request = ImportMemoryRequest { file: name(&file)?, tenant, make_version };
+                    let request = ImportMemoryRequest {
+                        file: name(&file)?,
+                        tenant,
+                        make_version,
+                        ephemeral: false,
+                    };
                     let imported = call!(
                         format!("importing memory {}", file.display()),
                         import_memory,
@@ -2244,6 +2249,10 @@ mod cli {
             members_up,
             active_replicas,
             forced_after,
+            fast_wal,
+            fast_wal_bucket,
+            fast_wal_degraded,
+            ephemeral,
         } = stat;
         serde_json::json!({
             "tenant": base32_id::Short(*tenant).to_string(),
@@ -2272,6 +2281,10 @@ mod cli {
             "members_up": members_up,
             "active_replicas": active_replicas,
             "forced_after": forced_after,
+            "fast_wal": fast_wal,
+            "fast_wal_bucket": fast_wal_bucket,
+            "fast_wal_degraded": fast_wal_degraded,
+            "ephemeral": ephemeral,
         })
     }
 

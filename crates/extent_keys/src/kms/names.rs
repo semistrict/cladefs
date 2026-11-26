@@ -8,7 +8,7 @@
 use super::Origin;
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 
 /// What stands for a tenant's ID in a [`KeyNames`] template.
 const TENANT: &str = "{tenant}";
@@ -18,6 +18,46 @@ pub type Check = fn(&str) -> Result<(), String>;
 
 /// Overrides of tenants' keys' names, by tenant.
 type Overrides = HashMap<u64, String>;
+
+/// Shared cell holding a `keys=FILE`'s current overrides map.
+type OverridesCell = Arc<RwLock<Arc<Overrides>>>;
+
+/// cladefs: per-host registry of `keys=FILE` override cells, keyed by path (board 10466): every
+/// KMS instance on a host naming the same `keys=FILE` shares one cell, read once on first use and
+/// changed only by reload. Weak references keep no stale entry if a construction fails or drops.
+#[derive(Default)]
+pub struct OverrideFiles {
+    cells: Mutex<HashMap<PathBuf, Weak<RwLock<Arc<Overrides>>>>>,
+}
+
+impl OverrideFiles {
+    /// Registers `names`'s file cell so later KMS instances on the same host naming the same file
+    /// share it without re-reading disk.
+    pub fn register(&self, names: &KeyNames) {
+        if let Some(file) = &names.file {
+            self.cells.lock().unwrap().insert(file.clone(), Arc::downgrade(&names.overrides));
+        }
+    }
+
+    /// Returns the shared cell for `path`, validating its current entries against `check`, or
+    /// reads and parses `path` once if no live KMS instance holds it yet.
+    fn get_or_load(&self, path: &Path, check: Check) -> Result<OverridesCell, String> {
+        let mut cells = self.cells.lock().unwrap();
+        if let Some(cell) = cells.get(path).and_then(Weak::upgrade) {
+            let current = cell.read().unwrap().clone();
+            for (&tenant, name) in current.iter() {
+                check(name).map_err(|why| {
+                    format!("the key overrides: tenant {}'s key, {why}", base32_id::Short(tenant))
+                })?;
+            }
+            return Ok(cell);
+        }
+        let overrides = parse(&read(path)?, check)?;
+        let cell = Arc::new(RwLock::new(Arc::new(overrides)));
+        cells.insert(path.to_path_buf(), Arc::downgrade(&cell));
+        Ok(cell)
+    }
+}
 
 /// The name a real KMS knows each tenant's KEK by: a template, in which `{tenant}` stands for the
 /// tenant's ID in base 32, as cladefs displays tenants (`TENANT/CELL`, `base32_id`); and overrides, for
@@ -81,6 +121,17 @@ impl KeyNames {
         origin: Origin,
         check: Check,
     ) -> Result<Self, String> {
+        Self::of_query_in(query, origin, check, None)
+    }
+
+    /// cladefs: like [`KeyNames::of_query`], sharing the overrides cell in `files` when another
+    /// KMS on the same host has already loaded the same `keys=FILE` (board 10466).
+    pub fn of_query_in<'a>(
+        query: impl IntoIterator<Item = (&'a str, &'a str)>,
+        origin: Origin,
+        check: Check,
+        files: Option<&OverrideFiles>,
+    ) -> Result<Self, String> {
         let (mut template, mut overrides) = (None, None);
         for (name, value) in query {
             match name {
@@ -93,9 +144,26 @@ impl KeyNames {
             origin.file("keys=FILE")?;
         }
         let template = template.ok_or("the KMS URL names no key template: key=...{tenant}...")?;
+        if !template.contains(TENANT) {
+            return Err(format!(
+                "the key template {template:?} holds no {TENANT}: every tenant would share one KEK"
+            ));
+        }
         let file = overrides.map(PathBuf::from);
-        let overrides = file.as_deref().map(read).transpose()?;
-        Self::checked(template, file, overrides.as_deref(), check)
+        let overrides = match (&file, files) {
+            (Some(path), Some(files)) => files.get_or_load(path, check)?,
+            (Some(path), None) => {
+                let parsed = parse(&read(path)?, check)?;
+                Arc::new(RwLock::new(Arc::new(parsed)))
+            }
+            (None, _) => Arc::new(RwLock::new(Arc::new(HashMap::new()))),
+        };
+        Ok(Self { template: template.to_owned(), file, check, overrides })
+    }
+
+    /// The overrides file `keys` named, if any.
+    pub fn file(&self) -> Option<&Path> {
+        self.file.as_deref()
     }
 
     /// The template, `{tenant}` in it.
@@ -119,7 +187,13 @@ impl KeyNames {
     /// refused naming the line by its number alone, as at the start, and nothing changes.
     pub fn reread(&self) -> Result<Option<Staged>, String> {
         let Some(file) = &self.file else { return Ok(None) };
-        let overrides = parse(&read(file)?, self.check)?;
+        self.reread_text(&read(file)?).map(Some)
+    }
+
+    /// cladefs: stages overrides already read from its `keys` file (`text`), so a reload over
+    /// multiple KMS instances sharing one file reads the file once (board 10466).
+    pub fn reread_text(&self, text: &str) -> Result<Staged, String> {
+        let overrides = parse(text, self.check)?;
         let current = self.current();
         let tenants: BTreeSet<u64> = current.keys().chain(overrides.keys()).copied().collect();
         let renamed = (tenants.into_iter())
@@ -127,12 +201,21 @@ impl KeyNames {
                 named(&self.template, &current, tenant) != named(&self.template, &overrides, tenant)
             })
             .collect();
-        Ok(Some(Staged {
-            names: self.clone(),
-            from: current,
-            overrides: Arc::new(overrides),
-            renamed,
-        }))
+        Ok(Staged { names: self.clone(), from: current, overrides: Arc::new(overrides), renamed })
+    }
+
+    /// cladefs: like [`KeyNames::reread`], reusing previously-read file text from `files` so one
+    /// reload reads each unique `keys=FILE` once (board 10466).
+    pub fn reread_in(
+        &self,
+        files: &mut HashMap<PathBuf, String>,
+    ) -> Result<Option<Staged>, String> {
+        let Some(file) = &self.file else { return Ok(None) };
+        let text = match files.entry(file.clone()) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::hash_map::Entry::Vacant(entry) => entry.insert(read(file)?),
+        };
+        self.reread_text(text).map(Some)
     }
 }
 
@@ -156,13 +239,41 @@ impl Staged {
     /// Puts it in use, for every clone of its [`KeyNames`], from their next call on: refused,
     /// changing nothing, if another reload put others in use since it was read.
     pub fn apply(self) -> Result<(), String> {
-        let mut overrides = self.names.overrides.write().unwrap();
-        if !Arc::ptr_eq(&overrides, &self.from) {
-            return Err(
-                "the key overrides changed since this reload read them: reload again".into()
-            );
+        Self::apply_all([self])
+    }
+
+    /// cladefs: puts every staged reload in `staged` in use, deduplicating instances that share
+    /// the same overrides cell (board 10466): refused, changing nothing, if any cell changed since
+    /// its reload read it.
+    pub fn apply_all(staged: impl IntoIterator<Item = Self>) -> Result<(), String> {
+        let mut unique: Vec<Self> = Vec::new();
+        for item in staged {
+            if let Some(existing) =
+                unique.iter().find(|done| Arc::ptr_eq(&done.names.overrides, &item.names.overrides))
+            {
+                if !Arc::ptr_eq(&existing.from, &item.from) {
+                    return Err(
+                        "the key overrides changed since this reload read them: reload again"
+                            .into(),
+                    );
+                }
+                continue;
+            }
+            unique.push(item);
         }
-        *overrides = self.overrides;
+        // Hold every cell's write lock before swapping any, so a concurrent change refuses all.
+        let mut guards: Vec<_> =
+            unique.iter().map(|item| item.names.overrides.write().unwrap()).collect();
+        for (guard, item) in guards.iter().zip(&unique) {
+            if !Arc::ptr_eq(guard, &item.from) {
+                return Err(
+                    "the key overrides changed since this reload read them: reload again".into()
+                );
+            }
+        }
+        for (guard, item) in guards.iter_mut().zip(&unique) {
+            **guard = item.overrides.clone();
+        }
         Ok(())
     }
 }

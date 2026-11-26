@@ -61,6 +61,9 @@ pub struct Daemon {
     pub(super) upload_intervals: Mutex<std::collections::HashMap<PathBuf, std::time::Duration>>,
     /// The daemon's bucket handle, initialized on first use or injected in tests.
     pub(super) bucket: OnceLock<Arc<RoutedBucket>>,
+    /// The daemon's appendable zonal fast WAL bucket and large-extent threshold
+    /// (`CLADEFSD_FAST_WAL_BUCKET`, `CLADEFSD_FAST_WAL_LARGE_EXTENT_BYTES`, doc-29).
+    pub(super) fast_wal: Mutex<Option<Option<(local_cell::fast_wal::FastWalConfig, u64)>>>,
     /// The daemon's part cache, opened once from `CLADEFSD_PART_CACHE`.
     pub(super) part_cache: Mutex<Option<Option<Arc<Cache>>>>,
     /// Listening VM socket FDs shut down on drain.
@@ -135,6 +138,7 @@ impl Daemon {
             table: cells::Table::new(),
             upload_intervals: Mutex::new(std::collections::HashMap::new()),
             bucket: OnceLock::new(),
+            fast_wal: Mutex::new(None),
             part_cache: Mutex::new(None),
             accepting: Mutex::new(Vec::new()),
             connected: Mutex::new(0),
@@ -338,5 +342,11 @@ impl Daemon {
     #[cfg(any(test, madsim))]
     pub fn use_bucket(self: &Arc<Self>, bucket: Arc<RoutedBucket>) {
         super::storage::use_bucket_on(self, bucket);
+    }
+
+    /// Injects a fast WAL configuration for this daemon before any cell opens (tests and `madsim`).
+    #[cfg(any(test, madsim))]
+    pub fn use_fast_wal(&self, config: local_cell::fast_wal::FastWalConfig, large_extent: u64) {
+        super::storage::use_fast_wal_on(self, config, large_extent);
     }
 }

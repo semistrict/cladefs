@@ -847,6 +847,44 @@ impl Recovered {
     }
 }
 
+/// Drops every local WAL file of `cell` in `dir` without parsing or syncing them and returns an
+/// empty [`Recovered`] (doc-29, Hotbed review 118, board 12181): used only after verifying the
+/// cold bucket head has an active Fast WAL so local disk sync/removal failures never prevent
+/// reopening when both remote buckets are healthy.
+pub(crate) fn drop_all<D: Dir>(dir: &D, cell: CellId) -> Result<Recovered, Error> {
+    for kind in [SEGMENTS, OPEN_SEGMENTS, LOGS, crate::layout::EXTENTS] {
+        let sub = cell_dir(kind, cell.id);
+        let listed = match dir.list(&sub) {
+            Ok(names) => names,
+            Err(err) if not_found(&err) => continue,
+            Err(err) => {
+                log::warn!(
+                    "cladefs: listing damaged cache dir {sub} during fast WAL reopen: {err}"
+                );
+                continue;
+            }
+        };
+        for name in listed {
+            let path = format!("{sub}/{name}");
+            if let Err(err) = remove(dir, &path) {
+                log::warn!(
+                    "cladefs: removing damaged cache file {path} during fast WAL reopen: {err}"
+                );
+            }
+        }
+    }
+    if let Err(err) = remove(dir, START) {
+        log::warn!("cladefs: removing damaged WAL start file during fast WAL reopen: {err}");
+    }
+    Ok(Recovered {
+        start: None,
+        start_file: StartFile { made: false, serial: 0 },
+        segments: Vec::new(),
+        next: 0,
+        closing: BTreeMap::new(),
+    })
+}
+
 /// Recovers the WAL of `cell` in `dir` (see the module's docs): each segment whose framed file
 /// is whole, in order, and each whose framed file is not that its log closes again, holding
 /// commits, to the last durable commit; and nothing else of segments: raw data, logs and framed
@@ -1332,6 +1370,7 @@ impl Queue {
     }
 
     /// The WAL's start: the cell's commit before its first segment.
+    #[cfg(test)]
     pub fn start(&self) -> Option<u64> {
         self.start
     }
@@ -1362,6 +1401,44 @@ impl Queue {
         taken
     }
 
+    /// Numbers of untaken durable segments (up to `limit`) whose framed files are still being
+    /// written (`writing`), in order.
+    pub fn pending_writing(
+        &self,
+        durable: u64,
+        limit: usize,
+        writing: impl Fn(u64) -> bool,
+    ) -> Vec<u64> {
+        let mut pending = Vec::new();
+        let mut seen = 0;
+        for queued in self.segments.iter().filter(|queued| !queued.taken) {
+            if seen == limit || footer_last(&queued.footer) > durable {
+                break;
+            }
+            seen += 1;
+            if writing(queued.number) {
+                pending.push(queued.number);
+            }
+        }
+        pending
+    }
+
+    /// If the queue begins with `numbers` in exact order, returns the WAL start commit after
+    /// acknowledging all of them (the last commit in `numbers`, falling back to `self.start`).
+    pub fn start_after(&self, numbers: &[u64]) -> Option<Option<u64>> {
+        if self.segments.len() < numbers.len() {
+            return None;
+        }
+        let mut after = self.start;
+        for (queued, &number) in self.segments.iter().zip(numbers) {
+            if queued.number != number {
+                return None;
+            }
+            after = queued.footer.contents.commits.last().copied().or(after);
+        }
+        Some(after)
+    }
+
     /// cladefs: the segments, from the first, whose commits are `durable` or before, ending where
     /// no commit goes on past them, by their numbers, with their footers: what an ephemeral cell's
     /// checkpoint covers (doc-25, TASK-698.2).
@@ -1374,11 +1451,6 @@ impl Queue {
             covering.pop();
         }
         covering
-    }
-
-    /// The first segment, if any.
-    pub fn first(&self) -> Option<&Queued> {
-        self.segments.front()
     }
 
     /// Segment `number`, the first, is acknowledged: it leaves the queue, which goes on from its
@@ -2098,9 +2170,13 @@ mod tests {
     /// dropped from there.
     #[test]
     fn files_of_versions_not_read_are_refused() {
-        let refusal = "cell directory version 19: this build reads version 18 alone";
+        let future = FORMAT.current + 1;
+        let refusal = format!(
+            "cell directory version {future}: this build reads versions {} to {}",
+            FORMAT.oldest, FORMAT.current
+        );
         let newer = |mut payload: Vec<u8>| {
-            payload[..4].copy_from_slice(&19u32.to_le_bytes());
+            payload[..4].copy_from_slice(&future.to_le_bytes());
             payload
         };
 
@@ -2110,7 +2186,7 @@ mod tests {
         let slot = newer(versioned(&Slot { serial: 2, start: Some(9) }));
         let file = dir.open(START, false).unwrap();
         file.write_at(&frame_salted(&slot, 0), 0).unwrap();
-        let err = StartFile::read(&dir).err().expect("a slot of 19 is refused");
+        let err = StartFile::read(&dir).err().expect("a future slot is refused");
         assert_eq!(format!("{err:#}"), format!("reading the WAL's start: {refusal}"));
 
         let (dir, seg, enc) = (MemDir::new(), segment(0), encryption());
@@ -2127,7 +2203,7 @@ mod tests {
         log.write_at(&frame_salted(&payload, 7), LOG_RECORDS).unwrap();
         log.sync().unwrap();
         let before = dir.files();
-        let err = recover(&dir, CELL, None).err().expect("a record of 19 is refused");
+        let err = recover(&dir, CELL, None).err().expect("a future record is refused");
         assert_eq!(
             format!("{err:#}"),
             format!(
@@ -2138,11 +2214,11 @@ mod tests {
         assert_eq!(dir.files(), before, "refused recovery keeps every file as it was");
 
         let mut header = log_header(7, seg, &enc);
-        header[4..8].copy_from_slice(&19u32.to_le_bytes());
+        header[4..8].copy_from_slice(&future.to_le_bytes());
         log.write_at(&header, 0).unwrap();
         log.sync().unwrap();
         let before = dir.files();
-        let err = recover(&dir, CELL, None).err().expect("a log headed 19 is refused");
+        let err = recover(&dir, CELL, None).err().expect("a future log header is refused");
         assert!(format!("{err:#}").contains("'s log has unsupported format"), "{err:#}");
         assert_eq!(dir.files(), before, "refused recovery keeps every file as it was");
     }

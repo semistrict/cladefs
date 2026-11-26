@@ -1,0 +1,71 @@
+Footer {
+    cell: CellId {
+        tenant: 47,
+        id: 844424930131975,
+    },
+    segment: 9,
+    epoch: 4,
+    contents: Contents {
+        commits: [
+            4398046511115,
+            4398046511116,
+        ],
+        extents: [
+            (
+                ExtentId {
+                    cell: 844424930131975,
+                    sequence: 5,
+                },
+                0,
+                4096,
+            ),
+        ],
+        own: [
+            (
+                6,
+                8192,
+            ),
+        ],
+        frees: [
+            ExtentId {
+                cell: 281474976710661,
+                sequence: 1,
+            },
+        ],
+        root: Some(
+            [
+                114,
+                111,
+                111,
+                116,
+            ],
+        ),
+        next_sequence: 13,
+        capacity: Some(
+            1073741824,
+        ),
+        continued: Some(
+            Continued {
+                commit: 4398046511117,
+                extents: [
+                    (
+                        ExtentId {
+                            cell: 844424930131975,
+                            sequence: 14,
+                        },
+                        4096,
+                        8192,
+                    ),
+                ],
+            },
+        ),
+        versions: [
+            NewVersion {
+                id: 190,
+                keep_last: Some(
+                    3,
+                ),
+            },
+        ],
+    },
+}

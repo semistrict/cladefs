@@ -38,7 +38,7 @@ use std::time::Duration;
 use tokio::time::{Instant, Sleep};
 
 /// The slices a request's body goes to its connection in.
-pub const SLICE: usize = 16 << 10;
+pub const SLICE: usize = 64 << 10;
 
 /// The client of buckets: how long a connection may take to open, and a request to move no bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,6 +101,84 @@ pub(crate) fn names(bucket: &str, url: &reqwest::Url) -> bool {
     !local && (labelled || pathed)
 }
 
+/// cladefs: the write-offset header of an append PUT through a [`Connector`]'s client (doc-29):
+/// S3 Express One Zone's `x-amz-write-offset-bytes`, the object's path in its bucket, and whether
+/// a request carried it.
+#[derive(Debug)]
+pub(crate) struct AppendHeader {
+    pub header: (reqwest::header::HeaderName, reqwest::header::HeaderValue),
+    pub path: String,
+    sent: std::sync::atomic::AtomicBool,
+}
+
+tokio::task_local! {
+    /// The write-offset header of the append [`appending`] runs: what its PUT requests carry
+    /// (doc-29).
+    static APPEND: AppendHeader;
+}
+
+/// cladefs: runs `put`, an append PUT through a [`Connector`]'s client of the object at `path`,
+/// its PUT request carrying `header` (`x-amz-write-offset-bytes`, doc-29); and whether a request
+/// carried it.
+pub(crate) async fn appending<T>(
+    header: (reqwest::header::HeaderName, reqwest::header::HeaderValue),
+    path: String,
+    put: impl Future<Output = T>,
+) -> (T, bool) {
+    let append = AppendHeader { header, path, sent: std::sync::atomic::AtomicBool::new(false) };
+    APPEND
+        .scope(append, async {
+            let written = put.await;
+            (written, APPEND.with(|append| append.sent.load(Ordering::Relaxed)))
+        })
+        .await
+}
+
+/// Decodes `%XX` escapes in a URL path segment without external dependencies.
+fn percent_decode_path(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(hi), Some(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2]))
+        {
+            out.push((hi << 4) | lo);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Puts the write-offset header of the append under way in this task, if any, on `request`, if it
+/// is a PUT of the append's path (doc-29).
+fn append_header(request: &mut reqwest::Request) {
+    if request.method() != reqwest::Method::PUT {
+        return;
+    }
+    let path = percent_decode_path(request.url().path());
+    // No append active in this task: nothing to add.
+    let _ = APPEND.try_with(|append| {
+        if path.strip_suffix(append.path.as_str()).is_some_and(|rest| rest.ends_with('/')) {
+            let (name, value) = append.header.clone();
+            request.headers_mut().insert(name, value);
+            append.sent.store(true, Ordering::Relaxed);
+        }
+    });
+}
 /// The user agent of a client whose options name none.
 const USER_AGENT: &str = concat!("cladefs/", env!("CARGO_PKG_VERSION"));
 
@@ -235,7 +313,7 @@ fn parse_duration(input: &str) -> Result<Duration, String> {
 /// A reqwest client built from `options` as `object_store` builds its own (0.14.2,
 /// `ClientOptions::client`, which is its crate's alone), from what the options say of each key.
 /// Root certificates, which only `object_store`'s API adds, cladefs adds none of.
-fn reqwest_client(options: &ClientOptions) -> object_store::Result<reqwest::Client> {
+pub(crate) fn reqwest_client(options: &ClientOptions) -> object_store::Result<reqwest::Client> {
     use ClientConfigKey as Key;
     let value = |key: Key| options.get_config_value(&key);
     let invalid = |key: Key, error: &dyn std::fmt::Display| object_store::Error::Generic {
@@ -369,6 +447,8 @@ impl object_store::client::HttpService for Watched {
         let dated = names(&self.bucket, &url);
         let mut sent = reqwest::Request::new(parts.method, url);
         *sent.headers_mut() = parts.headers;
+        // cladefs: attach write-offset header for unsigned local/test S3 append endpoints (doc-29).
+        append_header(&mut sent);
         let progress = Arc::new(Progress::new());
         let body = Sending { body, slice: Bytes::new(), progress: progress.clone() };
         *sent.body_mut() = Some(reqwest::Body::wrap(body));

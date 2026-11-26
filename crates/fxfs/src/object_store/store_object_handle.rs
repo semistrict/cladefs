@@ -1387,15 +1387,23 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
         options: Options<'_>,
     ) -> Result<(), Error> {
         let store = self.store();
-        let tree = store.tree();
-        let object_key = ObjectKey::extended_attribute(self.object_id(), name);
-
-        // NB: The API says we have to return an error if the attribute doesn't exist, so we have
-        // to look it up first to make sure we have a record of it before we delete it. Make sure
-        // we take a lock and make a transaction before we do so we don't race with other
-        // operations.
         let keys = lock_keys![LockKey::object(store.store_object_id(), self.object_id())];
         let mut transaction = store.new_transaction(keys, options).await?;
+        self.remove_extended_attribute_in_transaction(&mut transaction, name).await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    /// cladefs: removes extended attribute `name` within `transaction`, which must already hold
+    /// `LockKey::object(store_id, self.object_id())`. Fails with `FxfsError::NotFound` if absent.
+    pub async fn remove_extended_attribute_in_transaction(
+        &self,
+        transaction: &mut Transaction<'_>,
+        name: Vec<u8>,
+    ) -> Result<(), Error> {
+        let store = self.store();
+        let tree = store.tree();
+        let object_key = ObjectKey::extended_attribute(self.object_id(), name);
 
         let attribute_to_delete = tree
             .find_map(&object_key, |item| match item.value {
@@ -1423,12 +1431,7 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
         // everything in one shot.
         if let Some(attribute_id) = attribute_to_delete {
             let trim_result = store
-                .trim_some(
-                    &mut transaction,
-                    self.object_id(),
-                    attribute_id,
-                    TrimMode::FromOffset(0),
-                )
+                .trim_some(transaction, self.object_id(), attribute_id, TrimMode::FromOffset(0))
                 .await?;
             // In case you didn't read the comment above - this should not be used to delete
             // arbitrary attributes!
@@ -1442,7 +1445,6 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
             );
         }
 
-        transaction.commit().await?;
         Ok(())
     }
 }

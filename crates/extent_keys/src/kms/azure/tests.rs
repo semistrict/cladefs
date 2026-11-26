@@ -17,7 +17,7 @@ fn overrides_naming_no_vault_are_refused() {
     let keys = dir.path().join("keys");
     std::fs::write(&keys, "7 https://evil.example/keys/x\n").unwrap();
     let url = format!("azure-kv://v.vault.azure.net?key=t-{{tenant}}&keys={}", keys.display());
-    let refused = parse(&url, Origin::Host).unwrap_err();
+    let refused = parse(&url, Origin::Host, None).unwrap_err();
     assert!(
         refused.starts_with(&format!(
             "{url:?}: the key overrides' line 1: tenant 7's key, \"https://evil.example/keys/x\", names no key: \"evil.example\" is no vault's host"
@@ -29,7 +29,7 @@ fn overrides_naming_no_vault_are_refused() {
 #[test]
 fn urls_naming_no_vault_or_no_keys_are_refused() {
     let usage = "azure-kv://VAULT_HOST?key=TEMPLATE[&keys=FILE][&alg=ALG][&endpoint=URL]";
-    let refused = |url: &str| parse(url, Origin::Host).unwrap_err();
+    let refused = |url: &str| parse(url, Origin::Host, None).unwrap_err();
     let domains = "NAME.vault.azure.net, NAME.managedhsm.azure.net, NAME.vault.azure.cn, \
                    NAME.managedhsm.azure.cn, NAME.vault.usgovcloudapi.net, \
                    NAME.managedhsm.usgovcloudapi.net";
@@ -48,7 +48,7 @@ fn urls_naming_no_vault_or_no_keys_are_refused() {
         assert!(refused(&url).contains("the endpoint, "), "{url}: {}", refused(&url));
     }
     let local = "azure-kv://v.vault.azure.net?key=t-{tenant}&endpoint=http://localhost:8443";
-    assert_eq!(parse(local, Origin::Host).unwrap().vault, "http://localhost:8443");
+    assert_eq!(parse(local, Origin::Host, None).unwrap().vault, "http://localhost:8443");
     let url = "azure-kv://v.vault.azure.net?key=t-{tenant}&region=x";
     assert_eq!(refused(url), format!("{url:?}: no parameter \"region\": {usage}"));
     let url = "azure-kv://v.vault.azure.net?key=t-{tenant}&alg=RSA1_5";
@@ -414,7 +414,7 @@ fn operational_forbidden_responses_are_io_errors() {
 
 #[test]
 fn explicit_key_state_refusals_are_scoped_to_the_requested_version() {
-    for code in ["KeyDisabled", "KeyRevoked", "KeyDeleted", "KeyPurged"] {
+    for code in ["KeyDisabled", "KeyRevoked", "KeyExpired", "KeyDeleted", "KeyPurged"] {
         for body in [
             format!(r#"{{"error":{{"code":"{code}"}}}}"#),
             format!(r#"{{"error":{{"code":"Forbidden","innererror":{{"code":"{code}"}}}}}}"#),
@@ -424,7 +424,10 @@ fn explicit_key_state_refusals_are_scoped_to_the_requested_version() {
             assert!(!wrap.transient);
             let unwrap = refusal(9, ID, Op::Unwrap("old"), 403, body.as_bytes()).failed;
             match (code, unwrap.error) {
-                ("KeyDisabled" | "KeyRevoked", Error::VersionDisabled { tenant: 9, version })
+                (
+                    "KeyDisabled" | "KeyRevoked" | "KeyExpired",
+                    Error::VersionDisabled { tenant: 9, version },
+                )
                 | ("KeyDeleted" | "KeyPurged", Error::VersionGone { tenant: 9, version }) => {
                     assert_eq!(version, "old");
                 }
@@ -436,6 +439,103 @@ fn explicit_key_state_refusals_are_scoped_to_the_requested_version() {
     let missing =
         refusal(9, ID, Op::Unwrap("old"), 404, br#"{"error":{"code":"KeyNotFound"}}"#).failed;
     assert!(matches!(missing.error, Error::VersionGone { tenant: 9, version } if version == "old"));
+}
+
+/// board 9384: against a fake Key Vault whose current version `v2` wraps and unwraps normally,
+/// unwrapping under a disabled (`KeyDisabled`) or expired (`KeyExpired`) older version `v1`
+/// returns `Error::VersionDisabled` naming that version — never tenant-wide `Error::Revoked` —
+/// and a missing older version `v0` returns `Error::VersionGone`; wrapping under a disabled or
+/// expired current version stays `Error::Revoked`.
+#[test]
+fn disabled_or_expired_older_version_refuses_its_unwrap_alone() {
+    let current_version = Arc::new(Mutex::new("v1"));
+    let version_for_server = current_version.clone();
+    let server = Server::start(move |base, request| {
+        let path = request.route();
+        if path.ends_with("/oauth2/v2.0/token") {
+            return Response::of(
+                200,
+                r#"{"token_type":"Bearer","expires_in":3600,"access_token":"token-1"}"#,
+            );
+        }
+        let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+        match segments[..] {
+            ["keys", "expired-9", "wrapkey"] => Response::of(
+                403,
+                r#"{"error":{"code":"Forbidden","message":"Operation wrapKey is not allowed on an expired key.","innererror":{"code":"KeyExpired"}}}"#,
+            ),
+            ["keys", name, "wrapkey"] => {
+                let req: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                let mut value = decode(req["value"].as_str().unwrap()).unwrap();
+                value.reverse();
+                let ver = *version_for_server.lock().unwrap();
+                Response::of(
+                    200,
+                    format!(
+                        r#"{{"kid":"{base}/keys/{name}/{ver}","value":"{}"}}"#,
+                        BASE64URL.encode(value)
+                    ),
+                )
+            }
+            ["keys", _, "v1", "unwrapkey"] => Response::of(
+                403,
+                r#"{"error":{"code":"Forbidden","message":"Operation unwrapKey is not allowed on a disabled key.","innererror":{"code":"KeyDisabled"}}}"#,
+            ),
+            ["keys", _, "v1exp", "unwrapkey"] => Response::of(
+                403,
+                r#"{"error":{"code":"Forbidden","message":"Operation unwrapKey is not allowed on an expired key.","innererror":{"code":"KeyExpired"}}}"#,
+            ),
+            ["keys", _, "v0", "unwrapkey"] => Response::of(
+                404,
+                r#"{"error":{"code":"KeyNotFound","message":"A key with (name/id) t-9/v0 was not found in this key vault."}}"#,
+            ),
+            ["keys", name, "v2", "unwrapkey"] => {
+                let req: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                let mut value = decode(req["value"].as_str().unwrap()).unwrap();
+                value.reverse();
+                Response::of(
+                    200,
+                    format!(
+                        r#"{{"kid":"{base}/keys/{name}/v2","value":"{}"}}"#,
+                        BASE64URL.encode(value)
+                    ),
+                )
+            }
+            _ => Response::of(404, r#"{"error":{"code":"NotFound","message":"no such path"}}"#),
+        }
+    });
+    let base = server.base();
+    let kms = over(base, "t-{tenant}", None);
+    let key_old = Secret::random();
+    let wrapped_v1 = block_on(kms.wrap(9, &key_old)).unwrap();
+    *current_version.lock().unwrap() = "v1exp";
+    let wrapped_v1exp = block_on(kms.wrap(9, &key_old)).unwrap();
+    *current_version.lock().unwrap() = "v0";
+    let wrapped_v0 = block_on(kms.wrap(9, &key_old)).unwrap();
+    // Rotate to enabled v2 while older versions are disabled, expired, or missing.
+    *current_version.lock().unwrap() = "v2";
+    let key_new = Secret::random();
+    let wrapped_v2 = block_on(kms.wrap(9, &key_new)).unwrap();
+    assert_eq!(block_on(kms.unwrap(9, &wrapped_v2)).unwrap().expose(), key_new.expose());
+
+    assert!(matches!(
+        block_on(kms.unwrap(9, &wrapped_v1)),
+        Err(Error::VersionDisabled { tenant: 9, version }) if version == "v1"
+    ));
+    assert!(matches!(
+        block_on(kms.unwrap(9, &wrapped_v1exp)),
+        Err(Error::VersionDisabled { tenant: 9, version }) if version == "v1exp"
+    ));
+    assert!(matches!(
+        block_on(kms.unwrap(9, &wrapped_v0)),
+        Err(Error::VersionGone { tenant: 9, version }) if version == "v0"
+    ));
+    // Wrapping under an expired current key remains tenant-wide Revoked.
+    let expired = over(base, "expired-{tenant}", None);
+    assert!(matches!(
+        block_on(expired.wrap(9, &Secret::random())),
+        Err(Error::Revoked { tenant: 9 })
+    ));
 }
 
 /// TASK-633.6 (review): each vault's tokens are for its own audience: a Managed HSM's, a sovereign
@@ -451,7 +551,8 @@ fn tokens_are_for_the_audience_of_each_vault() {
     );
     assert_eq!(audience_of("evil.example"), None);
     let parsed =
-        parse("azure-kv://h.managedhsm.azure.net?key=t-{tenant}&alg=A256KW", Origin::Host).unwrap();
+        parse("azure-kv://h.managedhsm.azure.net?key=t-{tenant}&alg=A256KW", Origin::Host, None)
+            .unwrap();
     assert_eq!(parsed.audience, "https://managedhsm.azure.net");
     let fake = Arc::new(Mutex::new(Fake::default()));
     let server = serve(&fake);

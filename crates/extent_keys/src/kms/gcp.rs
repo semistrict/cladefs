@@ -32,7 +32,7 @@
 use super::background::Background;
 use super::http::{self, Unread};
 use super::retry::{self, Failed};
-use super::{Error, KeyNames, Kms, Origin, Vars, real};
+use super::{Error, KeyNames, Kms, Origin, OverrideFiles, Vars, real};
 use crate::{KEY_LEN, Secret, Unauthentic, Wrapped};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -91,8 +91,13 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The KMS `url` names ([`super::from_url_with`]), of `origin`, its credentials as `vars` give
 /// them.
-pub(super) fn from_url(url: &str, vars: &Vars, origin: Origin) -> Result<super::Shared, String> {
-    let (ring, names) = parse(url, origin)?;
+pub(super) fn from_url(
+    url: &str,
+    vars: &Vars,
+    origin: Origin,
+    files: Option<&OverrideFiles>,
+) -> Result<super::Shared, String> {
+    let (ring, names) = parse(url, origin, files)?;
     let credentials = credentials(vars).map_err(|why| format!("{url}: {why}"))?;
     let quota_project = vars.get(QUOTA_PROJECT_VAR).map(str::to_owned);
     let kms = GcpKms::new(ENDPOINT, ring, names, credentials, quota_project);
@@ -100,12 +105,48 @@ pub(super) fn from_url(url: &str, vars: &Vars, origin: Origin) -> Result<super::
 }
 
 pub(super) fn check_url(url: &str, origin: Origin) -> Result<(), String> {
-    parse(url, origin).map(drop)
+    parse(url, origin, None).map(drop)
+}
+
+/// Whether `project` is syntactically a GCP project ID: lowercase letters, digits, hyphens, or a
+/// domain-scoped `example.com:id`.
+pub(super) fn valid_project(project: &str) -> bool {
+    let project_char = |c: char| matches!(c, 'a'..='z' | '0'..='9' | '-' | '.' | ':');
+    !project.is_empty() && project.chars().all(project_char)
+}
+
+/// Literal GCP project IDs named by a host's own `gcp-kms://` URL (its ring's, and its template's
+/// if the template is a full resource name without `{tenant}` in the project segment; board 9686).
+pub(super) fn url_projects(url: &str) -> Vec<String> {
+    let Some(rest) = url.strip_prefix("gcp-kms://") else { return Vec::new() };
+    let (ring, query) = rest.split_once('?').unwrap_or((rest, ""));
+    let segments: Vec<&str> = ring.split('/').collect();
+    let mut projects = Vec::new();
+    if let ["projects", project, "locations", _, "keyRings", _] = segments[..]
+        && valid_project(project)
+    {
+        projects.push(project.to_owned());
+    }
+    for (name, value) in url::form_urlencoded::parse(query.as_bytes()) {
+        if name == "key"
+            && let Some(rest) = value.strip_prefix("projects/")
+            && let Some(project) = rest.split('/').next()
+            && valid_project(project)
+            && !projects.iter().any(|existing| existing == project)
+        {
+            projects.push(project.to_owned());
+        }
+    }
+    projects
 }
 
 /// The key ring `url` names and its tenants' keys' names, each checked: of `origin` the registry of
-/// buckets, no file of the host's named (board 8525).
-fn parse(url: &str, origin: Origin) -> Result<(String, KeyNames), String> {
+/// buckets, no file of the host's named (board 8525) and only allowed GCP projects (board 9686).
+fn parse(
+    url: &str,
+    origin: Origin,
+    files: Option<&OverrideFiles>,
+) -> Result<(String, KeyNames), String> {
     let usage = "gcp-kms://projects/P/locations/L/keyRings/R?key=TEMPLATE[&keys=FILE]";
     let rest = url.strip_prefix("gcp-kms://").expect("a gcp-kms:// URL");
     let (ring, query) = rest.split_once('?').unwrap_or((rest, ""));
@@ -114,24 +155,31 @@ fn parse(url: &str, origin: Origin) -> Result<(String, KeyNames), String> {
         return Err(format!("{url:?} names no key ring: {usage}"));
     };
     check_ring(project, location, id).map_err(|why| format!("{url:?}: {why}"))?;
+    origin.gcp_project(project).map_err(|why| format!("{url:?}: {why}"))?;
     let query: Vec<(String, String)> =
         url::form_urlencoded::parse(query.as_bytes()).into_owned().collect();
     if let Some((name, _)) = query.iter().find(|(name, _)| !matches!(&name[..], "key" | "keys")) {
         return Err(format!("{url:?}: no parameter {name:?}: {usage}"));
     }
     let query_pairs = query.iter().map(|(name, value)| (&name[..], &value[..]));
-    let names = KeyNames::of_query(query_pairs, origin, check_key)
+    let names = KeyNames::of_query_in(query_pairs, origin, check_key, files)
         .map_err(|why| format!("{url:?}: {why}"))?;
     // The template, as the longest tenant names it: its other tenants' names are as valid.
     check_key(&names.of(u64::MAX)).map_err(|why| format!("{url:?}: the key template, {why}"))?;
+    // A template naming keys whole names their project: one the host allows, as the template has
+    // it, so that a project containing `{tenant}` is refused too (board 9686).
+    if let Some(rest) = names.template().strip_prefix("projects/") {
+        let template_project = rest.split('/').next().unwrap_or_default();
+        origin
+            .gcp_project(template_project)
+            .map_err(|why| format!("{url:?}: the key template, {why}"))?;
+    }
     Ok((ring.to_owned(), names))
 }
 
 /// Checks a key ring's resource name, of `project`, `location` and `id`, is one Cloud KMS has.
 fn check_ring(project: &str, location: &str, id: &str) -> Result<(), String> {
-    // A project's ID: lowercase letters, digits and hyphens, or a domain's, `example.com:id`.
-    let project_char = |c: char| matches!(c, 'a'..='z' | '0'..='9' | '-' | '.' | ':');
-    if project.is_empty() || !project.chars().all(project_char) {
+    if !valid_project(project) {
         return Err(format!("no project {project:?}"));
     }
     let location_char = |c: char| matches!(c, 'a'..='z' | '0'..='9' | '-');
@@ -638,7 +686,7 @@ mod tests {
         let own = "projects/tenant.example:own/locations/europe-west1/keyRings/r/cryptoKeys/k";
         std::fs::write(&keys, format!("7 {own}\n8 their-key\n")).unwrap();
         let url = format!("gcp-kms://{RING}?key=t-{{tenant}}&keys={}", keys.display());
-        let (ring, names) = parse(&url, Origin::Host).unwrap();
+        let (ring, names) = parse(&url, Origin::Host, None).unwrap();
         assert_eq!(qualified(&ring, &names.of(7)), own);
         assert_eq!(qualified(&ring, &names.of(8)), format!("{RING}/cryptoKeys/their-key"));
         assert_eq!(qualified(&ring, &names.of(9)), format!("{RING}/cryptoKeys/t-9"));
@@ -647,7 +695,7 @@ mod tests {
     #[test]
     fn urls_naming_no_key_ring_or_no_keys_are_refused() {
         let usage = "gcp-kms://projects/P/locations/L/keyRings/R?key=TEMPLATE[&keys=FILE]";
-        let refused = |url: &str| parse(url, Origin::Host).unwrap_err();
+        let refused = |url: &str| parse(url, Origin::Host, None).unwrap_err();
         let url = "gcp-kms://projects/p/locations/l?key=t-{tenant}";
         assert_eq!(refused(url), format!("{url:?} names no key ring: {usage}"));
         let url = "gcp-kms://projects/P/locations/l/keyRings/r?key=t-{tenant}";
@@ -683,7 +731,7 @@ mod tests {
         std::fs::write(&keys, "a projects/p/locations/l/keyRings/r\n").unwrap();
         let url = format!("gcp-kms://{RING}?key=t-{{tenant}}&keys={}", keys.display());
         assert_eq!(
-            parse(&url, Origin::Host).unwrap_err(),
+            parse(&url, Origin::Host, None).unwrap_err(),
             format!(
                 "{url:?}: the key overrides' line 1: tenant a's key, \
                  \"projects/p/locations/l/keyRings/r\", names no key: \

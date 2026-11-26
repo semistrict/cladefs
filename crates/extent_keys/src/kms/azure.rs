@@ -39,7 +39,7 @@
 use super::background::Background;
 use super::http::{self, Unread};
 use super::retry::{self, Failed};
-use super::{Error, KeyNames, Kms, Origin, Vars, real};
+use super::{Error, KeyNames, Kms, Origin, OverrideFiles, Vars, real};
 use crate::{KEY_LEN, Secret, Unauthentic, Wrapped};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64URL;
@@ -97,8 +97,13 @@ const QUERY: [&str; 4] = ["key", "keys", "alg", "endpoint"];
 
 /// The KMS `url` names ([`super::from_url_with`]), of `origin`, its credentials as `vars` give
 /// them.
-pub(super) fn from_url(url: &str, vars: &Vars, origin: Origin) -> Result<super::Shared, String> {
-    let parsed = parse(url, origin)?;
+pub(super) fn from_url(
+    url: &str,
+    vars: &Vars,
+    origin: Origin,
+    files: Option<&OverrideFiles>,
+) -> Result<super::Shared, String> {
+    let parsed = parse(url, origin, files)?;
     Ok(Arc::new(AzureKms::new(parsed, source(vars)).map_err(|why| format!("{url}: {why}"))?))
 }
 
@@ -115,13 +120,13 @@ struct Parsed {
 }
 
 pub(super) fn check_url(url: &str, origin: Origin) -> Result<(), String> {
-    parse(url, origin).map(drop)
+    parse(url, origin, None).map(drop)
 }
 
 /// What `url` says, each name checked; of `origin` the registry of buckets, each host it names (its
 /// vault's, its endpoint's, its template's) one the host allows, and no file of the host's (board
 /// 8525), before any is opened.
-fn parse(url: &str, origin: Origin) -> Result<Parsed, String> {
+fn parse(url: &str, origin: Origin, files: Option<&OverrideFiles>) -> Result<Parsed, String> {
     let usage = "azure-kv://VAULT_HOST?key=TEMPLATE[&keys=FILE][&alg=ALG][&endpoint=URL]";
     let rest = url.strip_prefix("azure-kv://").expect("an azure-kv:// URL");
     let (host, query) = rest.split_once('?').unwrap_or((rest, ""));
@@ -150,7 +155,7 @@ fn parse(url: &str, origin: Origin) -> Result<Parsed, String> {
         None => format!("https://{host}"),
     };
     let query_pairs = query.iter().map(|(name, value)| (&name[..], &value[..]));
-    let names = KeyNames::of_query(query_pairs, origin, check_key)
+    let names = KeyNames::of_query_in(query_pairs, origin, check_key, files)
         .map_err(|why| format!("{url:?}: {why}"))?;
     check_key(&names.of(u64::MAX)).map_err(|why| format!("{url:?}: the key template, {why}"))?;
     // A template naming keys whole names their vault: one the host allows, as the template has it,
@@ -816,10 +821,14 @@ fn refusal(tenant: u64, id: &str, op: Op<'_>, code: u16, body: &[u8]) -> Failure
         | (403, "KeyDeleted" | "KeyPurged", Op::Unwrap(version)) => {
             return refused(Error::VersionGone { tenant, version: version.to_owned() });
         }
-        (403, "KeyDisabled" | "KeyRevoked", Op::Unwrap(version)) => {
+        (403, "KeyDisabled" | "KeyRevoked" | "KeyExpired", Op::Unwrap(version)) => {
             return refused(Error::VersionDisabled { tenant, version: version.to_owned() });
         }
-        (403, "KeyDisabled" | "KeyRevoked" | "KeyDeleted" | "KeyPurged", Op::Wrap) => {
+        (
+            403,
+            "KeyDisabled" | "KeyRevoked" | "KeyExpired" | "KeyDeleted" | "KeyPurged",
+            Op::Wrap,
+        ) => {
             return refused(Error::Revoked { tenant });
         }
         (400, _, Op::Unwrap(_)) => {

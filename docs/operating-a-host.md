@@ -209,6 +209,25 @@ taking it forced (`cladefsctl take --force DIR CAPACITY CELL TOKEN`,
 and the bucket, and lose what only the others held; `StatCell`'s `forced_after`
 names the last commit the bucket held, past which commits told Replicated may be lost.
 
+### Fast WAL cells (appendable zonal object storage)
+
+When compute hosts have access to an appendable zonal object store (Amazon S3
+Express One Zone today; GCS Rapid Storage via gRPC `BidiWriteObject` is planned
+and currently rejected at boot), set `CLADEFSD_FAST_WAL_BUCKET` to its URL
+(`s3://...`, doc-29). The daemon probes offset-checked append semantics at boot
+and refuses to start if the bucket does not honor them. Optional
+`CLADEFSD_FAST_WAL_LARGE_EXTENT_BYTES` overrides the 256 KiB large-write
+direct-to-cold-bucket threshold. For cross-AZ takeover recovery, set
+`CLADEFSD_FAST_WAL_ALLOWED_BUCKETS` to a comma-separated allowlist of trusted
+fast WAL bucket URLs; takeover refuses any bucket URL in a cell head outside
+`CLADEFSD_FAST_WAL_BUCKET` and that allowlist. Fast WAL cells
+(`CreateCellRequest.fast_wal = true`, `FsyncLevel.FSYNC_LEVEL_FAST_WAL`) perform
+zero local disk `fsync`s and keep compute nodes 100% stateless cache-only; losing
+any node at any time loses zero acknowledged commits, and takeover from another
+host fences and recovers the active WAL automatically. Fast WAL cannot be
+combined with peer replication (`replicas >= 1` or an active peer configuration;
+disable replication with `replicas = 0` and `SyncCell` first).
+
 ### Buckets and their numbers
 
 Every bucket has a **bucket number**, which the high bits of every cell ID it gives carry, so that
@@ -260,6 +279,14 @@ bucket KMS over that bucket, its tenants' KEKs kept in it. A bucket given any of
 `CLADEFS_MASTER_KEY` or `CLADEFS_MASTER_KEY_FILE` as its own takes none of the host's three. A
 master key's ID recorded with
 `--master-key-id` must be among those given, or the bucket's cells are refused (`EACCES`). A KMS
+URL recorded in the registry is untrusted (`Origin::Recorded`): it may name no host files
+(`keys=FILE`, `ca=FILE`), `local://` only if `CLADEFSD_KMS_LOCAL=1`, OpenBao or Azure Key Vault
+hosts only those in `CLADEFSD_KMS_HOSTS` or the host's own `CLADEFS_KMS` (OpenBao over cleartext
+only on loopback), GCP Cloud KMS projects (both key ring and full-resource key template) only those
+in `CLADEFSD_KMS_GCP_PROJECTS` or the host's own `CLADEFS_KMS`, and AWS KMS key template ARNs only
+accounts in `CLADEFSD_KMS_AWS_ACCOUNTS` or the host's own `CLADEFS_KMS` (non-ARN key IDs and
+aliases resolve in the host's own account; `endpoint=` only AWS KMS over HTTPS, loopback, or
+`CLADEFSD_KMS_HOSTS`). A KMS
 refusing a tenant refuses it in the buckets under that KMS alone. The host's own bucket's cells are
 under the KMS its own environment names, as below.
 

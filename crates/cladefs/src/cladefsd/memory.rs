@@ -232,12 +232,16 @@ pub(super) async fn govern_on(daemon: &Daemon, allowance: u64) {
         local_cell::replicate::evict_hot_to_on(daemon.host.local(), room);
     }
     // cladefs: unified recent/unpacked parts (local framed + bucket fetch) and object tails
-    // (TASK-603, board 6026).
+    // (TASK-603, board 6026). While FUSE cells are attached (`OpenCellDevice::read` bypasses
+    // `ExtentCache`, board 8260), `PartMemory` is the only unpacked-part cache: scale it to half
+    // the remaining room (at least `RECENT.min(room)`) so multi-file reads across hundreds of
+    // files don't thrash a 64 MiB LRU while leaving room for `tails`, `pages`, and the kernel's
+    // FUSE page cache (board 12313). Without FUSE cells, `ExtentCache` holds unpacked extents for
+    // VMs, so keep `PartMemory` bounded to `RECENT.min(room)`.
     let fetch_mem = crate::bucket::memory_on(&daemon.host);
     let room = room.saturating_sub(local_cell::replicate::hot_bytes_on(daemon.host.local()));
-    if fetch_mem.recent_bytes() > room {
-        fetch_mem.evict_recent_to(room);
-    }
+    let recent_limit = recent_limit_for(room, super::mount::has_attached_on(daemon));
+    fetch_mem.size_recent_to(recent_limit);
     let room = room.saturating_sub(fetch_mem.recent_bytes());
     if fetch_mem.tails_bytes() > room {
         fetch_mem.evict_tails_to(room);
@@ -281,6 +285,13 @@ pub(super) async fn govern_on(daemon: &Daemon, allowance: u64) {
     {
         log::error!("cladefsd: shrinking the daemon's memory to the host's: {err}");
     }
+}
+
+/// cladefs: target byte limit for `PartMemory` (`recent`) given the remaining governor `room` and
+/// whether any FUSE cells are attached (board 12313). Never exceeds `room`.
+pub(super) fn recent_limit_for(room: u64, fuse_attached: bool) -> u64 {
+    let base = bucket_cell::fetch::RECENT.min(room);
+    if fuse_attached { (room / 2).max(base) } else { base }
 }
 
 /// The process's default daemon's governor's look at the host's memory.

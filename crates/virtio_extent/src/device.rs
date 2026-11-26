@@ -175,9 +175,18 @@ impl Device {
         let cell = connect(&config.cladefsd_socket, &config.id, &on_lost)
             .and_then(|daemon| match &making {
                 Making::Boot => daemon.open(&config.path_on_host, config.capacity),
-                Making::Restore { snapshot, .. } => {
-                    daemon.open_forked(&config.path_on_host, snapshot.version, config.capacity)
-                }
+                Making::Restore { snapshot, .. } => match snapshot.target {
+                    cladefs::CellSnapshot::Version(version) => {
+                        daemon.open_forked(&config.path_on_host, version, config.capacity)
+                    }
+                    cladefs::CellSnapshot::LocalEphemeral { tenant, cell, committed } => daemon
+                        .open_ephemeral_at_commit(
+                            &config.path_on_host,
+                            cladefs::CellId { tenant, id: cell },
+                            committed,
+                            config.capacity,
+                        ),
+                },
             })
             .map_err(|err| Error::Cell(config.path_on_host.clone(), err))?;
         config_space.cell = cell.cell().to_le();
@@ -371,18 +380,20 @@ impl Device {
         if private > 0 {
             return Err(SnapshotError::Private(id, private));
         }
-        let version = self
+        let target = self
             .cell()
-            .make_version()
+            .snapshot_cell()
             .map_err(|errno| SnapshotError::Version(id.clone(), errno))?;
         let mappings = match self.cell().window_mappings() {
             Ok(mappings) => mappings,
             Err(errno) => {
-                self.drop_version(version.version);
+                if let cladefs::CellSnapshot::Version(version) = target {
+                    self.drop_version(version.version);
+                }
                 return Err(SnapshotError::Mappings(id, errno));
             }
         };
-        self.snapshot = Some(Snapshot { version, mappings });
+        self.snapshot = Some(Snapshot { target, mappings });
         Ok(())
     }
 
@@ -390,9 +401,12 @@ impl Device {
     /// snapshot fails after it: no snapshot file names its version then, which its cell would keep,
     /// and all it holds, for good (TASK-575). The device has no snapshot then. Only a snapshot this
     /// device took: one restored from is the VM manager's (the daemon refuses it, `EPERM`).
+    /// Host-local ephemeral snapshots make no bucket version, so dropping them is local-only.
     pub fn drop_snapshot(&mut self) {
         let Some(snapshot) = self.snapshot.take() else { return };
-        self.drop_version(snapshot.version.version);
+        if let cladefs::CellSnapshot::Version(version) = snapshot.target {
+            self.drop_version(version.version);
+        }
     }
 
     /// cladefs: drops the version `version` of the cell, which this device made, logging a
@@ -421,7 +435,7 @@ impl Device {
         State {
             config: ConfigState::from(&self.config),
             window_addr: self.window.as_ref().map(WindowMemory::guest_addr),
-            version: snapshot.version,
+            target: snapshot.target,
             mappings: snapshot.mappings.iter().map(MappingState::from).collect(),
             frozen: self.notices.frozen(),
         }

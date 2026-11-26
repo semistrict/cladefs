@@ -24,6 +24,8 @@ use fprint::TypeFingerprint;
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "crypto")]
 use zeroize::Zeroize;
+#[cfg(feature = "crypto")]
+pub use zeroize::Zeroizing;
 
 #[cfg(feature = "crypto")]
 pub mod kms;

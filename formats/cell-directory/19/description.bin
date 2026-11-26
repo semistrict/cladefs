@@ -1,0 +1,12 @@
+cladefs cell directory 19
+block_size 4096
+cell 1f/7
+capacity 1073741824
+bucket gs://cladefs-golden/cells
+token 81
+forced 81
+forced_after 12
+writer_copies 3 4
+kind sqlite
+version 000000000004s
+ephemeral yes

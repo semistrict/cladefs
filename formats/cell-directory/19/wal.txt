@@ -1,0 +1,14 @@
+[
+    Slot {
+        serial: 2,
+        start: Some(
+            9,
+        ),
+    },
+    Slot {
+        serial: 1,
+        start: Some(
+            5,
+        ),
+    },
+]

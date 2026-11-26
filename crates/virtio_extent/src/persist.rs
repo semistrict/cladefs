@@ -33,8 +33,10 @@ use crate::config::{CacheType, Config};
 /// The family of an extent-store device's saved state in a VM snapshot (doc-28, board 10058):
 /// 1, unversioned bitcode fields with `dax_private_max` in pages; 2, frozen: version-prefixed
 /// payload (`[version: u32 LE][bincode(StateV2)]`, trailing bytes refused), read by
-/// [`FORMAT::check`] before decoding, with `dax_private_max_bytes` in bytes.
-pub const FORMAT: formats::Format = formats::Format::new("snapshot extent state", 2, 2);
+/// [`FORMAT::check`] before decoding, with `dax_private_max_bytes` in bytes; 3: replaces
+/// `version: CellVersionV2` with `target: SnapshotTargetV3` to support both bucket-backed versions
+/// and host-local quiesced ephemeral cell checkpoints (`CellSnapshot::LocalEphemeral`).
+pub const FORMAT: formats::Format = formats::Format::new("snapshot extent state", 2, 3);
 
 /// Maximum encoded device state accepted from a snapshot (64 MiB): bounds allocations from hostile
 /// or corrupted snapshot bytes before bincode allocates `Vec<MappingStateV2>` (AGENTS.md, Trust
@@ -51,8 +53,10 @@ pub struct State {
     pub config: ConfigState,
     /// Where the window was in guest memory, if the device has one.
     pub window_addr: Option<u64>,
-    /// The version of the cell the snapshot holds, which its restores fork, on any host.
-    pub version: cladefs::CellVersion,
+    /// What cell state the snapshot holds: either a bucket-backed version (forked on restore on
+    /// any host) or a host-local ephemeral cell quiesced at its latest commit (reopened in place
+    /// on the same host).
+    pub target: cladefs::CellSnapshot,
     /// The window's mappings.
     pub mappings: Vec<MappingState>,
     /// Whether the guest's filesystem was frozen: it is, as a snapshot is taken.
@@ -219,7 +223,24 @@ enum MappingContentsStateV2 {
     Zeros,
 }
 
-impl From<&State> for StateV2 {
+// Version 3 wire types (doc-28): generalizes `version: CellVersionV2` to `target: SnapshotTargetV3`
+// so host-local ephemeral cells can be suspended and resumed in place without bucket versions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, fprint::TypeFingerprint)]
+struct StateV3 {
+    config: ConfigStateV2,
+    window_addr: Option<u64>,
+    target: SnapshotTargetV3,
+    mappings: Vec<MappingStateV2>,
+    frozen: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, fprint::TypeFingerprint)]
+enum SnapshotTargetV3 {
+    Version(CellVersionV2),
+    LocalEphemeral { tenant: u64, cell: u64, committed: u64 },
+}
+
+impl From<&State> for StateV3 {
     fn from(state: &State) -> Self {
         Self {
             config: ConfigStateV2 {
@@ -236,10 +257,15 @@ impl From<&State> for StateV2 {
                 },
             },
             window_addr: state.window_addr,
-            version: CellVersionV2 {
-                tenant: state.version.tenant,
-                cell: state.version.cell,
-                version: state.version.version,
+            target: match state.target {
+                cladefs::CellSnapshot::Version(v) => SnapshotTargetV3::Version(CellVersionV2 {
+                    tenant: v.tenant,
+                    cell: v.cell,
+                    version: v.version,
+                }),
+                cladefs::CellSnapshot::LocalEphemeral { tenant, cell, committed } => {
+                    SnapshotTargetV3::LocalEphemeral { tenant, cell, committed }
+                }
             },
             mappings: state
                 .mappings
@@ -252,6 +278,54 @@ impl From<&State> for StateV2 {
                             MappingContentsStateV2::Extent { cell, sequence, offset }
                         }
                         MappingContentsState::Zeros => MappingContentsStateV2::Zeros,
+                    },
+                })
+                .collect(),
+            frozen: state.frozen,
+        }
+    }
+}
+
+impl From<StateV3> for State {
+    fn from(state: StateV3) -> Self {
+        Self {
+            config: ConfigState {
+                id: state.config.id,
+                tag: state.config.tag,
+                path_on_host: state.config.path_on_host,
+                capacity: state.config.capacity,
+                dax_window_size: state.config.dax_window_size,
+                dax_private_max_bytes: state.config.dax_private_max_bytes,
+                cladefsd_socket: state.config.cladefsd_socket,
+                cache_type: match state.config.cache_type {
+                    CacheTypeV2::Unsafe => CacheType::Unsafe,
+                    CacheTypeV2::Writeback => CacheType::Writeback,
+                },
+            },
+            window_addr: state.window_addr,
+            target: match state.target {
+                SnapshotTargetV3::Version(v) => {
+                    cladefs::CellSnapshot::Version(cladefs::CellVersion {
+                        tenant: v.tenant,
+                        cell: v.cell,
+                        version: v.version,
+                    })
+                }
+                SnapshotTargetV3::LocalEphemeral { tenant, cell, committed } => {
+                    cladefs::CellSnapshot::LocalEphemeral { tenant, cell, committed }
+                }
+            },
+            mappings: state
+                .mappings
+                .into_iter()
+                .map(|m| MappingState {
+                    window_offset: m.window_offset,
+                    len: m.len,
+                    contents: match m.contents {
+                        MappingContentsStateV2::Extent { cell, sequence, offset } => {
+                            MappingContentsState::Extent { cell, sequence, offset }
+                        }
+                        MappingContentsStateV2::Zeros => MappingContentsState::Zeros,
                     },
                 })
                 .collect(),
@@ -277,11 +351,11 @@ impl From<StateV2> for State {
                 },
             },
             window_addr: state.window_addr,
-            version: cladefs::CellVersion {
+            target: cladefs::CellSnapshot::Version(cladefs::CellVersion {
                 tenant: state.version.tenant,
                 cell: state.version.cell,
                 version: state.version.version,
-            },
+            }),
             mappings: state
                 .mappings
                 .into_iter()
@@ -306,7 +380,7 @@ fn bincode_options() -> impl bincode::Options {
 }
 
 impl State {
-    /// Encodes this device state as `[version: u32 LE][bincode(StateV2)]` at [`FORMAT::current`].
+    /// Encodes this device state as `[version: u32 LE][bincode(StateV3)]` at [`FORMAT::current`].
     /// Unbounded on encode so valid large DAX mapping tables never panic (hotbed review 90 finding
     /// 323, hotbed review 89 finding 326).
     pub fn encode(&self) -> Vec<u8> {
@@ -328,26 +402,30 @@ impl State {
                 let state: StateV2 = bincode_options().deserialize(payload)?;
                 Ok(Self::from(state))
             }
+            3 => {
+                let state: StateV3 = bincode_options().deserialize(payload)?;
+                Ok(Self::from(state))
+            }
             _ => unreachable!("FORMAT.check admitted unknown version {version}"),
         }
     }
 }
 
 impl Serialize for State {
-    /// Serializes as `(FORMAT.current, StateV2)` so `bitcode` keeps columnar field packing and
+    /// Serializes as `(FORMAT.current, StateV3)` so `bitcode` keeps columnar field packing and
     /// never blows Firecracker's 10 MB `Snapshot::load` limit (hotbed review 90 finding 324).
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeTuple as _;
         let mut tuple = serializer.serialize_tuple(2)?;
         tuple.serialize_element(&FORMAT.current)?;
-        tuple.serialize_element(&StateV2::from(self))?;
+        tuple.serialize_element(&StateV3::from(self))?;
         tuple.end()
     }
 }
 
 impl<'de> Deserialize<'de> for State {
-    /// Deserializes `(version, StateV2)`, running [`FORMAT::check`] on `version` before asking the
-    /// deserializer to read `StateV2`'s fields.
+    /// Deserializes `(version, StateV2|StateV3)`, running [`FORMAT::check`] on `version` before
+    /// asking the deserializer to read the versioned payload fields.
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         struct Visitor;
 
@@ -373,6 +451,12 @@ impl<'de> Deserialize<'de> for State {
                             .ok_or_else(|| serde::de::Error::invalid_length(1, &self))?;
                         Ok(State::from(state))
                     }
+                    3 => {
+                        let state: StateV3 = seq
+                            .next_element()?
+                            .ok_or_else(|| serde::de::Error::invalid_length(1, &self))?;
+                        Ok(State::from(state))
+                    }
                     _ => unreachable!("FORMAT.check admitted unknown version {version}"),
                 }
             }
@@ -382,19 +466,19 @@ impl<'de> Deserialize<'de> for State {
     }
 }
 
-/// What a snapshot of the device holds of its cell (TASK-39.1): the version of its cell it was
-/// taken at, which each VM restored from it forks, and the window's mappings then, which the
-/// restored VM's window maps again.
+/// What a snapshot of the device holds of its cell (TASK-39.1): either the version of its cell it
+/// was taken at (forked on restore) or a host-local ephemeral cell checkpoint (reopened in place),
+/// and the window's mappings then, which the restored VM's window maps again.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
-    pub version: cladefs::CellVersion,
+    pub target: cladefs::CellSnapshot,
     pub mappings: Vec<cladefs::WindowMapping>,
 }
 
 impl From<&State> for Snapshot {
     fn from(state: &State) -> Self {
         Self {
-            version: state.version,
+            target: state.target,
             mappings: state.mappings.iter().map(cladefs::WindowMapping::from).collect(),
         }
     }
@@ -436,7 +520,11 @@ mod tests {
                 cache_type: CacheType::Unsafe,
             },
             window_addr: Some(1 << 40),
-            version: cladefs::CellVersion { tenant: 2, cell: 77, version: 5 },
+            target: cladefs::CellSnapshot::Version(cladefs::CellVersion {
+                tenant: 2,
+                cell: 77,
+                version: 5,
+            }),
             mappings: vec![
                 MappingState {
                     window_offset: 4096,
@@ -466,9 +554,20 @@ mod tests {
                 cache_type: CacheType::Writeback,
             },
             window_addr: None,
-            version: cladefs::CellVersion { tenant: 0, cell: 1, version: 0 },
+            target: cladefs::CellSnapshot::Version(cladefs::CellVersion {
+                tenant: 0,
+                cell: 1,
+                version: 0,
+            }),
             mappings: Vec::new(),
             frozen: false,
+        }
+    }
+
+    fn ephemeral_state() -> State {
+        State {
+            target: cladefs::CellSnapshot::LocalEphemeral { tenant: 2, cell: 88, committed: 42 },
+            ..sample_state()
         }
     }
 
@@ -483,23 +582,34 @@ mod tests {
         const FORMAT: formats::Format = FORMAT;
 
         fn write() -> Vec<(&'static str, Vec<u8>)> {
-            vec![("state", sample_state().encode()), ("state-minimal", minimal_state().encode())]
+            vec![
+                ("state", sample_state().encode()),
+                ("state-minimal", minimal_state().encode()),
+                ("state-ephemeral", ephemeral_state().encode()),
+            ]
         }
 
         fn written(version: u32, _: &str, bytes: &[u8]) -> Result<String, String> {
-            if version != 2 {
-                return Err(format!("no decoder of version {version}"));
-            }
             let (found, payload) = bytes
                 .split_first_chunk::<4>()
                 .ok_or_else(|| "truncated before version".to_owned())?;
             let found = u32::from_le_bytes(*found);
-            if found != 2 {
-                return Err(format!("expected version 2, found {found}"));
+            if found != version {
+                return Err(format!("expected version {version}, found {found}"));
             }
-            let state: StateV2 =
-                bincode_options().deserialize(payload).map_err(|err| err.to_string())?;
-            Ok(format!("{state:#?}"))
+            match version {
+                2 => {
+                    let state: StateV2 =
+                        bincode_options().deserialize(payload).map_err(|err| err.to_string())?;
+                    Ok(format!("{state:#?}"))
+                }
+                3 => {
+                    let state: StateV3 =
+                        bincode_options().deserialize(payload).map_err(|err| err.to_string())?;
+                    Ok(format!("{state:#?}"))
+                }
+                _ => Err(format!("no decoder of version {version}")),
+            }
         }
 
         fn read(_: &str, bytes: &[u8]) -> Result<(), String> {
@@ -509,9 +619,46 @@ mod tests {
         fn fingerprint(version: u32) -> Option<String> {
             match version {
                 2 => Some(format!("{}\n", StateV2::fingerprint())),
+                3 => Some(format!("{}\n", StateV3::fingerprint())),
                 _ => None,
             }
         }
+    }
+
+    #[test]
+    fn v2_state_converts_to_version_target_in_v3() {
+        let v2 = StateV2 {
+            config: ConfigStateV2 {
+                id: "extents".into(),
+                tag: "fxfs".into(),
+                path_on_host: "/store".into(),
+                capacity: 1 << 30,
+                dax_window_size: Some(64 << 20),
+                dax_private_max_bytes: Some(1 << 20),
+                cladefsd_socket: "/cladefsd.sock".into(),
+                cache_type: CacheTypeV2::Unsafe,
+            },
+            window_addr: Some(1 << 40),
+            version: CellVersionV2 { tenant: 2, cell: 77, version: 5 },
+            mappings: vec![
+                MappingStateV2 {
+                    window_offset: 4096,
+                    len: 8192,
+                    contents: MappingContentsStateV2::Extent { cell: 3, sequence: 9, offset: 0 },
+                },
+                MappingStateV2 {
+                    window_offset: 1 << 21,
+                    len: 4096,
+                    contents: MappingContentsStateV2::Zeros,
+                },
+            ],
+            frozen: true,
+        };
+        let encoded = bincode_options().serialize(&(2u32, &v2)).unwrap();
+        let decoded = State::decode(&encoded).unwrap();
+        assert_eq!(decoded, sample_state());
+        let serde_decoded: State = bincode_options().deserialize(&encoded).unwrap();
+        assert_eq!(serde_decoded, sample_state());
     }
 
     #[test]
@@ -522,33 +669,35 @@ mod tests {
         }
         // Unsupported versions are refused by FORMAT.check before bincode runs, even when the
         // payload after the 4-byte version is arbitrary bytes of a future schema.
-        for bad_version in [0u32, 1, 3, u32::MAX] {
+        for bad_version in [0u32, 1, 4, u32::MAX] {
             let mut bytes = bad_version.to_le_bytes().to_vec();
             bytes.extend_from_slice(b"future schema bytes");
             let err = State::decode(&bytes).unwrap_err();
             assert_eq!(
                 err.to_string(),
                 format!(
-                    "snapshot extent state version {bad_version}: this build reads version 2 alone"
+                    "snapshot extent state version {bad_version}: this build reads versions 2 to 3"
                 )
             );
         }
-        // Trailing bytes after a valid v2 payload are refused.
+        // Trailing bytes after a valid v3 payload are refused.
         let mut trailing = sample_state().encode();
         trailing.push(0);
         assert!(matches!(State::decode(&trailing), Err(DecodeError::Decode(_))));
 
-        // Serde round-trip via bincode directly, and unsupported version refused by serde
-        // Deserialize before reading StateV2 fields.
-        let encoded = bincode_options().serialize(&sample_state()).unwrap();
-        assert_eq!(encoded, sample_state().encode());
-        let decoded: State = bincode_options().deserialize(&encoded).unwrap();
-        assert_eq!(decoded, sample_state());
-        let future_encoded = bincode_options().serialize(&(3u32, "incompatible future")).unwrap();
+        // Serde round-trip via bincode directly (both Version and LocalEphemeral), and unsupported
+        // version refused by serde Deserialize before reading StateV3 fields.
+        for state in [sample_state(), ephemeral_state()] {
+            let encoded = bincode_options().serialize(&state).unwrap();
+            assert_eq!(encoded, state.encode());
+            let decoded: State = bincode_options().deserialize(&encoded).unwrap();
+            assert_eq!(decoded, state);
+        }
+        let future_encoded = bincode_options().serialize(&(4u32, "incompatible future")).unwrap();
         let err = bincode_options().deserialize::<State>(&future_encoded).unwrap_err();
         assert!(
             err.to_string()
-                .contains("snapshot extent state version 3: this build reads version 2 alone"),
+                .contains("snapshot extent state version 4: this build reads versions 2 to 3"),
             "{err}"
         );
 

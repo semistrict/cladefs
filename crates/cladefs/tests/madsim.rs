@@ -346,7 +346,8 @@ async fn an_image_imported_through_the_control_api_reads_back() {
     let (hostname, target) = nodes[0]
         .spawn(async move {
             let daemon = current_daemon().expect("node 0 daemon");
-            let cell = daemon.cell_path(made_id).expect("imported cell path");
+            let cell =
+                host_fs::may_block(|| daemon.cell_path(made_id)).expect("imported cell path");
             let storage = cladefs::Storage::open_on(daemon.host(), &cell).await.unwrap();
             let fs = cladefs::Filesystem::mount(storage).await.unwrap();
             let (etc, _) = fs.root().lookup(b"etc").await.unwrap();
@@ -1864,7 +1865,8 @@ async fn hand_overs_to_wedged_targets_end_within_their_bound() {
                 guest.commit(cladefs::Commit::Local).await.unwrap();
             }
             guest.close();
-            let writing = current_daemon().unwrap().cell_path(child_id).unwrap();
+            let writing =
+                host_fs::may_block(|| current_daemon().unwrap().cell_path(child_id)).unwrap();
             let listed = || {
                 host_fs::may_block(|| {
                     let mut files = Vec::new();
@@ -1888,7 +1890,8 @@ async fn hand_overs_to_wedged_targets_end_within_their_bound() {
                 }
                 madsim::time::sleep(Duration::from_secs(1)).await;
             }
-            (writing, listed())
+            let files = listed();
+            (writing, files)
         })
         .await
         .unwrap();

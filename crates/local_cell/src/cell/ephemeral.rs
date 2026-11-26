@@ -51,10 +51,36 @@ pub struct Parent {
     pub epoch: u64,
 }
 
-/// The non-extent state stored in `TableFooter::rest` of a [`LocalCheckpoint`].
+/// Frozen cell-directory v18 layout of `TableFooter::rest` in a [`LocalCheckpoint`] (doc-28,
+/// board 10044): every v18 ephemeral cell was forked from a bucket version (`parent: Parent`).
+/// Kept in its own module so its type name stays `Rest` (matching its frozen golden debug output)
+/// and never edited; v18 checkpoints decode into it and convert into [`Rest`].
+mod v18 {
+    use super::{ExtentId, Parent, Spent};
+    use fprint::TypeFingerprint;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
+    pub(super) struct Rest {
+        pub(super) parent: Parent,
+        pub(super) freed: Vec<ExtentId>,
+        pub(super) root: Option<Vec<u8>>,
+        pub(super) next_sequence: u64,
+        pub(super) last_commit: Option<u64>,
+        pub(super) spent: Spent,
+        pub(super) capacity: Option<u64>,
+        pub(super) punch: Vec<(u64, u64, u64)>,
+        pub(super) through: Option<u64>,
+        pub(super) keys: Vec<u8>,
+    }
+}
+
+/// The non-extent state stored in `TableFooter::rest` of a [`LocalCheckpoint`] (cell-directory v19):
+/// `parent` is `None` for a standalone host-local ephemeral cell (such as an ephemeral memory cell)
+/// with no parent version in a bucket.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
 struct Rest {
-    parent: Parent,
+    parent: Option<Parent>,
     freed: Vec<ExtentId>,
     root: Option<Vec<u8>>,
     next_sequence: u64,
@@ -66,16 +92,49 @@ struct Rest {
     keys: Vec<u8>,
 }
 
-/// cladefs: the corpus's local checkpoint's rest, as its file holds it (doc-28): the cell
-/// directory's part of the file, whose table is the bucket layout's checkpoints' and frame the
-/// extent frames', and whose salt is drawn at random.
+impl From<v18::Rest> for Rest {
+    fn from(v18: v18::Rest) -> Self {
+        Self {
+            parent: Some(v18.parent),
+            freed: v18.freed,
+            root: v18.root,
+            next_sequence: v18.next_sequence,
+            last_commit: v18.last_commit,
+            spent: v18.spent,
+            capacity: v18.capacity,
+            punch: v18.punch,
+            through: v18.through,
+            keys: v18.keys,
+        }
+    }
+}
+
+/// Decodes a versioned [`Rest`] from `bytes` (cell-directory v18 or v19).
+fn decode_rest(bytes: &[u8]) -> Result<Rest, Error> {
+    use bincode::Options as _;
+    let options = bincode::DefaultOptions::new().with_fixint_encoding().reject_trailing_bytes();
+    crate::layout::read_versioned_with(bytes, |version, payload| match version {
+        18 => Ok(Rest::from(options.deserialize::<v18::Rest>(payload)?)),
+        19 => Ok(options.deserialize::<Rest>(payload)?),
+        _ => unreachable!("FORMAT.check admitted unknown cell directory version {version}"),
+    })
+}
+
+/// cladefs: the corpus's local checkpoint's rest for a forked ephemeral cell, as its file holds it
+/// (doc-28): the cell directory's part of the file, whose table is the bucket layout's checkpoints'
+/// and frame the extent frames', and whose salt is drawn at random.
 #[cfg(test)]
 pub(crate) fn golden_rest() -> Vec<u8> {
     let mut spent = Spent::default();
     spent.insert(3);
     spent.insert(4);
     let rest = Rest {
-        parent: Parent { cell: CellId { tenant: 0x2f, id: 7 }, version: 0x99, at: 12, epoch: 3 },
+        parent: Some(Parent {
+            cell: CellId { tenant: 0x2f, id: 7 },
+            version: 0x99,
+            at: 12,
+            epoch: 3,
+        }),
         freed: vec![ExtentId::new(7, 2)],
         root: Some(vec![1, 2, 3]),
         next_sequence: 9,
@@ -89,23 +148,62 @@ pub(crate) fn golden_rest() -> Vec<u8> {
     crate::layout::versioned(&rest)
 }
 
-/// cladefs: a local checkpoint's rest, `bytes`, read by this build, as its `{:#?}`.
+/// cladefs: the corpus's local checkpoint's rest for a standalone (parentless) ephemeral cell
+/// (cell-directory v19).
 #[cfg(test)]
-pub(crate) fn rest_said(bytes: &[u8]) -> Result<String, Error> {
-    crate::layout::read_versioned::<Rest>(bytes).map(|rest| format!("{rest:#?}"))
+pub(crate) fn golden_rest_root() -> Vec<u8> {
+    let rest = Rest {
+        parent: None,
+        freed: Vec::new(),
+        root: Some(vec![4, 5, 6]),
+        next_sequence: 3,
+        last_commit: Some(2),
+        spent: Spent::default(),
+        capacity: Some(64 << 20),
+        punch: Vec::new(),
+        through: Some(1),
+        keys: crate::upload::golden_keys(),
+    };
+    crate::layout::versioned(&rest)
 }
 
-/// cladefs: the layout of a local checkpoint's rest's types.
+/// cladefs: a local checkpoint's rest, `bytes`, decoded as the version `version` wrote it, as its
+/// `{:#?}`.
 #[cfg(test)]
-pub(crate) fn rest_fingerprint() -> String {
-    <Rest as TypeFingerprint>::fingerprint()
+pub(crate) fn rest_written(version: u32, bytes: &[u8]) -> Result<String, Error> {
+    use bincode::Options as _;
+    let options = bincode::DefaultOptions::new().with_fixint_encoding().reject_trailing_bytes();
+    crate::layout::read_versioned_with(bytes, |found, payload| {
+        ensure!(found == version, "expected version {version}, found {found}");
+        match version {
+            18 => Ok(format!("{:#?}", options.deserialize::<v18::Rest>(payload)?)),
+            19 => Ok(format!("{:#?}", options.deserialize::<Rest>(payload)?)),
+            _ => bail!("no local checkpoint rest decoder for version {version}"),
+        }
+    })
+}
+
+/// cladefs: a local checkpoint's rest, `bytes`, read by this build's current reader.
+#[cfg(test)]
+pub(crate) fn rest_read(bytes: &[u8]) -> Result<(), Error> {
+    decode_rest(bytes).map(drop)
+}
+
+/// cladefs: the layout of a local checkpoint's rest's types for `version`.
+#[cfg(test)]
+pub(crate) fn rest_fingerprint(version: u32) -> Option<String> {
+    match version {
+        18 => Some(<v18::Rest as TypeFingerprint>::fingerprint()),
+        19 => Some(<Rest as TypeFingerprint>::fingerprint()),
+        _ => None,
+    }
 }
 
 /// An ephemeral cell's local checkpoint (see the module's docs): its state, as of the last segment
-/// a checkpoint covered, over its parent's version.
+/// a checkpoint covered, over its parent's version (or standalone when `parent` is `None`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LocalCheckpoint {
-    parent: Parent,
+    parent: Option<Parent>,
     /// Its own extents, where they are in its segments ([`key`]), sorted by [`ExtentId`].
     own: Vec<(ExtentId, Location)>,
     /// The extents of its parent's version it freed.
@@ -130,7 +228,7 @@ impl LocalCheckpoint {
     /// them.
     pub fn fork(parent: Parent, state: &bucket_cell::State, keys: Vec<u8>) -> Self {
         Self {
-            parent,
+            parent: Some(parent),
             own: Vec::new(),
             freed: Vec::new(),
             root: state.root.clone(),
@@ -145,8 +243,26 @@ impl LocalCheckpoint {
         }
     }
 
-    /// The version it was forked from.
-    pub fn parent(&self) -> Parent {
+    /// The local checkpoint of a new standalone (parentless) ephemeral cell of `capacity` bytes,
+    /// with `keys` wrapped as its caller keeps them: no parent version, no bucket reference.
+    pub fn root(capacity: u64, keys: Vec<u8>) -> Self {
+        Self {
+            parent: None,
+            own: Vec::new(),
+            freed: Vec::new(),
+            root: None,
+            next_sequence: 0,
+            last_commit: None,
+            spent: Spent::default(),
+            capacity: Some(capacity),
+            punch: Vec::new(),
+            through: None,
+            keys,
+        }
+    }
+
+    /// The version it was forked from, or `None` for a standalone host-local ephemeral cell.
+    pub fn parent(&self) -> Option<Parent> {
         self.parent
     }
 
@@ -197,7 +313,7 @@ impl LocalCheckpoint {
             punch,
             through,
             keys,
-        } = crate::layout::read_versioned(&footer.rest)
+        } = decode_rest(&footer.rest)
             .context("decoding an ephemeral cell's local checkpoint state")?;
         let own = entries
             .into_iter()
@@ -302,8 +418,8 @@ pub(crate) fn settle<D: Dir>(dir: &D, cell: CellId) -> Result<Option<u64>, Error
 pub struct EphemeralOpening {
     /// Its parent's state at the version it was forked from ([`LocalCheckpoint::parent`]), as
     /// decoded once for every fork of it ([`bucket_cell::Recovered::layer`]): its extents its lower
-    /// layer.
-    pub parent: Arc<bucket_cell::State>,
+    /// layer; `None` for a standalone (parentless) ephemeral cell.
+    pub parent: Option<Arc<bucket_cell::State>>,
     /// Its keys: its own DEK, which its segments are encrypted under, and those it inherits.
     pub keys: Arc<Ring>,
     /// The host's cache of the bucket's objects, which its parent's are read through.
@@ -335,7 +451,7 @@ impl Places for Based {
 /// An open ephemeral cell's local checkpoint as it stands (see the module's docs), which its
 /// checkpoints move on, one at a time.
 pub(crate) struct Ephemeral {
-    parent: Parent,
+    parent: Option<Parent>,
     based: bucket_cell::State<Based>,
     through: Option<u64>,
     keys: Vec<u8>,
@@ -416,12 +532,18 @@ impl<D: Dir> Recovering<D> {
         let EphemeralOpening { parent, keys, cache, held } = opening;
         // Authenticate the local checkpoint under the cell's own DEK.
         let checkpoint = LocalCheckpoint::read_under(&*dir, &keys.of(cell.id))?;
+        ensure!(
+            checkpoint.parent.is_some() == parent.is_some(),
+            "ephemeral cell {cell} parent mismatch: checkpoint has {:?}, opening gave {}",
+            checkpoint.parent,
+            parent.is_some()
+        );
         let segment = |number| SegmentId { cell: cell.id, number };
         // Close any segments left open at a crash in place as Encryption::Sectors.
         recovered.close(&*dir, cell, &keys, true)?;
 
-        // Its extents: its parent's version's, its local checkpoint's over them, its WAL's over
-        // those.
+        // Its extents: its parent's version's (if forked), its local checkpoint's over them, its
+        // WAL's over those.
         let mut by_key = HashMap::new();
         let mut covered_segments = BTreeSet::new();
         for (_, location) in &checkpoint.own {
@@ -434,7 +556,10 @@ impl<D: Dir> Recovering<D> {
         for (_, number) in &recovered.segments {
             by_key.insert(key(cell, *number), segment(*number));
         }
-        let lower = Extents::over(parent.extents.clone(), Some(parent.clone()), cell);
+        let lower = match parent {
+            Some(parent) => Extents::over(parent.extents.clone(), Some(parent), cell),
+            None => Extents::over(bucket_cell::recovery::Extents::new(), None, cell),
+        };
         let mut replay = bucket_cell::State {
             root: checkpoint.root.clone(),
             next_sequence: checkpoint.next_sequence,

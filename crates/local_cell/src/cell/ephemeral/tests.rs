@@ -71,7 +71,8 @@ fn open(dir: &MemDir) -> LocalCell<MemDir> {
     let recovering = LocalCell::recover_unmade(dir.clone()).unwrap();
     assert!(recovering.is_ephemeral());
     assert_eq!(recovering.local_checkpoint().unwrap().keys(), b"wrapped");
-    let opening = EphemeralOpening { parent: parent(), keys: keys(), cache: None, held: None };
+    let opening =
+        EphemeralOpening { parent: Some(parent()), keys: keys(), cache: None, held: None };
     let cell = recovering.open_ephemeral(options(), opening).unwrap();
     cell.made().unwrap();
     cell
@@ -216,7 +217,8 @@ async fn a_kept_segment_gives_back_a_run_alone() {
     make(&dir);
     let options = Options { segment_size: 4 * BLOCK as u64, ..Options::default() };
     let recovering = LocalCell::recover_unmade(dir.clone()).unwrap();
-    let opening = EphemeralOpening { parent: parent(), keys: keys(), cache: None, held: None };
+    let opening =
+        EphemeralOpening { parent: Some(parent()), keys: keys(), cache: None, held: None };
     let cell = recovering.open_ephemeral(options, opening).unwrap();
     cell.made().unwrap();
     // Four extents a segment, eight segments.

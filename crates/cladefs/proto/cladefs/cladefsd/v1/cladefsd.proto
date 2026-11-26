@@ -514,10 +514,23 @@ message CreateCellRequest {
   // Optional per-cell uploader interval in milliseconds (hotbed question 534). Unset keeps the
   // daemon default; 0 or values past 24 hours are refused (INVALID_ARGUMENT).
   optional uint64 upload_interval_ms = 12;
+  // Whether the cell uses Fast WAL commits backed by appendable zonal object storage (doc-29):
+  // compute nodes stay stateless cache-only with zero local disk fsyncs. Unset keeps what the
+  // cell's head says (and makes a new cell without Fast WAL); true enables Fast WAL (refused with
+  // ENOTSUP if CLADEFSD_FAST_WAL_BUCKET is unset, and EINVAL if combined with replicas >= 1);
+  // false disables Fast WAL, flushing any active WAL on take.
+  optional bool fast_wal = 13;
+  // Whether to create a standalone (parentless) host-local ephemeral cell (doc-25): kept on host
+  // SSD alone, encrypted under the tenant's KMS key, never uploaded to the bucket, with no
+  // versions and no bucket reference. Must be a new cell (`cell == 0`) with `token`, `replicas`,
+  // `force`, `upload_interval_ms`, and `fast_wal` unset and `fsync == FSYNC_LEVEL_ORDERED`
+  // (INVALID_ARGUMENT otherwise).
+  bool ephemeral = 14;
 }
 
-// What a guest's fsync, fdatasync, msync and O_SYNC wait for in a cell (doc-12, doc-21). Its sync,
-// syncfs and unmount wait for its commits replicated in a replicated cell, uploaded in any other.
+// What a guest's fsync, fdatasync, msync and O_SYNC wait for in a cell (doc-12, doc-21, doc-29).
+// Its sync, syncfs and unmount wait for its commits replicated in a replicated cell, durable in
+// the fast WAL in a fast-WAL cell, and uploaded in any other.
 enum FsyncLevel {
   // In the daemon's memory, in order: survives what leaves the daemon alive.
   FSYNC_LEVEL_ORDERED = 0;
@@ -525,6 +538,9 @@ enum FsyncLevel {
   FSYNC_LEVEL_LOCAL = 1 [deprecated = true];
   // On f+1 hosts' disks, or uploaded: survives the writer's host.
   FSYNC_LEVEL_REPLICATED = 2;
+  // Appended to the cell's fast WAL in appendable zonal object storage, or uploaded to the cold
+  // regional bucket: survives losing the writer's host with zero local disk state (doc-29).
+  FSYNC_LEVEL_FAST_WAL = 3;
 }
 
 // What a cell holds, which says what opens it (the type's name is renamed with the rest,
@@ -581,6 +597,9 @@ message ImportMemoryRequest {
   uint64 tenant = 3;
   // Whether to make an initial version of the memory cell as part of the import.
   bool make_version = 4;
+  // Whether to import into a standalone host-local ephemeral memory cell (doc-25): kept on host
+  // SSD alone with zero bucket uploads. Cannot be combined with `make_version` (INVALID_ARGUMENT).
+  bool ephemeral = 5;
 }
 
 // The memory cell made.
@@ -868,6 +887,17 @@ message StatCellResponse {
   // than a take needs: the commit number of the last commit the bucket held, past which commits told
   // replicated may be lost (TASK-681); 0 if the bucket held none. Unset if not.
   optional uint64 forced_after = 28;
+  // Whether the cell uses Fast WAL commits backed by appendable zonal object storage (doc-29).
+  bool fast_wal = 29;
+  // URL of the appendable zonal bucket holding the cell's active fast WAL, empty if not using
+  // Fast WAL.
+  string fast_wal_bucket = 30;
+  // Whether the cell's fast WAL bucket is degraded and commits are falling back to cold regional
+  // bucket uploads.
+  bool fast_wal_degraded = 31;
+  // Whether this cell is a host-local ephemeral cell (doc-25): kept on host SSD alone, never
+  // uploaded to the bucket.
+  bool ephemeral = 32;
 }
 
 // Asks for the cells the daemon serves.

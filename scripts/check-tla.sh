@@ -26,6 +26,10 @@
 # - specs/part-slabs: the extent cache in part slabs (doc-26, board 6124): slabs owned by a part's
 #   slot, an eviction's token or the quarantine, which waits for the VM processes a slab was
 #   staged to alone; copy on write in the VM process; frozen and killed VM processes;
+# - specs/fast-wal: fast-WAL commits on an appendable object store (S3 Express One Zone / GCS
+#   Rapid Storage, doc-29): offset-checked appends, adaptive group-commit batching, large-write
+#   direct-to-cold upload + collector protection, segment rolling, tombstone reclamation, and
+#   stateless compute-host takeovers;
 #
 #   check-tla.sh [MODEL...|deep]
 #   check-tla.sh cover MODEL [NAME=VALUE...]

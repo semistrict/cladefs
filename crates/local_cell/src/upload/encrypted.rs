@@ -883,7 +883,8 @@ async fn segments_closed_again_are_never_in_the_clear() {
     let cell = test_cell(7);
     let dir = made(cell);
     // No closing between commits: the open segment holds the commit as the crash leaves it.
-    let quiet = Options { interval: Duration::from_secs(3600), ..Options::default() };
+    let quiet =
+        Options { interval: Duration::from_secs(3600), upload_closed: false, ..Options::default() };
     let extent = ExtentId::new(cell.id, 1);
     let data = noise(1, 8 * 4096);
     let crashed = {
@@ -944,7 +945,8 @@ async fn encrypted_cells_raw_files_and_logs_hold_no_plaintext() {
     let host = world.host(5);
     let cell = test_cell(7);
     let dir = made(cell);
-    let quiet = Options { interval: Duration::from_secs(3600), ..Options::default() };
+    let quiet =
+        Options { interval: Duration::from_secs(3600), upload_closed: false, ..Options::default() };
     let (open_cell, uploader) = open_with(&world, &host, &dir, quiet).await.unwrap();
     assert!(open_cell.keys().encrypts());
     let (small, large) = (ExtentId::new(cell.id, 1), ExtentId::new(cell.id, 2));
@@ -1027,7 +1029,12 @@ async fn encrypted_cells_hold_parts_packed_ahead_and_encrypt_them_framing() {
         LocalCell::make(&dir, description, Some("memory:///encrypted"), Some(kind)).unwrap();
         let held = crate::HeldParts::new();
         let interval = Duration::from_secs(3600);
-        let options = Options { interval, held: Some(held.clone()), ..Options::default() };
+        let options = Options {
+            interval,
+            upload_closed: false,
+            held: Some(held.clone()),
+            ..Options::default()
+        };
         let (open_cell, uploader) = open_with(&world, &host, &dir, options).await.unwrap();
         assert!(open_cell.keys().encrypts());
         for sequence in 1..=7 {
@@ -1090,7 +1097,11 @@ async fn encrypted_cells_frame_in_place_writing_what_clear_cells_write() {
         let host = world.host(5);
         let cell = test_cell(7);
         let dir = made(cell);
-        let quiet = Options { interval: Duration::from_secs(3600), ..Options::default() };
+        let quiet = Options {
+            interval: Duration::from_secs(3600),
+            upload_closed: false,
+            ..Options::default()
+        };
         let (open_cell, uploader) = open_with(&world, &host, &dir, quiet).await.unwrap();
         assert!(open_cell.keys().encrypts());
         let before = (crate::written(), crate::segments_framed_in_place());
@@ -1175,7 +1186,8 @@ async fn segments_framed_in_place_encrypted_recover_from_crashes() {
     let host = world.host(5);
     let cell = test_cell(7);
     let dir = made(cell);
-    let quiet = Options { interval: Duration::from_secs(3600), ..Options::default() };
+    let quiet =
+        Options { interval: Duration::from_secs(3600), upload_closed: false, ..Options::default() };
     let extent = ExtentId::new(cell.id, 1);
     let data = noise(1, (2 << 20) + 8 * 4096);
     let (open_cell, remote) = open_with(&world, &host, &dir, quiet.clone()).await.unwrap();
@@ -1291,7 +1303,8 @@ async fn encrypted_logs_changed_are_refused() {
     let host = world.host(5);
     let cell = test_cell(7);
     let dir = made(cell);
-    let quiet = Options { interval: Duration::from_secs(3600), ..Options::default() };
+    let quiet =
+        Options { interval: Duration::from_secs(3600), upload_closed: false, ..Options::default() };
     let extent = ExtentId::new(cell.id, 1);
     let crashed = {
         let (open_cell, uploader) = open_with(&world, &host, &dir, quiet.clone()).await.unwrap();

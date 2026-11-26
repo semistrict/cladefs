@@ -2644,7 +2644,7 @@ async fn control_takes_cells_at_the_placements_given() {
         path("first"),
         1 << 24,
         new,
-        (Some(5), Kind::Fxfs, None, false, None),
+        (Some(5), Kind::Fxfs, None, None, false, None, false),
     );
     let cell = control(made).unwrap();
     let extent = ExtentId { cell: cell.id, sequence: 1 };
@@ -2665,7 +2665,7 @@ async fn control_takes_cells_at_the_placements_given() {
         path("third"),
         1 << 24,
         cell,
-        (Some(7), Kind::Fxfs, None, false, None),
+        (Some(7), Kind::Fxfs, None, None, false, None, false),
     );
     assert_eq!(control(taken), Ok(cell));
     let third = CellClient::connect(&socket, path("third"), 1 << 24).unwrap();
@@ -4881,8 +4881,9 @@ fn daemons_of_other_wire_versions_are_refused() {
                 OPEN => {
                     reply.set_body(&OpenedBody {
                         cell: 7,
+                        tenant: 0,
                         arena: 1,
-                        reserved: [0; 3],
+                        flags: 0,
                         max_map_count: 0,
                         version: 0,
                     });
@@ -4994,7 +4995,7 @@ fn openings_fail_on_refusals_of_what_they_ask() {
 /// its own, as of the default tenant, and its wire version this one.
 fn opened_body(cell: u64) -> super::wire::OpenedBody {
     let arena = crate::pages::ArenaId(1);
-    super::codec::Opened { cell, arena, max_map_count: None }.to_body()
+    super::codec::Opened { cell, tenant: 0, arena, max_map_count: None, ephemeral: false }.to_body()
 }
 
 /// TASK-216: a VM booted again on the cell its VM crashed out of opens it at once, while what
@@ -8129,4 +8130,26 @@ async fn unpacked_parts_are_counted_and_evicted_by_govern() {
     );
     super::memory::govern(0).await;
     assert_eq!(unpacked.bytes(), 0, "govern(0) must evict unpacked parts");
+    assert_eq!(parts.limit(), 0, "govern(0) must lower PartMemory limit to 0");
+    // Restore limit so tests sharing this process under `cargo test` are unaffected.
+    super::memory::govern(u64::MAX).await;
+    assert_eq!(parts.limit(), bucket_cell::fetch::RECENT);
+}
+
+/// board 12313: `recent_limit_for` scales `PartMemory` to half the remaining room when FUSE cells
+/// are attached (never exceeding `room`), while keeping VM-only daemons capped at `RECENT`.
+#[test]
+fn recent_limit_scales_for_fuse_and_stays_bounded_for_vms() {
+    let recent = bucket_cell::fetch::RECENT;
+    // VM-only daemon (no FUSE cells attached): capped at RECENT, shrunk under pressure.
+    assert_eq!(super::memory::recent_limit_for(0, false), 0);
+    assert_eq!(super::memory::recent_limit_for(recent / 2, false), recent / 2);
+    assert_eq!(super::memory::recent_limit_for(4 << 30, false), recent);
+
+    // FUSE cells attached: scales to room / 2 (never below RECENT.min(room), never past room).
+    assert_eq!(super::memory::recent_limit_for(0, true), 0);
+    assert_eq!(super::memory::recent_limit_for(recent / 2, true), recent / 2);
+    assert_eq!(super::memory::recent_limit_for(recent, true), recent);
+    assert_eq!(super::memory::recent_limit_for(256 << 20, true), 128 << 20);
+    assert_eq!(super::memory::recent_limit_for(4 << 30, true), 2 << 30);
 }

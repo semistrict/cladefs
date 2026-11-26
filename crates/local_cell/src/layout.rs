@@ -39,7 +39,10 @@ use storage_device::ExtentId;
 /// each segment's log its header (`wal::LOG_MAGIC`); an ephemeral cell's local checkpoint its rest.
 /// Every later build reads every version from 18 on. Its framed files are the extent frames' family
 /// and, within, the bucket layout's; its markers (`unmade`) are names alone.
-pub const FORMAT: formats::Format = formats::Format::new("cell directory", 18, 18);
+/// 19: an ephemeral cell's local checkpoint rest holds `parent: Option<Parent>` so standalone
+/// (parentless) host-local ephemeral cells — such as ephemeral memory cells for local VM
+/// suspend/resume — need no parent version in a bucket.
+pub const FORMAT: formats::Format = formats::Format::new("cell directory", 18, 19);
 
 /// What a cell's description starts with, its version after it.
 pub const DESCRIPTION_HEADER: &str = "cladefs cell directory ";
@@ -523,11 +526,21 @@ pub(crate) fn versioned<R: Serialize>(record: &R) -> Vec<u8> {
 /// named, never taken for one torn.
 pub(crate) fn read_versioned<R: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<R, Error> {
     use bincode::Options as _;
+    read_versioned_with(bytes, |_, record| {
+        let options = bincode::DefaultOptions::new().with_fixint_encoding().reject_trailing_bytes();
+        Ok(options.deserialize(record)?)
+    })
+}
+
+/// cladefs: as [`read_versioned`], handing the checked cell-directory version and trailing bincode
+/// payload to `decode` for types whose schema changed across frozen versions (doc-28).
+pub(crate) fn read_versioned_with<R>(
+    bytes: &[u8],
+    decode: impl FnOnce(u32, &[u8]) -> Result<R, Error>,
+) -> Result<R, Error> {
     let (version, record) = bytes.split_first_chunk::<4>().ok_or_else(|| anyhow!("no version"))?;
-    // 18's records are its types' alone: a version that changes one decodes its own here.
-    FORMAT.check(u32::from_le_bytes(*version))?;
-    let options = bincode::DefaultOptions::new().with_fixint_encoding().reject_trailing_bytes();
-    Ok(options.deserialize(record)?)
+    let version = FORMAT.check(u32::from_le_bytes(*version))?;
+    decode(version, record)
 }
 
 /// `record`, as a log holds it: its header, then its payload.
@@ -715,7 +728,7 @@ mod tests {
             // cladefs: and versions of the frozen family this build doesn't read (doc-28), newer
             // ones a rollback finds, and lines saying none.
             "cladefs cell directory 17",
-            "cladefs cell directory 19",
+            "cladefs cell directory 20",
             "cladefs cell directory +18",
             "cladefs cell directory 018x",
             "cladefs cell directory ",
@@ -728,12 +741,16 @@ mod tests {
                 found.to_string(),
                 format!(
                     "a cell directory saying {older:?}: this build reads cladefs cell directory 18 \
-                     to 18"
+                     to 19"
                 )
             );
         }
         let header = format!("{DESCRIPTION_HEADER}{}", FORMAT.current);
-        assert!(file.text().starts_with("cladefs cell directory 18\n"));
+        assert!(file.text().starts_with("cladefs cell directory 19\n"));
+        // Version 18 descriptions remain readable (doc-28).
+        let v18 =
+            file.text().replacen("cladefs cell directory 19\n", "cladefs cell directory 18\n", 1);
+        assert_eq!(CellFile::parse(&v18).unwrap(), file);
         let capacity = "capacity 4096\n";
         assert!(CellFile::parse(&format!("{header}\nblock_size 4096\n{capacity}")).is_err());
         assert!(CellFile::parse(&format!("{header}\nblock_size 4096\ncell 1\n")).is_err());

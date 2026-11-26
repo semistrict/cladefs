@@ -1781,10 +1781,26 @@ impl Connection {
             }
             Request::Root => open_cell.root().map(|root| *payload = root),
             Request::Version => {
-                // A VM snapshot's: a version of the cell, made here (doc-20), refused while
-                // the window holds private pages, whose bytes no extent holds (TASK-203). Each
-                // refusal says why here, as the VMM's error can't (TASK-92.14).
+                // A VM snapshot's: a version of a bucket-backed cell (doc-20), or a local-only
+                // quiesced checkpoint of an ephemeral cell (doc-25), refused while the window
+                // holds private pages, whose bytes no extent holds (TASK-203). Each refusal says
+                // why here, as the VMM's error can't (TASK-92.14).
                 // Boxed, as a cell's opening is (`serve_message`, TASK-707).
+                let cell = open_cell.cell();
+                if open_cell.is_ephemeral() {
+                    let committed =
+                        Box::pin(open_cell.quiesce_ephemeral()).await.map_err(|err| {
+                            if err.errno() == Some(Errno::EBUSY) {
+                                log::warn!("cladefsd: an ephemeral snapshot refused: {err:#}");
+                            }
+                            cells::errno_of(format_args!("quiescing ephemeral cell"), err)
+                        })?;
+                    reply.set_body(
+                        &Forked { version: 0, tenant: cell.tenant, committed, ephemeral: true }
+                            .to_body(),
+                    );
+                    return Ok(());
+                }
                 let version = Box::pin(open_cell.make_version(None)).await.map_err(|err| {
                     if err.errno() == Some(Errno::EBUSY) {
                         log::warn!("cladefsd: a version refused: {err:#}");
@@ -1792,8 +1808,10 @@ impl Connection {
                     cells::errno_of(format_args!("making a version"), err)
                 })?;
                 self.versions_made.with(Mutex::lock).insert(version);
-                let cell = open_cell.cell();
-                reply.set_body(&Forked { version, tenant: cell.tenant }.to_body());
+                reply.set_body(
+                    &Forked { version, tenant: cell.tenant, committed: 0, ephemeral: false }
+                        .to_body(),
+                );
                 Ok(())
             }
             // cladefs: a version it made, which a VM snapshot failing past it names nowhere
@@ -1924,9 +1942,18 @@ impl Connection {
         let mut reply = answer.reply_header();
         let opened = self.open(&path, how).await;
         let fds = match &opened {
-            Ok(cell) => {
-                let (cell, arena, max_map_count) = (*cell, self.arena_id(), max_map_count());
-                reply.set_body(&Opened { cell, arena, max_map_count }.to_body());
+            Ok((cell, ephemeral)) => {
+                let (arena, max_map_count) = (self.arena_id(), max_map_count());
+                reply.set_body(
+                    &Opened {
+                        cell: cell.id,
+                        tenant: cell.tenant,
+                        arena,
+                        max_map_count,
+                        ephemeral: *ephemeral,
+                    }
+                    .to_body(),
+                );
                 Vec::from(self.memories())
             }
             // Not opened: no memories to send; the failure goes in the answer.
@@ -1994,7 +2021,7 @@ impl Connection {
     /// process is gone to let the cell go, and for a restore's version, hold no thread
     /// (TASK-92.5); its I/O blocks. A version of another tenant's than the connection's forks only
     /// if it is shared (`EACCES`, TASK-395.7).
-    async fn open(&self, path: &Path, how: codec::Opening) -> Result<u64, Errno> {
+    async fn open(&self, path: &Path, how: codec::Opening) -> Result<(crate::CellId, bool), Errno> {
         let opening = self.opening()?;
         let (resolved, effective_how, named_cell) = if let Some(pool) = self.daemon().disk_pool() {
             let req_str = path.to_str().ok_or(Errno::EINVAL)?;
@@ -2009,7 +2036,11 @@ impl Connection {
                 let daemon = self.daemon();
                 let disk = pool.pick_disk()?;
                 match how {
-                    codec::Opening::Existing => return Err(Errno::EINVAL),
+                    codec::Opening::Existing
+                    | codec::Opening::LocalEphemeral { .. }
+                    | codec::Opening::ExistingEphemeralMemory { .. } => {
+                        return Err(Errno::EINVAL);
+                    }
                     codec::Opening::Create(_, _) => {
                         // Allocate the cell ID up front so `open_held` creates and takes the cell
                         // directly at its canonical `<disk>/cells/<TENANT>/<CELL>` path in a
@@ -2028,6 +2059,63 @@ impl Connection {
                         })
                         .await?;
                         (final_path, how, Some(cell))
+                    }
+                    codec::Opening::CreateEphemeral(capacity, kind) => {
+                        let disk_for_stage = Arc::clone(&disk);
+                        let staging = cells::blocking(move || {
+                            super::disks::DiskPool::staging_path(&disk_for_stage, effective_tenant)
+                        })
+                        .await?;
+                        let made = cells::create(
+                            daemon,
+                            staging.clone(),
+                            capacity,
+                            crate::CellId { tenant: effective_tenant, id: 0 },
+                            (None, kind, None, None, false, None, true),
+                        )
+                        .await;
+                        let made = match made {
+                            Ok(made) => made,
+                            Err(err) => {
+                                let cleanup = staging.clone();
+                                let local = Arc::clone(daemon.host.local());
+                                // Best-effort cleanup of failed staging dir; primary error wins.
+                                let _ = cells::blocking(move || {
+                                    if host_fs::exists(&cleanup) {
+                                        // Best-effort cleanup of failed staging dir; primary error wins.
+                                        let _ = local_cell::remove_cell_dir_on(&local, &cleanup);
+                                    }
+                                    Ok(())
+                                })
+                                .await;
+                                return Err(err);
+                            }
+                        };
+                        let pool_commit = Arc::clone(pool);
+                        let disk_commit = Arc::clone(&disk);
+                        let staging_commit = staging.clone();
+                        let final_path = match cells::blocking(move || {
+                            pool_commit.commit_staged(&disk_commit, made, &staging_commit)
+                        })
+                        .await
+                        {
+                            Ok(final_path) => final_path,
+                            Err(err) => {
+                                let cleanup = staging;
+                                let local = Arc::clone(daemon.host.local());
+                                // Best-effort cleanup of failed staging dir; primary error wins.
+                                let _ = cells::blocking(move || {
+                                    if host_fs::exists(&cleanup) {
+                                        // Best-effort cleanup of failed staging dir; primary error wins.
+                                        let _ = local_cell::remove_cell_dir_on(&local, &cleanup);
+                                    }
+                                    Ok(())
+                                })
+                                .await;
+                                return Err(err);
+                            }
+                        };
+                        (final_path, codec::Opening::Existing, None)
                     }
                     codec::Opening::ForkOf { tenant, cell, version, capacity } => {
                         let disk_for_stage = Arc::clone(&disk);
@@ -2117,14 +2205,15 @@ impl Connection {
         let flushed = open_cell.clone();
         let flushing_daemon = Arc::clone(self.daemon());
         self.start_behind(move |stopped| flush_behind(flushing_daemon, flushed, stopped));
-        let cell = open_cell.cell().id;
+        let cell = open_cell.cell();
+        let ephemeral = open_cell.is_ephemeral();
         // cladefs: should its VM process go, and a writer wait for its cell to close, the cell's
         // uploader stops at once rather than upload what it holds first (TASK-216).
         if let Some(cut_short) = open_cell.cut_short() {
             hold.when_wanted(cut_short);
         }
         opening.opened(&resolved, open_cell, hold);
-        Ok(cell)
+        Ok((cell, ephemeral))
     }
 
     /// Opens the cell at `path`, which `hold` holds, as [`Connection::open`] does: the cell
@@ -2185,10 +2274,93 @@ impl Connection {
                     kind: *kind,
                     tenant: self.tenant.id,
                     cell: named_cell,
+                    ephemeral: false,
                 };
                 Arc::new(open_cell_at(daemon, path, Some(new), Some(arena)).await?)
             }
-            (None, _) => Arc::new(open_cell_at(daemon, path, None, Some(arena)).await?),
+            (None, codec::Opening::CreateEphemeral(capacity, kind)) => {
+                local_cell::upload::blocking(|| cells::removed_if_unmade_on(&daemon.host, path))?;
+                let new = cells::New {
+                    capacity: *capacity,
+                    kind: *kind,
+                    tenant: self.tenant.id,
+                    cell: None,
+                    ephemeral: true,
+                };
+                let open_cell = Arc::new(open_cell_at(daemon, path, Some(new), Some(arena)).await?);
+                if !open_cell.is_ephemeral() || open_cell.kind() != Some(*kind) {
+                    crate::open_cell::release(open_cell).await;
+                    return Err(Errno::EINVAL);
+                }
+                open_cell
+            }
+            (None, &codec::Opening::LocalEphemeral { tenant, cell, committed, capacity: _ }) => {
+                let exists = local_cell::upload::blocking(|| {
+                    host_fs::exists(&path) && !crate::host_cell::unmade_on(&daemon.host, path)
+                });
+                if !exists {
+                    return Err(Errno::ENOENT);
+                }
+                let open_cell = Arc::new(open_cell_at(daemon, path, None, Some(arena)).await?);
+                let expected = crate::CellId { tenant, id: cell };
+                let checked = (|| -> Result<(), Errno> {
+                    if !open_cell.is_ephemeral() {
+                        return Err(Errno::EINVAL);
+                    }
+                    if open_cell.cell() != expected {
+                        log::warn!(
+                            "cladefsd: refusing local ephemeral restore of {expected} into {}: \
+                             holds cell {}",
+                            path.display(),
+                            open_cell.cell()
+                        );
+                        return Err(Errno::EEXIST);
+                    }
+                    let actual = open_cell.committed()?;
+                    if actual != committed {
+                        log::warn!(
+                            "cladefsd: refusing local ephemeral restore of {expected} at commit \
+                             {committed} into {}: cell is at commit {actual}",
+                            path.display(),
+                        );
+                        return Err(Errno::EEXIST);
+                    }
+                    Ok(())
+                })();
+                if let Err(err) = checked {
+                    crate::open_cell::release(open_cell).await;
+                    return Err(err);
+                }
+                open_cell
+            }
+            (None, &codec::Opening::ExistingEphemeralMemory { tenant, cell, capacity: _ }) => {
+                let exists = local_cell::upload::blocking(|| {
+                    host_fs::exists(&path) && !crate::host_cell::unmade_on(&daemon.host, path)
+                });
+                if !exists {
+                    return Err(Errno::ENOENT);
+                }
+                let open_cell = Arc::new(open_cell_at(daemon, path, None, Some(arena)).await?);
+                let checked = (|| -> Result<(), Errno> {
+                    if !open_cell.is_ephemeral()
+                        || open_cell.kind() != Some(bucket_cell::cell::Kind::Memory)
+                    {
+                        return Err(Errno::EINVAL);
+                    }
+                    if cell != 0 && open_cell.cell() != (crate::CellId { tenant, id: cell }) {
+                        return Err(Errno::EEXIST);
+                    }
+                    Ok(())
+                })();
+                if let Err(err) = checked {
+                    crate::open_cell::release(open_cell).await;
+                    return Err(err);
+                }
+                open_cell
+            }
+            (None, codec::Opening::Existing) => {
+                Arc::new(open_cell_at(daemon, path, None, Some(arena)).await?)
+            }
         };
         // A VM process opens no cell to write that its writer may not write
         // ([`crate::CellAccess::may_write`]): checked before publishing via `hold.open`, and every

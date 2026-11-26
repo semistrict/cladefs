@@ -52,6 +52,7 @@ mod shuttle_tests;
 #[cfg(test)]
 mod tests;
 
+pub use crate::fast_wal::{FastWalConfig, FastWalOpener, FastWalStatus};
 pub use replication::{Members, MembersOf, Replicated, ReplicationStatus};
 
 use crate::{
@@ -70,22 +71,19 @@ use bucket_cell::{Body, Objects, Recovered, Writer, head, lifecycle};
 use event_listener::Event;
 use fprint::TypeFingerprint;
 use futures::StreamExt as _;
-use futures::future::{BoxFuture, Either, FutureExt as _, TryFutureExt as _};
-use futures::stream::FuturesOrdered;
+use futures::future::{BoxFuture, FutureExt as _};
+use futures::stream::FuturesUnordered;
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
 use std::time::{Duration, SystemTime};
 
-/// How many of a cell's segments upload at once: as many of a segment's size as the host's
-/// uploads may hold at once ([`UPLOAD_BYTES`]), so that a cell catching up uploads as many at once
-/// as the host's budget lets it, about ten keeping 1 GB/s going with PUTs of 0.35 s, and holds no
-/// more of its segments' files open for them (TASK-79.19).
-pub const IN_FLIGHT: usize = (UPLOAD_BYTES / SEGMENT) as usize;
-
-/// About the most bytes of a segment: a cell's segments' size
-/// (`local_cell::Options::segment_size`).
-const SEGMENT: u64 = 32 << 20;
+/// How many of a cell's segments upload at once. Compressed segments average ~7.5 MiB on build
+/// workloads (~5x smaller than the 32 MiB raw `segment_size`), so 32 concurrent PUTs per cell
+/// sustain full object-storage line rate across parallel HTTP/1.1 connections while the host's
+/// `UPLOAD_BYTES` budget (`Writer::create`) still caps total bytes held in memory before reading
+/// any body from disk (TASK-79.19).
+pub const IN_FLIGHT: usize = 32;
 
 /// How many segments go between checkpoints, by default ([`Options::checkpoint_every`]).
 pub const CHECKPOINT_EVERY: u64 = 64;
@@ -370,6 +368,10 @@ impl From<bucket_cell::bucket::Refused> for Failure {
 pub struct Options {
     /// How long local commits wait at most before they are uploaded.
     pub interval: Duration,
+    /// Whether already-closed segments wake the uploader immediately without waiting for
+    /// `interval` (closing no open segment). True in production; tests that pause background
+    /// uploads set this to false.
+    pub upload_closed: bool,
     /// How many commits may wait to be uploaded: the next waits, while object storage is out of
     /// reach, rather than the lag grow without bound (doc-7, decision 3).
     pub max_lag: u64,
@@ -431,6 +433,16 @@ pub struct Options {
     /// forced is (TASK-681, `CreateCell`'s `force`): it goes on with the members of the
     /// configuration the cell's head names that answer, however few.
     pub force: bool,
+    /// cladefs: the Fast WAL commit mode a taking of the cell gives it (doc-29): `None` keeps
+    /// what the cell's head says, `Some(Some(fsync))` enables Fast WAL with that guest fsync
+    /// level, and `Some(None)` disables Fast WAL (flushing any active WAL on take).
+    pub fast_wal: Option<Option<bucket_cell::layout::Fsync>>,
+    /// cladefs: this host's appendable zonal fast WAL bucket and cross-AZ opener (doc-29).
+    pub fast_wal_config: Option<FastWalConfig>,
+    /// cladefs: large-write threshold in bytes for fast WAL cells (defaults to 256 KiB; extents at
+    /// or above this size upload directly to the cold regional bucket before referencing them
+    /// metadata-only in the fast WAL).
+    pub fast_wal_large_extent: u64,
 }
 
 /// cladefs: the budget of a host's fetchers' GETs and the memory they keep tails and parts in
@@ -451,6 +463,7 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             interval: Duration::from_secs(1),
+            upload_closed: true,
             max_lag: 4096,
             max_lag_bytes: 1 << 30,
             cache: None,
@@ -466,6 +479,9 @@ impl Default for Options {
             members: None,
             replace_after: Duration::from_secs(30),
             force: false,
+            fast_wal: None,
+            fast_wal_config: None,
+            fast_wal_large_extent: crate::fast_wal::DEFAULT_LARGE_EXTENT,
         }
     }
 }
@@ -605,10 +621,45 @@ pub(crate) fn keys_fingerprint() -> String {
     <EphemeralKeys as TypeFingerprint>::fingerprint()
 }
 
+/// cladefs: creates the initial local checkpoint, encryption ring, and ring hold for a new
+/// standalone (parentless) host-local ephemeral cell of `capacity` bytes (cell-directory v19):
+/// wraps a fresh cell KEK under its tenant's KEK via `runtime.keys.kms`, wraps a fresh DEK under
+/// it, and registers the ring so `ForgetTenantKeys`/`ShredTenant` revokes it immediately. Writes
+/// nothing to `bucket`.
+pub async fn create_standalone_ephemeral(
+    bucket: &RoutedBucket,
+    runtime: &Runtime,
+    cell: CellId,
+    capacity: u64,
+    owner: u64,
+) -> Result<(crate::LocalCheckpoint, Arc<Ring>, RingHold), Failure> {
+    let (kek_secret, kek) = keys::new_cell_kek(&runtime.keys.kms, cell).await?;
+    let dek =
+        keys::wrap_dek((&kek_secret, kek.generation), cell, 1, &extent_frame::Secret::random());
+    let ephemeral_keys = EphemeralKeys {
+        owner,
+        kek: Some(kek.clone()),
+        deks: vec![dek.clone()],
+        inherited: Vec::new(),
+    };
+    let mut head = Head::of(bucket_cell::record::Made::Root, owner);
+    head.epoch = 1;
+    head.holder = rand::random();
+    head.keks.push(kek);
+    head.deks.push(dek);
+    let cell_keys = CellKeys::fresh(cell, &head, runtime.keys.kms.clone());
+    let ring = keys::ring(bucket, &cell_keys, cell, &head, true).await?;
+    let holding = runtime.keys.ring.hold(ring.clone());
+    let checkpoint =
+        crate::LocalCheckpoint::root(capacity, crate::layout::versioned(&ephemeral_keys));
+    Ok((checkpoint, ring, holding))
+}
+
 /// cladefs: opens the ephemeral cell `recovering` recovered (doc-25, TASK-698.3), with
 /// `cell_options`: its keys, as its local checkpoint keeps them, unwrapped through the host's KMS
-/// as its fork's head would give them; its parent's state at its version recovered from `bucket`,
-/// its parent's, under them, which its cell starts from. No uploader: nothing of it goes to a
+/// as its fork's head would give them; for a forked ephemeral cell, its parent's state at its
+/// version recovered from `bucket`, its parent's, under them; for a standalone (parentless)
+/// ephemeral cell, zero bucket I/O and an empty lower layer. No uploader: nothing of it goes to a
 /// bucket. Its parent's extents are read through `cache`, the host's, if it has one. Its keys are
 /// held among the host's while what it returns with the cell is, so that the host's fetchers read
 /// what it inherits, and forgetting its tenant or cell drops them (TASK-698.7).
@@ -618,14 +669,19 @@ pub async fn open_ephemeral<D: Dir>(
     bucket: Arc<RoutedBucket>,
     runtime: &Runtime,
     (cache, held): (Option<Arc<Cache>>, Option<Arc<HeldParts>>),
-) -> Result<(Arc<LocalCell<D>>, RingHold, Forked), Failure> {
+) -> Result<(Arc<LocalCell<D>>, RingHold, Option<Forked>), Failure> {
     let checkpoint = blocking(|| recovering.local_checkpoint())?;
     let (parent, cell) = (checkpoint.parent(), recovering.cell());
     let EphemeralKeys { owner, kek, deks, inherited } =
         crate::layout::read_versioned(checkpoint.keys())
             .map_err(|err| Failure::msg(format!("an ephemeral cell's keys: {err:#}")))?;
-    let origin = Origin { parent: parent.cell, at: parent.at, epoch: parent.epoch };
-    let mut head = Head::of(bucket_cell::record::Made::Clone(origin), owner);
+    let origin =
+        parent.map(|parent| Origin { parent: parent.cell, at: parent.at, epoch: parent.epoch });
+    let made = match origin {
+        Some(origin) => bucket_cell::record::Made::Clone(origin),
+        None => bucket_cell::record::Made::Root,
+    };
+    let mut head = Head::of(made, owner);
     // cladefs: use a fresh non-zero taking `(epoch, holder)` on every ephemeral reopen so
     // `CachingKms::kek` unwraps afresh instead of reusing a cached `(0, 0)` unwrap from an
     // earlier open (board 5410).
@@ -638,13 +694,18 @@ pub async fn open_ephemeral<D: Dir>(
     // board 2704).
     let cell_keys = CellKeys::fresh(cell, &head, runtime.keys.kms.clone());
     let ring = keys::ring(&*bucket, &cell_keys, cell, &head, true).await?;
-    let recovering_parent =
-        bucket_cell::recovery::recover_version(&*bucket, parent.cell, parent.at, &ring);
-    let recovered = recovering_parent.await?;
-    let state = recovered.layer.unwrap_or_else(|| Arc::new(recovered.state));
+    let (parent_state, forked) = match (parent, origin) {
+        (Some(parent), Some(origin)) => {
+            let recovering_parent =
+                bucket_cell::recovery::recover_version(&*bucket, parent.cell, parent.at, &ring);
+            let recovered = recovering_parent.await?;
+            let state = recovered.layer.unwrap_or_else(|| Arc::new(recovered.state));
+            (Some(state), Some(Forked { origin, ring: ring.clone() }))
+        }
+        _ => (None, None),
+    };
     let holding = runtime.keys.ring.hold(ring.clone());
-    let forked = Forked { origin, ring: ring.clone() };
-    let opening = crate::EphemeralOpening { parent: state, keys: ring, cache, held };
+    let opening = crate::EphemeralOpening { parent: parent_state, keys: ring, cache, held };
     let open_cell = blocking(|| recovering.open_ephemeral(cell_options, opening))?;
     Ok((Arc::new(open_cell), holding, forked))
 }
@@ -721,6 +782,9 @@ pub(crate) struct Shared<D: Dir, B: bucket_cell::Bucket = RoutedBucket> {
     changed: Arc<Event>,
     /// Wakes the uploader: a commit waits, or it is to stop.
     wake: tokio::sync::Notify,
+    /// Wakes the uploader when a closed segment finishes writing its framed file, without closing
+    /// the open segment or resetting the open-segment `interval` timer.
+    segment_ready: Arc<tokio::sync::Notify>,
     options: Options,
     /// The host's budget of uploads, which its writer uploads within.
     uploads: Arc<Budget>,
@@ -750,6 +814,10 @@ pub(crate) struct Shared<D: Dir, B: bucket_cell::Bucket = RoutedBucket> {
     /// history of the commits of (TASK-680).
     #[cfg(test)]
     recovered_from: Mutex<Option<bucket_cell::layout::Configuration>>,
+    /// cladefs: active Fast WAL sink for a fast-WAL cell (doc-29).
+    fast_wal_sink: Mutex<Option<Arc<crate::fast_wal::FastWalSink>>>,
+    /// cladefs: completion signal for the background Fast WAL writer task, awaited in `wind_up`.
+    fast_wal_done: Mutex<Option<futures::channel::oneshot::Receiver<()>>>,
 }
 
 /// The holders an uploader's takings of its cell's head after the first take, and the owners of
@@ -845,6 +913,12 @@ enum Waiting {
     For(Awaited, u64),
     /// The commits up to an epoch told replicated by a replicator, or uploaded.
     Told(Arc<crate::replicate::Replicator>, u64),
+    /// The commits up to an epoch appended to the fast WAL, or uploaded to the cold bucket.
+    FastWal(Arc<crate::fast_wal::FastWalSink>, u64),
+    /// Fast WAL lag backpressure for `commit_epoch` (waits until `lag_epoch` is within lag OR
+    /// `sink.head_acked() >= commit_epoch` so cold-head acknowledgement wakes immediately without
+    /// waiting on local WAL release, board 12179).
+    FastWalLag(Arc<crate::fast_wal::FastWalSink>, u64, u64),
 }
 
 #[derive(Default)]
@@ -893,10 +967,13 @@ pub struct Taking {
     /// cladefs: its cell's replication as the head it took says (doc-21, TASK-537.3.1): none for
     /// a cell durable off its host once uploaded alone.
     pub replication: Option<Replicated>,
+    /// cladefs: its cell's Fast WAL fsync level as the head it took says (doc-29): none unless
+    /// the cell uses Fast WAL.
+    pub fast_wal: Option<bucket_cell::layout::Fsync>,
 }
 
 /// What a cell's uploader has done, and has left to do (TASK-50.5).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UploadStatus {
     /// Its writer's taking of its cell's head, once taken.
     pub taking: Option<Taking>,
@@ -911,6 +988,8 @@ pub struct UploadStatus {
     pub stalls: u64,
     /// cladefs: of a replicated cell, its replication now (TASK-537.3.5).
     pub replication: Option<ReplicationStatus>,
+    /// cladefs: of a Fast WAL cell, its live fast WAL status (doc-29).
+    pub fast_wal: Option<FastWalStatus>,
 }
 
 impl Progress {
@@ -972,6 +1051,7 @@ impl<D: Dir> Uploader<D> {
         shared.observe()?;
         let pending_bytes = self.cell().wal_bytes()?;
         let replication = self.replication_status();
+        let fast_wal = shared.fast_wal_sink.lock().unwrap().as_ref().map(|sink| sink.status());
         let progress = shared.progress.lock().unwrap();
         Ok(UploadStatus {
             taking: progress.taking,
@@ -980,7 +1060,67 @@ impl<D: Dir> Uploader<D> {
             oldest_pending: progress.seen.front().map(|(_, seen)| *seen),
             stalls: progress.stalls,
             replication,
+            fast_wal,
         })
+    }
+
+    /// cladefs: the Fast WAL fsync level of the cell, as its writer's taking found its head
+    /// (doc-29): none unless the cell uses Fast WAL.
+    pub fn fast_wal_fsync(&self) -> Option<bucket_cell::layout::Fsync> {
+        self.shared.progress.lock().unwrap().taking.and_then(|taking| taking.fast_wal)
+    }
+
+    /// cladefs: waits until local cache lag for `epoch` is within bounds, OR returns immediately
+    /// as soon as the cold bucket head itself acknowledges `epoch` (`sink.head_acked() >= epoch`),
+    /// even if cold acknowledgement arrives after waiting began (board 12179).
+    pub fn fast_wal_lag(
+        &self,
+        epoch: u64,
+    ) -> impl std::future::Future<Output = Result<(), Failure>> + Send + use<D> {
+        let waiting = (|| -> Result<Option<Waiting>, Failure> {
+            let sink = self.shared.fast_wal_sink.lock().unwrap().clone();
+            let Some(sink) = sink else {
+                return self.waiting_lag(epoch);
+            };
+            if sink.head_acked() >= epoch {
+                return Ok(None);
+            }
+            let lag_epoch = epoch.saturating_sub(self.shared.options.max_lag);
+            if self.shared.ask(lag_epoch, Awaited::Lag)? {
+                return Ok(None);
+            }
+            Ok(Some(Waiting::FastWalLag(sink, epoch, lag_epoch)))
+        })();
+        self.awaiting(waiting)
+    }
+
+    /// cladefs: returns once the commits up to `epoch` are durable in the cell's fast WAL or
+    /// acknowledged in the cold regional bucket (doc-29).
+    pub fn fast_wal(
+        &self,
+        epoch: u64,
+    ) -> impl std::future::Future<Output = Result<(), Failure>> + Send + use<D> {
+        let waiting = (|| -> Result<Option<Waiting>, Failure> {
+            self.shared.observe()?;
+            let sink = self.shared.fast_wal_sink.lock().unwrap().clone();
+            let Some(sink) = sink else {
+                return self.waiting_uploaded(epoch);
+            };
+            let progress = self.shared.progress.lock().unwrap();
+            if sink.durable().max(sink.head_acked()).max(progress.uploaded) >= epoch {
+                return Ok(None);
+            }
+            if let Some(err) = progress.failed.clone().or_else(|| sink.failed()) {
+                return Err(err);
+            }
+            drop(progress);
+            if sink.degraded() {
+                self.shared.progress.lock().unwrap().wanted = true;
+                self.shared.wake.notify_one();
+            }
+            Ok(Some(Waiting::FastWal(sink, epoch)))
+        })();
+        self.awaiting(waiting)
     }
 
     /// cladefs: returns once the lag is within its bounds, as [`Uploader::lag`] does: a future,
@@ -1319,6 +1459,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             progress: Mutex::new(Progress::default()),
             changed: Arc::new(Event::new()),
             wake: tokio::sync::Notify::new(),
+            segment_ready: Arc::new(tokio::sync::Notify::new()),
             options,
             uploads,
             clock,
@@ -1331,6 +1472,8 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             relocation: Mutex::default(),
             #[cfg(test)]
             recovered_from: Mutex::default(),
+            fast_wal_sink: Mutex::default(),
+            fast_wal_done: Mutex::default(),
         })
     }
 
@@ -1357,7 +1500,12 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
 
     /// Why uploading stopped, if it did.
     pub(crate) fn failed(&self) -> Option<Failure> {
-        self.progress.lock().unwrap().failed.clone()
+        self.progress
+            .lock()
+            .unwrap()
+            .failed
+            .clone()
+            .or_else(|| self.fast_wal_sink.lock().unwrap().as_ref().and_then(|sink| sink.failed()))
     }
 
     /// The cell's writer, once one took it.
@@ -1369,20 +1517,23 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     /// commits too, unless cut short ([`Uploader::cut_short`]).
     pub(crate) fn stop(&self) {
         self.progress.lock().unwrap().stop = true;
+        if let Some(sink) =
+            self.fast_wal_sink.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref()
+        {
+            sink.stop();
+        }
         self.changed.notify(usize::MAX);
         self.wake.notify_one();
     }
 
-    /// Waits until the uploader is woken, or `interval` runs out first: whether it was woken.
-    async fn woken(&self, interval: Duration) -> bool {
-        // cladefs: in a simulation, the interval run out at once, uploading what it holds now, of
-        // any size (doc-24).
+    /// A sleep for the open-segment close interval, or immediate in a buggified simulation turn.
+    fn interval_sleep(&self, interval: Duration) -> BoxFuture<'static, ()> {
+        // cladefs: in a simulation, the interval runs out at once, uploading what it holds now,
+        // of any size (doc-24).
         if bucket_cell::buggify!() {
-            return false;
+            return futures::future::ready(()).boxed();
         }
-        let notified = std::pin::pin!(self.wake.notified());
-        let ran_out = (self.clock)(interval);
-        matches!(futures::future::select(notified, ran_out).await, Either::Left(_))
+        (self.clock)(interval)
     }
 
     fn cell(&self) -> &Arc<LocalCell<D>> {
@@ -1450,7 +1601,13 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     /// is durable.
     fn within_lag(&self, uploaded: u64, epoch: u64) -> Result<bool, Failure> {
         let max_bytes = self.options.max_lag_bytes;
-        Ok(uploaded >= epoch && self.cell().wal_bytes()? <= max_bytes)
+        let effective_uploaded = self
+            .fast_wal_sink
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map_or(uploaded, |sink| uploaded.max(sink.head_acked()));
+        Ok(effective_uploaded >= epoch && self.cell().wal_bytes()? <= max_bytes)
     }
 
     /// cladefs: what `waiting` finds in `progress`: done, or failed, or, if nothing yet, `None`
@@ -1462,20 +1619,33 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                 Some(Ok(()))
             }
             Waiting::Told(..) => progress.failed.clone().map(Err),
+            Waiting::FastWal(sink, epoch)
+                if sink.durable().max(sink.head_acked()).max(progress.uploaded) >= *epoch =>
+            {
+                Some(Ok(()))
+            }
+            Waiting::FastWal(sink, _) => progress.failed.clone().or_else(|| sink.failed()).map(Err),
+            Waiting::FastWalLag(sink, commit_epoch, _) if sink.head_acked() >= *commit_epoch => {
+                Some(Ok(()))
+            }
+            Waiting::FastWalLag(_, _, lag_epoch) => {
+                self.reached(progress, *lag_epoch, Awaited::Lag)
+            }
         }
     }
 
     /// cladefs: returns once the progress has what `waiting` waits for, done or failed, holding no
-    /// thread while it waits (TASK-685.3).
+    /// thread while it waits (TASK-685.3). Listener is registered before checking state so
+    /// lock-free fast-WAL / replicator durability updates can never lose a wakeup.
     async fn wait(&self, waiting: &Waiting) -> Result<(), Failure> {
         loop {
-            let changed = {
+            let changed = self.changed.listen();
+            {
                 let progress = self.progress.lock().unwrap();
                 if let Some(found) = self.found(&progress, waiting) {
                     return found;
                 }
-                self.changed.listen()
-            };
+            }
             changed.await;
         }
     }
@@ -1501,6 +1671,17 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     /// its keeper (TASK-701). Its locks taken as a panic holding one left them, poisoned or not:
     /// what it takes of them is all it changes.
     async fn wind_up(&self) {
+        if let Some(sink) =
+            self.fast_wal_sink.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref()
+        {
+            sink.stop();
+        }
+        let fast_wal_done =
+            self.fast_wal_done.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+        if let Some(done) = fast_wal_done {
+            // Said as the fast WAL writer task exits, or goes with its sender.
+            let _ = done.await;
+        }
         let relocation = self.relocation.lock();
         let round = relocation.unwrap_or_else(std::sync::PoisonError::into_inner).take();
         if let Some((abort, gone)) = round {
@@ -1579,16 +1760,20 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         // whether any segment since the last checkpoint freed extents (hotbed question 535).
         let (mut segments, mut checkpointed, mut freed_since_checkpoint) = (0u64, 0u64, false);
         let mut in_flight = InFlight::default();
-        // cladefs: the work with the cell's head under way, an acknowledgement or a checkpoint, one
-        // at a time, beside the uploads, which go on meanwhile as it waits for the bucket's object
-        // store to take the head's next write: an acknowledgement then names all they uploaded
-        // (`Writer::acknowledge`, TASK-690). And whether an upload since it began wants an
-        // acknowledgement, plus an optional coalescing timer when no waiter is blocked (hotbed
-        // question 535).
-        let mut head_work: Option<BoxFuture<'static, Result<HeadWork, bucket_cell::Error>>> = None;
+        // cladefs: head acknowledgements (`Writer::acknowledge`) and periodic checkpoint uploads
+        // (`Writer::checkpoint`) run in separate slots beside segment uploads: checkpoint PUTs
+        // hold no head lock while uploading and piggyback on the next acknowledgement swap
+        // (`Writer::write_checkpoint`), so multi-second checkpoint uploads never stall head swaps
+        // or WAL release (TASK-690).
+        let mut ack_work: Option<BoxFuture<'static, Result<Option<u64>, bucket_cell::Error>>> =
+            None;
+        let mut checkpoint_work: Option<BoxFuture<'static, ()>> = None;
         let mut ack_wanted = false;
         let mut ack_wait: Option<BoxFuture<'static, ()>> = None;
         let mut ack_urgent = false;
+        // Persistent open-segment close interval timer: survives upload/ack completions so steady
+        // upload traffic never starves or resets the open-segment close cadence.
+        let mut interval_wait: Option<BoxFuture<'static, ()>> = None;
         // cladefs: the relocation round under way, if one is, with what it was allowed; what the
         // next may copy; and the keys the states the cell keeps read (doc-27, board 6214).
         let mut relocating: Option<(u64, Round)> = None;
@@ -1596,12 +1781,11 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         let mut credit = relocations::Credit::default();
         let pins = Arc::new(relocations::Pins::default());
         // Whether the next gather closes the cell's open segment: for a commit waiting for its
-        // upload, or a fork, or as the interval is up, or the uploader stops; and whether the last
-        // took segments, after which the cell may hold more closed, which the next takes,
-        // closing none for them (TASK-92.15).
+        // upload, or a fork, or as the interval is up, or the uploader stops; and whether the cell
+        // may hold closed segments ready to upload without closing the open segment (TASK-92.15).
         // cladefs: and whether a commit waits for it, or a fork, or the uploader stops: closing
         // whatever it holds, not only once the guest is filling it no more (TASK-92.41).
-        let (mut close, mut more, mut urgent) = (false, false, false);
+        let (mut close, mut more, mut urgent) = (false, self.options.upload_closed, false);
         loop {
             // cladefs: a test's uploader panicking (board 8507).
             fail::fail_point!("upload::turn");
@@ -1646,6 +1830,9 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                 };
                 // Done with once closed; the segments the cell had closed taking the room, it
                 // closes the next time.
+                if gathered.closed {
+                    interval_wait = None;
+                }
                 close &= !gathered.closed;
                 urgent &= !gathered.closed;
                 more = gathered.took;
@@ -1656,7 +1843,8 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                 }
                 if stop
                     && in_flight.is_empty()
-                    && head_work.is_none()
+                    && ack_work.is_none()
+                    && checkpoint_work.is_none()
                     && !ack_wanted
                     && relocating.is_none()
                 {
@@ -1680,15 +1868,14 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                 || stop
                 || self.options.ack_coalesce.is_zero()
                 || ack_wait.is_none();
-            if ack_wanted && head_work.is_none() && ack_due {
+            if ack_wanted && ack_work.is_none() && ack_due {
                 ack_wanted = false;
                 ack_wait = None;
                 if in_flight.is_empty() {
                     ack_urgent = false;
                 }
                 let writer = writer.clone();
-                let acknowledging = async move { writer.acknowledge().await };
-                head_work = Some(acknowledging.map_ok(HeadWork::Acknowledged).boxed());
+                ack_work = Some(async move { writer.acknowledge().await }.boxed());
             }
             // cladefs: a relocation round after a checkpoint, once any earlier round is done, the
             // uploader isn't stopping and the cell's disk has room (doc-27, board 10918).
@@ -1703,14 +1890,24 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                     relocating = Some((allowance, round));
                 }
             }
-            let mut woken = std::pin::pin!(self.woken(interval));
+            if interval_wait.is_none() && !close && !stop {
+                interval_wait = Some(self.interval_sleep(interval));
+            }
+            let watch_closed = self.options.upload_closed && !more;
+            let mut wake = std::pin::pin!(self.wake.notified());
+            let mut segment_ready = std::pin::pin!(self.segment_ready.notified());
             let happened = futures::future::poll_fn(|cx| {
-                if let Some(work) = head_work.as_mut()
+                if let Some(work) = ack_work.as_mut()
                     && let Poll::Ready(done) = work.poll_unpin(cx)
                 {
-                    return Poll::Ready(Happened::Headed(done));
+                    return Poll::Ready(Happened::Acknowledged(done));
                 }
-                if let Poll::Ready(Some(uploaded)) = in_flight.next().poll_unpin(cx) {
+                if let Some(work) = checkpoint_work.as_mut()
+                    && let Poll::Ready(()) = work.poll_unpin(cx)
+                {
+                    return Poll::Ready(Happened::Checkpointed);
+                }
+                if let Poll::Ready(Some(uploaded)) = in_flight.poll_next(cx) {
                     return Poll::Ready(Happened::Uploaded(uploaded));
                 }
                 if let Some(wait) = ack_wait.as_mut()
@@ -1724,12 +1921,29 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                     let ended = ended.unwrap_or_else(|_| Err(anyhow::anyhow!("its task dropped")));
                     return Poll::Ready(Happened::Relocated(*allowance, ended));
                 }
-                woken.as_mut().poll(cx).map(Happened::Woken)
+                if watch_closed && let Poll::Ready(()) = segment_ready.as_mut().poll(cx) {
+                    return Poll::Ready(Happened::SegmentReady);
+                }
+                if let Poll::Ready(()) = wake.as_mut().poll(cx) {
+                    return Poll::Ready(Happened::Woken);
+                }
+                if let Some(wait) = interval_wait.as_mut()
+                    && let Poll::Ready(()) = wait.poll_unpin(cx)
+                {
+                    return Poll::Ready(Happened::Interval);
+                }
+                Poll::Pending
             })
             .await;
             let done = match happened {
-                Happened::Woken(woken) => {
-                    close |= !woken;
+                Happened::Woken => Ok(()),
+                Happened::SegmentReady => {
+                    more = true;
+                    Ok(())
+                }
+                Happened::Interval => {
+                    interval_wait = None;
+                    close = true;
                     Ok(())
                 }
                 Happened::AckDue => {
@@ -1738,39 +1952,55 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                 }
                 Happened::Uploaded(uploaded) => uploaded.map_err(Failure::from).map(|()| {
                     segments += 1;
-                    ack_wanted = true;
-                    if ack_wait.is_none()
-                        && !self.options.ack_coalesce.is_zero()
-                        && !ack_urgent
-                        && !urgent
-                        && !stop
-                    {
-                        ack_wait = Some((self.clock)(self.options.ack_coalesce));
+                    if in_flight.ready_to_ack() {
+                        ack_wanted = true;
+                        if ack_wait.is_none()
+                            && !self.options.ack_coalesce.is_zero()
+                            && !ack_urgent
+                            && !urgent
+                            && !stop
+                        {
+                            ack_wait = Some((self.clock)(self.options.ack_coalesce));
+                        }
                     }
                 }),
-                Happened::Headed(done) => {
-                    head_work = None;
+                Happened::Acknowledged(done) => {
+                    ack_work = None;
                     match done {
-                        Ok(HeadWork::Acknowledged(through)) => {
-                            let acked = self.acknowledged(through, &mut in_flight);
+                        Ok(through) => {
+                            let acked = self.acknowledged(through, &mut in_flight).await;
                             // A checkpoint every so many segments, after the commits it covers
-                            // returned.
-                            if segments - checkpointed >= self.options.checkpoint_every {
+                            // returned, running concurrently with subsequent acknowledgements.
+                            if segments - checkpointed >= self.options.checkpoint_every
+                                && checkpoint_work.is_none()
+                                && !stop
+                            {
                                 checkpointed = segments;
                                 freed_since_checkpoint = false;
-                                head_work = Some(Self::checkpointing(writer.clone()));
+                                checkpoint_work = Some(Self::checkpointing(writer.clone()));
                             }
-                            acked.await
-                        }
-                        Ok(HeadWork::Checkpointed) => {
-                            // cladefs: queue a relocation round for after this checkpoint
-                            // (started at the top of the loop once any earlier round has ended,
-                            // doc-27, board 10918).
-                            relocate_wanted = true;
-                            Ok(())
+                            if in_flight.ready_to_ack() {
+                                ack_wanted = true;
+                                if ack_wait.is_none()
+                                    && !self.options.ack_coalesce.is_zero()
+                                    && !ack_urgent
+                                    && !urgent
+                                    && !stop
+                                {
+                                    ack_wait = Some((self.clock)(self.options.ack_coalesce));
+                                }
+                            }
+                            acked
                         }
                         Err(err) => Err(err.into()),
                     }
+                }
+                Happened::Checkpointed => {
+                    checkpoint_work = None;
+                    // cladefs: queue a relocation round for after this checkpoint (started at the
+                    // top of the loop once any earlier round has ended, doc-27, board 10918).
+                    relocate_wanted = true;
+                    Ok(())
                 }
                 Happened::Relocated(allowance, ended) => {
                     relocating = None;
@@ -1789,11 +2019,9 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         }
     }
 
-    /// cladefs: writes a checkpoint as of what `writer` acknowledged, as the run's work with the
-    /// cell's head: a checkpoint failing is said, and fails nothing.
-    fn checkpointing(
-        writer: Arc<Writer<B>>,
-    ) -> BoxFuture<'static, Result<HeadWork, bucket_cell::Error>> {
+    /// cladefs: writes a checkpoint as of what `writer` acknowledged, concurrently with segment
+    /// uploads and head acknowledgements: a checkpoint failing is logged, and fails nothing.
+    fn checkpointing(writer: Arc<Writer<B>>) -> BoxFuture<'static, ()> {
         async move {
             // A test's: the checkpoint landing late, after the commits it covers returned, as on
             // a loaded host, which a collector's pass then runs beside (TASK-339).
@@ -1801,7 +2029,6 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             if let Err(err) = writer.checkpoint().await {
                 log::warn!("cladefs: checkpointing cell {}: {err}", writer.cell());
             }
-            Ok(HeadWork::Checkpointed)
         }
         .boxed()
     }
@@ -1852,6 +2079,11 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
 
     /// Stops uploading, for `err`: commits waiting for uploads, and forks, fail with it.
     fn fail(&self, writer: &Writer<B>, err: Failure) {
+        if let Some(sink) =
+            self.fast_wal_sink.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref()
+        {
+            sink.stop();
+        }
         let mut progress = self.progress.lock().unwrap();
         if !progress.stop {
             log::error!("cladefs: uploading cell {}: {err}", writer.cell());
@@ -1866,9 +2098,9 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     /// then, the head taken, the writer recovers it on from there (TASK-92.6) and the cell opens
     /// as the writer found its end, which another writer may have moved on meanwhile.
     async fn start(
-        &self,
+        self: &Arc<Self>,
         recovering: Recovering<D>,
-        options: crate::Options,
+        mut options: crate::Options,
         bucket: &Arc<B>,
         holder: u64,
         initial_head: Option<head::Read>,
@@ -1901,6 +2133,36 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         if found.deleted() {
             return Err(bucket_cell::Error::Deleted.into());
         }
+        // cladefs: fail hard before taking the head if this cell will run in Fast WAL mode or has
+        // an active Fast WAL to fence and recover, and this host cannot satisfy it (doc-29):
+        // - no configured Fast WAL bucket,
+        // - persisted cross-AZ active bucket URL not in the host's allowlist, or
+        // - enabling Fast WAL on a cell with unuploaded local WAL commits (must sync first so no
+        //   earlier local-only commit can be orphaned behind a newly activated Fast WAL).
+        let want_fast_wal_pre = match self.options.fast_wal {
+            Some(Some(_)) => true,
+            Some(None) => false,
+            None => found.fast_wal.is_some(),
+        };
+        let old_active_pre = found.fast_wal.as_ref().and_then(|fw| fw.active.as_ref());
+        if want_fast_wal_pre || old_active_pre.is_some() {
+            let cfg = self.options.fast_wal_config.as_ref().ok_or_else(|| {
+                Failure::msg(
+                    "cell requires fast WAL, but CLADEFSD_FAST_WAL_BUCKET is not configured",
+                )
+            })?;
+            if let Some(active) = old_active_pre
+                && cfg.bucket_url != active.bucket
+            {
+                cfg.opener.is_allowed(&active.bucket).map_err(Failure::msg)?;
+            }
+        }
+        if want_fast_wal_pre && old_active_pre.is_none() && recovering.has_wal() {
+            return Err(Failure::msg(
+                "cell has unuploaded local commits; sync to the cold bucket before enabling fast \
+                 WAL",
+            ));
+        }
         // cladefs: recovered before the taking under its keys, as the taking will hold them,
         // unwrapped once for it (TASK-411.3); a head with none yet, a fork's child's or a new
         // cell's, which its taking gives them, recovered once it is taken.
@@ -1917,10 +2179,14 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                 )
                 .await?;
                 // Where the writer's chain would go: the log's restamping, not looked at here.
-                let chain = Chain::new(cell, 0, recovered.end(), 0);
-                let head = recovered.head.clone().unwrap_or_default();
-                if !recovering.follows(&TakenCell::of(head, &recovered.state, chain)) {
-                    return Err(bucket_cell::Error::Diverged.into());
+                // Cells with an active fast WAL treat local disk WAL as cache-only and drop it
+                // after fencing & recovering the fast WAL.
+                if old_active_pre.is_none() {
+                    let chain = Chain::new(cell, 0, recovered.end(), 0);
+                    let head = recovered.head.clone().unwrap_or_default();
+                    if !recovering.follows(&TakenCell::of(head, &recovered.state, chain)) {
+                        return Err(bucket_cell::Error::Diverged.into());
+                    }
                 }
                 (Some(recovered), Some(ring))
             }
@@ -1932,12 +2198,25 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         // it is of another (`OtherKind`, doc-20). Not a version's, which no writer
         // takes, and any number of hosts open at once. A cell with no head is no cell: its maker
         // makes it, before its cell opens (`lifecycle::create`), and no taking does.
+        let fast_wal_allowed: Option<Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>> = {
+            let cfg = self.options.fast_wal_config.clone();
+            Some(Arc::new(move |url: &str| match &cfg {
+                Some(cfg) if cfg.bucket_url == url => Ok(()),
+                Some(cfg) => cfg.opener.is_allowed(url),
+                None => Err(
+                    "cell has an active fast WAL, but CLADEFSD_FAST_WAL_BUCKET is not configured"
+                        .into(),
+                ),
+            }))
+        };
         let taking = head::Taking {
             holder,
             token: placement,
             kind: recovering.kind(),
             keys: None,
             replication: self.options.replication,
+            fast_wal: self.options.fast_wal,
+            fast_wal_allowed,
         };
         let (held, cell_keys) = keys::taking(&**bucket, kms, cell, read, taking).await?;
         let fenced_take = self.fence_for_take(cell, &recovering, &held.head).await?;
@@ -1948,26 +2227,161 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         let writer = Writer::holding(bucket.clone(), cell, held, before, keys).await?;
         let writer = Arc::new(writer.uploading_within(self.uploads.clone()));
         let keys = writer.keys().clone();
-        let (recovering, replicated_take) =
+        let (mut recovering, replicated_take) =
             self.recover_replicated(cell, &writer, recovering, placement, fenced_take).await?;
-        let (state, layer, taken) = (writer.state(), writer.layer(), Some(writer.taken().clone()));
+
+        // cladefs: Fast WAL takeover fencing, recovery, and activation (doc-29).
+        let taken_head = writer.head().await;
+        let old_active = taken_head.fast_wal.as_ref().and_then(|fw| fw.active.clone());
+        let want_fast_wal = match self.options.fast_wal {
+            Some(Some(fsync)) => Some(fsync),
+            Some(None) => None,
+            None => taken_head.fast_wal.as_ref().map(|fw| fw.fsync),
+        };
+        let target_fast_wal = match want_fast_wal {
+            Some(fsync) => {
+                let cfg = self.options.fast_wal_config.as_ref().ok_or_else(|| {
+                    Failure::msg(
+                        "cell requires fast WAL, but CLADEFSD_FAST_WAL_BUCKET is not configured",
+                    )
+                })?;
+                Some(bucket_cell::layout::FastWal {
+                    fsync,
+                    active: Some(bucket_cell::layout::ActiveWal {
+                        epoch: writer.epoch(),
+                        bucket: cfg.bucket_url.clone(),
+                    }),
+                })
+            }
+            None => None,
+        };
+        if let Some(active) = old_active.as_ref() {
+            let cfg = self.options.fast_wal_config.as_ref().ok_or_else(|| {
+                Failure::msg(
+                    "cell has an active fast WAL, but CLADEFSD_FAST_WAL_BUCKET is not configured",
+                )
+            })?;
+            let old_bucket = if cfg.bucket_url == active.bucket {
+                cfg.bucket.clone()
+            } else {
+                (cfg.opener.open(&active.bucket)).await.map_err(Failure::msg)?
+            };
+            crate::fast_wal::fence_and_recover(
+                &writer,
+                bucket,
+                &old_bucket,
+                active,
+                target_fast_wal.clone(),
+            )
+            .await?;
+            let sweep_bucket = old_bucket.clone();
+            let sweep_keys = writer.keys().clone();
+            let head_epoch = writer.epoch();
+            let active_wal_epoch =
+                target_fast_wal.as_ref().and_then(|fw| fw.active.as_ref()).map(|a| a.epoch);
+            (self.spawn)(
+                async move {
+                    if let Err(err) = crate::fast_wal::sweep_superseded(
+                        &sweep_bucket,
+                        cell,
+                        head_epoch,
+                        active_wal_epoch,
+                        &sweep_keys,
+                    )
+                    .await
+                    {
+                        log::warn!("cladefs: sweeping superseded fast WAL for {cell}: {err}");
+                    }
+                }
+                .boxed(),
+            );
+        } else if taken_head.fast_wal != target_fast_wal {
+            if target_fast_wal.is_some() && recovering.has_wal() {
+                return Err(Failure::msg(
+                    "cell has unuploaded local commits; sync to the cold bucket before enabling \
+                     fast WAL",
+                ));
+            }
+            writer.activate_fast_wal(target_fast_wal.clone()).await?;
+        }
+        // Only drop local WAL when the cell already had an active fast WAL (local disk was
+        // cache-only); never drop local or peer-recovered WAL when newly enabling Fast WAL.
+        if old_active.is_some() {
+            blocking(|| recovering.drop_wal())?;
+        }
+        if target_fast_wal.is_some() {
+            options.large_extent = options.large_extent.min(self.options.fast_wal_large_extent);
+        }
+
+        let head_now = writer.head().await;
+        let state = writer.state();
+        let layer = writer.layer();
+        let taken = Some(TakenCell::of(head_now.clone(), &state, writer.chain()));
         let opening = Opening { state, layer, taken, cache, keys: keys.clone(), held: parts };
         let open_cell = blocking(|| recovering.open(options, opening))?;
         assert!(self.cell.set(Arc::new(open_cell)).is_ok(), "an uploader opens its cell once");
+        if self.options.upload_closed {
+            self.cell().wake_on_segment_written(self.segment_ready.clone());
+        }
         self.hold_ring(&keys);
         self.token.set(placement).expect("an uploader's writers take one placement's token");
-        self.took(&writer, placement);
+        self.took(&writer, placement, &head_now);
         self.start_replication(cell, &writer, replicated_take).await?;
+        if target_fast_wal.is_some() {
+            let cfg =
+                self.options.fast_wal_config.as_ref().expect("fast WAL config checked before take");
+            let initial_epoch = writer.state().last_commit.map_or(0, epoch_of);
+            let shared_weak = Arc::downgrade(self);
+            let urge_cold: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+                if let Some(shared) = shared_weak.upgrade() {
+                    shared.progress.lock().unwrap().wanted = true;
+                    shared.wake.notify_one();
+                }
+            });
+            let hot_budget = self.host.as_ref().map(|h| Arc::clone(&h.hot_budget));
+            let sink = crate::fast_wal::FastWalSink::new(
+                cfg.bucket_url.clone(),
+                initial_epoch,
+                self.changed.clone(),
+                urge_cold,
+                hot_budget,
+            );
+            self.cell().fast_wal_to(sink.clone());
+            *self.fast_wal_sink.lock().unwrap() = Some(sink.clone());
+            let fw_writer = crate::fast_wal::FastWalWriter::new(
+                writer.clone(),
+                cfg.bucket.clone(),
+                sink,
+                cfg.max_writer_appends,
+                cfg.max_segment_bytes,
+            );
+            let (done_tx, done_rx) = futures::channel::oneshot::channel();
+            *self.fast_wal_done.lock().unwrap() = Some(done_rx);
+            (self.spawn)(
+                async move {
+                    fw_writer.run().await;
+                    drop(done_tx);
+                }
+                .boxed(),
+            );
+        }
         Ok(Some(writer))
     }
 
     /// `writer` took the cell, with the fencing token `token`: the cell's commits are uploaded,
     /// its forks made, and what the cell's write-ahead log holds after them is the uploader's to
     /// upload.
-    fn took(&self, writer: &Arc<Writer<B>>, token: u64) {
+    fn took(&self, writer: &Arc<Writer<B>>, token: u64, head: &Head) {
         *self.writer.lock().unwrap() = Some(writer.clone());
-        let replication = writer.taken().head.replication.as_ref().map(Replicated::of);
-        let taking = Taking { token, epoch: writer.epoch(), taken: SystemTime::now(), replication };
+        let replication = head.replication.as_ref().map(Replicated::of);
+        let fast_wal = head.fast_wal.as_ref().map(|fw| fw.fsync);
+        let taking = Taking {
+            token,
+            epoch: writer.epoch(),
+            taken: SystemTime::now(),
+            replication,
+            fast_wal,
+        };
         let mut progress = self.progress.lock().unwrap();
         (progress.next_sequence, progress.taking) = (writer.chain().next_sequence(), Some(taking));
         if let Some(last) = writer.state().last_commit {
@@ -2027,7 +2441,11 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         // What a waiter wants is durable; then closed, if fewer segments wait than may upload, and
         // what the closing closed durable too.
         cell.flush().await?;
-        let mut closed = cell.closed(room).await?;
+        let mut closed = if close || !self.options.upload_closed {
+            cell.closed(room).await?
+        } else {
+            cell.closed_ready(room).await?
+        };
         let mut closing = close && closed.len() < room;
         if closing {
             let waited = {
@@ -2051,6 +2469,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         let freed = closed.iter().any(|closed| !closed.footer.contents.frees.is_empty());
         for closed in closed {
             let (number, tag) = (closed.number, closed.tag());
+            let continues = closed.footer.contents.continued.is_some();
             // cladefs: what reads its files, on a blocking thread, as `blocking` gives (board
             // 2944).
             let (own, size) = blocking(|| -> Result<_, Failure> {
@@ -2063,7 +2482,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             let closed = Arc::new(closed);
             let body = Body::new(size, move || blocking(|| closed.bytes()));
             let segment = writer.add_segment(Objects { footer, segment: body, own, data_len })?;
-            segments.push(Uploading { segment, number, tag });
+            segments.push(Uploading { segment, number, tag, continues });
         }
         let took = !segments.is_empty();
         in_flight.upload(writer, segments);
@@ -2081,6 +2500,13 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     ) -> Result<(), Failure> {
         failing!("upload::acknowledged");
         let acked = in_flight.acknowledged(through);
+        // Notify Fast WAL immediately once the cold head CAS succeeds, without blocking degraded
+        // fallback or oversized-batch spill waiters on local WAL start-file sync.
+        if let Some(last_epoch) = acked.last().map(|segment| segment.epoch())
+            && let Some(sink) = self.fast_wal_sink.lock().unwrap().as_ref()
+        {
+            sink.head_acknowledged(last_epoch);
+        }
         in_flight.acknowledging.extend(acked);
         self.acknowledge_pending(in_flight).await
     }
@@ -2092,18 +2518,18 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     /// uploader's (TASK-539.12). Before, the cell failed for it. A disk failing otherwise (EIO) is
     /// no full one: tried again for ever, it left every wait on an upload hanging (board 5359).
     async fn acknowledge_pending(&self, in_flight: &mut InFlight) -> Result<(), Failure> {
-        let mut epoch = None;
-        let stored = async {
-            while let Some(segment) = in_flight.acknowledging.front() {
-                self.cell().acknowledged(segment.number).await?;
-                epoch = Some(segment.epoch());
-                in_flight.acknowledging.pop_front();
-            }
-            Ok::<(), anyhow::Error>(())
+        if in_flight.acknowledging.is_empty() {
+            return Ok(());
         }
-        .await;
-        match stored {
-            Ok(()) => in_flight.acknowledging_failed = false,
+        let numbers: Vec<u64> =
+            in_flight.acknowledging.iter().map(|segment| segment.number).collect();
+        let epoch = match self.cell().acknowledged_batch(&numbers).await {
+            Ok(()) => {
+                in_flight.acknowledging_failed = false;
+                let epoch = in_flight.acknowledging.back().map(Uploading::epoch);
+                in_flight.acknowledging.clear();
+                epoch
+            }
             Err(err) if full(&err) => {
                 if !std::mem::replace(&mut in_flight.acknowledging_failed, true) {
                     log::warn!(
@@ -2112,11 +2538,15 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                         self.cell().description().cell
                     );
                 }
+                None
             }
             Err(err) => return Err(err.into()),
-        }
+        };
         let Some(epoch) = epoch else { return Ok(()) };
         failing!("upload::released");
+        if let Some(sink) = self.fast_wal_sink.lock().unwrap().as_ref() {
+            sink.head_acknowledged(epoch);
+        }
         self.progress.lock().unwrap().uploaded_through(epoch);
         self.changed.notify(usize::MAX);
         Ok(())
@@ -2164,12 +2594,13 @@ struct Gathered {
     freed: bool,
 }
 
-/// A segment uploading: its number in the cell, and in the open cell; and the tag of the open
-/// cell's commit it ends with.
+/// A segment uploading: its number in the cell, and in the open cell; the tag of the open cell's
+/// commit it ends with; and whether a commit continues past it into the next segment.
 struct Uploading {
     segment: u64,
     number: u64,
     tag: u64,
+    continues: bool,
 }
 
 impl Uploading {
@@ -2179,38 +2610,38 @@ impl Uploading {
     }
 }
 
-/// The segments uploading, in order, and the futures of their uploads: an acknowledgement takes
-/// exactly the segments the writer acknowledged. Each is in the cell's write-ahead log, durably,
-/// before its upload goes (TASK-79.72's rule), so that nothing lands in the writer's name that the
-/// log doesn't hold.
-/// cladefs: the uploader's run's work with its cell's head, done.
-enum HeadWork {
-    /// An acknowledgement, to the segment it returns.
-    Acknowledged(Option<u64>),
-    Checkpointed,
-}
-
-/// cladefs: what the uploader's run waits on that happened first.
 /// cladefs: a relocation round under way, its task's, as it ends ([`Shared::relocating`]).
 type Round = futures::channel::oneshot::Receiver<anyhow::Result<crate::Relocated>>;
 
+/// cladefs: what the uploader's run waits on that happened first.
 enum Happened {
-    /// The next upload in order is done.
+    /// An in-flight upload finished (in any order, avoiding head-of-line blocking).
     Uploaded(Result<(), bucket_cell::Error>),
     /// cladefs: the relocation round under way, given what it was allowed, is done: how it ended.
     Relocated(u64, anyhow::Result<crate::Relocated>),
-    /// The work with the cell's head under way is done.
-    Headed(Result<HeadWork, bucket_cell::Error>),
+    /// The head acknowledgement under way finished, through the segment it returns.
+    Acknowledged(Result<Option<u64>, bucket_cell::Error>),
+    /// The background checkpoint upload finished.
+    Checkpointed,
     /// The head-swap coalescing window elapsed (hotbed question 535).
     AckDue,
-    /// It was woken, or its interval ran out: whether it was woken.
-    Woken(bool),
+    /// A closed segment finished framing and is ready to upload without closing the open segment.
+    SegmentReady,
+    /// The uploader was explicitly woken (`ask`, `stop`, `urge`, etc.).
+    Woken,
+    /// The open-segment close interval elapsed.
+    Interval,
 }
 
+/// The segments uploading, in order, and the unordered futures of their uploads: completions
+/// refill slots immediately without head-of-line blocking, while acknowledgements still advance
+/// strictly through the longest contiguous uploaded prefix ending on a complete commit.
 #[derive(Default)]
 struct InFlight {
     segments: VecDeque<Uploading>,
-    uploads: FuturesOrdered<BoxFuture<'static, Result<(), bucket_cell::Error>>>,
+    uploads: FuturesUnordered<BoxFuture<'static, Result<u64, bucket_cell::Error>>>,
+    /// Segment numbers (in `Writer`'s numbering) whose PUTs finished and await head swap.
+    uploaded: BTreeSet<u64>,
     /// cladefs: the segments the writer acknowledged that the cell hasn't yet, its last try at
     /// recording it failing on its disk, as a full one fails it: tried again at each pass
     /// ([`Shared::acknowledge_pending`], TASK-539.12).
@@ -2228,16 +2659,41 @@ impl InFlight {
     ) {
         for uploading in segments {
             let (writer, segment) = (writer.clone(), uploading.segment);
-            self.uploads.push_back(async move { writer.upload(segment).await }.boxed());
+            self.uploads
+                .push(async move { writer.upload(segment).await.map(|()| segment) }.boxed());
             self.segments.push_back(uploading);
         }
     }
 
-    /// The next upload done, in order.
-    fn next(
+    /// Polls for any finished upload, recording its segment number on completion.
+    fn poll_next(
         &mut self,
-    ) -> impl Future<Output = Option<Result<(), bucket_cell::Error>>> + Unpin + '_ {
-        self.uploads.next()
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Option<Result<(), bucket_cell::Error>>> {
+        match self.uploads.poll_next_unpin(cx) {
+            Poll::Ready(Some(Ok(segment))) => {
+                self.uploaded.insert(segment);
+                Poll::Ready(Some(Ok(())))
+            }
+            Poll::Ready(Some(Err(err))) => Poll::Ready(Some(Err(err))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    /// Awaits the next finished upload (used by tests that drive `InFlight` directly).
+    #[cfg(test)]
+    async fn next(&mut self) -> Option<Result<(), bucket_cell::Error>> {
+        futures::future::poll_fn(|cx| self.poll_next(cx)).await
+    }
+
+    /// Whether a contiguous prefix of `segments` has finished uploading and ends on at least one
+    /// complete (non-continued) commit, matching `Writer::naming`.
+    fn ready_to_ack(&self) -> bool {
+        self.segments
+            .iter()
+            .take_while(|segment| self.uploaded.contains(&segment.segment))
+            .any(|segment| !segment.continues)
     }
 
     /// The segments the writer acknowledged, `through` the last, which upload no more.
@@ -2245,7 +2701,11 @@ impl InFlight {
         let taken =
             |uploading: &&Uploading| through.is_some_and(|through| uploading.segment <= through);
         let count = self.segments.iter().take_while(taken).count();
-        self.segments.drain(..count).collect()
+        let acked: Vec<Uploading> = self.segments.drain(..count).collect();
+        for segment in &acked {
+            self.uploaded.remove(&segment.segment);
+        }
+        acked
     }
 
     /// How many uploads are in flight.

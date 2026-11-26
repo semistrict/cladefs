@@ -77,6 +77,9 @@ pub(super) async fn boot_daemon(
     }
     local_cell::upload::blocking(|| super::storage::open_part_cache(daemon))
         .map_err(anyhow::Error::msg)?;
+    // cladefs: its appendable zonal fast WAL bucket, if configured: opened and append-probed at
+    // boot so misconfigured buckets fail hard before serving any cell (doc-29).
+    super::storage::open_fast_wal(daemon).await.map_err(anyhow::Error::msg)?;
     // cladefs: where traces of what VMs read go, if anywhere (TASK-702.1).
     super::reads::configure_on(daemon).map_err(anyhow::Error::msg)?;
     // cladefs: how long its replicated cells' members are down before they are replaced (doc-21).
@@ -242,6 +245,7 @@ pub(super) async fn boot_with_config(
         })
         .map_err(anyhow::Error::msg)?;
     }
+    super::storage::open_fast_wal(daemon).await.map_err(anyhow::Error::msg)?;
 
     super::reads::configure_on(daemon).map_err(anyhow::Error::msg)?;
     super::replace_after().map_err(anyhow::Error::msg)?;
@@ -319,6 +323,8 @@ pub(super) async fn boot_with_config(
     #[cfg(not(madsim))]
     let listener = super::bind_owner_only(&socket)
         .with_context(|| format!("listening at {}", socket.display()))?;
+    #[cfg(madsim)]
+    let _ = socket;
     #[cfg(not(madsim))]
     {
         let serving = Arc::clone(daemon);

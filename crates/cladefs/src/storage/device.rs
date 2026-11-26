@@ -12,7 +12,10 @@
 //! - Its reads are the cell's own, not the extent cache's (`OpenCell::read_uncached`): the
 //!   filesystem mounted on it caches what it reads in its kernel's pages, which the extent cache
 //!   would hold again, as windows' guests need it to and it does not; read through the extent
-//!   cache, reading an image's large file back took 2.4 times as long.
+//!   cache, reading an image's large file back took 2.4 times as long. Unpacked 1 MiB parts are
+//!   retained in the unified `bucket_cell::fetch::PartMemory` LRU, which the daemon's governor
+//!   scales to half the remaining room while FUSE cells are attached so multi-file reads don't
+//!   thrash zstd decompression (board 12313).
 //!
 //! - Flushing commits the cell, synced to the host's disk (`COMMIT_LOCAL`), within its uploader's
 //!   lag; closing commits it uploaded, as a closed image's cell is whole in its bucket.

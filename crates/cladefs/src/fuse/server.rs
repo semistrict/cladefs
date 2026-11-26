@@ -70,6 +70,8 @@ pub type Notifier = Box<dyn Fn(&[u8]) -> std::io::Result<()> + Send + Sync>;
 /// whatever carries them, as `Mount` does `/dev/fuse`'s. See the module docs.
 pub struct Server {
     shape: Shape,
+    /// `INIT` flags negotiated with the kernel (bitmask of `InitIn::flags | (flags2 << 32)`).
+    negotiated: AtomicU64,
     /// Tells the kernel of nodes changed ([`Server::changed`]) and names detached.
     notify: Arc<Notifier>,
     /// The filesystems served, by slot.
@@ -549,6 +551,7 @@ impl Server {
         }
         Self {
             shape,
+            negotiated: AtomicU64::new(0),
             notify,
             cells,
             nodes,
@@ -557,6 +560,10 @@ impl Server {
             counters: Counters::default(),
             _registered: registered,
         }
+    }
+
+    fn handle_killpriv_v2(&self) -> bool {
+        self.negotiated.load(Ordering::Relaxed) & HANDLE_KILLPRIV_V2 != 0
     }
 
     /// cladefs: what it did since it was made (board 8565).
@@ -1159,25 +1166,27 @@ impl Server {
             log::error!("fuse: unsupported protocol version {}.{}", init.major, init.minor);
             return Err(Errno::EPROTO);
         }
-        // The mount is each filesystem's only writer, so the kernel may cache all it reads: not
-        // AUTO_INVAL_DATA, which drops a file's cached pages when its modification time changes,
-        // nor WRITEBACK_CACHE, which cost more than it saved (dead-ends/fuse-writeback-cache.md).
-        // Opens are not sent (`OPEN` is refused), so not ATOMIC_O_TRUNC either: the kernel
-        // truncates with `SETATTR`. Nor HANDLE_KILLPRIV_V2: the kernel kills setuid and setgid
-        // itself, as for any filesystem, with a `SETATTR` of the mode, as it alone knows whether
-        // its caller may keep them (CAP_FSETID), and does so for every change that kills them,
-        // where with it a server is told of writes, truncations and chowns, not fallocate's
-        // (TASK-149.37), and must remove security.capability too.
+        // The mount is each filesystem's only writer, so the kernel may cache all it reads (not
+        // AUTO_INVAL_DATA, which drops a file's cached pages when its modification time changes)
+        // and coalesce buffered writes in the page cache (WRITEBACK_CACHE). Opens are not sent
+        // (`OPEN` is refused), so not ATOMIC_O_TRUNC: the kernel truncates with `SETATTR`.
+        // HANDLE_KILLPRIV_V2 sets `SB_NOSEC` on the superblock so the kernel stops sending
+        // `GETXATTR("security.capability")` before every `write(2)` syscall, and instead asks the
+        // server to clear suid/sgid and `security.capability` via `WRITE_KILL_SUIDGID` /
+        // `FATTR_KILL_SUIDGID`.
         let supported = ASYNC_READ
             | PARALLEL_DIROPS
             | BIG_WRITES
             | ASYNC_DIO
+            | WRITEBACK_CACHE
             | DO_READDIRPLUS
             | READDIRPLUS_AUTO
             | MAX_PAGES
             | CACHE_SYMLINKS
+            | HANDLE_KILLPRIV_V2
             | INIT_EXT;
         let enabled = (((flags2 as u64) << 32) | init.flags as u64) & supported;
+        self.negotiated.store(enabled, Ordering::Relaxed);
         let max_pages = (MAX_WRITE as u64).div_ceil(crate::pages::page_size());
         let out = InitOut {
             major: KERNEL_VERSION,
@@ -1242,7 +1251,7 @@ impl Server {
     async fn setattr(&self, header: &InHeader, body: &mut Body<'_>) -> Result<Vec<u8>> {
         let set: SetattrIn = body.read()?;
         let valid = |flag| set.valid & flag != 0;
-        let time = |flag, now_flag, secs, nsecs| {
+        let set_time = |flag, now_flag, secs, nsecs| {
             Ok(if valid(now_flag) {
                 Some(SetTime::Now)
             } else if valid(flag) {
@@ -1251,18 +1260,29 @@ impl Server {
                 None
             })
         };
+        let explicit_ctime =
+            if valid(FATTR_CTIME) { Some(time(set.ctime, set.ctimensec)?) } else { None };
+        let killpriv_v2 = self.handle_killpriv_v2();
+        // Linux's `chown_common` sets `ATTR_KILL_SUID | ATTR_KILL_SGID | ATTR_KILL_PRIV` even for
+        // a no-op `chown(-1, -1)` on any non-directory. With `FUSE_HANDLE_KILLPRIV_V2`,
+        // `fuse_setattr` strips `ATTR_MODE`, and `fuse_do_setattr` only sets `FATTR_KILL_SUIDGID`
+        // when `ATTR_UID | ATTR_GID` is present — leaving at most `FATTR_CTIME` and `FATTR_FH`.
+        // No other VFS operation sends a `SETATTR` without mode/uid/gid/size/atime/mtime.
+        let noop_chown = (set.valid & !(FATTR_CTIME | FATTR_FH)) == 0;
+        let kill_suid_sgid = killpriv_v2 && (valid(FATTR_KILL_SUIDGID) || noop_chown);
+        let kill_security_cap =
+            killpriv_v2 && (kill_suid_sgid || valid(FATTR_UID) || valid(FATTR_GID));
         let set = SetAttr {
             perm: valid(FATTR_MODE).then_some(perm(set.mode)),
             uid: valid(FATTR_UID).then_some(set.uid),
             gid: valid(FATTR_GID).then_some(set.gid),
             size: valid(FATTR_SIZE).then_some(set.size),
-            atime: time(FATTR_ATIME, FATTR_ATIME_NOW, set.atime, set.atimensec)?,
-            mtime: time(FATTR_MTIME, FATTR_MTIME_NOW, set.mtime, set.mtimensec)?,
-            // The kernel's to kill, with the mode it sends.
-            kill_suid_sgid: false,
+            atime: set_time(FATTR_ATIME, FATTR_ATIME_NOW, set.atime, set.atimensec)?,
+            mtime: set_time(FATTR_MTIME, FATTR_MTIME_NOW, set.mtime, set.mtimensec)?,
+            kill_suid_sgid,
         };
         let (slot, node) = self.node(header.nodeid, Errno::EPERM)?;
-        let attr = node.setattr(&set).await?;
+        let attr = node.setattr_fuse(&set, explicit_ctime, kill_security_cap).await?;
         // The reply's attributes are the kernel's at once, but a stat's sent before them would
         // be taken after them, as fresh (`fuse_do_setattr` leaves `attr_version` alone).
         self.changed([header.nodeid]);
@@ -1409,20 +1429,23 @@ impl Server {
         if size > MAX_WRITE {
             return Err(Errno::EINVAL);
         }
-        let mut data = vec![0; size as usize];
-        let read = self.node(header.nodeid, Errno::EISDIR)?.1.read(offset, &mut data).await?;
-        data.truncate(read);
-        Ok(data)
+        self.node(header.nodeid, Errno::EISDIR)?.1.read_vec(offset, size as usize).await
     }
 
     async fn write(&self, header: &InHeader, body: &mut Body<'_>) -> Result<Vec<u8>> {
-        let WriteIn { offset, size, .. } = body.read()?;
+        let WriteIn { offset, size, write_flags, .. } = body.read()?;
         if size > MAX_WRITE {
             return Err(Errno::EINVAL);
         }
         let data = body.take(size as usize)?;
         let (_, file) = self.node(header.nodeid, Errno::EISDIR)?;
-        let written = file.write(offset, data).await?;
+        let write_cache = write_flags & WRITE_CACHE != 0;
+        let kill_priv = self.handle_killpriv_v2() && (write_flags & WRITE_KILL_SUIDGID != 0);
+        let (written, mode_changed) =
+            file.write_fuse(offset, data, !write_cache, kill_priv).await?;
+        if mode_changed {
+            self.changed([header.nodeid]);
+        }
         Ok(WriteOut { size: written as u32, padding: 0 }.as_bytes().to_vec())
     }
 
@@ -1854,7 +1877,17 @@ impl Server {
         if mode != 0 {
             return Err(Errno::ENOTSUP);
         }
-        self.node(header.nodeid, Errno::EISDIR)?.1.allocate(offset, length).await?;
+        let killpriv_v2 = self.handle_killpriv_v2();
+        let kill_suid_sgid = killpriv_v2 && header.uid != 0;
+        let kill_security_cap = killpriv_v2;
+        let mode_changed = self
+            .node(header.nodeid, Errno::EISDIR)?
+            .1
+            .allocate_fuse(offset, length, kill_suid_sgid, kill_security_cap)
+            .await?;
+        if mode_changed {
+            self.changed([header.nodeid]);
+        }
         Ok(Vec::new())
     }
 }
@@ -1957,18 +1990,17 @@ struct Reply {
 
 impl Reply {
     fn ok(&self, payload: &[u8]) -> Vec<u8> {
-        let mut reply = self.header(payload.len(), 0);
+        let len = size_of::<OutHeader>() + payload.len();
+        let mut reply = Vec::with_capacity(len);
+        let header = OutHeader { len: len as u32, error: 0, unique: self.unique };
+        reply.extend_from_slice(header.as_bytes());
         reply.extend_from_slice(payload);
         reply
     }
 
     fn error(&self, errno: Errno) -> Vec<u8> {
-        self.header(0, -errno.raw())
-    }
-
-    fn header(&self, payload_len: usize, error: i32) -> Vec<u8> {
-        let len = (size_of::<OutHeader>() + payload_len) as u32;
-        OutHeader { len, error, unique: self.unique }.as_bytes().to_vec()
+        let len = size_of::<OutHeader>() as u32;
+        OutHeader { len, error: -errno.raw(), unique: self.unique }.as_bytes().to_vec()
     }
 }
 

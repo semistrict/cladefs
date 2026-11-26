@@ -4,6 +4,15 @@
 [build]
 rustflags = ["-Cforce-frame-pointers=yes"]
 
+# cladefs: rustc 1.100.0 already defaults to its bundled rust-lld on x86_64-unknown-linux-gnu, but
+# aarch64-unknown-linux-gnu still falls back to GNU ld.bfd (2.0-3.0 GiB private RssAnon and >60 s
+# per debug link on 16 KiB pages, OOM-killing 10 GiB slices under concurrent cargo jobs;
+# -Clinker-features=+lld is still unstable). Use system lld (installed by scripts/host-packages.txt)
+# on Linux arm64 gnu, repeating -Cforce-frame-pointers=yes because [target.<triple>].rustflags
+# overrides [build].rustflags rather than appending to it.
+[target.aarch64-unknown-linux-gnu]
+rustflags = ["-Cforce-frame-pointers=yes", "-Clink-arg=-fuse-ld=lld"]
+
 # cladefs: the extent daemons tests start, in their processes or as processes of their own, leave no
 # headroom of the host's memory (cladefs::cladefsd::governor::headroom), so that the host's memory
 # full, which makes a daemon refuse cells (governor::full, board 5662), is its last 256 MiB (the

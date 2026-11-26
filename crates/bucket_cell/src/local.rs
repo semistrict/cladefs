@@ -188,6 +188,56 @@ impl Local {
         let opts = PutOptions { mode: PutMode::Overwrite, ..opts };
         self.files.put_opts(location, payload, opts).await
     }
+    /// cladefs: appends `bytes` to `location` at exact byte `offset` under the directory lock
+    /// (doc-29): `offset == 0` creates the object if absent (failing with `Precondition` if it
+    /// already exists), and `offset > 0` verifies the current length matches `offset` before
+    /// publishing the concatenated object atomically.
+    pub async fn append(&self, location: &Path, offset: u64, bytes: bytes::Bytes) -> Result<u64> {
+        let location = location.clone();
+        let lock = lock_of(location.as_ref());
+        self.locked_write(vec![lock], move |this| async move {
+            if offset == 0 {
+                match this.files.head(&location).await {
+                    Ok(_) => {
+                        return Err(object_store::Error::Precondition {
+                            path: location.to_string(),
+                            source: "object already exists at offset 0".into(),
+                        });
+                    }
+                    Err(object_store::Error::NotFound { .. }) => {}
+                    Err(other) => return Err(other),
+                }
+                let new_len = bytes.len() as u64;
+                let opts = PutOptions { mode: PutMode::Create, ..PutOptions::default() };
+                this.files.put_opts(&location, PutPayload::from(bytes), opts).await?;
+                return Ok(new_len);
+            }
+            let existing = match this.files.get_opts(&location, GetOptions::default()).await {
+                Ok(got) => got.bytes().await?,
+                Err(object_store::Error::NotFound { .. }) => {
+                    return Err(object_store::Error::Precondition {
+                        path: location.to_string(),
+                        source: format!("missing object for append at offset {offset}").into(),
+                    });
+                }
+                Err(other) => return Err(other),
+            };
+            if existing.len() as u64 != offset {
+                return Err(object_store::Error::Precondition {
+                    path: location.to_string(),
+                    source: format!("length {} is not offset {offset}", existing.len()).into(),
+                });
+            }
+            let mut combined = Vec::with_capacity(existing.len() + bytes.len());
+            combined.extend_from_slice(&existing);
+            combined.extend_from_slice(&bytes);
+            let new_len = combined.len() as u64;
+            let opts = PutOptions { mode: PutMode::Overwrite, ..PutOptions::default() };
+            this.files.put_opts(&location, PutPayload::from(combined), opts).await?;
+            Ok(new_len)
+        })
+        .await
+    }
 }
 
 /// The lock file `path`, locked, by blocking the calling thread: held until it is dropped.

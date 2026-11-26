@@ -282,7 +282,7 @@ _Avoid_: clone (git's alone), restore (a VM snapshot's alone)
 The cell a fork came from, and the cell it made. Dropping a version that has children keeps its data until they go.
 
 **Ephemeral cell**:
-A child kept on one host's disk alone, never uploaded, with no versions of its own: its parent's version its lower layer, its own extents raw in its directory (doc-25). It survives what keeps the host's disk, and moves to another host only by hand-over. Its reference in the parent's bucket names its host's incarnation.
+A host-local cell kept on one host's disk alone, never uploaded, with no versions of its own (doc-25): either forked from a parent version in a bucket (its parent's version its lower layer, held by a reference naming its host's incarnation) or standalone (parentless, e.g. a host-local ephemeral memory cell with no bucket reference). It survives what keeps the host's disk, supports host-local in-place suspend/resume, and (when forked) moves to another host only by hand-over.
 _Avoid_: local cell (`local_cell` is the extent store's crate, Local a level), scratch, overlay, upper
 
 **Hand over**:
@@ -414,6 +414,10 @@ _Avoid_: durable, durable locally
 **Replicated**:
 A commit on the disks of f+1 of its configuration's 2f+1 members, the writer's counting as one (doc-21); between Local and Uploaded, and released by Uploaded too.
 _Avoid_: durable, quorum-committed
+
+**Fast WAL**:
+A commit appended via an offset-checked write to an appendable zonal object store (`tenants/<T>/cells/<C>/wal/<epoch>/<segment>`, Amazon S3 Express One Zone today, GCS Rapid Storage via gRPC `BidiWriteObject` planned, doc-29), or acknowledged in the cold regional bucket. Compute nodes stay stateless cache-only with zero local disk `fsync`s; large extents (`>= 256 KiB` by default) upload directly to the cold regional bucket before referencing them metadata-only in the fast WAL.
+_Avoid_: zonal log, express WAL (say Fast WAL)
 
 **Uploaded**:
 A commit whose segments the bucket has acknowledged.

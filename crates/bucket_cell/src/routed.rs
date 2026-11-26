@@ -314,6 +314,12 @@ impl<B: Bucket> Bucket for RoutedBucket<B> {
         self.route.as_ref().map(|_| self as &dyn crate::mirror::Here)
     }
 
+    fn ephemeral_buckets(
+        &self,
+    ) -> Option<crate::bucket::BucketFuture<'_, Result<BTreeSet<u16>, crate::Error>>> {
+        Some(Box::pin(self.ephemeral_buckets()))
+    }
+
     async fn get(&self, key: &str) -> Result<Object, Error> {
         // cladefs: the cell's bucket asked only where the mirror copied not what is asked, never
         // as this bucket fails (board 8547): its failure is the read's, asked again as it is.
@@ -394,6 +400,13 @@ impl<B: Bucket> Bucket for RoutedBucket<B> {
         match self.member(key).await? {
             Some(member) => member.put(key, bytes, mode).await,
             None => self.home.put(key, bytes, mode).await,
+        }
+    }
+
+    async fn append(&self, key: &str, offset: u64, bytes: crate::Bytes) -> Result<u64, Error> {
+        match self.member(key).await? {
+            Some(member) => member.append(key, offset, bytes).await,
+            None => self.home.append(key, offset, bytes).await,
         }
     }
 
@@ -856,6 +869,315 @@ mod tests {
             let late = block_on(lifecycle::refer_ephemeral(&one, origin(9), incarnation, child(9)));
             assert_eq!(late, Err(crate::Error::Decommissioned(incarnation)));
             assert_eq!(held(3), (0, 0, 1 + home_named(3)), "taken back");
+
+            // Board 9966 AC #1: a bucket added after decommissioning copies the root's tombstones
+            // (and not active ephemeral index entries of other incarnations) before writing its
+            // identity, so referring the decommissioned incarnation against a parent there is
+            // refused with `Error::Decommissioned`.
+            let active_incarnation = incarnation + 2;
+            let root_parent = CellId { tenant: 1, id: 1 << 48 | 7 };
+            let root_origin = Origin { parent: root_parent, at: 7, epoch: 1 };
+            block_on(lifecycle::refer_ephemeral(&one, root_origin, active_incarnation, child(10)))
+                .unwrap();
+
+            let bucket4 = Arc::new(Scripted::new(""));
+            block_on(async {
+                let details = crate::identity::Details::default();
+                let root = &buckets[&1].objects;
+                let (id4, registry) =
+                    crate::identity::add(root, &details, &bucket4.objects, details.clone())
+                        .await
+                        .unwrap();
+                assert_eq!(id4.number, 4);
+                crate::identity::spread(&registry, &bucket4.objects).await.unwrap();
+            });
+            let mut buckets_with_4 = buckets.clone();
+            buckets_with_4.insert(4, bucket4);
+            let held4 = || {
+                let listed = block_on(buckets_with_4[&4].objects.list("")).unwrap();
+                let count = |of: fn(&Kind) -> bool| {
+                    listed.iter().filter(|meta| of(&layout::kind(&meta.key))).count()
+                };
+                (
+                    count(|kind| matches!(kind, Kind::Ephemeral { .. })),
+                    count(|kind| matches!(kind, Kind::EphemeralIndex { .. })),
+                    count(|kind| matches!(kind, Kind::Decommissioned { .. })),
+                )
+            };
+            assert_eq!(held4(), (0, 0, 1), "root tombstone copied, active index entry not copied");
+            let one_with_4 = RoutedBucket::new(
+                buckets_with_4[&1].clone(),
+                Arc::new(Members(buckets_with_4.clone())),
+            );
+            let parent4 = CellId { tenant: 1, id: 4 << 48 | 1 };
+            let origin4 = Origin { parent: parent4, at: 7, epoch: 1 };
+            let refused4 =
+                block_on(lifecycle::refer_ephemeral(&one_with_4, origin4, incarnation, child(11)));
+            assert_eq!(refused4, Err(crate::Error::Decommissioned(incarnation)));
+            assert_eq!(held4(), (0, 0, 1), "taken back in bucket 4");
+            let allowed4 = block_on(lifecycle::refer_ephemeral(
+                &one_with_4,
+                origin4,
+                active_incarnation,
+                child(12),
+            ));
+            assert_eq!(allowed4, Ok(()), "active incarnation may still refer in bucket 4");
         }
+    }
+
+    /// Resolver that verifies each member bucket's identity object matches the root's registry,
+    /// like `Registered::reach`, so routing to a bucket whose `identity::add` has updated
+    /// `root/buckets` but not yet written `new/identity` fails with `Mismatched` (and retries).
+    struct VerifyingMembers<B: Bucket> {
+        root: Arc<B>,
+        members: BTreeMap<u16, Arc<B>>,
+    }
+
+    impl<B: Bucket> Resolve<B> for VerifyingMembers<B> {
+        fn open<'a>(
+            &'a self,
+            _: &'a B,
+            number: u16,
+        ) -> futures::future::BoxFuture<'a, Result<Arc<B>, crate::Error>> {
+            let member = self.members.get(&number).cloned();
+            let root = self.root.clone();
+            Box::pin(async move {
+                let member = member.ok_or(crate::Error::NoBucket(number))?;
+                let registry = crate::identity::registry_once(&*root)
+                    .await?
+                    .ok_or(crate::Error::NoBucket(number))?;
+                let entry = registry.bucket(number).ok_or(crate::Error::NoBucket(number))?;
+                crate::identity::verified(entry, crate::identity::get_once(&*member).await?)?;
+                Ok(member)
+            })
+        }
+    }
+
+    /// Board 9966 AC #2: a bucket added concurrently with `lifecycle::decommission` ends up with
+    /// the incarnation's tombstone and any ephemeral references written there are retired, across
+    /// both orderings of the root Dekker barrier and even when decommissioning runs through a
+    /// non-root daemon whose local registry copy has not received the new bucket yet.
+    #[test]
+    fn bucket_added_concurrently_with_decommission_is_tombstoned_and_retired() {
+        use crate::layout::{CellId, Kind, Origin};
+        use crate::lifecycle::{self, Decommissioned};
+        use crate::testing::Fault;
+        use std::task::{Context, Poll};
+
+        let incarnation = 0x3b;
+        let parent3 = CellId { tenant: 1, id: 3 << 48 | 1 };
+        let origin3 = Origin { parent: parent3, at: 7, epoch: 1 };
+        let child = |n: u64| CellId { tenant: 1, id: 1 << 48 | 0x200 | n };
+
+        let count_kinds = |bucket: &Direct| {
+            let listed = block_on(bucket.list("")).unwrap();
+            let count = |of: fn(&Kind) -> bool| {
+                listed.iter().filter(|meta| of(&layout::kind(&meta.key))).count()
+            };
+            (
+                count(|kind| matches!(kind, Kind::Ephemeral { .. })),
+                count(|kind| matches!(kind, Kind::EphemeralIndex { .. })),
+                count(|kind| matches!(kind, Kind::Decommissioned { .. })),
+            )
+        };
+
+        // Interleaving 1: `identity::add` updates `root/buckets`, lists root tombstones before
+        // `decommission` writes the root tombstone (copying none), and finishes writing bucket 3's
+        // identity without spreading the registry to bucket 2; a live host refers in bucket 3;
+        // then `decommission` runs from `routed(decommissioner)` with the stale pre-add bucket set
+        // `{0, 1, 2}` (and also with `ROOT` omitted on a separate check). Its re-read of the root
+        // registry discovers bucket 3, tombstones it, and retires the reference there.
+        for (decommissioner, omit_root) in [(1, false), (2, false), (2, true)] {
+            let buckets: BTreeMap<u16, Arc<Scripted>> =
+                [1, 2, 3].into_iter().map(|n| (n, Arc::new(Scripted::new("")))).collect();
+            let details = crate::identity::Details::default();
+            block_on(async {
+                let root = &buckets[&1].objects;
+                crate::identity::format(root, &details).await.unwrap();
+                let (id2, reg2) =
+                    crate::identity::add(root, &details, &buckets[&2].objects, details.clone())
+                        .await
+                        .unwrap();
+                assert_eq!(id2.number, 2);
+                // Spread reg2 (only {1, 2}) to bucket 2; never spread bucket 3 to bucket 2.
+                crate::identity::spread(&reg2, &buckets[&2].objects).await.unwrap();
+            });
+            let routed = |home: u16| {
+                RoutedBucket::new(
+                    buckets[&home].clone(),
+                    Arc::new(VerifyingMembers {
+                        root: buckets[&1].clone(),
+                        members: buckets.clone(),
+                    }),
+                )
+            };
+            let through = routed(decommissioner);
+            let mut stale_numbers = block_on(through.ephemeral_buckets()).unwrap();
+            assert_eq!(stale_numbers, BTreeSet::from([crate::identity::NAMED, 1, 2]));
+            if omit_root {
+                stale_numbers.remove(&crate::identity::ROOT);
+            }
+
+            // Concurrent `identity::add` of bucket 3 finishes before `decommission` writes any
+            // tombstone, leaving bucket 2's registry copy stale at {1, 2}.
+            block_on(async {
+                let (id3, _) = crate::identity::add(
+                    &buckets[&1].objects,
+                    &details,
+                    &buckets[&3].objects,
+                    details.clone(),
+                )
+                .await
+                .unwrap();
+                assert_eq!(id3.number, 3);
+            });
+            assert_eq!(count_kinds(&buckets[&3].objects), (0, 0, 0));
+
+            // A live host of `incarnation` forks from a parent in bucket 3 before decommission
+            // reaches bucket 3.
+            let one = routed(1);
+            block_on(lifecycle::refer_ephemeral(&one, origin3, incarnation, child(1))).unwrap();
+            assert_eq!(count_kinds(&buckets[&3].objects), (1, 1, 0));
+
+            let done =
+                block_on(lifecycle::decommission(&through, &stale_numbers, incarnation, 100))
+                    .unwrap();
+            assert_eq!(done, Decommissioned { retired: 1, left: 0 });
+            assert_eq!(count_kinds(&buckets[&3].objects), (0, 0, 1));
+            let refused =
+                block_on(lifecycle::refer_ephemeral(&one, origin3, incarnation, child(2)));
+            assert_eq!(refused, Err(crate::Error::Decommissioned(incarnation)));
+            assert_eq!(count_kinds(&buckets[&3].objects), (0, 0, 1));
+        }
+
+        // Interleaving 2: true mid-flight overlap on `SimBucket` — `identity::add` updates
+        // `root/buckets` and pauses before listing root tombstones and before writing bucket 3's
+        // identity; `decommission` (from non-root bucket 2, with stale `{0, 1, 2}`) writes root's
+        // tombstone, re-reads root's registry, sees bucket 3, and hits `Mismatched` -> retries
+        // until `identity::add` copies the root tombstone and writes bucket 3's identity.
+        let sim1 = SimBucket::new();
+        let sim2 = SimBucket::new();
+        let sim3 = SimBucket::new();
+        let details = crate::identity::Details::default();
+        block_on(async {
+            let (d1, d2) = (Direct(sim1.clone()), Direct(sim2.clone()));
+            crate::identity::format(&d1, &details).await.unwrap();
+            let (_, reg2) =
+                crate::identity::add(&d1, &details, &d2, details.clone()).await.unwrap();
+            crate::identity::spread(&reg2, &d2).await.unwrap();
+        });
+        let members = BTreeMap::from([(1, sim1.clone()), (2, sim2.clone()), (3, sim3.clone())]);
+        let through = RoutedBucket::new(
+            sim2.clone(),
+            Arc::new(VerifyingMembers { root: sim1.clone(), members: members.clone() }),
+        );
+        let stale_numbers = BTreeSet::from([crate::identity::NAMED, 1, 2]);
+
+        let mut add_fut = Box::pin(crate::identity::add(&*sim1, &details, &*sim3, details.clone()));
+        let mut dec_fut =
+            Box::pin(lifecycle::decommission(&through, &stale_numbers, incarnation, 100));
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // Step `add_fut` until it has updated `root/buckets` and enqueued the `list-delimited`
+        // of `ephemeral_hosts(ROOT)` (holding that listing in `sim1`'s queue).
+        let list_root_tombstones =
+            format!("list-delimited {}", layout::ephemeral_hosts(crate::identity::ROOT));
+        loop {
+            assert!(add_fut.as_mut().poll(&mut cx).is_pending());
+            let held = (0..sim1.waiting()).any(|i| sim1.describe(i) == list_root_tombstones);
+            if held {
+                break;
+            }
+            for sim in [&sim1, &sim2, &sim3] {
+                if sim.waiting() > 0 {
+                    sim.complete(0, Fault::None);
+                }
+            }
+        }
+        assert!(sim3.waiting() == 0, "bucket 3 identity not written yet");
+
+        // Now step `dec_fut` while holding `add_fut`'s `list-delimited` on `sim1`: `dec_fut`
+        // writes the root tombstone, re-reads `root/buckets`, discovers bucket 3, and observes
+        // bucket 3 missing `identity` (retrying via `Unavailable`).
+        let mut saw_bucket3_identity_probe = false;
+        for _ in 0..64 {
+            assert!(dec_fut.as_mut().poll(&mut cx).is_pending());
+            let mut progressed = false;
+            for idx in 0..sim1.waiting() {
+                if sim1.describe(idx) != list_root_tombstones {
+                    sim1.complete(idx, Fault::None);
+                    progressed = true;
+                    break;
+                }
+            }
+            if sim2.waiting() > 0 {
+                sim2.complete(0, Fault::None);
+                progressed = true;
+            }
+            if sim3.waiting() > 0 {
+                if sim3.describe(0).contains(layout::IDENTITY) {
+                    saw_bucket3_identity_probe = true;
+                }
+                sim3.complete(0, Fault::None);
+                progressed = true;
+            }
+            if saw_bucket3_identity_probe || !progressed {
+                break;
+            }
+        }
+        assert!(
+            saw_bucket3_identity_probe,
+            "decommission re-read root registry and probed bucket 3"
+        );
+
+        // Now release all requests and drive both futures to completion.
+        let mut add_done = None;
+        let mut dec_done = None;
+        for _ in 0..500 {
+            if add_done.is_none()
+                && let Poll::Ready(res) = add_fut.as_mut().poll(&mut cx)
+            {
+                add_done = Some(res);
+            }
+            if dec_done.is_none()
+                && let Poll::Ready(res) = dec_fut.as_mut().poll(&mut cx)
+            {
+                dec_done = Some(res);
+            }
+            if add_done.is_some() && dec_done.is_some() {
+                break;
+            }
+            for sim in [&sim1, &sim2, &sim3] {
+                while sim.waiting() > 0 {
+                    sim.complete(0, Fault::None);
+                }
+            }
+        }
+        let (id3, _) = add_done.expect("add finished").unwrap();
+        assert_eq!(id3.number, 3);
+        assert_eq!(
+            dec_done.expect("decommission finished").unwrap(),
+            Decommissioned { retired: 0, left: 0 }
+        );
+        drop(add_fut);
+        drop(dec_fut);
+        assert_eq!(count_kinds(&Direct(sim3.clone())), (0, 0, 1));
+
+        let one = RoutedBucket::new(
+            Arc::new(Direct(sim1.clone())),
+            Arc::new(VerifyingMembers {
+                root: Arc::new(Direct(sim1.clone())),
+                members: BTreeMap::from([
+                    (1, Arc::new(Direct(sim1))),
+                    (2, Arc::new(Direct(sim2))),
+                    (3, Arc::new(Direct(sim3))),
+                ]),
+            }),
+        );
+        assert_eq!(
+            block_on(lifecycle::refer_ephemeral(&one, origin3, incarnation, child(3))),
+            Err(crate::Error::Decommissioned(incarnation))
+        );
     }
 }

@@ -8,7 +8,9 @@
 use super::Daemon;
 use crate::Errno;
 use bucket_cell::cache::Cache;
-use bucket_cell::object_bucket::RoutedBucket;
+use bucket_cell::object_bucket::{ObjectBucket, RoutedBucket};
+use futures::future::{BoxFuture, FutureExt as _};
+use local_cell::fast_wal::{DEFAULT_LARGE_EXTENT, FastWalConfig, FastWalOpener};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -72,6 +74,16 @@ pub(super) fn upload_interval() -> std::time::Duration {
         return std::time::Duration::MAX;
     }
     local_cell::upload::Options::default().interval
+}
+
+/// Whether closed segments wake cell uploaders immediately without waiting for `upload_interval`:
+/// true in production, false when a test paused background uploads via [`uploads_when_asked`].
+pub(super) fn upload_closed() -> bool {
+    #[cfg(test)]
+    if UPLOADS_WHEN_ASKED.load(std::sync::atomic::Ordering::Relaxed) {
+        return false;
+    }
+    true
 }
 
 /// Makes `bucket` `daemon`'s, before any cell opens: for tests that put themselves between the
@@ -374,6 +386,162 @@ pub(super) fn open_part_cache(daemon: &Daemon) -> Result<Option<Arc<Cache>>, Str
     Ok(opened.insert(cache).clone())
 }
 
+/// Opener for cross-AZ fast WAL buckets named in a prior epoch's `head.fast_wal.active` (doc-29).
+/// Validates every URL against the host's explicit allowlist (`CLADEFSD_FAST_WAL_BUCKET` plus
+/// optional `CLADEFSD_FAST_WAL_ALLOWED_BUCKETS`) before opening or probing so a corrupted or
+/// hostile cold head can never direct takeover to an untrusted endpoint or local path.
+struct UrlFastWalOpener {
+    allowed: Vec<String>,
+}
+
+impl FastWalOpener for UrlFastWalOpener {
+    fn is_allowed(&self, url: &str) -> Result<(), String> {
+        if self.allowed.iter().any(|allowed| allowed == url) {
+            return Ok(());
+        }
+        Err(format!(
+            "refusing untrusted fast WAL bucket {url:?} from cell head (add to \
+             CLADEFSD_FAST_WAL_ALLOWED_BUCKETS for cross-AZ takeover)"
+        ))
+    }
+
+    fn open(&self, url: &str) -> BoxFuture<'static, Result<Arc<ObjectBucket>, String>> {
+        if let Err(msg) = self.is_allowed(url) {
+            return async move { Err(msg) }.boxed();
+        }
+        let url = url.to_owned();
+        async move {
+            let bucket = Arc::new(ObjectBucket::from_url(&url)?);
+            bucket.probed_append(rand::random()).await?;
+            Ok(bucket)
+        }
+        .boxed()
+    }
+}
+
+/// Parses `CLADEFSD_FAST_WAL_BUCKET`, optional `CLADEFSD_FAST_WAL_LARGE_EXTENT_BYTES`, and
+/// optional comma-separated `CLADEFSD_FAST_WAL_ALLOWED_BUCKETS` (doc-29).
+pub fn fast_wal_env() -> Result<Option<(String, u64, Vec<String>)>, String> {
+    let set = |var| node_local::env::var_os(var).filter(|value| !value.is_empty());
+    let bucket = match set("CLADEFSD_FAST_WAL_BUCKET") {
+        Some(url) => match url.into_string() {
+            Ok(url) => Some(url),
+            Err(url) => {
+                return Err(format!("CLADEFSD_FAST_WAL_BUCKET must be valid UTF-8: {url:?}"));
+            }
+        },
+        None => None,
+    };
+    let large_extent = match set("CLADEFSD_FAST_WAL_LARGE_EXTENT_BYTES") {
+        None => DEFAULT_LARGE_EXTENT,
+        Some(_) if bucket.is_none() => {
+            return Err(
+                "CLADEFSD_FAST_WAL_LARGE_EXTENT_BYTES is set, but CLADEFSD_FAST_WAL_BUCKET names \
+                 no bucket"
+                    .to_owned(),
+            );
+        }
+        // Not UTF-8, or not a number: refused below.
+        Some(bytes) => match bytes.to_str().and_then(|bytes| bytes.parse().ok()) {
+            Some(0) | None => {
+                return Err(format!(
+                    "CLADEFSD_FAST_WAL_LARGE_EXTENT_BYTES must be a positive number of bytes: \
+                     {bytes:?}"
+                ));
+            }
+            Some(bytes) => bytes,
+        },
+    };
+    let mut allowed: Vec<String> = bucket.iter().cloned().collect();
+    if let Some(extra) = set("CLADEFSD_FAST_WAL_ALLOWED_BUCKETS") {
+        if bucket.is_none() {
+            return Err(
+                "CLADEFSD_FAST_WAL_ALLOWED_BUCKETS is set, but CLADEFSD_FAST_WAL_BUCKET names no \
+                 bucket"
+                    .to_owned(),
+            );
+        }
+        let extra = extra.into_string().map_err(|raw| {
+            format!("CLADEFSD_FAST_WAL_ALLOWED_BUCKETS must be valid UTF-8: {raw:?}")
+        })?;
+        for entry in extra.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            if !allowed.iter().any(|existing| existing == entry) {
+                allowed.push(entry.to_owned());
+            }
+        }
+    }
+    Ok(bucket.map(|url| (url, large_extent, allowed)))
+}
+
+/// Opens and append-probes `daemon`'s fast WAL bucket at boot, failing hard if the backend does
+/// not honor offset-checked appends (doc-29).
+pub(super) async fn open_fast_wal(daemon: &Daemon) -> Result<Option<(FastWalConfig, u64)>, String> {
+    if let Some(found) =
+        daemon.fast_wal.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+    {
+        return Ok(found);
+    }
+    let Some((url, large_extent, allowed)) = fast_wal_env()? else {
+        *daemon.fast_wal.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(None);
+        return Ok(None);
+    };
+    let bucket = Arc::new(
+        ObjectBucket::from_url(&url)
+            .map_err(|err| format!("CLADEFSD_FAST_WAL_BUCKET: {url}: {err}"))?,
+    );
+    bucket
+        .probed_append(rand::random())
+        .await
+        .map_err(|err| format!("CLADEFSD_FAST_WAL_BUCKET: {url}: {err}"))?;
+    let config = FastWalConfig::new(url, bucket, Arc::new(UrlFastWalOpener { allowed }));
+    let mut slot = daemon.fast_wal.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    Ok(slot.get_or_insert(Some((config, large_extent))).clone())
+}
+
+/// Returns `daemon`'s fast WAL configuration, opening and probing lazily if `boot_daemon` did not
+/// run (e.g. control API tests).
+pub(super) fn fast_wal_config(daemon: &Daemon) -> Result<Option<(FastWalConfig, u64)>, Errno> {
+    if let Some(found) =
+        daemon.fast_wal.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+    {
+        return Ok(found);
+    }
+    let Some((url, large_extent, allowed)) = fast_wal_env().map_err(|err| {
+        log::error!("cladefsd: {err}");
+        Errno::EINVAL
+    })?
+    else {
+        *daemon.fast_wal.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(None);
+        return Ok(None);
+    };
+    let bucket = Arc::new(ObjectBucket::from_url(&url).map_err(|err| {
+        log::error!("cladefsd: CLADEFSD_FAST_WAL_BUCKET: {url}: {err}");
+        Errno::EIO
+    })?);
+    let probed = local_cell::upload::block_on_host(
+        daemon.host.local(),
+        bucket.probed_append(rand::random()),
+    )
+    .map_err(|err| {
+        log::error!("cladefsd: CLADEFSD_FAST_WAL_BUCKET: {err}");
+        Errno::EIO
+    })?;
+    if let Err(err) = probed {
+        log::error!("cladefsd: CLADEFSD_FAST_WAL_BUCKET: {url}: {err}");
+        return Err(Errno::EIO);
+    }
+    let config = FastWalConfig::new(url, bucket, Arc::new(UrlFastWalOpener { allowed }));
+    let mut slot = daemon.fast_wal.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    Ok(slot.get_or_insert(Some((config, large_extent))).clone())
+}
+
+/// Injects `config` as `daemon`'s fast WAL bucket before any cell opens (tests and `madsim`).
+#[cfg(any(test, madsim))]
+pub(super) fn use_fast_wal_on(daemon: &Daemon, config: FastWalConfig, large_extent: u64) {
+    let mut slot = daemon.fast_wal.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    *slot = Some(Some((config, large_extent)));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -480,5 +648,56 @@ mod tests {
         let mut expanded = expand_part_cache_dirs_best_effort(&mixed);
         expanded.sort();
         assert_eq!(expanded, vec![d0, d1]);
+    }
+
+    /// doc-29: a persisted `head.fast_wal.active.bucket` URL is untrusted until matched against the
+    /// daemon's configured allowlist (`CLADEFSD_FAST_WAL_BUCKET` + `CLADEFSD_FAST_WAL_ALLOWED_BUCKETS`).
+    #[test]
+    fn url_fast_wal_opener_refuses_untrusted_bucket_urls() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let opener = UrlFastWalOpener {
+            allowed: vec![
+                "s3://fast-az1--use1-az4--x-s3".to_owned(),
+                "s3://fast-az2--use1-az5--x-s3".to_owned(),
+            ],
+        };
+        assert!(
+            opener
+                .is_allowed("file:///tmp/untrusted-fast-wal")
+                .unwrap_err()
+                .contains("refusing untrusted fast WAL bucket")
+        );
+        assert!(opener.is_allowed("s3://fast-az2--use1-az5--x-s3").is_ok());
+        let err = rt
+            .block_on(opener.open("file:///tmp/untrusted-fast-wal"))
+            .err()
+            .expect("untrusted local file URL must be refused");
+        assert!(err.contains("refusing untrusted fast WAL bucket"), "err={err}");
+        let err = rt
+            .block_on(opener.open("s3://other-zone--use1-az6--x-s3"))
+            .err()
+            .expect("unlisted zonal bucket URL must be refused");
+        assert!(err.contains("CLADEFSD_FAST_WAL_ALLOWED_BUCKETS"), "err={err}");
+
+        // Verify `fast_wal_env` parses the allowlist and deduplicates the primary bucket.
+        // SAFETY: nextest runs each test in its own process.
+        unsafe {
+            std::env::set_var("CLADEFSD_FAST_WAL_BUCKET", "s3://fast-az1--use1-az4--x-s3");
+            std::env::set_var(
+                "CLADEFSD_FAST_WAL_ALLOWED_BUCKETS",
+                "s3://fast-az1--use1-az4--x-s3, s3://fast-az2--use1-az5--x-s3 ,",
+            );
+            std::env::remove_var("CLADEFSD_FAST_WAL_LARGE_EXTENT_BYTES");
+        }
+        let parsed = fast_wal_env().unwrap().unwrap();
+        assert_eq!(parsed.0, "s3://fast-az1--use1-az4--x-s3");
+        assert_eq!(parsed.1, DEFAULT_LARGE_EXTENT);
+        assert_eq!(
+            parsed.2,
+            vec![
+                "s3://fast-az1--use1-az4--x-s3".to_owned(),
+                "s3://fast-az2--use1-az5--x-s3".to_owned(),
+            ]
+        );
     }
 }

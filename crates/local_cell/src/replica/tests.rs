@@ -497,12 +497,13 @@ fn logs_of_other_formats_are_refused_as_sent_and_as_held() {
     }
     // A segment's log headed `FXLG` and a version this build doesn't read: refused as sent.
     let mut newer = header.clone();
-    newer[4..8].copy_from_slice(&19u32.to_le_bytes());
+    let future = crate::layout::FORMAT.current + 1;
+    newer[4..8].copy_from_slice(&future.to_le_bytes());
     let dir = MemDir::new();
     let replicas = Replicas::open(dir.clone(), MOST).unwrap();
     let me = (CELL, key(1, 4), replicas.incarnation());
     let refusal = refused(replicas.append(me, log_of(1), 0, &newer));
-    assert_eq!(refusal, format(&at(2, 0), "FXLG\\x13\\x00\\x00\\x00"));
+    assert_eq!(refusal, format(&at(2, 0), &format!("{}", newer[..8].escape_ascii())));
 }
 
 /// Board 8449: a cell gone for good loses every promise, of `u64::MAX` too, durably, and holds 0

@@ -49,7 +49,7 @@ mod tail;
 mod testing;
 mod write_many;
 pub use dax::ExtentAccess;
-pub use write_many::FAIL_COMMITS;
+pub use write_many::{FAIL_COMMITS, WriteAttrs};
 
 /// How much data each transaction will cover when writing an attribute across batches. Pulled from
 /// `FLUSH_BATCH_SIZE` in paged_object_handle.rs.

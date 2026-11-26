@@ -1167,3 +1167,141 @@ fn ephemeral_cells_attach_to_fuse_without_uploading_to_the_bucket() {
 
     terminate(child, &m);
 }
+
+/// board 12313: a governed `cladefsd` serving FUSE cells scales `PartMemory` above the 64 MiB
+/// `RECENT` default so strided multi-file reads across >64 compressed 1 MiB parts unpack each part
+/// once instead of thrashing zstd decompression on every pass, stays within `AnonBudget`, and
+/// shrinks back to `<= RECENT` once all FUSE cells detach.
+#[test]
+fn fuse_strided_multi_file_reads_scale_part_memory_without_thrashing() {
+    use cladefs::cladefsd::{Daemon, process};
+    use std::os::unix::fs::FileExt as _;
+
+    const FILES: usize = 80; // 80 MiB > 64 MiB default RECENT
+    const FILE_SIZE: usize = 1 << 20;
+    const READ_LEN: usize = 16 << 10;
+
+    let dir = tempfile::tempdir().unwrap();
+    let bucket = dir.path().join("bucket");
+    let part_cache = dir.path().join("part-cache");
+    let cells = dir.path().join("cells");
+    let mountpoint = dir.path().join(".gvfs");
+    let control = dir.path().join("control.sock");
+    let vm_sock = dir.path().join("vm.sock");
+    std::fs::create_dir_all(&bucket).unwrap();
+    std::fs::create_dir_all(&part_cache).unwrap();
+    std::fs::create_dir_all(&mountpoint).unwrap();
+
+    let bucket_url = url::Url::from_directory_path(&bucket).unwrap().to_string();
+    // SAFETY: Single-threaded in this nextest process before starting the daemon runtime.
+    unsafe {
+        std::env::set_var("CLADEFSD_BUCKET", &bucket_url);
+        std::env::set_var("CLADEFSD_TOKEN", "1");
+        std::env::set_var("CLADEFSD_GRPC", &control);
+        std::env::set_var("CLADEFSD_MOUNT", &mountpoint);
+        std::env::set_var("CLADEFSD_MOUNT_STORES", &cells);
+        std::env::set_var("CLADEFSD_PART_CACHE", &part_cache);
+        std::env::set_var("CLADEFSD_PART_CACHE_BYTES", (2u64 << 30).to_string());
+        std::env::set_var(
+            "CLADEFS_MASTER_KEY",
+            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        );
+    }
+
+    let daemon = Daemon::process();
+    daemon.block_on(daemon.boot(&vm_sock, None)).expect("boot governed cladefsd");
+    let sock_s = control.to_str().unwrap();
+
+    let capacity = ((FILES as u64 + 64) << 20).to_string();
+    let cell_id = cladefsctl_mount(sock_s, &["create", "1", &capacity]).trim().to_owned();
+    let tenant_dir = "0000000000001";
+    let cell_mnt = mountpoint.join(tenant_dir).join(&cell_id);
+
+    // Populate 80 compressible 1 MiB files.
+    for i in 0..FILES {
+        let mut data = vec![0u8; FILE_SIZE];
+        for page in 0..(FILE_SIZE / 4096) {
+            let p = &mut data[page * 4096..(page + 1) * 4096];
+            let tag = ((i as u32) << 12) | (page as u32);
+            p[..4].copy_from_slice(&tag.to_le_bytes());
+            p[4..].fill((i ^ page) as u8);
+        }
+        std::fs::write(cell_mnt.join(format!("lib_{i:03}.rlib")), &data).unwrap();
+    }
+
+    // Detach, remove local cell dir, and re-attach so reads come from bucket segments through
+    // `bucket_cell::fetch::PartMemory` + `CLADEFSD_PART_CACHE`.
+    cladefsctl_mount(sock_s, &["detach", "1", &cell_id]);
+    std::fs::remove_dir_all(cells.join(tenant_dir).join(&cell_id)).unwrap();
+    cladefsctl_mount(sock_s, &["attach", "1", &cell_id]);
+
+    // Wait for the memory governor to observe the attached FUSE cell and scale PartMemory up.
+    let parts = bucket_cell::fetch::shared_parts();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while parts.limit() <= bucket_cell::fetch::RECENT {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "governor did not scale PartMemory above RECENT while FUSE cell attached (limit={})",
+            parts.limit()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    let handles: Vec<_> = (0..FILES)
+        .map(|i| std::fs::File::open(cell_mnt.join(format!("lib_{i:03}.rlib"))).unwrap())
+        .collect();
+
+    let mut buf = vec![0u8; READ_LEN];
+    // Pass 0: read offset 0 of all 80 files, unpacking each part into PartMemory.
+    let u0 = bucket_cell::fetch::unpacks();
+    for (i, f) in handles.iter().enumerate() {
+        f.read_exact_at(&mut buf, 0).unwrap();
+        assert_eq!(u32::from_le_bytes(buf[..4].try_into().unwrap()), (i as u32) << 12);
+    }
+    let pass0_unpacks = bucket_cell::fetch::unpacks() - u0;
+    assert!(
+        pass0_unpacks >= 60,
+        "expected compressed bucket parts to unpack on pass 0, got {pass0_unpacks}"
+    );
+
+    // Passes 1..4: read untouched sub-part offsets (256K, 512K, 768K) across all 80 files.
+    // Every offset misses the kernel FUSE page cache, so `cladefsd` must serve all 240 reads
+    // from `PartMemory` without re-decompressing parts (with the old 64 MiB LRU this thrashed
+    // ~240 extra zstd decompressions).
+    let u1 = bucket_cell::fetch::unpacks();
+    for pass in 1..4usize {
+        let off = pass * (256 << 10);
+        let page = off / 4096;
+        for (i, f) in handles.iter().enumerate() {
+            f.read_exact_at(&mut buf, off as u64).unwrap();
+            let expected = ((i as u32) << 12) | (page as u32);
+            assert_eq!(u32::from_le_bytes(buf[..4].try_into().unwrap()), expected);
+        }
+    }
+    let later_unpacks = bucket_cell::fetch::unpacks() - u1;
+    assert!(
+        later_unpacks <= 4,
+        "PartMemory thrashed across strided FUSE passes: {later_unpacks} extra zstd unpacks \
+         (pass0={pass0_unpacks}, parts={} MiB / limit={} MiB)",
+        parts.bytes() >> 20,
+        parts.limit() >> 20,
+    );
+
+    let sample = process::sample();
+    assert_eq!(sample.over_budget, 0, "FUSE PartMemory exceeded AnonBudget: {sample:?}");
+
+    drop(handles);
+    cladefsctl_mount(sock_s, &["detach", "1", &cell_id]);
+
+    // Once all FUSE cells detach, the governor shrinks PartMemory back to `<= RECENT`.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while parts.limit() > bucket_cell::fetch::RECENT {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "governor did not shrink PartMemory after FUSE cell detached (limit={})",
+            parts.limit()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let _ = daemon.block_on(daemon.drain(std::time::Duration::from_secs(30)));
+}

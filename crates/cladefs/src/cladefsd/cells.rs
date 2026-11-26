@@ -19,7 +19,7 @@
 
 use super::Daemon;
 use super::server::Connection;
-use super::storage::{daemon_bucket_on, part_cache, upload_interval};
+use super::storage::{daemon_bucket_on, part_cache, upload_closed, upload_interval};
 use crate::cell_table::{self, CellTable, Writer as _};
 use crate::open_cell::{Opening, release};
 use crate::pages::Arena;
@@ -480,6 +480,8 @@ pub(super) struct New {
     pub tenant: u64,
     /// Pre-allocated cell ID (for direct `DiskPool` placement without double-taking).
     pub cell: Option<CellId>,
+    /// Whether the new cell is a standalone host-local ephemeral cell (doc-25).
+    pub ephemeral: bool,
 }
 
 /// The cell at `path` on `daemon`, made as `new` says if given and it doesn't exist, keeping it in
@@ -496,7 +498,12 @@ pub(super) async fn open_cell_at(
     let open_cell = attached(daemon, path, async |keeping| {
         let opening = Opening::keeping_on(daemon.host.clone(), keeping).arena(own);
         match new {
-            Some(New { capacity, kind, tenant, cell })
+            Some(New { capacity, kind, tenant, ephemeral: true, .. })
+                if !local_cell::upload::blocking(|| host_fs::exists(&path)) =>
+            {
+                OpenCell::create_ephemeral_kind_with(path, capacity, (tenant, kind), opening).await
+            }
+            Some(New { capacity, kind, tenant, cell, ephemeral: false })
                 if !local_cell::upload::blocking(|| host_fs::exists(&path)) =>
             {
                 let of = match cell {
@@ -669,14 +676,21 @@ fn keeping(daemon: &Daemon) -> Result<local_cell::upload::Options, Errno> {
         log::error!("cladefsd: {err}");
         Errno::EINVAL
     })?;
+    let (fast_wal_config, fast_wal_large_extent) = match super::storage::fast_wal_config(daemon)? {
+        Some((config, large_extent)) => (Some(config), large_extent),
+        None => (None, local_cell::fast_wal::DEFAULT_LARGE_EXTENT),
+    };
     Ok(local_cell::upload::Options {
         cache,
         held,
         fetching: Some(crate::bucket::fetching_on(&daemon.host)),
         token,
         interval,
+        upload_closed: upload_closed(),
         members,
         replace_after,
+        fast_wal_config,
+        fast_wal_large_extent,
         ..Default::default()
     })
 }
@@ -733,12 +747,14 @@ pub(super) async fn create(
     path: PathBuf,
     capacity: u64,
     cell: CellId,
-    (token, kind, replication, force, upload_interval): (
+    (token, kind, replication, fast_wal, force, upload_interval, ephemeral): (
         Option<u64>,
         Kind,
         Option<bucket_cell::layout::Wish>,
+        Option<Option<bucket_cell::layout::Fsync>>,
         bool,
         Option<std::time::Duration>,
+        bool,
     ),
 ) -> Result<CellId, Errno> {
     // Let go of once the work is done.
@@ -754,6 +770,29 @@ pub(super) async fn create(
         Ok(())
     })
     .await?;
+    if ephemeral {
+        if cell.id != 0
+            || token.is_some()
+            || replication.is_some()
+            || fast_wal.is_some()
+            || force
+            || upload_interval.is_some()
+        {
+            return Err(Errno::EINVAL);
+        }
+        return attached(daemon, &path, async |keeping| {
+            OpenCell::create_ephemeral_closed_on(
+                &daemon.host,
+                &path,
+                capacity,
+                cell.tenant,
+                kind,
+                &keeping,
+            )
+            .await
+        })
+        .await;
+    }
     // cladefs: a cell of 0 is a new one, its ID, its cell's too, the bucket's to give: no
     // caller names a new cell; a cell named, one the bucket has, of a cell named (TASK-364).
     let of = match (cell.id, cell.id) {
@@ -761,12 +800,13 @@ pub(super) async fn create(
         (_, 0) | (0, _) => return Err(Errno::EINVAL),
         (_, _) => CellOf::Taken(cell),
     };
-    // cladefs: the replication its call asked for, which its taking gives the cell's head
-    // (doc-21, TASK-537.3.1); its taking forced, if asked (TASK-681); and any per-cell uploader
-    // interval override (hotbed question 534).
+    // cladefs: the replication or Fast WAL mode its call asked for, which its taking gives the
+    // cell's head (doc-21, doc-29, TASK-537.3.1); its taking forced, if asked (TASK-681); and any
+    // per-cell uploader interval override (hotbed question 534).
     let made = attached(daemon, &path, async |keeping| {
         let interval = upload_interval.unwrap_or(keeping.interval);
-        let keeping = local_cell::upload::Options { replication, force, interval, ..keeping };
+        let keeping =
+            local_cell::upload::Options { replication, fast_wal, force, interval, ..keeping };
         OpenCell::create_placed_on(&daemon.host, &path, (capacity, of, token), kind, keeping).await
     })
     .await?;
@@ -837,7 +877,11 @@ pub(super) async fn import_memory(
     file: PathBuf,
     tenant: u64,
     make_version: bool,
+    ephemeral: bool,
 ) -> Result<(CellId, Option<u64>), Errno> {
+    if ephemeral && make_version {
+        return Err(Errno::EINVAL);
+    }
     let _held = hold(daemon, &path).await?;
     let checked = path.clone();
     let host = daemon.host.clone();
@@ -856,6 +900,7 @@ pub(super) async fn import_memory(
         &file,
         tenant,
         make_version,
+        ephemeral,
         keeping,
     )
     .await
@@ -1517,7 +1562,7 @@ pub(super) async fn make_public(
 }
 
 /// What the cell at `path` is, and holds.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct CellState {
     pub cell: CellId,
     pub info: ExtentInfo,
@@ -1531,6 +1576,8 @@ pub(super) struct CellState {
     pub committed: u64,
     /// What its uploader has done and has left to do, if its commits upload now.
     pub upload: Option<local_cell::upload::UploadStatus>,
+    /// Whether this cell is a host-local ephemeral cell (doc-25).
+    pub ephemeral: bool,
 }
 
 /// What `open_cell` is, and holds; `open` if a connection has it open.
@@ -1543,6 +1590,7 @@ fn state_of(open_cell: &OpenCell, open: bool) -> Result<CellState, Errno> {
         open,
         committed: open_cell.committed()?,
         upload: open_cell.upload_status()?,
+        ephemeral: open_cell.is_ephemeral(),
     })
 }
 

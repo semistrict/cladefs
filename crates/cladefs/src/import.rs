@@ -132,11 +132,12 @@ pub async fn import_memory(
     let host = crate::Host::process();
     let keeping = crate::host_cell::keeping_on(host).map_err(Error::new)?;
     let tenant = crate::host_cell::DEFAULT_TENANT;
-    import_memory_keeping_on(host, path.as_ref(), file, tenant, make_version, keeping).await
+    import_memory_keeping_on(host, path.as_ref(), file, tenant, make_version, false, keeping).await
 }
 
 /// cladefs: makes a memory cell at `path` on `host` as [`import_memory`] does, of `tenant`'s, kept
-/// as `keeping` says (board 11222).
+/// as `keeping` says (board 11222); when `ephemeral` is true, creates a standalone host-local
+/// ephemeral memory cell with zero bucket uploads (`make_version` must be false).
 #[cfg_attr(not(any(target_os = "linux", madsim)), allow(dead_code))]
 pub(crate) async fn import_memory_keeping_on(
     host: &std::sync::Arc<crate::Host>,
@@ -144,8 +145,12 @@ pub(crate) async fn import_memory_keeping_on(
     file: &Path,
     tenant: u64,
     make_version: bool,
+    ephemeral: bool,
     keeping: local_cell::upload::Options,
 ) -> Result<(crate::CellId, Option<u64>), Error> {
+    if ephemeral && make_version {
+        return Err(Error::new(Errno::EINVAL).context("an ephemeral memory cell has no versions"));
+    }
     let page = crate::OpenCell::BLOCK_SIZE as u64;
     let source_path = file.to_owned();
     let (mut source, size) = local_cell::upload::blocking(move || -> Result<_, Error> {
@@ -179,14 +184,25 @@ pub(crate) async fn import_memory_keeping_on(
         return Err(Error::new(Errno::EEXIST));
     }
     let capacity = memory_capacity(size);
-    let storage = Storage::create_unmade_kind_keeping_on(
-        host,
-        path,
-        (capacity, tenant),
-        bucket_cell::cell::Kind::Memory,
-        keeping,
-    )
-    .await?;
+    let storage = if ephemeral {
+        Storage::create_unmade_ephemeral_kind_keeping_on(
+            host,
+            path,
+            (capacity, tenant),
+            bucket_cell::cell::Kind::Memory,
+            keeping,
+        )
+        .await?
+    } else {
+        Storage::create_unmade_kind_keeping_on(
+            host,
+            path,
+            (capacity, tenant),
+            bucket_cell::cell::Kind::Memory,
+            keeping,
+        )
+        .await?
+    };
     let unfinished = Unfinished { host: host.clone(), path: Some(path.to_owned()) };
     let (device, kind) = storage.into_parts();
     let open_cell = match kind {

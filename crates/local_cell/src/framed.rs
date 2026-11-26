@@ -424,37 +424,36 @@ impl<F> Packed<F> {
 
     /// The part, unpacked from `stored`, its stored bytes and any after them, read from its file,
     /// checked against its CRC, opened in place if encrypted (TASK-411.2), and kept in `unpacked`:
-    /// one stored compressed unpacked into what keeps it, rather than copied there (TASK-92.19);
-    /// one stored raw kept in the buffer it was read into, which a page-in reads all of, uncopied
-    /// (TASK-153.11).
+    /// one stored compressed unpacked into what keeps it (reusing an evicted `PartMemory` buffer
+    /// when full to avoid 1 MiB mmap/page-fault churn, board 12313), rather than copied there
+    /// (TASK-92.19); one stored raw kept in the buffer it was read into, which a page-in reads all
+    /// of, uncopied (TASK-153.11).
     pub(crate) fn unpack(
         &self,
         mut stored: Aligned,
         unpacked: &Unpacked,
-    ) -> Result<Arc<Aligned>, Error> {
+    ) -> Result<PartBytes, Error> {
         let len = self.part.len();
         debug_assert!(len <= PART);
-        let part = match self.stored().encoding {
+        let bytes = match self.stored().encoding {
             Encoding::Raw => {
                 // A raw part's stored bytes are as long as it is (`Frame::stored_in`).
                 self.part.open(stored.as_mut_slice()).map_err(unread)?;
-                stored.within(0, len as usize)
+                let part = stored.within(0, len as usize);
+                let held = part.held();
+                PartBytes::from_owned(Arc::new(part), held)
             }
             Encoding::Zstd => {
-                // Zeroed as it is allocated, not a byte at a time, as collecting an iterator is in
-                // a debug build, where a fork's opening spent seconds unpacking its base's parts
-                // so (TASK-92.17).
-                let mut part = Aligned::new(len as usize);
-                (self.part.unpack_into(stored.as_mut_slice(), part.as_mut_slice()))
-                    .map_err(unread)?;
+                let mut out = unpacked
+                    .take_spare_buf(len as usize)
+                    .unwrap_or_else(|| vec![0; len as usize].into_boxed_slice());
+                self.part.unpack_into(stored.as_mut_slice(), &mut out).map_err(unread)?;
                 UNPACKS.fetch_add(1, Ordering::Relaxed);
-                part
+                PartBytes::from_box(out)
             }
         };
-        let held = part.held();
-        let part = Arc::new(part);
-        unpacked.put(self.key, PartBytes::from_owned(part.clone(), held));
-        Ok(part)
+        unpacked.put(self.key, bytes.clone());
+        Ok(bytes)
     }
 }
 
@@ -568,6 +567,10 @@ impl Unpacked {
 
     fn put(&self, key: Key, bytes: PartBytes) {
         self.parts.put_local(key.0, key.1, bytes);
+    }
+
+    fn take_spare_buf(&self, len: usize) -> Option<Box<[u8]>> {
+        self.parts.take_spare_buf(len)
     }
 }
 

@@ -19,6 +19,15 @@ use zeroize::{Zeroize as _, Zeroizing};
 /// key.
 pub const KMS_VAR: &str = "CLADEFS_KMS";
 
+/// AWS credential variables replaced as a group by a numbered bucket (board 8485, board 9684).
+pub const AWS_CREDENTIAL_VARS: &[&str] = super::aws::CREDENTIAL_VARS;
+
+/// GCP credential variables replaced as a group by a numbered bucket (board 8485, board 9684).
+pub const GCP_CREDENTIAL_VARS: &[&str] = gcp::CREDENTIAL_VARS;
+
+/// Azure credential variables replaced as a group by a numbered bucket (board 8485, board 9684).
+pub const AZURE_CREDENTIAL_VARS: &[&str] = azure::CREDENTIAL_VARS;
+
 /// The variables a bucket's own replace the host's of as one: whichever of them a bucket sets, it
 /// takes none of the host's (board 8485 AC #4). The KMS's choice, then each real KMS's credentials,
 /// as its backend reads them: so that a bucket's own key id never meets the host's secret, nor a
@@ -26,13 +35,14 @@ pub const KMS_VAR: &str = "CLADEFS_KMS";
 const GROUPS: [&[&str]; 5] = [
     &[KMS_VAR, MASTER_KEY_VAR, MASTER_KEY_FILE_VAR],
     &[openbao::TOKEN_ENV, openbao::TOKEN_FILE_ENV],
-    gcp::CREDENTIAL_VARS,
-    azure::CREDENTIAL_VARS,
-    super::aws::CREDENTIAL_VARS,
+    GCP_CREDENTIAL_VARS,
+    AZURE_CREDENTIAL_VARS,
+    AWS_CREDENTIAL_VARS,
 ];
 
 /// The variables read besides: what a recorded KMS URL may reach ([`trust`]), each its own.
-const OTHERS: [&str; 2] = [trust::HOSTS_VAR, trust::LOCAL_VAR];
+const OTHERS: [&str; 4] =
+    [trust::HOSTS_VAR, trust::LOCAL_VAR, trust::GCP_PROJECTS_VAR, trust::AWS_ACCOUNTS_VAR];
 
 /// What starts each variable of a numbered bucket's own, before its number.
 const NUMBERED: &str = "CLADEFSD_BUCKET_";
@@ -154,7 +164,7 @@ fn kept(name: &str) -> bool {
 }
 
 /// `name` without a numbered bucket's prefix (`CLADEFSD_BUCKET_<digits>_`), if it has one.
-fn unnumbered(name: &str) -> &str {
+pub fn unnumbered(name: &str) -> &str {
     let numbered = name.strip_prefix(NUMBERED).and_then(|rest| {
         let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
         (digits > 0).then(|| rest[digits..].strip_prefix('_')).flatten()
@@ -211,6 +221,8 @@ mod tests {
             "GOOGLE_APPLICATION_CREDENTIALS",
             "AZURE_CLIENT_SECRET",
             "CLADEFSD_KMS_HOSTS",
+            "CLADEFSD_KMS_GCP_PROJECTS",
+            "CLADEFSD_KMS_AWS_ACCOUNTS",
             "CLADEFSD_BUCKET_0_CLADEFS_KMS",
             "CLADEFSD_BUCKET_2_AWS_ACCESS_KEY_ID",
             "CLADEFSD_BUCKET_65535_CLADEFS_KMS_AZURE_TOKEN",

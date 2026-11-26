@@ -235,13 +235,44 @@ pub async fn format(bucket: &impl Bucket, details: &Details) -> Result<Identity,
     Ok(identity)
 }
 
+/// How many decommissioned-host tombstones [`copy_tombstones`] writes into a newly added bucket at
+/// once.
+#[cfg(feature = "full")]
+const TOMBSTONES_AT_ONCE: usize = 16;
+
+/// cladefs: copies every decommissioned-host tombstone from the root bucket into `new`, numbered
+/// `number` (board 9966, hotbed question 543), using a delimited listing of
+/// [`layout::ephemeral_hosts`] so active ephemeral index entries under `<incarnation>/` are never
+/// scanned. Called after recording `new` in the root's registry and before writing `new`'s
+/// identity so it linearizes with concurrent [`crate::lifecycle::decommission`] calls, which write
+/// the root tombstone first and then re-read the root's registry.
+#[cfg(feature = "full")]
+async fn copy_tombstones(root: &impl Bucket, new: &impl Bucket, number: u16) -> Result<(), Error> {
+    use futures::StreamExt as _;
+    let listed = bucket::list_delimited(root, &layout::ephemeral_hosts(ROOT)).await?;
+    let keys: Vec<String> = listed
+        .objects
+        .iter()
+        .filter_map(|meta| layout::decommissioned_of(&meta.key))
+        .filter(|&(of, _)| of == ROOT)
+        .map(|(_, incarnation)| layout::decommissioned(number, incarnation))
+        .collect();
+    // Make the creates' futures first so a caller's future stays `Send`.
+    let creates: Vec<_> = keys.iter().map(|key| bucket::create(new, key, Vec::new())).collect();
+    let results: Vec<Result<_, bucket::Refused>> =
+        futures::stream::iter(creates).buffer_unordered(TOMBSTONES_AT_ONCE).collect().await;
+    results.into_iter().collect::<Result<Vec<_>, _>>()?;
+    Ok(())
+}
+
 /// Adds `new`, at `details.url`, to the buckets of the root bucket `root`, whose own details
 /// missing from its registry `root_details` gives: the next number, given by a conditional write of
-/// the root's registry, then its identity, of that number. Its identity, and the root's registry,
-/// which the caller copies to every bucket ([`spread`]). An addition that stopped short of `new`'s
-/// identity is finished by another of the same URL. `root` unformatted is formatted, the root;
-/// refused if it is another bucket ([`Error::NotRoot`]), as is `new` if it is a bucket already
-/// ([`Error::Formatted`]), or if no number is left ([`Error::NoNumbers`]).
+/// the root's registry, then the root's decommissioned-host tombstones copied into `new`
+/// (board 9966, hotbed question 543), then its identity, of that number. Its identity, and the
+/// root's registry, which the caller copies to every bucket ([`spread`]). An addition that stopped
+/// short of `new`'s identity is finished by another of the same URL. `root` unformatted is
+/// formatted, the root; refused if it is another bucket ([`Error::NotRoot`]), as is `new` if it is
+/// a bucket already ([`Error::Formatted`]), or if no number is left ([`Error::NoNumbers`]).
 #[cfg(feature = "full")]
 pub async fn add(
     root: &impl Bucket,
@@ -285,6 +316,7 @@ pub async fn add(
             Updated::Changed => {}
         }
     };
+    copy_tombstones(root, new, entry.number).await?;
     let identity = Identity { format: layout::FORMAT.current, number: entry.number, id: entry.id };
     match bucket::create(new, layout::IDENTITY, layout::encode(&identity)).await? {
         Created::Created(_) => Ok((identity, registry)),

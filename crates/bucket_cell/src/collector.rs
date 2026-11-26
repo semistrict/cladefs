@@ -598,7 +598,7 @@ impl Collector {
         let looked = match &found {
             Some(object) => match self.look(bucket, cell, holder, object).await? {
                 Looked::Unchanged(report) => return Ok(report),
-                Looked::Changed(listed, epoch) => Some((listed, epoch)),
+                Looked::Changed(listed, epoch, ephemeral) => Some((listed, epoch, ephemeral)),
                 Looked::Unrecorded => None,
             },
             None => None,
@@ -609,12 +609,14 @@ impl Collector {
         // The look's listing is this pass's if its taking came next, no other between: as if it
         // listed once it took, the passes before it fenced alike, those deleting since their
         // checks doing so either way (TASK-455). Else it lists anew.
-        let listed = match looked {
-            Some((listed, epoch)) if taken.epoch == epoch + 1 => Some(listed),
-            _ => first_listing(bucket, cell).await?,
+        let (listed, ephemeral) = match looked {
+            Some((listed, epoch, ephemeral)) if taken.epoch == epoch + 1 => {
+                (Some(listed), ephemeral)
+            }
+            _ => (first_listing(bucket, cell).await?, EphemeralCheck::Unchecked),
         };
         let recorded = taken.passed.take();
-        let collected = self.collect_held(bucket, cell, &taken, recorded, listed).await;
+        let collected = self.collect_held(bucket, cell, &taken, recorded, listed, ephemeral).await;
         let ended = match &collected {
             Ok((_, passed)) => PassEnd::Through(passed.clone()),
             // The pass's failure, its caller's below: its lease says it ended.
@@ -650,10 +652,95 @@ impl Collector {
             return Ok(Looked::Unrecorded);
         };
         if !passed.holds_for(&listed) {
-            return Ok(Looked::Changed(listed, epoch));
+            return Ok(Looked::Changed(listed, epoch, EphemeralCheck::Unchecked));
+        }
+        if let Some(decommissioned) =
+            self.check_retired_ephemeral(bucket, cell, &listed.objects).await?
+        {
+            return Ok(Looked::Changed(listed, epoch, EphemeralCheck::Retired(decommissioned)));
         }
         let skipped = Report { skipped: 1, ..Report::default() };
         Ok(Looked::Unchanged(self.trim_evidence(bucket, cell, &listed, skipped).await?))
+    }
+
+    /// cladefs: checks whether `objects` holds any ephemeral reference under `cell` that should
+    /// now be retired because its child's tenant was shredded or its host's incarnation has a
+    /// decommissioned tombstone in `cell`'s bucket (board 9968, hotbed question 544): both live
+    /// outside `cell`'s prefix, so an unchanged cell listing digest must not skip retiring them.
+    /// Returns `Some(decommissioned)` (the subset of non-shredded incarnations under `cell` that
+    /// have tombstones, reused by `collect_held` without repeating bucket lookups; hotbed review
+    /// 120 finding 455) when at least one ephemeral reference must be retired, or `None` if all
+    /// ephemeral references under `cell` remain live.
+    async fn check_retired_ephemeral(
+        &self,
+        bucket: &impl Bucket,
+        cell: CellId,
+        objects: &BTreeMap<String, Meta>,
+    ) -> Result<Option<BTreeSet<u64>>, bucket::Refused> {
+        let mut any_shredded = false;
+        let mut check_incarnations = BTreeSet::new();
+        for key in objects.keys() {
+            if let Kind::Ephemeral { parent, incarnation, child, .. } = layout::kind(key)
+                && parent == cell
+            {
+                if child.tenant != layout::DEFAULT_TENANT && self.shredded.contains(&child.tenant) {
+                    any_shredded = true;
+                } else {
+                    check_incarnations.insert(incarnation);
+                }
+            }
+        }
+        let decommissioned = decommissioned_incarnations(bucket, cell, &check_incarnations).await?;
+        if any_shredded || !decommissioned.is_empty() { Ok(Some(decommissioned)) } else { Ok(None) }
+    }
+
+    /// cladefs: orphaned ephemeral references under `cell` whose child belongs to a tenant in
+    /// `self.shredded` or whose host incarnation has a decommissioned tombstone in `cell`'s bucket
+    /// (board 9968, hotbed question 544), paired with their ephemeral index keys. Reuses
+    /// `prechecked` from `look()` when present (hotbed review 120 finding 455); otherwise makes
+    /// zero requests when `objects` holds no ephemeral references, one HEAD for a single distinct
+    /// incarnation, or one delimited listing of `ephemeral/<bucket>/` for multiple incarnations.
+    async fn retired_ephemeral<'a>(
+        &self,
+        bucket: &impl Bucket,
+        cell: CellId,
+        objects: &'a BTreeMap<String, Meta>,
+        prechecked: Option<&BTreeSet<u64>>,
+    ) -> Result<Vec<(&'a str, String)>, bucket::Refused> {
+        let mut ephemeral = Vec::new();
+        let mut check_incarnations = BTreeSet::new();
+        for key in objects.keys() {
+            if let Kind::Ephemeral { parent, at, incarnation, child } = layout::kind(key)
+                && parent == cell
+            {
+                let shredded =
+                    child.tenant != layout::DEFAULT_TENANT && self.shredded.contains(&child.tenant);
+                if !shredded && prechecked.is_none() {
+                    check_incarnations.insert(incarnation);
+                }
+                ephemeral.push((key.as_str(), at, incarnation, child, shredded));
+            }
+        }
+        if ephemeral.is_empty() {
+            return Ok(Vec::new());
+        }
+        let fetched;
+        let decommissioned = match prechecked {
+            Some(known) => known,
+            None => {
+                fetched = decommissioned_incarnations(bucket, cell, &check_incarnations).await?;
+                &fetched
+            }
+        };
+        Ok(ephemeral
+            .into_iter()
+            .filter(|(_, _, incarnation, _, shredded)| {
+                *shredded || decommissioned.contains(incarnation)
+            })
+            .map(|(ref_key, at, incarnation, child, _)| {
+                (ref_key, layout::ephemeral_index(incarnation, cell, at, child))
+            })
+            .collect())
     }
 
     /// cladefs: a pass over `cell`, which holds its lease as `taken` says, and what the last pass
@@ -671,13 +758,29 @@ impl Collector {
         taken: &LeaseTaking,
         recorded: Option<Passed>,
         listed: Option<Listed>,
+        ephemeral: EphemeralCheck,
     ) -> Result<(Report, Option<Passed>), Error> {
-        if let Some(listed) = &listed
-            && recorded.as_ref().is_some_and(|passed| passed.holds_for(listed))
-        {
-            let skipped = Report { skipped: 1, ..Report::default() };
-            return Ok((self.trim_evidence(bucket, cell, listed, skipped).await?, None));
-        }
+        let prechecked = match ephemeral {
+            EphemeralCheck::Retired(decommissioned) => Some(decommissioned),
+            EphemeralCheck::Unchecked => {
+                if let Some(listed) = &listed
+                    && recorded.as_ref().is_some_and(|passed| passed.holds_for(listed))
+                {
+                    match self.check_retired_ephemeral(bucket, cell, &listed.objects).await? {
+                        None => {
+                            let skipped = Report { skipped: 1, ..Report::default() };
+                            return Ok((
+                                self.trim_evidence(bucket, cell, listed, skipped).await?,
+                                None,
+                            ));
+                        }
+                        Some(decommissioned) => Some(decommissioned),
+                    }
+                } else {
+                    None
+                }
+            }
+        };
         let mut remembered =
             Remembered { stream_checkpoints: self.stream_checkpoints, ..Remembered::default() };
         let survey = remembered.survey(bucket, cell, taken.epoch, Writes::Some, listed, false);
@@ -689,19 +792,20 @@ impl Collector {
             return Ok((report, None));
         }
         let doomed = pass.fates(bucket, &self.shredded)?;
+        let retired_ephemeral =
+            self.retired_ephemeral(bucket, cell, &pass.objects, prechecked.as_ref()).await?;
         // A pass a later one took the lease from stops.
         if !self.holds(bucket, cell, taken).await? {
             return Ok((report, None));
         }
         let retired = pass.retired();
-        let shredded_ephemeral = pass.shredded_ephemeral(&self.shredded);
         let removal = pass.removal(&doomed);
         // cladefs: past its sweep's budget, it deletes nothing, as one fenced, and records nothing
         // new, so that the next pass decides anew (board 8529): what it would delete, the head of
         // its cell if it goes whole, and the references it would retire.
         let head = removal.as_ref().and_then(|removal| removal.head);
         let objects =
-            doomed.len() + usize::from(head.is_some()) + retired.len() + shredded_ephemeral.len();
+            doomed.len() + usize::from(head.is_some()) + retired.len() + retired_ephemeral.len();
         let objects = objects + pass.recording.stale.len();
         let bytes = doomed.iter().copied().chain(head).map(|meta| meta.size).sum();
         if !self.may_delete(objects, bytes) {
@@ -735,15 +839,15 @@ impl Collector {
         }
         let stale: Vec<&str> = pass.recording.stale.iter().map(String::as_str).collect();
         bucket::delete_all(bucket, &stale).await?;
-        if !shredded_ephemeral.is_empty() {
+        if !retired_ephemeral.is_empty() {
             let ref_keys: Vec<&str> =
-                shredded_ephemeral.iter().map(|(ref_key, _)| *ref_key).collect();
+                retired_ephemeral.iter().map(|(ref_key, _)| *ref_key).collect();
             let idx_keys: Vec<&str> =
-                shredded_ephemeral.iter().map(|(_, idx_key)| idx_key.as_str()).collect();
+                retired_ephemeral.iter().map(|(_, idx_key)| idx_key.as_str()).collect();
             bucket::delete_all(bucket, &ref_keys).await?;
             bucket::delete_all(bucket, &idx_keys).await?;
         }
-        report.retired += marked.len() + unmarked.len() + stale.len() + shredded_ephemeral.len();
+        report.retired += marked.len() + unmarked.len() + stale.len() + retired_ephemeral.len();
         // cladefs: a dead cell nothing will need again goes whole, its retirements made: its head,
         // then its lease (TASK-455), the collector's own, which the report counts not, as it counts
         // not its taking. It records nothing: nothing is left to record it in.
@@ -756,8 +860,13 @@ impl Collector {
         // What the cell takes now: as listed, less what went.
         let mut usage = pass.recording.usage.clone();
         doomed.iter().for_each(|meta| usage.remove(&meta.key, meta.size));
+        for &(ref_key, _) in &retired_ephemeral {
+            if let Some(meta) = pass.objects.get(ref_key) {
+                usage.remove(&meta.key, meta.size);
+            }
+        }
         let listing =
-            if shredded_ephemeral.is_empty() { pass.recorded_listing(&doomed) } else { None };
+            if retired_ephemeral.is_empty() { pass.recorded_listing(&doomed) } else { None };
         Ok((report, Some(Passed { listing, usage })))
     }
 
@@ -864,7 +973,8 @@ impl Collector {
         let mut retired: Vec<String> = pass.retired().into_iter().map(|(key, _)| key).collect();
         retired.extend(pass.recording.stale.iter().cloned());
         retired.extend(
-            pass.shredded_ephemeral(&self.shredded)
+            self.retired_ephemeral(bucket, cell, &pass.objects, None)
+                .await?
                 .into_iter()
                 .map(|(ref_key, _)| ref_key.to_owned()),
         );
@@ -872,12 +982,57 @@ impl Collector {
     }
 }
 
+/// cladefs: the subset of `incarnations` that have a decommissioned tombstone in `cell`'s bucket
+/// (board 9968, hotbed review 120 finding 455): zero requests when empty, one HEAD for a single
+/// incarnation, or one delimited listing of `ephemeral/<bucket>/` for multiple incarnations so a
+/// cell forked by many hosts never pays serial per-host HEADs.
+async fn decommissioned_incarnations(
+    bucket: &impl Bucket,
+    cell: CellId,
+    incarnations: &BTreeSet<u64>,
+) -> Result<BTreeSet<u64>, bucket::Refused> {
+    let mut found = BTreeSet::new();
+    match incarnations.len() {
+        0 => {}
+        1 => {
+            let &incarnation = incarnations.iter().next().expect("len == 1");
+            if lifecycle::decommissioned(bucket, incarnation, cell).await? {
+                found.insert(incarnation);
+            }
+        }
+        _ => {
+            let number = layout::ephemeral_bucket(cell);
+            let listed = bucket::list_delimited(bucket, &layout::ephemeral_hosts(number)).await?;
+            for meta in &listed.objects {
+                if let Some((of, incarnation)) = layout::decommissioned_of(&meta.key)
+                    && of == number
+                    && incarnations.contains(&incarnation)
+                {
+                    found.insert(incarnation);
+                }
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// cladefs: whether `Collector::look` already ran the out-of-cell ephemeral retirement check for
+/// its listing (hotbed review 120 finding 455).
+enum EphemeralCheck {
+    /// `look()` did not run an ephemeral retirement check for this listing.
+    Unchecked,
+    /// `look()` found at least one ephemeral reference to retire and already resolved which of
+    /// the cell's non-shredded incarnations are decommissioned.
+    Retired(BTreeSet<u64>),
+}
+
 /// cladefs: what a look at a cell found, before its pass took the lease ([`Collector::look`]).
 enum Looked {
     /// The cell as the last pass in full recorded it: the pass that skips it, writing nothing.
     Unchanged(Report),
-    /// Changed: its listing, and the lease's epoch the look read.
-    Changed(Listed, u64),
+    /// Changed: its listing, the lease's epoch the look read, and any prechecked decommissioned
+    /// incarnations from `look()`.
+    Changed(Listed, u64, EphemeralCheck),
     /// The last pass recorded no listing: nothing to look at.
     Unrecorded,
 }
@@ -1490,18 +1645,26 @@ struct Ended {
     epoch: u64,
     /// Its newest checkpoint, by its number and its writer's epoch.
     checkpoint: Option<(u64, u64)>,
+    /// cladefs: the active fast WAL epoch named in `head.fast_wal.active` (doc-29): large own
+    /// extents of this epoch at or past `end` stay protected until the taker flushes the fast WAL
+    /// and switches `active` (rule `protect_wal_epoch`).
+    wal_epoch: Option<u64>,
 }
 
 impl Ended {
     /// Whether the head may yet name the object of `kind`, which it names not (rule
     /// `collector_epochs`): of its epoch, or a later one, a segment or an extent of its own at or
     /// past its end, or a checkpoint newer than its own. An object of an earlier epoch, its
-    /// writer's swaps all fail: no head ever names it.
+    /// writer's swaps all fail: no head ever names it, except large own extents of the active
+    /// fast WAL epoch (`protect_wal_epoch`, doc-29).
     fn ahead(&self, kind: Kind) -> bool {
         rules().collector_epochs
             && match kind {
-                Kind::Segment { segment, epoch, .. } | Kind::Extent { segment, epoch, .. } => {
-                    epoch >= self.epoch && segment >= self.end
+                Kind::Segment { segment, epoch, .. } => epoch >= self.epoch && segment >= self.end,
+                Kind::Extent { segment, epoch, .. } => {
+                    (epoch >= self.epoch
+                        || (rules().protect_wal_epoch && Some(epoch) == self.wal_epoch))
+                        && segment >= self.end
                 }
                 Kind::Checkpoint { segment, epoch, .. } => {
                     epoch >= self.epoch && self.checkpoint.is_none_or(|at| (segment, epoch) > at)
@@ -1512,6 +1675,12 @@ impl Ended {
 }
 
 impl Live {
+    fn active_wal_epoch(head: Option<&Head>) -> Option<u64> {
+        head.and_then(|head| head.fast_wal.as_ref())
+            .and_then(|fast_wal| fast_wal.active.as_ref())
+            .map(|active| active.epoch)
+    }
+
     /// Folds in `recovered`, a live cell's: its own layer, and what it inherited but the extents
     /// it holds no longer where it inherited them.
     fn add(&mut self, recovered: Recovered<Layers>) {
@@ -1519,6 +1688,7 @@ impl Live {
             end: recovered.end(),
             epoch: recovered.epoch(),
             checkpoint: recovered.checkpoint(),
+            wal_epoch: Self::active_wal_epoch(recovered.head.as_ref()),
         };
         let Recovered { state, touched, .. } = recovered;
         let State { cell, extents, .. } = state;
@@ -1541,6 +1711,7 @@ impl Live {
             end: recovered.end(),
             epoch: recovered.epoch(),
             checkpoint: recovered.checkpoint(),
+            wal_epoch: Self::active_wal_epoch(recovered.head.as_ref()),
         };
         self.touched.extend(recovered.touched);
         for key in recovered.named {
@@ -1736,7 +1907,9 @@ impl Pass {
                 | Kind::Pin { .. }
                 | Kind::Hold { .. }
                 // cladefs: an ephemeral cell's reference, and its index entry: its host's to delete
-                // (doc-25, TASK-698.3); and a host's tombstone, kept for good (board 8519).
+                // (doc-25, TASK-698.3), or retired by `Collector::retired_ephemeral` when its
+                // child's tenant is shredded or its host's incarnation is decommissioned (board
+                // 9968, hotbed question 544); and a host's tombstone, kept for good (board 8519).
                 | Kind::Ephemeral { .. }
                 | Kind::EphemeralIndex { .. }
                 | Kind::Decommissioned { .. }
@@ -1745,6 +1918,7 @@ impl Pass {
                 | Kind::Identity
                 | Kind::Buckets
                 | Kind::Kek { .. }
+                | Kind::Wal { .. }
                 | Kind::Unknown => Fate::Stays,
                 Kind::Evidence { .. } => goes(evidence.contains(key)),
             };
@@ -1775,27 +1949,6 @@ impl Pass {
         };
         let marked = !record.retires_unmarked();
         vec![(layout::reference(origin.parent, origin.at, self.cell), marked)]
-    }
-
-    /// cladefs: orphaned ephemeral references under this cell whose child belongs to a tenant in
-    /// `shredded`, paired with their ephemeral index keys.
-    fn shredded_ephemeral(&self, shredded: &BTreeSet<u64>) -> Vec<(&str, String)> {
-        if shredded.is_empty() {
-            return Vec::new();
-        }
-        self.objects
-            .keys()
-            .filter_map(|key| match layout::kind(key) {
-                Kind::Ephemeral { parent, at, incarnation, child }
-                    if parent == self.cell
-                        && child.tenant != layout::DEFAULT_TENANT
-                        && shredded.contains(&child.tenant) =>
-                {
-                    Some((key.as_str(), layout::ephemeral_index(incarnation, parent, at, child)))
-                }
-                _ => None,
-            })
-            .collect()
     }
 
     /// cladefs: whether its cell holds no live cell and no reference of its own.
@@ -4329,6 +4482,342 @@ mod tests {
                 .await
                 .unwrap_err();
             assert!(matches!(err, Error::Corrupt(_)), "expected Corrupt, got {err:?}");
+        });
+    }
+
+    /// Board 9968 (hotbed question 544): an in-flight `ephemeral.<incarnation>...` reference PUT
+    /// from a lost host that lands *after* `lifecycle::decommission` deleted its index entry is
+    /// retired by the collector using the incarnation's tombstone in that bucket, unpinning the
+    /// parent's dropped version, while leaving non-decommissioned hosts' ephemeral references and
+    /// their pinned versions intact.
+    #[test]
+    fn late_ephemeral_reference_put_after_decommission_is_retired_by_collector() {
+        use crate::testing::Fault;
+        use std::task::{Context, Poll};
+
+        let sim = SimBucket::new();
+        let direct = Arc::new(Direct(sim.clone()));
+        let parent = test_cell(1);
+        let lost_inc = 0x1b;
+        let live_inc = 0x1d;
+
+        let (origin_lost, origin_live, ext_lost, ext_live) = block_on(async {
+            lifecycle::create(&*direct, parent, 0).await.unwrap();
+            let writer = Writer::open(direct.clone(), parent, 10, 0).await.unwrap();
+            let first = writer.chain().next_sequence();
+            let ext_lost = ExtentId::new(1, first);
+            let ext_live = ExtentId::new(1, first + 1);
+
+            // Version 0xa (will be pinned only by the late ref from `lost_inc`).
+            commit(
+                &writer,
+                Commit {
+                    tag: 1,
+                    extents: vec![(ext_lost, b"lost-host-version".to_vec())],
+                    ..Commit::default()
+                },
+            )
+            .await;
+            let at_lost = crate::testing::versioned_by(&writer, Vec::new(), 0xa).await;
+            recovery::checkpoint_at(
+                &*direct,
+                parent,
+                at_lost,
+                crate::keys::Parents::Held(writer.keys()),
+            )
+            .await
+            .unwrap();
+
+            // Version 0xb (pinned by live non-decommissioned host `live_inc`).
+            commit(
+                &writer,
+                Commit {
+                    tag: 2,
+                    extents: vec![(ext_live, b"live-host-version".to_vec())],
+                    frees: vec![ext_lost],
+                    ..Commit::default()
+                },
+            )
+            .await;
+            let at_live = crate::testing::versioned_by(&writer, Vec::new(), 0xb).await;
+            recovery::checkpoint_at(
+                &*direct,
+                parent,
+                at_live,
+                crate::keys::Parents::Held(writer.keys()),
+            )
+            .await
+            .unwrap();
+
+            commit(&writer, Commit { tag: 3, frees: vec![ext_live], ..Commit::default() }).await;
+            writer.checkpoint().await.unwrap();
+            writer.drop_versions(&BTreeSet::from([0xa, 0xb])).await.unwrap();
+
+            let origin_lost = Origin { parent, at: at_lost, epoch: writer.epoch() };
+            let origin_live = Origin { parent, at: at_live, epoch: writer.epoch() };
+            lifecycle::refer_ephemeral(&*direct, origin_live, live_inc, test_cell(20))
+                .await
+                .unwrap();
+            (origin_lost, origin_live, ext_lost, ext_live)
+        });
+
+        let lost_child = test_cell(10);
+        let lost_ref =
+            layout::ephemeral_reference(origin_lost.parent, origin_lost.at, lost_inc, lost_child);
+        let live_ref = layout::ephemeral_reference(
+            origin_live.parent,
+            origin_live.at,
+            live_inc,
+            test_cell(20),
+        );
+
+        // Start `refer_ephemeral` for `lost_inc`, let its index PUT land, hold its reference PUT
+        // in flight in `sim`'s queue, and drop the future (host lost its disk).
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        {
+            let mut refer =
+                Box::pin(lifecycle::refer_ephemeral(&*sim, origin_lost, lost_inc, lost_child));
+            assert!(refer.as_mut().poll(&mut cx).is_pending());
+            assert_eq!(sim.waiting(), 1, "index entry PUT queued");
+            sim.complete(0, Fault::None);
+            assert!(refer.as_mut().poll(&mut cx).is_pending());
+            assert_eq!(sim.waiting(), 1, "reference PUT queued");
+            assert!(sim.describe(0).contains(&lost_ref), "{}", sim.describe(0));
+            // Drop `refer`: the host died while the reference PUT stayed in flight.
+        }
+
+        // Decommission `lost_inc` while keeping the in-flight reference PUT held in `sim`'s queue.
+        let buckets = BTreeSet::from([crate::identity::NAMED]);
+        let mut dec = Box::pin(lifecycle::decommission(&*sim, &buckets, lost_inc, 100));
+        let dec_result = loop {
+            if let Poll::Ready(res) = dec.as_mut().poll(&mut cx) {
+                break res.unwrap();
+            }
+            let next = (0..sim.waiting())
+                .find(|&i| !sim.describe(i).contains(&format!("put {lost_ref}")))
+                .expect("decommission should progress while reference PUT is held");
+            sim.complete(next, Fault::None);
+        };
+        assert_eq!(dec_result, lifecycle::Decommissioned { retired: 1, left: 0 });
+
+        // Now the delayed reference PUT lands with no index entry left.
+        assert_eq!(sim.waiting(), 1);
+        assert!(sim.describe(0).contains(&format!("put {lost_ref}")));
+        sim.complete(0, Fault::None);
+
+        // Confirm the orphaned reference stands and a second `decommission` cannot find it.
+        block_on(async {
+            assert_eq!(
+                lifecycle::decommission(&*direct, &buckets, lost_inc, 100).await.unwrap(),
+                lifecycle::Decommissioned { retired: 0, left: 0 }
+            );
+            let all_keys = keys(&*direct).await;
+            assert!(all_keys.contains(&lost_ref), "orphaned ref present before collector pass");
+            assert!(all_keys.contains(&live_ref), "live host ref present");
+
+            // Dry run reports the orphaned decommissioned ref and does not touch the bucket or
+            // the live host's ref.
+            let dry = Collector::new().dry_run_cell(&*direct, parent).await.unwrap();
+            assert!(dry.retired.contains(&lost_ref), "dry_run reports orphaned ref: {dry:?}");
+            assert!(!dry.retired.contains(&live_ref), "dry_run keeps live ref: {dry:?}");
+            assert!(keys(&*direct).await.contains(&lost_ref), "dry_run writes nothing");
+
+            // First collector pass retires the orphaned reference (recording no skip digest so the
+            // next pass reclaims the now-unpinned version).
+            let pass1 = Collector::new().collect_cell(&*direct, parent, 1).await.unwrap();
+            assert_eq!(pass1.retired, 1, "first pass retires orphaned ref: {pass1:?}");
+            let after1 = keys(&*direct).await;
+            assert!(!after1.contains(&lost_ref), "orphaned ref retired");
+            assert!(after1.contains(&live_ref), "live host ref kept");
+
+            // Second pass reclaims the dropped version `origin_lost` that only `lost_ref` pinned.
+            let pass2 = Collector::new().collect_cell(&*direct, parent, 2).await.unwrap();
+            assert!(pass2.deleted > 0, "second pass reclaims unpinned version: {pass2:?}");
+
+            // `origin_lost` is now reclaimed; `origin_live` remains readable.
+            let checkpoints = Checkpoints::new(&*direct, 0);
+            let lost_read = recovery::recover_at(&checkpoints, parent, origin_lost.at).await;
+            let lost_missing = match lost_read {
+                Err(Error::Lost(_)) => true,
+                Ok((state, _)) => match state.extents.get(&ext_lost) {
+                    Some(loc) => crate::testing::read(&direct, ext_lost, loc).await.is_err(),
+                    None => true,
+                },
+                Err(other) => panic!("unexpected error reading lost version: {other:?}"),
+            };
+            assert!(lost_missing, "unpinned version's extent should be reclaimed");
+
+            let (live_state, _) =
+                recovery::recover_at(&checkpoints, parent, origin_live.at).await.unwrap();
+            let live_loc = live_state.extents.get(&ext_live).expect("live extent kept");
+            assert_eq!(
+                crate::testing::read(&direct, ext_live, live_loc).await.unwrap(),
+                b"live-host-version"
+            );
+        });
+    }
+
+    /// Board 9968 blind-spot regression: a cell whose collector lease already recorded a matching
+    /// listing digest before a host incarnation was decommissioned must NOT be skipped by `look()`
+    /// or `collect_held()` once that incarnation's tombstone appears outside the cell's prefix.
+    #[test]
+    fn unchanged_cell_digest_does_not_skip_decommissioned_ephemeral_reference() {
+        let direct = Arc::new(Direct(SimBucket::new()));
+        let parent = test_cell(1);
+        let inc = 0x2f;
+
+        block_on(async {
+            lifecycle::create(&*direct, parent, 0).await.unwrap();
+            let writer = Writer::open(direct.clone(), parent, 10, 0).await.unwrap();
+            let ext = ExtentId::new(1, writer.chain().next_sequence());
+            commit(
+                &writer,
+                Commit { tag: 1, extents: vec![(ext, b"pinned".to_vec())], ..Commit::default() },
+            )
+            .await;
+            let at = crate::testing::versioned_by(&writer, Vec::new(), 0xc).await;
+            recovery::checkpoint_at(
+                &*direct,
+                parent,
+                at,
+                crate::keys::Parents::Held(writer.keys()),
+            )
+            .await
+            .unwrap();
+            commit(&writer, Commit { tag: 2, frees: vec![ext], ..Commit::default() }).await;
+            writer.checkpoint().await.unwrap();
+            writer.drop_versions(&BTreeSet::from([0xc])).await.unwrap();
+
+            let child = test_cell(30);
+            let ref_key = layout::ephemeral_reference(parent, at, inc, child);
+            // Write only the reference (as after a late PUT) BEFORE any tombstone exists.
+            bucket::create(&*direct, &ref_key, Vec::new()).await.unwrap();
+
+            // Settle any garbage unrelated to the pinned version so the lease records the clean
+            // digest, then verify the next pass skips while the host is still live.
+            let mut holder = 1;
+            loop {
+                let report = Collector::new().collect_cell(&*direct, parent, holder).await.unwrap();
+                holder += 1;
+                assert_eq!(report.retired, 0);
+                if report.deleted == 0 {
+                    break;
+                }
+            }
+            let skipped = Collector::new().collect_cell(&*direct, parent, holder).await.unwrap();
+            holder += 1;
+            assert_eq!((skipped.skipped, skipped.retired), (1, 0), "skipped while host live");
+
+            // Decommission `inc` (tombstone lives outside `parent`'s prefix; cell listing digest
+            // is completely unchanged).
+            let buckets = BTreeSet::from([crate::identity::NAMED]);
+            lifecycle::decommission(&*direct, &buckets, inc, 100).await.unwrap();
+
+            // Next pass must NOT skip: it detects the tombstone and retires the orphaned reference.
+            let retired = Collector::new().collect_cell(&*direct, parent, holder).await.unwrap();
+            holder += 1;
+            assert_eq!(
+                (retired.skipped, retired.retired),
+                (0, 1),
+                "retired despite unchanged digest"
+            );
+            assert!(!keys(&*direct).await.contains(&ref_key), "orphaned ref deleted");
+
+            // Following pass reclaims the now-unpinned dropped version.
+            let reclaimed = Collector::new().collect_cell(&*direct, parent, holder).await.unwrap();
+            assert!(reclaimed.deleted > 0, "unpinned version reclaimed: {reclaimed:?}");
+        });
+    }
+
+    /// Hotbed review 120 finding 455: a cell holding ephemeral references from many distinct host
+    /// incarnations checks tombstones with a single delimited listing of `ephemeral/<bucket>/`
+    /// (zero serial HEADs), and reuses `look()`'s result in `collect_held()` instead of querying
+    /// tombstones twice.
+    #[test]
+    fn skipped_pass_over_many_ephemeral_incarnations_uses_one_delimited_listing() {
+        let bucket = memory_bucket();
+        let parent = test_cell(1);
+        const HOSTS: u64 = 25;
+
+        block_on(async {
+            lifecycle::create(&*bucket, parent, 0).await.unwrap();
+            let writer = Writer::open(bucket.clone(), parent, 10, 0).await.unwrap();
+            let ext = ExtentId::new(1, writer.chain().next_sequence());
+            commit(
+                &writer,
+                Commit { tag: 1, extents: vec![(ext, b"shared".to_vec())], ..Commit::default() },
+            )
+            .await;
+            let at = crate::testing::versioned_by(&writer, Vec::new(), 0xd).await;
+            recovery::checkpoint_at(
+                &*bucket,
+                parent,
+                at,
+                crate::keys::Parents::Held(writer.keys()),
+            )
+            .await
+            .unwrap();
+            let origin = Origin { parent, at, epoch: writer.epoch() };
+
+            for i in 0..HOSTS {
+                let inc = 0x101 + 2 * i;
+                lifecycle::refer_ephemeral(&*bucket, origin, inc, test_cell(100 + i))
+                    .await
+                    .unwrap();
+            }
+
+            // Settle the cell so the collector lease holds the clean digest.
+            let mut holder = 1;
+            loop {
+                let report = Collector::new().collect_cell(&*bucket, parent, holder).await.unwrap();
+                holder += 1;
+                if report.deleted == 0 {
+                    break;
+                }
+            }
+
+            // A skipped pass over 25 distinct incarnations uses 0 HEADs and 1 delimited listing.
+            let before = bucket.stats();
+            let skipped = Collector::new().collect_cell(&*bucket, parent, holder).await.unwrap();
+            holder += 1;
+            let after = bucket.stats();
+            assert_eq!((skipped.skipped, skipped.retired), (1, 0));
+            assert_eq!(
+                after.requests(Request::Head) - before.requests(Request::Head),
+                0,
+                "no serial per-incarnation HEADs on skip"
+            );
+            assert_eq!(
+                after.requests(Request::ListDelimited) - before.requests(Request::ListDelimited),
+                1,
+                "one delimited listing of ephemeral/<bucket>/"
+            );
+
+            // Decommission one incarnation (leaving its ref behind as after a late PUT), then run
+            // a pass: `look()` does 1 delimited listing and `collect_held()` reuses it without a
+            // second tombstone query (only `referenced()` adds 1 delimited listing of `refs/`).
+            let doomed_inc = 0x101;
+            let doomed_ref = layout::ephemeral_reference(parent, at, doomed_inc, test_cell(100));
+            let buckets = BTreeSet::from([crate::identity::NAMED]);
+            lifecycle::decommission(&*bucket, &buckets, doomed_inc, 100).await.unwrap();
+            bucket::create(&*bucket, &doomed_ref, Vec::new()).await.unwrap();
+
+            let before = bucket.stats();
+            let retired = Collector::new().collect_cell(&*bucket, parent, holder).await.unwrap();
+            let after = bucket.stats();
+            assert_eq!((retired.skipped, retired.retired), (0, 1));
+            assert_eq!(
+                after.requests(Request::Head) - before.requests(Request::Head),
+                0,
+                "no serial HEADs when retiring"
+            );
+            assert_eq!(
+                after.requests(Request::ListDelimited) - before.requests(Request::ListDelimited),
+                2,
+                "1 delimited listing for tombstones in look() (reused) + 1 for refs/"
+            );
+            assert!(!keys(&*bucket).await.contains(&doomed_ref));
         });
     }
 }

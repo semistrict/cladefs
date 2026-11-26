@@ -16,8 +16,8 @@ use crate::dax::uffd::{FaultThread, UffdSecondStage};
 use crate::error::{Errno, Error, Result};
 use crate::hearing::Occurrence;
 use crate::{
-    CellVersion, Commit, ExtentId, ExtentInfo, MappingContents, Prefault, SecondStage,
-    VolatileSlice, VolatileSliceMut, WindowMapping, WriteBarriers,
+    CellId, CellSnapshot, CellVersion, Commit, ExtentId, ExtentInfo, MappingContents, Prefault,
+    SecondStage, VolatileSlice, VolatileSliceMut, WindowMapping, WriteBarriers,
 };
 use bucket_cell::cell::Kind;
 use futures::channel::oneshot;
@@ -35,6 +35,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 pub struct CellClient {
     client: Arc<Client>,
     cell: u64,
+    tenant: u64,
+    ephemeral: bool,
     /// The daemon's physical memory, which the window maps pages of, by arena: its
     /// tenant's, the default tenant's if of none, and the default arena, read-only (TASK-43,
     /// TASK-79.17).
@@ -136,7 +138,7 @@ impl CellClient {
             ))),
             errno => Error::new(anyhow::Error::new(errno).context("the daemon named no arena")),
         })?;
-        let Opened { cell, arena, max_map_count } = opened;
+        let Opened { cell, tenant, arena, max_map_count, ephemeral } = opened;
         let mut fds = reply.fds.into_iter();
         let (Some(own), Some(public)) = (fds.next(), fds.next()) else {
             return Err(Error::msg("the daemon sent no physical memory"));
@@ -152,7 +154,18 @@ impl CellClient {
             .into();
         let copying = std::sync::atomic::AtomicBool::new(false);
         let (faults, window_faults) = (Mutex::new(None), std::sync::OnceLock::new());
-        Ok(Self { client, cell, memories, faults, window_faults, transfer, copying, max_map_count })
+        Ok(Self {
+            client,
+            cell,
+            tenant,
+            ephemeral,
+            memories,
+            faults,
+            window_faults,
+            transfer,
+            copying,
+            max_map_count,
+        })
     }
 
     /// Calls `changed` with the cell's capacity each time the daemon resizes it (the control API's
@@ -198,6 +211,16 @@ impl CellClient {
     /// The cell whose extents the guest mints.
     pub fn cell(&self) -> u64 {
         self.cell
+    }
+
+    /// The cell's tenant.
+    pub fn tenant(&self) -> u64 {
+        self.tenant
+    }
+
+    /// Whether the opened cell is a host-local ephemeral cell (doc-25).
+    pub fn is_ephemeral(&self) -> bool {
+        self.ephemeral
     }
 
     /// The daemon's physical memory, which it handed this VM process as it connected,
@@ -390,20 +413,39 @@ impl CellClient {
         Ok(self.client.request(&Request::Root).await?.payload)
     }
 
-    /// Makes a version of the cell, once nothing is open
-    /// ([`OpenCell::is_quiescent`](crate::OpenCell::is_quiescent)), as with its guest's
-    /// filesystem frozen, `EBUSY` otherwise: what a VM snapshot holds, which any number of hosts
-    /// fork at once ([`DaemonConnection::open_forked`]), and none writes.
-    pub fn make_version(&self) -> Result<CellVersion> {
+    /// Snapshots the cell once nothing is open: makes a bucket-backed version for a regular cell,
+    /// or quiesces and checkpoints a host-local ephemeral cell at its latest commit (`EBUSY` while
+    /// an extent is open or the window holds private pages).
+    pub fn snapshot_cell(&self) -> Result<CellSnapshot> {
         // cladefs: not while its window holds private pages, whose bytes no extent holds: a VM
-        // restored from the version would read their sources' old bytes (TASK-203). This process
+        // restored from the snapshot would read their sources' old bytes (TASK-203). This process
         // alone knows of them (doc-26).
         if self.private_pages() > 0 {
             return Err(Errno::EBUSY);
         }
         let reply = self.client.request_blocking(&Request::Version)?;
-        let Forked { version, tenant } = Forked::decode(&reply.header).map_err(|_| Errno::EIO)?;
-        Ok(CellVersion { tenant, cell: self.cell, version })
+        let Forked { version, tenant, committed, ephemeral } =
+            Forked::decode(&reply.header).map_err(|_| Errno::EIO)?;
+        if ephemeral {
+            Ok(CellSnapshot::LocalEphemeral { tenant, cell: self.cell, committed })
+        } else {
+            Ok(CellSnapshot::Version(CellVersion { tenant, cell: self.cell, version }))
+        }
+    }
+
+    /// Makes a version of the cell, once nothing is open
+    /// ([`OpenCell::is_quiescent`](crate::OpenCell::is_quiescent)), as with its guest's
+    /// filesystem frozen, `EBUSY` otherwise: what a VM snapshot holds, which any number of hosts
+    /// fork at once ([`DaemonConnection::open_forked`]), and none writes. `ENOTSUP` for an
+    /// ephemeral cell, which has no versions.
+    pub fn make_version(&self) -> Result<CellVersion> {
+        if self.ephemeral {
+            return Err(Errno::ENOTSUP);
+        }
+        match self.snapshot_cell()? {
+            CellSnapshot::Version(version) => Ok(version),
+            CellSnapshot::LocalEphemeral { .. } => Err(Errno::ENOTSUP),
+        }
     }
 
     /// cladefs: drops the version `version`, which [`CellClient::make_version`] made on this
@@ -792,6 +834,48 @@ impl DaemonConnection {
         capacity: u64,
     ) -> Result<CellClient, Error> {
         self.opening(cell_dir.as_ref(), Opening::Create(capacity, Kind::Memory))
+    }
+
+    /// cladefs: creates (or reopens) a standalone host-local ephemeral memory cell at `cell_dir`
+    /// with `capacity` bytes (zero bucket uploads).
+    pub fn open_memory_ephemeral(
+        self,
+        cell_dir: impl AsRef<Path>,
+        capacity: u64,
+    ) -> Result<CellClient, Error> {
+        self.opening(cell_dir.as_ref(), Opening::CreateEphemeral(capacity, Kind::Memory))
+    }
+
+    /// cladefs: reopens an existing host-local ephemeral memory cell at `cell_dir` in place
+    /// (`ENOENT` if missing, `EINVAL` if not an ephemeral memory cell, `EEXIST` if `expected` is
+    /// given and differs from the cell on disk).
+    pub fn open_ephemeral_memory_existing(
+        self,
+        cell_dir: impl AsRef<Path>,
+        expected: Option<CellId>,
+        capacity: u64,
+    ) -> Result<CellClient, Error> {
+        let (tenant, cell) = match expected {
+            Some(CellId { tenant, id }) => (tenant, id),
+            None => (0, 0),
+        };
+        self.opening(cell_dir.as_ref(), Opening::ExistingEphemeralMemory { tenant, cell, capacity })
+    }
+
+    /// cladefs: reopens an existing host-local ephemeral cell at `cell_dir` in place for a local
+    /// VM snapshot restore, verifying its `(tenant, cell)` ID and latest commit `committed`
+    /// (`ENOENT` if missing, `EINVAL` if not ephemeral, `EEXIST` if modified or replaced).
+    pub fn open_ephemeral_at_commit(
+        self,
+        cell_dir: impl AsRef<Path>,
+        cell: CellId,
+        committed: u64,
+        capacity: u64,
+    ) -> Result<CellClient, Error> {
+        self.opening(
+            cell_dir.as_ref(),
+            Opening::LocalEphemeral { tenant: cell.tenant, cell: cell.id, committed, capacity },
+        )
     }
 
     /// The cell at `cell_dir`, of `capacity` bytes, forked from the version `from` if it doesn't

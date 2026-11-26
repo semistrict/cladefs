@@ -20,9 +20,15 @@ pub struct Commit {
     pub tag: u64,
     pub extents: Vec<(ExtentId, Vec<u8>)>,
     pub own: Vec<(u64, Vec<u8>)>,
+    /// Pre-framed own extents `(sequence, logical_len, framed_bytes)` copied directly without
+    /// recompression/re-encryption (used by fast WAL takeover recovery, doc-29).
+    pub own_preframed: Vec<(u64, u64, Vec<u8>)>,
     pub frees: Vec<ExtentId>,
     pub root: Option<Vec<u8>>,
     pub capacity: Option<u64>,
+    /// Minimum next sequence number recorded by this commit (preserves allocation floor across
+    /// commits that freed or skipped sequence numbers, e.g. fast WAL takeover replay, doc-29).
+    pub next_sequence: u64,
 }
 
 impl Commit {
@@ -30,6 +36,7 @@ impl Commit {
     pub fn is_empty(&self) -> bool {
         self.extents.is_empty()
             && self.own.is_empty()
+            && self.own_preframed.is_empty()
             && self.frees.is_empty()
             && self.root.is_none()
             && self.capacity.is_none()
@@ -154,6 +161,8 @@ pub struct SegmentBuilder {
     data: Vec<u8>,
     /// Those sealed on their own, by their sequence numbers.
     own: BTreeMap<u64, Vec<u8>>,
+    /// Pre-framed own extents, keyed by sequence number, uploaded as-is (doc-29).
+    own_preframed: BTreeMap<u64, Vec<u8>>,
 }
 
 impl From<Commit> for SegmentBuilder {
@@ -176,6 +185,12 @@ impl SegmentBuilder {
             self.plan.seal_own(sequence, bytes.len() as u64);
             self.own.insert(sequence, bytes);
         }
+        for (sequence, logical_len, framed) in commit.own_preframed {
+            self.plan.seal_own(sequence, logical_len);
+            self.own_preframed.insert(sequence, framed);
+        }
+        self.plan.contents.next_sequence =
+            self.plan.contents.next_sequence.max(commit.next_sequence);
         self.plan.commit(commit.tag, commit.frees, commit.root, commit.capacity);
     }
 
@@ -187,19 +202,23 @@ impl SegmentBuilder {
     /// Closes it on `chain`, its writer's, as the writer's next segment, which the chain goes on
     /// after: its footer, stamped, its data yet to be framed.
     pub fn close(self, chain: &mut Chain) -> Unframed {
-        self.close_ending(chain, Vec::new())
+        self.close_with_versions(chain, Vec::new())
     }
 
-    /// cladefs: closes it on `chain`, as [`Batch::close`] does, with the version `cut` cut at its
-    /// end: a name for the cell's state there, which the acknowledgement naming the segment names
-    /// in the cell's head (doc-18, TASK-476).
+    /// cladefs: closes it on `chain`, as [`SegmentBuilder::close`] does, with the version `cut`
+    /// cut at its end: a name for the cell's state there, which the acknowledgement naming the
+    /// segment names in the cell's head (doc-18, TASK-476).
     pub fn cut(self, cut: NewVersion, chain: &mut Chain) -> Unframed {
-        self.close_ending(chain, vec![cut])
+        self.close_with_versions(chain, vec![cut])
     }
 
-    fn close_ending(self, chain: &mut Chain, versions: Vec<NewVersion>) -> Unframed {
+    /// Closes it on `chain` with `versions` cut at its end.
+    pub fn close_with_versions(self, chain: &mut Chain, versions: Vec<NewVersion>) -> Unframed {
         let footer = self.plan.close_ending(chain, versions);
-        Unframed { footer, data: Data { segment: self.data, own: self.own } }
+        Unframed {
+            footer,
+            data: Data { segment: self.data, own: self.own, own_preframed: self.own_preframed },
+        }
     }
 }
 
@@ -226,6 +245,7 @@ impl Unframed {
 pub struct Data {
     segment: Vec<u8>,
     own: BTreeMap<u64, Vec<u8>>,
+    own_preframed: BTreeMap<u64, Vec<u8>>,
 }
 
 impl Data {
@@ -236,8 +256,14 @@ impl Data {
         let encrypting = encrypting.as_key();
         let own = (footer.own())
             .map(|(extent, location)| {
-                let data = self.own.get(&extent.sequence).expect("sealed on its own");
-                (location.key.clone(), layout::own_extent(extent, data, encrypting).into())
+                let framed = match self.own_preframed.get(&extent.sequence) {
+                    Some(framed) => framed.clone(),
+                    None => {
+                        let data = self.own.get(&extent.sequence).expect("sealed on its own");
+                        layout::own_extent(extent, data, encrypting)
+                    }
+                };
+                (location.key.clone(), framed.into())
             })
             .collect();
         let data_len = self.segment.len() as u64;

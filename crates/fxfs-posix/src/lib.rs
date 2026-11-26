@@ -36,7 +36,7 @@ use fxfs::object_store::{
     AttributeId, AttributeKey, DataObjectHandle, Directory, ExtentAccess, FileExtent,
     HandleOptions, MAX_INLINE_XATTR_SIZE, MAX_XATTR_NAME_SIZE, MAX_XATTR_VALUE_SIZE,
     MutableNodeAttributes, ObjectDescriptor, ObjectKey, ObjectKind, ObjectStore, ObjectValue,
-    PosixAttributes, SetExtendedAttributeMode, StoreObjectHandle, Timestamp,
+    PosixAttributes, SetExtendedAttributeMode, StoreObjectHandle, Timestamp, WriteAttrs,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::BTreeSet;
@@ -117,6 +117,9 @@ pub const SET_CTIME: u32 = 1 << 6;
 /// cladefs: a truncate leaves the last block as it is: a DAX window's file zeroes it through the
 /// window, which maps that block.
 pub const SET_KEEP_TAIL: u32 = 1 << 7;
+/// cladefs: remove the `security.capability` extended attribute if present, in the same
+/// transaction (`FUSE_HANDLE_KILLPRIV_V2`).
+pub const SET_KILL_SECURITY_CAP: u32 = 1 << 8;
 
 /// Attributes to set: `struct cladefs_setattr`.
 #[repr(C)]
@@ -612,6 +615,33 @@ impl<P: Platform> Fxfs<P> {
     /// the range beyond what the file holds already, but no blocks set aside, which an extent store
     /// can't do, each write taking new ones (copy-on-write); blocks not written read as zeros.
     pub async fn allocate(&self, ino: u64, range: Range<u64>) -> Result<(), Error> {
+        self.allocate_impl(ino, range, None, false, false).await?;
+        Ok(())
+    }
+
+    /// cladefs: `allocate`, also updating `mtime` and `ctime` to `mtime_ctime_ns` and optionally
+    /// clearing `S_ISUID`/`S_ISGID` and `security.capability` in the same `setattr` call. Returns
+    /// whether the object's mode changed.
+    pub async fn allocate_at(
+        &self,
+        ino: u64,
+        range: Range<u64>,
+        mtime_ctime_ns: u64,
+        kill_suid_sgid: bool,
+        kill_security_cap: bool,
+    ) -> Result<bool, Error> {
+        self.allocate_impl(ino, range, Some(mtime_ctime_ns), kill_suid_sgid, kill_security_cap)
+            .await
+    }
+
+    async fn allocate_impl(
+        &self,
+        ino: u64,
+        range: Range<u64>,
+        mtime_ctime_ns: Option<u64>,
+        kill_suid_sgid: bool,
+        kill_security_cap: bool,
+    ) -> Result<bool, Error> {
         self.begin(Op::Allocate, None).await?;
         ensure!(range.start < range.end, FxfsError::InvalidArgs);
         let attr = self.attr(ino).await?;
@@ -620,11 +650,39 @@ impl<P: Platform> Fxfs<P> {
         let usage = self.usage();
         let room = (usage.free_blocks * usage.block_size).saturating_add(attr.blocks * 512);
         ensure!(range.end - range.start <= room, FxfsError::NoSpace);
+        let mut set = SetAttr::default();
         if range.end > attr.size {
-            let grow = SetAttr { valid: SET_SIZE, size: range.end, ..SetAttr::default() };
-            self.setattr(ino, &grow).await?;
+            set.valid |= SET_SIZE;
+            set.size = range.end;
         }
-        Ok(())
+        if let Some(now) = mtime_ctime_ns {
+            set.valid |= SET_MTIME | SET_CTIME;
+            set.mtime_ns = now;
+            set.ctime_ns = now;
+        }
+        let mut mode_changed = false;
+        if kill_suid_sgid {
+            const S_ISUID: u32 = 0o4000;
+            const S_ISGID: u32 = 0o2000;
+            const S_IXGRP: u32 = 0o0010;
+            let mut mode = attr.mode;
+            mode &= !S_ISUID;
+            if mode & S_IXGRP != 0 {
+                mode &= !S_ISGID;
+            }
+            if mode != attr.mode {
+                set.valid |= SET_MODE;
+                set.mode = mode;
+                mode_changed = true;
+            }
+        }
+        if kill_security_cap {
+            set.valid |= SET_KILL_SECURITY_CAP;
+        }
+        if set.valid != 0 {
+            self.setattr(ino, &set).await?;
+        }
+        Ok(mode_changed)
     }
 
     /// cladefs: the attributes of the object `ino`, for a file handle (open_by_handle_at, NFS):
@@ -852,6 +910,28 @@ impl<P: Platform> Fxfs<P> {
     /// does. The kernel keeps the file's times (`setattr`).
     pub async fn write(&self, ino: u64, offset: u64, data: &[u8]) -> Result<(), Error> {
         self.write_many(ino, &mut [(offset, data)]).await
+    }
+
+    /// cladefs: writes `data` to the file `ino` at `offset`, atomically applying optional
+    /// timestamp updates and privilege clearing (`S_ISUID`/`S_ISGID` and `security.capability`)
+    /// inside the final write transaction instead of a second `setattr` transaction. Returns
+    /// whether `kill_suid_sgid` cleared `S_ISUID` or `S_ISGID`.
+    pub async fn write_at(
+        &self,
+        ino: u64,
+        offset: u64,
+        data: &[u8],
+        mtime_ctime_ns: Option<u64>,
+        kill_suid_sgid: bool,
+        kill_security_cap: bool,
+    ) -> Result<bool, Error> {
+        self.begin(Op::Write, None).await?;
+        let attrs = WriteAttrs {
+            change_time: mtime_ctime_ns.map(Timestamp::from_nanos),
+            kill_suid_sgid,
+            kill_security_cap,
+        };
+        self.file(ino).await?.write_many_with_attrs(&[(offset, data)], attrs).await
     }
 
     /// cladefs: reserves room for `bytes` more of the file `ino`'s data, whole pages, which the page
@@ -1255,10 +1335,39 @@ impl<P: Platform> Fxfs<P> {
         value: &[u8],
         mode: SetExtendedAttributeMode,
     ) -> Result<(), Error> {
+        self.set_xattr_impl(ino, name, value, mode, None).await
+    }
+
+    /// cladefs: `set_xattr`, also updating `ctime` to `ctime_ns` in the same transaction.
+    pub async fn set_xattr_at(
+        &self,
+        ino: u64,
+        name: &[u8],
+        value: &[u8],
+        mode: SetExtendedAttributeMode,
+        ctime_ns: u64,
+    ) -> Result<(), Error> {
+        self.set_xattr_impl(ino, name, value, mode, Some(ctime_ns)).await
+    }
+
+    async fn set_xattr_impl(
+        &self,
+        ino: u64,
+        name: &[u8],
+        value: &[u8],
+        mode: SetExtendedAttributeMode,
+        ctime_ns: Option<u64>,
+    ) -> Result<(), Error> {
         let begun = self.begin(Op::SetXattr, None).await?;
         let mut transaction = begun.transaction(&[ino]).await?;
         let (name, value) = (name.to_vec(), value.to_vec());
-        self.handle(ino).set_extended_attribute_impl(name, value, mode, &mut transaction).await?;
+        let handle = self.handle(ino);
+        handle.set_extended_attribute_impl(name, value, mode, &mut transaction).await?;
+        if let Some(ctime_ns) = ctime_ns {
+            handle
+                .update_attributes(&mut transaction, None, Some(Timestamp::from_nanos(ctime_ns)))
+                .await?;
+        }
         transaction.commit().await?;
         Ok(())
     }
@@ -1275,6 +1384,19 @@ impl<P: Platform> Fxfs<P> {
         let begun = self.begin(Op::RemoveXattr, None).await?;
         let handle = self.handle(ino);
         handle.remove_extended_attribute_with_options(name.to_vec(), begun.options()).await
+    }
+
+    /// cladefs: `remove_xattr`, also updating `ctime` to `ctime_ns` in the same transaction.
+    pub async fn remove_xattr_at(&self, ino: u64, name: &[u8], ctime_ns: u64) -> Result<(), Error> {
+        let begun = self.begin(Op::RemoveXattr, None).await?;
+        let mut transaction = begun.transaction(&[ino]).await?;
+        let handle = self.handle(ino);
+        handle.remove_extended_attribute_in_transaction(&mut transaction, name.to_vec()).await?;
+        handle
+            .update_attributes(&mut transaction, None, Some(Timestamp::from_nanos(ctime_ns)))
+            .await?;
+        transaction.commit().await?;
+        Ok(())
     }
 
     /// cladefs: how many records the volume's tree caches (its objects', names' and data's) plus
@@ -1659,7 +1781,10 @@ impl<P: Platform> Fxfs<P> {
             modification_time: flag(SET_MTIME).then_some(set.mtime_ns),
             ..Default::default()
         };
-        if attributes != MutableNodeAttributes::default() || flag(SET_CTIME) {
+        if attributes != MutableNodeAttributes::default()
+            || flag(SET_CTIME)
+            || flag(SET_KILL_SECURITY_CAP)
+        {
             // cladefs: changing a record, it borrows the metadata space it needs, as Fuchsia's
             // `update_attributes` does: an inode's writeback on a full filesystem failed (TASK-82).
             let begun = self.begin(Op::SetAttr, None).await?;
@@ -1682,6 +1807,19 @@ impl<P: Platform> Fxfs<P> {
             };
             let handle = self.handle(ino);
             handle.update_attributes(&mut transaction, Some(&attributes), Some(ctime)).await?;
+            if flag(SET_KILL_SECURITY_CAP) {
+                match handle
+                    .remove_extended_attribute_in_transaction(
+                        &mut transaction,
+                        b"security.capability".to_vec(),
+                    )
+                    .await
+                {
+                    Ok(()) => {}
+                    Err(error) if FxfsError::NotFound.matches(&error) => {}
+                    Err(error) => return Err(error),
+                }
+            }
             transaction.commit().await?;
         }
         Ok(())

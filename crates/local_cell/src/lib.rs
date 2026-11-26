@@ -162,6 +162,7 @@ mod cached;
 mod dir;
 mod durability;
 mod extents;
+pub mod fast_wal;
 #[cfg(not(madsim))]
 pub use durability::durability_lags;
 pub use durability::{LAG_BUCKETS, Lags, durability_lags_on};

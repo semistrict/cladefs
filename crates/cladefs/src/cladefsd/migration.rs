@@ -520,7 +520,9 @@ pub(super) async fn migrate_on(
         if ephemeral {
             let checkpoint =
                 local_cell::host_local_checkpoint_on(&local, &read).map_err(|_| Errno::ENOENT)?;
-            let parent = checkpoint.ok_or(Errno::EINVAL)?.parent();
+            let Some(parent) = checkpoint.ok_or(Errno::EINVAL)?.parent() else {
+                return Err(Errno::EINVAL);
+            };
             let origin = Origin { parent: parent.cell, at: parent.at, epoch: parent.epoch };
             return Ok(SourceKind::Ephemeral { cell, parent: origin });
         }

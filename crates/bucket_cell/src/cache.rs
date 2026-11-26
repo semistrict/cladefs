@@ -539,23 +539,40 @@ const DISK_ID: &str = ".disk-id";
 const PROBE_FILE: &str = ".health-probe";
 
 /// Reads or creates a persistent non-zero random disk ID in `<root>/.disk-id`.
+///
+/// The part cache is rebuildable (`doc-28`), so a missing, torn/non-UTF-8, or invalid `.disk-id`
+/// regenerates a fresh ID instead of failing daemon boot (board 12102), while real I/O errors
+/// (such as `EIO` or `EACCES`) are still propagated.
 fn load_or_create_disk_id(root: &Path) -> io::Result<u64> {
     let path = root.join(DISK_ID);
-    match host_fs::read_to_string(&path) {
-        Ok(text) => {
-            if let Ok(id) = text.trim().parse::<u64>()
+    match host_fs::read(&path) {
+        Ok(bytes) => {
+            if let Ok(text) = std::str::from_utf8(&bytes)
+                && let Ok(id) = text.trim().parse::<u64>()
                 && id != 0
             {
                 return Ok(id);
             }
+            log::warn!(
+                "cladefs: corrupt part-cache disk id at {} ({} bytes); regenerating",
+                path.display(),
+                bytes.len()
+            );
         }
         Err(err) if err.kind() == io::ErrorKind::NotFound => {}
         Err(err) => return Err(err),
     }
     let id = rand::random::<u64>() | 1;
     let tmp = root.join(".disk-id.new");
-    host_fs::write(&tmp, format!("{id}\n"))?;
+    let content = format!("{id}\n");
+    {
+        let file =
+            host_fs::OpenOptions::new().write(true).create(true).truncate(true).open(&tmp)?;
+        file.write_all_at(content.as_bytes(), 0)?;
+        file.sync_all()?;
+    }
     host_fs::rename(&tmp, &path)?;
+    host_fs::sync_dir(root)?;
     Ok(id)
 }
 
@@ -2980,5 +2997,37 @@ mod tests {
         assert_eq!(cache.shards[0].bytes(), 0, "offline shard must not receive new fills");
         assert!(cache.shards[1].bytes() > 0, "healthy shard must absorb failover fills");
         cache.check();
+    }
+
+    #[test]
+    fn jbod_corrupt_disk_id_regenerates_without_failing_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk_id_path = dir.path().join(DISK_ID);
+
+        // Torn / non-UTF-8 bytes after a crash must regenerate `.disk-id` instead of failing open
+        // (board 12102).
+        for corrupt in [b"\xff\xfe\x00\x80".as_slice(), b"0\n".as_slice(), b"garbage\n".as_slice()]
+        {
+            host_fs::write(&disk_id_path, corrupt).unwrap();
+            let cache = Cache::open(dir.path(), 4 * PART).unwrap();
+            let id = cache.shards[0].disk_id;
+            assert_ne!(id, 0);
+            assert_eq!(
+                host_fs::read_to_string(&disk_id_path).unwrap().trim().parse::<u64>().unwrap(),
+                id
+            );
+            drop(cache);
+            let reopened = Cache::open(dir.path(), 4 * PART).unwrap();
+            assert_eq!(reopened.shards[0].disk_id, id, "regenerated disk id must persist");
+        }
+
+        // Real I/O errors (such as EISDIR) must still propagate rather than being masked.
+        host_fs::remove_file(&disk_id_path).unwrap();
+        host_fs::create_dir(&disk_id_path).unwrap();
+        let err = match Cache::open(dir.path(), 4 * PART) {
+            Ok(_) => panic!("opening cache with directory at .disk-id must fail"),
+            Err(err) => err,
+        };
+        assert_eq!(err.raw_os_error(), Some(libc::EISDIR), "{err}");
     }
 }

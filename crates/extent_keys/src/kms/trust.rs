@@ -13,7 +13,12 @@
 //! - `local://`, a fake for tests, unless [`LOCAL_VAR`] allows it;
 //! - an OpenBao or a vault (Azure Key Vault) of a host none of [`HOSTS_VAR`] names, nor the host's
 //!   own `CLADEFS_KMS`; and OpenBao over cleartext but on this host;
-//! - an AWS KMS endpoint not AWS's own over HTTPS (`*.amazonaws.com`), nor on this host.
+//! - an AWS KMS endpoint not AWS's own over HTTPS (`*.amazonaws.com`), nor on this host;
+//! - a GCP Cloud KMS project none of [`GCP_PROJECTS_VAR`] names, nor the host's own `CLADEFS_KMS`
+//!   (board 9686, hotbed question 545);
+//! - an AWS KMS key template naming an account (an ARN, or containing `:`) none of
+//!   [`AWS_ACCOUNTS_VAR`] names, nor the host's own `CLADEFS_KMS` (board 9686, hotbed question
+//!   545).
 //!
 //! The host's own `CLADEFS_KMS` is [`Origin::Host`]: trusted, as the host's own configuration
 //! (hotbed question 475).
@@ -29,6 +34,16 @@ pub const HOSTS_VAR: &str = "CLADEFSD_KMS_HOSTS";
 /// The variable which, `1`, lets a KMS URL the registry records be `local://`, a fake for tests.
 pub const LOCAL_VAR: &str = "CLADEFSD_KMS_LOCAL";
 
+/// The variable naming the GCP project IDs a recorded `gcp-kms://` URL (its ring or its key
+/// template) may name, besides the host's own `CLADEFS_KMS`'s: separated by commas or white space
+/// (board 9686, hotbed question 545).
+pub const GCP_PROJECTS_VAR: &str = "CLADEFSD_KMS_GCP_PROJECTS";
+
+/// The variable naming the 12-digit AWS account IDs a recorded `aws-kms://` key template ARN may
+/// name, besides the host's own `CLADEFS_KMS`'s: separated by commas or white space (board 9686,
+/// hotbed question 545).
+pub const AWS_ACCOUNTS_VAR: &str = "CLADEFSD_KMS_AWS_ACCOUNTS";
+
 /// Where a KMS URL came from, and so what it may reach.
 #[derive(Clone, Copy)]
 pub enum Origin<'a> {
@@ -39,17 +54,23 @@ pub enum Origin<'a> {
 }
 
 /// What a recorded KMS URL may reach, as the host's variables say: the hosts [`HOSTS_VAR`] names,
-/// and its own `CLADEFS_KMS`'s; `local://` if [`LOCAL_VAR`] allows it.
+/// the GCP projects [`GCP_PROJECTS_VAR`] names, the AWS accounts [`AWS_ACCOUNTS_VAR`] names, and
+/// its own `CLADEFS_KMS`'s; `local://` if [`LOCAL_VAR`] allows it.
 #[derive(Debug, Default)]
 pub struct Trust {
     /// Each a host, and its port if named.
     hosts: Vec<(String, Option<u16>)>,
+    /// Allowed GCP project IDs for recorded `gcp-kms://` URLs.
+    gcp_projects: Vec<String>,
+    /// Allowed 12-digit AWS account IDs for recorded `aws-kms://` key ARNs.
+    aws_accounts: Vec<String>,
     local: bool,
 }
 
 impl Trust {
     /// What `vars`, a host's or its bucket's, allow. A [`LOCAL_VAR`] neither `1` nor unset, or a
-    /// host of [`HOSTS_VAR`] with a port that is none, is refused, never taken for allowing less.
+    /// host of [`HOSTS_VAR`] with a port that is none, or an invalid project/account in
+    /// [`GCP_PROJECTS_VAR`] / [`AWS_ACCOUNTS_VAR`], is refused, never taken for allowing less.
     pub fn of(vars: &Vars) -> Result<Self, String> {
         let mut hosts = Vec::new();
         for entry in vars.get(HOSTS_VAR).unwrap_or_default().split([',', ' ', '\t', '\n']) {
@@ -59,20 +80,44 @@ impl Trust {
                 })?);
             }
         }
-        // The host's own KMS's host: of an OpenBao or a vault, which a URL names by its host.
-        let own = vars.get(KMS_VAR).and_then(|own| {
+        let mut gcp_projects = Vec::new();
+        for entry in vars.get(GCP_PROJECTS_VAR).unwrap_or_default().split([',', ' ', '\t', '\n']) {
+            if !entry.is_empty() {
+                if !super::gcp::valid_project(entry) {
+                    return Err(format!("{GCP_PROJECTS_VAR}: {entry:?} is no GCP project"));
+                }
+                gcp_projects.push(entry.to_owned());
+            }
+        }
+        let mut aws_accounts = Vec::new();
+        for entry in vars.get(AWS_ACCOUNTS_VAR).unwrap_or_default().split([',', ' ', '\t', '\n']) {
+            if !entry.is_empty() {
+                if !super::aws::valid_account(entry) {
+                    return Err(format!(
+                        "{AWS_ACCOUNTS_VAR}: {entry:?} is no 12-digit AWS account ID"
+                    ));
+                }
+                aws_accounts.push(entry.to_owned());
+            }
+        }
+        // The host's own KMS's host, GCP project(s), or AWS ARN account.
+        if let Some(own) = vars.get(KMS_VAR) {
             // No URL: none of its host, the host's KMS refusing it as it is made.
-            let parsed = url::Url::parse(own).ok()?;
-            let named = matches!(parsed.scheme(), "openbao" | "openbaos" | "azure-kv");
-            Some((named.then(|| parsed.host_str())??.to_owned(), None))
-        });
-        hosts.extend(own);
+            if let Ok(parsed) = url::Url::parse(own)
+                && matches!(parsed.scheme(), "openbao" | "openbaos" | "azure-kv")
+                && let Some(host) = parsed.host_str()
+            {
+                hosts.push((host.to_owned(), None));
+            }
+            gcp_projects.extend(super::gcp::url_projects(own));
+            aws_accounts.extend(super::aws::url_account(own));
+        }
         let local = match vars.get(LOCAL_VAR) {
             None => false,
             Some("1") => true,
             Some(other) => return Err(format!("{LOCAL_VAR}: {other:?}, not 1")),
         };
-        Ok(Self { hosts, local })
+        Ok(Self { hosts, gcp_projects, aws_accounts, local })
     }
 
     /// Whether it allows `host`, at `port`.
@@ -80,6 +125,16 @@ impl Trust {
         self.hosts.iter().any(|(allowed, at)| {
             allowed.eq_ignore_ascii_case(host) && (at.is_none() || *at == port)
         })
+    }
+
+    /// Whether it allows GCP project `project`.
+    fn allows_gcp_project(&self, project: &str) -> bool {
+        self.gcp_projects.iter().any(|allowed| allowed == project)
+    }
+
+    /// Whether it allows AWS account `account`.
+    fn allows_aws_account(&self, account: &str) -> bool {
+        self.aws_accounts.iter().any(|allowed| allowed == account)
     }
 }
 
@@ -172,6 +227,41 @@ impl Origin<'_> {
             _ => Err(refused()),
         }
     }
+
+    /// Refuses, of a recorded `gcp-kms://` URL, a GCP `project` unless [`GCP_PROJECTS_VAR`] or the
+    /// host's own `CLADEFS_KMS` names it (board 9686).
+    pub(super) fn gcp_project(&self, project: &str) -> Result<(), String> {
+        match self {
+            Origin::Recorded(trust) if !trust.allows_gcp_project(project) => Err(format!(
+                "project {project:?}: a KMS URL the registry of buckets records reaches only the \
+                 GCP projects {GCP_PROJECTS_VAR} names, or the host's own {KMS_VAR}'s"
+            )),
+            _ => Ok(()),
+        }
+    }
+
+    /// Refuses, of a recorded `aws-kms://` URL, a key `template` that names an ARN (or contains
+    /// `:`, which could form an ARN for some tenant) unless its literal 12-digit account ID is in
+    /// [`AWS_ACCOUNTS_VAR`] or the host's own `CLADEFS_KMS` (board 9686). Non-ARN key IDs and
+    /// aliases resolve in the caller's own AWS account and are allowed.
+    pub(super) fn aws_key_template(&self, template: &str) -> Result<(), String> {
+        let Origin::Recorded(trust) = self else { return Ok(()) };
+        if !template.contains(':') {
+            return Ok(());
+        }
+        match super::aws::arn_account(template) {
+            Some(account) if trust.allows_aws_account(account) => Ok(()),
+            Some(account) => Err(format!(
+                "account {account:?}: a KMS URL the registry of buckets records reaches only the \
+                 AWS accounts {AWS_ACCOUNTS_VAR} names, or the host's own {KMS_VAR}'s"
+            )),
+            None => Err(format!(
+                "the key template {template:?} names no allowed AWS KMS account: a KMS URL the \
+                 registry of buckets records reaches only the AWS accounts {AWS_ACCOUNTS_VAR} \
+                 names, or the host's own {KMS_VAR}'s"
+            )),
+        }
+    }
 }
 
 /// Whether `host` is this host's: `localhost`, or a loopback address (`127.0.0.0/8`, `::1`).
@@ -203,6 +293,8 @@ mod tests {
     fn host_vars(local: Option<&str>) -> Vars {
         let mut vars = vec![
             (HOSTS_VAR, "vault.example.com, 10.0.0.5:8200 [::1]:8201\tv.vault.azure.net"),
+            (GCP_PROJECTS_VAR, "p"),
+            (AWS_ACCOUNTS_VAR, "111122223333"),
             (KMS_VAR, "openbaos://own.example.com:8200/transit?key=k{tenant}"),
             (crate::kms::openbao::TOKEN_ENV, "s.token"),
             (crate::kms::GCP_TOKEN_VAR, "t"),
@@ -376,9 +468,131 @@ mod tests {
         for local in ["0", "true", "yes", " 1"] {
             assert_eq!(trust(&[(LOCAL_VAR, local)]), Err(format!("{LOCAL_VAR}: {local:?}, not 1")));
         }
+        for bad_project in ["UPPER", "p/q", "p_1"] {
+            assert_eq!(
+                trust(&[(GCP_PROJECTS_VAR, bad_project)]),
+                Err(format!("{GCP_PROJECTS_VAR}: {bad_project:?} is no GCP project"))
+            );
+        }
+        for bad_account in ["123", "1234567890123", "12345678901a"] {
+            assert_eq!(
+                trust(&[(AWS_ACCOUNTS_VAR, bad_account)]),
+                Err(format!("{AWS_ACCOUNTS_VAR}: {bad_account:?} is no 12-digit AWS account ID"))
+            );
+        }
         assert_eq!(
             trust(&[(KMS_VAR, "gcp-kms://projects/p/locations/l/keyRings/r?key=k")]),
             Ok(vec![])
+        );
+    }
+
+    /// board 9686: a recorded `gcp-kms://` URL's ring project and full-resource key template
+    /// project, and a recorded `aws-kms://` key template naming an ARN (or containing `:`), must
+    /// be allowed by `CLADEFSD_KMS_GCP_PROJECTS` / `CLADEFSD_KMS_AWS_ACCOUNTS` or the host's own
+    /// `CLADEFS_KMS`, refused before any call naming why.
+    #[test]
+    fn recorded_gcp_projects_and_aws_accounts_are_restricted() {
+        let mk_vars = |pairs: &[(&str, &str)]| {
+            let mut all: Vec<(String, String)> = pairs
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+                .collect();
+            all.push((crate::kms::GCP_TOKEN_VAR.to_owned(), "t".to_owned()));
+            Vars::new(all)
+        };
+
+        // Host's own CLADEFS_KMS is GCP project `our-project`: allows that project, refuses others
+        // and refuses any cross-account AWS KMS ARN.
+        let vars = mk_vars(&[(
+            KMS_VAR,
+            "gcp-kms://projects/our-project/locations/us/keyRings/our-ring?key=k-{tenant}",
+        )]);
+        let trust = Trust::of(&vars).unwrap();
+        let recorded = |url: &str| from_url_with(url, &vars, Origin::Recorded(&trust)).map(drop);
+
+        for (url, expected) in [
+            (
+                "gcp-kms://projects/attacker-project/locations/us/keyRings/r?key=k-{tenant}",
+                "project \"attacker-project\": a KMS URL the registry of buckets records reaches \
+                 only the GCP projects CLADEFSD_KMS_GCP_PROJECTS names, or the host's own \
+                 CLADEFS_KMS's",
+            ),
+            (
+                "gcp-kms://projects/our-project/locations/us/keyRings/r?key=projects/attacker-project/locations/us/keyRings/r/cryptoKeys/k-{tenant}",
+                "project \"attacker-project\": a KMS URL the registry of buckets records reaches \
+                 only the GCP projects CLADEFSD_KMS_GCP_PROJECTS names, or the host's own \
+                 CLADEFS_KMS's",
+            ),
+            (
+                "gcp-kms://projects/our-project/locations/us/keyRings/r?key=projects/p-{tenant}/locations/us/keyRings/r/cryptoKeys/k",
+                "project \"p-{tenant}\": a KMS URL the registry of buckets records reaches only \
+                 the GCP projects CLADEFSD_KMS_GCP_PROJECTS names, or the host's own \
+                 CLADEFS_KMS's",
+            ),
+            (
+                "aws-kms://us-east-1?key=arn:aws:kms:us-east-1:999999999999:key/attacker-{tenant}",
+                "account \"999999999999\": a KMS URL the registry of buckets records reaches only \
+                 the AWS accounts CLADEFSD_KMS_AWS_ACCOUNTS names, or the host's own CLADEFS_KMS's",
+            ),
+            (
+                "aws-kms://us-east-1?key=arn:aws:kms:us-east-1:999999999999:alias/attacker-{tenant}",
+                "account \"999999999999\": a KMS URL the registry of buckets records reaches only \
+                 the AWS accounts CLADEFSD_KMS_AWS_ACCOUNTS names, or the host's own CLADEFS_KMS's",
+            ),
+            (
+                "aws-kms://us-east-1?key=arn:aws:kms:us-east-1:{tenant}:key/k",
+                "names no allowed AWS KMS account",
+            ),
+            (
+                "aws-kms://us-east-1?key={tenant}:aws:kms:us-east-1:999999999999:key/k",
+                "names no allowed AWS KMS account",
+            ),
+        ] {
+            let err = recorded(url).unwrap_err();
+            assert!(err.contains(expected), "{url}: {err}");
+            assert!(crate::kms::check_recorded_url(url, &trust).is_err(), "{url}");
+            // Host's own configuration stays trusted.
+            if !url.contains("p-{tenant}") {
+                from_url_with(url, &vars, Origin::Host).unwrap_or_else(|e| panic!("{url}: {e}"));
+            }
+        }
+
+        // Same project / non-ARN AWS alias are allowed.
+        for ok in [
+            "gcp-kms://projects/our-project/locations/europe-west1/keyRings/r2?key=k-{tenant}",
+            "gcp-kms://projects/our-project/locations/us/keyRings/r2?key=projects/our-project/locations/us/keyRings/r3/cryptoKeys/k-{tenant}",
+            "aws-kms://us-east-1?key=alias/cladefs-tenant-{tenant}",
+        ] {
+            recorded(ok).unwrap_or_else(|e| panic!("{ok}: {e}"));
+        }
+
+        // Allowlists and host's own AWS KMS ARN account work too.
+        let vars = mk_vars(&[
+            (
+                KMS_VAR,
+                "aws-kms://us-east-1?key=arn:aws:kms:us-east-1:111122223333:key/own-{tenant}",
+            ),
+            (GCP_PROJECTS_VAR, "allowed-a, example.com:allowed-b"),
+            (AWS_ACCOUNTS_VAR, "222233334444"),
+        ]);
+        let trust = Trust::of(&vars).unwrap();
+        for ok in [
+            "gcp-kms://projects/allowed-a/locations/us/keyRings/r?key=k-{tenant}",
+            "gcp-kms://projects/allowed-a/locations/us/keyRings/r?key=projects/example.com:allowed-b/locations/us/keyRings/r/cryptoKeys/k-{tenant}",
+            "aws-kms://us-east-1?key=arn:aws:kms:us-east-1:111122223333:key/other-{tenant}",
+            "aws-kms://us-east-1?key=arn:aws:kms:us-east-1:222233334444:alias/other-{tenant}",
+        ] {
+            from_url_with(ok, &vars, Origin::Recorded(&trust))
+                .map(drop)
+                .unwrap_or_else(|e| panic!("{ok}: {e}"));
+        }
+        assert!(
+            from_url_with(
+                "aws-kms://us-east-1?key=arn:aws:kms:us-east-1:333344445555:key/x-{tenant}",
+                &vars,
+                Origin::Recorded(&trust),
+            )
+            .is_err()
         );
     }
 }

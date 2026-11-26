@@ -94,9 +94,21 @@ pub(crate) enum Opening {
     /// To write, created with this many bytes of capacity if it doesn't exist ([`OPEN_CREATE`]),
     /// a new cell of this kind ([`OPEN_SQLITE`], TASK-364).
     Create(u64, Kind),
+    /// To write, created as a standalone host-local ephemeral cell with this many bytes of
+    /// capacity if it doesn't exist ([`OPEN_CREATE`] | [`OPEN_EPHEMERAL`]), or reopened if it
+    /// already exists as an ephemeral cell of the same kind.
+    CreateEphemeral(u64, Kind),
     /// To write, forked from the version `version` of the cell `cell` of `tenant`'s if it doesn't
     /// exist, of `capacity` bytes ([`OPEN_FORK`]): a VM restored from a snapshot.
     ForkOf { tenant: u64, cell: u64, version: u64, capacity: u64 },
+    /// To write, reopening an existing host-local ephemeral cell in place at its quiesced commit
+    /// `committed` ([`OPEN_EPHEMERAL`]): `ENOENT` if missing, `EINVAL` if not ephemeral, `EEXIST`
+    /// if the cell ID or latest commit number differs.
+    LocalEphemeral { tenant: u64, cell: u64, committed: u64, capacity: u64 },
+    /// To write, reopening an existing host-local ephemeral memory cell in place
+    /// ([`OPEN_EPHEMERAL`] | [`OPEN_MEMORY`]): `ENOENT` if missing, `EINVAL` if not an ephemeral
+    /// memory cell, `EEXIST` if `cell != 0` and the cell ID differs.
+    ExistingEphemeralMemory { tenant: u64, cell: u64, capacity: u64 },
 }
 
 /// Where a [`READ`]'s bytes go.
@@ -186,7 +198,7 @@ impl<'a> Encoded<'a> {
 /// The flags requests of `kind` know: `EINVAL` for a kind no request is of.
 fn known_flags(kind: u32) -> Result<u32, Errno> {
     Ok(match kind {
-        OPEN => OPEN_CREATE | OPEN_FORK | OPEN_SQLITE | OPEN_MEMORY,
+        OPEN => OPEN_CREATE | OPEN_FORK | OPEN_SQLITE | OPEN_MEMORY | OPEN_EPHEMERAL,
         READ => READ_TRANSFER,
         WRITE => crate::protocol::WRITE_SHARED_FLAGS | WRITE_TRANSFER | WRITE_LOCAL,
         MAP => MAP_ZEROS,
@@ -293,12 +305,46 @@ impl<'a> Request<'a> {
                             },
                         )
                     }
+                    Opening::CreateEphemeral(capacity, kind) => {
+                        let flags = OPEN_CREATE
+                            | OPEN_EPHEMERAL
+                            | flag(*kind == Kind::Sqlite, OPEN_SQLITE)
+                            | flag(*kind == Kind::Memory, OPEN_MEMORY);
+                        (
+                            flags,
+                            OpenBody {
+                                capacity: *capacity,
+                                version: VERSION,
+                                ..Default::default()
+                            },
+                        )
+                    }
                     Opening::ForkOf { tenant, cell, version, capacity } => (
                         OPEN_FORK,
                         OpenBody {
                             capacity: *capacity,
                             cell: *cell,
                             cell_version: *version,
+                            tenant: *tenant,
+                            version: VERSION,
+                        },
+                    ),
+                    Opening::LocalEphemeral { tenant, cell, committed, capacity } => (
+                        OPEN_EPHEMERAL,
+                        OpenBody {
+                            capacity: *capacity,
+                            cell: *cell,
+                            cell_version: *committed,
+                            tenant: *tenant,
+                            version: VERSION,
+                        },
+                    ),
+                    Opening::ExistingEphemeralMemory { tenant, cell, capacity } => (
+                        OPEN_EPHEMERAL | OPEN_MEMORY,
+                        OpenBody {
+                            capacity: *capacity,
+                            cell: *cell,
+                            cell_version: 0,
                             tenant: *tenant,
                             version: VERSION,
                         },
@@ -446,26 +492,46 @@ impl<'a> Request<'a> {
             OPEN => {
                 let body: OpenBody = header.decode_body()?;
                 let OpenBody { capacity, cell, cell_version, tenant, .. } = body;
-                match flags {
-                    OPEN_FORK => {}
-                    flags if flags & OPEN_CREATE != 0 => unused(&[cell, cell_version, tenant])?,
-                    _ => unused(&[capacity, cell, cell_version, tenant])?,
-                }
                 let opening = match flags {
-                    0 => Opening::Existing,
-                    OPEN_CREATE => Opening::Create(body.capacity, Kind::Fxfs),
+                    0 => {
+                        unused(&[capacity, cell, cell_version, tenant])?;
+                        Opening::Existing
+                    }
+                    OPEN_CREATE => {
+                        unused(&[cell, cell_version, tenant])?;
+                        Opening::Create(capacity, Kind::Fxfs)
+                    }
                     flags if flags == OPEN_CREATE | OPEN_SQLITE => {
-                        Opening::Create(body.capacity, Kind::Sqlite)
+                        unused(&[cell, cell_version, tenant])?;
+                        Opening::Create(capacity, Kind::Sqlite)
                     }
                     flags if flags == OPEN_CREATE | OPEN_MEMORY => {
-                        Opening::Create(body.capacity, Kind::Memory)
+                        unused(&[cell, cell_version, tenant])?;
+                        Opening::Create(capacity, Kind::Memory)
                     }
-                    OPEN_FORK => Opening::ForkOf {
-                        tenant: body.tenant,
-                        cell: body.cell,
-                        version: body.cell_version,
-                        capacity: body.capacity,
-                    },
+                    flags if flags == OPEN_CREATE | OPEN_EPHEMERAL => {
+                        unused(&[cell, cell_version, tenant])?;
+                        Opening::CreateEphemeral(capacity, Kind::Fxfs)
+                    }
+                    flags if flags == OPEN_CREATE | OPEN_EPHEMERAL | OPEN_SQLITE => {
+                        unused(&[cell, cell_version, tenant])?;
+                        Opening::CreateEphemeral(capacity, Kind::Sqlite)
+                    }
+                    flags if flags == OPEN_CREATE | OPEN_EPHEMERAL | OPEN_MEMORY => {
+                        unused(&[cell, cell_version, tenant])?;
+                        Opening::CreateEphemeral(capacity, Kind::Memory)
+                    }
+                    OPEN_FORK => Opening::ForkOf { tenant, cell, version: cell_version, capacity },
+                    OPEN_EPHEMERAL => {
+                        Opening::LocalEphemeral { tenant, cell, committed: cell_version, capacity }
+                    }
+                    flags if flags == OPEN_EPHEMERAL | OPEN_MEMORY => {
+                        unused(&[cell_version])?;
+                        if cell == 0 && tenant != 0 {
+                            return Err(Errno::EINVAL);
+                        }
+                        Opening::ExistingEphemeralMemory { tenant, cell, capacity }
+                    }
                     // Two ways of opening at once.
                     _ => return Err(Errno::EINVAL),
                 };
@@ -1039,6 +1105,8 @@ pub(crate) fn with_version(mut header: Header) -> Header {
 pub(crate) struct Opened {
     /// The cell.
     pub cell: u64,
+    /// The cell's tenant.
+    pub tenant: u64,
     /// The arena of the memory it carries first: the VM process's tenant's.
     pub arena: ArenaId,
     /// cladefs: how many mappings the host lets a process make, if it limits them
@@ -1046,6 +1114,8 @@ pub(crate) struct Opened {
     /// reads it for the VM process, which can't in a jail without /proc (TASK-172). 0 if it
     /// doesn't limit them.
     pub max_map_count: Option<u64>,
+    /// Whether the opened cell is a host-local ephemeral cell (doc-25).
+    pub ephemeral: bool,
 }
 
 impl Opened {
@@ -1053,26 +1123,33 @@ impl Opened {
     pub fn to_body(self) -> OpenedBody {
         OpenedBody {
             cell: self.cell,
+            tenant: self.tenant,
             max_map_count: self.max_map_count.unwrap_or(0),
             arena: self.arena.0,
-            reserved: [0; 3],
+            flags: if self.ephemeral { OPENED_EPHEMERAL } else { 0 },
             version: VERSION,
         }
     }
 
     /// What an `OPEN` reply `header` says: `EPROTONOSUPPORT` from a daemon of another wire
-    /// version, before anything else of it (TASK-141.3); `EINVAL` on non-zero reserved bytes.
+    /// version, before anything else of it (TASK-141.3); `EINVAL` on unknown flags.
     #[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
     pub fn decode(header: &Header) -> Result<Self, Errno> {
         if version(header) != VERSION {
             return Err(Errno::EPROTONOSUPPORT);
         }
         let body: OpenedBody = header.decode_body()?;
-        if body.reserved != [0; 3] {
+        if body.flags & !OPENED_EPHEMERAL != 0 {
             return Err(Errno::EINVAL);
         }
         let max_map_count = (body.max_map_count != 0).then_some(body.max_map_count);
-        Ok(Self { cell: body.cell, arena: ArenaId(body.arena), max_map_count })
+        Ok(Self {
+            cell: body.cell,
+            tenant: body.tenant,
+            arena: ArenaId(body.arena),
+            max_map_count,
+            ephemeral: body.flags & OPENED_EPHEMERAL != 0,
+        })
     }
 }
 
@@ -1094,23 +1171,39 @@ impl Info {
     }
 }
 
-/// cladefs: a quiescent [`FORK`]'s reply: the version of the cell made, a VM snapshot's, and
-/// the cell's tenant.
+/// cladefs: a quiescent [`FORK`]'s reply: either a bucket-backed version (`!ephemeral`,
+/// `committed == 0`), or a quiesced host-local ephemeral cell checkpoint (`ephemeral`,
+/// `version == 0`, `committed` set).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Forked {
     pub version: u64,
     pub tenant: u64,
+    pub committed: u64,
+    pub ephemeral: bool,
 }
 
 impl Forked {
     pub fn to_body(self) -> ForkedBody {
-        ForkedBody { version: self.version, tenant: self.tenant }
+        ForkedBody {
+            version: self.version,
+            tenant: self.tenant,
+            committed: self.committed,
+            flags: if self.ephemeral { FORKED_EPHEMERAL } else { 0 },
+            reserved: 0,
+        }
     }
 
     #[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
     pub fn decode(header: &Header) -> Result<Self, Errno> {
-        let ForkedBody { version, tenant } = header.decode_body()?;
-        Ok(Self { version, tenant })
+        let ForkedBody { version, tenant, committed, flags, reserved } = header.decode_body()?;
+        if reserved != 0 || flags & !FORKED_EPHEMERAL != 0 {
+            return Err(Errno::EINVAL);
+        }
+        let ephemeral = flags & FORKED_EPHEMERAL != 0;
+        if (ephemeral && version != 0) || (!ephemeral && committed != 0) {
+            return Err(Errno::EINVAL);
+        }
+        Ok(Self { version, tenant, committed, ephemeral })
     }
 }
 
@@ -1303,7 +1396,13 @@ mod tests {
             open(Opening::Create(a, Kind::Fxfs)),
             open(Opening::Create(a, Kind::Sqlite)),
             open(Opening::Create(a, Kind::Memory)),
+            open(Opening::CreateEphemeral(a, Kind::Fxfs)),
+            open(Opening::CreateEphemeral(a, Kind::Sqlite)),
+            open(Opening::CreateEphemeral(a, Kind::Memory)),
             open(Opening::ForkOf { tenant: c, cell: b, version: d, capacity: a }),
+            open(Opening::LocalEphemeral { tenant: c, cell: b, committed: d, capacity: a }),
+            open(Opening::ExistingEphemeralMemory { tenant: 0, cell: 0, capacity: a }),
+            open(Opening::ExistingEphemeralMemory { tenant: c, cell: b.max(1), capacity: a }),
             read(d % (MAX_PAYLOAD + 1), ReadInto::Reply),
             read(d, ReadInto::Transfer { at: e }),
             write(Data::Inline(&fields.data[..])),
@@ -1655,7 +1754,7 @@ mod tests {
     fn requests_with_flags_their_kinds_dont_know_are_refused() {
         let known = |kind: u32| -> u32 {
             match kind {
-                OPEN => 0b111,
+                OPEN => 0b10_0111,
                 READ => 0b1,
                 WRITE => 0b11_1111,
                 MAP => 0b1000,
@@ -2152,9 +2251,11 @@ mod tests {
             mappings_of in proptest::collection::vec((any::<[u64; 5]>(), any::<bool>()), 0..16),
         ) {
             let max_map_count = (c != 0).then_some(c);
-            let opened = Opened { cell: a, arena: ArenaId(arena), max_map_count };
-            let header = Header::new(REPLY, 1).with_body(&opened.to_body());
-            prop_assert_eq!(Opened::decode(&header), Ok(opened));
+            for ephemeral in [false, true] {
+                let opened = Opened { cell: a, tenant: b, arena: ArenaId(arena), max_map_count, ephemeral };
+                let header = Header::new(REPLY, 1).with_body(&opened.to_body());
+                prop_assert_eq!(Opened::decode(&header), Ok(opened));
+            }
             let info = Info(ExtentInfo {
                 capacity: a,
                 used: b,
@@ -2164,9 +2265,12 @@ mod tests {
             });
             let header = Header::new(REPLY, 1).with_body(&info.to_body());
             prop_assert_eq!(Info::decode(&header), Ok(info));
-            let forked = Forked { version: a, tenant: b };
+            let forked = Forked { version: a, tenant: b, committed: 0, ephemeral: false };
             let header = Header::new(REPLY, 1).with_body(&forked.to_body());
             prop_assert_eq!(Forked::decode(&header), Ok(forked));
+            let forked_ephemeral = Forked { version: 0, tenant: b, committed: d, ephemeral: true };
+            let header = Header::new(REPLY, 1).with_body(&forked_ephemeral.to_body());
+            prop_assert_eq!(Forked::decode(&header), Ok(forked_ephemeral));
             let mapped: Vec<WindowMapping> = (mappings_of.into_iter())
                 .map(|([window_offset, len, cell, sequence, offset], zeros)| {
                     let (window_offset, len) = windowed(window_offset, len);
@@ -2195,16 +2299,17 @@ mod tests {
     fn replies_malformed_are_refused() {
         let mut bad_opened = OpenedBody {
             cell: 1,
+            tenant: 2,
             max_map_count: 0,
             arena: 1,
-            reserved: [0, 0, 1],
+            flags: 1 << 1,
             version: VERSION,
         };
         assert_eq!(
             Opened::decode(&Header::new(REPLY, 1).with_body(&bad_opened)).err(),
             Some(Errno::EINVAL)
         );
-        bad_opened.reserved = [0; 3];
+        bad_opened.flags = OPENED_EPHEMERAL;
         assert!(Opened::decode(&Header::new(REPLY, 1).with_body(&bad_opened)).is_ok());
 
         let bad_stage = Header::new(STAGE_MAP, 1).with_body(&StageMapBody {
@@ -2216,10 +2321,38 @@ mod tests {
         });
         assert_eq!(Stage::decode(&bad_stage).err(), Some(Errno::EINVAL));
 
-        let mut dirty_forked =
-            Header::new(REPLY, 1).with_body(&ForkedBody { version: 2, tenant: 3 });
+        let mut dirty_forked = Header::new(REPLY, 1).with_body(&ForkedBody {
+            version: 2,
+            tenant: 3,
+            committed: 0,
+            flags: 0,
+            reserved: 0,
+        });
         dirty_forked.body.0[size_of::<ForkedBody>()] = 1;
         assert_eq!(Forked::decode(&dirty_forked).err(), Some(Errno::EINVAL));
+        for bad_forked in [
+            ForkedBody { version: 2, tenant: 3, committed: 1, flags: 0, reserved: 0 },
+            ForkedBody {
+                version: 2,
+                tenant: 3,
+                committed: 1,
+                flags: FORKED_EPHEMERAL,
+                reserved: 0,
+            },
+            ForkedBody { version: 0, tenant: 3, committed: 1, flags: 1 << 1, reserved: 0 },
+            ForkedBody {
+                version: 0,
+                tenant: 3,
+                committed: 1,
+                flags: FORKED_EPHEMERAL,
+                reserved: 1,
+            },
+        ] {
+            assert_eq!(
+                Forked::decode(&Header::new(REPLY, 1).with_body(&bad_forked)).err(),
+                Some(Errno::EINVAL)
+            );
+        }
 
         let mapping = |flags: u64| {
             MappingWire {
@@ -2259,14 +2392,20 @@ mod tests {
                 }
             }
         });
-        let opened = Opened { cell: 1, arena: ArenaId::DEFAULT, max_map_count: None };
+        let opened = Opened {
+            cell: 1,
+            tenant: 2,
+            arena: ArenaId::DEFAULT,
+            max_map_count: None,
+            ephemeral: false,
+        };
         assert_eq!(version(&Header::new(REPLY, 1).with_body(&opened.to_body())), VERSION);
         for other in [0, VERSION - 1, VERSION + 1] {
             let body = OpenedBody { version: other, ..opened.to_body() };
             let header = Header::new(REPLY, 1).with_body(&body);
             assert_eq!(Opened::decode(&header).err(), Some(Errno::EPROTONOSUPPORT), "{other}");
-            // Before its reserved field, which another version may use otherwise.
-            let body = OpenedBody { reserved: [u32::MAX; 3], version: other, ..opened.to_body() };
+            // Before its flags field, which another version may use otherwise.
+            let body = OpenedBody { flags: u32::MAX, version: other, ..opened.to_body() };
             let header = Header::new(REPLY, 1).with_body(&body);
             assert_eq!(Opened::decode(&header).err(), Some(Errno::EPROTONOSUPPORT), "{other}");
         }
@@ -2281,7 +2420,7 @@ mod tests {
     fn the_wire_is_its_version() {
         /// The version, and the fingerprint of the wire it is. A change to the wire is a new
         /// version, both changed together, never the fingerprint alone.
-        const WIRE: (u64, u64) = (17, 0x42af1ca606e2c7cf);
+        const WIRE: (u64, u64) = (18, 0x978181f01df55f6c);
         let fingerprint = fingerprint();
         assert_eq!(
             (VERSION, fingerprint),
@@ -2351,7 +2490,13 @@ mod tests {
         for made in [Made::Ack { id: 2, counts }, Made::Counts(other), private] {
             header(&mut hashed, made.encode());
         }
-        let opened = Opened { cell: 3, arena: ArenaId(6), max_map_count: Some(65530) };
+        let opened = Opened {
+            cell: 3,
+            tenant: 5,
+            arena: ArenaId(6),
+            max_map_count: Some(65530),
+            ephemeral: true,
+        };
         let info = ExtentInfo {
             capacity: 1 << 30,
             used: 4096,
@@ -2359,10 +2504,12 @@ mod tests {
             next_sequence: 12,
             sequence_floor: 1 << 40,
         };
-        let forked = Forked { version: 4, tenant: 5 };
+        let forked = Forked { version: 4, tenant: 5, committed: 0, ephemeral: false };
+        let forked_ephemeral = Forked { version: 0, tenant: 5, committed: 7, ephemeral: true };
         hashed(opened.to_body().as_bytes());
         hashed(Info(info).to_body().as_bytes());
         hashed(forked.to_body().as_bytes());
+        hashed(forked_ephemeral.to_body().as_bytes());
         let extent =
             MappingContents::Extent { extent: ExtentId { cell: 3, sequence: 4 }, offset: 8192 };
         hashed(&mappings_payload(&[

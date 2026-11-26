@@ -71,6 +71,11 @@ fn cells_through_the_control_api() {
             active_replicas: 0,
             // Taken unforced (TASK-681).
             forced_after: None,
+            // Not using Fast WAL (doc-29).
+            fast_wal: false,
+            fast_wal_bucket: String::new(),
+            fast_wal_degraded: false,
+            ephemeral: false,
         }
     );
 
@@ -1062,6 +1067,7 @@ fn memory_cells_through_the_control_api() {
             file: name(&mem_file),
             tenant: 0,
             make_version: true,
+            ephemeral: false,
         }))
         .unwrap()
         .into_inner();
@@ -1103,6 +1109,7 @@ fn memory_cells_through_the_control_api() {
             file: name(&mem_file),
             tenant: 0,
             make_version: false,
+            ephemeral: false,
         }))
         .unwrap()
         .into_inner();
@@ -1124,6 +1131,7 @@ fn memory_cells_through_the_control_api() {
         file: name(&dir.path().join("no-such-file.mem")),
         tenant: 0,
         make_version: false,
+        ephemeral: false,
     }));
     assert_eq!(failure(missing), (Code::NotFound, Errno::ENOENT));
 
@@ -1133,6 +1141,7 @@ fn memory_cells_through_the_control_api() {
         file: name(&bad_file),
         tenant: 0,
         make_version: false,
+        ephemeral: false,
     }));
     assert_eq!(failure(bad), (Code::InvalidArgument, Errno::EINVAL));
 
@@ -1144,11 +1153,245 @@ fn memory_cells_through_the_control_api() {
             file: name(&mem_file),
             tenant: 7,
             make_version: true,
+            ephemeral: false,
         }))
         .unwrap()
         .into_inner();
     assert_eq!(right_tenant.tenant, 7);
     assert_ne!(right_tenant.version, 0);
+
+    // Ephemeral memory import: rejects make_version=true, otherwise stays local with ephemeral=true.
+    let bad_ephemeral = daemon.runtime.block_on(daemon.client.import_memory(ImportMemoryRequest {
+        file: name(&mem_file),
+        tenant: 0,
+        make_version: true,
+        ephemeral: true,
+    }));
+    assert_eq!(failure(bad_ephemeral), (Code::InvalidArgument, Errno::EINVAL));
+    let imported_eph = daemon
+        .runtime
+        .block_on(daemon.client.import_memory(ImportMemoryRequest {
+            file: name(&mem_file),
+            tenant: 0,
+            make_version: false,
+            ephemeral: true,
+        }))
+        .unwrap()
+        .into_inner();
+    assert_eq!(imported_eph.version, 0);
+    let eph_id = CellId { tenant: imported_eph.tenant, id: imported_eph.cell };
+    let eph_stat = daemon.stat(eph_id).unwrap();
+    assert!(eph_stat.ephemeral);
+    assert!(!eph_stat.uploading);
+    let eph_open = cladefs::memory_cell::MemoryCell::open_ephemeral_existing(
+        &daemon.vms,
+        std::path::Path::new(&eph_id.to_string()),
+        Some(eph_id),
+        size,
+    )
+    .unwrap();
+    let mut got_eph = vec![0u8; size as usize];
+    eph_open.read(0, &mut got_eph).unwrap();
+    assert!(got_eph == expected);
+    eph_open.close().unwrap();
+    daemon.delete(eph_id).unwrap();
+
+    // Standalone ephemeral CreateCell via control API.
+    let created_eph = daemon
+        .runtime
+        .block_on(daemon.client.create_cell(CreateCellRequest {
+            capacity: CAPACITY,
+            kind: CellKind::Memory.into(),
+            ephemeral: true,
+            ..Default::default()
+        }))
+        .unwrap()
+        .into_inner();
+    assert_ne!(created_eph.cell, 0);
+    let created_eph_id = CellId { tenant: created_eph.tenant, id: created_eph.cell };
+    let stat_eph = daemon.stat(created_eph_id).unwrap();
+    assert!(stat_eph.ephemeral);
+    assert!(!stat_eph.uploading);
+    daemon.delete(created_eph_id).unwrap();
+    let bad_create_eph = daemon.runtime.block_on(daemon.client.create_cell(CreateCellRequest {
+        capacity: CAPACITY,
+        token: Some(1),
+        ephemeral: true,
+        ..Default::default()
+    }));
+    assert_eq!(failure(bad_create_eph), (Code::InvalidArgument, Errno::EINVAL));
+}
+
+/// doc-29: Fast WAL cells are refused with ENOTSUP without CLADEFSD_FAST_WAL_BUCKET and with
+/// EINVAL on invalid durability mode combinations.
+#[test]
+fn fast_wal_refused_without_bucket_and_on_invalid_combinations() {
+    // SAFETY: nextest runs each test in a process of its own.
+    unsafe {
+        std::env::set_var("CLADEFSD_BUCKET", "memory:///fast-wal-ctl-refused");
+        std::env::set_var("CLADEFSD_TOKEN", "1");
+        std::env::remove_var("CLADEFSD_FAST_WAL_BUCKET");
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let mut daemon = Daemon::new(dir.path());
+    let create = |daemon: &mut Daemon, request: CreateCellRequest| {
+        daemon.runtime.block_on(daemon.client.create_cell(request)).map(|made| made.into_inner())
+    };
+
+    // Without CLADEFSD_FAST_WAL_BUCKET, fast_wal = true is refused with ENOTSUP before making anything.
+    let refused = create(
+        &mut daemon,
+        CreateCellRequest {
+            capacity: CAPACITY,
+            fast_wal: Some(true),
+            fsync: FsyncLevel::FastWal.into(),
+            ..CreateCellRequest::default()
+        },
+    );
+    assert_eq!(failure(refused), (Code::FailedPrecondition, Errno::ENOTSUP));
+    assert!(daemon.list().is_empty());
+
+    // Invalid combinations are refused with EINVAL and create no cell.
+    let invalid = [
+        (Some(1), Some(true), FsyncLevel::FastWal),
+        (None, Some(true), FsyncLevel::Replicated),
+        (None, None, FsyncLevel::FastWal),
+        (None, Some(false), FsyncLevel::FastWal),
+    ];
+    for (replicas, fast_wal, fsync) in invalid {
+        let res = create(
+            &mut daemon,
+            CreateCellRequest {
+                capacity: CAPACITY,
+                replicas,
+                fast_wal,
+                fsync: fsync.into(),
+                ..CreateCellRequest::default()
+            },
+        );
+        assert_eq!(
+            failure(res),
+            (Code::InvalidArgument, Errno::EINVAL),
+            "{replicas:?} {fast_wal:?} {fsync:?}"
+        );
+        assert!(daemon.list().is_empty());
+    }
+}
+
+/// doc-29: Fast WAL cells created, written, stated, and taken through the control API.
+#[test]
+fn cells_are_made_fast_wal_through_the_control_api() {
+    let dir = tempfile::tempdir().unwrap();
+    let fast_wal_dir = dir.path().join("fast-wal-store");
+    std::fs::create_dir_all(&fast_wal_dir).unwrap();
+    let fast_wal_url = format!("file://{}", fast_wal_dir.display());
+    // SAFETY: nextest runs each test in a process of its own.
+    unsafe {
+        std::env::set_var("CLADEFSD_BUCKET", "memory:///fast-wal-ctl");
+        std::env::set_var("CLADEFSD_TOKEN", "1");
+        std::env::set_var("CLADEFSD_FAST_WAL_BUCKET", &fast_wal_url);
+    }
+    let dir2 = tempfile::tempdir().unwrap();
+    let mut daemon2 = Daemon::new(dir2.path());
+    let create = |daemon: &mut Daemon, request: CreateCellRequest| {
+        daemon.runtime.block_on(daemon.client.create_cell(request)).map(|made| made.into_inner())
+    };
+    let made = create(
+        &mut daemon2,
+        CreateCellRequest {
+            capacity: CAPACITY,
+            fast_wal: Some(true),
+            fsync: FsyncLevel::FastWal.into(),
+            ..CreateCellRequest::default()
+        },
+    )
+    .unwrap();
+    assert_ne!(made.cell, 0);
+    let first = CellId { tenant: made.tenant, id: made.cell };
+
+    let vm = daemon2.open(first);
+    write(&vm, &pattern(1), b"fast-wal-data");
+    let stat = daemon2.stat(first).unwrap();
+    assert!(stat.fast_wal);
+    assert_eq!(stat.fast_wal_bucket, fast_wal_url);
+    assert!(!stat.fast_wal_degraded);
+    assert_eq!(stat.fsync(), FsyncLevel::FastWal);
+    assert_eq!(stat.replicas, 0);
+    drop(vm);
+    let closed = daemon2.wait_closed(first);
+    assert!(closed.fast_wal);
+    assert_eq!(closed.fsync(), FsyncLevel::FastWal);
+
+    // Drop the local copy and re-take the same cell at a higher token (inherits Fast WAL from head).
+    daemon2.drop_cell(first).unwrap();
+    create(
+        &mut daemon2,
+        CreateCellRequest {
+            capacity: CAPACITY,
+            tenant: made.tenant,
+            cell: made.cell,
+            token: Some(2),
+            ..CreateCellRequest::default()
+        },
+    )
+    .unwrap();
+    let vm2 = daemon2.open(first);
+    let stat2 = daemon2.stat(first).unwrap();
+    assert!(stat2.fast_wal);
+    assert_eq!(stat2.fsync(), FsyncLevel::FastWal);
+    assert_eq!(stat2.fast_wal_bucket, fast_wal_url);
+    drop(vm2);
+
+    // Explicit replicas=0 with fast_wal=true and FSYNC_LEVEL_FAST_WAL keeps FastWal fsync.
+    let made3 = create(
+        &mut daemon2,
+        CreateCellRequest {
+            capacity: CAPACITY,
+            replicas: Some(0),
+            fast_wal: Some(true),
+            fsync: FsyncLevel::FastWal.into(),
+            ..CreateCellRequest::default()
+        },
+    )
+    .unwrap();
+    let zero_rep = CellId { tenant: made3.tenant, id: made3.cell };
+    let vm3 = daemon2.open(zero_rep);
+    // Exercise guest fsync (`commit_ordered` -> `Waiting::FastWal` via `head.fast_wal.fsync`)
+    // with explicit `replicas=0`, ensuring `replicas=0` never bypasses Fast WAL durability.
+    let extent = cladefs::ExtentId { cell: vm3.cell(), sequence: 1 };
+    let data = pattern(2);
+    vm3.write(extent, 0, &[cladefs::VolatileSlice::from(&data[..])]).unwrap();
+    vm3.commit_ordered(Some(b"zero-rep-fw")).unwrap();
+    let cell3 = bucket_cell::layout::CellId { tenant: made3.tenant, id: made3.cell };
+    // Epoch 1 (from `create_cell`) was empty and fenced by epoch 2 with the 36-byte `CFTF`
+    // tombstone; epoch 2's segment 0 must already contain the committed record before returning.
+    let wal_ep1 = fast_wal_dir.join(bucket_cell::layout::wal(cell3, 1, 0));
+    assert_eq!(
+        std::fs::metadata(&wal_ep1).unwrap().len(),
+        local_cell::fast_wal::TOMBSTONE_LEN as u64
+    );
+    let wal_ep2 = fast_wal_dir.join(bucket_cell::layout::wal(cell3, 2, 0));
+    let wal_len = std::fs::metadata(&wal_ep2)
+        .expect("replicas=0 + FSYNC_LEVEL_FAST_WAL must append to fast WAL before returning")
+        .len();
+    assert!(
+        wal_len > local_cell::fast_wal::HEADER_LEN as u64,
+        "fast WAL segment {wal_ep2:?} must contain the committed record (len={wal_len})"
+    );
+    let stat3 = daemon2.stat(zero_rep).unwrap();
+    assert!(stat3.fast_wal);
+    assert_eq!(stat3.replicas, 0);
+    assert_eq!(stat3.fsync(), FsyncLevel::FastWal);
+    drop(vm3);
+    daemon2.wait_closed(zero_rep);
+
+    // Hotbed review 118 #426: corrupt local WAL files of an active Fast WAL cell and verify
+    // reopening recovers cleanly from the remote cold + fast WAL buckets.
+    let zero_rep_dir = daemon2.cell_path(zero_rep);
+    std::fs::write(zero_rep_dir.join("wal"), b"corrupt-local-wal-start-file").unwrap();
+    let vm3_reopened = daemon2.open(zero_rep);
+    assert_eq!(vm3_reopened.root().unwrap(), b"zero-rep-fw");
+    drop(vm3_reopened);
 }
 
 /// hotbed question 547: multi-disk JBOD governance via `ListDisks` and `SetDiskGovernance`:

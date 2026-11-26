@@ -120,8 +120,7 @@ impl Opening {
                 true => {
                     let (local, bucket, keys, forked) =
                         host_cell::open_ephemeral_on(&self.host, path, &self.keeping).await?;
-                    let assembling =
-                        OpenCell::assemble(path, (local, bucket, None), Some(forked), self);
+                    let assembling = OpenCell::assemble(path, (local, bucket, None), forked, self);
                     let mut opened = assembling.await?;
                     opened.keys = Some(keys);
                     opened
@@ -179,6 +178,35 @@ impl Opening {
                 host_cell::create_on(&self.host, path, capacity, of, kind, keeping).await?;
             span.set_cell(opened.local.description().cell);
             OpenCell::new(path, opened, self).await
+        })
+        .await
+    }
+
+    /// Creates a new standalone (parentless) host-local ephemeral cell directory at `path`, of
+    /// `capacity` bytes, `tenant`, and `kind`, opened as this [`Opening`] configures: never
+    /// uploaded, no bucket reference, no versions.
+    pub async fn create_ephemeral_kind(
+        self,
+        path: impl AsRef<Path>,
+        capacity: u64,
+        tenant: u64,
+        kind: Kind,
+    ) -> Result<OpenCell, Error> {
+        let path = path.as_ref();
+        OpenCell::creating(path, async |span| {
+            let (local, bucket, keys) = host_cell::create_ephemeral_on(
+                &self.host,
+                path,
+                capacity,
+                tenant,
+                kind,
+                &self.keeping,
+            )
+            .await?;
+            span.set_cell(local.description().cell);
+            let mut opened = OpenCell::assemble(path, (local, bucket, None), None, self).await?;
+            opened.keys = Some(keys);
+            Ok(opened)
         })
         .await
     }
@@ -261,6 +289,61 @@ impl OpenCell {
         opening: Opening,
     ) -> Result<Self, Error> {
         opening.create_kind(path, capacity, of, kind).await
+    }
+
+    /// cladefs: a new standalone (parentless) host-local ephemeral Fxfs cell directory at `path`,
+    /// of `capacity` bytes and `tenant`, opened as `opening` says.
+    pub async fn create_ephemeral_with(
+        path: impl AsRef<Path>,
+        capacity: u64,
+        tenant: u64,
+        opening: Opening,
+    ) -> Result<Self, Error> {
+        opening.create_ephemeral_kind(path, capacity, tenant, Kind::Fxfs).await
+    }
+
+    /// cladefs: a new standalone (parentless) host-local ephemeral cell directory at `path`, of
+    /// `capacity` bytes, `tenant`, and `kind`, opened as `opening` says.
+    pub async fn create_ephemeral_kind_with(
+        path: impl AsRef<Path>,
+        capacity: u64,
+        (tenant, kind): (u64, Kind),
+        opening: Opening,
+    ) -> Result<Self, Error> {
+        opening.create_ephemeral_kind(path, capacity, tenant, kind).await
+    }
+
+    /// cladefs: creates a standalone (parentless) host-local ephemeral cell at `path` on `host`,
+    /// closes it cleanly, and returns its cell ID.
+    pub(crate) async fn create_ephemeral_closed_on(
+        host: &crate::Host,
+        path: impl AsRef<Path>,
+        capacity: u64,
+        tenant: u64,
+        kind: Kind,
+        keeping: &local_cell::upload::Options,
+    ) -> Result<CellId, Error> {
+        let path = path.as_ref();
+        let (local, bucket, keys) =
+            host_cell::create_ephemeral_on(host, path, capacity, tenant, kind, keeping).await?;
+        let cell = local.description().cell;
+        local.close().await.map_err(Error::new)?;
+        drop((local, bucket, keys));
+        Ok(cell)
+    }
+
+    /// cladefs: assembles an unmade standalone ephemeral cell opened by
+    /// `host_cell::create_ephemeral_unmade_on` into an [`OpenCell`].
+    pub(crate) async fn from_ephemeral_parts(
+        path: &Path,
+        local: Arc<LocalCell<HostDir>>,
+        bucket: Arc<bucket_cell::object_bucket::RoutedBucket>,
+        keys: bucket_cell::keys::RingHold,
+        opening: Opening,
+    ) -> Result<Self, Error> {
+        let mut opened = Self::assemble(path, (local, bucket, None), None, opening).await?;
+        opened.keys = Some(keys);
+        Ok(opened)
     }
 
     /// cladefs: `make`'s making of a new cell directory at `path`, in a span of its own,

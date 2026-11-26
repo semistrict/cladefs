@@ -736,6 +736,12 @@ impl<F: File> Segments<F> {
         self.tracked.get(&number).map_or(0, |segment| segment.len)
     }
 
+    /// cladefs: the next bucket segment number this cell's chain will stamp on its open segment
+    /// when it closes, used by fast WAL large-extent pre-upload (doc-29).
+    pub fn next_bucket_segment(&self) -> u64 {
+        self.chain.next_segment()
+    }
+
     /// cladefs: the bytes of the extents the open segment's commits sealed, in its data and in
     /// files of their own: what of the write-ahead log it holds, which closing it uploads, and not
     /// the writes no commit sealed yet, which no upload takes (TASK-165.9); and the first full
@@ -1549,11 +1555,23 @@ pub(crate) fn make_durable<D: Dir>(
     cell: u64,
     (framed, entries): (&[(SegmentId, Arc<Framed<D::File>>)], bool),
     since: Instant,
+    cache_only: bool,
 ) -> Result<(), Error> {
     // Where the segments are framed, written, not yet durable: their framings still running.
     fail::fail_point!("segments::making_durable");
     let mut timing = Timing::since(since);
     timing.took(durable::WAIT);
+    if cache_only {
+        // cladefs: fast WAL cells treat local disk as cache-only (doc-29, Hotbed review 118):
+        // rename framed files into place with zero local disk fsyncs or barriers so cold fallback
+        // and background acknowledgement never stall on local disk sync.
+        for &(number, _) in framed {
+            let (from, to) = (framing_path(number), segment_path(number));
+            dir.rename(&from, &to).with_context(|| format!("renaming {from} {to}"))?;
+        }
+        timings::made_durable(cell, framed.len(), timing.end());
+        return Ok(());
+    }
     if entries {
         let mut opened = Syncs::default();
         for kind in [OPEN_SEGMENTS, LOGS] {
@@ -2357,7 +2375,8 @@ mod tests {
     fn framed_durably(dir: &MemDir, unframed: Unframed<MemFile>) -> Arc<Framed<MemFile>> {
         let number = unframed.number();
         let framed = unframed.frame(dir, Vec::new()).unwrap();
-        make_durable(dir, CELL.id, (&[(number, framed.clone())], false), Instant::now()).unwrap();
+        make_durable(dir, CELL.id, (&[(number, framed.clone())], false), Instant::now(), false)
+            .unwrap();
         framed
     }
 
@@ -2559,8 +2578,14 @@ mod tests {
         let framed = unframed.frame(&dir, seen).unwrap();
         assert_eq!(framing_reads().0 - before.0, BLOCK, "the last part alone read");
         assert_eq!(segments_framed_in_place() - before.1, 1, "framed in place");
-        make_durable(&dir, CELL.id, (&[(segment(0), framed.clone())], false), Instant::now())
-            .unwrap();
+        make_durable(
+            &dir,
+            CELL.id,
+            (&[(segment(0), framed.clone())], false),
+            Instant::now(),
+            false,
+        )
+        .unwrap();
         segments.framed(segment(0), framed.clone());
         let decoded = extent_frame::data(
             &read_whole(&*framed.file).unwrap(),
@@ -2609,8 +2634,14 @@ mod tests {
         let before = framing_reads().0;
         let framed = unframed.frame(&dir, seen).unwrap();
         assert_eq!(framing_reads().0 - before, BLOCK, "only the trailing partial part read");
-        make_durable(&dir, CELL.id, (&[(segment(0), framed.clone())], false), Instant::now())
-            .unwrap();
+        make_durable(
+            &dir,
+            CELL.id,
+            (&[(segment(0), framed.clone())], false),
+            Instant::now(),
+            false,
+        )
+        .unwrap();
         segments.framed(segment(0), framed.clone());
         let decoded = extent_frame::data(
             &read_whole(&*framed.file).unwrap(),
@@ -2739,7 +2770,8 @@ mod tests {
         let locked = extent_frame::data(&object, &extent_frame::NoKeys);
         assert_eq!(locked, Err(extent_frame::Error::NoKey(key)));
         assert_eq!(in_the_clear(&dir, &noise), Vec::<String>::new());
-        make_durable(&dir, CELL.id, (&[(number, framed.clone())], false), Instant::now()).unwrap();
+        make_durable(&dir, CELL.id, (&[(number, framed.clone())], false), Instant::now(), false)
+            .unwrap();
         segments.framed(number, framed);
         let Source::Framed(read) = segments.source(&dir, number).unwrap() else { panic!() };
         let parts = &read.parts;

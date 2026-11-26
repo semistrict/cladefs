@@ -1,0 +1,109 @@
+Head {
+    format: 35,
+    owner: 305419896,
+    made: Root,
+    kind: Some(
+        Fxfs,
+    ),
+    keks: [
+        Kek {
+            generation: 1,
+            wrapped: Wrapped(
+                [
+                    1,
+                    2,
+                    3,
+                    4,
+                ],
+            ),
+        },
+    ],
+    shredded: false,
+    deks: [
+        Dek {
+            generation: 1,
+            kek: 1,
+            wrapped: Wrapped(
+                [
+                    5,
+                    6,
+                    7,
+                    8,
+                ],
+            ),
+        },
+    ],
+    inherited: [
+        InheritedDek {
+            cell: CellId {
+                tenant: 47,
+                id: 281474976710661,
+            },
+            dek: Dek {
+                generation: 2,
+                kek: 1,
+                wrapped: Wrapped(
+                    [
+                        9,
+                        10,
+                    ],
+                ),
+            },
+        },
+    ],
+    epoch: 4,
+    holder: 153,
+    token: 12,
+    end: 5,
+    swaps: 7,
+    runs: [
+        (
+            0,
+            1,
+        ),
+        (
+            3,
+            4,
+        ),
+    ],
+    checkpoint: Some(
+        (
+            3,
+            4,
+        ),
+    ),
+    versions: [
+        Version {
+            id: 171,
+            at: 3,
+            epoch: 4,
+            shared: true,
+        },
+    ],
+    replication: Some(
+        Replication {
+            wish: Wish {
+                f: 1,
+                fsync: Replicated,
+            },
+            configuration: Some(
+                Configuration {
+                    number: 2,
+                    epoch: 4,
+                    f: 1,
+                    members: [
+                        Member {
+                            address: "10.0.0.1:9000",
+                            incarnation: 101,
+                        },
+                        Member {
+                            address: "10.0.0.2:9000",
+                            incarnation: 202,
+                        },
+                    ],
+                },
+            ),
+        },
+    ),
+    fast_wal: None,
+}

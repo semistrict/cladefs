@@ -19,10 +19,14 @@ bucket (CONTEXT.md, Cell), and its sync, syncfs and unmount wait for an upload (
 
 ## Decisions
 
-1. *(decided)* **An ephemeral cell** is a cell forked from a version of a cell in a bucket, kept on
-   one host's disk alone, and never uploaded. Its parent's version is its lower layer, read as every
-   fork reads its origin: the extent cache, shared by DAX across the host's VMs, then the part cache,
-   then the bucket. Its own extents are its upper layer.
+1. *(decided)* **An ephemeral cell** is kept on one host's disk alone and never uploaded: either
+   forked from a version of a cell in a bucket (its parent's version its lower layer, read through
+   the extent cache, part cache, and bucket; its own extents its upper layer), or a **standalone
+   (parentless) ephemeral cell** (cell-directory v19, `LocalCheckpoint::parent == None`), such as a
+   host-local ephemeral memory cell (`CELL_KIND_MEMORY`) for local VM suspend/resume. Standalone
+   ephemeral cells hold no bucket reference and require no `CLADEFSD_EPHEMERAL` journal entry, while
+   still allocating a unique cell ID from the daemon's bucket allocator and encrypting under a
+   tenant-wrapped cell KEK via the host's KMS (so tenant shredding still invalidates them).
 2. *(decided)* **No bucket of its own.** The extent store keeps an ephemeral cell's segments raw in its
    directory, with no uploader and no framing. The other design, a `file://` bucket per host disk
    holding ephemeral cells as cells homed there (doc-23's cross-bucket fork), was rejected once
@@ -30,8 +34,16 @@ bucket (CONTEXT.md, Cell), and its sync, syncfs and unmount wait for an upload (
    leaves the host. It would also have spent a bucket number per host, and hosts come and go.
 3. *(decided)* **Never promoted.** No ephemeral cell becomes a bucket cell, and none is forked into
    one.
-4. *(decided)* **No versions.** An ephemeral cell is a leaf. It has no `MakeVersion`, no forks of it,
-   and no VM snapshot that includes it.
+4. *(decided)* **No versions; host-local in-place suspend/resume only.** An ephemeral cell is a
+   leaf. It has no `MakeVersion` and no forks of it. A VM running on an ephemeral cell may still
+   suspend and resume **in place on the same host** (`snapshot-extent-state` v3,
+   `CellSnapshot::LocalEphemeral { tenant, cell, committed }`): on snapshot, `cladefsd` verifies
+   quiescence, flushes commits locally, folds closed segments into `local-checkpoint` (punching
+   freed runs), and returns the cell's `(tenant, cell, committed)`; on restore, `cladefsd` reopens
+   the same cell directory in place only if `(tenant, cell)` and `committed` still match (`EEXIST`
+   otherwise, preserving TASK-194's stale-restore safety). Combined with standalone ephemeral memory
+   cells (`PUT /snapshot/create` / `PUT /snapshot/load` with `memory_cell.ephemeral: true`), a VM
+   can park to local SSD and stop its Firecracker process with zero bucket uploads.
 5. *(decided)* **The parent's version is kept by a reference.** The reference is in the parent's
    bucket and names the holding host's incarnation. A daemon retires its own stale references when
    it starts. **Decommissioning** a host, the VM manager's call for a host gone for good, retires every

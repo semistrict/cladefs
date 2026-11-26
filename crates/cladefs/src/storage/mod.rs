@@ -290,6 +290,34 @@ impl Storage {
         Self::make_on(host, path.as_ref(), (size, tenant), kind, false, keeping).await
     }
 
+    /// cladefs: a new unmade standalone (parentless) host-local ephemeral cell of `kind` at `path`
+    /// on `host` of `size` bytes, for `tenant`, writing nothing to the bucket.
+    pub(crate) async fn create_unmade_ephemeral_kind_keeping_on(
+        host: &Arc<crate::Host>,
+        path: impl AsRef<Path>,
+        (size, tenant): (u64, u64),
+        kind: bucket_cell::cell::Kind,
+        keeping: local_cell::upload::Options,
+    ) -> Result<Self, Error> {
+        if size < Self::BLOCK_SIZE as u64 {
+            return Err(Error::msg("the image is smaller than a block"));
+        }
+        let path = path.as_ref().to_owned();
+        let task_host = host.clone();
+        on_bucket_runtime_on(host, async move {
+            let (local, bucket, keys) = host_cell::create_ephemeral_unmade_on(
+                &task_host, &path, size, tenant, kind, &keeping,
+            )
+            .await?;
+            let opening = Opening::keeping_on(task_host.clone(), keeping).for_host();
+            let cell = Arc::new(
+                OpenCell::from_ephemeral_parts(&path, local, bucket, keys, opening).await?,
+            );
+            Self::wrap_cell(path, cell, None).await
+        })
+        .await
+    }
+
     /// How an image `host` makes keeps its cell.
     fn keeping_on(host: &crate::Host) -> Result<local_cell::upload::Options, Error> {
         host_cell::keeping_on(host).map_err(Error::new)

@@ -126,7 +126,7 @@ use bucket_cell::collector::{Collector, DryRun, Report};
 use bucket_cell::layout;
 use bucket_cell::layout::CellId;
 use bucket_cell::layout::Head;
-use bucket_cell::object_bucket::{ObjectBucket, Request, RoutedBucket, probe};
+use bucket_cell::object_bucket::{Request, RoutedBucket, probe};
 use bucket_cell::passed::{self, Sum, Usage};
 use bucket_cell::sweep::{self, Limits, Outcome, Ran, Requests, Stop, Stopped, Sweep, Swept};
 use bucket_cell::{cell, lifecycle};
@@ -1369,9 +1369,10 @@ fn main() -> Result<(), String> {
     log::set_max_level(log::LevelFilter::Warn);
     // cladefs: its passes' requests of other buckets' cells go there (TASK-633.7): a child's pass
     // retires its reference, under its parent's cell, in its parent's bucket, and a parent's pass
-    // reads its children's heads in theirs.
+    // reads its children's heads in theirs. One filtered snapshot shared across the run (board
+    // 9684).
     let resolve = Arc::new(bucket_cell::object_bucket::Registered::from_env());
-    let bucket = Arc::new(ObjectBucket::from_url(&url)?.routed(resolve));
+    let bucket = Arc::new(resolve.open_url(&url)?.routed(resolve.clone()));
     // Of a thread a core: a sweep's passes run on them at once (TASK-395.15).
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -1433,6 +1434,7 @@ fn main() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bucket_cell::object_bucket::ObjectBucket;
 
     fn parsed(args: &[&str]) -> Result<Args, String> {
         parse(args.iter().map(|arg| arg.to_string()))
@@ -1635,6 +1637,7 @@ cladefs_gc_sweep_requests{request=\"overwrite\"} 0
 cladefs_gc_sweep_requests{request=\"delete\"} 0
 cladefs_gc_sweep_requests{request=\"list-delimited\"} 0
 cladefs_gc_sweep_requests{request=\"delete-batch\"} 0
+cladefs_gc_sweep_requests{request=\"append\"} 0
 # HELP cladefs_gc_pass_seconds How long its last sweep's passes took.
 # TYPE cladefs_gc_pass_seconds histogram
 cladefs_gc_pass_seconds_bucket{le=\"0.001\"} 0

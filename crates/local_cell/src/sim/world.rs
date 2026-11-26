@@ -1539,6 +1539,7 @@ impl World {
         };
         let options = upload::Options {
             interval: INTERVAL,
+            upload_closed: true,
             max_lag: u64::MAX,
             max_lag_bytes: u64::MAX,
             cache: None,
@@ -1560,6 +1561,9 @@ impl World {
             // model follows: its uploaders run none, whose commits it would not know of.
             relocate: false,
             fetching: None,
+            fast_wal: None,
+            fast_wal_config: None,
+            fast_wal_large_extent: crate::fast_wal::DEFAULT_LARGE_EXTENT,
         };
         let (uploads, keys) = (self.hosts[host].uploads.clone(), self.hosts[host].keys.clone());
         let kept = Arc::<Mutex<Vec<BoxFuture<'static, ()>>>>::default();

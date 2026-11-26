@@ -1,0 +1,117 @@
+WalHeader {
+    key_generation: 1,
+    cell: CellId {
+        tenant: 47,
+        id: 844424930131975,
+    },
+    epoch: 2,
+    segment: 0,
+    salt: Salt(
+        [
+            17,
+            17,
+            17,
+            17,
+            17,
+            17,
+            17,
+            17,
+            17,
+            17,
+            17,
+            17,
+            17,
+            17,
+            17,
+            17,
+            17,
+            17,
+            17,
+            17,
+            17,
+            17,
+            17,
+            17,
+            17,
+            17,
+            17,
+            17,
+            17,
+            17,
+            17,
+            17,
+        ],
+    ),
+}
+[
+    (
+        0,
+        Batch(
+            [
+                FastWalCommit {
+                    epoch: 1,
+                    tag: 2199023255553,
+                    inline_extents: [
+                        (
+                            ExtentId {
+                                cell: 844424930131975,
+                                sequence: 5,
+                            },
+                            [
+                                104,
+                                101,
+                                108,
+                                108,
+                                111,
+                                45,
+                                119,
+                                97,
+                                108,
+                            ],
+                        ),
+                    ],
+                    large_refs: [
+                        LargeRef {
+                            sequence: 6,
+                            logical_len: 262144,
+                            bucket_segment: 0,
+                        },
+                    ],
+                    frees: [
+                        ExtentId {
+                            cell: 844424930131975,
+                            sequence: 1,
+                        },
+                    ],
+                    root: Some(
+                        [
+                            114,
+                            111,
+                            111,
+                            116,
+                            45,
+                            118,
+                            49,
+                        ],
+                    ),
+                    capacity: Some(
+                        1073741824,
+                    ),
+                    next_sequence: 7,
+                    versions: [
+                        NewVersion {
+                            id: 190,
+                            keep_last: Some(
+                                2,
+                            ),
+                        },
+                    ],
+                },
+            ],
+        ),
+    ),
+    (
+        1,
+        Rolled,
+    ),
+]

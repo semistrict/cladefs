@@ -142,19 +142,32 @@ pub(crate) struct State {
     /// The buckets this host keeps cells in, by their URLs: one each, which every cell naming it
     /// shares.
     buckets: Mutex<BTreeMap<String, Arc<RoutedBucket>>>,
+    /// Shared filtered bucket-option snapshot reused by every bucket opened on this host
+    /// (board 9684).
+    registered: std::sync::OnceLock<Arc<bucket_cell::object_bucket::Registered>>,
     /// cladefs: the cells this host made versions of, by the version (cell and ID).
     versions_made: Mutex<BTreeMap<(CellId, u64), PathBuf>>,
 }
 
 impl State {
     pub(crate) fn new() -> Self {
-        Self { buckets: Mutex::new(BTreeMap::new()), versions_made: Mutex::new(BTreeMap::new()) }
+        Self {
+            buckets: Mutex::new(BTreeMap::new()),
+            registered: std::sync::OnceLock::new(),
+            versions_made: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    fn registered(&self) -> Arc<bucket_cell::object_bucket::Registered> {
+        self.registered
+            .get_or_init(|| Arc::new(bucket_cell::object_bucket::Registered::from_env()))
+            .clone()
     }
 }
 
 /// The bucket at `url` in `state`.
 pub(crate) fn bucket_in(state: &State, url: &str) -> anyhow::Result<Arc<RoutedBucket>> {
-    bucket_opened_in(state, url, ObjectBucket::from_url)
+    bucket_opened_in(state, url, |resolve, url| resolve.open_url(url))
 }
 
 /// The bucket at `url` on `host` ([`ObjectBucket::from_url`]): `host`'s, made if it has none yet.
@@ -175,7 +188,7 @@ pub(crate) fn bucket_of_on(
     url: &str,
     number: u16,
 ) -> anyhow::Result<Arc<RoutedBucket>> {
-    bucket_opened_in(host.host_cells(), url, |url| ObjectBucket::from_url_numbered(url, number))
+    bucket_opened_in(host.host_cells(), url, |resolve, url| resolve.open_url_numbered(url, number))
 }
 
 /// cladefs: the bucket numbered `number` at `url`, as [`bucket`] has it: opened with that bucket's
@@ -191,15 +204,16 @@ pub(crate) fn bucket_of(url: &str, number: u16) -> anyhow::Result<Arc<RoutedBuck
 fn bucket_opened_in(
     state: &State,
     url: &str,
-    open: impl FnOnce(&str) -> Result<ObjectBucket, String>,
+    open: impl FnOnce(&bucket_cell::object_bucket::Registered, &str) -> Result<ObjectBucket, String>,
 ) -> anyhow::Result<Arc<RoutedBucket>> {
     let mut buckets = state.buckets.lock().unwrap();
     if let Some(bucket) = buckets.get(url) {
         return Ok(bucket.clone());
     }
     // Its requests of other buckets' cells go there, by the registry of buckets (TASK-633.4).
-    let resolve = Arc::new(bucket_cell::object_bucket::Registered::from_env());
-    let bucket = open(url).map_err(anyhow::Error::msg)?.routed(resolve);
+    // One filtered snapshot shared across every bucket opened on this host (board 9684).
+    let resolve = state.registered();
+    let bucket = open(&resolve, url).map_err(anyhow::Error::msg)?.routed(resolve);
     let bucket = Arc::new(bucket);
     buckets.insert(url.to_owned(), bucket.clone());
     Ok(bucket)
@@ -558,10 +572,42 @@ pub(crate) async fn open_on(
 ) -> Result<Opened, Failure> {
     // cladefs: a close of it on this host waited for first, holding no thread (doc-24).
     closed_on(host, path).await?;
-    let recovering = upload::blocking(|| -> Result<_, Failure> {
+    let recovered = upload::blocking(|| -> Result<_, Failure> {
         Ok(LocalCell::recover(host_dir_on(host, path)?)?)
-    })?;
-    opened_on(host, recovering, keeping).await
+    });
+    match recovered {
+        Ok(recovering) => opened_on(host, recovering, keeping).await,
+        Err(recover_err) => {
+            // cladefs: for an active Fast WAL cell, local disk is cache-only (doc-29, Hotbed
+            // review 118): if local WAL recovery fails (e.g. damaged cache files), peek the cell's
+            // description and check the cold bucket head. Only if the head confirms an active Fast
+            // WAL do we drop the damaged local WAL and recover from the remote buckets; non-Fast-WAL
+            // cells still fail hard with the original local error.
+            let peeked = upload::blocking(|| {
+                let dir = host_dir_on(host, path)?;
+                Ok::<_, Failure>(LocalCell::peek_bucket(&dir)?)
+            });
+            if let Ok((cell, Some(url))) = peeked
+                && let Ok(bucket) = bucket_on(host, &url)
+                && let Ok(read) = bucket_cell::head::read(&*bucket, cell).await
+                && matches!(
+                    read.head(),
+                    Ok(Some(h)) if h.fast_wal.as_ref().and_then(|fw| fw.active.as_ref()).is_some()
+                )
+            {
+                log::warn!(
+                    "cladefs: local cache WAL of active fast-WAL cell {cell} at {} is damaged \
+                     ({recover_err}); dropping local cache and recovering from remote buckets",
+                    path.display()
+                );
+                let recovering = upload::blocking(|| -> Result<_, Failure> {
+                    Ok(LocalCell::recover_dropping_wal(host_dir_on(host, path)?)?)
+                })?;
+                return opened_with_head_on(host, recovering, keeping, Some(read)).await;
+            }
+            Err(recover_err)
+        }
+    }
 }
 
 #[cfg(all(test, not(madsim)))]
@@ -906,13 +952,97 @@ fn make_dir(path: &Path) -> Result<(), Error> {
     })
 }
 
+/// cladefs: creates a standalone (parentless) host-local ephemeral cell of `kind` and `capacity`
+/// bytes for `tenant` at `path` on `host`, unmade until the caller marks it whole: encrypted under
+/// a tenant-wrapped cell KEK via the host's KMS, writing nothing to the bucket and holding no
+/// bucket reference or `CLADEFSD_EPHEMERAL` journal entry.
+pub(crate) async fn create_ephemeral_unmade_on(
+    host: &crate::Host,
+    path: &Path,
+    capacity: u64,
+    tenant: u64,
+    kind: cell::Kind,
+    keeping: &upload::Options,
+) -> Result<(Arc<LocalCell<HostDir>>, Arc<RoutedBucket>, bucket_cell::keys::RingHold), Failure> {
+    let url = bucket_for(path)?;
+    let bucket = bucket_on(host, &url).with_context(|| format!("opening the bucket {url}"))?;
+    let cell = new_cell(&bucket, tenant).await?;
+    let runtime = crate::bucket::runtime_on(host)?;
+    let (checkpoint, ring, ring_hold) =
+        upload::create_standalone_ephemeral(&*bucket, &runtime, cell, capacity, rand::random())
+            .await?;
+    upload::blocking(|| host_fs::create_dir(path))
+        .map_err(|err| Failure::local(err, format!("creating {}", path.display())))?;
+    let made = upload::blocking(|| -> anyhow::Result<LocalCell<HostDir>> {
+        let description = Description { block_size: BLOCK_SIZE, capacity, cell };
+        local_cell::create_host_ephemeral_on(
+            host.local(),
+            path,
+            description,
+            &url,
+            kind,
+            &checkpoint,
+            ring.try_encrypting()?,
+            |making| {
+                durable_in_parent(making, path);
+                Ok(())
+            },
+        )
+        .with_context(|| {
+            format!("creating standalone ephemeral cell {cell}: its cell directory")
+        })?;
+        let recovering = LocalCell::recover_unmade(host_dir_on(host, path)?)?;
+        let opening = local_cell::EphemeralOpening {
+            parent: None,
+            keys: ring,
+            cache: keeping.cache.clone(),
+            held: keeping.held.clone(),
+        };
+        recovering.open_ephemeral(options(), opening)
+    });
+    match made {
+        Ok(local) => Ok((Arc::new(local), bucket, ring_hold)),
+        Err(err) => {
+            upload::blocking(|| discard_on(host, path));
+            Err(Failure::from(err))
+        }
+    }
+}
+
+/// cladefs: creates a standalone (parentless) host-local ephemeral cell at `path` on `host`,
+/// marked whole (`made`).
+pub(crate) async fn create_ephemeral_on(
+    host: &crate::Host,
+    path: &Path,
+    capacity: u64,
+    tenant: u64,
+    kind: cell::Kind,
+    keeping: &upload::Options,
+) -> Result<(Arc<LocalCell<HostDir>>, Arc<RoutedBucket>, bucket_cell::keys::RingHold), Failure> {
+    let (local, bucket, ring_hold) =
+        create_ephemeral_unmade_on(host, path, capacity, tenant, kind, keeping).await?;
+    if let Err(err) = upload::blocking(|| local.made()) {
+        // Error path: best-effort close before discarding the unmade directory.
+        let _ = local.close().await;
+        drop((local, bucket, ring_hold));
+        upload::blocking(|| discard_on(host, path));
+        return Err(Failure::from(err));
+    }
+    Ok((local, bucket, ring_hold))
+}
+
 /// cladefs: opens the ephemeral cell at `path` on `host`.
 pub(crate) async fn open_ephemeral_on(
     host: &crate::Host,
     path: &Path,
     keeping: &upload::Options,
 ) -> Result<
-    (Arc<LocalCell<HostDir>>, Arc<RoutedBucket>, bucket_cell::keys::RingHold, upload::Forked),
+    (
+        Arc<LocalCell<HostDir>>,
+        Arc<RoutedBucket>,
+        bucket_cell::keys::RingHold,
+        Option<upload::Forked>,
+    ),
     Failure,
 > {
     closed_on(host, path).await?;
@@ -979,14 +1109,17 @@ pub(crate) async fn delete_on(
     bucket: Option<&RoutedBucket>,
     token: impl Fn() -> Result<u64, Failure>,
 ) -> Result<(), Error> {
-    // cladefs: an ephemeral cell's reference retired, its note forgotten (doc-25, TASK-698.3).
+    // cladefs: an ephemeral cell's reference retired, its note forgotten (doc-25, TASK-698.3);
+    // standalone (parentless) ephemeral cells hold no bucket reference or journal entry.
     if upload::blocking(|| is_ephemeral(path)) {
         return delete_with_on(host_ctx, path, async |dir, cell| {
             let checkpoint =
                 upload::blocking(|| local_cell::host_local_checkpoint_on(host_ctx.local(), dir))?;
             let checkpoint = checkpoint
                 .ok_or_else(|| Failure::msg(format!("{} has no checkpoint", dir.display())))?;
-            let parent = checkpoint.parent();
+            let Some(parent) = checkpoint.parent() else {
+                return Ok(());
+            };
             let origin = bucket_cell::layout::Origin {
                 parent: parent.cell,
                 at: parent.at,
