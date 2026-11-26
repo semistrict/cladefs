@@ -363,13 +363,16 @@ fn read_psi(path: &std::path::Path) -> Option<MemoryPressure> {
     psi_of(&text)
 }
 
-/// The host's memory now (macOS: its pages free and speculative, as the VM statistics count them).
+/// The host's memory now (macOS: what it says is available, `kern.memorystatus_level`).
 #[cfg(target_os = "macos")]
 pub fn host_memory() -> std::io::Result<HostMemory> {
-    let page = cladefs_core::slabs::page_size();
     let total = sysctl_u64(c"hw.memsize")?;
-    let free = sysctl_u64(c"vm.page_free_count")? + sysctl_u64(c"vm.page_speculative_count")?;
-    Ok(HostMemory { total, available: free * page })
+    // cladefs: the share of it macOS says is available (`kern.memorystatus_level`, a percentage:
+    // what its memory pressure is reckoned from), its inactive and purgeable pages among it, which
+    // the kernel takes back as it needs. Free and speculative pages alone, as before, said a busy
+    // Mac's memory was full, its daemon making no cell more (board 13065).
+    let level = sysctl_u64(c"kern.memorystatus_level")?.min(100);
+    Ok(HostMemory { total, available: total / 100 * level })
 }
 
 /// The host's memory sample on macOS (no cgroups or Linux PSI).
