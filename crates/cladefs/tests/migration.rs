@@ -18,7 +18,7 @@ use cladefs::cladefsd::control::proto::{
 use cladefs::testing::Control;
 use cladefs::{CellClient, CellId, ExtentId, VolatileSlice, VolatileSliceMut};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 const CAPACITY: u64 = 1 << 31;
@@ -72,6 +72,17 @@ fn daemon(dir: &Path, bucket: &Path, peers: &[String]) -> Daemon {
 /// A daemon as [`daemon`] starts one, its environment `env` besides: failpoints (FAILPOINTS) its
 /// build has, as this crate's tests build it with the `failpoints` feature.
 fn daemon_with(dir: &Path, bucket: &Path, peers: &[String], env: &[(&str, &str)]) -> Daemon {
+    daemon_logging(dir, bucket, peers, env, Stdio::inherit())
+}
+
+/// A daemon as [`daemon_with`] starts one, what it logs going to `log`.
+fn daemon_logging(
+    dir: &Path,
+    bucket: &Path,
+    peers: &[String],
+    env: &[(&str, &str)],
+    log: Stdio,
+) -> Daemon {
     let disk = dir.join("disk0");
     std::fs::create_dir_all(&disk).unwrap();
     let (vms, control, ephemeral) =
@@ -91,6 +102,7 @@ fn daemon_with(dir: &Path, bucket: &Path, peers: &[String], env: &[(&str, &str)]
         .env("CLADEFSD_PEER_ADDRESS", &peers[0])
         .env("CLADEFSD_PEERS", peers.join(","))
         .envs(env.iter().copied())
+        .stderr(log)
         .spawn()
         .unwrap();
     let process = KillOnDrop(process);
@@ -385,13 +397,19 @@ impl Forked {
 
     /// Host `host`'s daemon, killed, as a crash does, and started again with `env` besides.
     fn restart_with(&mut self, host: usize, env: &[(&str, &str)]) {
+        self.restart_logging(host, env, Stdio::inherit());
+    }
+
+    /// Host `host`'s daemon, killed, as a crash does, and started again with `env` besides, what
+    /// it logs going to `log`.
+    fn restart_logging(&mut self, host: usize, env: &[(&str, &str)], log: Stdio) {
         let (dir, bucket) = (self.host(host), self.bucket());
         let killed = match host {
             0 => &mut self.source,
             _ => &mut self.target,
         };
         killed.kill();
-        *killed = daemon_with(&dir, &bucket, &self.peers[host], env);
+        *killed = daemon_logging(&dir, &bucket, &self.peers[host], env, log);
     }
 
     /// How many cells each host's journal notes: the source's, then the target's.
@@ -652,6 +670,47 @@ fn a_target_crashed_between_its_rename_and_accepting_is_clean_as_it_starts() {
     assert!(!there.exists(), "the cell, never accepted, removed as the target started again");
     let refused = forked.source.hand_over(forked.child).unwrap_err();
     assert_eq!(refused.errno(), Some(cladefs::Errno::EAGAIN));
+    forked.assert_served_again(4);
+    forked.source.migrate(forked.child, forked.target_at()).unwrap();
+    forked.source.hand_over(forked.child).unwrap();
+    forked.assert_handed_over(4);
+}
+
+/// Board 10705 (hotbed review 86): a target whose acceptance of a hand-over is renamed into place
+/// but never synced into its directory (failpoint `ephemeral_host::accepted_renamed`), its reaper
+/// queued behind that hand-over then finding the migration accepted, notes the cell taken only once
+/// the acceptance is durable: never while its sync fails. Crashed then, the acceptance lost as a
+/// power cut may lose a rename never synced, the target removes the cell as it starts again, never
+/// accepted; the source, asking again, is refused and serves the cell, the only host to; and the
+/// cell migrates there after.
+#[test]
+fn a_target_noting_a_cell_taken_makes_its_acceptance_durable_first() {
+    let mut forked = forked(4);
+    let there = forked.there();
+    let log = forked.dir.path().join("target.log");
+    // The hand-over held at its accepting past the idle bound, the reaper waiting its turn behind.
+    let failpoints = "migration::accepting=sleep(5000);ephemeral_host::accepted_renamed=return";
+    let env = [("FAILPOINTS", failpoints), ("CLADEFSD_MIGRATION_IDLE", "2")];
+    forked.restart_logging(1, &env, std::fs::File::create(&log).unwrap().into());
+    forked.source.migrate(forked.child, forked.target_at()).unwrap();
+    let failed = forked.source.hand_over(forked.child).unwrap_err();
+    assert_eq!(failed.errno(), Some(cladefs::Errno::ENOTCONN), "{failed}");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !std::fs::read_to_string(&log).unwrap().contains("accepted: noted taken, not given up") {
+        assert!(Instant::now() < deadline, "the reaper never found the migration accepted");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    forked.target.kill();
+    // Lost to a power cut: renamed into its directory, which no sync made durable.
+    let accepted = forked.target.ephemeral.join("accepted");
+    let renamed: Vec<PathBuf> =
+        std::fs::read_dir(&accepted).unwrap().map(|found| found.unwrap().path()).collect();
+    assert_eq!(renamed.len(), 1, "the acceptance renamed into place: {renamed:?}");
+    std::fs::remove_file(&renamed[0]).unwrap();
+    forked.restart(1);
+    assert!(!there.exists(), "the cell, never accepted, removed as the target started again");
+    let refused = forked.source.hand_over(forked.child).unwrap_err();
+    assert_eq!(refused.errno(), Some(cladefs::Errno::EAGAIN), "{refused}");
     forked.assert_served_again(4);
     forked.source.migrate(forked.child, forked.target_at()).unwrap();
     forked.source.hand_over(forked.child).unwrap();
