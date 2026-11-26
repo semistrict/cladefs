@@ -629,7 +629,9 @@ impl Tenant {
         self.memory.arena.id()
     }
 
-    /// cladefs: its arena itself, which its cells' own pages are of.
+    /// cladefs: its arena itself, which its cells' own pages are of: an embedded cell's, outside
+    /// the simulation as `embedded` is (board 14256).
+    #[cfg(not(madsim))]
     pub(super) fn memory_arena(&self) -> &Arc<cladefs_core::pages::Arena> {
         &self.memory.arena
     }
