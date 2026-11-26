@@ -5,7 +5,6 @@
 //! Virtio devices (virtio 1.2), all attached over the modern virtio-PCI
 //! transport (doc-30), and the thread that runs their queues.
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub(crate) mod extent;
 #[cfg(target_os = "linux")]
 pub(crate) mod net;

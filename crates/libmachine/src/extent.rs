@@ -13,48 +13,84 @@
 //! machine's [`MachineConfig::extent_stores`](crate::MachineConfig::extent_stores) are its
 //! devices, each opening a cell of its own on the daemon.
 //!
-//! The device's connection to the daemon has one seam (`ExtentDaemon::connect`): until
-//! libcladefs (board 13471) runs the daemon embedded in this process, connected to in memory,
-//! it is a daemon listening at a socket, as a host's or a test's is; a macOS helper process
-//! (board 13460) reaches its server's over the same wire.
+//! The daemon is this process's own ([`ExtentDaemon::start`], libcladefs), its devices connected
+//! to it in memory; or one listening at a socket ([`ExtentDaemon::at_socket`]), as a host's
+//! `cladefsd` is.
 //!
-//! On KVM (x86-64 Linux) the devices are virtio-PCI devices of type 0x4658 with a request queue
-//! per vCPU and, given a size, a DAX window. On Hypervisor.framework, none yet: virtio_extent's
-//! device and cladefs's daemon client build on Linux alone until the daemon comes to macOS
-//! (board 13471), and the window then without DAX first (board 13067, board 13069).
+//! The devices are virtio-PCI devices of type 0x4658 with a request queue per vCPU and, on KVM
+//! (x86-64 Linux), given a size, a DAX window. On Hypervisor.framework (arm64 macOS) they have
+//! no window yet: every read and write is a request (board 13069).
 
 use std::path::PathBuf;
+
+/// A cell of the daemon's, by tenant and ID.
+pub use libcladefs::CellId;
+/// What a daemon this process runs serves from ([`ExtentDaemon::start`]): its disks, bucket, KMS
+/// and memory budget, as a host's `cladefsd`'s configuration says them.
+pub use libcladefs::Config as ExtentDaemonConfig;
 
 /// cladefs's extent daemon, as this process's machines reach it: made once, shared by every
 /// machine with extent store devices ([`MachineConfig::extent_daemon`]), each of whose devices
 /// connects to it as its machine is made.
 ///
 /// [`MachineConfig::extent_daemon`]: crate::MachineConfig::extent_daemon
-#[derive(Debug)]
+#[derive(Clone)]
 pub struct ExtentDaemon {
     at: DaemonAt,
 }
 
+impl std::fmt::Debug for ExtentDaemon {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.at {
+            DaemonAt::Embedded(_) => f.write_str("ExtentDaemon::Embedded"),
+            DaemonAt::Socket(socket) => write!(f, "ExtentDaemon::Socket({})", socket.display()),
+        }
+    }
+}
+
 /// Where the daemon is.
-#[derive(Debug)]
+#[derive(Clone)]
 enum DaemonAt {
+    /// In this process.
+    Embedded(libcladefs::Daemon),
     /// Listening at a socket.
     Socket(PathBuf),
 }
 
 impl ExtentDaemon {
-    /// The daemon listening at `socket`: a host's `cladefsd`, or one a test runs in its own
-    /// process. Until libcladefs (board 13471) lets libmachine run the daemon itself, embedded,
-    /// as this process's own, with its storage and memory budget from here.
+    /// Boots cladefs's extent daemon in this process, serving from `config`: the process's one
+    /// (libcladefs), for its life. A process makes one at most: a second fails, as does one after
+    /// [`ExtentDaemon::embedded`]'s.
+    pub fn start(config: ExtentDaemonConfig) -> crate::Result<Self> {
+        let daemon = futures::executor::block_on(libcladefs::Daemon::start(config))
+            .map_err(|err| crate::Error::ExtentStore(format!("starting the daemon: {err:#}")))?;
+        Ok(Self::embedded(daemon))
+    }
+
+    /// The daemon `daemon`, this process's, which its embedder booted itself (on its own runtime,
+    /// serving its control API, as machined does).
+    pub fn embedded(daemon: libcladefs::Daemon) -> Self {
+        Self { at: DaemonAt::Embedded(daemon) }
+    }
+
+    /// The daemon listening at `socket`: a host's `cladefsd`, or one a test runs.
     pub fn at_socket(socket: impl Into<PathBuf>) -> Self {
         Self { at: DaemonAt::Socket(socket.into()) }
     }
 
+    /// The daemon this process runs, if it is one ([`ExtentDaemon::start`]).
+    pub fn daemon(&self) -> Option<&libcladefs::Daemon> {
+        match &self.at {
+            DaemonAt::Embedded(daemon) => Some(daemon),
+            DaemonAt::Socket(_) => None,
+        }
+    }
+
     /// A new connection to the daemon, for a device to open its cell over: the device's one seam
     /// to it.
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     pub(crate) fn connect(&self) -> Result<cladefs::DaemonConnection, cladefs::Error> {
         match &self.at {
+            DaemonAt::Embedded(daemon) => daemon.connect(),
             DaemonAt::Socket(socket) => cladefs::DaemonConnection::connect(socket),
         }
     }
@@ -73,6 +109,47 @@ pub enum ExtentCache {
     Unsafe,
 }
 
+/// The cell an extent store device opens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExtentCell {
+    /// A new cell of the tenant's, made on a disk of the daemon's as the machine is made.
+    New {
+        /// The tenant the cell is of.
+        tenant: u64,
+    },
+    /// The daemon's existing cell.
+    Existing(CellId),
+    /// The cell in a directory on the host, made if it isn't there: a daemon without disks
+    /// keeps its cells so.
+    Directory(PathBuf),
+}
+
+impl ExtentCell {
+    /// The cell as the daemon's open names it: a directory's path, or a cell's ID, ID 0 making
+    /// one.
+    pub(crate) fn path_on_host(&self) -> Result<String, String> {
+        match self {
+            Self::New { tenant } => Ok(CellId { tenant: *tenant, id: 0 }.to_string()),
+            Self::Existing(cell) if cell.id == 0 => Err(format!("cell {cell} names no cell")),
+            Self::Existing(cell) => Ok(cell.to_string()),
+            Self::Directory(dir) => (dir.to_str().map(str::to_owned))
+                .ok_or_else(|| format!("its cell's path {} is not UTF-8", dir.display())),
+        }
+    }
+}
+
+impl From<PathBuf> for ExtentCell {
+    fn from(dir: PathBuf) -> Self {
+        Self::Directory(dir)
+    }
+}
+
+impl From<CellId> for ExtentCell {
+    fn from(cell: CellId) -> Self {
+        Self::Existing(cell)
+    }
+}
+
 /// An extent store device of a machine: a cell of cladefs's, which the guest mounts its Fxfs
 /// from by the device's tag (`mount -t cladefs TAG DIR`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,13 +158,14 @@ pub struct ExtentStore {
     pub id: String,
     /// The filesystem's name, which the guest mounts it by: 1 to 36 bytes.
     pub tag: String,
-    /// The cell directory on the host, created if it doesn't exist.
-    pub cell: PathBuf,
+    /// The cell the device opens.
+    pub cell: ExtentCell,
     /// The most bytes a cell created holds.
     pub capacity: u64,
     /// The DAX window's size, a nonzero multiple of 2 MiB, through which the guest maps its files'
     /// data from the daemon's extent cache: none without one, every read and write then a
-    /// request. Its guest physical addresses are a 64-bit BAR of the device's.
+    /// request. Its guest physical addresses are a 64-bit BAR of the device's. KVM's alone yet
+    /// (board 13069).
     pub dax_window_size: Option<u64>,
     /// The most bytes of private pages the window holds, as it copies on write (doc-13): pages
     /// the guest wrote and has not written back yet, this process's memory. A multiple of the
@@ -99,9 +177,9 @@ pub struct ExtentStore {
 }
 
 impl ExtentStore {
-    /// A device of tag `tag` on the cell at `cell`, created with `capacity` bytes if it isn't
-    /// there, its ID its tag, without a DAX window, its syncs waiting for the bucket.
-    pub fn new(tag: impl Into<String>, cell: impl Into<PathBuf>, capacity: u64) -> Self {
+    /// A device of tag `tag` on `cell`, made with `capacity` bytes if it is new, its ID its tag,
+    /// without a DAX window, its syncs waiting for the bucket.
+    pub fn new(tag: impl Into<String>, cell: impl Into<ExtentCell>, capacity: u64) -> Self {
         let tag = tag.into();
         Self {
             id: tag.clone(),

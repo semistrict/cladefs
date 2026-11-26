@@ -78,9 +78,10 @@ fn to_py_err(err: libmachine::Error) -> PyErr {
 }
 
 /// cladefs's extent daemon, which this process's machines share: made once, given to each
-/// machine with extent store devices (`Machine.boot_linux(extent_daemon=...)`). For now the
-/// daemon listening at `socket` (a host's cladefsd, or a test's); embedded in this process once
-/// libcladefs lands (board 13471).
+/// machine with extent store devices (`Machine.boot_linux(extent_daemon=...)`).
+/// `ExtentDaemon(socket)` is the daemon listening at `socket` (a host's cladefsd, or a test's);
+/// `ExtentDaemon.local(dir)` and `ExtentDaemon.from_config(path)` boot one in this process, its
+/// one for its life.
 #[pyclass(module = "libmachine", frozen)]
 struct ExtentDaemon(std::sync::Arc<libmachine::ExtentDaemon>);
 
@@ -90,10 +91,51 @@ impl ExtentDaemon {
     fn new(socket: std::path::PathBuf) -> Self {
         Self(std::sync::Arc::new(libmachine::ExtentDaemon::at_socket(socket)))
     }
+
+    /// Boots a daemon in this process keeping everything in `dir`: one local disk, and a bucket
+    /// of local files in it. `memory` is its pages' and caches' budget in bytes (the host's
+    /// governs it if None); its keys are under the KMS at `kms`, or the master key in the file
+    /// `master_key_file`.
+    #[staticmethod]
+    #[pyo3(signature = (dir, *, memory = None, kms = None, master_key_file = None))]
+    fn local(
+        dir: std::path::PathBuf,
+        memory: Option<u64>,
+        kms: Option<String>,
+        master_key_file: Option<std::path::PathBuf>,
+    ) -> PyResult<Self> {
+        let mut config = libmachine::ExtentDaemonConfig::local(dir);
+        if let Some(memory) = memory {
+            config = config.memory(memory);
+        }
+        if let Some(kms) = kms {
+            config = config.kms(kms);
+        }
+        if let Some(key) = master_key_file {
+            config = config.master_key_file(key);
+        }
+        Self::start(config)
+    }
+
+    /// Boots a daemon in this process serving as the cladefsd configuration file at `path` says.
+    #[staticmethod]
+    fn from_config(path: std::path::PathBuf) -> PyResult<Self> {
+        let config = libmachine::ExtentDaemonConfig::from_file(path)
+            .map_err(|err| PyValueError::new_err(format!("{err:#}")))?;
+        Self::start(config)
+    }
 }
 
-/// An extent store device: the cell at `cell` (created with `capacity` bytes if it isn't there),
-/// which the guest mounts its Fxfs from by `tag` (`mount -t cladefs TAG DIR`). `dax_window_size`
+impl ExtentDaemon {
+    fn start(config: libmachine::ExtentDaemonConfig) -> PyResult<Self> {
+        let daemon = libmachine::ExtentDaemon::start(config).map_err(to_py_err)?;
+        Ok(Self(std::sync::Arc::new(daemon)))
+    }
+}
+
+/// An extent store device: the cell in the directory `cell` (created with `capacity` bytes if it
+/// isn't there), or, `cell` None, a new cell of `tenant`'s on the daemon's disks, which the guest
+/// mounts its Fxfs from by `tag` (`mount -t cladefs TAG DIR`). `dax_window_size`
 /// (a multiple of 2 MiB) gives it a DAX window, `dax_private_max_bytes` bounds the window's
 /// private pages, and `cache` ("writeback", the default, or "unsafe") says whether the guest's
 /// syncs wait for the bucket. `id` names it in errors, its tag by default.
@@ -112,16 +154,29 @@ impl ExtentStore {
         dax_private_max_bytes = None,
         cache = "writeback",
         id = None,
+        tenant = None,
     ))]
+    #[allow(clippy::too_many_arguments, reason = "Python's keyword arguments")]
     fn new(
         tag: String,
-        cell: std::path::PathBuf,
+        cell: Option<std::path::PathBuf>,
         capacity: u64,
         dax_window_size: Option<u64>,
         dax_private_max_bytes: Option<u64>,
         cache: &str,
         id: Option<String>,
+        tenant: Option<u64>,
     ) -> PyResult<Self> {
+        let cell = match (cell, tenant) {
+            (Some(dir), None) => libmachine::ExtentCell::Directory(dir),
+            (None, Some(tenant)) => libmachine::ExtentCell::New { tenant },
+            _ => {
+                return Err(PyValueError::new_err(
+                    "an extent store is on a cell directory or a new cell of a tenant's: \
+                     cell or tenant, one of them",
+                ));
+            }
+        };
         let cache = match cache {
             "writeback" => libmachine::ExtentCache::Writeback,
             "unsafe" => libmachine::ExtentCache::Unsafe,

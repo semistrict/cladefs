@@ -9,11 +9,17 @@ publish = false
 # libmachine runs on x86-64 Linux, with KVM, and on arm64 macOS, with Hypervisor.framework
 # (src/lib.rs); elsewhere it is empty and needs nothing.
 [target.'cfg(any(all(target_os = "linux", target_arch = "x86_64"), all(target_os = "macos", target_arch = "aarch64")))'.dependencies]
+# cladefs's extent store device (board 13067): the device, the daemon client it opens its cell
+# with, and the daemon itself, embedded in this process (libcladefs, board 13553).
+cladefs = { path = "../cladefs" }
+futures.workspace = true
 libc.workspace = true
+libcladefs = { path = "../libcladefs" }
 libmachine-agent.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 virtio-queue.workspace = true
+virtio_extent = { path = "../virtio_extent" }
 vm-memory.workspace = true
 vm-superio.workspace = true
 zerocopy.workspace = true
@@ -25,10 +31,6 @@ kvm-bindings.workspace = true
 kvm-ioctls.workspace = true
 linux-loader.workspace = true
 smoltcp.workspace = true
-# cladefs's extent store device (board 13067): the device, and the daemon client it opens its cell
-# with, which build on Linux alone until the daemon comes to macOS (board 13471).
-cladefs = { path = "../cladefs" }
-virtio_extent = { path = "../virtio_extent" }
 # Sandbox's (board 13399 brings it to macOS).
 tokio = { workspace = true, features = ["rt", "sync"], optional = true }
 socket2.workspace = true
@@ -47,9 +49,12 @@ sandbox = ["dep:tokio"]
 # fuzz/.
 fuzzing = []
 
-[target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dev-dependencies]
-# kvm_extent's daemon's cells encrypt under the tests' KMS (TASK-411.28).
+[target.'cfg(any(all(target_os = "linux", target_arch = "x86_64"), all(target_os = "macos", target_arch = "aarch64")))'.dev-dependencies]
+# The extent tests' daemons' cells encrypt under the tests' KMS (TASK-411.28).
 cladefs_core = { workspace = true, features = ["tests-kms"] }
+tempfile.workspace = true
+
+[target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dev-dependencies]
 # The tests' and examples' guest programs, assembled (AGENTS.md: never raw bytes).
 iced-x86 = { version = "1.22.0", default-features = false, features = ["std", "code_asm"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync"] }

@@ -4,8 +4,9 @@
 
 //! cladefs's extent store device on libmachine (board 13067): cladefs's guest kernel
 //! (`CLADEFS_GUEST_KERNEL`) with the test initramfs and its agent (`LIBMACHINE_GUEST_DIR`) mounts
-//! Fxfs from the device, its cell served by an extent daemon in the test's own process, with a
-//! DAX window, and its writes, fsyncs and reads hold across a remount.
+//! Fxfs from the device, its cell served by cladefs's extent daemon embedded in the test's process
+//! (libcladefs, board 13553), with a DAX window, and its writes, fsyncs and reads hold across a
+//! remount.
 //!
 //! Tests return early with a note when /dev/kvm, the kernel or the initramfs is missing;
 //! scripts/test.sh's libmachine part provides them all, and fails on such a note.
@@ -15,12 +16,14 @@ mod common;
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use common::{cladefs_kernel, kvm_available, test_guest_dir};
 use libmachine::agent::{Agent, Command};
-use libmachine::{ExitReason, ExtentDaemon, ExtentStore, LinuxBoot, Machine, MachineConfig};
+use libmachine::{
+    ExitReason, ExtentCell, ExtentDaemon, ExtentDaemonConfig, ExtentStore, LinuxBoot, Machine,
+    MachineConfig,
+};
 use virtio_extent::protocol::VIRTIO_EXTENT_F_DAX;
 
 /// cladefs's kernel and the test initramfs, if /dev/kvm and both are there.
@@ -40,46 +43,11 @@ fn guest() -> Option<(PathBuf, PathBuf)> {
     Some((kernel, initrd))
 }
 
-/// A directory of the test's, removed once dropped.
-struct TestDir(PathBuf);
-
-impl TestDir {
-    fn new() -> Self {
-        static NEXT: AtomicU32 = AtomicU32::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "libmachine-extent-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir(&path).unwrap();
-        Self(path)
-    }
-}
-
-impl Drop for TestDir {
-    fn drop(&mut self) {
-        // The test's scratch: what a failed removal leaves is the temporary directory's.
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-/// An extent daemon in the test's process, serving at a socket in `dir`, its cells in a bucket in
-/// its memory, as virtio_extent's daemon tests have theirs (`tests/daemon.rs`): until
-/// libcladefs (board 13471) lets the machine's process run its own, embedded, with no socket.
-fn daemon(dir: &TestDir) -> ExtentDaemon {
+/// cladefs's extent daemon, embedded in the test's process, keeping its disk and bucket in `dir`.
+fn daemon(dir: &std::path::Path) -> ExtentDaemon {
     // Its log on standard error, which a failed test shows.
     let _ = cladefs::cladefsd::logging::to_stderr();
-    for (name, value) in [("CLADEFSD_BUCKET", "memory:///cells"), ("CLADEFSD_TOKEN", "1")] {
-        if std::env::var_os(name).is_none() {
-            // SAFETY: nextest runs each test in a process of its own, whose other threads don't
-            // read the environment yet.
-            unsafe { std::env::set_var(name, value) };
-        }
-    }
-    let socket = dir.0.join("cladefsd.sock");
-    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
-    std::thread::spawn(move || cladefs::cladefsd::serve(listener));
-    ExtentDaemon::at_socket(socket)
+    ExtentDaemon::start(ExtentDaemonConfig::local(dir).memory(256 << 20)).expect("the daemon")
 }
 
 /// Runs `script` in the guest with the agent's shell: its standard output, the script's exit
@@ -120,11 +88,11 @@ fn a_guest_mounts_fxfs_from_the_device_with_dax() {
     let Some((kernel, initrd)) = guest() else {
         return;
     };
-    let dir = TestDir::new();
-    let daemon = Arc::new(daemon(&dir));
+    let dir = tempfile::tempdir().unwrap();
+    let daemon = Arc::new(daemon(dir.path()));
     let store = ExtentStore {
         dax_window_size: Some(64 << 20),
-        ..ExtentStore::new("extents", dir.0.join("cell"), 256 << 20)
+        ..ExtentStore::new("extents", ExtentCell::New { tenant: 1 }, 256 << 20)
     };
     let expected_features = acked(&store);
     assert_eq!(&expected_features[VIRTIO_EXTENT_F_DAX as usize..][..1], "1");

@@ -14,18 +14,20 @@
 //!   driver set up as it activates the device, with their notification events and the eventfds of
 //!   their vectors, which the workers signal from the threads completing requests (hotbed
 //!   question 572).
-//! - **The DAX window:** a 64-bit BAR of the device's own, allocated before the transports' BARs
-//!   and placed by the device (`PlacedShm`): virtio_extent reserves it ([`ExtentVm`]) and adds
-//!   its KVM memory slot (`MemorySlots`), into which cladefs maps the window's pages from the
-//!   extent daemon's memory, and prefaults them with `KVM_PRE_FAULT_MEMORY` on a vCPU of its own
-//!   (`virtio_extent::kvm`). The BAR never moves (hotbed question 571).
+//! - **The DAX window** (KVM's; Hypervisor.framework's is board 13069): a 64-bit BAR of the
+//!   device's own, allocated before the transports' BARs and placed by the device (`PlacedShm`):
+//!   virtio_extent reserves it ([`ExtentVm`]) and adds its KVM memory slot (`MemorySlots`), into
+//!   which cladefs maps the window's pages from the extent daemon's memory, and prefaults them
+//!   with `KVM_PRE_FAULT_MEMORY` on a vCPU of its own (`virtio_extent::kvm`). The BAR never moves
+//!   (hotbed question 571).
 //! - **Stopping the machine:** as the extent daemon goes, or the device can't be activated, the
 //!   machine stops for good with `Error::ExtentStore` (`StopShared::fail`); the vCPUs stop it so
 //!   too when a guest's access to the window keeps failing (`virtio_extent::vcpu`; hotbed question
 //!   573).
 //! - **Snapshots:** refused, as the device's freeze and fork protocol is board 13139's.
 
-use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, BorrowedFd};
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use std::ptr::NonNull;
 use std::sync::{Arc, Weak};
 
@@ -38,6 +40,7 @@ use super::{
     OwnQueues, PlacedShm, VIRTIO_F_VERSION_1, VIRTIO_RING_F_EVENT_IDX, VirtioDevice,
     not_snapshottable,
 };
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use crate::backend::MemorySlots;
 use crate::devices::pci::BarAllocator;
 use crate::error::{Error, Result};
@@ -79,27 +82,24 @@ pub(crate) struct ExtentDevice {
 
 impl ExtentDevice {
     /// The device `store` describes, with `queues` request queues, its cell opened on `daemon`,
-    /// its DAX window (if it has one) placed from `bars`' 64-bit window and mapped through
-    /// `slots`, prefaulted by `prefault` if given; `failing` stops the machine.
+    /// its DAX window (if it has one) placed from `bars`' 64-bit window and mapped by `window_vm`,
+    /// given the window's BAR, prefaulted by `prefault` if given; `failing` stops the machine.
     pub(crate) fn new(
         store: &ExtentStore,
         daemon: &ExtentDaemon,
         queues: u16,
         bars: &mut BarAllocator,
-        slots: &MemorySlots,
+        window_vm: impl FnOnce(Option<u64>) -> Arc<dyn virtio_extent::WindowVm>,
         prefault: Option<Arc<dyn virtio_extent::PrefaultGuestMemory>>,
         failing: Failing,
     ) -> Result<Self> {
         let id = store.id.clone();
         let invalid =
             |why: String| Error::InvalidConfig(format!("extent store device {id}: {why}"));
-        let path = store.cell.to_str().ok_or_else(|| {
-            invalid(format!("its cell's path {} is not UTF-8", store.cell.display()))
-        })?;
         let config = virtio_extent::Config {
             id: id.clone(),
             tag: store.tag.clone(),
-            path_on_host: path.to_owned(),
+            path_on_host: store.cell.path_on_host().map_err(invalid)?,
             capacity: store.capacity,
             dax_window_size: store.dax_window_size,
             dax_private_max_bytes: store.dax_private_max_bytes,
@@ -111,9 +111,13 @@ impl ExtentDevice {
                 ExtentCache::Unsafe => virtio_extent::CacheType::Unsafe,
             },
         };
-        config.validate().map_err(|err| invalid(err.to_string()))?;
+        config
+            .validate()
+            .map_err(|err| Error::InvalidConfig(format!("extent store device {id}: {err}")))?;
         if queues == 0 {
-            return Err(invalid("no request queue".into()));
+            return Err(Error::InvalidConfig(format!(
+                "extent store device {id}: no request queue"
+            )));
         }
         // The window's BAR, a power of two as BARs are, before any transport's.
         let window = match store.dax_window_size {
@@ -123,7 +127,7 @@ impl ExtentDevice {
             }
             None => None,
         };
-        let vm = Arc::new(ExtentVm { slots: slots.clone(), at: window.map(|(at, _)| at) });
+        let vm = window_vm(window.map(|(at, _)| at));
         let connection = daemon.connect().map_err(|err| {
             Error::ExtentStore(format!("{id}: connecting to the extent daemon: {err:#}"))
         })?;
@@ -170,13 +174,18 @@ impl ExtentDevice {
         let mut queues = Vec::new();
         let mut kicks = Vec::new();
         for (index, queue) in own.queues.iter().enumerate().filter(|(_, queue)| queue.ready()) {
-            let event = own.notify[index].try_clone().map_err(|err| err.to_string())?;
-            kicks.push(own.notify[index].try_clone().map_err(|err| err.to_string())?);
+            let notify = &own.notify[index];
+            // SAFETY: The notification event's descriptor (an eventfd, or a pipe's read end on
+            // macOS), open while the transport holds the event, as it does here.
+            let event = unsafe { BorrowedFd::borrow_raw(notify.as_raw_fd()) }
+                .try_clone_to_owned()
+                .map_err(|err| err.to_string())?;
+            kicks.push(notify.try_clone().map_err(|err| err.to_string())?);
             queues.push(virtio_extent::WorkerQueue {
                 index: u16::try_from(index).expect("the transport's queues are few"),
                 queue: ExtentQueue { queue: queue.duplicate(), mem: own.mem.clone() },
-                // SAFETY: The copy's descriptor, which the worker owns from here on.
-                event: unsafe { OwnedFd::from_raw_fd(event.into_raw_fd()) },
+                // The worker's own copy of the descriptor.
+                event,
                 interrupt: Arc::new(Vector(own.queue_vectors[index].take())),
             });
         }
@@ -348,12 +357,14 @@ impl virtio_extent::ConfigInterrupt for Vector {
 /// What only libmachine can do for the device's DAX window (`virtio_extent::WindowVm`): its guest
 /// physical addresses, the 64-bit BAR allocated for it ([`ExtentDevice::new`]), and the KVM memory
 /// slot mapping its host memory there.
-struct ExtentVm {
-    slots: MemorySlots,
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub(crate) struct ExtentVm {
+    pub(crate) slots: MemorySlots,
     /// The window's BAR's address.
-    at: Option<u64>,
+    pub(crate) at: Option<u64>,
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 impl virtio_extent::WindowVm for ExtentVm {
     fn reserve(&self, _len: u64, at: Option<u64>) -> std::result::Result<u64, BoxError> {
         match (at, self.at) {
@@ -387,5 +398,34 @@ impl virtio_extent::WindowVm for ExtentVm {
             eprintln!("libmachine: cannot remove the DAX window's memory slot {slot}: {err}");
             std::process::abort();
         }
+    }
+}
+
+/// A machine whose devices have no DAX window (Hypervisor.framework's, board 13069): virtio_extent
+/// refuses a device with one before it would ask for this.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub(crate) struct NoWindow;
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+impl virtio_extent::WindowVm for NoWindow {
+    fn reserve(&self, _len: u64, _at: Option<u64>) -> std::result::Result<u64, BoxError> {
+        Err("no DAX window on Hypervisor.framework yet (board 13069)".into())
+    }
+
+    fn release(&self, _start: u64, _len: u64) {
+        unreachable!("no window reserved");
+    }
+
+    fn add_slot(
+        &self,
+        _guest_addr: u64,
+        _len: u64,
+        _host: std::ptr::NonNull<u8>,
+    ) -> std::result::Result<u32, BoxError> {
+        unreachable!("no window reserved");
+    }
+
+    fn remove_slot(&self, _slot: u32) {
+        unreachable!("no window reserved");
     }
 }

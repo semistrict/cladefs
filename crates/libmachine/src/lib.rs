@@ -44,10 +44,10 @@
 //! [`Machine::restore`]), each with its RAM a copy-on-write mapping of the
 //! file, a fresh RNG seed and the right time.
 //!
-//! A PC machine may have cladefs's extent store devices ([`extent`]): its guest's Fxfs on a cell
-//! of cladefs's extent daemon, which every machine of the process shares
+//! A machine may have cladefs's extent store devices ([`extent`]): its guest's Fxfs on a cell of
+//! cladefs's extent daemon, embedded in the process, which every machine of the process shares
 //! ([`MachineConfig::extent_daemon`], [`MachineConfig::extent_stores`]), its files' data mapped
-//! through a DAX window.
+//! through a DAX window on KVM.
 //!
 //! A machine counts the vCPU exits it takes, by kind
 //! ([`Machine::exit_counts`]), so that tests can bound them.
@@ -93,7 +93,7 @@ pub use devices::virtio::vsock::{
 };
 pub use error::{Error, Result};
 pub use exits::ExitCounts;
-pub use extent::{ExtentCache, ExtentDaemon, ExtentStore};
+pub use extent::{CellId, ExtentCache, ExtentCell, ExtentDaemon, ExtentDaemonConfig, ExtentStore};
 #[cfg(target_arch = "x86_64")]
 pub use machine::Registers;
 pub use machine::{ExitReason, LinuxBoot, Machine, MachineConfig, Run, Waited};

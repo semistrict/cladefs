@@ -53,8 +53,8 @@ pub struct MachineConfig {
     /// cladefs's extent daemon, which this process's machines share ([`crate::extent`]): the
     /// one every device of [`extent_stores`](MachineConfig::extent_stores) opens its cell on.
     pub extent_daemon: Option<Arc<crate::ExtentDaemon>>,
-    /// The machine's extent store devices (PC machines on KVM, [`Machine::boot_linux`]): a
-    /// virtio-PCI device each, with a request queue per vCPU, its cell opened on
+    /// The machine's extent store devices ([`Machine::boot_linux`]'s machines): a virtio-PCI
+    /// device each, with a request queue per vCPU, its cell opened on
     /// [`extent_daemon`](MachineConfig::extent_daemon) as the machine is made. A machine with any
     /// is neither snapshotted nor suspended, nor restored (board 13139).
     pub extent_stores: Vec<crate::ExtentStore>,
@@ -527,20 +527,11 @@ fn check_vcpus(vcpus: u32) -> Result<()> {
     Ok(())
 }
 
-/// The extent store devices of `config`'s ([`MachineConfig::extent_stores`]), on `vm`, with a
-/// request queue per vCPU, their DAX windows' BARs from `bars`, stopping the machine through
-/// `stop` as one can't go on.
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-fn extent_devices(
-    config: &MachineConfig,
-    vm: &backend::Vm,
-    bars: &mut crate::devices::pci::BarAllocator,
-    stop: &Arc<StopShared>,
-) -> Result<Vec<Box<dyn crate::devices::virtio::VirtioDevice>>> {
-    use crate::devices::virtio::extent::{ExtentDevice, Failing};
-
+/// The daemon `config`'s extent store devices open their cells on, if it has any devices: refused
+/// if it names none, or two devices of one name.
+fn extent_daemon(config: &MachineConfig) -> Result<Option<&Arc<crate::ExtentDaemon>>> {
     if config.extent_stores.is_empty() {
-        return Ok(Vec::new());
+        return Ok(None);
     }
     let Some(daemon) = &config.extent_daemon else {
         return Err(Error::InvalidConfig(
@@ -555,6 +546,64 @@ fn extent_devices(
             )));
         }
     }
+    Ok(Some(daemon))
+}
+
+/// The extent store devices of `config`'s ([`MachineConfig::extent_stores`]), with a request
+/// queue per vCPU, stopping the machine through `stop` as one can't go on: on
+/// Hypervisor.framework, without DAX windows yet (board 13069).
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn extent_devices(
+    config: &MachineConfig,
+    bars: &mut crate::devices::pci::BarAllocator,
+    stop: &Arc<StopShared>,
+) -> Result<Vec<Box<dyn crate::devices::virtio::VirtioDevice>>> {
+    use crate::devices::virtio::extent::{ExtentDevice, Failing, NoWindow};
+
+    let Some(daemon) = extent_daemon(config)? else {
+        return Ok(Vec::new());
+    };
+    if let Some(store) = config.extent_stores.iter().find(|store| store.dax_window_size.is_some()) {
+        return Err(Error::InvalidConfig(format!(
+            "extent store device {}: machines on Hypervisor.framework have no DAX window yet \
+             (board 13069); dax_window_size must be None",
+            store.id
+        )));
+    }
+    let queues = u16::try_from(config.vcpus).expect("check_vcpus bounds them");
+    config
+        .extent_stores
+        .iter()
+        .map(|store| {
+            let device = ExtentDevice::new(
+                store,
+                daemon,
+                queues,
+                bars,
+                |_| Arc::new(NoWindow),
+                None,
+                Failing::new(stop),
+            )?;
+            Ok(Box::new(device) as Box<dyn crate::devices::virtio::VirtioDevice>)
+        })
+        .collect()
+}
+
+/// The extent store devices of `config`'s ([`MachineConfig::extent_stores`]), on `vm`, with a
+/// request queue per vCPU, their DAX windows' BARs from `bars`, stopping the machine through
+/// `stop` as one can't go on.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn extent_devices(
+    config: &MachineConfig,
+    vm: &backend::Vm,
+    bars: &mut crate::devices::pci::BarAllocator,
+    stop: &Arc<StopShared>,
+) -> Result<Vec<Box<dyn crate::devices::virtio::VirtioDevice>>> {
+    use crate::devices::virtio::extent::{ExtentDevice, ExtentVm, Failing};
+
+    let Some(daemon) = extent_daemon(config)? else {
+        return Ok(Vec::new());
+    };
     // KVM's prefault of the windows' pages, on a vCPU of its own after the guest's, if any
     // device has a window and KVM can.
     let windows = config.extent_stores.iter().any(|store| store.dax_window_size.is_some());
@@ -572,12 +621,13 @@ fn extent_devices(
         .extent_stores
         .iter()
         .map(|store| {
+            let slots = vm.memory_slots();
             let device = ExtentDevice::new(
                 store,
                 daemon,
                 queues,
                 bars,
-                vm.memory_slots(),
+                |at| Arc::new(ExtentVm { slots: slots.clone(), at }),
                 prefault.clone(),
                 Failing::new(stop),
             )?;
@@ -823,14 +873,6 @@ impl Machine {
                 "machines on Hypervisor.framework have no network yet; network must be None".into(),
             ));
         }
-        if !config.extent_stores.is_empty() {
-            return Err(Error::InvalidConfig(
-                "machines on Hypervisor.framework have no extent store devices yet, which wait \
-                 on cladefs's daemon and its client building on macOS (board 13471); \
-                 extent_stores must be empty"
-                    .into(),
-            ));
-        }
         let (vm, mut vcpus) = backend::Vm::new(
             config.mem_size,
             config.cpu_model,
@@ -870,16 +912,18 @@ impl Machine {
         vm.write_memory(loaded.fdt, &tree)?;
         vcpus[0].set_boot_cpu(&linux::boot_cpu(&loaded))?;
 
-        let (vsock_device, vsock) = VsockDevice::new(GUEST_CID)?;
-        let devices: Vec<Box<dyn VirtioDevice>> = vec![Box::new(Rng), Box::new(vsock_device)];
         let doorbell: Arc<Doorbell> = Arc::default();
-        let bars = crate::devices::pci::BarAllocator::new();
+        let stop = Arc::new(StopShared::with_doorbell(doorbell.clone()));
+        // The extent store devices first, as on the PC.
+        let mut bars = crate::devices::pci::BarAllocator::new();
+        let mut devices = extent_devices(&config, &mut bars, &stop)?;
+        let (vsock_device, vsock) = VsockDevice::new(GUEST_CID)?;
+        devices.extend([Box::new(Rng) as Box<dyn VirtioDevice>, Box::new(vsock_device)]);
         let pci =
             Arc::new(crate::devices::Pci::new(devices, vm.guest_memory(), &vm, &doorbell, bars)?);
         let output = serial::output(config.serial_capture_limit);
         let uart = IrqLine::Spi(vm.shared().clone(), layout::UART_SPI);
         let bus = Bus::board(serial::new(uart, output.clone()), pci.clone());
-        let stop = Arc::new(StopShared::with_doorbell(doorbell.clone()));
         let mut machine = Self::assemble(
             vm,
             vcpus,
