@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 struct Service {
     /// As the daemon's log names it.
     name: &'static str,
-    /// The failpoint that has it panic.
+    /// The failpoint that has it panic, and its action (`FAILPOINTS`'s `name=action`).
     failpoint: String,
     env: Vec<(&'static str, String)>,
     /// Done once the daemon serves VM processes, as some services start only then.
@@ -32,7 +32,7 @@ struct Service {
 impl Service {
     /// A service panicking as it starts, through `supervised`'s failpoint.
     fn starting(name: &'static str, env: Vec<(&'static str, String)>, then: fn(&Path)) -> Self {
-        Self { name, failpoint: format!("cladefsd::service::{name}"), env, then }
+        Self { name, failpoint: format!("cladefsd::service::{name}=panic"), env, then }
     }
 }
 
@@ -63,7 +63,7 @@ fn panicking(dir: &Path, service: &Service) -> (ExitStatus, String) {
         .env("CLADEFSD_BUCKET", format!("file://{}", bucket.display()))
         .env("CLADEFSD_TOKEN", "1")
         .env("CLADEFSD_ROOTS", &disk)
-        .env("FAILPOINTS", format!("{}=panic", service.failpoint))
+        .env("FAILPOINTS", &service.failpoint)
         .envs(service.env.iter().map(|(name, value)| (name, value)))
         .stderr(std::fs::File::create(&log).unwrap());
     // Its abort is what is looked for, no crash to keep: no core dump, which a host's
@@ -191,7 +191,7 @@ fn a_panic_on_any_service_aborts_the_daemon_naming_it() {
     ));
     services.push(Service {
         name: "health reporter",
-        failpoint: "cladefsd::health_reporter_gone".into(),
+        failpoint: "cladefsd::health_reporter_gone=panic".into(),
         env: vec![control(&controlled)],
         then: nothing,
     });
@@ -210,6 +210,48 @@ fn a_panic_on_any_service_aborts_the_daemon_naming_it() {
             "{}: {said}",
             service.name
         );
+    }
+}
+
+/// board 12891: the daemon's FUSE mount ends visibly, aborting the daemon naming it, on a panic in
+/// a tenant's request task outside its handler (here its failpoint's, as `Admission::next`'s
+/// `expect` or a poisoned lock would), and on a reader's unexpected error reading `/dev/fuse`.
+/// Before, Tokio swallowed the task's panic, its tenant's waiting requests never answered, and the
+/// reader said its error and ended alone: the daemon served on, none the wiser, its mount hanging
+/// once every reader had.
+#[test]
+fn the_daemons_mount_ends_visibly_on_a_task_panic_or_a_read_error() {
+    let root = tempfile::tempdir().unwrap();
+    // A lookup of a tenant's directory, at the mount's root: one of that tenant's requests. On a
+    // thread of its own: unanswered, as its task's panic left it before, it holds its caller until
+    // the daemon is killed, which the test's deadline then does.
+    let looked_up = |dir: &Path| {
+        let at = dir.join("mnt").join("0000000000001");
+        std::thread::spawn(move || drop(std::fs::metadata(at)));
+    };
+    let cases = [
+        ("task panic", "fuse::tenant::0000000000001=panic", looked_up as fn(&Path)),
+        // The first read of any reader, as the mount starts.
+        ("read error", "fuse::read=1*return", nothing),
+    ];
+    for (case, failpoint, then) in cases {
+        let dir = root.path().join(case.replace(' ', "-"));
+        std::fs::create_dir(&dir).unwrap();
+        let mountpoint = Detached(dir.join("mnt"));
+        std::fs::create_dir(&mountpoint.0).unwrap();
+        let service = Service {
+            name: "cladefsd fuse",
+            failpoint: failpoint.into(),
+            env: vec![
+                ("CLADEFSD_MOUNT", mountpoint.0.display().to_string()),
+                ("CLADEFSD_MOUNT_STORES", dir.join("cells").display().to_string()),
+                control(&dir),
+            ],
+            then,
+        };
+        let (status, said) = panicking(&dir, &service);
+        assert_eq!(status.signal(), Some(libc::SIGABRT), "{case}: {status}: {said}");
+        assert!(local_cell::shared::aborted_holding(&said, service.name), "{case}: {said}");
     }
 }
 

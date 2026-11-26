@@ -13,9 +13,11 @@
 //! Threads of the mount's own each read a request from the device, have the server handle it, and
 //! write its reply, until the filesystem is unmounted, which ends the connection: reads then fail
 //! with `ENODEV`. A handler that panics is answered `EIO`, its thread going on (board 8539). A
-//! panic on a thread itself, outside a handler, ends it alone, unless the mount is a service of
-//! the daemon's ([`MountOptions::supervised`]): there it aborts the daemon, naming the mount, as
-//! with every thread gone the mount would hang, and its callers' calls with it (board 12443). A
+//! panic on a thread itself, outside a handler, ends it alone, as does any other error reading the
+//! device, and a panic in a request's task outside its handler ends that task alone, its tenant's
+//! waiting requests never answered; unless the mount is a service of the daemon's
+//! ([`MountOptions::supervised`]): there each aborts the daemon, naming the mount, as with every
+//! thread gone the mount would hang, and its callers' calls with it (board 12443, board 12891). A
 //! request may wait long on its cell, as one waiting on the bucket does, holding its thread: of a
 //! mount of many cells, a tenant's requests take at most all threads but two at once
 //! ([`Admission`]), the rest waiting for one of its own to end, so that the other tenants' cells,
@@ -117,11 +119,12 @@ impl MountOptions {
         self
     }
 
-    /// Has each reader thread run as the daemon's service `service`:
-    /// a panic on one outside a handler (those run on the
-    /// runtime, answered `EIO`, and those it runs inline, said: a cell's, which halts it) aborts
-    /// the daemon, naming `service`, rather than ending the thread alone, which with every thread
-    /// gone would hang the mount and its callers (board 12443, hotbed question 561).
+    /// Has each reader thread, and each request's task, run as the daemon's service `service`:
+    /// a panic on one outside a handler (those run on the runtime, answered `EIO`, and those it
+    /// runs inline, said: a cell's, which halts it), or an error reading the device but the
+    /// mount's end, aborts the daemon, naming `service`, rather than ending the thread or task
+    /// alone, which with every thread gone would hang the mount and its callers, and with a
+    /// tenant's task gone its waiting requests (board 12443, hotbed question 561, board 12891).
     pub fn supervised(&mut self, service: &'static str) -> &mut Self {
         self.supervised = Some(service);
         self
@@ -658,7 +661,7 @@ fn clone_device(master: &File) -> io::Result<File> {
 /// Reads the kernel's requests from its cloned `device` until the filesystem is unmounted,
 /// handling fire-and-forget opcodes inline and dispatching all other requests asynchronously onto
 /// `runtime` (board 9850, board 12092): as the daemon's service `supervised`, if named, except
-/// while it handles a request inline (board 12443).
+/// while it handles a request inline (board 12443), and so the tasks it spawns ([`spawn_task`]).
 fn serve(
     device: Arc<File>,
     server: Arc<Server>,
@@ -676,17 +679,22 @@ fn serve(
     let mut request = vec![0; REQUEST_ROOM];
     let is_many = server.is_many();
     loop {
-        let len = match (&*device).read(&mut request) {
+        let len = match read_request(&device, &mut request) {
             Ok(len) => len,
             Err(error) => match error.raw_os_error() {
                 // Unmounted: the kernel is done with the filesystem.
                 Some(libc::ENODEV) => return,
+                // Its connection aborted (fusectl's `abort`): the mount ended, its callers
+                // answered `ENOTCONN` by the kernel, which every reader reads from now on.
+                Some(libc::ECONNABORTED) => {
+                    return log::error!("fuse: the mount's connection was aborted: {error}");
+                }
                 // A request interrupted before it was read, or a signal.
                 Some(libc::ENOENT | libc::EINTR | libc::EAGAIN) => continue,
-                _ => {
-                    log::error!("fuse: reading a request: {error}");
-                    return;
-                }
+                // A reader's end, as a panic is, supervised: aborting the daemon, naming the
+                // mount. Ended alone, said only in a log, it left the mount to hang once every
+                // reader had (board 12891, hotbed question 577).
+                _ => panic!("fuse: reading a request: {error}"),
             },
         };
         let slice = &request[..len];
@@ -717,7 +725,7 @@ fn serve(
                 let owned = admission.track(slice.to_vec());
                 let guard = in_flight.enter();
                 let (dev, srv) = (device.clone(), server.clone());
-                runtime.spawn(async move {
+                spawn_task(&runtime, supervised, async move {
                     let (_guard, _permit) = (guard, permit);
                     answer_async(&dev, &srv, &owned).await;
                 });
@@ -726,7 +734,7 @@ fn serve(
                 Decision::Serve(dev, req) => {
                     let guard = in_flight.enter();
                     let (srv, adm) = (server.clone(), admission.clone());
-                    runtime.spawn(async move {
+                    spawn_task(&runtime, supervised, async move {
                         let _guard = guard;
                         let mut current = Some((dev, req));
                         while let Some((cur_dev, cur_req)) = current {
@@ -751,17 +759,56 @@ fn serve(
     }
 }
 
+/// Reads a request from `device` into `request`: or, in a test, the error the failpoint
+/// `fuse::read` returns, `EIO`, as an unexpected error of the device's (board 12891).
+fn read_request(device: &File, request: &mut [u8]) -> io::Result<usize> {
+    fail::fail_point!("fuse::read", |_| Err(io::Error::from_raw_os_error(libc::EIO)));
+    (&*device).read(request)
+}
+
+/// Spawns `task`, a request's, on `runtime`. A panic in it outside its handler (`answer_async`
+/// catches those, answered `EIO`): in [`Admission::next`], the admission's lock poisoned, the
+/// reply's writing, is one of the mount's, which leaves its tenant's waiting requests unanswered
+/// for good, their callers hung, and its tenant's tasks one fewer: as the daemon's service
+/// `supervised`, it aborts the daemon, naming it. Tokio swallowed it before, its handle dropped
+/// (board 12891, hotbed question 576). Caught around the task, rather than its holding of the
+/// service counted ([`local_cell::shared::Awaited`]), which would lock the process's table of them
+/// twice a request.
+fn spawn_task(
+    runtime: &tokio::runtime::Handle,
+    supervised: Option<&'static str>,
+    task: impl Future<Output = ()> + Send + 'static,
+) {
+    runtime.spawn(async move {
+        // Unwind safe: nothing of the task's is used after its panic, the daemon aborting, or,
+        // unsupervised, the task ending, as it did.
+        if let Err(panic) = AssertUnwindSafe(task).catch_unwind().await {
+            let Some(service) = supervised else { std::panic::resume_unwind(panic) };
+            // On the thread polling the task: the process's panic hook aborts the daemon, naming
+            // the service (`local_cell::shared::abort_on_panics`), as for a reader's panic.
+            let _holding = local_cell::shared::Holding::work(service);
+            panic!("fuse: a request's task panicked outside its handler: {}", said(&*panic));
+        }
+    });
+}
+
 /// A test's failpoint, `fuse::tenant::TENANT`, before each of `tenant`'s requests is handled: to
-/// hold them, as a bucket that never answers holds a cell's. Runs on Tokio's blocking pool so a
-/// test callback blocking on a `Condvar` never stalls Tokio's async worker threads (board 9850).
+/// hold them, as a bucket that never answers holds a cell's, or to panic, as a bug outside the
+/// handler does (board 12891). Runs on Tokio's blocking pool so a test callback blocking on a
+/// `Condvar` never stalls Tokio's async worker threads (board 9850).
 #[cfg(feature = "failpoints")]
 async fn tenant_failpoint_async(tenant: &str) {
     let name = format!("fuse::tenant::{tenant}");
-    // Failpoint callbacks in tests are synchronous; ignore JoinError only if shutting down.
-    let _ = tokio::task::spawn_blocking(move || {
+    let held = tokio::task::spawn_blocking(move || {
         fail::fail_point!(&name);
-    })
-    .await;
+    });
+    match held.await {
+        Ok(()) => {}
+        // The failpoint's panic: the task's, as one outside the handler.
+        Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+        // Cancelled: the runtime shutting down, the mount's ending, which waits for no request.
+        Err(error) => log::warn!("fuse: tenant {tenant}'s failpoint: {error}"),
+    }
 }
 
 #[cfg(not(feature = "failpoints"))]
