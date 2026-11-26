@@ -1,0 +1,19 @@
+# Copyright 2026 The cladefs Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# machined's API, as buf reads it: go/generate.sh generates the Go client from it, buf lint holds
+# it to buf's STANDARD rules and to comments on everything, and go/compat.sh holds it to the last
+# build's by `buf breaking`, FILE, the strictest rules: a VM manager is upgraded apart from the
+# machined it calls, so v1 only grows.
+version: v2
+lint:
+  use:
+    - STANDARD
+    - COMMENTS
+  except:
+    # The service is Machined, as the extent daemon's is Cladefsd: named as its server is.
+    - SERVICE_SUFFIX
+breaking:
+  use:
+    - FILE

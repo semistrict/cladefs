@@ -1,0 +1,523 @@
+// Copyright 2026 The cladefs Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+// machined's API (board 13467): what a host's VM manager asks of machined, the server that runs
+// many machines, each a Linux guest, in one process with libmachine (crates/libmachine, doc-30).
+// It is to embed cladefs's extent daemon, shared by them all, and serve that daemon's own API
+// (cladefs.cladefsd.v1.Cladefsd) on the same endpoint, through which the caller makes the cells
+// machines' roots are on (board 13471): until then a call of it fails with UNIMPLEMENTED.
+//
+// It is served over a Unix socket, its user's alone (mode 0600, whatever the umask), whose callers
+// are checked by their peer credentials too (machined's own user or root); and, if asked, over TCP
+// with mutual TLS, whose callers present a certificate of the client CA machined is given. Every
+// caller may do everything: a caller is the host's VM manager.
+//
+// Machines are named by their caller, and outlive the caller's connection: a VM manager that
+// restarts lists what runs (ListMachines), and takes up or stops what it finds. They do not
+// outlive machined: its machines are its process's (on macOS, each in a helper process of its
+// own, board 13460).
+//
+// A machine's life:
+//
+//   CreateMachine -> CREATED -StartMachine-> STARTING -> RUNNING -(guest stops, StopMachine)->
+//   STOPPED -StartMachine-> STARTING ...  and DeleteMachine at any time with `force`, or while
+//   CREATED or STOPPED without.
+//
+// A RUNNING machine may be SUSPENDED (SuspendMachine, ResumeMachine) and snapshotted
+// (SnapshotMachine), where its platform can: KVM today. Elsewhere those calls fail with
+// UNIMPLEMENTED, saying so. A start boots the machine's kernel again, from scratch.
+//
+// Exec, ReadFile, WriteFile and StopMachine's `sync_filesystems` reach the guest through
+// libmachine's agent (crates/libmachine-agent), which a guest runs as `libmachine_action=agent` on
+// the test initramfs's command line, or of its own init's choosing. A guest without it fails them
+// with DEADLINE_EXCEEDED once its agent hasn't answered in 30 s. Each machine has at most 64 such
+// calls under way (an Exec until its command ends): past that they fail with RESOURCE_EXHAUSTED.
+// A file's read or write waits at most 60 s for any one answer of the guest's.
+//
+// A guest with an agent of its own (a VM manager's) reaches it through the machine's vsock socket
+// (Machine.vsock_socket), which speaks Firecracker's vsock protocol: connect, send
+// "CONNECT <port>\n", read "OK <port>\n", then the stream is the guest's port's; and a guest's
+// connection to a port the spec lists in `vsock_listen_ports` is passed to the Unix socket
+// "<vsock_socket>_<port>", if one listens there.
+//
+// Errors are gRPC statuses: NOT_FOUND for a machine or snapshot not there, ALREADY_EXISTS for a
+// name taken, INVALID_ARGUMENT for a request that means nothing (a name or path out of bounds, a
+// size not a multiple of 4096), FAILED_PRECONDITION for a call the machine's state refuses (a
+// start of a running machine, an exec in a stopped one), RESOURCE_EXHAUSTED for a limit reached
+// (on macOS before board 13460, a second machine running), UNIMPLEMENTED for what this platform or
+// build can't do yet, saying which board task brings it, and INTERNAL for the hypervisor's errors.
+//
+// Compatibility: v1 only grows. Calls and fields are added; none is removed, renamed, renumbered
+// or given another meaning or type. A field a server doesn't know of is zero, empty or false, which
+// each says it means. A call an older machined lacks fails with UNIMPLEMENTED.
+
+syntax = "proto3";
+
+package machined.v1;
+
+// Its Go package, go/machined/v1, generated from this file (go/generate.sh).
+option go_package = "github.com/semistrict/cladefs/go/machined/v1;machinedv1";
+
+// machined's API: machines, their guests, their consoles.
+service Machined {
+  // Makes a machine from a spec, CREATED: nothing runs until StartMachine.
+  rpc CreateMachine(CreateMachineRequest) returns (CreateMachineResponse);
+  // Boots a CREATED or STOPPED machine; returns once it is RUNNING (its kernel loaded and its
+  // vCPUs running), not once its guest is up: WatchMachine and the console say more.
+  rpc StartMachine(StartMachineRequest) returns (StartMachineResponse);
+  // Stops a running or suspended machine, its guest's filesystems synced first if asked, and
+  // frees it: STOPPED, its exit STOPPED. A machine already STOPPED or CREATED is left as it is.
+  rpc StopMachine(StopMachineRequest) returns (StopMachineResponse);
+  // Deletes a machine: one CREATED or STOPPED, or, with `force`, one in any state, stopped first.
+  rpc DeleteMachine(DeleteMachineRequest) returns (DeleteMachineResponse);
+  // A machine: its spec, state and how it last ended.
+  rpc GetMachine(GetMachineRequest) returns (GetMachineResponse);
+  // Every machine, by name.
+  rpc ListMachines(ListMachinesRequest) returns (ListMachinesResponse);
+  // A machine's status now, then each time it changes, until the machine is deleted (the stream
+  // ends) or the caller goes.
+  rpc WatchMachine(WatchMachineRequest) returns (stream WatchMachineResponse);
+  // What a machine's guest wrote to its console (its UART), from an offset, and, if asked, what
+  // it writes after, as it does. machined keeps the last 1 MiB of it, across starts.
+  rpc StreamConsole(StreamConsoleRequest) returns (stream StreamConsoleResponse);
+  // Runs a command in a running machine's guest through its agent: the first request starts it,
+  // the next feed its stdin and signal it; the answers are its pid, its output as it comes, and
+  // how it ended, the last. A caller gone before the command ended kills it.
+  rpc Exec(stream ExecRequest) returns (stream ExecResponse);
+  // A file of a running machine's guest, through its agent, in chunks. At most 64 MiB:
+  // RESOURCE_EXHAUSTED past it.
+  rpc ReadFile(ReadFileRequest) returns (stream ReadFileResponse);
+  // Makes a file of a running machine's guest hold what the requests carry, whole or not at all,
+  // through its agent: the first request names it, each carries a chunk. At most 64 MiB.
+  rpc WriteFile(stream WriteFileRequest) returns (WriteFileResponse);
+  // Writes a snapshot of a running machine to machined's snapshots, by a name of the caller's;
+  // the machine is paused for it, and runs on. KVM only. A machine with a network can't be.
+  rpc SnapshotMachine(SnapshotMachineRequest) returns (SnapshotMachineResponse);
+  // Makes a new machine from a snapshot, and starts it: RUNNING, its guest where the snapshot
+  // left it, its RNG reseeded and its clock moved on. KVM only.
+  rpc RestoreMachine(RestoreMachineRequest) returns (RestoreMachineResponse);
+  // Deletes a snapshot. Machines restored from it live on.
+  rpc DeleteSnapshot(DeleteSnapshotRequest) returns (DeleteSnapshotResponse);
+  // Suspends a running machine whose guest is idle: its RAM goes to a file, its threads stop,
+  // and it wakes by itself when a device has something for it, or on ResumeMachine. KVM only.
+  // FAILED_PRECONDITION if the guest stays busy for 2 s.
+  rpc SuspendMachine(SuspendMachineRequest) returns (SuspendMachineResponse);
+  // Wakes a suspended machine; returns once it runs (at once if it wasn't suspended).
+  rpc ResumeMachine(ResumeMachineRequest) returns (ResumeMachineResponse);
+}
+
+// What a machine is: its guest's size, what it boots, its network, its root.
+message MachineSpec {
+  // How many vCPUs: 0 means 1. At most 254.
+  uint32 vcpus = 1;
+  // Guest RAM in bytes, a multiple of 4096: 0 means 256 MiB.
+  uint64 memory_bytes = 2;
+  // What it boots.
+  Boot boot = 3;
+  // Its network: none (no network card at all) if absent.
+  Network network = 4;
+  // The cell its root filesystem is on, served by machined's embedded daemon: none (the guest's
+  // root is its initramfs) if absent. UNIMPLEMENTED until board 13067 connects machines' extent
+  // devices to the embedded daemon.
+  Cell root = 5;
+  // Guest ports whose connections from the guest machined passes to the Unix socket
+  // "<vsock_socket>_<port>" (Firecracker's convention), each at most 2^32 - 1, at most 16 of
+  // them. A connection to a port not listed, or whose socket nobody listens on, is refused.
+  repeated uint32 vsock_listen_ports = 6;
+  // The caller's own labels, kept and returned as they are: at most 32, each key 1 to 63 bytes
+  // and value at most 256 bytes.
+  map<string, string> labels = 7;
+}
+
+// A Linux kernel and how it boots.
+message Boot {
+  // The kernel: on x86_64 an ELF vmlinux with a PVH entry point or a bzImage, on arm64 an
+  // Image. A path relative to machined's images directory (its --images flag), which it must not
+  // leave: no "..", no absolute path.
+  string kernel = 1;
+  // The initramfs, a path as `kernel`'s: none if empty.
+  string initramfs = 2;
+  // The kernel command line, after libmachine's own ("console=ttyS0 panic=-1"); at most 2048
+  // bytes.
+  string command_line = 3;
+}
+
+// A machine's network: a virtio-net card whose other end is libmachine's userspace network
+// stack, in machined, which makes the guest's TCP connections from the host where the egress
+// rules allow (doc-30, "Host I/O"). The guest is 10.0.2.2/30, its gateway and DNS server
+// 10.0.2.1, which stands for the host's loopback too; the guest's kernel needs `ip=` on its
+// command line (libmachine's README). UNIMPLEMENTED on macOS until board 13399.
+message Network {
+  // The guest's outbound connections, checked against these in order, the first that matches
+  // deciding; none matching is denied. At most 256.
+  repeated EgressRule egress = 1;
+  // Host ports forwarded to the guest's. UNIMPLEMENTED until libmachine's network takes
+  // inbound connections (board 13486).
+  repeated PortForward port_forwards = 2;
+}
+
+// One egress rule.
+message EgressRule {
+  // Allows or denies what it matches.
+  EgressAction action = 1;
+  // What it matches: "*" (any globally routable address), an IPv4 address, a CIDR
+  // ("10.0.0.0/8"), or a DNS name, exact or "*.domain", matched against the names the guest
+  // resolved through machined. "*" and names never match loopback, private or link-local
+  // addresses: an explicit IP or CIDR rule does.
+  string host = 2;
+  // The first port it matches, 1 to 65535: 0, with `last_port` 0, means all of them.
+  uint32 first_port = 3;
+  // The last port it matches, `first_port` to 65535.
+  uint32 last_port = 4;
+}
+
+// What an egress rule does with a connection it matches.
+enum EgressAction {
+  // Refused.
+  EGRESS_ACTION_UNSPECIFIED = 0;
+  // Made from the host.
+  EGRESS_ACTION_ALLOW = 1;
+  // Refused at once.
+  EGRESS_ACTION_DENY = 2;
+}
+
+// A host port forwarded into the guest.
+message PortForward {
+  // The host's TCP port machined listens on, on loopback.
+  uint32 host_port = 1;
+  // The guest's TCP port each connection is made to.
+  uint32 guest_port = 2;
+}
+
+// A cell of machined's embedded daemon: its tenant and its ID, as cladefs.cladefsd.v1 names it.
+message Cell {
+  // Its tenant: 0 is the default tenant.
+  uint64 tenant = 1;
+  // Its ID, never 0.
+  uint64 cell = 2;
+}
+
+// A machine.
+message Machine {
+  // Its name, its caller's.
+  string name = 1;
+  // What it is, as created.
+  MachineSpec spec = 2;
+  // What it does now, and how it last ended.
+  MachineStatus status = 3;
+  // The Unix socket through which the host reaches its guest's vsock ports (Firecracker's
+  // protocol: the file's header comment), machined's user's alone, mode 0600. Empty while the
+  // machine doesn't run: each start serves a socket of its own.
+  string vsock_socket = 4;
+}
+
+// What a machine does now, and how it last ended.
+message MachineStatus {
+  // What it does.
+  MachineState state = 1;
+  // How it last ended, since it last started: absent if it hasn't.
+  Exit last_exit = 2;
+}
+
+// What a machine does.
+enum MachineState {
+  // Never a machine's.
+  MACHINE_STATE_UNSPECIFIED = 0;
+  // Made, never started.
+  MACHINE_STATE_CREATED = 1;
+  // Its kernel is loading.
+  MACHINE_STATE_STARTING = 2;
+  // Its vCPUs run.
+  MACHINE_STATE_RUNNING = 3;
+  // Its RAM is in a file, its threads stopped, until something wakes it.
+  MACHINE_STATE_SUSPENDED = 4;
+  // Asked to stop, its guest's filesystems syncing.
+  MACHINE_STATE_STOPPING = 5;
+  // Ended, and freed: how, its last exit says.
+  MACHINE_STATE_STOPPED = 6;
+}
+
+// How a machine ended.
+message Exit {
+  // Why.
+  ExitReason reason = 1;
+  // What more there is to say, for people: the hypervisor's error, the boot's failure.
+  string detail = 2;
+}
+
+// Why a machine ended.
+enum ExitReason {
+  // Never a machine's.
+  EXIT_REASON_UNSPECIFIED = 0;
+  // StopMachine, or DeleteMachine with `force`, stopped it.
+  EXIT_REASON_STOPPED = 1;
+  // Its guest powered it off.
+  EXIT_REASON_POWEROFF = 2;
+  // Its guest reset it (a reboot, or a panic with libmachine's panic=-1).
+  EXIT_REASON_RESET = 3;
+  // Its guest triple-faulted.
+  EXIT_REASON_SHUTDOWN = 4;
+  // It couldn't boot: a kernel or initramfs that won't load, a size the hypervisor refuses.
+  EXIT_REASON_BOOT_FAILED = 5;
+  // The hypervisor failed, or the guest made an exit libmachine doesn't handle.
+  EXIT_REASON_FAILED = 6;
+}
+
+// CreateMachine's request.
+message CreateMachineRequest {
+  // Its name: 1 to 63 bytes of a-z, 0-9, '.', '_' and '-', starting with a letter or digit.
+  string name = 1;
+  // What it is.
+  MachineSpec spec = 2;
+}
+
+// CreateMachine's answer.
+message CreateMachineResponse {
+  // The machine made.
+  Machine machine = 1;
+}
+
+// StartMachine's request.
+message StartMachineRequest {
+  // The machine's name.
+  string name = 1;
+}
+
+// StartMachine's answer.
+message StartMachineResponse {
+  // The machine, RUNNING.
+  Machine machine = 1;
+}
+
+// StopMachine's request.
+message StopMachineRequest {
+  // The machine's name.
+  string name = 1;
+  // Syncs its guest's filesystems through its agent before it stops: if the sync fails, or its
+  // agent doesn't answer within `timeout_ms`, the machine is left running and the call fails.
+  bool sync_filesystems = 2;
+  // How long the sync may take, in milliseconds: 0 means 3 minutes.
+  uint64 timeout_ms = 3;
+}
+
+// StopMachine's answer.
+message StopMachineResponse {
+  // The machine, STOPPED.
+  Machine machine = 1;
+}
+
+// DeleteMachine's request.
+message DeleteMachineRequest {
+  // The machine's name.
+  string name = 1;
+  // Stops it first if it runs, or is suspended, without syncing anything.
+  bool force = 2;
+}
+
+// DeleteMachine's answer.
+message DeleteMachineResponse {}
+
+// GetMachine's request.
+message GetMachineRequest {
+  // The machine's name.
+  string name = 1;
+}
+
+// GetMachine's answer.
+message GetMachineResponse {
+  // The machine.
+  Machine machine = 1;
+}
+
+// ListMachines's request.
+message ListMachinesRequest {}
+
+// ListMachines's answer.
+message ListMachinesResponse {
+  // Every machine, by name.
+  repeated Machine machines = 1;
+}
+
+// WatchMachine's request.
+message WatchMachineRequest {
+  // The machine's name.
+  string name = 1;
+}
+
+// One of WatchMachine's answers.
+message WatchMachineResponse {
+  // Its status, now or after a change. Changes in quick succession may come as their last alone.
+  MachineStatus status = 1;
+}
+
+// StreamConsole's request.
+message StreamConsoleRequest {
+  // The machine's name.
+  string name = 1;
+  // Where in what its guest ever wrote to start: 0 is its first byte. Bytes no longer kept are
+  // skipped (the first answer's offset says from where it starts).
+  uint64 offset = 2;
+  // Goes on with what the guest writes after, until the machine is deleted or the caller goes;
+  // otherwise ends at what is written now.
+  bool follow = 3;
+}
+
+// One of StreamConsole's answers.
+message StreamConsoleResponse {
+  // Where in what the guest ever wrote `data` starts.
+  uint64 offset = 1;
+  // What it wrote there, at most 64 KiB.
+  bytes data = 2;
+}
+
+// One of Exec's requests: the first starts the command, the others feed or signal it.
+message ExecRequest {
+  // What this one does.
+  oneof request {
+    // Starts the command: the first request, and only it.
+    ExecStart start = 1;
+    // Bytes for its stdin, at most 1 MiB a request.
+    bytes stdin = 2;
+    // Closes its stdin, once what was sent before reached it.
+    ExecCloseStdin close_stdin = 3;
+    // A signal for its process group, a Linux signal number (1 to 64).
+    int32 signal = 4;
+  }
+}
+
+// The command an Exec runs.
+message ExecStart {
+  // The machine's name.
+  string name = 1;
+  // The program, then its arguments: at least the program. A program without a slash is looked
+  // up in PATH. At most 4096 of them, 128 KiB in all.
+  repeated string argv = 2;
+  // Its environment, whole: if empty, PATH alone, libmachine's default
+  // (/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin).
+  map<string, string> env = 3;
+  // Its working directory: the agent's (/) if empty.
+  string working_directory = 4;
+  // Gives it a stdin fed by the requests that follow; otherwise its stdin is closed at once.
+  bool stdin = 5;
+}
+
+// Closes an Exec's stdin.
+message ExecCloseStdin {}
+
+// One of Exec's answers.
+message ExecResponse {
+  // What this one says.
+  oneof response {
+    // It started: the first answer.
+    ExecStarted started = 1;
+    // Bytes it wrote to its stdout.
+    bytes stdout = 2;
+    // Bytes it wrote to its stderr.
+    bytes stderr = 3;
+    // How it ended, after all its output: the last answer.
+    ExecExit exit = 4;
+  }
+}
+
+// An Exec's command started.
+message ExecStarted {
+  // Its process ID in the guest, also its process group's.
+  uint32 pid = 1;
+}
+
+// How an Exec's command ended.
+message ExecExit {
+  // Its exit status, or the signal that killed it.
+  oneof status {
+    // It exited, with this status.
+    int32 code = 1;
+    // A signal killed it, this one.
+    int32 signal = 2;
+  }
+}
+
+// ReadFile's request.
+message ReadFileRequest {
+  // The machine's name.
+  string name = 1;
+  // The guest's file, an absolute path of at most 4096 bytes.
+  string path = 2;
+}
+
+// One of ReadFile's answers.
+message ReadFileResponse {
+  // The next chunk of the file, at most 1 MiB. An empty file is one empty answer.
+  bytes data = 1;
+}
+
+// One of WriteFile's requests: the first names the file, each carries a chunk of it.
+message WriteFileRequest {
+  // The machine's name: the first request's, and only its.
+  string name = 1;
+  // The guest's file, an absolute path of at most 4096 bytes: the first request's, and only its.
+  string path = 2;
+  // Its permissions (07777 at most): the first request's, and only its.
+  uint32 mode = 3;
+  // The next chunk of what it is to hold, at most 1 MiB a request.
+  bytes data = 4;
+}
+
+// WriteFile's answer.
+message WriteFileResponse {}
+
+// SnapshotMachine's request.
+message SnapshotMachineRequest {
+  // The machine's name.
+  string name = 1;
+  // The snapshot's name, as a machine's is: one there already is replaced.
+  string snapshot = 2;
+}
+
+// SnapshotMachine's answer.
+message SnapshotMachineResponse {}
+
+// RestoreMachine's request.
+message RestoreMachineRequest {
+  // The snapshot's name.
+  string snapshot = 1;
+  // The new machine's name.
+  string name = 2;
+  // Its labels, as CreateMachine's.
+  map<string, string> labels = 3;
+  // Its vsock listen ports, as CreateMachine's.
+  repeated uint32 vsock_listen_ports = 4;
+}
+
+// RestoreMachine's answer.
+message RestoreMachineResponse {
+  // The new machine, RUNNING. Its spec is the snapshotted machine's.
+  Machine machine = 1;
+}
+
+// DeleteSnapshot's request.
+message DeleteSnapshotRequest {
+  // The snapshot's name.
+  string snapshot = 1;
+}
+
+// DeleteSnapshot's answer.
+message DeleteSnapshotResponse {}
+
+// SuspendMachine's request.
+message SuspendMachineRequest {
+  // The machine's name.
+  string name = 1;
+}
+
+// SuspendMachine's answer.
+message SuspendMachineResponse {}
+
+// ResumeMachine's request.
+message ResumeMachineRequest {
+  // The machine's name.
+  string name = 1;
+}
+
+// ResumeMachine's answer.
+message ResumeMachineResponse {}

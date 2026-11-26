@@ -1,0 +1,45 @@
+// Copyright 2026 The cladefs Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+//! machined: the server libmachine is for (board 13467). One process runs many machines, each a
+//! Linux guest on libmachine (`crates/libmachine`, doc-30), and serves a gRPC API to make, start,
+//! stop and delete them, watch them, stream their consoles, run commands and move files in their
+//! guests, and snapshot, restore, suspend and resume them where the platform can
+//! (`proto/machined/v1/machined.proto`; the README says how to run it).
+//!
+//! - [`start`] serves it, as [`Config`] says, on a Unix socket, TCP with mutual TLS, or both
+//!   (`listen`); `src/main.rs` is the binary over it.
+//! - Every request is checked once, where it enters (`checks`), then done on the machines
+//!   (`machines`), each of which runs through machined's one seam over libmachine (`vmm`), which
+//!   board 13460 fills on macOS with a helper process per machine.
+//! - A machine's guest's vsock is reached through a Unix socket speaking Firecracker's protocol
+//!   (`vsock`); its console is kept and streamed with offsets (`console`).
+//! - [`client`] connects a Rust client to a machined's Unix socket.
+//!
+//! Machines' roots on cells of the extent daemon machined embeds (libcladefs, board 13471), and
+//! that daemon's Cladefsd service on machined's endpoint, wait on boards 13067 and 13471.
+#![cfg(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64")
+))]
+
+/// The API's messages and service, generated from its .proto.
+pub mod proto {
+    tonic::include_proto!("machined.v1");
+}
+
+mod checks;
+pub mod client;
+mod config;
+mod console;
+mod errors;
+mod guest;
+mod listen;
+mod machines;
+mod service;
+mod vmm;
+mod vsock;
+
+pub use config::{Config, Tcp};
+pub use listen::{Server, start};

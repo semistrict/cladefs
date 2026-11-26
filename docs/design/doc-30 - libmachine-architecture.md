@@ -53,6 +53,7 @@ Fixed for every machine, so snapshots keep device addresses whatever the RAM siz
 - Async on tokio. Many VMs per process.
 - Two layers: a low-level `Machine` (memory, vCPUs, devices, vsock, snapshots) and a high-level `Sandbox` (exec, stdio, file put/get) built on it.
 - **Python bindings via PyO3 are a first-class deliverable** and prove the library works from a real consumer.
+- **machined** (`crates/machined`, board 13467) is the multi-VM server this library is for: one process, many machines, managed over its own gRPC API (`machined.v1.Machined`: create, start, stop, delete, watch, console, exec, files, snapshots, suspensions), on a Unix socket (mode 0600, peer credentials checked) or TCP with mutual TLS; each machine's vsock reached through a Unix socket speaking Firecracker's protocol. Its one seam over libmachine (`vmm.rs`) is where macOS's helper processes (board 13460) slot in; its README says how to run it.
 
 ## Virtio transport: PCI only (decision)
 - Every virtio device attaches over **virtio-PCI** (modern, virtio 1.x) with MSI-X; there is no virtio-mmio transport.

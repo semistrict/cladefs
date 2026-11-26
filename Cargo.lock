@@ -3062,6 +3062,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
 
 [[package]]
+name = "machined"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "futures",
+ "hyper-util",
+ "libc",
+ "libmachine",
+ "libmachine-agent",
+ "log",
+ "madsim-tokio",
+ "madsim-tonic",
+ "madsim-tonic-build",
+ "prost 0.14.4",
+ "protox",
+ "tempfile",
+ "tokio-stream",
+ "tonic-health",
+ "tonic-prost",
+ "tower",
+]
+
+[[package]]
 name = "madsim"
 version = "0.2.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"

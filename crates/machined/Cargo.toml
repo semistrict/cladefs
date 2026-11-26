@@ -1,0 +1,39 @@
+[package]
+name = "machined"
+description = "The multi-VM server: many libmachine machines in one process, with a gRPC API"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# machined runs where libmachine does: x86-64 Linux with KVM, arm64 macOS with
+# Hypervisor.framework (src/lib.rs); elsewhere it is empty and needs nothing.
+[target.'cfg(any(all(target_os = "linux", target_arch = "x86_64"), all(target_os = "macos", target_arch = "aarch64")))'.dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
+futures.workspace = true
+# The client's connector to a Unix socket (src/client.rs), as cladefsd's control client's.
+hyper-util = { version = "0.1.21", features = ["tokio"] }
+libc.workspace = true
+# The synchronous Machine alone: machined runs each machine on a thread of its own (src/vmm.rs).
+libmachine = { workspace = true, default-features = false }
+log.workspace = true
+prost.workspace = true
+tokio = { workspace = true, features = ["io-util", "signal"] }
+tokio-stream = { version = "0.1.19", features = ["net"] }
+# The workspace's tonic (madsim's, which is tonic outside the simulation; machined is never in it),
+# with TLS (rustls over aws-lc-rs) for TCP's mutual authentication, as cladefsd's peers'.
+tonic = { package = "madsim-tonic", version = "=0.6.0", features = ["tls-aws-lc"] }
+tonic-health = "0.14.6"
+tonic-prost = "0.14.6"
+tower = "0.5.3"
+
+[target.'cfg(any(all(target_os = "linux", target_arch = "x86_64"), all(target_os = "macos", target_arch = "aarch64")))'.dev-dependencies]
+libmachine-agent.workspace = true
+tempfile.workspace = true
+
+[build-dependencies]
+madsim-tonic-build = { version = "=0.6.0", default-features = false, features = ["prost", "transport"] }
+protox = "0.10.0"
+
+[lints]
+workspace = true
