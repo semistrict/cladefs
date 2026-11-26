@@ -475,6 +475,67 @@ SIGINT and SIGHUP each drain the daemon (`CLADEFSD_DRAIN`) and end it: Ctrl-C in
 its terminal or ssh session closing, no longer kills it with every cell crashed (board 8567). A
 second signal while it drains changes nothing; SIGKILL ends it at once.
 
+## cladefsctl: the control API from a shell
+
+`cladefsctl`, with `CLADEFSD_GRPC` naming the daemon's control socket, calls its control API
+(`integrator-guide.md` has it call by call; `cladefsctl`'s header, `crates/cladefs/src/bin/cladefsctl.rs`,
+every command). Besides the cells' commands (`create`, `take`, `fork`, `stat`, ...), these are
+for operators and scripts, through the daemon alone, each the call of the same name (as its usage
+prints them); each prints
+what its call answers, one `name value` a line, or one JSON object with `--json` where it takes
+it (board 8585). TENANT is in base 32; `--tenant` names one, its absence every tenant, or, for
+`shrink-memory`, the daemon's memory whole.
+
+| Command | Call | What |
+|---|---|---|
+| `stats [--json] [--wait SECONDS] [--leave-out histograms\|guests\|vms]...` | `GetStats` | What the daemon, its VM processes and their guests counted; `--wait` waits for the VM processes' answers SECONDS at most (2 unless given, 60 at most); `--leave-out` leaves out the guests' histograms, their stats, or the VM processes |
+| `cells [--json]` | `ListCells` | The cells VM processes have open, each's `path` and what `StatCell` says of it |
+| `counters [--json]` | `GetCounters` | The daemon's counters since it started, its bucket's under `object_storage` |
+| `set-peers [ADDRESS...]` | `SetPeers` | The hosts sharing its bucket, each `HOST:PORT`; none without any |
+| `migrate TENANT/CELL PEER` | `MigrateCell` | Begins the live migration of the cell to the daemon at peer address PEER; prints `migration ID` |
+| `hand-over [--token TOKEN] TENANT/CELL` | `HandOverCell` | Hands the cell over to its migration's target |
+| `abort-migration TENANT/CELL` | `AbortMigration` | Ends the cell's migration, the cell free to migrate again |
+| `memory-limit [--tenant TENANT] BYTES\|none` | `SetMemoryLimit` | Limits the memory extents' pages are held in, or lifts the limit |
+| `memory-weight TENANT WEIGHT` | `SetMemoryWeight` | Weighs a tenant's memory against the others' |
+| `in-flight [--tenant TENANT] BYTES\|default` | `SetTenantInFlight` | The bytes in flight a tenant's connections share, or the default |
+| `shrink-memory [--tenant TENANT] TARGET` | `ShrinkMemory` | Evicts pages down to TARGET bytes; prints `bytes`, what is held then |
+| `disk-limit [--tenant TENANT] BYTES\|none` | `SetDiskLimit` | Limits the disk, or lifts the limit |
+| `disk-weight TENANT WEIGHT` | `SetDiskWeight` | Weighs a tenant's disk against the others' |
+| `tenant-disk [--tenant TENANT] [--json]` | `GetTenantDisk` | Prints `bytes`, `limit_bytes` (null without one) and `reserved_bytes` |
+
+**Bounding a call.** Any command may be preceded by `--timeout SECONDS`, or run with
+`CLADEFSCTL_TIMEOUT=SECONDS`, which bounds connecting to the daemon and its call as one deadline:
+past it the command fails with `ETIMEDOUT`, and the daemon goes on with the call, which it may
+still complete, as it completes every call whether or not its caller waits. No command has one
+unless given: `sync`, `import` and `fork` take minutes, others as long as their cells or VMs take.
+It bounds the control API's calls alone, not `mount`'s, nor what `cladefsctl` does without the
+daemon.
+
+**Answers are 64 MiB at most** (`control::MAX_MESSAGE_BYTES`, board 8581). A call whose answer
+grows with the host refuses one past it with `RESOURCE_EXHAUSTED` (`EMSGSIZE`), saying its size
+and what to ask instead: `GetStats` (`stats`) of a host of many VMs, to leave the guests'
+histograms, their stats or the VM processes out (`--leave-out`), the daemon's own stats alone at
+the least; `ListCells` (`cells`), to `StatCell` each cell; `ListVersions`, to drop versions;
+`ListEphemeralHosts`, to decommission hosts gone for good.
+
+## What the daemon refuses to start without
+
+What only failed once it served, the daemon refuses as it starts, saying why (boards 8533,
+8595), so that the host's setup gets fixed:
+
+- **Linux 6.5 or later.** The daemon knows the process at the other end of a VM socket by the
+  socket's pidfd (`SO_PEERPIDFD`, 6.5), and kills that process when it stops acknowledging the
+  daemon's changes to its window. On an older kernel it refuses to start: the pid of the process
+  that connected, opened after the fact, may be another process's by then, which it would kill.
+  `architecture.md` lists the rest of what it needs of the kernel.
+- **35,840 open files** (`RLIMIT_NOFILE`: its own 1,024, and 136 for each of 256 cells): the
+  systemd unit's `LimitNOFILE` (below, Running under systemd).
+- **Every `CLADEFSD_ROOTS` directory there**, and a directory: one missing is refused as it
+  starts, rather than every cell under it later.
+- **A part cache it can open**: every `CLADEFSD_PART_CACHE` shard there, not locked by another
+  daemon, and on a filesystem that bypasses the page cache (`O_DIRECT`), whether or not the daemon
+  has peers.
+
 ## Access to userfaultfd
 
 On Linux, DAX windows take KVM's faults through userfaultfd, which needs
