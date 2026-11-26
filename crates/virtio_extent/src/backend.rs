@@ -2,8 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! What serving the device's requests asks of its backend, its cell: on Linux, cladefs's
-//! `CellClient`, the device's connection to the extent daemon; a fake one in tests.
+//! What serving the device's requests asks of its backend, its cell: cladefs's `CellClient`, the device's connection to the extent daemon; a fake one in tests.
 
 use std::future::Future;
 
@@ -75,7 +74,6 @@ pub trait Backend: Send + Sync {
     fn resized(&self, capacity: u64, took: bool) -> impl Future<Output = Result<(), Errno>> + Send;
 }
 
-#[cfg(target_os = "linux")]
 impl Backend for cladefs::CellClient {
     fn cell(&self) -> u64 {
         cladefs::CellClient::cell(self)

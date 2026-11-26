@@ -13,12 +13,14 @@ adapter) and libmachine (`crates/libmachine`, board 13067).
   driver's features (`check_acked`) and of a snapshot's version (`check_version`).
 - **Configuration** (`Config`): a device's, as a VMM's user gives it, serializable, with its
   validation and the features it makes.
-- **The device** (`Device`, Linux): opens its cell in cladefs's extent daemon (at its
+- **The device** (`Device`, Linux and macOS): opens its cell in cladefs's extent daemon (at its
   configuration's socket, `Device::new`, or over a connection the VMM made, `Device::connected`:
-  libmachine's to the daemon of its own process, board 13471), builds and reads
+  libmachine's, in memory, to the daemon of its own process, libcladefs, board 13553), builds and
+  reads
   its configuration space, hears the daemon's notices (capacity, asks for
   the guest's stats) and has the VMM raise a configuration change interrupt for them, makes and
-  creates the DAX window, and takes snapshots of the store and restores from them.
+  creates the DAX window (Linux's: macOS refuses one until the VMM maps its pages, board 13069),
+  and takes snapshots of the store and restores from them.
 - **Requests** (`Buffers`, `handle`, `Requests`, `Workers`): a request's buffers, built from its
   descriptors' guest memory in their order, served over any `Backend` (cladefs's
   `CellClient` on Linux, a fake in tests), what doc-4 calls out of range refused first,

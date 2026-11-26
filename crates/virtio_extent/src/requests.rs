@@ -344,11 +344,9 @@ pub(crate) fn read_obj<T: zerocopy::FromBytes>(bytes: &[u8]) -> T {
     T::read_from_prefix(bytes).expect("room for the object").0
 }
 
-#[cfg(target_os = "linux")]
-pub use self::linux::Requests;
+pub use self::serving::Requests;
 
-#[cfg(target_os = "linux")]
-mod linux {
+mod serving {
     use std::fmt::Display;
     use std::sync::{Arc, Condvar, Mutex};
     use std::time::Instant;

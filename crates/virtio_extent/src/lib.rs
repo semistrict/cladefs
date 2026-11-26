@@ -17,9 +17,10 @@
 //! - [`protocol`]: the requests, flags, features and configuration space, and the version a
 //!   driver and a snapshot are checked against.
 //! - [`Config`]: a device's configuration, as a VMM's user gives it.
-//! - [`Device`] (Linux): a device's cell, configuration space, notices, DAX window and
-//!   snapshots, which a VMM's adapter holds beside its transport's state.
-//! - [`Buffers`], [`handle`] and, on Linux, [`Requests`]: serving a request whose buffers the
+//! - [`Device`]: a device's cell, configuration space, notices, DAX window (Linux's; on macOS
+//!   none yet, board 13069) and snapshots, which a VMM's adapter holds beside its transport's
+//!   state.
+//! - [`Buffers`], [`handle`] and [`Requests`]: serving a request whose buffers the
 //!   adapter took off a queue, over any [`Backend`]; [`Workers`], a thread each queue, taking
 //!   requests off a [`RequestQueue`] of the VMM's transport as its event (an eventfd, or a pipe on
 //!   macOS) is notified, and returning them.
@@ -38,7 +39,6 @@
 mod backend;
 mod buffers;
 mod config;
-#[cfg(target_os = "linux")]
 mod device;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub mod kvm;
@@ -49,24 +49,16 @@ mod requests;
 mod sync;
 #[cfg(target_os = "linux")]
 pub mod vcpu;
-#[cfg(target_os = "linux")]
 mod window;
-// Started by the device alone, which is Linux's until cladefs's daemon client builds on macOS
-// (board 13471): its tests run everywhere.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod workers;
 
 pub use backend::Backend;
 pub use buffers::{Buffers, BuffersError};
 pub use config::{CacheType, Config, ConfigError, PRIVATE_MAX_DEFAULT, private_max};
-#[cfg(target_os = "linux")]
 pub use device::{ActivateError, Device, Error, OnLost, ReleaseError, ShmRegion};
 pub use notices::{ConfigInterrupt, Notices, Resizing, StatsAsks};
 pub use persist::SnapshotMode;
-#[cfg(target_os = "linux")]
-pub use requests::Requests;
-pub use requests::{Served, handle};
-#[cfg(target_os = "linux")]
+pub use requests::{Requests, Served, handle};
 pub use window::{DaxWindowError, PrefaultGuestMemory, WindowVm, dax_window_at};
 pub use workers::{Popped, QueueInterrupt, RequestQueue, WorkerQueue, Workers};
 

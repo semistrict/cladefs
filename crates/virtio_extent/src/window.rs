@@ -13,6 +13,10 @@
 //! access to it, an exit per page, which nested virtualization makes slow: given a
 //! [`PrefaultGuestMemory`] (KVM's `KVM_PRE_FAULT_MEMORY`), the window has the hypervisor map the
 //! pages as the daemon maps them.
+//!
+//! The window's memory is the same everywhere; cladefs's second stage of it, which serves its
+//! faults (userfaultfd), is Linux's: on macOS the window waits on the VMM mapping its pages
+//! itself (board 13069), and a device there has none.
 
 use std::io;
 use std::ptr::NonNull;
@@ -201,6 +205,7 @@ impl WindowMemory {
         self.guest.len
     }
 
+    #[cfg(target_os = "linux")]
     /// Creates `cell`'s DAX window in the window's host memory, which its connection takes over:
     /// it copies on write, of `private_max` pages at most (backlog doc-13). `prefault` maps the window's pages for the guest as the cell maps
     /// them, if given.
@@ -253,11 +258,13 @@ pub fn dax_window_at(gpa: u64) -> Option<(u64, usize)> {
 }
 
 /// Has `prefault` map the pages the cell maps into the window, at the window's guest address.
+#[cfg(target_os = "linux")]
 struct WindowPrefault {
     guest_addr: u64,
     prefault: Arc<dyn PrefaultGuestMemory>,
 }
 
+#[cfg(target_os = "linux")]
 impl cladefs::Prefault for WindowPrefault {
     fn prefault(&self, offset: u64, len: u64) {
         self.prefault.prefault(self.guest_addr + offset, len);

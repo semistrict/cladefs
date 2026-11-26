@@ -11,7 +11,8 @@
 //! - [`Daemon::start`] boots one from a [`Config`], [`Daemon::stop`] drains it.
 //! - [`Daemon::open`], [`Daemon::create`] and [`Daemon::fork`] give a device its cell's
 //!   [`CellClient`], connected in this process: no listener, no path. The client is what an extent
-//!   device serves its guest from (`virtio_extent`'s backend).
+//!   device serves its guest from (`virtio_extent`'s backend). [`Daemon::connect`] gives a device
+//!   that opens its cell itself (`virtio_extent::Device::connected`) a connection of its own.
 //! - [`Daemon::control_service`] is the daemon's control API (the Cladefsd gRPC service, health,
 //!   and the Mount service of its FUSE mount, Linux's), for the process to serve on an endpoint of
 //!   its own.
@@ -206,19 +207,19 @@ impl Daemon {
 
     /// The existing managed cell `cell`, opened for a device, connected in this process.
     pub fn open(&self, cell: CellId) -> Result<CellClient, Error> {
-        self.connection()?.open_cell(cell)
+        self.connect()?.open_cell(cell)
     }
 
     /// A new managed cell of `tenant`'s, of `capacity` bytes, on a disk the daemon picks, opened
     /// for a device: its ID is the client's ([`CellClient::cell`]).
     pub fn create(&self, tenant: u64, capacity: u64) -> Result<CellClient, Error> {
-        self.connection()?.create_cell(tenant, capacity)
+        self.connect()?.create_cell(tenant, capacity)
     }
 
     /// A new managed cell of `tenant`'s, forked from the version `from`, of `capacity` bytes,
     /// opened for a device.
     pub fn fork(&self, tenant: u64, from: CellVersion, capacity: u64) -> Result<CellClient, Error> {
-        self.connection()?.open_forked_cell(tenant, from, capacity)
+        self.connect()?.open_forked_cell(tenant, from, capacity)
     }
 
     /// The daemon's control API, the Cladefsd gRPC service, health and its FUSE mount's Mount, for
@@ -270,8 +271,10 @@ impl Daemon {
         })
     }
 
-    /// A connection of this process's to the daemon.
-    fn connection(&self) -> Result<DaemonConnection, Error> {
+    /// A new connection of this process's to the daemon, in memory, for a device to open a cell
+    /// over ([`DaemonConnection::open`] and the like): one a cell, as a cell's client owns its
+    /// connection.
+    pub fn connect(&self) -> Result<DaemonConnection, Error> {
         let stream = self.daemon.connect_in_process().map_err(|err| {
             Error::new(anyhow::Error::new(err).context("connecting to the embedded daemon"))
         })?;
