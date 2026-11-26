@@ -842,6 +842,7 @@ dependencies = [
  "sha2 0.11.0",
  "storage_device",
  "thiserror",
+ "toml",
  "url",
 ]
 
@@ -986,6 +987,7 @@ dependencies = [
  "tar",
  "thiserror",
  "tokio-stream",
+ "toml",
  "tonic-health",
  "tonic-prost",
  "tower",

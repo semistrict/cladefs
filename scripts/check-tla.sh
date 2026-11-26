@@ -56,16 +56,16 @@
 #
 # TLC runs on Java: $JAVA, or java if it runs, or Homebrew's openjdk. Its jar, the release pinned
 # below, is fetched once into ~/.cache/cladefs/tla and checked against its SHA-256. v1.8.0 is a
-# pre-release TLA+ re-cuts in place (2026-11-19's, pinned 2026-11-22), and 1.7.4, the last that
+# pre-release TLA+ re-cuts in place (2026-11-26's, pinned 2026-11-26), and 1.7.4, the last that
 # stays put, lacks -noGenerateSpecTE: a jar re-cut since fails the check until the pinned version
 # follows it.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 specs="$root/specs"
 tla_version=1.8.0
-tla_sha256=fdffef247f563ef6edbfd44958d2a82db79e7564e07cb673262d896353fa6713
+tla_sha256=67f9575c3b9ef7a0787b1bded34812862ffe79d711298e5a75b1a77720b19928
 cache="$HOME/.cache/cladefs/tla"
-jar="$cache/tla2tools-$tla_version.jar"
+jar="$cache/tla2tools-$tla_version-${tla_sha256:0:12}.jar"
 
 if [[ ! -f $jar ]]; then
     mkdir -p "$cache"

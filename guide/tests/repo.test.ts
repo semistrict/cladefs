@@ -17,7 +17,6 @@ describe("where code comes from", () => {
 
   test.each([
     ["crates/fxfs/src/object_store/journal.rs", "fuchsia-changed"],
-    ["crates/fxfs/src/object_store/volume/snapshot.rs", "cladefs"],
     ["crates/storage_device/src/extent.rs", "cladefs"],
     ["crates/fxfs/src/round.rs", "fuchsia"],
     ["crates/cladefs/src/open_cell.rs", "cladefs"],

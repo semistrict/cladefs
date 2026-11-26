@@ -315,6 +315,8 @@ struct InFlight {
 
 impl InFlight {
     fn enter(self: &Arc<Self>) -> InFlightGuard {
+        // Relaxed increment: callers already hold an active server reference, and only the 1->0
+        // fetch_sub(AcqRel) and wait_idle's Acquire load synchronize task completion with teardown.
         self.count.fetch_add(1, Ordering::Relaxed);
         InFlightGuard(Arc::clone(self))
     }

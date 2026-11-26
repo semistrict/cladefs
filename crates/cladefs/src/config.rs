@@ -139,9 +139,14 @@ pub struct MemoryConfig {
     /// Free memory headroom left for VMs and host (`default: max(host/16, 1GiB)`).
     #[serde(default)]
     pub headroom: Option<ByteSize>,
-    /// Minimum memory floor kept by the governor before declaring the host full.
+    /// Minimum memory floor kept by the governor before declaring the host full (default:
+    /// `limit / 8`).
     #[serde(default)]
     pub floor: Option<ByteSize>,
+    /// Allow proactive VM `memory.reclaim` without `CAP_DAC_OVERRIDE` when VM cgroups are
+    /// delegated to `cladefsd`'s user (`CLADEFSD_VM_CGROUP_DELEGATED`).
+    #[serde(default)]
+    pub vm_cgroup_delegated: Option<bool>,
 }
 
 /// `[disk]` section: global disk defaults shared across `[[disks]]`.
@@ -667,6 +672,9 @@ impl Config {
         }
         if let Some(floor) = self.memory.floor {
             set("CLADEFSD_MEMORY_FLOOR", &floor.bytes().to_string());
+        }
+        if let Some(delegated) = self.memory.vm_cgroup_delegated {
+            set("CLADEFSD_VM_CGROUP_DELEGATED", if delegated { "1" } else { "0" });
         }
         if let Some(replace) = self.peers.replace_after_secs {
             set("CLADEFSD_REPLACE_AFTER", &replace.to_string());

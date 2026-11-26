@@ -65,6 +65,24 @@ groups:
           severity: warning
         annotations:
           summary: "cladefsd on {{ $labels.instance }} leaked {{ $value }} bytes of its memory: a bug"
+      # Extent cache actively refault-thrashing under memory pressure: mapped DAX extents are
+      # faulting back in rapidly after governor eviction.
+      - alert: CladefsdMemoryThrashing
+        expr: cladefsd_memory_thrashing{job="cladefsd"} == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "cladefsd on {{ $labels.instance }}: DAX extent cache refault-thrashing for 5 minutes"
+      # Proactive VM cgroup memory.reclaim writes failing (e.g. missing CAP_DAC_OVERRIDE or
+      # delegated cgroup permissions).
+      - alert: CladefsdVmReclaimFailing
+        expr: rate(cladefsd_vm_reclaim_errors_total{job="cladefsd"}[5m]) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "cladefsd on {{ $labels.instance }}: proactive VM memory.reclaim failing for 10 minutes"
       # Its anonymous memory past what its design bounds it by (cladefsd_process_anon_budget_bytes),
       # which a memory.max sized by that budget meets with the cgroup's OOM killer.
       - alert: CladefsdHeapOverBudget

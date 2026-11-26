@@ -884,6 +884,7 @@ impl Server {
     /// (board 9850, review 131).
     #[cfg_attr(madsim, allow(dead_code))]
     pub(crate) fn rejected(request: &[u8]) -> Option<[u8; size_of::<OutHeader>()]> {
+        // Shorter than a header: nothing to reply to, as in `panicked`.
         let (header, _) = InHeader::read_from_prefix(request).ok()?;
         match header.opcode {
             opcode::DESTROY | opcode::FORGET | opcode::BATCH_FORGET | opcode::INTERRUPT => None,
@@ -905,6 +906,7 @@ impl Server {
     /// Returns `None` if `request` requires async handling or a reply.
     #[cfg_attr(madsim, allow(dead_code))]
     pub(crate) fn try_handle_inline(&self, request: &[u8]) -> Option<Result<(), Error>> {
+        // Shorter than a header: fall through to the normal async decoder to handle/log it.
         let (header, rest) = InHeader::read_from_prefix(request).ok()?;
         if !matches!(header.opcode, opcode::FORGET | opcode::BATCH_FORGET | opcode::INTERRUPT) {
             return None;

@@ -294,8 +294,10 @@ process's memory (backlog doc-13), until the guest writes them back to the cell,
 writes back dirty pages, and the window shares them again. They are charged to the VM process, as
 its guest memory is, not to the daemon or the cell's tenant: the daemon reserves none of it, so its
 memory sizes its cache alone (TASK-501). Bound the VM process's memory, its cgroup, for guest memory
-and private pages together. Everything else the window maps is sealed extents' pages, shared and
-evictable.
+and private pages together; leave `memory.swap.max` non-zero (e.g. `max`) so `cladefsd`'s unified
+memory governor can proactively swap cold anonymous guest RAM under host pressure, and enable
+Firecracker's virtio-balloon `free_page_reporting` so guests return freed pages to the host.
+Everything else the window maps is sealed extents' pages, shared and evictable.
 
 **Sizing a VM's private pages.** The extent device's `dax_private_max_bytes` caps how many bytes of
 them a VM holds at once (`PUT /cladefs/{id}`, in Firecracker's swagger spec): a multiple of the page

@@ -50,10 +50,33 @@ floor (`CLADEFSD_MEMORY_FLOOR` bytes, by default an eighth of the limit: e.g.
 ~3.5 GiB on a 28 GiB host, 8 GiB on a 64 GiB host). On a soft `MemAvailable` dip
 without kernel memory pressure, the governor sheds derived caches, spare slabs,
 and idle (unmapped) extents and stops growing without evicting actively mapped
-DAX extents; it shrinks mapped extents gradually only under own-cgroup limits or
-real Linux PSI memory pressure, and backs off if refault thrashing is detected.
-`MEMORY_BYTES`, its second argument, fixes it at that instead, ungoverned, as a
-test's daemon may have it. Arenas take it in 2 MiB chunks as they need them. The control API limits, at runtime, the memory
+DAX extents; it shrinks mapped extents gradually only under own-cgroup limits,
+real Linux PSI memory pressure, or emergency host shortage (`< headroom / 4`),
+and backs off above emergency if governor-caused refault thrashing is detected.
+
+On Linux, governed mode unifies `cladefsd`'s shared `memfd` extent cache and
+connected VMs' anonymous RAM under one MGLRU + swap aging clock:
+- **Fail-hard startup prerequisites:** governed `cladefsd` refuses to start unless
+  Linux 6.5+ `cachestat(2)` works, MGLRU is enabled (`/sys/kernel/mm/lru_gen/enabled != 0`),
+  `SwapTotal >= floor`, `/sys/fs/cgroup` is writable, and the daemon holds `CAP_DAC_OVERRIDE`
+  (or `CLADEFSD_VM_CGROUP_DELEGATED=1` / `[memory].vm_cgroup_delegated = true` when VM cgroups
+  are delegated to `cladefsd`'s user). Run `cladefsd --setup-host` as root (`ExecStartPre=+`)
+  to enable MGLRU, set `lru_gen/min_ttl_ms=1000`, and provision zstd zram swap automatically.
+- **Cold-slab harvesting:** a budgeted background worker polls `cachestat(2)` outside extent
+  locks and harvests individual parts MGLRU has completely paged out to swap on two consecutive
+  scans (never during thrashing).
+- **Proactive VM reclaim (TMO):** when raw host `MemAvailable < headroom` and host swap has room
+  above reserve (`max(SwapTotal / 8, 256 MiB)`), the governor discovers connected VM cgroups
+  race-free from `SO_PEERPIDFD` and writes deficit-budgeted `memory.reclaim` (`swappiness=max`)
+  only to VMs with observable low PSI (`some avg10 < 1%`, `full avg10 == 0`), holding its own
+  cache growth for 5 s after progress.
+- **Cgroup protection:** place `cladefsd.service` in a top-level `Slice=cladefs.slice` with
+  `MemoryLow=` set to at least the floor on both the slice and the service (Linux cgroup v2 caps
+  effective `memory.low` by every ancestor).
+
+`MEMORY_BYTES`, its second argument (or `[memory].bytes` in TOML), fixes it at that instead,
+ungoverned, as a test's daemon may have it. Arenas take memory in 1 MiB part slabs (doc-26) as
+they need them. The control API limits, at runtime, the memory
 of each tenant and of every tenant together (`SetMemoryLimit`): past a
 tenant's limit, the daemon evicts the clean pages of its extents read longest
 ago; past the total, or out of `MEMORY_BYTES`, any tenant's. With none left to
@@ -460,7 +483,7 @@ is listed in `crates/cladefs/src/cladefsd/metrics.rs`'s module doc):
 | `cladefsd_mount_requests_total`, `cladefsd_mount_request_errors_total`, `cladefsd_mount_attaches_total`, `cladefsd_mount_detaches_total` | Its requests, those answered with an error (but `ENOENT` and `ENOSYS`, a name not there and an operation it has not, which the kernel asks every filesystem), its attaches and detaches. |
 | `cladefsd_page_cache_bytes`, `_dirty_bytes`, `_writeback_bytes`, `_stuck_bytes`, `_limit_bytes`, `_dirty_limit_bytes` | The cells' page cache: held, dirty, being written back, dirty of files whose write-back fails, its size, and the dirty bytes past which writers wait. |
 | `cladefsd_page_cache_flush_stalls_total`, `cladefsd_page_cache_flush_stalled_seconds_total`, `cladefsd_page_cache_flusher_died` | Writers held back at that bound and how long, together: the disk not keeping up; 1 once its flusher died. |
-| `cladefsd_memory_full`, `cladefsd_memory_pressure`, `cladefsd_memory_thrashing`, `cladefsd_memory_full_entered_total`, `cladefsd_memory_refaults_total`, `cladefsd_memory_refaults_per_second`, `cladefsd_memory_floor_bytes`, `cladefsd_memory_target_bytes`, `cladefsd_memory_psi_some_avg10_bps`, `cladefsd_memory_psi_full_avg10_bps` | 1 while the host's memory is full (the daemon makes no cell, `CreateCell` failing `ENOMEM`), 1 while under memory pressure, 1 while actively refault-thrashing; full-entry and part-refault counters; 1-second refault rate; the protected floor and headroom-adjusted target; and memory PSI averages in basis points. All gauges and counters are also returned by gRPC `GetStats`. |
+| `cladefsd_memory_full`, `cladefsd_memory_pressure`, `cladefsd_memory_thrashing`, `cladefsd_memory_full_entered_total`, `cladefsd_memory_refaults_total`, `cladefsd_memory_refaults_per_second`, `cladefsd_memory_floor_bytes`, `cladefsd_memory_target_bytes`, `cladefsd_memory_psi_some_avg10_bps`, `cladefsd_memory_psi_full_avg10_bps`, `cladefsd_memory_kernel_cold_harvested_bytes_total`, `cladefsd_vm_reclaim_bytes_total`, `cladefsd_vm_reclaim_attempts_total`, `cladefsd_vm_reclaim_errors_total` | 1 while the host's memory is full (the daemon makes no cell, `CreateCell` failing `ENOMEM`), 1 while under memory pressure, 1 while actively refault-thrashing; full-entry and part-refault counters; 1-second refault rate; the protected floor and headroom-adjusted target; memory PSI averages in basis points; cold DAX bytes harvested via `cachestat(2)` after MGLRU swap-out; and proactive VM `memory.reclaim` reclaimed bytes, attempts, and errors. All gauges and counters are also returned by gRPC `GetStats`. |
 | `cladefsd_otel_spans_exported_total`, `cladefsd_otel_spans_dropped_total`, `cladefsd_otel_spans_failed_total` | Spans exported over OTLP, dropped (the exporter's queue, `OTEL_BSP_MAX_QUEUE_SIZE`, full), and whose export failed (`docs/tracing.md`). |
 
 No label holds what a caller names: a method none of the .protos has is `unknown`.
@@ -685,6 +708,8 @@ and `scripts/tests/test_ops_examples.py` that every metric they name is one the 
 | `CladefsdBucketFailing` | warning | Requests to the bucket failing (`cladefsd_object_storage_failures_total`) for 10 minutes. |
 | `CladefsdMemoryExhausted` | critical | Arenas whose relief found nothing to free (`cladefsd_memory_exhausted_arenas`): reads fail `ENOMEM`. |
 | `CladefsdMemoryLeaked` | warning | `cladefsd_memory_leaked_bytes` above 0: a bug. |
+| `CladefsdMemoryThrashing` | warning | `cladefsd_memory_thrashing == 1` for 5 minutes: DAX extent cache refault-thrashing under memory pressure. |
+| `CladefsdVmReclaimFailing` | warning | `cladefsd_vm_reclaim_errors_total` rising for 10 minutes: proactive VM `memory.reclaim` denied or failing. |
 | `CladefsdHeapOverBudget` | warning | The daemon's anonymous memory past its budget (`cladefsd_process_anon_over_budget_total`), which a `MemoryMax` sized by it meets with the OOM killer. |
 | `CladefsdVmProcessesWedged` | warning | VM processes it killed that have not gone, for 15 minutes. |
 | `CladefsdDiskPressure` | warning | A disk under pressure for 10 minutes: uploads urged, tenants held to their shares. |

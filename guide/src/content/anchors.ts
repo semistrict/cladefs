@@ -62,7 +62,6 @@ export const anchors = {
   arena: { path: "crates/cladefs/src/pages.rs", snippet: "pub struct Arena {", note: "An arena of physical memory: a tenant's." },
   guest_fault: { path: "guest/linux/fs/cladefs/dax.c", snippet: "static vm_fault_t cladefs_dax_do_fault(struct vm_fault *vmf, unsigned int order, bool write)", note: "The guest's DAX fault." },
   guest_writeback: { path: "guest/linux/fs/cladefs/dax.c", snippet: "int cladefs_dax_write_back(struct inode *inode)", note: "The guest's DAX writeback." },
-  snapshot_volume: { path: "crates/fxfs/src/object_store/volume/snapshot.rs", snippet: "pub async fn snapshot_volume(", note: "cladefs's addition to Fuchsia's Fxfs: a volume snapshot sharing layers and extents." },
   es_commit_ordered: { path: "crates/cladefs/src/open_cell.rs", snippet: "pub async fn commit_ordered(&self, root: Option<&[u8]>) -> Result<()>", note: "A barrier: ordered, not yet local." },
   guest_dirty: { path: "guest/linux/fs/cladefs/dax.c", snippet: "static int cladefs_dax_dirty(struct inode *inode, struct cladefs_dax_range *range, unsigned long first,", note: "Before a page is dirty, the host makes it private (PRIVATE): dirty implies private." },
   guest_rebind_range: { path: "guest/linux/fs/cladefs/dax.c", snippet: "static long cladefs_dax_rebind_range(struct cladefs_dax *dax, struct cladefs *fs,", note: "Rebinding: clean private pages MAPped anew to their sealed extents, the semaphore held for writing." },

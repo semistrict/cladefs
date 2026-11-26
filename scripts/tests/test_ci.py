@@ -394,3 +394,21 @@ class AptInstall(unittest.TestCase):
         """apt's update's failure, an index no mirror served, is the action's."""
         status, _, _, asked = self.install(UBUNTU_COM + FALLBACKS, update_status=100)
         self.assertEqual((status, asked), (100, "update -o APT::Update::Error-Mode=any\n"))
+
+    def test_arm64_ports_uses_ports_when_it_resolves(self):
+        """ubuntu-24.04-arm fetches from ports.ubuntu.com directly instead of mirror+file."""
+        status, _, _, asked = self.install(
+            ["ports.ubuntu.com"],
+            sources="Types: deb\nURIs: http://ports.ubuntu.com/ubuntu-ports/\n",
+        )
+        self.assertEqual(status, 0)
+        self.assertEqual(asked, "update -o APT::Update::Error-Mode=any\ninstall -y clang lld\n")
+
+    def test_arm64_ports_falls_back_when_ports_does_not_resolve(self):
+        status, out, _, asked = self.install(
+            ["mirrors.edge.kernel.org"],
+            sources="Types: deb\nURIs: http://ports.ubuntu.com/ubuntu-ports/\n",
+        )
+        self.assertEqual(status, 0)
+        self.assertIn("::warning::ports.ubuntu.com doesn't resolve", out)
+        self.assertEqual(asked, "update -o APT::Update::Error-Mode=any\ninstall -y clang lld\n")

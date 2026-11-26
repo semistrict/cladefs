@@ -50,6 +50,8 @@ func daemon(t *testing.T, dir string) *cladefsdv1.Client {
 		`url = "memory:///cells"` + "\n" +
 		"\n[kms]\n" +
 		`master_key = "7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e"` + "\n" +
+		"\n[memory]\n" +
+		`size = "64 MiB"` + "\n" +
 		"\n[[disks]]\n" +
 		`id = "disk0"` + "\n" +
 		"path = " + `"` + disk0 + `"` + "\n"

@@ -28,10 +28,16 @@ url = "aws-kms://us-east-1"
 # master_key_file = "/etc/cladefs/master.key"
 
 [memory]
-# Omit `bytes` to govern dynamically from free host/cgroup memory.
+# Omit `bytes` to govern dynamically from free host/cgroup memory (recommended on VM hosts;
+# requires Linux 6.5+ cachestat(2), MGLRU, SwapTotal >= floor, writable /sys/fs/cgroup, and
+# CAP_DAC_OVERRIDE or vm_cgroup_delegated = true — run `cladefsd --setup-host` via ExecStartPre=+).
 # bytes = "32GiB"
-headroom = "2GiB"
-floor = "512MiB"
+# Free headroom left for VMs and host (default: max(limit/16, 1GiB), capped at limit/2).
+# headroom = "2GiB"
+# Minimum shared DAX working-set floor kept before declaring the host full (default: limit/8).
+# floor = "4GiB"
+# Set true when VM cgroups are delegated to cladefsd's user instead of granting CAP_DAC_OVERRIDE.
+# vm_cgroup_delegated = false
 
 [disk]
 # Optional aggregate cap across all disks (apportioned proportionally by each disk's effective cap).

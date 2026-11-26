@@ -157,7 +157,11 @@ frozen, holds the pages it may still map until the daemon has killed it
 connected, opened after the fact (`pidfd_open`), may be another process's by then, which the
 daemon would kill. It refuses to start, too, under a limit of open files of 35,840
 (`RLIMIT_NOFILE`: its own 1,024, and 136 for each of 256 cells), with a `CLADEFSD_ROOTS`
-directory it can't resolve, or a part cache it can't open (board 8595).
+directory it can't resolve, a part cache it can't open (board 8595), or—in governed memory mode
+(no fixed `MEMORY_BYTES`)—without Linux 6.5+ `cachestat(2)`, MGLRU enabled, swap at least the
+governor's floor, and writable `/sys/fs/cgroup` with `CAP_DAC_OVERRIDE` (or
+`CLADEFSD_VM_CGROUP_DELEGATED=1`); `cladefsd --setup-host` provisions the kernel settings and zram
+swap before start.
 
 ## Ephemeral cells
 

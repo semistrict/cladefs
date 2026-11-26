@@ -27,6 +27,10 @@ tests:
         values: '1 1'
       - series: 'cladefsd_build_info{job="cladefsd", instance="h2", commit="4567cdef"}'
         values: '1 1'
+      - series: 'cladefsd_memory_thrashing{job="cladefsd", instance="h1"}'
+        values: '0 1 1 1 1 1 1 1'
+      - series: 'cladefsd_vm_reclaim_errors_total{job="cladefsd", instance="h1"}'
+        values: '0 1 2 3 4 5 6 7 8 9 10 11 12 13 14'
     alert_rule_test:
       - eval_time: 1m
         alertname: CladefsdDown
@@ -70,3 +74,21 @@ tests:
           - exp_labels: {severity: warning, job: cladefsd, instance: h1, commit: 0123abcd-dirty}
             exp_annotations:
               summary: "cladefsd on h1 runs build 0123abcd-dirty"
+      - eval_time: 5m
+        alertname: CladefsdMemoryThrashing
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: CladefsdMemoryThrashing
+        exp_alerts:
+          - exp_labels: {severity: warning, job: cladefsd, instance: h1}
+            exp_annotations:
+              summary: "cladefsd on h1: DAX extent cache refault-thrashing for 5 minutes"
+      - eval_time: 10m
+        alertname: CladefsdVmReclaimFailing
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: CladefsdVmReclaimFailing
+        exp_alerts:
+          - exp_labels: {severity: warning, job: cladefsd, instance: h1}
+            exp_annotations:
+              summary: "cladefsd on h1: proactive VM memory.reclaim failing for 10 minutes"
