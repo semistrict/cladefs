@@ -71,6 +71,10 @@ pub(super) async fn boot_daemon(
                 super::disks::DiskPool::from_roots(daemon.host.bucket_host(), &roots)
             })
             .map_err(anyhow::Error::msg)?;
+            let reaped = local_cell::upload::blocking(|| pool.reap_staging());
+            if reaped > 0 {
+                log::info!("cladefsd: removed {reaped} leftover staging cell directories");
+            }
             // OnceLock: keeps any pool already configured before boot_daemon ran.
             let _ = daemon.disk_pool.set(Arc::new(pool));
         }

@@ -2468,8 +2468,12 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         let cell = self.cell();
         let room = IN_FLIGHT.saturating_sub(in_flight.len());
         // What a waiter wants is durable; then closed, if fewer segments wait than may upload, and
-        // what the closing closed durable too.
-        cell.flush().await?;
+        // what the closing closed durable too. Skip when nothing is pending so the uploader's
+        // startup probe (`upload_closed = true`) does not immediately settle a freshly restored
+        // fork's deferred durability (board 7420).
+        if cell.flush_pending() {
+            cell.flush().await?;
+        }
         let mut closed = if close || !self.options.upload_closed {
             cell.closed(room).await?
         } else {

@@ -1501,3 +1501,48 @@ fn fuse_strided_multi_file_reads_scale_part_memory_without_thrashing() {
     }
     let _ = daemon.block_on(daemon.drain(std::time::Duration::from_secs(30)));
 }
+
+/// hotbed review 135: FUSE `Mount Attach(cell=0)` routes new cell creation through `DiskPool`, so
+/// marking every managed disk `drain` refuses new mount cells with `ENOSPC` instead of creating
+/// them via raw root free-space fallback.
+#[test]
+fn fuse_mount_create_respects_disk_drain_placement() {
+    let dir = tempfile::tempdir().unwrap();
+    let bucket = dir.path().join("bucket");
+    let disk0 = dir.path().join("disk0");
+    let cells_dir = disk0.join("cells");
+    let m = dir.path().join("mnt");
+    let socket = dir.path().join("control");
+    std::fs::create_dir_all(&bucket).unwrap();
+    std::fs::create_dir_all(&disk0).unwrap();
+    std::fs::create_dir_all(&m).unwrap();
+    let mut command = cladefsd(&dir.path().join("vm.sock"), &bucket, 1);
+    command
+        .env("CLADEFSD_GRPC", &socket)
+        .env("CLADEFSD_ROOTS", &disk0)
+        .env("CLADEFSD_MOUNT", &m)
+        .env("CLADEFSD_MOUNT_STORES", &cells_dir);
+    let child = serving(command, &socket);
+    let socket_s = socket.to_str().unwrap();
+
+    // Mark the sole managed disk as draining via cladefsctl set-disk.
+    let set = std::process::Command::new(env!("CARGO_BIN_EXE_cladefsctl"))
+        .env("CLADEFSD_GRPC", socket_s)
+        .args(["set-disk", "disk-0", "--placement", "drain"])
+        .output()
+        .unwrap();
+    assert!(set.status.success(), "set-disk failed: {}", String::from_utf8_lossy(&set.stderr));
+
+    // Mount create (Attach cell=0) must now be refused with ENOSPC.
+    let out = cladefsctl_mount_command(socket_s, &["create", "1", &CELL_SIZE.to_string()])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "mount create succeeded despite disk-0 being drained: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("ENOSPC"), "expected ENOSPC, got: {stderr}");
+    terminate(child, &m);
+}

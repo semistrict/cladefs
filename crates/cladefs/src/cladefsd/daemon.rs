@@ -260,6 +260,43 @@ impl Daemon {
         self.disk_pool.get()?.find_cell(cell)
     }
 
+    /// Checks whether the daemon's [`super::disks::DiskPool`] (if configured) currently has a
+    /// writable disk that accepts new cells (`ENOSPC` if all disks are draining/read-only/full).
+    #[cfg(not(madsim))]
+    pub(crate) fn check_disk_placement(&self) -> Result<(), crate::Errno> {
+        if let Some(pool) = self.disk_pool.get() {
+            drop(pool.pick_disk()?);
+        }
+        Ok(())
+    }
+
+    /// Resolves `cell`'s existing path in [`super::disks::DiskPool`], or picks an eligible
+    /// `ReadWrite` disk and prepares `<disk>/cells/<TENANT>/<CELL>`. Returns `Ok(None)` when no
+    /// managed disk pool is configured (standalone `cladefs-mount`).
+    #[cfg(not(madsim))]
+    pub(crate) fn resolve_or_pick_cell_path(
+        &self,
+        cell: crate::CellId,
+    ) -> Result<Option<PathBuf>, crate::Errno> {
+        let Some(pool) = self.disk_pool.get() else {
+            return Ok(None);
+        };
+        if let Some(existing) = pool.find_cell(cell) {
+            return Ok(Some(existing));
+        }
+        let disk = pool.pick_disk()?;
+        drop(super::disks::DiskPool::ensure_tenant_dir(&disk, cell.tenant)?);
+        Ok(Some(super::disks::DiskPool::cell_path(&disk, cell)))
+    }
+
+    /// Registers `cell` at `path` in this daemon's [`super::disks::DiskPool`], if configured.
+    #[cfg(not(madsim))]
+    pub(crate) fn register_cell_path(&self, cell: crate::CellId, path: PathBuf) {
+        if let Some(pool) = self.disk_pool.get() {
+            pool.register_cell(cell, path);
+        }
+    }
+
     /// Starts the disk governor for this daemon instance with `config`.
     pub fn start_disk_governor(
         self: &Arc<Self>,

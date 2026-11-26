@@ -150,7 +150,7 @@ pub struct MemoryConfig {
 }
 
 /// `[disk]` section: global disk defaults shared across `[[disks]]`.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DiskDefaultsConfig {
     /// Optional aggregate hard cap across all managed disks combined.
@@ -171,6 +171,19 @@ pub struct DiskDefaultsConfig {
     /// Whether the daemon opens a part-cache shard on each managed disk (default `true`).
     #[serde(default = "default_true")]
     pub part_cache: bool,
+}
+
+impl Default for DiskDefaultsConfig {
+    fn default() -> Self {
+        Self {
+            cap: None,
+            headroom: None,
+            cache_cap: None,
+            dirty_budget: None,
+            ephemeral_journal: None,
+            part_cache: true,
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -812,5 +825,34 @@ log_format = "json"
         );
         assert!(Config::from_toml_str("[[disks]]\npath = \"/d1\"\ncap = 0\n").is_err());
         assert!(Config::from_toml_str("[disk]\nheadroom = \"100%\"\n").is_err());
+    }
+
+    #[test]
+    fn omitting_disk_table_keeps_part_cache_enabled_by_default() {
+        let omitted = Config::from_toml_str(
+            r#"
+[daemon]
+vm_socket = "/run/cladefsd.sock"
+[bucket]
+url = "memory:///omitted"
+[[disks]]
+path = "/var/lib/cladefs/d0"
+"#,
+        )
+        .unwrap();
+        let empty = Config::from_toml_str(
+            r#"
+[daemon]
+vm_socket = "/run/cladefsd.sock"
+[bucket]
+url = "memory:///empty"
+[disk]
+[[disks]]
+path = "/var/lib/cladefs/d0"
+"#,
+        )
+        .unwrap();
+        assert!(omitted.disk.part_cache, "omitting [disk] must default part_cache to true");
+        assert_eq!(omitted.disk, empty.disk);
     }
 }

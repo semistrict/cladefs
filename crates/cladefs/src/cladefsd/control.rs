@@ -809,6 +809,7 @@ impl Cladefsd for Control {
         let pool = Arc::clone(self.disk_pool()?);
         if cell != 0 {
             let target_id = crate::CellId { tenant, id: cell };
+            let _reserved = pool.reserve_cell(target_id).map_err(status)?;
             let pool_check = Arc::clone(&pool);
             let host = Arc::clone(&self.daemon.host);
             let exists = cells::blocking(move || {

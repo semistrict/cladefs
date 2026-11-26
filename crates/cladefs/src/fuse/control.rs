@@ -40,15 +40,20 @@ pub struct CellSource {
 }
 
 impl CellSource {
-    /// Resolves the local cell directory path for `shown` (`TENANT/CELL`): reuses an existing
-    /// directory if present on any JBOD root, fails hard if probing a root hits an unexpected
-    /// storage error (e.g. `EIO`, never forking local cell state onto another root), and otherwise
-    /// picks the root whose `HostDisk` currently has the most free space.
+    /// Resolves the local cell directory path for `cell` (`shown` = `TENANT/CELL`): when the
+    /// daemon has a managed `DiskPool`, reuses an existing directory (even on a draining disk) or
+    /// delegates new placement to `DiskPool::pick_disk` (enforcing `ReadWrite`/cap/headroom policy).
+    /// Without a `DiskPool` (standalone `cladefs-mount`), falls back to probing `self.dirs` and
+    /// picking by filesystem free space.
     fn resolve_cell_path(
         &self,
         daemon: &crate::cladefsd::Daemon,
+        cell: CellId,
         shown: &str,
-    ) -> std::io::Result<PathBuf> {
+    ) -> Result<PathBuf, Errno> {
+        if let Some(managed) = daemon.resolve_or_pick_cell_path(cell)? {
+            return Ok(managed);
+        }
         if self.dirs.len() == 1 {
             return Ok(self.dirs[0].join(shown));
         }
@@ -57,7 +62,10 @@ impl CellSource {
             match host_fs::metadata(&candidate) {
                 Ok(_) => return Ok(candidate),
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(err) => return Err(err),
+                Err(err) => {
+                    log::error!("cladefs: resolving mount store path for {shown}: {err}");
+                    return Err(err.raw_os_error().map(Errno::from_raw).unwrap_or(Errno::EIO));
+                }
             }
         }
         let best = self
@@ -279,12 +287,9 @@ impl Control {
             return Err(Errno::ENOTCONN.into());
         };
         let shown = cell_path(cell);
-        let path =
-            local_cell::upload::blocking(|| self.source.resolve_cell_path(&self.daemon, &shown))
-                .map_err(|err| {
-                    log::error!("cladefs: resolving mount store path for {shown}: {err}");
-                    err.raw_os_error().map(Errno::from_raw).unwrap_or(Errno::EIO)
-                })?;
+        let path = local_cell::upload::blocking(|| {
+            self.source.resolve_cell_path(&self.daemon, cell, &shown)
+        })?;
         let of = match (new, kind) {
             (true, _) => (CellOf::Named(cell), capacity),
             (false, Some(Kind::Fxfs)) => (CellOf::Taken(cell), TAKEN_CAPACITY),
@@ -297,6 +302,7 @@ impl Control {
             self.holds.lock().unwrap().remove(&path);
             return Err(err);
         }
+        self.daemon.register_cell_path(cell, path.clone());
         Ok((true, path))
     }
 
@@ -340,6 +346,10 @@ impl proto::mount_server::Mount for Control {
         let make = cell == 0;
         if make && capacity == 0 {
             return Err(failed(Errno::EINVAL.into()));
+        }
+        // Fail fast before allocating a bucket cell ID if managed disks refuse new cells.
+        if make {
+            self.daemon.check_disk_placement().map_err(|errno| failed(errno.into()))?;
         }
         // A new cell's ID is the bucket's to give, its cell's too (TASK-364).
         let cell = match cell {

@@ -2121,72 +2121,28 @@ impl Connection {
                         };
                         (final_path, codec::Opening::Existing, None)
                     }
-                    codec::Opening::ForkOf { tenant, cell, version, capacity } => {
-                        let disk_for_stage = Arc::clone(&disk);
-                        let staging = cells::blocking(move || {
-                            super::disks::DiskPool::staging_path(&disk_for_stage, effective_tenant)
+                    codec::Opening::ForkOf { tenant, .. } => {
+                        // Allocate the child cell ID up front so `open_held` forks and opens it
+                        // directly at `<disk>/cells/<TENANT>/<CELL>` under `defer_durability_on`
+                        // (board 7420), with no staging directory or eager syncs.
+                        let child_tenant = self
+                            .tenant
+                            .granted()
+                            .unwrap_or(if req_cell.tenant != 0 { req_cell.tenant } else { tenant });
+                        let bucket = super::storage::daemon_bucket_on(daemon)?;
+                        let child = crate::host_cell::new_cell(&*bucket, child_tenant)
+                            .await
+                            .map_err(|_| Errno::EIO)?;
+                        let disk_prep = Arc::clone(&disk);
+                        let final_path = cells::blocking(move || {
+                            drop(super::disks::DiskPool::ensure_tenant_dir(
+                                &disk_prep,
+                                child.tenant,
+                            )?);
+                            Ok(super::disks::DiskPool::cell_path(&disk_prep, child))
                         })
                         .await?;
-                        let forked = (crate::CellId { tenant, id: cell }, version);
-                        let made = match cells::fork_version(
-                            daemon,
-                            forked,
-                            capacity,
-                            (&staging, Some(effective_tenant)),
-                        )
-                        .await
-                        {
-                            Ok(()) => {
-                                let read = staging.clone();
-                                cells::blocking(move || {
-                                    local_cell::host_cell(&read).map_err(|_| Errno::EIO)
-                                })
-                                .await
-                            }
-                            Err(err) => Err(err),
-                        };
-                        let made = match made {
-                            Ok(made) => made,
-                            Err(err) => {
-                                let cleanup = staging.clone();
-                                let local = Arc::clone(daemon.host.local());
-                                // Best-effort cleanup of failed staging dir; returning primary error.
-                                let _ = cells::blocking(move || {
-                                    if host_fs::exists(&cleanup) {
-                                        // Best-effort cleanup of failed staging dir; primary error wins.
-                                        let _ = local_cell::remove_cell_dir_on(&local, &cleanup);
-                                    }
-                                    Ok(())
-                                })
-                                .await;
-                                return Err(err);
-                            }
-                        };
-                        let pool_commit = Arc::clone(pool);
-                        let disk_commit = Arc::clone(&disk);
-                        let staging_commit = staging.clone();
-                        let final_path = match cells::blocking(move || {
-                            pool_commit.commit_staged(&disk_commit, made, &staging_commit)
-                        })
-                        .await
-                        {
-                            Ok(final_path) => final_path,
-                            Err(err) => {
-                                let cleanup = staging;
-                                let local = Arc::clone(daemon.host.local());
-                                // Best-effort cleanup of failed staging dir; returning primary error.
-                                let _ = cells::blocking(move || {
-                                    if host_fs::exists(&cleanup) {
-                                        // Best-effort cleanup of failed staging dir; primary error wins.
-                                        let _ = local_cell::remove_cell_dir_on(&local, &cleanup);
-                                    }
-                                    Ok(())
-                                })
-                                .await;
-                                return Err(err);
-                            }
-                        };
-                        (final_path, codec::Opening::Existing, None)
+                        (final_path, how, Some(child))
                     }
                 }
             }
@@ -2266,8 +2222,13 @@ impl Connection {
                 // call). A host crash before leaves it unmade, as if the restore never was.
                 // cladefs: a crash of the daemon's too, its VM processes going with it.
                 let deferring = local_cell::defer_durability_on(daemon.host.local(), path);
-                cells::fork_version(daemon, forked, capacity, (path, self.tenant.granted()))
-                    .await?;
+                cells::fork_version(
+                    daemon,
+                    forked,
+                    capacity,
+                    (path, self.tenant.granted(), named_cell),
+                )
+                .await?;
                 let open_cell = open_cell_at(daemon, path, None, Some(arena)).await?;
                 deferring.opened();
                 Arc::new(open_cell)

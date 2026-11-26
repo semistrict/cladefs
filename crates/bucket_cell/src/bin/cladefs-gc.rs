@@ -1217,6 +1217,81 @@ struct TomlKms {
     master_key_file: Option<PathBuf>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TomlByteSize(u64);
+
+impl TomlByteSize {
+    fn parse_str(raw: &str) -> Result<Self, String> {
+        let s = raw.trim();
+        if s.is_empty() {
+            return Err("empty byte size".to_owned());
+        }
+        let split =
+            s.find(|c: char| !c.is_ascii_digit() && c != '.' && c != '_').unwrap_or(s.len());
+        let (num_str, unit_raw) = s.split_at(split);
+        let num_clean: String = num_str.chars().filter(|&c| c != '_').collect();
+        let unit = unit_raw.trim().to_ascii_lowercase();
+        let multiplier: u64 = match unit.as_str() {
+            "" | "b" => 1,
+            "k" | "kb" => 1_000,
+            "ki" | "kib" => 1 << 10,
+            "m" | "mb" => 1_000_000,
+            "mi" | "mib" => 1 << 20,
+            "g" | "gb" => 1_000_000_000,
+            "gi" | "gib" => 1 << 30,
+            "t" | "tb" => 1_000_000_000_000,
+            "ti" | "tib" => 1 << 40,
+            _ => return Err(format!("unknown byte size unit {unit_raw:?} in {raw:?}")),
+        };
+        if num_clean.contains('.') {
+            let val: f64 =
+                num_clean.parse().map_err(|err| format!("invalid byte size {raw:?}: {err}"))?;
+            if !val.is_finite() || val < 0.0 {
+                return Err(format!("invalid byte size {raw:?}"));
+            }
+            let bytes = val * (multiplier as f64);
+            if !bytes.is_finite() || bytes > (u64::MAX as f64) {
+                return Err(format!("byte size overflows u64: {raw:?}"));
+            }
+            Ok(Self(bytes.round() as u64))
+        } else {
+            let val: u64 =
+                num_clean.parse().map_err(|err| format!("invalid byte size {raw:?}: {err}"))?;
+            val.checked_mul(multiplier)
+                .map(Self)
+                .ok_or_else(|| format!("byte size overflows u64: {raw:?}"))
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for TomlByteSize {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl serde::de::Visitor<'_> for Visitor {
+            type Value = TomlByteSize;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a non-negative byte integer or size string like \"1GiB\"")
+            }
+
+            fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> {
+                Ok(TomlByteSize(v))
+            }
+
+            fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Self::Value, E> {
+                u64::try_from(v)
+                    .map(TomlByteSize)
+                    .map_err(|_| E::custom(format!("negative byte size {v}")))
+            }
+
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                TomlByteSize::parse_str(v).map_err(E::custom)
+            }
+        }
+        deserializer.deserialize_any(Visitor)
+    }
+}
+
 #[derive(Default, serde::Deserialize)]
 struct TomlGc {
     #[serde(default)]
@@ -1232,7 +1307,7 @@ struct TomlGc {
     #[serde(default)]
     max_delete_objects: Option<u64>,
     #[serde(default)]
-    max_delete_bytes: Option<u64>,
+    max_delete_bytes: Option<TomlByteSize>,
     #[serde(default)]
     max_requests_per_second: Option<f64>,
     #[serde(default)]
@@ -1300,11 +1375,11 @@ fn load_toml_args(raw: Vec<String>) -> Result<Vec<String>, String> {
             "--cells" | "--delete-cell" | "--delete-tenant" | "--usage" | "--rotate-master-key"
         )
     });
-    if !is_special {
+    let is_dry_run = rest.iter().any(|a| a == "--dry-run");
+    if !is_special && !is_dry_run {
         let has_flag = |name: &str| rest.iter().any(|a| a == name);
         if let Some(every) = cfg.gc.every_secs
             && !has_flag("--every")
-            && !has_flag("--dry-run")
         {
             effective.push("--every".into());
             effective.push(every.to_string());
@@ -1337,7 +1412,7 @@ fn load_toml_args(raw: Vec<String>) -> Result<Vec<String>, String> {
             && !has_flag("--max-delete-bytes")
         {
             effective.push("--max-delete-bytes".into());
-            effective.push(max_bytes.to_string());
+            effective.push(max_bytes.0.to_string());
         }
         if let Some(rps) = cfg.gc.max_requests_per_second
             && !has_flag("--max-requests-per-second")
@@ -1831,5 +1906,54 @@ cladefs_gc_peak_resident_bytes 67108864
             .map(|(index, cell)| (format!("{cell}"), 1 + (index / LIST_PAGE) as u64 + 1))
             .collect();
         assert_eq!(out.lines, expected);
+    }
+
+    #[test]
+    fn toml_config_accepts_byte_size_strings_and_allows_dry_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("cladefs.toml");
+        std::fs::write(
+            &cfg_path,
+            r#"
+[bucket]
+url = "memory:///gc-toml"
+
+[gc]
+every_secs = 60
+at_once = 4
+lease_secs = 30
+metrics_file = "/tmp/gc.prom"
+max_delete_objects = 100
+max_delete_bytes = "1GiB"
+max_requests_per_second = 50.0
+max_refused_passes = 3
+"#,
+        )
+        .unwrap();
+        let cfg_arg = cfg_path.to_str().unwrap().to_owned();
+
+        let normal_args = load_toml_args(vec!["--config".into(), cfg_arg.clone()]).unwrap();
+        let normal_cmd = parse(normal_args.into_iter()).unwrap().command;
+        match normal_cmd {
+            Command::Collect { every, mode, run, .. } => {
+                assert_eq!(every, Some(Duration::from_secs(60)));
+                assert_eq!(mode, Mode::Delete);
+                assert_eq!(run.max_deleted_objects, Some(100));
+                assert_eq!(run.max_deleted_bytes, Some(1 << 30));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let dry_args =
+            load_toml_args(vec!["--config".into(), cfg_arg, "--dry-run".into()]).unwrap();
+        let dry_cmd = parse(dry_args.into_iter()).unwrap().command;
+        match dry_cmd {
+            Command::Collect { every, mode, run, .. } => {
+                assert_eq!(every, None);
+                assert_eq!(mode, Mode::DryRun);
+                assert_eq!(run, Run::default());
+            }
+            other => panic!("unexpected dry-run command: {other:?}"),
+        }
     }
 }

@@ -1041,14 +1041,14 @@ pub(super) async fn fork_version(
     daemon: &Arc<Daemon>,
     (cell, version): (CellId, u64),
     capacity: u64,
-    (path, tenant): (&Path, Option<u64>),
+    (path, tenant, named): (&Path, Option<u64>, Option<CellId>),
 ) -> Result<(), Errno> {
     let from = opened_version(daemon, cell, version, capacity).await?;
-    match fork_kept(daemon, &from, capacity, (path, tenant)).await {
+    match fork_kept(daemon, &from, capacity, (path, tenant, named)).await {
         (Err(errno), Opened::Before) if cell_at_fault(errno) => {
             // What a crash left at `path` goes first, as before any restore's.
             local_cell::upload::blocking(|| removed_if_unmade_on(&daemon.host, path))?;
-            fork_kept(daemon, &from, capacity, (path, tenant)).await.0
+            fork_kept(daemon, &from, capacity, (path, tenant, named)).await.0
         }
         (forked, _) => forked,
     }
@@ -1063,7 +1063,7 @@ pub(super) async fn fork_of_version(
     tenant: Option<u64>,
 ) -> Result<CellId, Errno> {
     let _child = hold_to_fork(daemon, &to).await?;
-    fork_version(daemon, (cell, version), OpenCell::BLOCK_SIZE as u64, (&to, tenant)).await?;
+    fork_version(daemon, (cell, version), OpenCell::BLOCK_SIZE as u64, (&to, tenant, None)).await?;
     local_cell::upload::blocking(|| local_cell::host_cell(&to)).map_err(|_| Errno::EIO)
 }
 
@@ -1168,7 +1168,7 @@ async fn fork_kept(
     daemon: &Arc<Daemon>,
     from: &Path,
     capacity: u64,
-    (path, tenant): (&Path, Option<u64>),
+    (path, tenant, named): (&Path, Option<u64>, Option<CellId>),
 ) -> (Result<(), Errno>, Opened) {
     let (kept, opened) = match kept_or_open(daemon, from, capacity).await {
         Ok(kept) => kept,
@@ -1178,9 +1178,11 @@ async fn fork_kept(
     let tenant = tenant.unwrap_or(kept.open_cell.cell().tenant);
     let failed = Arc::downgrade(&kept);
     // cladefs: awaited, its disk work off the runtime's threads (TASK-685.3).
-    let forked = kept.open_cell.fork(path, tenant).await.map(drop).map_err(|err| {
-        errno_of(format_args!("forking {} to {}", from.display(), path.display()), err)
-    });
+    let forked = match named {
+        Some(cell) => kept.open_cell.fork_into(path, cell).await,
+        None => kept.open_cell.fork(path, tenant).await.map(drop),
+    }
+    .map_err(|err| errno_of(format_args!("forking {} to {}", from.display(), path.display()), err));
     release_held(kept).await;
     if forked.is_err_and(cell_at_fault) {
         let_go_failed(daemon, &cell_dir_key(from), failed).await;

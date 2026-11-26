@@ -1569,3 +1569,45 @@ placement = "drain"
     let _ = child.kill();
     let _ = child.wait();
 }
+
+/// hotbed review 135: concurrent `CreateCell(cell != 0)` calls for the same `(tenant, cell)` on a
+/// multi-disk daemon serialize through `DiskPool::reserve_cell`: one succeeds, the retry returns
+/// `EEXIST`, and only one copy of `cells/<TENANT>/<CELL>` exists across all disks.
+#[test]
+fn concurrent_named_create_cell_returns_eexist_and_leaves_one_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let disk0 = dir.path().join("disk0");
+    let disk1 = dir.path().join("disk1");
+    let mut daemon = Daemon::with_disks(dir.path(), &[disk0.clone(), disk1.clone()]);
+
+    // Create and sync a cell, then drop it locally so it exists in the bucket ready to be taken.
+    let cell = daemon.create(NEW, Some(1)).unwrap();
+    daemon.sync(cell).unwrap();
+    daemon.drop_cell(cell).unwrap();
+
+    let mut c1 = daemon.client.clone();
+    let mut c2 = daemon.client.clone();
+    let req = CreateCellRequest {
+        capacity: CAPACITY,
+        token: Some(2),
+        tenant: cell.tenant,
+        cell: cell.id,
+        ..CreateCellRequest::default()
+    };
+    let (r1, r2) =
+        daemon.runtime.block_on(async { tokio::join!(c1.create_cell(req), c2.create_cell(req)) });
+    let results = [r1, r2];
+    let ok_count = results.iter().filter(|r| r.is_ok()).count();
+    let eexist_count = results
+        .iter()
+        .filter(|r| r.as_ref().err().is_some_and(|s| s.code() == Code::AlreadyExists))
+        .count();
+    assert_eq!(ok_count, 1, "expected exactly 1 success: {results:?}");
+    assert_eq!(eexist_count, 1, "expected exactly 1 AlreadyExists: {results:?}");
+
+    let rel = std::path::Path::new("cells")
+        .join(base32_id::Padded(cell.tenant).to_string())
+        .join(base32_id::Padded(cell.id).to_string());
+    let copies = [disk0.join(&rel), disk1.join(&rel)].into_iter().filter(|p| p.exists()).count();
+    assert_eq!(copies, 1, "expected exactly one on-disk copy across disks");
+}

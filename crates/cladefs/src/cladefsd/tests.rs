@@ -3881,6 +3881,44 @@ fn restores_forks_are_made_durable_by_their_first_flush_or_their_close() {
     drop((again, vm, client));
 }
 
+/// Board 7420 + hotbed review 135: restore forks placed through a managed `DiskPool` (`0/0`)
+/// still defer durability until their first flush or close, without eager syncs at restore time.
+#[test]
+fn managed_disk_restore_forks_defer_durability() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    super::Daemon::process().configure_disks(&[dir.path().join("disk0")]).unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+
+    let client = CellClient::connect(&socket, "0/0", 1 << 24).unwrap();
+    let extent = ExtentId { cell: client.cell(), sequence: 1 };
+    write(&client, extent, 0, &pattern(3, BLOCK)).unwrap();
+    client.commit(None).unwrap();
+    let version = client.make_version().unwrap();
+
+    let vm = CellClient::connect_forked(&socket, "0/0", version, 0).unwrap();
+    let restored_id = crate::CellId { tenant: 0, id: vm.cell() };
+    let restored = super::Daemon::process().cell_path(restored_id).unwrap();
+    let entries: Vec<_> =
+        std::fs::read_dir(&restored).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert!(
+        restored.join("unmade").exists(),
+        "made durable as it was restored: client={} vm={} restored={} entries={entries:?}",
+        client.cell(),
+        vm.cell(),
+        restored.display()
+    );
+    assert!(!crate::host_cell::unmade(&restored), "unmade here");
+    assert_eq!(read(&vm, extent, 0, 512), Ok(pattern(3, BLOCK)[..512].to_vec()));
+    let own = ExtentId { cell: vm.cell(), sequence: 1 };
+    write(&vm, own, 0, &pattern(4, BLOCK)).unwrap();
+    vm.commit(None).unwrap();
+    assert!(!restored.join("unmade").exists(), "its first flush left it unmade");
+    drop((vm, client));
+}
+
 /// Board 7420: a restore's fork whose settling fails fails its cell, as a flush's failure does:
 /// its commit is refused, then and after, and it stays unmade on the disk, for deleting.
 #[test]
@@ -3973,7 +4011,7 @@ fn cells_worked_on_here_fetch_nothing_ahead() {
         super::Daemon::process(),
         (cell, version.version),
         1 << 24,
-        (&path, None),
+        (&path, None, None),
     ))
     .unwrap();
 

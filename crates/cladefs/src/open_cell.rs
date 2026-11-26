@@ -774,6 +774,23 @@ impl OpenCell {
         self.fork_span(cell).run_async(forking).await
     }
 
+    /// cladefs: forks the open cell into a pre-allocated `cell` after checking cross-tenant fork
+    /// permission ([`host_cell::may_fork_into`]), so daemon restore forks can place directly at
+    /// `<disk>/cells/<TENANT>/<CELL>` without losing deferred durability (board 7420).
+    pub(crate) async fn fork_into(
+        &self,
+        path: impl AsRef<Path>,
+        cell: CellId,
+    ) -> Result<(), Error> {
+        let forking = async {
+            let admitted = self.admit(Changing::Cell)?;
+            let uploader = admitted.uploader().ok_or(Errno::EROFS)?;
+            host_cell::may_fork_into(self.cell(), uploader, cell.tenant)?;
+            self.fork_at_version(&admitted, path.as_ref(), cell, false).await
+        };
+        self.fork_span(cell).run_async(forking).await
+    }
+
     /// cladefs: the span of a fork of it to `cell`.
     fn fork_span(&self, cell: CellId) -> trace::Span {
         let span = trace::Span::start("store.fork");

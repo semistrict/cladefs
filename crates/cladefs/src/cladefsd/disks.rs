@@ -11,7 +11,7 @@
 use crate::config::{DiskDefaultsConfig, DiskEntryConfig};
 use crate::{CellId, Errno};
 use bucket_cell::host_disk::{DiskHeadroom, DiskPlacement, DiskPolicy, HostDisk};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -109,11 +109,30 @@ pub(crate) struct GovernanceUpdate {
     pub placement: Option<DiskPlacement>,
 }
 
+/// RAII guard reserving a caller-named [`CellId`] across concurrent `CreateCell(cell != 0)` calls
+/// so retries cannot race on `find_cell`, `removed_if_unmade_on`, or `pick_disk` across disks.
+pub(crate) struct CellReservation {
+    pool: Arc<DiskPool>,
+    cell: CellId,
+}
+
+impl Drop for CellReservation {
+    fn drop(&mut self) {
+        self.pool
+            .inflight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.cell);
+    }
+}
+
 /// The daemon's managed pool of local disks and cell-ID-to-path index.
 pub(crate) struct DiskPool {
     disks: Vec<Arc<ManagedDisk>>,
     /// Cached mapping from `CellId` to its canonical on-disk cell directory across the pool.
     index: Mutex<HashMap<CellId, PathBuf>>,
+    /// Caller-named cells currently being created/taken across the pool.
+    inflight: Mutex<HashSet<CellId>>,
 }
 
 impl DiskPool {
@@ -175,6 +194,7 @@ impl DiskPool {
             ));
         }
         let mut disks = Vec::with_capacity(raw_disks.len());
+        let mut shared_devs: HashSet<u64> = HashSet::new();
         for (id, cells_dir, part_cache_dir, replicas_dir, replicas_enabled, host_disk, policy) in
             raw_disks
         {
@@ -182,12 +202,8 @@ impl DiskPool {
                 host_disk.dev().is_some_and(|dev| dev_counts.get(&dev).copied().unwrap_or(0) > 1);
             if !shared_fs {
                 host_disk.set_policy(policy.clone());
-            } else {
-                // On shared-FS test setups, only set non-conflicting defaults on the shared
-                // HostDisk; per-entry placement/cap governance lives on each ManagedDisk.
-                let mut shared_policy = policy.clone();
-                shared_policy.placement = DiskPlacement::ReadWrite;
-                host_disk.set_policy(shared_policy);
+            } else if let Some(dev) = host_disk.dev() {
+                shared_devs.insert(dev);
             }
             disks.push(Arc::new(ManagedDisk {
                 id,
@@ -200,7 +216,11 @@ impl DiskPool {
                 shared_fs,
             }));
         }
-        let pool = Self { disks, index: Mutex::new(HashMap::new()) };
+        let pool =
+            Self { disks, index: Mutex::new(HashMap::new()), inflight: Mutex::new(HashSet::new()) };
+        for dev in shared_devs {
+            pool.sync_shared_host_disk(dev);
+        }
         pool.scan_existing();
         Ok(pool)
     }
@@ -241,7 +261,21 @@ impl DiskPool {
                     let Some(id) = base32_id::parse_padded(cell_str) else { continue };
                     let path = cell_entry.path();
                     if host_fs::is_dir(&path) {
-                        index.insert(CellId { tenant, id }, path);
+                        let cell_id = CellId { tenant, id };
+                        if let Some(prev) = index.get(&cell_id) {
+                            let prev_unmade = host_fs::exists(prev.join("unmade"));
+                            let next_unmade = host_fs::exists(path.join("unmade"));
+                            log::warn!(
+                                "cladefsd: duplicate cell {cell_id} found at {} and {}",
+                                prev.display(),
+                                path.display()
+                            );
+                            if prev_unmade && !next_unmade {
+                                index.insert(cell_id, path);
+                            }
+                        } else {
+                            index.insert(cell_id, path);
+                        }
                     }
                 }
             }
@@ -302,10 +336,10 @@ impl DiskPool {
             .join(base32_id::Padded(cell.id).to_string())
     }
 
-    /// Ensures `<disk.cells_dir>/<TENANT_PADDED>` exists on `disk` and returns it.
+    /// Ensures `<disk.cells_dir>/<TENANT_PADDED>` exists durably on `disk` and returns it.
     pub(crate) fn ensure_tenant_dir(disk: &ManagedDisk, tenant: u64) -> Result<PathBuf, Errno> {
         let dir = disk.cells_dir.join(base32_id::Padded(tenant).to_string());
-        host_fs::create_dir_all(&dir).map_err(|err| {
+        host_fs::create_dir_all_durably(&dir).map_err(|err| {
             log::warn!("cladefsd: creating tenant dir {}: {err}", dir.display());
             Errno::EIO
         })?;
@@ -341,14 +375,15 @@ impl DiskPool {
     }
 
     /// Atomically moves a newly constructed cell from `staging` into its canonical `<TENANT>/<CELL>`
-    /// path on `disk`, registers it in the index, and returns the final path.
+    /// path on `disk`, syncs the parent tenant directory so the rename is durable before any RPC
+    /// acknowledges the cell, registers it in the index, and returns the final path.
     pub(crate) fn commit_staged(
         &self,
         disk: &ManagedDisk,
         cell: CellId,
         staging: &Path,
     ) -> Result<PathBuf, Errno> {
-        drop(Self::ensure_tenant_dir(disk, cell.tenant)?);
+        let tenant_dir = Self::ensure_tenant_dir(disk, cell.tenant)?;
         let final_path = Self::cell_path(disk, cell);
         host_fs::rename(staging, &final_path).map_err(|err| {
             log::warn!(
@@ -358,14 +393,29 @@ impl DiskPool {
             );
             Errno::EIO
         })?;
+        host_fs::sync_dir(&tenant_dir).map_err(|err| {
+            log::warn!("cladefsd: syncing tenant dir {}: {err}", tenant_dir.display());
+            Errno::EIO
+        })?;
         self.register_cell(cell, final_path.clone());
         Ok(final_path)
+    }
+
+    /// Reserves a caller-named `cell` against concurrent `CreateCell(cell != 0)` calls so retries
+    /// receive `EEXIST` instead of racing on `find_cell`, `removed_if_unmade_on`, or `pick_disk`.
+    pub(crate) fn reserve_cell(self: &Arc<Self>, cell: CellId) -> Result<CellReservation, Errno> {
+        let mut inflight = self.inflight.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !inflight.insert(cell) {
+            return Err(Errno::EEXIST);
+        }
+        Ok(CellReservation { pool: Arc::clone(self), cell })
     }
 
     /// Finds the host directory of `cell` across the disk pool, checking the in-memory index first
     /// and falling back to probing `<disk.cells_dir>/<TENANT_PADDED>/<CELL_PADDED>`.
     pub(crate) fn find_cell(&self, cell: CellId) -> Option<PathBuf> {
-        if let Some(cached) = self.index.lock().unwrap().get(&cell).cloned() {
+        let cached = self.index.lock().unwrap().get(&cell).cloned();
+        if let Some(cached) = cached {
             if host_fs::exists(&cached) {
                 return Some(cached);
             }
@@ -457,20 +507,75 @@ impl DiskPool {
                 disk.host_disk.set_placement(placement);
             }
         } else if let Some(dev) = disk.host_disk.dev() {
-            // If all managed disks sharing this test filesystem are ReadOnly, propagate ReadOnly
-            // to the shared HostDisk; otherwise keep it writable so non-RO peers keep working.
-            let all_ro = self
-                .disks
-                .iter()
-                .filter(|d| d.host_disk.dev() == Some(dev))
-                .all(|d| d.placement() == DiskPlacement::ReadOnly);
-            disk.host_disk.set_placement(if all_ro {
-                DiskPlacement::ReadOnly
-            } else {
-                DiskPlacement::ReadWrite
-            });
+            self.sync_shared_host_disk(dev);
         }
         Ok(())
+    }
+
+    /// Recomputes and applies an order-independent aggregate [`DiskPolicy`] on the shared
+    /// [`HostDisk`] backing all [`ManagedDisk`] entries on filesystem `dev`:
+    /// - `cap`, `cache_cap`, `dirty_budget`: strictest (minimum) configured limit across siblings so
+    ///   an uncapped sibling never silently disables another sibling's cap.
+    /// - `headroom`: strictest (largest resolved bytes) headroom override across siblings.
+    /// - `placement`: `ReadOnly` iff all siblings are `ReadOnly`, else `Drain` iff all are
+    ///   `Drain`/`ReadOnly`, else `ReadWrite`.
+    fn sync_shared_host_disk(&self, dev: u64) {
+        let siblings: Vec<&Arc<ManagedDisk>> =
+            self.disks.iter().filter(|d| d.host_disk.dev() == Some(dev)).collect();
+        let Some(first) = siblings.first() else { return };
+        // Sample disk size once to compare mixed Bytes/Percent headroom overrides consistently;
+        // falls back to 0 when statvfs is unavailable.
+        let disk_size = first.host_disk.sample().map(|s| s.size).unwrap_or(0);
+        let mut cap: Option<u64> = None;
+        let mut cache_cap: Option<u64> = None;
+        let mut dirty_budget: Option<u64> = None;
+        let mut headroom: Option<DiskHeadroom> = None;
+        let mut all_ro = true;
+        let mut all_no_new = true;
+        for d in &siblings {
+            let p = d.policy.lock().unwrap();
+            if let Some(c) = p.cap {
+                cap = Some(cap.map_or(c, |cur| cur.min(c)));
+            }
+            if let Some(c) = p.cache_cap {
+                cache_cap = Some(cache_cap.map_or(c, |cur| cur.min(c)));
+            }
+            if let Some(b) = p.dirty_budget {
+                dirty_budget = Some(dirty_budget.map_or(b, |cur| cur.min(b)));
+            }
+            if let Some(h) = p.headroom {
+                headroom = Some(match headroom {
+                    None => h,
+                    Some(cur)
+                        if DiskHeadroom::resolve(disk_size, Some(h))
+                            > DiskHeadroom::resolve(disk_size, Some(cur)) =>
+                    {
+                        h
+                    }
+                    Some(cur) => cur,
+                });
+            }
+            if p.placement != DiskPlacement::ReadOnly {
+                all_ro = false;
+            }
+            if p.placement == DiskPlacement::ReadWrite {
+                all_no_new = false;
+            }
+        }
+        let placement = if all_ro {
+            DiskPlacement::ReadOnly
+        } else if all_no_new {
+            DiskPlacement::Drain
+        } else {
+            DiskPlacement::ReadWrite
+        };
+        let mut merged = DiskPolicy::default();
+        merged.cap = cap;
+        merged.cache_cap = cache_cap;
+        merged.dirty_budget = dirty_budget;
+        merged.headroom = headroom;
+        merged.placement = placement;
+        first.host_disk.set_policy(merged);
     }
 
     /// Removes any leftover `.staging-*` directories left by a prior crash across all disks.
@@ -496,5 +601,125 @@ impl DiskPool {
             }
         }
         removed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{ByteSize, PlacementSpec};
+
+    fn entry(id: &str, path: PathBuf, cap: Option<u64>) -> DiskEntryConfig {
+        DiskEntryConfig {
+            id: Some(id.to_owned()),
+            path,
+            cap: cap.map(ByteSize),
+            headroom: None,
+            cache_cap: None,
+            dirty_budget: None,
+            replicas: true,
+            placement: PlacementSpec::ReadWrite,
+        }
+    }
+
+    #[test]
+    fn find_cell_evicts_vanished_cached_path_without_deadlocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = bucket_cell::Host::new();
+        let pool = Arc::new(DiskPool::from_roots(&host, &[dir.path().join("disk0")]).unwrap());
+        let cell = CellId { tenant: 1, id: 42 };
+        let path = DiskPool::cell_path(&pool.disks()[0], cell);
+        std::fs::create_dir_all(&path).unwrap();
+        pool.register_cell(cell, path.clone());
+        std::fs::remove_dir_all(&path).unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let pool_t = Arc::clone(&pool);
+        std::thread::spawn(move || {
+            let found = pool_t.find_cell(cell);
+            let _ = tx.send(found);
+        });
+        let found = rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("find_cell deadlocked on vanished cached path");
+        assert_eq!(found, None);
+        assert_eq!(pool.find_cell(CellId { tenant: 1, id: 43 }), None);
+    }
+
+    #[test]
+    fn shared_fs_disks_aggregate_strictest_caps_order_independently() {
+        let dir = tempfile::tempdir().unwrap();
+        let cap_40g = 40u64 << 30;
+        let cap_20g = 20u64 << 30;
+        let defaults = DiskDefaultsConfig::default();
+
+        let host_ab = bucket_cell::Host::new();
+        let pool_ab = DiskPool::open(
+            &host_ab,
+            &[
+                entry("a", dir.path().join("a1"), Some(cap_40g)),
+                entry("b", dir.path().join("b1"), None),
+            ],
+            &defaults,
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(pool_ab.disks()[0].host_disk.cap(), Some(cap_40g));
+
+        let host_ba = bucket_cell::Host::new();
+        let pool_ba = DiskPool::open(
+            &host_ba,
+            &[
+                entry("b", dir.path().join("b2"), None),
+                entry("a", dir.path().join("a2"), Some(cap_40g)),
+            ],
+            &defaults,
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(pool_ba.disks()[0].host_disk.cap(), Some(cap_40g));
+
+        // Live governance tightening and clearing propagates to the shared HostDisk.
+        pool_ab
+            .update_governance(
+                "b",
+                GovernanceUpdate { cap: Some(Some(cap_20g)), ..Default::default() },
+            )
+            .unwrap();
+        assert_eq!(pool_ab.disks()[0].host_disk.cap(), Some(cap_20g));
+        pool_ab
+            .update_governance("b", GovernanceUpdate { cap: Some(None), ..Default::default() })
+            .unwrap();
+        assert_eq!(pool_ab.disks()[0].host_disk.cap(), Some(cap_40g));
+        pool_ab
+            .update_governance("a", GovernanceUpdate { cap: Some(None), ..Default::default() })
+            .unwrap();
+        assert_eq!(pool_ab.disks()[0].host_disk.cap(), None);
+    }
+
+    #[test]
+    fn reserve_cell_and_commit_staged_enforce_uniqueness_and_reap_leftovers() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = bucket_cell::Host::new();
+        let pool = Arc::new(DiskPool::from_roots(&host, &[dir.path().join("disk0")]).unwrap());
+        let cell = CellId { tenant: 2, id: 9 };
+        let guard = pool.reserve_cell(cell).unwrap();
+        assert_eq!(pool.reserve_cell(cell).err(), Some(Errno::EEXIST));
+        drop(guard);
+        let _guard2 = pool.reserve_cell(cell).unwrap();
+
+        let disk = &pool.disks()[0];
+        let staging = DiskPool::staging_path(disk, cell.tenant).unwrap();
+        std::fs::create_dir_all(&staging).unwrap();
+        let final_path = pool.commit_staged(disk, cell, &staging).unwrap();
+        assert!(final_path.is_dir());
+
+        let leftover = DiskPool::staging_path(disk, cell.tenant).unwrap();
+        std::fs::create_dir_all(&leftover).unwrap();
+        assert_eq!(pool.reap_staging(), 1);
+        assert!(!leftover.exists());
+        assert!(final_path.is_dir());
     }
 }
