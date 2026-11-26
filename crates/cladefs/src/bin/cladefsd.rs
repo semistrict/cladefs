@@ -156,7 +156,11 @@
 //! time first and its control characters escaped (board 8571), or, with `CLADEFS_LOG_FORMAT=json`,
 //! a JSON object a line, of the record's `timestamp`, `level`, `target`, `message` and key-values
 //! (TASK-259), and its span's `trace_id` and `span_id`. SIGQUIT logs its threads' stacks
-//! (`cladefs::stacks`). `CLADEFS_LOG_LEVEL` says how much, `info` by
+//! (`cladefs::stacks`), on Linux.
+//!
+//! cladefs: it is a thin binary over libcladefs, the daemon a process embeds (board 13471), which
+//! runs on Linux and macOS (board 13065): on macOS, without the FUSE mount, the memory governor's
+//! cgroups and pressure, and VM processes' DAX windows (board 13069). `CLADEFS_LOG_LEVEL` says how much, `info` by
 //! default, by target too: `info,bucket_cell::object_bucket=debug` logs each request of object
 //! storage. A record about a VM's request names it, `request_id`, the guest's number of it, with
 //! its `store` (TASK-260).
@@ -177,7 +181,7 @@ compile_error!(
 #[global_allocator]
 static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-#[cfg(all(target_os = "linux", not(madsim)))]
+#[cfg(not(madsim))]
 fn main() -> anyhow::Result<()> {
     use anyhow::Context;
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
@@ -195,15 +199,19 @@ fn main() -> anyhow::Result<()> {
         Some(path) => {
             let cfg = cladefs::config::Config::from_toml_file(&path).map_err(anyhow::Error::msg)?;
             cfg.validate_for_daemon().map_err(anyhow::Error::msg)?;
+            anyhow::ensure!(
+                cfg.daemon.vm_socket.is_some(),
+                "daemon.vm_socket is required in TOML config"
+            );
             // SAFETY: single-threaded startup before any background thread or runtime is spawned.
             unsafe { cfg.apply_process_env() };
-            Some(cfg)
+            Some(libcladefs::Config::from_file(&path)?)
         }
         None => None,
     };
     cladefs::cladefsd::logging::to_stderr()?;
     if std::env::args().nth(1).as_deref() == Some("--setup-host") {
-        return cladefs::cladefsd::governor::setup_host().map_err(anyhow::Error::msg);
+        return setup_host();
     }
     // cladefs: its large buffers given back as they are freed, before any thread is made
     // (TASK-317).
@@ -215,11 +223,13 @@ fn main() -> anyhow::Result<()> {
     let _failpoints = fail::FailScenario::setup();
     cladefs::faults::from_seed().map_err(anyhow::Error::msg)?;
     // cladefs: before any thread is started, which SIGQUIT would end otherwise (TASK-44.13).
+    #[cfg(target_os = "linux")]
     cladefs::stacks::on_sigquit().context("handling SIGQUIT")?;
-    let daemon = cladefs::cladefsd::Daemon::new();
+    // cladefs: the daemon libcladefs embeds, this process's (board 13471), nothing of it started
+    // before the signals that drain it are blocked.
+    let daemon = libcladefs::Daemon::new()?;
     let drain = cladefs::cladefsd::drain::bound().map_err(anyhow::Error::msg)?;
-    drain_on_signals(std::sync::Arc::clone(&daemon), drain)
-        .context("handling SIGTERM, SIGINT and SIGHUP")?;
+    drain_on_signals(daemon.clone(), drain).context("handling SIGTERM, SIGINT and SIGHUP")?;
     // Start OTLP tracing if configured (TASK-258, TASK-707). Its exporter threads start after the
     // signals that drain it are blocked, as every thread but the drain's.
     use cladefs::cladefsd::otel::Tracing;
@@ -227,9 +237,10 @@ fn main() -> anyhow::Result<()> {
         Tracing::Off => {}
         Tracing::Exported => log::info!("cladefsd: exporting spans over OTLP"),
     }
-    cladefs::cladefsd::raise_open_files_limit().context("raising the limit of open files")?;
+    // cladefs: its boot run on the daemon's runtime, which raises the limit of open files first
+    // (libcladefs).
     if let Some(cfg) = toml_config {
-        daemon.block_on(daemon.boot_with_config(cfg))?;
+        futures::executor::block_on(daemon.boot(cfg))?;
     } else {
         let mut args = raw_args.into_iter();
         let socket = args
@@ -237,9 +248,7 @@ fn main() -> anyhow::Result<()> {
             .context("usage: cladefsd --config PATH | cladefsd SOCKET [MEMORY_BYTES]")?;
         let memory = args.next().map(|memory| memory.parse::<u64>());
         let memory = memory.transpose().context("MEMORY_BYTES must be a number")?;
-        // cladefs: its boot awaited on the daemon's consolidated runtime at its outermost entry
-        // (doc-24, board 10774).
-        daemon.block_on(daemon.boot(std::path::Path::new(&socket), memory))?;
+        futures::executor::block_on(daemon.boot_from_env(std::path::Path::new(&socket), memory))?;
     }
     // Serving stops only as the daemon drains, whose thread exits the process once it has
     // (`drain_on_signals`): not here, its cells still closing.
@@ -248,17 +257,23 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
+/// `cladefsd --setup-host`: the host's settings the memory governor needs (Linux's).
+#[cfg(not(madsim))]
+fn setup_host() -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    return cladefs::cladefsd::governor::setup_host().map_err(anyhow::Error::msg);
+    #[cfg(not(target_os = "linux"))]
+    anyhow::bail!("cladefsd --setup-host: the memory governor's host settings are Linux's")
+}
+
 /// Drains `daemon` on SIGTERM, as an orchestrator stops it, within `bound`, and exits
 /// (`cladefs::cladefsd::drain`, TASK-141.4): 0 once it drained, 1 past its bound; cladefs: its last
 /// spans exported within the bound too, as much as it leaves (board 8569). cladefs: on
 /// SIGINT and SIGHUP too, whose default action ended it at once, a crash for every cell (board
 /// 8567). They are blocked in every thread but one, made here first, which waits for them
 /// (`cladefs::signals`), and, once draining, for none again.
-#[cfg(all(target_os = "linux", not(madsim)))]
-fn drain_on_signals(
-    daemon: std::sync::Arc<cladefs::cladefsd::Daemon>,
-    bound: std::time::Duration,
-) -> std::io::Result<()> {
+#[cfg(not(madsim))]
+fn drain_on_signals(daemon: libcladefs::Daemon, bound: std::time::Duration) -> std::io::Result<()> {
     let signals = cladefs::signals::Signals::block(&[libc::SIGTERM, libc::SIGINT, libc::SIGHUP])?;
     cladefs::signals::spawn_taking_no_signals("cladefsd signal", move || {
         // cladefs: its panic, as its drain's, aborts the daemon, which could drain no more
@@ -284,7 +299,7 @@ fn drain_on_signals(
         };
         log::info!("cladefsd: draining, on {name}, within {}s", bound.as_secs());
         let began = std::time::Instant::now();
-        let drained = daemon.block_on(daemon.drain(bound));
+        let drained = futures::executor::block_on(daemon.stop(bound));
         // cladefs: the last spans exported within what is left of the bound, never past it,
         // whatever the collector (board 8569).
         cladefs::cladefsd::otel::shutdown(bound.saturating_sub(began.elapsed()));
@@ -294,15 +309,15 @@ fn drain_on_signals(
                 std::process::exit(0);
             }
             Err(left) => {
-                log::error!("cladefsd: not drained within {}s: {left}", bound.as_secs());
+                log::error!("cladefsd: {left}");
                 std::process::exit(1);
             }
         }
     })
 }
 
-#[cfg(any(not(target_os = "linux"), madsim))]
+#[cfg(madsim)]
 fn main() {
-    eprintln!("cladefsd runs on Linux only (not under madsim)");
+    eprintln!("cladefsd runs outside the simulation only");
     std::process::exit(2);
 }

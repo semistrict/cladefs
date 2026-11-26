@@ -1,0 +1,68 @@
+# Copyright 2026 The cladefs Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@crates//:defs.bzl", "all_crate_deps")
+load("//tools/bazel:rust.bzl", "cladefs_rust_library", "cladefs_rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["Cargo.toml"])
+
+filegroup(
+    name = "crate_files",
+    srcs = glob(["Cargo.toml", "src/**/*", "tests/**/*"], allow_empty = True),
+)
+
+_ALIASES = {
+    "@crates//:tonic": "tonic",
+}
+
+_LIB_SRCS = glob(["src/**/*.rs"])
+
+_COMPAT = select({
+    "//tools/bazel:linux_or_madsim": [],
+    "//conditions:default": ["@platforms//:incompatible"],
+})
+
+# The daemon a process embeds (board 13471): cladefsd's library and its client, as cladefsd's
+# binary has them.
+cladefs_rust_library(
+    name = "libcladefs",
+    srcs = _LIB_SRCS,
+    aliases = _ALIASES,
+    target_compatible_with = _COMPAT,
+    deps = [
+        "//crates/cladefs_core",
+        "//crates/cladefs_wire",
+        "//crates/cladefsd",
+        "//crates/node_local",
+    ] + all_crate_deps(normal = True),
+)
+
+# The same over the daemon's test variants, as cladefsd_for_test's binary has them.
+cladefs_rust_library(
+    name = "libcladefs_for_test",
+    srcs = _LIB_SRCS,
+    aliases = _ALIASES,
+    crate_name = "libcladefs",
+    target_compatible_with = _COMPAT,
+    deps = [
+        "//crates/cladefs_core:cladefs_core_for_test",
+        "//crates/cladefs_wire:cladefs_wire_for_test",
+        "//crates/cladefsd:cladefsd_for_test",
+        "//crates/node_local",
+    ] + all_crate_deps(normal = True),
+)
+
+cladefs_rust_test(
+    name = "embedded_test",
+    srcs = ["tests/embedded.rs"],
+    aliases = _ALIASES,
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    target_compatible_with = _COMPAT,
+    deps = [
+        ":libcladefs_for_test",
+        "//crates/cladefs_core:cladefs_core_for_test",
+    ] + all_crate_deps(normal = True, normal_dev = True),
+)

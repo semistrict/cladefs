@@ -72,7 +72,7 @@ _BASE_INTERNAL_DEPS = [
 ]
 
 _PROD_DAEMON_DEP = select({
-    "//tools/bazel:linux_or_madsim": ["//crates/cladefsd"],
+    "//tools/bazel:linux_or_madsim": ["//crates/cladefsd", "//crates/libcladefs"],
     "//conditions:default": [],
 })
 
@@ -87,7 +87,7 @@ _TESTS_KMS_DAEMON_DEP = select({
 })
 
 _FOR_TEST_DAEMON_DEP = select({
-    "//tools/bazel:linux_or_madsim": ["//crates/cladefsd:cladefsd_for_test"],
+    "//tools/bazel:linux_or_madsim": ["//crates/cladefsd:cladefsd_for_test", "//crates/libcladefs:libcladefs_for_test"],
     "//conditions:default": [],
 })
 

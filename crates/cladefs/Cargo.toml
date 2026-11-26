@@ -36,6 +36,8 @@ fxfs.workspace = true
 fxfs-posix.workspace = true
 host_fs.workspace = true
 libc.workspace = true
+# cladefs: the daemon cladefsd is a thin binary over (board 13471).
+libcladefs.workspace = true
 local_cell.workspace = true
 log.workspace = true
 node_local.workspace = true

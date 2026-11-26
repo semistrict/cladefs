@@ -95,7 +95,7 @@ Fixed for every machine, so snapshots keep device addresses whatever the RAM siz
 - Guest-facing parsers (virtio queues, the extent device's requests, smoltcp) must be fuzzed. The network's are (board 13097, `crates/libmachine/fuzz`).
 
 ## macOS (decision, 2026-11-26)
-- macOS runs the same extent device as Linux, **with DAX** (the user's goal; it overturns libmachine's decision-4, which had dev platforms run it without DAX). cladefsd runs on the Mac (board 13065), and libmachine there maps the window's pages into the guest itself (board 13069). The device without DAX comes first (board 13067), as a step.
+- macOS runs the same extent device as Linux, **with DAX** (the user's goal; it overturns libmachine's decision-4, which had dev platforms run it without DAX). cladefs's daemon runs on the Mac (board 13065), embedded in libmachine's process (`libcladefs`, board 13471): its in-process devices reach it through a socket pair, and the helper processes a VM per process needs (board 13460) through the VM-process wire; libmachine there maps the window's pages into the guest itself (board 13069). On macOS the daemon has no FUSE mount, no cgroups or pressure for its governor (its budget from `hw.memsize` and the VM statistics), and no userfaultfd stage; a transfer area is a POSIX shared memory object, which macOS never resizes once sized (hotbed question 566); a VM process's exit is watched by kqueue (hotbed question 567). The device without DAX comes first (board 13067), as a step.
 - HVF builds and VM tests run on the user's Mac: hotbed has no macOS node and GitHub's M1 runners cannot nest Hypervisor.framework.
 
 ## References

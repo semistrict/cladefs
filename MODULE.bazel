@@ -144,6 +144,7 @@ _MEMBER_MANIFESTS = [
     "//crates/fxfs-sim-diff:Cargo.toml",
     "//crates/gc_wasm:Cargo.toml",
     "//crates/host_fs:Cargo.toml",
+    "//crates/libcladefs:Cargo.toml",
     "//crates/local_cell:Cargo.toml",
     "//crates/node_local:Cargo.toml",
     "//crates/sqlite_cladefs:Cargo.toml",

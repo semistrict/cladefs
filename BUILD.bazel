@@ -71,6 +71,7 @@ filegroup(
         "//crates/fxfs_macros:crate_files",
         "//crates/gc_wasm:crate_files",
         "//crates/host_fs:crate_files",
+        "//crates/libcladefs:crate_files",
         "//crates/local_cell:crate_files",
         "//crates/node_local:crate_files",
         "//crates/sqlite_cladefs:crate_files",

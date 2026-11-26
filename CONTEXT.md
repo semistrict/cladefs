@@ -134,6 +134,10 @@ A file created in this mount, served from the guest's page cache until it is nex
 The one process on a host that owns the physical memory, the extent cache and the open cells, and serves them to VM processes.
 _Avoid_: server, remote; `cladefsd`, its name on the command line, in its module, protocol and files
 
+**Embedded daemon**:
+The extent daemon running inside another program's process, one per process, shared by that process's VMs (`libcladefs`, as machined and libmachine run it); `cladefsd` is a thin binary over it. Its devices connect to it in process, through a socket pair with no listener or path.
+_Avoid_: in-memory daemon, local daemon
+
 **Daemon client**:
 A VM process's connection to the extent daemon, through which its extent device has an open cell.
 _Avoid_: remote, remote store, store

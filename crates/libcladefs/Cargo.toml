@@ -1,0 +1,28 @@
+# libcladefs: cladefs's extent daemon as a Rust library, for a process to embed: machined and
+# libmachine run one in their own process, shared by its VMs (board 13471). cladefsd is a thin
+# binary over it.
+[package]
+name = "libcladefs"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+cladefs_core.workspace = true
+cladefs_wire.workspace = true
+cladefsd.workspace = true
+node_local.workspace = true
+tonic = { package = "madsim-tonic", version = "=0.6.0" }
+
+[dev-dependencies]
+# The tests' KMS, which a host given none encrypts under in tests (`tests-kms`).
+cladefs_core = { workspace = true, features = ["testing", "tests-kms"] }
+cladefsd = { workspace = true, features = ["tests-kms"] }
+futures.workspace = true
+libc.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true
