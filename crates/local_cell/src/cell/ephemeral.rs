@@ -34,7 +34,7 @@
 mod tests;
 
 use super::*;
-use crate::layout::LOCAL_CHECKPOINT;
+use crate::layout::{LOCAL_CHECKPOINT, OPEN_SEGMENTS};
 use extent_frame::spent::Spent;
 use fprint::TypeFingerprint;
 use serde::{Deserialize, Serialize};

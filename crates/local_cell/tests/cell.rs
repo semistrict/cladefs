@@ -266,11 +266,11 @@ async fn frees_remove_files() {
     settled(&cell).await;
     // The first segment, closed, and the next, open.
     // cladefs: segments' files, not the next segment's, placed ahead of it (TASK-384).
-    let segments = async || {
-        let count = async |kind| segment_files(&cell, &dir, kind).await.len();
-        (count("segments").await, count("open-segments").await)
+    let segments = || {
+        let count = |kind| segment_files(&dir, kind).len();
+        (count("segments"), count("open-segments"))
     };
-    assert_eq!(segments().await, (1, 1));
+    assert_eq!(segments(), (1, 1));
     assert_eq!(dir.list(&of("extents", CELL.id)).unwrap(), vec!["000000000000g"]);
     assert_eq!(dir.list(&of("open-extents", CELL.id)).unwrap(), Vec::<String>::new());
 
@@ -279,16 +279,16 @@ async fn frees_remove_files() {
     }
     // cladefs: not until the frees are committed, and the segment is acknowledged in the bucket,
     // the write-ahead log keeping it until then (TASK-165.9).
-    assert_eq!(segments().await, (1, 1));
+    assert_eq!(segments(), (1, 1));
     assert_eq!(dir.list(&of("extents", CELL.id)).unwrap().len(), 1);
     cell.commit(None).await.unwrap();
-    assert_eq!(segments().await, (1, 1));
+    assert_eq!(segments(), (1, 1));
     assert_eq!(dir.list(&of("extents", CELL.id)).unwrap().len(), 1);
     error_is(cell.read(extent(16), 0, &mut [0; BLOCK]), NoExtent(extent(16)));
     let closed = closed_one(&cell).await;
     cell.acknowledged(closed.number).await.unwrap();
     cell.commit(None).await.unwrap();
-    assert_eq!(segments().await, (0, 1));
+    assert_eq!(segments(), (0, 1));
     assert_eq!(dir.list(&of("extents", CELL.id)).unwrap(), Vec::<String>::new());
 }
 
@@ -606,21 +606,18 @@ async fn segments_close_framed_by_the_commits_flush() {
         cell.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
     }
     cell.commit_ordered(None).await.unwrap();
-    // cladefs: segments' files, not the next segment's, placed ahead of it (TASK-384).
-    let count = async |kind| segment_files(&cell, &dir, kind).await.len();
+    let count = |kind| segment_files(&dir, kind).len();
     // Closed, and the next open: its raw file stays until the commit is durable.
-    assert_eq!(count("open-segments").await, 2);
+    assert_eq!(count("open-segments"), 2);
     let reads = || (0..17).map(|sequence| read(&cell, extent(sequence), 0, BLOCK));
     let written: Vec<_> = (0..17).map(|sequence| pattern(sequence as u8, 0, BLOCK)).collect();
     assert_eq!(reads().collect::<Vec<_>>(), written);
     // Not the uploader's until its commit is durable (TASK-165.9).
     assert!(cell.closed(usize::MAX).await.unwrap().is_empty());
 
-    // cladefs: framed, then its commit's flush: its raw file the spare, the segment after the next
-    // one's placed ahead of it as the next opened, before, its raw file made anew (TASK-384).
     cell.wait_framed().await.unwrap();
     cell.flush().await.unwrap();
-    assert_eq!((count("segments").await, count("open-segments").await), (1, 1));
+    assert_eq!((count("segments"), count("open-segments")), (1, 1));
     assert_eq!(reads().collect::<Vec<_>>(), written);
     let closed = cell.closed(usize::MAX).await.unwrap();
     let [segment] = &closed[..] else { panic!("{} segments closed", closed.len()) };
@@ -778,23 +775,20 @@ async fn commits_reopen_from_their_logs() {
     }
     drop((go, held));
     settled(&cell).await;
-    cell.prepared().await.unwrap();
     // The open segment's log, and under spares' names the logs of segments gone kept as spares,
-    // two at most (TASK-301), and the next segment's, prepared (TASK-333), placed under its name
-    // (TASK-384): a segment opened takes the one prepared, else a spare. The closed segments' logs
-    // went together once settled, their framed files durable at last: two kept.
-    let logs = async |cell: &LocalCell<MemDir>| {
+    // two at most (TASK-301); logs are created lazily on first flush (board 11709).
+    let logs = |cell: &LocalCell<MemDir>| {
+        let _ = cell;
         let names = dir.list(&of("logs", CELL.id)).unwrap();
         let spares = names.iter().filter(|name| name.starts_with("spare-")).count();
-        (segment_files(cell, &dir, "logs").await.len(), cell.placed().is_some(), spares)
+        (segment_files(&dir, "logs").len(), spares)
     };
-    assert_eq!(logs(&cell).await, (1, true, 2));
+    assert_eq!(logs(&cell), (1, 2));
     drop(cell);
     let cell = LocalCell::open(dir.clone(), OPTIONS).unwrap();
-    cell.prepared().await.unwrap();
-    // The opening's open segment took a spare; the log of the one it closed again went, and the
-    // next's, placed ahead of it, holding nothing (TASK-384).
-    assert_eq!(logs(&cell).await, (1, false, 1));
+    // Reopening creates no eager log for the new open segment until its first commit flushes; both
+    // spares stay ready for reuse (board 11709).
+    assert_eq!(logs(&cell), (0, 2));
     assert_eq!(cell.root().unwrap(), b"root 199");
     assert_eq!(cell.last_commit().unwrap(), 200);
     let held: Vec<u64> =
@@ -913,17 +907,16 @@ async fn sealed_extents_are_one_run_each() {
 async fn closed_segments_hold_the_cells_history() {
     let dir = MemDir::new();
     let cell = create(dir.clone(), 64 << 20);
-    // Closed, and open; cladefs: not the next segment's, placed ahead of it (TASK-384).
-    let segments = async |cell: &LocalCell<MemDir>| {
+    let segments = || {
         dir.list(&of("segments", CELL.id)).unwrap().len()
-            + segment_files(cell, &dir, "open-segments").await.len()
+            + segment_files(&dir, "open-segments").len()
     };
     cell.write(extent(0), 0, &pattern(0, 0, BLOCK)).await.unwrap();
     cell.commit(Some(b"one")).await.unwrap();
-    assert_eq!(segments(&cell).await, 1);
+    assert_eq!(segments(), 1);
     // Asked to.
     let state = closed_state(&cell).await;
-    assert_eq!(segments(&cell).await, 2);
+    assert_eq!(segments(), 2);
     let (reopened, cell) = reopened_state(cell, &dir);
     assert_eq!(reopened, state);
 
@@ -935,7 +928,7 @@ async fn closed_segments_hold_the_cells_history() {
         }
         cell.commit(Some(format!("root {sequence}").as_bytes())).await.unwrap();
     }
-    assert!(segments(&cell).await > 2, "no segment filled");
+    assert!(segments() > 2, "no segment filled");
     cell.free(extent(0)).unwrap();
     cell.commit(None).await.unwrap();
     let state = closed_state(&cell).await;
@@ -954,11 +947,11 @@ async fn closed_segments_hold_the_cells_history() {
     drop(cell);
     let options = Options { segment_age: std::time::Duration::ZERO, ..OPTIONS };
     let cell = LocalCell::open(dir.clone(), options).unwrap();
-    let before = segments(&cell).await;
+    let before = segments();
     cell.write(extent(50), 0, &pattern(50, 0, BLOCK)).await.unwrap();
     cell.commit(None).await.unwrap();
     settled(&cell).await;
-    assert_eq!(segments(&cell).await, before + 1);
+    assert_eq!(segments(), before + 1);
 
     // At a version.
     cell.write(extent(51), 0, &pattern(51, 0, BLOCK)).await.unwrap();
@@ -1621,14 +1614,9 @@ fn names(dir: &MemDir, kind: &str) -> Vec<String> {
     dir.list(&of(kind, CELL.id)).unwrap()
 }
 
-/// cladefs: the names of the cell's files of `kind` in `dir`, `cell`'s, but for spare logs
-/// (TASK-301) and the next segment's raw file and log, placed ahead of it (`LocalCell::placed`,
-/// TASK-384), once the preparation of them ended.
-async fn segment_files(cell: &LocalCell<MemDir>, dir: &MemDir, kind: &str) -> Vec<String> {
-    cell.prepared().await.unwrap();
-    let placed = cell.placed().map(|number| Padded(number).to_string());
-    let ours = |name: &String| !name.starts_with("spare-") && placed.as_ref() != Some(name);
-    names(dir, kind).into_iter().filter(ours).collect()
+/// cladefs: the names of the cell's files of `kind` in `dir`, excluding spare logs (TASK-301).
+fn segment_files(dir: &MemDir, kind: &str) -> Vec<String> {
+    names(dir, kind).into_iter().filter(|name| !name.starts_with("spare-")).collect()
 }
 
 /// cladefs: a large extent none of whose parts compresses is framed in place: its raw file is its
@@ -2216,110 +2204,82 @@ async fn segments_made_durable_sync_no_entries_a_flush_synced() {
         cell.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
         cell.commit(None).await.unwrap();
         settled(&cell).await;
-        // cladefs: and the next segment placed, its entries synced by the cell's opener, on a
-        // thread of its own, before the closing and after it, so that it counts those of the next
-        // after it alone (TASK-384).
-        cell.prepared().await.unwrap();
         let before = dir.io().synced_dirs;
         cell.close_segment().unwrap();
         cell.commit_ordered(None).await.unwrap();
-        // Framed and made durable, then the commit's flush.
+        // Framed and made durable (1 dir sync: SEGMENTS), then the commit's flush (1 dir sync:
+        // OPEN_SEGMENTS for the newly opened segment; LOGS is not synced because the closed
+        // segment already had its log created by the prior durable commit, board 11709).
         cell.wait_framed().await.unwrap();
         cell.flush().await.unwrap();
-        cell.prepared().await.unwrap();
         let synced = dir.io().synced_dirs - before;
-        assert_eq!(synced, 3, "closing after extent {sequence}: directories synced");
+        assert_eq!(synced, 2, "closing after extent {sequence}: directories synced");
     }
 }
 
-/// cladefs: a segment opened from its raw file and log placed ahead of it, their entries made
-/// durable off the commits by the cell's opener, costs the commits' flush no directory: before,
-/// each segment opened had its commits' next flush sync the directories of raw files and logs, each
-/// a commit of the host's journal, which a durable commit, closing a segment and opening the next
-/// for its upload, waited for every time (TASK-384, `durable_commits_through_the_daemon`). Red so
-/// with the entries left unsynced, or the segment opened unplaced.
+/// cladefs: board 11709 / board 1770: subsequent flushes in the same open segment cost zero
+/// directory syncs once its log exists, and opening a new segment on close costs zero file syncs
+/// until a flush actually appends commits to it.
 #[tokio::test(flavor = "multi_thread")]
-async fn segments_opened_ahead_cost_their_commits_flushes_no_directory() {
+async fn subsequent_flushes_in_an_open_segment_sync_no_directory() {
     let dir = MemDir::new();
     let cell = create(dir.clone(), 64 << 20);
     cell.write(extent(1), 0, &pattern(1, 0, BLOCK)).await.unwrap();
     cell.commit(None).await.unwrap();
     settled(&cell).await;
     for sequence in 2..6 {
-        cell.prepared().await.unwrap();
-        let next = cell.placed().expect("the next segment placed");
-        cell.close_segment().unwrap();
         cell.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
         cell.commit_ordered(None).await.unwrap();
-        // Framed and made durable, and the segment after placed, their syncs apart.
-        cell.wait_framed().await.unwrap();
-        cell.prepared().await.unwrap();
-        assert_eq!(cell.placed(), Some(next + 1), "the segment after the one opened, placed");
         let before = dir.io().synced_dirs;
         cell.flush().await.unwrap();
         let synced = dir.io().synced_dirs - before;
-        assert_eq!(synced, 0, "segment {next}'s commits' flush: directories synced");
+        assert_eq!(synced, 0, "subsequent flush for extent {sequence}: directories synced");
     }
     for sequence in 1..6 {
         assert_eq!(read(&cell, extent(sequence), 0, BLOCK), pattern(sequence as u8, 0, BLOCK));
     }
 }
 
-/// cladefs: a preparation of the next segment's log whose segment opened before it was placed, with
-/// a log of its own, goes on as the next's: no opening, nor flush, began another while it ran, and
-/// ended there it left the next segment nothing placed, as `LocalCell::prepared` found it, until a
-/// flush or closing after it began one (TASK-404: commits_reopen_from_their_logs's (1, false, 2)
-/// on loaded hosts, the last flush having found a preparation running). Red so with it ending.
+/// cladefs: board 11709: multiple segments closed and framed in a single `make_durable` batch before
+/// any log file has been created for them recover cleanly across crashes without losing an earlier
+/// framed segment while keeping a later one.
 #[tokio::test(flavor = "multi_thread")]
-async fn preparations_overtaken_go_on_as_the_next_segments() {
-    use std::sync::Mutex;
-    use std::sync::mpsc::channel;
-    let dir = MemDir::new();
-    let cell = create(dir.clone(), 64 << 20);
-    cell.write(extent(1), 0, &pattern(1, 0, BLOCK)).await.unwrap();
-    cell.commit(None).await.unwrap();
-    settled(&cell).await;
-    cell.prepared().await.unwrap();
-    let next = cell.placed().expect("the next segment placed");
-    // The preparation of the segment after it held, as a loaded host's opener thread is, while
-    // commits open it and the one after.
-    let (go, gone) = channel::<()>();
-    let gone = Mutex::new(gone);
-    let held = fail::FailGuard::with_callback("segments::preparing", move || {
-        let _ = gone.lock().unwrap().recv();
-    })
-    .unwrap();
-    for sequence in 2..4 {
-        cell.close_segment().unwrap();
-        cell.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
-        cell.commit(None).await.unwrap();
-    }
-    drop((go, held));
-    cell.prepared().await.unwrap();
-    assert_eq!(cell.placed(), Some(next + 2), "the segment after the open one, placed");
-    settled(&cell).await;
-    for sequence in 1..4 {
-        assert_eq!(read(&cell, extent(sequence), 0, BLOCK), pattern(sequence as u8, 0, BLOCK));
+async fn unlogged_multi_segment_batches_recover_across_crashes() {
+    for seed in 0..32 {
+        let dir = MemDir::serial();
+        let cell = create(dir.clone(), 64 << 20);
+        for sequence in 1..=3 {
+            cell.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
+            cell.close_segment().unwrap();
+            cell.commit_ordered(Some(format!("root {sequence}").as_bytes())).await.unwrap();
+        }
+        let crashed = dir.crash(seed);
+        drop(cell);
+        let reopened = LocalCell::open(crashed, OPTIONS).unwrap();
+        let last = reopened.last_commit().unwrap();
+        assert!(last <= 3, "seed {seed}: last commit {last}");
+        for sequence in 1..=last {
+            assert_eq!(
+                read(&reopened, extent(sequence), 0, BLOCK),
+                pattern(sequence as u8, 0, BLOCK),
+                "seed {seed}, extent {sequence}"
+            );
+        }
     }
 }
 
-/// cladefs: a cell prepares the next segment's log once a flush made commits durable, a cell that
-/// writes, not as it opens (TASK-333): one that only reads, as a fork a daemon serves, prepares
-/// none, nor holds a file open for it, its flushes making nothing durable. Every fork the daemon
-/// served took one, and a file held open (`serves_hundreds_of_forks_of_a_base`).
+/// cladefs: a cell creates no log until its first durable commit (board 11709): one that only
+/// reads, as a fork a daemon serves, creates no log file and holds none open.
 #[tokio::test(flavor = "multi_thread")]
 async fn cells_that_only_read_prepare_no_log() {
     let dir = MemDir::new();
     let cell = create(dir.clone(), 64 << 20);
     let logs = || dir.list(&of("logs", CELL.id)).unwrap().len();
-    // Its open segment's log alone, flushed, nothing durable.
     cell.flush().await.unwrap();
-    cell.prepared().await.unwrap();
-    assert_eq!(logs(), 1, "the next segment's log prepared, nothing durable");
+    assert_eq!(logs(), 0, "a cell that only reads creates no log");
     cell.write(extent(1), 0, &pattern(1, 0, BLOCK)).await.unwrap();
     cell.commit(None).await.unwrap();
-    cell.prepared().await.unwrap();
-    assert_eq!(logs(), 2, "the next segment's log not prepared, a commit durable");
+    assert_eq!(logs(), 1, "first durable commit creates the open segment's log");
 }
 
 /// cladefs: the uploader takes a segment once its framing wrote its framed file, not once it made
@@ -2409,9 +2369,8 @@ async fn closed_segments_keep_no_more_files_open_than_allowed() {
         cell.close_segment().unwrap();
         cell.commit(None).await.unwrap();
         // cladefs: framed, which no commit waits for: a segment being framed holds its raw file and
-        // log open till then (TASK-165.9); and the next segment's placed ahead of it (TASK-384).
+        // log open till then (TASK-165.9).
         settled(&cell).await;
-        cell.prepared().await.unwrap();
         open.push(open_fds());
     }
     assert_eq!(open[39], open[9], "{open:?}");
@@ -2850,7 +2809,7 @@ async fn rewrites_take_no_segment_past_a_segment_and_an_extent() {
     let place = Place::Run { cell: CELL.id, number: 4, offset: 0 };
     assert_eq!(cell.place(extent(1)).unwrap(), Some(place));
     let segments: Vec<String> = (0..4).map(|number| Padded(number).to_string()).collect();
-    assert_eq!(segment_files(&cell, &dir, "open-segments").await, ["0000000000004"]);
+    assert_eq!(segment_files(&dir, "open-segments"), ["0000000000004"]);
     assert_eq!(dir.list(&of("segments", CELL.id)).unwrap(), segments);
     for closed in cell.closed(usize::MAX).await.unwrap() {
         let data = extent_frame::data(
@@ -3400,8 +3359,6 @@ async fn eight_segments(open_files: usize) -> (MemDir, LocalCell<MemDir>) {
         cell.commit(None).await.unwrap();
     }
     settled(&cell).await;
-    // cladefs: and the next segment's log prepared, whose spare its preparation opens (TASK-333).
-    cell.prepared().await.unwrap();
     (dir, cell)
 }
 

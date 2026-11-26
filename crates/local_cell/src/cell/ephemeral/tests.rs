@@ -136,10 +136,8 @@ async fn an_ephemeral_cell_frames_segments_in_place_and_checkpoints_them() {
     );
     commit(&cell, 7, 8).await;
     assert_eq!(numbers(&dir, SEGMENTS), (0..8).collect::<Vec<_>>(), "eight closed: covered");
-    for kind in [LOGS, OPEN_SEGMENTS] {
-        let left = numbers(&dir, kind);
-        assert_eq!(left[0], 8, "the open segment's, and the next's if prepared: {left:?}");
-    }
+    assert_eq!(numbers(&dir, OPEN_SEGMENTS), vec![8], "only the open segment remains");
+    assert_eq!(numbers(&dir, LOGS), Vec::<u64>::new(), "open segment's log is created lazily");
     let ring = keys();
     let checkpoint = LocalCheckpoint::read_under(&dir, &ring.of(CHILD.id)).unwrap();
     assert_eq!((checkpoint.through, checkpoint.own.len()), (Some(7), 8));

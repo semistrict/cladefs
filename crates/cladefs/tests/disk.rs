@@ -50,9 +50,6 @@ fn metric(series: &str) -> u64 {
     line.rsplit(' ').next().unwrap().parse().unwrap()
 }
 
-/// The bytes of a segment's log's header, a block (`local_cell::wal::LOG_RECORDS`).
-const LOG_HEADER: u64 = 4096;
-
 /// What a cell's files under `dir` take, as its footprint counts them (`local_cell::footprint`):
 /// each file's length rounded up to a granule, once however many names it has, and each
 /// directory under `dir` a granule.
@@ -144,16 +141,12 @@ fn tenants_past_their_disk_limits_are_refused_while_others_write() {
     };
     assert_eq!((refused, written), (Errno::ENOSPC, 16));
     // What it takes, counted again, is what it wrote, and the base of each fork's write-ahead
-    // log, which its cell makes as it opens to write (backlog doc-14, `wal`), and the header of
-    // its open segment's log (TASK-301): its metrics name it by its ID, with its limit.
+    // log, which its cell makes as it opens to write (backlog doc-14, `wal`); segment logs are
+    // created lazily on commit (board 11709). Its metrics name it by its ID, with its limit.
     let (full, _) = daemon.tenant_disk(Some(1)).unwrap();
     let wal = |fork: CellId| std::fs::metadata(daemon.cell_path(fork).join("wal")).unwrap().len();
     let wals: u64 = forks.iter().map(|&fork| bucket_cell::host_disk::counted(wal(fork))).sum();
-    let opened = wals + forks.len() as u64 * LOG_HEADER;
-    assert_eq!(
-        (full, cells(&acme_dir)),
-        (taken + 16 * EXTENT + opened, taken + 16 * EXTENT + opened)
-    );
+    assert_eq!((full, cells(&acme_dir)), (taken + 16 * EXTENT + wals, taken + 16 * EXTENT + wals));
     let tenant = "{tenant=\"1\"}";
     assert_eq!(metric(&format!("cladefsd_tenant_disk_limit_bytes{tenant}")), limit);
     assert_eq!(metric(&format!("cladefsd_tenant_disk_bytes{tenant}")), full);

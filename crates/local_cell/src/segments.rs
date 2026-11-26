@@ -69,9 +69,9 @@ const FULL_OPEN_LIMIT: usize = 2;
 
 /// Where a segment the cell tracks is in its life.
 enum Phase<F> {
-    /// Taking writes, in its raw file; cladefs: its commits recorded in its log, which the flushes
-    /// append to (TASK-165.9).
-    Open { raw: Arc<RawFile<F>>, log: Log<F> },
+    /// Taking writes, in its raw file; cladefs: its commits recorded in its log, created lazily on
+    /// first flush (TASK-165.9, board 11709).
+    Open { raw: Arc<RawFile<F>> },
     /// cladefs: filled between commits, taking no more writes, which go to the next: the next
     /// commit seals in place what is one run in it, and closes it, its footer naming those runs as
     /// the commit's, which the segments after it go on with, after what the commits before made in
@@ -115,9 +115,56 @@ impl<F> Clone for Log<F> {
     }
 }
 
+/// cladefs: lifecycle of a segment's lazily-created log file handle (board 11709, board 12887).
+enum LogState<F> {
+    /// Log file has not yet been created on disk (created lazily on first flush).
+    Uncreated,
+    /// Log file exists on disk and its handle is kept open (only while `Phase::Open`).
+    Open(Arc<F>),
+    /// Log file exists on disk, but its handle was dropped when the segment filled or closed to
+    /// bound open FDs (board 12887); reopen off `LocalCell::state` lock on demand.
+    Closed,
+}
+
+/// cladefs: a segment's log metadata and lazily-created file (board 11709, board 1770,
+/// board 12887). Created off `LocalCell::state` lock by the first flush that appends records to
+/// this segment, reusing a spare log when one is available, its open handle dropped on fill/close,
+/// and cleared only when [`Segments::raw`] retires the segment's raw file and log.
+struct LogSlot<F> {
+    salt: u64,
+    encryption: Arc<RawEncryption>,
+    state: LogState<F>,
+    entry_synced: bool,
+}
+
+impl<F> LogSlot<F> {
+    /// Drops the cached open log handle once the segment leaves `Phase::Open` (board 12887),
+    /// remembering whether the log file already exists on disk.
+    fn drop_handle(&mut self) {
+        if matches!(self.state, LogState::Open(_)) {
+            self.state = LogState::Closed;
+        }
+    }
+}
+
+/// cladefs: what a flush needs to obtain a segment's log off the cell's state lock
+/// ([`Segments::take_log_init`], board 11709, board 12887).
+pub(crate) enum LogInit<F> {
+    /// Already created and open for this segment.
+    Existing(Log<F>),
+    /// Already created on disk, handle dropped to bound FDs (board 12887): reopen off lock.
+    Reopen { salt: u64, encryption: Arc<RawEncryption> },
+    /// Not yet created: create (or recycle `spare`), write and sync its salted header, then install.
+    Create { salt: u64, encryption: Arc<RawEncryption>, spare: Option<SegmentId> },
+    /// Not tracked with a live log slot: open from disk if still present.
+    Missing,
+}
+
 /// A segment the cell tracks.
 struct Segment<F> {
     phase: Phase<F>,
+    /// cladefs: its log metadata and lazily-created file, kept until [`Segments::raw`] retires it.
+    log: Option<LogSlot<F>>,
     /// The bytes of its data.
     len: u64,
     /// The bytes its file takes.
@@ -152,6 +199,7 @@ impl<F> Segment<F> {
         let ahead = Some(Ahead::default());
         Self {
             phase,
+            log: None,
             len,
             size,
             live,
@@ -165,11 +213,24 @@ impl<F> Segment<F> {
         }
     }
 
-    /// cladefs: a new segment, open, holding nothing yet: looked at ahead for its framing, for
-    /// ephemeral cells too since board 6905 frames ephemeral segments in place (`framing::see_raw`,
-    /// board 11365).
-    fn new_in(phase: Phase<F>, _ephemeral: bool) -> Self {
-        Self::new(phase, 0)
+    /// cladefs: a new segment, open, holding nothing yet, with its log metadata ready for lazy
+    /// creation on first flush (board 11709): looked at ahead for its framing, for ephemeral cells
+    /// too since board 6905 frames ephemeral segments in place (`framing::see_raw`, board 11365).
+    fn new_in(
+        phase: Phase<F>,
+        _ephemeral: bool,
+        salt: u64,
+        encryption: Arc<RawEncryption>,
+    ) -> Self {
+        Self {
+            log: Some(LogSlot {
+                salt,
+                encryption,
+                state: LogState::Uncreated,
+                entry_synced: false,
+            }),
+            ..Self::new(phase, 0)
+        }
     }
 
     /// A write of `len` bytes at `at` in it is done, `live` of them holding extents' data: returns
@@ -271,14 +332,14 @@ pub(crate) struct Segments<F> {
     /// commit closing them seals extents in (TASK-92.41). Synced by path with a `Weak` handle so
     /// closing many filled segments never holds unbounded raw FDs (board 12887).
     closed_unsynced: Vec<(String, std::sync::Weak<F>)>,
-    /// Whether a segment closed since the last commit, which syncs the directories of open
-    /// segments and of logs, the next's raw file's and log's entries. cladefs: its framed file's,
-    /// its framing makes durable (`make_durable`, TASK-310).
+    /// Whether a segment closed since the last commit, which syncs the directory of open segments,
+    /// the next's raw file's entry. cladefs: its framed file's, its framing makes durable
+    /// (`make_durable`, TASK-310); its log's, the flush creating it syncs (board 11709).
     closed_since: bool,
     /// cladefs: the segments whose framings are running, each of which ends itself (TASK-153.8).
     framing: BTreeSet<SegmentId>,
-    /// cladefs: the segments opened whose raw files' and logs' entries no sync has made durable
-    /// since ([`Segments::unsynced_entries`], TASK-310).
+    /// cladefs: the segments opened whose raw files' entries no sync has made durable since
+    /// ([`Segments::unsynced_entries`], TASK-310, board 11709).
     unsynced_entries: BTreeSet<SegmentId>,
     /// cladefs: the segments framed whose raw files and logs are still there, each with the last
     /// commit its footer names: they go once that commit is durable, so that an opening finding it
@@ -287,11 +348,6 @@ pub(crate) struct Segments<F> {
     /// cladefs: the spare logs, by the segments they were the logs of ([`spare_path`]), which the
     /// next segments' logs are, rather than files made anew (TASK-301).
     spares: Vec<SegmentId>,
-    /// cladefs: the next segment's raw file and log, prepared off the cell's state lock, if they
-    /// are, there under their names, and whether a preparation runs ([`Segments::to_prepare`],
-    /// TASK-333, TASK-384).
-    prepared: Option<Placed<F>>,
-    preparing: bool,
     /// cladefs: what the salts of the logs this opening of the cell makes are of ([`new_salt`]).
     lifetime: u64,
     /// cladefs: the cell's keys, which its segments are framed and read under (TASK-411.3).
@@ -370,7 +426,7 @@ impl<F: File> Segments<F> {
         let logs = dir.list(&cell_dir(LOGS, cell))?;
         let spared =
             logs.iter().filter_map(|name| name.strip_prefix(SPARE)).filter_map(parse_number);
-        let mut spares: Vec<_> = spared.map(|number| SegmentId { cell, number }).collect();
+        let spares: Vec<_> = spared.map(|number| SegmentId { cell, number }).collect();
         let lifetime = {
             let mut bytes = [0; 24];
             for (at, word) in [cell, epoch, next].into_iter().enumerate() {
@@ -380,11 +436,9 @@ impl<F: File> Segments<F> {
         };
         let salt = new_salt(lifetime, open);
         let (dek, key) = keys.try_encrypting()?;
-        let (phase, _) = create_open(dir, open, (&mut spares, &mut None), salt, (&dek, key))?;
-        for kind in [OPEN_SEGMENTS, LOGS] {
-            dir.sync_dir(&cell_dir(kind, cell))?;
-        }
-        segments.insert(open, Segment::new_in(phase, ephemeral));
+        let (phase, encryption) = create_open(dir, open, (&dek, key))?;
+        dir.sync_dir(&cell_dir(OPEN_SEGMENTS, cell))?;
+        segments.insert(open, Segment::new_in(phase, ephemeral, salt, encryption));
         // cladefs: a kept one no extent is in, reaping lets go of (TASK-698.2).
         let empty = segments.iter().filter(|(_, segment)| segment.is_empty());
         let empty = empty.map(|(&number, _)| number).collect();
@@ -408,8 +462,6 @@ impl<F: File> Segments<F> {
             unsynced_entries: BTreeSet::new(),
             raw: Vec::new(),
             spares,
-            prepared: None,
-            preparing: false,
             lifetime,
             keys,
             seeing: Vec::new(),
@@ -701,30 +753,100 @@ impl<F: File> Segments<F> {
         number == self.open || self.full.contains(&number)
     }
 
-    /// cladefs: the log of the open segment's commits (TASK-165.9).
-    pub fn open_log(&self) -> Log<F> {
-        let Phase::Open { log, .. } = &self.tracked[&self.open].phase else {
-            unreachable!("the open segment is open")
+    /// cladefs: what a flush needs to obtain `number`'s log off the cell's state lock: its already
+    /// created log, a reopen handle when closed to bound FDs, or its salt, encryption and an
+    /// optional spare to create it from (board 11709, board 12887).
+    pub fn take_log_init(&mut self, number: SegmentId) -> LogInit<F> {
+        let Some(slot) = self.tracked.get(&number).and_then(|segment| segment.log.as_ref()) else {
+            return LogInit::Missing;
         };
-        log.clone()
+        match &slot.state {
+            LogState::Open(file) => LogInit::Existing(Log {
+                file: Arc::clone(file),
+                salt: slot.salt,
+                encryption: Arc::clone(&slot.encryption),
+            }),
+            LogState::Closed => {
+                LogInit::Reopen { salt: slot.salt, encryption: Arc::clone(&slot.encryption) }
+            }
+            LogState::Uncreated => {
+                let salt = slot.salt;
+                let encryption = Arc::clone(&slot.encryption);
+                let spare = self.spares.pop();
+                LogInit::Create { salt, encryption, spare }
+            }
+        }
+    }
+
+    /// cladefs: installs the lazily-created log `file` for `number`, whose `logs/` directory entry
+    /// is synced by the creating flush before [`Segments::log_entries_synced`] marks it durable.
+    /// Keeps the open handle only while `number` is still [`Phase::Open`] (board 12887).
+    pub fn install_log(&mut self, number: SegmentId, file: Arc<F>) {
+        if let Some(segment) = self.tracked.get_mut(&number)
+            && let Some(slot) = segment.log.as_mut()
+        {
+            slot.state = if matches!(segment.phase, Phase::Open { .. }) {
+                LogState::Open(file)
+            } else {
+                LogState::Closed
+            };
+            slot.entry_synced = false;
+        }
+    }
+
+    /// cladefs: marks the `logs/` directory entries of `segments` durable after `sync_dir(LOGS)`
+    /// and `dir.barrier()` completed (board 11709).
+    pub fn log_entries_synced(&mut self, segments: &[SegmentId]) {
+        for number in segments {
+            if let Some(slot) =
+                self.tracked.get_mut(number).and_then(|segment| segment.log.as_mut())
+            {
+                slot.entry_synced = true;
+            }
+        }
+    }
+
+    /// cladefs: whether `number` has a log file whose `logs/` directory entry is already durable
+    /// on disk (`wal::recover` requires durable logs on both sides of a multi-segment framing batch
+    /// to avoid skipping a lost earlier framed segment; board 11709).
+    pub fn has_durable_log(&self, number: SegmentId) -> bool {
+        self.tracked
+            .get(&number)
+            .and_then(|segment| segment.log.as_ref())
+            .is_some_and(|slot| !matches!(slot.state, LogState::Uncreated) && slot.entry_synced)
     }
 
     /// cladefs: the log of segment `number`'s commits, open or closed since, which a flush appends
     /// their records to: there until its raw file goes, once it is framed and they are durable
     /// ([`Segments::raw`]).
     pub fn log_file<D: Dir<File = F>>(&self, dir: &D, number: SegmentId) -> Result<Log<F>, Error> {
-        match self.tracked.get(&number).map(|segment| &segment.phase) {
-            Some(Phase::Open { log, .. }) => Ok(log.clone()),
-            _ => {
-                let file = dir.open(&log_path(number), false)?;
-                let mut header = [0; crate::wal::LOG_HEADER];
-                file.read_at(&mut header, 0)?;
-                let header = LogHeader::of(&header, number)
-                    .ok_or_else(|| anyhow!("{number:?}'s log has no header of its own"))?;
-                let encryption = header.encryption(number, &self.keys)?;
-                Ok(Log { file: Arc::new(file), salt: header.salt, encryption })
+        if let Some(slot) = self.tracked.get(&number).and_then(|segment| segment.log.as_ref()) {
+            match &slot.state {
+                LogState::Open(file) => {
+                    return Ok(Log {
+                        file: Arc::clone(file),
+                        salt: slot.salt,
+                        encryption: Arc::clone(&slot.encryption),
+                    });
+                }
+                LogState::Closed => {
+                    let file = dir.open(&log_path(number), false)?;
+                    return Ok(Log {
+                        file: Arc::new(file),
+                        salt: slot.salt,
+                        encryption: Arc::clone(&slot.encryption),
+                    });
+                }
+                LogState::Uncreated => {}
             }
         }
+        let file = dir.open(&log_path(number), false)?;
+        let mut header = [0; crate::wal::LOG_HEADER];
+        file.read_at(&mut header, 0)?;
+        let header = LogHeader::of(&header, number)
+            .ok_or_else(|| anyhow!("{number:?}'s log has no header of its own"))?;
+        let encryption = header.encryption(number, &self.keys)?;
+        Ok(Log { file: Arc::new(file), salt: header.salt, encryption })
     }
 
     /// cladefs: segment `number`'s raw file, as stored, whose data a commit's record checks
@@ -853,9 +975,8 @@ impl<F: File> Segments<F> {
         debug_assert!(self.full.is_empty(), "{number:?} closes before those filled before it");
         let next = SegmentId { number: number.number + 1, ..number };
         let salt = new_salt(self.lifetime, next);
-        let placing = (&mut self.spares, &mut self.prepared);
         let (dek, key) = self.keys.try_encrypting()?;
-        let (phase, synced) = create_open(dir, next, placing, salt, (&dek, key))?;
+        let (phase, encryption) = create_open(dir, next, (&dek, key))?;
         // Nothing fails from here on.
         let window = std::mem::replace(&mut self.window, Window::starting(number.cell, epoch + 1));
         // What was written to it since the last commit, the next flush syncs, before it appends
@@ -866,10 +987,8 @@ impl<F: File> Segments<F> {
         let written = std::mem::take(&mut self.written);
         let last = Some(epoch);
         let unframed = self.seal_off(number, (window, last), epoch, next_sequence, written);
-        self.tracked.insert(next, Segment::new_in(phase, self.ephemeral));
-        if !synced {
-            self.unsynced_entries.insert(next);
-        }
+        self.tracked.insert(next, Segment::new_in(phase, self.ephemeral, salt, encryption));
+        self.unsynced_entries.insert(next);
         self.open = next;
         self.committed_len = 0;
         self.opened = Instant::now();
@@ -939,6 +1058,9 @@ impl<F: File> Segments<F> {
             Phase::Full { raw, encryption, .. } => (raw.clone(), encryption.clone()),
             _ => unreachable!("{number:?}, closing, is open or full"),
         };
+        if let Some(slot) = segment.log.as_mut() {
+            slot.drop_handle();
+        }
         let weak_raw = raw.as_ref().map(Arc::downgrade).unwrap_or_default();
         let weak_file = raw.as_ref().map(|r| Arc::downgrade(r.file())).unwrap_or_default();
         segment.phase = Phase::Framing {
@@ -982,16 +1104,18 @@ impl<F: File> Segments<F> {
         let number = self.open;
         let next = SegmentId { number: number.number + 1, ..number };
         let salt = new_salt(self.lifetime, next);
-        let placing = (&mut self.spares, &mut self.prepared);
         let (dek, key) = self.keys.try_encrypting()?;
-        let (phase, synced) = create_open(dir, next, placing, salt, (&dek, key))?;
+        let (phase, encryption) = create_open(dir, next, (&dek, key))?;
         let window = std::mem::replace(&mut self.window, Window::starting(number.cell, epoch + 1));
         let segment = self.tracked.get_mut(&number).unwrap();
         let Phase::Open { raw, .. } = &segment.phase else {
             unreachable!("the open segment is open")
         };
-        let encryption = raw.encryption().clone();
-        segment.phase = Phase::Full { raw: Some(raw.clone()), encryption, window };
+        let full_encryption = raw.encryption().clone();
+        segment.phase = Phase::Full { raw: Some(raw.clone()), encryption: full_encryption, window };
+        if let Some(slot) = segment.log.as_mut() {
+            slot.drop_handle();
+        }
         self.full.push(number);
         // cladefs: keep at most `FULL_OPEN_LIMIT` full segments' raw handles open between commits
         // so unbounded writes between commits never exhaust `RLIMIT_NOFILE` (board 12887).
@@ -1003,10 +1127,8 @@ impl<F: File> Segments<F> {
                 *raw = None;
             }
         }
-        self.tracked.insert(next, Segment::new_in(phase, self.ephemeral));
-        if !synced {
-            self.unsynced_entries.insert(next);
-        }
+        self.tracked.insert(next, Segment::new_in(phase, self.ephemeral, salt, encryption));
+        self.unsynced_entries.insert(next);
         self.open = next;
         self.committed_len = 0;
         self.opened = Instant::now();
@@ -1156,151 +1278,19 @@ impl<F: File> Segments<F> {
             .into_iter()
             .partition::<Vec<_>, _>(|(last, _)| *last <= durable);
         self.raw = staying;
-        going.into_iter().map(|(_, number)| number).collect()
+        let retired: Vec<SegmentId> = going.into_iter().map(|(_, number)| number).collect();
+        for &number in &retired {
+            if let Some(segment) = self.tracked.get_mut(&number) {
+                segment.log = None;
+            }
+        }
+        retired
     }
 
-    /// cladefs: whether `segment` has its log still: open, being framed, or framed and its raw file
-    /// and log not gone yet, as its commits aren't durable.
+    /// cladefs: whether `segment` still has a live log slot: open, full, being framed, failed, or
+    /// framed whose raw file and log have not yet retired via [`Segments::raw`].
     pub fn has_log(&self, segment: SegmentId) -> bool {
-        let framed = self.raw.iter().any(|(_, number)| *number == segment);
-        let phase = self.tracked.get(&segment).map(|segment| &segment.phase);
-        framed
-            || matches!(
-                phase,
-                Some(
-                    Phase::Open { .. }
-                        | Phase::Full { .. }
-                        | Phase::Framing { .. }
-                        | Phase::Failed { .. }
-                )
-            )
-    }
-
-    /// cladefs: what to prepare of the next segment's log, if anything: none if it is prepared, or
-    /// being, that segment's; a spare to prepare it from, if any (TASK-333).
-    pub fn to_prepare(&mut self) -> Option<Preparation> {
-        let next = SegmentId { number: self.open.number + 1, ..self.open };
-        if self.preparing || self.prepared.is_some() {
-            // One prepared is the next segment's: the opening takes it, or gives it back a spare.
-            debug_assert!(self.prepared.as_ref().is_none_or(|ready| ready.segment == next));
-            return None;
-        }
-        self.preparing = true;
-        let spare = self.spares.pop();
-        let Ok((dek, key)) = self.keys.try_encrypting() else {
-            self.preparing = false;
-            return None;
-        };
-        let encryption = new_encryption((&dek, key));
-        Some(Preparation { segment: next, spare, salt: new_salt(self.lifetime, next), encryption })
-    }
-
-    /// cladefs: a preparation's log is made, as `prepared` says: if it is still the next segment's,
-    /// placed in `dir`, there under its name, beside the next segment's raw file, the spare raw
-    /// file renamed, or a file made anew: changes to directories, which sync nothing, here,
-    /// holding the state, so that no opening of the segment makes them meanwhile (TASK-384).
-    /// Returns what of the preparation is left: the entries of the segment placed, to make durable
-    /// ([`Segments::placed_synced`]), the preparation running until then; or, one prepared for a
-    /// segment opened meanwhile, with a log of its own, the next's to prepare then, of the log
-    /// prepared, the preparation going on; or, one failed, the spare it took a spare again, if the
-    /// cell keeps another ([`SPARES`]), else its name to remove, the preparation ended.
-    pub fn prepared<D: Dir<File = F>>(
-        &mut self,
-        dir: &D,
-        prepared: Result<Prepared<F>, (Option<SegmentId>, Error)>,
-    ) -> Preparing {
-        let next = SegmentId { number: self.open.number + 1, ..self.open };
-        let spare = match prepared {
-            Ok(prepared) if prepared.segment == next => {
-                let spare = prepared.spare;
-                match self.place_prepared(dir, prepared) {
-                    Ok(placed) => {
-                        self.prepared = Some(placed);
-                        return Preparing::Placed(next);
-                    }
-                    Err(error) => {
-                        log::warn!("extent store: placing {next:?}'s raw file and log: {error:#}");
-                        spare
-                    }
-                }
-            }
-            // cladefs: its log the next's, the preparation going on: the opening began none, this
-            // one running, and ended here, it left the next segment nothing prepared until another
-            // flush or closing, the last flush's having found it running (TASK-404).
-            Ok(stale) => {
-                // cladefs: the next's raw file encrypted under a salt of its own, drawn anew
-                // (TASK-411.5).
-                let Ok((dek, key)) = self.keys.try_encrypting() else {
-                    self.preparing = false;
-                    return Preparing::Ended(Some(stale.spare));
-                };
-                let (salt, encryption) =
-                    (new_salt(self.lifetime, next), new_encryption((&dek, key)));
-                let spare = Some(stale.spare);
-                return Preparing::Again(Preparation { segment: next, spare, salt, encryption });
-            }
-            Err((spare, error)) => {
-                log::warn!("extent store: preparing {next:?}'s log: {error:#}");
-                self.preparing = false;
-                let Some(spare) = spare else { return Preparing::Ended(None) };
-                spare
-            }
-        };
-        self.preparing = false;
-        if self.wants_spare() {
-            self.spares.push(spare);
-            return Preparing::Ended(None);
-        }
-        Preparing::Ended(Some(spare))
-    }
-
-    /// cladefs: places `prepared`, the next segment's log, prepared, there under its name in `dir`,
-    /// beside the segment's raw file, made anew. Fails leaving the log a spare, under its spare's
-    /// name, and no raw file of the segment's.
-    fn place_prepared<D: Dir<File = F>>(
-        &self,
-        dir: &D,
-        prepared: Prepared<F>,
-    ) -> Result<Placed<F>, Error> {
-        let Prepared { segment, spare, file, salt, encryption } = prepared;
-        let raw = dir.create(&open_segment_path(segment), true)?;
-        let (from, to) = (spare_path(spare), log_path(segment));
-        if let Err(error) = dir.rename(&from, &to) {
-            let path = open_segment_path(segment);
-            if let Err(err) = dir.remove(&path) {
-                log::warn!("extent store: removing {path}: {err}");
-            }
-            return Err(Error::new(error).context(format!("renaming {from} {to}")));
-        }
-        Ok(Placed { segment, raw, log: file, salt, encryption, synced: false })
-    }
-
-    /// cladefs: the entries of segment `segment`, placed ([`Segments::prepared`]), were made
-    /// durable, or not, as `synced` says, which ends the preparation: the segment, opened
-    /// meanwhile, needs no flush to sync them, nor, opening later, does it (TASK-384). Returns the
-    /// next's preparation, if the segment opened meanwhile, the preparation going on with it: the
-    /// opening began none, this one running (TASK-404).
-    pub fn placed_synced(&mut self, segment: SegmentId, synced: bool) -> Option<Preparation> {
-        self.preparing = false;
-        if synced {
-            match &mut self.prepared {
-                Some(placed) if placed.segment == segment => placed.synced = true,
-                _ => {
-                    self.unsynced_entries.remove(&segment);
-                }
-            }
-        }
-        self.to_prepare()
-    }
-
-    /// cladefs: the next segment, if its raw file and log are placed ahead of it (TASK-384).
-    pub fn placed(&self) -> Option<SegmentId> {
-        self.prepared.as_ref().map(|placed| placed.segment)
-    }
-
-    /// cladefs: whether the next segment's log is being prepared ([`Segments::to_prepare`]).
-    pub fn preparing(&self) -> bool {
-        self.preparing
+        self.tracked.get(&segment).is_some_and(|segment| segment.log.is_some())
     }
 
     /// cladefs: whether the cell keeps another spare log ([`SPARES`]).
@@ -1411,14 +1401,10 @@ impl<F: File> Segments<F> {
         for (path, open) in self.closed_unsynced.drain(..) {
             syncs.cached_path(path, open);
         }
-        // cladefs: none if the segments opened since had theirs made durable as they were placed
-        // (TASK-384).
         if !std::mem::take(&mut self.closed_since) || self.unsynced_entries.is_empty() {
             return BTreeSet::new();
         }
-        for kind in [OPEN_SEGMENTS, LOGS] {
-            syncs.dir(cell_dir(kind, self.open.cell));
-        }
+        syncs.dir(cell_dir(OPEN_SEGMENTS, self.open.cell));
         self.unsynced_entries.clone()
     }
 
@@ -1598,10 +1584,11 @@ impl<F: File> Unframed<F> {
 pub(crate) fn make_durable<D: Dir>(
     dir: &D,
     cell: u64,
-    (framed, entries): (&[(SegmentId, Arc<Framed<D::File>>)], bool),
+    (framed, entries, logged): (&[(SegmentId, Arc<Framed<D::File>>)], bool, &[bool]),
     since: Instant,
     cache_only: bool,
 ) -> Result<(), Error> {
+    debug_assert_eq!(framed.len(), logged.len());
     // Where the segments are framed, written, not yet durable: their framings still running.
     fail::fail_point!("segments::making_durable");
     let mut timing = Timing::since(since);
@@ -1619,9 +1606,7 @@ pub(crate) fn make_durable<D: Dir>(
     }
     if entries {
         let mut opened = Syncs::default();
-        for kind in [OPEN_SEGMENTS, LOGS] {
-            opened.dir(cell_dir(kind, cell));
-        }
+        opened.dir(cell_dir(OPEN_SEGMENTS, cell));
         opened.sync_dirs(dir)?;
     }
     timing.took(durable::ENTRIES);
@@ -1640,9 +1625,17 @@ pub(crate) fn make_durable<D: Dir>(
     syncs.dir(cell_dir(SEGMENTS, cell));
     syncs.sync_files(dir)?;
     timing.took(durable::FILES);
-    for &(number, _) in framed {
+    for (i, &(number, _)) in framed.iter().enumerate() {
         let (from, to) = (framing_path(number), segment_path(number));
         dir.rename(&from, &to).with_context(|| format!("renaming {from} {to}"))?;
+        // cladefs: wal::recover detects a missing earlier framed segment via `raw && own` (a
+        // durable log file). When either adjacent segment in a multi-segment batch has no durable
+        // log yet (lazy log creation, board 11709), flush `SEGMENTS` between renames so the later
+        // framed segment can never survive a crash without the earlier one.
+        if i + 1 < framed.len() && (!logged[i] || !logged[i + 1]) {
+            syncs.sync_dirs(dir)?;
+            dir.barrier()?;
+        }
     }
     syncs.sync_dirs(dir)?;
     dir.barrier()?;
@@ -2172,90 +2165,6 @@ pub(crate) fn fold(cell: u64, commits: &[Contents]) -> Contents {
     window.contents(last, next_sequence)
 }
 
-/// cladefs: a segment's log made ahead of the segment, off the cell's state lock: a spare log,
-/// `spare`'s by its name, or a file made anew under `spare`'s name, its header `segment`'s, its
-/// records salted `salt`, synced ([`Preparation::prepare`], TASK-333). Placed, if the segment is
-/// still the next, renamed its log, beside its raw file ([`Segments::prepared`]).
-pub(crate) struct Prepared<F> {
-    segment: SegmentId,
-    spare: SegmentId,
-    file: F,
-    salt: u64,
-    encryption: Arc<RawEncryption>,
-}
-
-/// cladefs: the next segment's raw file and log, made ahead of it, there under their names, which
-/// its opening takes, changing no directory ([`create_open`]); their entries made durable off the
-/// cell's state lock, `synced` once they are, as no commit then waits for (TASK-384). An opening
-/// that renamed them, or made them, there, left their entries to the commits' next flush to sync,
-/// each a commit of the host's journal that a durable commit waited for, one per segment opened.
-pub(crate) struct Placed<F> {
-    segment: SegmentId,
-    raw: F,
-    log: F,
-    salt: u64,
-    encryption: Arc<RawEncryption>,
-    synced: bool,
-}
-
-/// cladefs: what of a preparation is left once its log is made ([`Segments::prepared`]).
-pub(crate) enum Preparing {
-    /// The segment's raw file and log placed, their entries to make durable, the preparation
-    /// running until then ([`Segments::placed_synced`]).
-    Placed(SegmentId),
-    /// Its segment opened meanwhile, with a log of its own: the next's to prepare, of the log it
-    /// made, the preparation running on (TASK-404).
-    Again(Preparation),
-    /// The preparation ended, a spare log's name to remove, if it left one the cell keeps not.
-    Ended(Option<SegmentId>),
-}
-
-/// cladefs: the bit set in the number naming a log a preparation made anew
-/// ([`Preparation::prepare`]), past every segment's number.
-const MADE: u64 = 1 << 63;
-
-/// cladefs: what to prepare of segment `segment`'s log ([`Segments::to_prepare`]): from `spare`'s
-/// spare log, if any, else a file made anew under a spare's name of its own ([`MADE`]), salted
-/// `salt`; cladefs: encrypted by `encryption`, with its raw file, if the cell is encrypted
-/// (TASK-411.5).
-pub(crate) struct Preparation {
-    segment: SegmentId,
-    spare: Option<SegmentId>,
-    salt: u64,
-    encryption: Arc<RawEncryption>,
-}
-
-impl Preparation {
-    /// Prepares the log in `dir`: its header written, then synced, under a spare's name, so that
-    /// a crash leaves a spare, whatever its header says, which a log made of it writes over. Its
-    /// sync waits behind the host's file system's journal, on a disk VMs share 0.1-1.4 s: it held
-    /// the cell's state lock in `create_open`, a write filling the open segment, every write and
-    /// read of the cell and its flushes waiting (TASK-333). Fails with the spare it took.
-    pub fn prepare<D: Dir>(self, dir: &D) -> Result<Prepared<D::File>, (Option<SegmentId>, Error)> {
-        let Self { segment, spare, salt, encryption } = self;
-        // Where it runs, off the cell's state lock, the segment's opening free to come first.
-        fail::fail_point!("segments::preparing");
-        // A file made anew under a name no segment's spare log has: a stale one, its segment
-        // opened with another log, its spare later, would take the name, the file a preparation
-        // held then gone from under it.
-        let made = SegmentId { number: segment.number | MADE, ..segment };
-        let named = spare.unwrap_or(made);
-        let path = spare_path(named);
-        let make = || -> io::Result<D::File> {
-            let log = match spare {
-                Some(_) => dir.open(&path, false)?,
-                None => dir.create(&path, false)?,
-            };
-            write_header(&log, salt, segment, &encryption)?;
-            Ok(log)
-        };
-        match make() {
-            Ok(file) => Ok(Prepared { segment, spare: named, file, salt, encryption }),
-            Err(error) => Err((spare, Error::new(error).context(format!("preparing {path}")))),
-        }
-    }
-}
-
 /// cladefs: writes the header of `segment`'s log, its records salted `salt`, to `log`, and syncs it
 /// (`wal::log_header`), MACed by `encryption`.
 fn write_header<F: File>(
@@ -2270,38 +2179,23 @@ fn write_header<F: File>(
     log.sync()
 }
 
-/// cladefs: the phase of a new open segment, `segment`, whose raw file and log it makes in `dir`,
-/// and whether their entries are durable: the raw file and log placed for it, if any, its log's
-/// header durable, their entries too once their preparation synced them (TASK-333, TASK-384);
-/// else a raw file made anew, and its log a spare, or a file made anew, its header written and
-/// synced here.
-fn create_open<D: Dir>(
+/// cladefs: creates (or recycles `spare` into) `segment`'s log file in `dir`, writing and syncing
+/// its salted header before renaming any spare so a crash never leaves a previous segment's header
+/// under `segment`'s name (TASK-301, TASK-310 crash round 270, board 11709). Called off
+/// `LocalCell::state` lock by the first flush appending records to `segment` (board 1770).
+pub(crate) fn create_log_file<D: Dir>(
     dir: &D,
     segment: SegmentId,
-    (spares, placed): (&mut Vec<SegmentId>, &mut Option<Placed<D::File>>),
     salt: u64,
-    encrypting: bucket_cell::layout::EncryptionKey<'_>,
-) -> Result<(Phase<D::File>, bool), Error> {
-    if let Some(ready) = placed.take_if(|ready| ready.segment == segment && ready.salt == salt) {
-        let raw = Arc::new(RawFile::new(ready.raw, ready.encryption.clone()));
-        let log = Log { file: Arc::new(ready.log), salt, encryption: ready.encryption };
-        return Ok((Phase::Open { raw, log }, ready.synced));
-    }
-    // cladefs: encrypted, as every cell is, under its cell's newest DEK (TASK-411.5).
-    let encryption = new_encryption(encrypting);
-    let raw =
-        Arc::new(RawFile::new(dir.create(&open_segment_path(segment), true)?, encryption.clone()));
-    // cladefs: its log a spare, if there is one, its header written over the one there (TASK-301):
-    // durable before any record is appended, and before the spare is renamed its log: renamed
-    // first, a crash, or a failure, before the header was durable left the spare's header, and the
-    // records it salts, its last segment's, under this segment's name, which an opening took for
-    // this segment's commits, their runs past its raw data (TASK-310's crash round 270).
+    encryption: &RawEncryption,
+    spare: Option<SegmentId>,
+) -> Result<Arc<D::File>, Error> {
     let path = log_path(segment);
     let headed = |log: D::File| -> io::Result<D::File> {
-        write_header(&log, salt, segment, &encryption)?;
+        write_header(&log, salt, segment, encryption)?;
         Ok(log)
     };
-    let reused = spares.pop().map(|spare| {
+    let reused = spare.map(|spare| {
         let spare = spare_path(spare);
         let log = headed(dir.open(&spare, false)?)?;
         dir.rename(&spare, &path)?;
@@ -2315,7 +2209,23 @@ fn create_open<D: Dir>(
         }
         None => headed(dir.create(&path, false)?)?,
     };
-    Ok((Phase::Open { raw, log: Log { file: Arc::new(log), salt, encryption } }, false))
+    Ok(Arc::new(log))
+}
+
+/// cladefs: the phase and encryption of a new open segment, `segment`, creating only its raw file
+/// in `dir` with zero `fsync`s under `LocalCell::state` lock (board 11709, board 1770). Its log
+/// file is created lazily off the state lock on the first flush recording commits in it
+/// ([`create_log_file`]).
+fn create_open<D: Dir>(
+    dir: &D,
+    segment: SegmentId,
+    encrypting: bucket_cell::layout::EncryptionKey<'_>,
+) -> Result<(Phase<D::File>, Arc<RawEncryption>), Error> {
+    // cladefs: encrypted, as every cell is, under its cell's newest DEK (TASK-411.5).
+    let encryption = new_encryption(encrypting);
+    let raw =
+        Arc::new(RawFile::new(dir.create(&open_segment_path(segment), true)?, encryption.clone()));
+    Ok((Phase::Open { raw }, encryption))
 }
 
 /// cladefs: the encryption of a new segment's raw file and log, under `encrypting`'s DEK, its
@@ -2420,8 +2330,14 @@ mod tests {
     fn framed_durably(dir: &MemDir, unframed: Unframed<MemFile>) -> Arc<Framed<MemFile>> {
         let number = unframed.number();
         let framed = unframed.frame(dir, Vec::new()).unwrap();
-        make_durable(dir, CELL.id, (&[(number, framed.clone())], false), Instant::now(), false)
-            .unwrap();
+        make_durable(
+            dir,
+            CELL.id,
+            (&[(number, framed.clone())], false, &[false]),
+            Instant::now(),
+            false,
+        )
+        .unwrap();
         framed
     }
 
@@ -2626,7 +2542,7 @@ mod tests {
         make_durable(
             &dir,
             CELL.id,
-            (&[(segment(0), framed.clone())], false),
+            (&[(segment(0), framed.clone())], false, &[false]),
             Instant::now(),
             false,
         )
@@ -2682,7 +2598,7 @@ mod tests {
         make_durable(
             &dir,
             CELL.id,
-            (&[(segment(0), framed.clone())], false),
+            (&[(segment(0), framed.clone())], false, &[false]),
             Instant::now(),
             false,
         )
@@ -2815,8 +2731,14 @@ mod tests {
         let locked = extent_frame::data(&object, &extent_frame::NoKeys);
         assert_eq!(locked, Err(extent_frame::Error::NoKey(key)));
         assert_eq!(in_the_clear(&dir, &noise), Vec::<String>::new());
-        make_durable(&dir, CELL.id, (&[(number, framed.clone())], false), Instant::now(), false)
-            .unwrap();
+        make_durable(
+            &dir,
+            CELL.id,
+            (&[(number, framed.clone())], false, &[false]),
+            Instant::now(),
+            false,
+        )
+        .unwrap();
         segments.framed(number, framed);
         let Source::Framed(read) = segments.source(&dir, number).unwrap() else { panic!() };
         let parts = &read.parts;
@@ -2927,7 +2849,7 @@ mod tests {
         assert_eq!(closed.iter().map(Unframed::len).collect::<Vec<_>>(), [2 * BLOCK, 0]);
         let mut syncs = Syncs::default();
         segments.take_syncs(&mut syncs);
-        assert_eq!(syncs.files().1.len(), 3, "the raw files of the two filled and the open one");
+        assert_eq!(syncs.counts().1, 3, "the raw files of the two filled and the open one");
         for unframed in closed {
             let number = unframed.number();
             segments.framed(number, framed_durably(&dir, unframed));
@@ -2935,15 +2857,12 @@ mod tests {
         assert_eq!(data(&mut segments, &dir, segment(0))[BLOCK as usize], 2);
     }
 
-    /// cladefs: the next segment's log prepared off the state lock, a filling opens the next with
-    /// it, syncing nothing; one prepared for a segment opened meanwhile, the opening having made
-    /// its own, goes on as the next's, as does one whose segment opened before its entries were
-    /// durable, no opening beginning another while it runs (TASK-404); and every log's header is
-    /// its segment's (TASK-333). Before, the filling wrote and synced the header, holding the
-    /// cell's state lock; and the preparation ended there, leaving the next segment nothing
-    /// prepared until another flush or closing began one.
+    /// cladefs: board 11709 / board 1770: opening a new segment on `fill` or `close` creates only
+    /// its raw file with zero file or directory syncs under `LocalCell::state` lock; its log file
+    /// is created lazily off the lock via `take_log_init` + `create_log_file` (reusing spare logs
+    /// when present), and `has_durable_log` flips true only after `log_entries_synced`.
     #[test]
-    fn segments_open_with_their_logs_prepared_syncing_nothing() {
+    fn segments_open_syncing_nothing_and_create_logs_lazily() {
         let dir = MemDir::new();
         let mut segments = opened(&dir, 64);
         let headed = |number: u64| {
@@ -2952,55 +2871,50 @@ mod tests {
             log.read_at(&mut header, 0).unwrap();
             crate::wal::log_salt(&header, segment(number)).is_some()
         };
-        // Made, then placed, its entries made durable, as the cell's opener does: what of the
-        // preparation goes on.
-        let prepare = |segments: &mut Segments<MemFile>, preparation: Preparation| match segments
-            .prepared(&dir, preparation.prepare(&dir))
-        {
-            Preparing::Placed(placed) => segments.placed_synced(placed, true),
-            Preparing::Again(next) => Some(next),
-            Preparing::Ended(stale) => panic!("the preparation ended, {stale:?} to remove"),
+        assert!(dir.list(&cell_dir(LOGS, CELL.id)).unwrap().is_empty(), "no eager log on open");
+        assert!(!segments.has_durable_log(segment(0)));
+
+        // Lazily create segment 0's log off lock.
+        let LogInit::Create { salt, encryption, spare } = segments.take_log_init(segment(0)) else {
+            panic!("expected lazy creation for segment 0");
         };
-        let preparation = segments.to_prepare().expect("the next's log to prepare");
-        assert!(segments.to_prepare().is_none(), "one at a time");
-        assert!(prepare(&mut segments, preparation).is_none(), "segment 1's placed");
-        assert!(segments.to_prepare().is_none(), "the next's prepared");
+        assert_eq!(spare, None);
+        let file = create_log_file(&dir, segment(0), salt, &encryption, spare).unwrap();
+        segments.install_log(segment(0), file);
+        assert!(headed(0));
+        assert!(!segments.has_durable_log(segment(0)), "not durable until logs dir synced");
+        segments.log_entries_synced(&[segment(0)]);
+        assert!(segments.has_durable_log(segment(0)));
+        assert!(matches!(segments.take_log_init(segment(0)), LogInit::Existing(_)));
+
+        // Filling/closing opens the next segment with ZERO file or dir syncs under lock.
         write(&mut segments, 1);
-        let before = dir.io().synced_files;
+        let before = dir.io();
         segments.fill(&dir, 1).unwrap();
-        assert_eq!(dir.io().synced_files - before, 0, "a filling syncs nothing");
-        assert!(headed(1), "segment 1's log, its header its own");
-        // Its next's being prepared, a filling opens it with a log of its own, its header synced.
-        let preparation = segments.to_prepare().expect("segment 2's log to prepare");
-        write(&mut segments, 2);
-        let before = dir.io().synced_files;
-        segments.fill(&dir, 1).unwrap();
-        assert_eq!(dir.io().synced_files - before, 1, "the header's sync, nothing prepared");
-        assert!(headed(2), "segment 2's log, its header its own");
-        assert!(segments.to_prepare().is_none(), "segment 2's preparing still");
-        // Late, it goes on as segment 3's, of the log it made.
-        let again = prepare(&mut segments, preparation).expect("segment 3's log to prepare");
-        let made = SegmentId { number: 2 | MADE, ..segment(2) };
-        assert_eq!((again.segment, again.spare), (segment(3), Some(made)));
-        assert!(segments.to_prepare().is_none(), "one at a time");
-        assert!(prepare(&mut segments, again).is_none(), "segment 3's placed");
-        assert!(segments.spares.is_empty(), "no spare left of segment 2's");
-        write(&mut segments, 3);
-        segments.fill(&dir, 1).unwrap();
-        assert!(headed(3), "segment 3's log, of segment 2's late, its header its own");
-        // Placed, its segment opened before its entries were durable: it goes on as the next's.
-        let preparation = segments.to_prepare().expect("segment 4's log to prepare");
-        let Preparing::Placed(placed) = segments.prepared(&dir, preparation.prepare(&dir)) else {
-            panic!("segment 4's placed");
+        let after = dir.io();
+        assert_eq!(after.synced_files - before.synced_files, 0, "fill syncs no files");
+        assert_eq!(after.synced_dirs - before.synced_dirs, 0, "fill syncs no dirs");
+        assert!(dir.open(&log_path(segment(1)), false).is_err(), "no eager log on fill");
+        assert!(
+            segments.has_durable_log(segment(0)),
+            "filled segment retains durable-log state after dropping its open log FD"
+        );
+        assert!(
+            matches!(segments.take_log_init(segment(0)), LogInit::Reopen { .. }),
+            "filled segment drops its open log handle and reopens on demand (board 12887)"
+        );
+
+        // Recycling a spare log reuses it with segment 1's own salted header.
+        dir.rename(&log_path(segment(0)), &spare_path(segment(0))).unwrap();
+        segments.spare(segment(0));
+        let LogInit::Create { salt, encryption, spare } = segments.take_log_init(segment(1)) else {
+            panic!("expected lazy creation for segment 1");
         };
-        write(&mut segments, 4);
-        segments.fill(&dir, 1).unwrap();
-        assert!(headed(4), "segment 4's log, placed, its header its own");
-        assert!(segments.to_prepare().is_none(), "segment 4's preparing still");
-        let again = segments.placed_synced(placed, true).expect("segment 5's log to prepare");
-        assert_eq!(again.segment, segment(5));
-        assert!(prepare(&mut segments, again).is_none(), "segment 5's placed");
-        assert_eq!(segments.placed(), Some(segment(5)));
+        assert_eq!(spare, Some(segment(0)));
+        let file = create_log_file(&dir, segment(1), salt, &encryption, spare).unwrap();
+        segments.install_log(segment(1), file);
+        assert!(headed(1), "segment 1's recycled spare has segment 1's header");
+        assert!(dir.open(&spare_path(segment(0)), false).is_err(), "spare consumed");
     }
 
     /// cladefs: a segment opened has its entries unsynced until a sync that began after it opened
@@ -3031,9 +2945,10 @@ mod tests {
     }
 
     /// A commit syncs the open segment's file if it was written since the last commit, keeping
-    /// its pages cached (TASK-92.23), and the directories of open segments and of logs if one
-    /// closed, but not of framed ones, which framings sync (TASK-310); cladefs: and the raw file of
-    /// one closed, if written since, which its commits' records name the data of (TASK-165.9).
+    /// its pages cached (TASK-92.23), and the directory of open segments if one closed, but not of
+    /// framed ones, which framings sync (TASK-310), nor of logs, which flushes creating logs sync
+    /// (board 11709); cladefs: and the raw file of one closed, if written since, which its commits'
+    /// records name the data of (TASK-165.9).
     #[test]
     fn only_written_open_segments_are_synced() {
         let dir = MemDir::new();
@@ -3049,7 +2964,7 @@ mod tests {
         assert_eq!(syncs(&mut segments), ((0, 0), vec![]));
         write(&mut segments, 2);
         segments.close(&dir, 1, 0).unwrap();
-        let dirs = vec![cell_dir(LOGS, CELL.id), cell_dir(OPEN_SEGMENTS, CELL.id)];
+        let dirs = vec![cell_dir(OPEN_SEGMENTS, CELL.id)];
         assert_eq!(syncs(&mut segments), ((0, 1), dirs));
         segments.append(BLOCK).unwrap();
         assert_eq!(syncs(&mut segments), ((0, 1), vec![]));
@@ -3078,6 +2993,15 @@ mod tests {
             .filter(|s| matches!(s.phase, Phase::Full { raw: Some(_), .. }))
             .count();
         assert_eq!(open_full, FULL_OPEN_LIMIT);
+        let open_full_logs = segments
+            .tracked
+            .values()
+            .filter(|s| {
+                matches!(s.phase, Phase::Full { .. })
+                    && s.log.as_ref().is_some_and(|slot| matches!(slot.state, LogState::Open(_)))
+            })
+            .count();
+        assert_eq!(open_full_logs, 0);
         // Every full segment — including those whose raw handle was dropped — is still readable.
         for (i, &number) in filled_ids.iter().enumerate() {
             let Source::Raw(raw) = segments.source(&dir, number).unwrap() else {
