@@ -3591,10 +3591,15 @@ impl<D: Dir> LocalCell<D> {
             let state = self.state()?;
             let durable = self.uploadable();
             let segments = &state.segments;
+            let deferred = &state.deferred;
             state
                 .wal
                 .pending_writing(durable, limit, |number| {
-                    segments.is_writing(SegmentId { cell: self.cell.id, number })
+                    // When Shuttle tests turn `framings_end_themselves` off (board 13424),
+                    // segments in `state.deferred` have not started framing yet; waiting on them
+                    // would deadlock instead of surfacing the missing segment to the caller.
+                    let segment = SegmentId { cell: self.cell.id, number };
+                    segments.is_writing(segment) && !deferred.iter().any(|u| u.number() == segment)
                 })
                 .into_iter()
                 .map(|number| SegmentId { cell: self.cell.id, number })
