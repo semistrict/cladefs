@@ -16,7 +16,7 @@ from script import SCRIPTS
 
 ROOT = SCRIPTS.parent
 EXAMPLES = ROOT / "docs" / "examples"
-DAEMON = ROOT / "crates" / "cladefs" / "src" / "cladefsd"
+DAEMON = ROOT / "crates" / "cladefsd" / "src"
 
 
 def served():
@@ -52,7 +52,7 @@ class Examples(unittest.TestCase):
         self.assertRegex(unit, r"(?m)^User=cladefsd$")
         # What needs them: the grant's chown, mode and link, the check of a VM process, and
         # proactive cgroup memory.reclaim on connected VMs.
-        grants = (DAEMON / "mod.rs").read_text()
+        grants = (DAEMON / "lib.rs").read_text()
         self.assertIn("std::os::unix::fs::chown(&bound, uid, gid)?;", grants)
         self.assertIn("std::fs::hard_link(&bound, socket)?;", grants)
         self.assertIn("process.signal(0)", (DAEMON / "server.rs").read_text())

@@ -64,7 +64,8 @@ if part clippy; then
     # boards 10218, 10489), and the Shuttle, loom and madsim builds below. `--no-deps` keeps
     # Fuchsia path dependencies under the workspace rule above.
     cladefs_crates=(
-        -p base32_id -p block_device -p bucket_cell -p cladefs -p cladefs_core -p cladefs_fs -p cladefs_wire -p cladefsd -p cladefs-examples
+        -p base32_id -p block_device -p bucket_cell -p cladefs -p cladefs_core -p cladefs_fs
+        -p cladefs_proto -p cladefs_wire -p cladefsd -p cladefs-examples
         -p extent_frame -p extent_keys -p formats -p fxfs-automount -p fxfs-posix
         -p fxfs-sim-diff -p gc_wasm -p host_fs -p libcladefs -p local_cell -p node_local
         -p sqlite_cladefs -p virtio_extent

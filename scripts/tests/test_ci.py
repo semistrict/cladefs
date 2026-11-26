@@ -77,10 +77,13 @@ class Ci(unittest.TestCase):
         """What lets the job install neither but in the firecracker part: the gRPC API compiled by
         protox, not protoc, and no bindgen, which loads libclang, in cladefs's workspace or the guest
         tests'. One that comes needs them back. The VMM's has it, its part's own libclang's why.
-        cladefs: protox's descriptors generated from, its tonic-build told to run no protoc."""
-        build = (ROOT / "crates/cladefs/build.rs").read_text()
-        self.assertIn("protox::Compiler", build)
-        self.assertIn(".skip_protoc_run()", build)
+        cladefs: protox's descriptors generated from, its tonic-build told to run no protoc: in
+        every crate that compiles a .proto, cladefs's APIs' (cladefs_proto, since the crate split)
+        and machined's (board 13467)."""
+        for crate in ["cladefs_proto", "machined"]:
+            build = (ROOT / "crates" / crate / "build.rs").read_text()
+            self.assertIn("protox::Compiler", build, crate)
+            self.assertIn(".skip_protoc_run()", build, crate)
         for lock in [ROOT / "Cargo.lock", ROOT / "guest/tests/Cargo.lock"]:
             self.assertNotIn('name = "bindgen"', lock.read_text(), lock)
         self.assertIn('name = "bindgen"', (ROOT / "vendor/firecracker.lock").read_text())
@@ -103,6 +106,12 @@ class Ci(unittest.TestCase):
         crates_block = re.search(r"cladefs_crates=\(\n(.*?)\n    \)", body, re.DOTALL)
         self.assertIsNotNone(crates_block, "scripts/test.sh clippy part missing cladefs_crates")
         listed = re.findall(r"-p\s+([A-Za-z0-9_-]+)", crates_block.group(1))
+        # libmachine's and machined's crates under clippy's default lints, their own line (board
+        # 13054), not cladefs_lints.
+        libmachine_block = re.search(r"libmachine_crates=\((.*?)\)", body, re.DOTALL)
+        self.assertIsNotNone(libmachine_block, "scripts/test.sh clippy part missing libmachine_crates")
+        listed += re.findall(r"-p\s+([A-Za-z0-9_-]+)", libmachine_block.group(1))
+        self.assertIn('"${libmachine_crates[@]}" \\\n        --all-targets -- -D warnings', body)
         expected = []
         for path in sorted((ROOT / "crates").iterdir()):
             manifest = path / "Cargo.toml"
@@ -121,9 +130,9 @@ class Ci(unittest.TestCase):
         for required in [
             '--no-deps \\\n        "${cladefs_crates[@]}" --tests --examples -- "${cladefs_lints[@]}"',
             '--no-deps \\\n        "${cladefs_crates[@]}" --lib --bins -- "${cladefs_lints[@]}"',
-            '--no-deps -p local_cell -p cladefs \\\n        --features shuttle --tests -- "${cladefs_lints[@]}"',
-            '--no-deps -p cladefs -p virtio_extent \\\n        --features loom --tests -- "${cladefs_lints[@]}"',
-            '--no-deps -p node_local -p host_fs \\\n        -p bucket_cell -p local_cell -p cladefs --lib --test madsim -- "${cladefs_lints[@]}"',
+            '--no-deps -p local_cell -p cladefs_core \\\n        --features shuttle --tests -- "${cladefs_lints[@]}"',
+            '--no-deps -p cladefs_core -p virtio_extent \\\n        --features loom --tests -- "${cladefs_lints[@]}"',
+            '--no-deps -p node_local -p host_fs \\\n        -p bucket_cell -p local_cell -p cladefs_core -p cladefs_fs -p cladefs_wire -p cladefsd -p cladefs -p libcladefs --lib --test madsim -- "${cladefs_lints[@]}"',
         ]:
             self.assertIn(required, body)
 

@@ -39,7 +39,7 @@ class TheCrates(unittest.TestCase):
 class OutsideTheSeam(unittest.TestCase):
     """cladefs: the daemon's threads, runtimes and blocking waits go through its seam (TASK-685.3)."""
 
-    def matches(self, source, path="crates/cladefs/src/cladefsd/x.rs"):
+    def matches(self, source, path="crates/cladefsd/src/x.rs"):
         return [(match.line, match.rule)
                 for match in rules.outside_the_seam(Path(path), textwrap.dedent(source))]
 
@@ -61,9 +61,9 @@ class OutsideTheSeam(unittest.TestCase):
 
     def test_the_seam_its_tests_and_other_crates_pass(self):
         source = "fn f() { tokio::task::spawn_blocking(work); }\n"
-        self.assertEqual(self.matches(source, "crates/cladefs/src/cladefsd/run.rs"), [])
-        self.assertEqual(self.matches(source, "crates/cladefs/src/cladefsd/tests.rs"), [])
-        self.assertEqual(self.matches(source, "crates/cladefs/src/fuse/x.rs"), [])
+        self.assertEqual(self.matches(source, "crates/cladefsd/src/run.rs"), [])
+        self.assertEqual(self.matches(source, "crates/cladefsd/src/tests.rs"), [])
+        self.assertEqual(self.matches(source, "crates/cladefs_fs/src/fuse/x.rs"), [])
         self.assertEqual(self.matches("""\
             fn f() {}
             #[cfg(test)]
