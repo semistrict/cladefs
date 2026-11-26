@@ -121,7 +121,7 @@ cladefs_rust_test(
     aliases = _DAEMON_ALIASES,
     crate = ":cladefsd_for_test",
     crate_features = ["failpoints", "testing", "tests-kms"],
-    data = ["//:Cargo.lock", "//formats:all"],
+    data = ["//:Cargo.lock", "//crates/cladefs:peer_tls_testdata", "//formats:all"],
     isolated = True,
     proc_macro_deps = all_crate_deps(proc_macro_dev = True),
     shard_count = 4,

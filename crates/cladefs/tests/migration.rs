@@ -705,7 +705,16 @@ fn a_target_noting_a_cell_taken_makes_its_acceptance_durable_first() {
     let failed = forked.source.hand_over(forked.child).unwrap_err();
     assert_eq!(failed.errno(), Some(cladefs::Errno::ENOTCONN), "{failed}");
     let deadline = Instant::now() + Duration::from_secs(30);
-    while !std::fs::read_to_string(&log).unwrap().contains("accepted: noted taken, not given up") {
+    // Wait until the reaper has both logged that it found the migration accepted AND finished its
+    // `host.accept` call (hitting `accepted_renamed`), so killing the target does not interrupt a
+    // concurrent `.new.<hex>` staging file mid-rename.
+    loop {
+        let logged = std::fs::read_to_string(&log).unwrap();
+        if logged.contains("accepted: noted taken, not given up")
+            && logged.contains("giving up migrations idle too long")
+        {
+            break;
+        }
         assert!(Instant::now() < deadline, "the reaper never found the migration accepted");
         std::thread::sleep(Duration::from_millis(100));
     }

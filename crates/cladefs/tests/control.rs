@@ -381,6 +381,9 @@ fn forks_of_cells_never_had_here() {
 fn shrinks_waiting_for_their_guests_hold_no_threads() {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    // Raise RLIMIT_NOFILE (e.g. on macOS, whose default 10,240 admits fewer than
+    // BLOCKING_THREADS + 16 connections under `cell_open_files()`).
+    cladefs::cladefsd::raise_open_files_limit().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let mut daemon = Daemon::new(dir.path());
     let idle = daemon.create(NEW, None).unwrap();

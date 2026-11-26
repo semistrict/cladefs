@@ -1325,7 +1325,7 @@ async fn two_processes_map_the_same_pages() {
     let (_cell, page) = map_first_page(&socket, &parent, extent);
     let ours = mapped_from(page);
     let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "cladefsd::tests::child_maps_an_extent", "--ignored", "--nocapture"])
+        .args(["--exact", "tests::child_maps_an_extent", "--ignored", "--nocapture"])
         .env(CHILD_SOCKET, &socket)
         .env(CHILD_CELL_DIR, &child)
         .env(CHILD_EXTENT, format!("{}:{}", extent.cell, extent.sequence))
@@ -1422,7 +1422,7 @@ fn vm_processes_tell_the_daemon_what_their_windows_cost() {
     let before = cladefs_core::stats::stats();
     let served = std::thread::spawn(move || serve_connection(ours, default_tenant().unwrap()));
     let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "cladefsd::tests::child_changes_its_window", "--ignored", "--nocapture"])
+        .args(["--exact", "tests::child_changes_its_window", "--ignored", "--nocapture"])
         .env(CHILD_CONNECTION, theirs.as_raw_fd().to_string())
         .env(CHILD_CELL_DIR, dir.path().join("store"))
         .output()
@@ -1651,7 +1651,7 @@ async fn two_vm_processes(env: &[&str]) -> TwoVmProcesses {
 
     let mut theirs = std::process::Command::new(std::env::current_exe().unwrap());
     theirs
-        .args(["--exact", "cladefsd::tests::child_maps_an_extent", "--ignored", "--nocapture"])
+        .args(["--exact", "tests::child_maps_an_extent", "--ignored", "--nocapture"])
         .env(CHILD_SOCKET, &socket)
         .env(CHILD_CELL_DIR, &child)
         .env(CHILD_EXTENT, format!("{}:{}", extent.cell, extent.sequence))
@@ -1801,7 +1801,7 @@ fn vm_processes_that_leave_their_sockets_to_children_are_gone() {
     std::thread::spawn(move || serve(listener));
     let cell_dir = dir.path().join("store");
     let mut process = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "cladefsd::tests::child_leaves_its_socket_to_a_child"])
+        .args(["--exact", "tests::child_leaves_its_socket_to_a_child"])
         .args(["--ignored", "--nocapture"])
         .env(CHILD_SOCKET, &socket)
         .env(CHILD_CELL_DIR, &cell_dir)
@@ -1847,7 +1847,7 @@ fn vm_processes_the_daemon_may_not_kill_are_refused() {
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
     let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "cladefsd::tests::child_opens_a_cell", "--ignored", "--nocapture"])
+        .args(["--exact", "tests::child_opens_a_cell", "--ignored", "--nocapture"])
         .env(CHILD_SOCKET, &socket)
         .env(CHILD_CELL_DIR, dir.path().join("store"))
         .output()
@@ -3088,7 +3088,12 @@ fn hundreds_of_writers_flush_on_threads_they_share() {
     const NAMES: [&str; 2] = ["cladefsd io", local_cell::pool::NAME];
     host();
     crate::raise_open_files_limit().unwrap();
-    let dir = tempfile::tempdir_in("/var/tmp").unwrap();
+    // CI runners (RLIMIT_NOFILE = 65536) admit fewer than 300 connections under worst-case
+    // `cell_open_files()`, though 300 simple writers use <2,000 FDs total (board 13823).
+    crate::server::CONNECTION_LIMITS_GIVEN.set((Some(CELLS + 16), 0)).unwrap();
+    // Prefer `/var/tmp` (real disk) when writable; fall back to the test temp dir inside
+    // read-only sandboxes (Bazel `linux-sandbox`, hotbed workspaces; board 13609).
+    let dir = tempfile::tempdir_in("/var/tmp").or_else(|_| tempfile::tempdir()).unwrap();
     let socket = dir.path().join("cladefsd.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
@@ -3661,18 +3666,23 @@ fn the_daemon_accepts_on_after_failing_to() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("cladefsd.sock");
     let listener = UnixListener::bind(&socket).unwrap();
+    // Allocate the stop pipe and queue a pending client BEFORE lowering RLIMIT_NOFILE to 0 so
+    // `serve_with_stop` enters its accept loop and hits real `EMFILE` on `listener.accept()`.
+    let stop = crate::server::StopAccepting::new().unwrap();
+    let _pending = UnixStream::connect(&socket).unwrap();
     let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
     // SAFETY: Reads the process's limit into `limit`.
     assert_eq!(unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) }, 0);
-    // No file opens: the daemon's accept fails as it begins.
-    let none = libc::rlimit { rlim_cur: 0, ..limit };
+    // Keep RLIMIT_NOFILE at 2 so `poll(2)` (nfds = 2) does not return EINVAL on Linux, while
+    // `listener.accept()` still fails with EMFILE because fds 0..2 are already open.
+    let none = libc::rlimit { rlim_cur: 2, ..limit };
     // SAFETY: Lowers the process's own limit, which this test sets back.
     assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &none) }, 0);
     let (serving, stopped) = std::sync::mpsc::channel::<()>();
     std::thread::spawn(move || {
         // Dropped as serving stops.
         let _serving = serving;
-        serve(listener)
+        crate::server::serve_with_stop(listener, stop)
     });
     let served = stopped.recv_timeout(std::time::Duration::from_secs(1));
     // SAFETY: As above.
@@ -6550,6 +6560,9 @@ fn window_mappings_are_answered_beside_the_stream_data_in_flight() {
     // A reply of mappings larger than the daemon's room for what it queues but replies.
     let count = (18 << 20) / MAPPING_BYTES;
     host();
+    // Queuing 256 MiB of unread READ replies in a debug build on a loaded CI runner can exceed the
+    // default 5 s stall watchdog before the client begins draining.
+    crate::server::STALL_GIVEN.set(std::time::Duration::from_secs(30)).unwrap();
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("cladefsd.sock");
     let listener = UnixListener::bind(&socket).unwrap();
@@ -7215,7 +7228,7 @@ fn a_panic_holding_a_shared_lock_stops_the_daemon() {
     use std::os::unix::process::ExitStatusExt;
     for lock in SHARED_LOCKS {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "cladefsd::tests::child_panics_holding", "--ignored", "--nocapture"])
+            .args(["--exact", "tests::child_panics_holding", "--ignored", "--nocapture"])
             .env(PANIC_HOLDING, lock)
             .output()
             .unwrap();
@@ -7480,7 +7493,7 @@ fn calls_for_guest_requests_are_logged_with_them() {
     let refusal = |kind: u32, flags: u32, saying: &str, logged: &[String]| {
         let [line] = logged else { panic!("not one refusal logged: {logged:?}") };
         let starts = format!(
-            "WARN cladefs::cladefsd::server: cladefsd: request {kind} refused with EINVAL: flags \
+            "WARN cladefsd::server: cladefsd: request {kind} refused with EINVAL: flags \
              {flags:#x}, body "
         );
         assert!(line.starts_with(&starts), "{line}");

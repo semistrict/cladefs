@@ -66,6 +66,14 @@ pub fn serve(listener: UnixListener) {
     serve_on(Daemon::process(), listener);
 }
 
+#[cfg(all(test, not(madsim)))]
+pub(super) fn serve_with_stop(listener: UnixListener, stop: Arc<StopAccepting>) {
+    let daemon = Daemon::process();
+    let _serving = crate::Serving::begin(daemon);
+    let serving = Arc::clone(daemon);
+    serve_as(daemon, listener, stop, move || default_tenant_on(&serving));
+}
+
 /// Serves the VM processes of `tenant` that connect to `listener` on `daemon`, as [`serve_on`]
 /// does (TASK-43): until its grant is revoked, which shuts the listener down.
 pub(super) fn serve_tenant_on(
@@ -422,6 +430,19 @@ fn tenant_connections() -> usize {
         return most;
     }
     MAX_CONNECTIONS
+}
+
+/// cladefs: test override for [`STALL`] so tests that intentionally queue `MAX_STREAM_BYTES`
+/// unread on heavily loaded debug CI runners do not trip the 5 s stall watchdog.
+#[cfg(test)]
+pub(super) static STALL_GIVEN: OnceLock<std::time::Duration> = OnceLock::new();
+
+fn stall_bound() -> std::time::Duration {
+    #[cfg(test)]
+    if let Some(&stall) = STALL_GIVEN.get() {
+        return stall;
+    }
+    STALL
 }
 
 /// cladefs: a tenant's most connections in a test, in place of [`MAX_CONNECTIONS`]: a process
@@ -4036,9 +4057,10 @@ async fn watch(daemon: Weak<Daemon>) {
             // cladefs: and those whose sockets took nothing of what is queued for them for
             // [`STALL`], which their tenant's bytes in flight held for good, whatever else they
             // said (board 8459).
+            let stall = stall_bound();
             let stalled = (peers.iter())
                 .map(|peer| (peer.clone(), peer.sender.stalled(now)))
-                .filter(|(_, stalled)| *stalled >= STALL)
+                .filter(|(_, stalled)| *stalled >= stall)
                 .collect();
             (unresponsive, stalled)
         };
@@ -4049,10 +4071,11 @@ async fn watch(daemon: Weak<Daemon>) {
                 "stopped answering stage operations: {silence}, {queued} bytes queued for it"
             ));
         }
+        let stall = stall_bound();
         for (peer, stalled) in stalled {
             let queued = peer.sender.queued();
             peer.let_go(format_args!(
-                "read nothing of the {queued} bytes queued for it for {stalled:?}, of {STALL:?} \
+                "read nothing of the {queued} bytes queued for it for {stalled:?}, of {stall:?} \
                  allowed"
             ));
         }
