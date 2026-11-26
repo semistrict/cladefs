@@ -69,6 +69,7 @@ impl Daemon {
             socket: Some(dir.path().join("machined.sock")),
             tcp: None,
             images: image_dir,
+            helper: env!("CARGO_BIN_EXE_machined-vm").into(),
             state: dir.path().join("state"),
             hotbed: None,
         };
@@ -183,6 +184,66 @@ async fn console(client: &mut MachinedClient<Channel>, name: &str) -> String {
         text.extend(answer.data);
     }
     String::from_utf8_lossy(&text).replace("\r\n", "\n")
+}
+
+/// Each machine runs in a helper process of its own (board 13460): several at once, on
+/// Hypervisor.framework too; one whose helper dies ends with that said, while machined and the
+/// others run on.
+#[tokio::test(flavor = "multi_thread")]
+async fn machines_run_in_helpers_of_their_own() {
+    let Some((kernel, initramfs)) = guest() else { return };
+    let daemon = Daemon::start(&[("kernel", &kernel), ("initramfs.cpio", &initramfs)]).await;
+    let mut client = daemon.client.clone();
+    let mut pids = Vec::new();
+    for name in ["a", "b", "c"] {
+        create(&mut client, name, spec("quiet libmachine_action=agent")).await;
+        let started = client.start_machine(proto::StartMachineRequest { name: name.into() }).await;
+        let started = started.unwrap().into_inner().machine.unwrap();
+        assert_eq!(state_of(&started), proto::MachineState::Running);
+        assert_ne!(started.pid, 0);
+        assert_ne!(started.pid, std::process::id(), "not machined's own process");
+        pids.push(started.pid);
+    }
+    pids.dedup();
+    assert_eq!(pids.len(), 3, "a process each: {pids:?}");
+    for name in ["a", "b", "c"] {
+        let (stdout, _, exit) = exec(&mut client, name, &["echo", name], None).await.unwrap();
+        assert_eq!(
+            (String::from_utf8_lossy(&stdout).into_owned(), exit),
+            (format!("{name}\n"), proto::exec_exit::Status::Code(0))
+        );
+    }
+
+    let watch = proto::WatchMachineRequest { name: "b".into() };
+    let mut watch = client.watch_machine(watch).await.unwrap().into_inner();
+    wait_for_state(&mut watch, proto::MachineState::Running).await;
+    // SAFETY: a plain system call, on the test's own machine's helper.
+    assert_eq!(unsafe { libc::kill(pids[1] as libc::pid_t, libc::SIGKILL) }, 0);
+    let stopped = wait_for_state(&mut watch, proto::MachineState::Stopped).await;
+    let exit = stopped.last_exit.unwrap();
+    assert_eq!(exit.reason(), proto::ExitReason::Failed);
+    assert_eq!(
+        exit.detail,
+        "its helper process ended with no word of the machine (signal: 9 (SIGKILL))"
+    );
+    let gone = client.get_machine(proto::GetMachineRequest { name: "b".into() }).await;
+    assert_eq!(gone.unwrap().into_inner().machine.unwrap().pid, 0);
+    for name in ["a", "c"] {
+        let (stdout, _, _) = exec(&mut client, name, &["echo", "on"], None).await.unwrap();
+        assert_eq!(stdout, b"on\n", "{name} runs on");
+    }
+    // Started again, in a new helper.
+    let again = client.start_machine(proto::StartMachineRequest { name: "b".into() }).await;
+    let again = again.unwrap().into_inner().machine.unwrap();
+    assert_ne!(again.pid, pids[1]);
+    let (stdout, _, _) = exec(&mut client, "b", &["echo", "back"], None).await.unwrap();
+    assert_eq!(stdout, b"back\n");
+    daemon.shutdown().await;
+    for pid in [pids[0], pids[2], again.pid] {
+        // SAFETY: signal 0 tests the process alone.
+        let alive = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
+        assert!(!alive, "helper {pid} outlived machined's shutdown");
+    }
 }
 
 /// The whole life of a machine, over gRPC: made, booted, a command run with its stdin and

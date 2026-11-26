@@ -325,6 +325,7 @@ fn config(dir: &Path, controller: &str, tune: impl FnOnce(&mut Hotbed)) -> machi
         socket: Some(dir.join("machined.sock")),
         tcp: None,
         images: dir.join("images"),
+        helper: env!("CARGO_BIN_EXE_machined-vm").into(),
         state: dir.join("state"),
         hotbed: Some(hotbed),
     }
@@ -614,19 +615,25 @@ async fn workspaces_are_machines() {
             break;
         }
     }
-    #[cfg(target_os = "macos")]
-    {
-        // Hypervisor.framework's one machine per process (board 13460): the node is full, which
-        // sends the controller's placement elsewhere.
-        let second = pb::CreateWorkspaceRequest { id: "ws-2".into(), ..Default::default() };
-        let up = tunnel.unary::<pb::Workspace>("CreateWorkspace", &second).await.unwrap_err();
-        assert_eq!(refusal(&up).0, "WORKER_UNREACHABLE");
-        assert_eq!(up["retryable"], true);
-        assert_eq!(
-            up["suggestion"],
-            "this node takes no more workspaces now: the controller places elsewhere"
-        );
-    }
+    // A second workspace runs beside it, a machine of its own in a helper of its own (board
+    // 13460: on Hypervisor.framework too).
+    let second = pb::CreateWorkspaceRequest { id: "ws-2".into(), ..Default::default() };
+    let ws2: pb::Workspace = tunnel.unary("CreateWorkspace", &second).await.unwrap();
+    assert_eq!(ws2.state(), pb::WorkspaceState::Active);
+    let echo = pb::RunCommandRequest {
+        workspace_id: "ws-2".into(),
+        id: "c-0".into(),
+        args: vec!["echo".into(), "two".into()],
+        ..Default::default()
+    };
+    tunnel.unary::<pb::Command>("RunCommand", &echo).await.unwrap();
+    let follow = pb::FollowLogRequest { id: "c-0".into(), follow: true, ..Default::default() };
+    let (chunks, end) = tunnel.stream::<pb::LogChunk>("FollowLog", &follow).await;
+    assert_eq!(end["type"], "rpc_end", "{end}");
+    let output: Vec<u8> = chunks.iter().flat_map(|c| c.data.clone()).collect();
+    assert_eq!(output, b"two\n");
+    let release = pb::ReleaseWorkspaceRequest { id: "ws-2".into() };
+    tunnel.unary::<pb::ReleaseWorkspaceResponse>("ReleaseWorkspace", &release).await.unwrap();
 
     // A command: its output followed to its end, which says how it ended.
     let run = |id: &str, script: &str| pb::RunCommandRequest {

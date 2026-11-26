@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 //! machined's machines, by name: each one's spec, its state, its console, and, while it runs, its
-//! [`Vm`] and vsock socket. A machine's lifecycle calls (start, stop, delete, snapshot, suspend,
+//! [`Vm`] (in a helper process of its own) and vsock socket. A machine's lifecycle calls (start, stop, delete, snapshot, suspend,
 //! resume) take turns on it; reads (get, list, watch, console, exec) never wait for them.
 
 use std::collections::BTreeMap;
@@ -14,16 +14,14 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use libmachine::agent::Command;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
+use tokio::sync::{Semaphore, watch};
 use tonic::Status;
 
-use crate::checks::{self, Plan};
+use crate::checks;
 use crate::console::Console;
-use crate::errors;
 use crate::guest::{self, Guest};
 use crate::proto::{self, MachineState};
-use crate::vmm::{self, Ended, Source, Vm};
-use crate::vsock;
+use crate::vmm::{Ended, Source, Vm};
 
 /// The most machines machined holds, running or not.
 const MAX_MACHINES: usize = 4096;
@@ -36,16 +34,6 @@ const SYNC_TIMEOUT: Duration = Duration::from_secs(180);
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-/// Runs `f` on tokio's blocking pool: machined's own work, never a call to a guest (`guest`).
-async fn blocking<T: Send + 'static>(
-    f: impl FnOnce() -> libmachine::Result<T> + Send + 'static,
-) -> Result<T, Status> {
-    match tokio::task::spawn_blocking(f).await {
-        Ok(result) => result.map_err(errors::status),
-        Err(e) => Err(Status::internal(format!("a blocking call failed: {e}"))),
-    }
 }
 
 /// What a machine does now, and how it last ended.
@@ -78,14 +66,12 @@ fn exit(reason: proto::ExitReason, detail: impl Into<String>) -> proto::Exit {
 }
 
 fn exit_of(ended: Ended) -> proto::Exit {
-    use libmachine::ExitReason as Guest;
     use proto::ExitReason as Why;
     match ended {
         Ended::Stopped => exit(Why::Stopped, ""),
-        Ended::Guest(Guest::Poweroff) => exit(Why::Poweroff, ""),
-        Ended::Guest(Guest::Reset) => exit(Why::Reset, ""),
-        Ended::Guest(Guest::Shutdown) => exit(Why::Shutdown, ""),
-        Ended::Guest(other) => exit(Why::Failed, format!("{other:?}")),
+        Ended::Poweroff => exit(Why::Poweroff, ""),
+        Ended::Reset => exit(Why::Reset, ""),
+        Ended::Shutdown => exit(Why::Shutdown, ""),
         Ended::Failed(why) => exit(Why::Failed, why),
     }
 }
@@ -94,7 +80,6 @@ fn exit_of(ended: Ended) -> proto::Exit {
 pub(crate) struct Entry {
     name: String,
     spec: proto::MachineSpec,
-    plan: Plan,
     /// Held by each lifecycle call, so that they take turns.
     lifecycle: tokio::sync::Mutex<()>,
     running: Mutex<Option<Arc<Running>>>,
@@ -107,10 +92,6 @@ pub(crate) struct Entry {
 /// A machine while it runs.
 struct Running {
     vm: Vm,
-    vsock: vsock::Server,
-    /// Its place among the machines that may run at once ([`vmm::MAX_RUNNING`]): given back as
-    /// it is freed, before anyone hears it stopped.
-    slot: Mutex<Option<OwnedSemaphorePermit>>,
     /// Its places for calls to its guest under way ([`guest::MAX_CALLS`]).
     calls: Arc<Semaphore>,
 }
@@ -156,8 +137,9 @@ impl Entry {
             status: Some(self.status.borrow().to_proto()),
             vsock_socket: self
                 .running()
-                .map(|r| r.vsock.path().to_string_lossy().into_owned())
+                .map(|r| r.vm.vsock_socket().to_string_lossy().into_owned())
                 .unwrap_or_default(),
+            pid: self.running().map_or(0, |r| r.vm.pid()),
         }
     }
 
@@ -177,8 +159,6 @@ impl Entry {
             return;
         }
         current.take();
-        running.vsock.stop();
-        lock(&running.slot).take();
         self.status.send_replace(Current::new(MachineState::Stopped, Some(exit_of(ended))));
     }
 
@@ -222,17 +202,18 @@ impl Entry {
     }
 }
 
-/// A snapshot machined holds, and what its machine was.
+/// A snapshot machined holds: its file, and what its machine was.
 #[cfg(target_os = "linux")]
 struct Taken {
-    snapshot: Arc<libmachine::Snapshot>,
+    path: PathBuf,
     spec: proto::MachineSpec,
-    plan: Plan,
 }
 
 /// Every machine.
 pub(crate) struct Machines {
     images: PathBuf,
+    /// The helper binary each machine's VM runs in (`crate::helper`).
+    helper: PathBuf,
     vsock_dir: PathBuf,
     #[cfg(target_os = "linux")]
     snapshot_dir: PathBuf,
@@ -241,8 +222,6 @@ pub(crate) struct Machines {
     entries: Mutex<BTreeMap<String, Arc<Entry>>>,
     #[cfg(target_os = "linux")]
     snapshots: Mutex<BTreeMap<String, Arc<Taken>>>,
-    /// The machines that may run at once, where there is a limit ([`vmm::MAX_RUNNING`]).
-    slots: Option<Arc<Semaphore>>,
     /// The next vsock socket's number.
     next_socket: AtomicU32,
 }
@@ -260,12 +239,18 @@ fn fresh(dir: &Path) -> io::Result<()> {
 impl Machines {
     /// machined's machines, none yet, booting kernels from `images`, keeping what it makes in
     /// `state` (made mode 0700, what an earlier machined left in it removed).
-    pub(crate) fn new(images: &Path, state: &Path) -> io::Result<Self> {
+    pub(crate) fn new(images: &Path, helper: &Path, state: &Path) -> io::Result<Self> {
         use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _};
         if !images.is_dir() {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 format!("the images directory {} is not a directory", images.display()),
+            ));
+        }
+        if !helper.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("the helper binary {} is not there", helper.display()),
             ));
         }
         match std::fs::DirBuilder::new().mode(0o700).create(state) {
@@ -305,6 +290,7 @@ impl Machines {
         }
         Ok(Self {
             images: images.to_owned(),
+            helper: helper.to_owned(),
             vsock_dir,
             #[cfg(target_os = "linux")]
             snapshot_dir,
@@ -313,7 +299,6 @@ impl Machines {
             entries: Mutex::default(),
             #[cfg(target_os = "linux")]
             snapshots: Mutex::default(),
-            slots: vmm::MAX_RUNNING.map(|n| Arc::new(Semaphore::new(n))),
             next_socket: AtomicU32::new(1),
         })
     }
@@ -332,12 +317,7 @@ impl Machines {
     }
 
     /// Adds a machine of `spec`, made into `plan`, CREATED.
-    fn insert(
-        &self,
-        name: &str,
-        spec: proto::MachineSpec,
-        plan: Plan,
-    ) -> Result<Arc<Entry>, Status> {
+    fn insert(&self, name: &str, spec: proto::MachineSpec) -> Result<Arc<Entry>, Status> {
         let mut entries = lock(&self.entries);
         if entries.contains_key(name) {
             return Err(Status::already_exists(format!("machine {name:?} exists")));
@@ -350,7 +330,6 @@ impl Machines {
         let entry = Arc::new(Entry {
             name: name.to_owned(),
             spec,
-            plan,
             lifecycle: tokio::sync::Mutex::new(()),
             running: Mutex::new(None),
             status: watch::channel(Current::new(MachineState::Created, None)).0,
@@ -374,13 +353,14 @@ impl Machines {
     ) -> Result<Arc<Entry>, Status> {
         checks::name("machine", &name)?;
         let images = self.images.clone();
-        let (spec, plan) = tokio::task::spawn_blocking(move || {
-            let plan = checks::plan(&images, &spec)?;
-            Ok::<_, Status>((spec, plan))
+        // Checked here, once, and planned again by its helper as it boots.
+        let spec = tokio::task::spawn_blocking(move || {
+            checks::plan(&images, &spec)?;
+            Ok::<_, Status>(spec)
         })
         .await
         .map_err(|e| Status::internal(format!("checking a spec failed: {e}")))??;
-        self.insert(&name, spec, plan)
+        self.insert(&name, spec)
     }
 
     /// Boots a CREATED or STOPPED machine.
@@ -394,47 +374,30 @@ impl Machines {
                 state.as_str_name()
             )));
         }
-        self.boot(entry, Source::Boot(entry.plan.boot.clone())).await
+        self.boot(entry, Source::Boot).await
     }
 
-    /// Starts `entry` from `source`, its turn held: RUNNING, or STOPPED with a BOOT_FAILED exit.
+    /// Starts `entry` from `source` in a helper of its own, its turn held: RUNNING, or STOPPED
+    /// with a BOOT_FAILED exit.
     async fn boot(&self, entry: &Arc<Entry>, source: Source) -> Result<(), Status> {
-        let slot = match &self.slots {
-            None => None,
-            Some(slots) => Some(slots.clone().try_acquire_owned().map_err(|_| {
-                Status::resource_exhausted(
-                    "Hypervisor.framework runs one machine per process: until each runs in a \
-                     helper process (board 13460), one machine runs at a time",
-                )
-            })?),
-        };
         entry.status.send_replace(Current::new(MachineState::Starting, None));
-        let failed = |status: Status| {
-            entry.status.send_replace(Current::new(
-                MachineState::Stopped,
-                Some(exit(proto::ExitReason::BootFailed, status.message())),
-            ));
-            status
-        };
-        let config = entry.plan.config.clone();
-        let console = entry.console.writer();
-        let vm = blocking(move || Vm::start(config, source, console)).await.map_err(failed)?;
         let socket =
             self.vsock_dir.join(self.next_socket.fetch_add(1, Ordering::Relaxed).to_string());
-        let vsock = match vsock::Server::start(socket, vm.vsock(), &entry.spec.vsock_listen_ports) {
-            Ok(vsock) => vsock,
-            Err(e) => {
-                vm.stop();
-                vm.wait().await;
-                return Err(failed(Status::internal(format!("the machine's vsock socket: {e}"))));
+        let console = entry.console.writer();
+        let started =
+            Vm::start(&self.helper, entry.spec.clone(), &self.images, source, socket, console)
+                .await;
+        let vm = match started {
+            Ok(vm) => vm,
+            Err(status) => {
+                entry.status.send_replace(Current::new(
+                    MachineState::Stopped,
+                    Some(exit(proto::ExitReason::BootFailed, status.message())),
+                ));
+                return Err(status);
             }
         };
-        let running = Arc::new(Running {
-            vm,
-            vsock,
-            slot: Mutex::new(slot),
-            calls: Arc::new(Semaphore::new(guest::MAX_CALLS)),
-        });
+        let running = Arc::new(Running { vm, calls: Arc::new(Semaphore::new(guest::MAX_CALLS)) });
         *lock(&entry.running) = Some(running.clone());
         entry.status.send_replace(Current::new(MachineState::Running, None));
         let entry = entry.clone();
@@ -451,6 +414,10 @@ impl Machines {
                         if changed.is_ok() {
                             let now = *suspended.borrow_and_update();
                             entry.follow_suspension(&running, now);
+                        } else {
+                            let ended = running.vm.wait().await;
+                            entry.finish(&running, ended);
+                            return;
                         }
                     }
                 }
@@ -532,9 +499,8 @@ impl Machines {
         let _turn = entry.turn().await?;
         let running = entry.require_running()?;
         let path = self.snapshot_dir.join(format!("{snapshot}.snap"));
-        let taken = running.vm.snapshot(path).await.map_err(errors::status)?;
-        let taken =
-            Taken { snapshot: Arc::new(taken), spec: entry.spec.clone(), plan: entry.plan.clone() };
+        running.vm.snapshot(path.clone()).await?;
+        let taken = Taken { path, spec: entry.spec.clone() };
         lock(&self.snapshots).insert(snapshot, Arc::new(taken));
         Ok(())
     }
@@ -557,10 +523,10 @@ impl Machines {
             .cloned()
             .ok_or_else(|| Status::not_found(format!("no snapshot {snapshot:?}")))?;
         let spec = proto::MachineSpec { labels, vsock_listen_ports, ..taken.spec.clone() };
-        let entry = self.insert(&name, spec, taken.plan.clone())?;
+        let entry = self.insert(&name, spec)?;
         let booted = async {
             let _turn = entry.turn().await?;
-            self.boot(&entry, Source::Snapshot(taken.snapshot.clone())).await
+            self.boot(&entry, Source::Snapshot(taken.path.clone())).await
         };
         if let Err(status) = booted.await {
             // Made whole or not at all.
@@ -589,7 +555,7 @@ impl Machines {
     pub(crate) async fn suspend(&self, entry: &Arc<Entry>) -> Result<(), Status> {
         let _turn = entry.turn().await?;
         let running = entry.require_running()?;
-        running.vm.suspend(self.suspend_dir.clone()).await.map_err(errors::status)
+        running.vm.suspend(self.suspend_dir.clone()).await
     }
 
     /// Wakes a suspended machine.
@@ -597,7 +563,7 @@ impl Machines {
     pub(crate) async fn resume(&self, entry: &Arc<Entry>) -> Result<(), Status> {
         let _turn = entry.turn().await?;
         let running = entry.require_running()?;
-        running.vm.resume().await.map_err(errors::status)
+        running.vm.resume().await
     }
 }
 

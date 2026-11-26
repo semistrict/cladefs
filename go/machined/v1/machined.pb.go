@@ -697,7 +697,10 @@ type Machine struct {
 	// The Unix socket through which the host reaches its guest's vsock ports (Firecracker's
 	// protocol: the file's header comment), machined's user's alone, mode 0600. Empty while the
 	// machine doesn't run: each start serves a socket of its own.
-	VsockSocket   string `protobuf:"bytes,4,opt,name=vsock_socket,json=vsockSocket,proto3" json:"vsock_socket,omitempty"`
+	VsockSocket string `protobuf:"bytes,4,opt,name=vsock_socket,json=vsockSocket,proto3" json:"vsock_socket,omitempty"`
+	// The process its VM runs in while it runs, a helper of machined's own (one per machine, its
+	// child, which ends with it): 0 while it doesn't run.
+	Pid           uint32 `protobuf:"varint,5,opt,name=pid,proto3" json:"pid,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -758,6 +761,13 @@ func (x *Machine) GetVsockSocket() string {
 		return x.VsockSocket
 	}
 	return ""
+}
+
+func (x *Machine) GetPid() uint32 {
+	if x != nil {
+		return x.Pid
+	}
+	return 0
 }
 
 // What a machine does now, and how it last ended.
@@ -2857,12 +2867,13 @@ const file_machined_v1_machined_proto_rawDesc = "" +
 	"guest_port\x18\x02 \x01(\rR\tguestPort\"2\n" +
 	"\x04Cell\x12\x16\n" +
 	"\x06tenant\x18\x01 \x01(\x04R\x06tenant\x12\x12\n" +
-	"\x04cell\x18\x02 \x01(\x04R\x04cell\"\xa2\x01\n" +
+	"\x04cell\x18\x02 \x01(\x04R\x04cell\"\xb4\x01\n" +
 	"\aMachine\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12,\n" +
 	"\x04spec\x18\x02 \x01(\v2\x18.machined.v1.MachineSpecR\x04spec\x122\n" +
 	"\x06status\x18\x03 \x01(\v2\x1a.machined.v1.MachineStatusR\x06status\x12!\n" +
-	"\fvsock_socket\x18\x04 \x01(\tR\vvsockSocket\"p\n" +
+	"\fvsock_socket\x18\x04 \x01(\tR\vvsockSocket\x12\x10\n" +
+	"\x03pid\x18\x05 \x01(\rR\x03pid\"p\n" +
 	"\rMachineStatus\x12/\n" +
 	"\x05state\x18\x01 \x01(\x0e2\x19.machined.v1.MachineStateR\x05state\x12.\n" +
 	"\tlast_exit\x18\x02 \x01(\v2\x11.machined.v1.ExitR\blastExit\"O\n" +

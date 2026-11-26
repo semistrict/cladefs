@@ -123,6 +123,61 @@ impl Dial for Vsock {
     }
 }
 
+impl Link for std::os::unix::net::UnixStream {
+    fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
+        Read::read(&mut &*self, buf)
+    }
+    fn write(&self, buf: &[u8]) -> io::Result<usize> {
+        Write::write(&mut &*self, buf)
+    }
+    fn set_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        self.set_read_timeout(timeout)?;
+        self.set_write_timeout(timeout)
+    }
+}
+
+/// The longest `OK <port>\n` answer taken: "OK 4294967295\n" is 14 bytes.
+const MAX_OK_LINE: usize = 32;
+
+/// A guest's vsock reached through a Unix socket speaking Firecracker's protocol
+/// (its `docs/vsock.md`): `CONNECT <port>\n`, answered `OK <host port>\n`, then the stream is the
+/// guest's port's. A process other than the machine's own serves it: machined's helper of a
+/// machine (`crates/machined`), Firecracker.
+struct UnixDial {
+    path: std::path::PathBuf,
+    generation: u64,
+}
+
+impl Dial for UnixDial {
+    fn dial(&self, port: u32, timeout: Duration) -> io::Result<Box<dyn Link>> {
+        let stream = std::os::unix::net::UnixStream::connect(&self.path)?;
+        stream.set_read_timeout(Some(timeout))?;
+        stream.set_write_timeout(Some(timeout))?;
+        (&stream).write_all(format!("CONNECT {port}\n").as_bytes())?;
+        // A byte at a time, so that nothing of the guest's stream past the line is taken.
+        let mut line = Vec::new();
+        let mut byte = [0];
+        while line.last() != Some(&b'\n') {
+            if line.len() >= MAX_OK_LINE {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "a vsock answer too long"));
+            }
+            // EOF here is the guest refusing: retried, as a vsock's refusal is.
+            (&stream).read_exact(&mut byte)?;
+            line.push(byte[0]);
+        }
+        if !line.starts_with(b"OK ") {
+            return Err(io::Error::new(
+                io::ErrorKind::ConnectionRefused,
+                format!("vsock port {port}: {:?}", String::from_utf8_lossy(&line)),
+            ));
+        }
+        Ok(Box::new(stream))
+    }
+    fn generation(&self) -> u64 {
+        self.generation
+    }
+}
+
 /// How much host entropy a reseed gives the guest: as much as its CRNG's
 /// key, twice over.
 const RESEED_BYTES: usize = 64;
@@ -411,6 +466,14 @@ impl Agent {
     /// The agent on `vsock`'s guest, at [`DEFAULT_PORT`].
     pub fn new(vsock: Vsock) -> Self {
         Self::with_dial(Arc::new(vsock))
+    }
+
+    /// The agent of a guest whose vsock is served at the Unix socket `path` in Firecracker's
+    /// protocol, by another process than this one (machined's helper of the machine), at
+    /// [`DEFAULT_PORT`]. `generation` is the machine's ([`Vsock::generation`]): 0 if it booted,
+    /// its restore's otherwise, for the agent to reseed the guest's RNG after a restore.
+    pub fn over_unix_socket(path: impl Into<std::path::PathBuf>, generation: u64) -> Self {
+        Self::with_dial(Arc::new(UnixDial { path: path.into(), generation }))
     }
 
     pub(crate) fn with_dial(dial: Arc<dyn Dial>) -> Self {

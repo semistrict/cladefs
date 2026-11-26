@@ -28,11 +28,17 @@ SIGTERM or SIGINT stops it: it stops serving, stops every machine, and exits. Ma
 process's: they outlive their callers' connections (a VM manager that restarts lists what runs
 and takes it up), not machined (board 13492).
 
-On macOS the binary must be signed with the hypervisor entitlement, as every macOS executable of
-this workspace is as it links (`scripts/macos-link.sh`). There, until board 13460 runs each
-machine in a helper process, one machine runs at a time (Hypervisor.framework's one VM per
-process: a second start fails with RESOURCE_EXHAUSTED), and machines have no network and can't be
-snapshotted or suspended yet (board 13399: UNIMPLEMENTED).
+Each machine's VM runs in a helper process of its own, `machined-vm` (board 13460): machined, the
+long-lived daemon with the API, starts one per machine start, from beside its own binary
+(`--helper` names another), and speaks to it over the helper's standard input
+(`src/helper/wire.rs`, this build's alone). machined keeps no VM itself: as many machines run as
+the host takes, on Hypervisor.framework too (one VM per process); a helper that dies ends its
+machine (FAILED, saying how its process ended) while machined and the others run on; and helpers
+end with machined. `Machine.pid` is a running machine's helper.
+
+On macOS `machined-vm` must be signed with the hypervisor entitlement, as every macOS executable
+of this workspace is as it links (`scripts/macos-link.sh`). There, machines have no network and
+can't be snapshotted or suspended yet (board 13399: UNIMPLEMENTED).
 
 ## Who may call it
 
@@ -91,7 +97,8 @@ holds it to the last build's with `buf breaking`).
 | `src/checks.rs` | Every request's checks, once, where it enters |
 | `src/service.rs` | The gRPC service |
 | `src/machines.rs` | Machines by name: their lifecycle, state and console |
-| `src/vmm.rs` | The one seam over libmachine: a machine's run thread; board 13460's helper processes slot in here |
+| `src/vmm.rs` | The one seam over a machine's VM: its helper process, started and spoken to |
+| `src/helper/` | The helper process (`src/bin/machined-vm.rs`): a machine's VM, its run thread, its vsock socket |
 | `src/vsock.rs` | The vsock socket, Firecracker's protocol |
 | `src/console.rs` | The console kept with offsets |
 | `tests/machined.rs` | End to end over gRPC: KVM (`scripts/test.sh`'s libmachine part) and Hypervisor.framework (its hvf part) |
@@ -117,6 +124,6 @@ hotbed places on machined's runtime.
 hotbed's worker runs each workspace as a Firecracker VM today (`internal/vm` in hotbed); machined
 is to run them on a Mac. Beyond what machined offers: roots on cells (boards 13067, 13471), a
 network on Hypervisor.framework (board 13399), port forwards into the guest (board 13486), a
-balloon (board 13490), machines past one per macOS process (board 13460), and machines that
+balloon (board 13490), and machines that
 outlive a machined restart (board 13492). hotbed's guestd boots from a read-only tools disk under
 Firecracker; under machined it comes in the initramfs (`Boot.initramfs`).

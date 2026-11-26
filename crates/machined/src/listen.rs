@@ -182,7 +182,7 @@ pub async fn start(config: Config) -> io::Result<Server> {
             "machined serves on nothing: give it a Unix socket, TCP, or both",
         ));
     }
-    let machines = Arc::new(Machines::new(&config.images, &config.state)?);
+    let machines = Arc::new(Machines::new(&config.images, &config.helper, &config.state)?);
     // Joined first, run last: a node that can't join fails the start with nothing bound, and
     // runs only once machined serves.
     let joining = match &config.hotbed {

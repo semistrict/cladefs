@@ -46,6 +46,10 @@ mod run {
         /// machined's own directory (vsock sockets, snapshots, suspensions): on disk, short.
         #[arg(long)]
         state: PathBuf,
+        /// The helper binary each machine's VM runs in: `machined-vm` beside machined unless
+        /// given.
+        #[arg(long)]
+        helper: Option<PathBuf>,
         /// Be a node of the hotbed controller at this URL (https://...): its machines then
         /// hotbed's workspaces, as the --hotbed flags say.
         #[arg(long, requires_all = ["hotbed_token_file", "hotbed_node", "hotbed_kernel"])]
@@ -122,8 +126,18 @@ mod run {
             }
             _ => None,
         };
-        let config =
-            Config { socket: flags.socket, tcp, images: flags.images, state: flags.state, hotbed };
+        let helper = match flags.helper {
+            Some(helper) => helper,
+            None => Config::default_helper()?,
+        };
+        let config = Config {
+            socket: flags.socket,
+            tcp,
+            images: flags.images,
+            helper,
+            state: flags.state,
+            hotbed,
+        };
         tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(async {
             let server = machined::start(config).await?;
             if let Some(socket) = server.socket() {

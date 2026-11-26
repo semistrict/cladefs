@@ -19,6 +19,9 @@ pub struct Config {
     /// The directory machines' kernels and initramfses are named in (`Boot`'s paths): nothing
     /// outside it boots.
     pub images: PathBuf,
+    /// The helper binary each machine's VM runs in, a process of its own (`machined-vm`, built
+    /// with machined, beside it: `Config::default_helper`).
+    pub helper: PathBuf,
     /// machined's own directory: its machines' vsock sockets, snapshots and suspensions. Made
     /// mode 0700 if it isn't there; what machined left in it before is removed as it starts.
     /// On disk, not tmpfs (suspensions refuse tmpfs), and short: its vsock sockets' paths, past
@@ -27,6 +30,13 @@ pub struct Config {
     pub state: PathBuf,
     /// A node of hotbed to be too, if any: its machines then hotbed's workspaces.
     pub hotbed: Option<crate::hotbed::Hotbed>,
+}
+
+impl Config {
+    /// The helper binary beside this process's own: `machined-vm`.
+    pub fn default_helper() -> std::io::Result<PathBuf> {
+        crate::vmm::default_helper()
+    }
 }
 
 /// TCP with mutual TLS.

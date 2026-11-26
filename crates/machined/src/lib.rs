@@ -37,6 +37,8 @@ mod config;
 mod console;
 mod errors;
 mod guest;
+#[doc(hidden)]
+pub mod helper;
 pub mod hotbed;
 mod listen;
 mod machines;

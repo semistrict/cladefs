@@ -210,6 +210,9 @@ message Machine {
   // protocol: the file's header comment), machined's user's alone, mode 0600. Empty while the
   // machine doesn't run: each start serves a socket of its own.
   string vsock_socket = 4;
+  // The process its VM runs in while it runs, a helper of machined's own (one per machine, its
+  // child, which ends with it): 0 while it doesn't run.
+  uint32 pid = 5;
 }
 
 // What a machine does now, and how it last ended.

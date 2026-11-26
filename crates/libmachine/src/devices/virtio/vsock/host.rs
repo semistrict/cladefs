@@ -220,8 +220,8 @@ impl Vsock {
     }
 
     /// Which restore of a snapshot the machine is (0: it booted), for the
-    /// agent's reseed (`agent`).
-    pub(crate) fn generation(&self) -> u64 {
+    /// agent's reseed (`agent`; `Agent::over_unix_socket` of another process).
+    pub fn generation(&self) -> u64 {
         self.shared.lock().generation
     }
 

@@ -96,11 +96,6 @@ impl Server {
         Ok(Self { path, stopped, accepting })
     }
 
-    /// Where it is served.
-    pub(crate) fn path(&self) -> &Path {
-        &self.path
-    }
-
     /// Serves it no more: the socket goes, and the guest ports' listeners within
     /// [`ACCEPT_POLL`]. Connections made go on until their machine is freed.
     pub(crate) fn stop(&self) {
