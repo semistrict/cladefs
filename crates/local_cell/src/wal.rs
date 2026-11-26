@@ -299,31 +299,41 @@ impl LogRecord {
 
     /// The bytes of the runs `contents` names.
     pub fn run_bytes(contents: &Contents) -> u64 {
-        contents.runs().map(|&(_, _, len)| len).sum()
+        contents.runs().fold(0u64, |acc, &(_, _, len)| acc.saturating_add(len))
     }
 
     /// Makes `raw`, its segment's raw data, hold the runs it names, as its commit wrote them:
     /// those it holds, written into it; whether it does, those it checks, or those synced.
     fn restore(&self, raw: &mut Vec<u8>) -> bool {
-        let runs =
-            self.contents.runs().map(|&(_, offset, len)| offset as usize..(offset + len) as usize);
+        let Some(runs) = self
+            .contents
+            .runs()
+            .map(|&(_, offset, len)| {
+                let end = offset.checked_add(len)?;
+                Some(usize::try_from(offset).ok()?..usize::try_from(end).ok()?)
+            })
+            .collect::<Option<Vec<_>>>()
+        else {
+            return false;
+        };
         match &self.runs {
             Runs::Synced => true,
             Runs::Checked(crcs) => {
-                crcs.len() == self.contents.runs().count()
-                    && runs.zip(crcs).all(|(run, &crc)| {
+                crcs.len() == runs.len()
+                    && runs.into_iter().zip(crcs).all(|(run, &crc)| {
                         raw.get(run).is_some_and(|run| extent_frame::crc(run) == crc)
                     })
             }
             Runs::Held(Bytes(bytes)) => {
-                let mut at = 0;
+                let mut at = 0usize;
                 for run in runs {
+                    let Some(next_at) = at.checked_add(run.len()) else { return false };
+                    let Some(held) = bytes.get(at..next_at) else { return false };
                     if raw.len() < run.end {
                         raw.resize(run.end, 0);
                     }
-                    let Some(held) = bytes.get(at..at + run.len()) else { return false };
                     raw[run.clone()].copy_from_slice(held);
-                    at += run.len();
+                    at = next_at;
                 }
                 at == bytes.len()
             }
@@ -1322,7 +1332,11 @@ fn closed_again(
     let first = records.first().and_then(last_commit);
     let first = first.context("a log closed again holds a commit")?;
     let mut chain = match last {
-        Some(last) => Chain::new(cell, last.epoch, last.segment + 1, last.contents.next_sequence),
+        Some(last) => {
+            let next_segment =
+                last.segment.checked_add(1).context("recovered WAL segment number overflow")?;
+            Chain::new(cell, last.epoch, next_segment, last.contents.next_sequence)
+        }
         None => Chain::new(cell, writer_of(first), 0, 0),
     };
     Ok(chain.close(fold(cell.id, records)))
@@ -2262,5 +2276,45 @@ mod tests {
             )
         );
         assert_eq!(dir.files(), before, "refused recovery keeps every file as it was");
+    }
+
+    #[test]
+    fn adv_wal_recover_footer_segment_u64_max_must_not_panic() {
+        let dir = MemDir::new();
+        create_cell_dirs(&dir, CELL.id).unwrap();
+        let keys = bucket_cell::testing::ring([CELL]);
+        let footer = Footer { cell: CELL, segment: u64::MAX, epoch: 1, contents: commit(1, 1, 0) };
+        let encoded_footer = bucket_cell::layout::encode_segment_footer(&footer);
+        let encrypting = keys.try_encrypting().unwrap();
+        let framed_bytes =
+            extent_frame::framed(&[0u8; 4096], &encoded_footer, (&encrypting.0, encrypting.1));
+        dir.create(&segment_path(segment(0)), true).unwrap().write_at(&framed_bytes, 0).unwrap();
+        left_open(&dir, 1, 1, &[commit(1, 2, 0)]);
+        let err = recover(&dir, CELL, None)
+            .err()
+            .expect("footer.segment == u64::MAX followed by torn segment must return Err");
+        assert!(err.to_string().contains("overflow"), "unexpected error: {err:#}");
+    }
+
+    #[test]
+    fn adv_wal_recover_run_offset_plus_len_overflow_must_not_panic() {
+        let dir = MemDir::new();
+        create_cell_dirs(&dir, CELL.id).unwrap();
+        let seg = segment(0);
+        let raw = dir.create(&open_segment_path(seg), true).unwrap();
+        raw.write_at(&[0xab; 4096], 0).unwrap();
+        raw.sync().unwrap();
+        let enc = encryption();
+        let mut contents = commit(1, 1, 0);
+        contents.extents = vec![(storage_device::ExtentId::new(CELL.id, 1), u64::MAX, 4096)];
+        let record = LogRecord { contents, runs: Runs::Checked(vec![0]) };
+        let log = Arc::new(dir.create(&log_path(seg), false).unwrap());
+        let salt = new_salt(0, seg);
+        log.write_at(&log_header(salt, seg, &enc), 0).unwrap();
+        let mut seg_log = SegmentLog::new(log, salt, enc);
+        seg_log.append(&[record]).unwrap();
+        let recovered =
+            recover(&dir, CELL, None).expect("overflowing run must be treated as torn, not panic");
+        assert!(recovered.segments.is_empty());
     }
 }

@@ -711,6 +711,29 @@ impl Holding {
         holding
     }
 
+    /// Like [`Holding::of`], rejecting overflowing extent counts or byte sums with an error rather
+    /// than panicking or wrapping on untrusted on-disk metadata (board 11649).
+    pub fn try_of(
+        cell: u64,
+        extents: impl IntoIterator<Item = (ExtentId, u64)>,
+    ) -> anyhow::Result<Self> {
+        let mut holding = Self::default();
+        for (extent, len) in extents {
+            let own = extent.cell == cell;
+            for held in holding.counts(own) {
+                held.extents = held
+                    .extents
+                    .checked_add(1)
+                    .ok_or_else(|| anyhow::anyhow!("extent count overflow"))?;
+                held.bytes = held
+                    .bytes
+                    .checked_add(len)
+                    .ok_or_else(|| anyhow::anyhow!("held extent length overflow"))?;
+            }
+        }
+        Ok(holding)
+    }
+
     /// The counts of all of them, and of the cell's own if `own`.
     fn counts(&mut self, own: bool) -> impl Iterator<Item = &mut Held> {
         std::iter::once(&mut self.all).chain(own.then_some(&mut self.own))

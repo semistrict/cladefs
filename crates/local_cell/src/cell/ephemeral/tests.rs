@@ -532,3 +532,39 @@ fn open_ephemeral_refuses_u64_max_sequence_and_segment_numbers() {
     .expect("extent sequence == u64::MAX must be refused");
     assert!(err.to_string().contains("overflows u64"), "unexpected error: {err:#}");
 }
+
+#[test]
+fn adv_open_ephemeral_held_length_overflow_must_return_err_not_panic() {
+    let dir = MemDir::new();
+    let mut checkpoint = LocalCheckpoint::fork(
+        Parent { cell: PARENT, version: 7, at: 3, epoch: 1 },
+        &parent(),
+        b"wrapped".to_vec(),
+    );
+    // Two own extents in the same segment whose lengths sum past u64::MAX.
+    checkpoint
+        .own
+        .push((own(1), Location { key: key(CHILD, 1), offset: 0, len: (u64::MAX / 2) + 1 }));
+    checkpoint
+        .own
+        .push((own(2), Location { key: key(CHILD, 1), offset: 0, len: (u64::MAX / 2) + 1 }));
+    let description = Description { block_size: BLOCK as u32, capacity: 1 << 30, cell: CHILD };
+    let ring = keys();
+    LocalCell::make_ephemeral(
+        &dir,
+        description,
+        Some("memory:///p"),
+        Some(Kind::Fxfs),
+        &checkpoint,
+        ring.encrypting(),
+        |_| Ok(()),
+    )
+    .unwrap();
+    let recovering = LocalCell::recover_unmade(dir).unwrap();
+    let opening = EphemeralOpening { parent: Some(parent()), keys: ring, cache: None, held: None };
+    let err = recovering
+        .open_ephemeral(options(), opening)
+        .err()
+        .expect("overflowing held extent lengths must be refused");
+    assert!(err.to_string().contains("overflow"), "unexpected error: {err:#}");
+}

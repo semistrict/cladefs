@@ -627,7 +627,7 @@ impl<D: Dir> Recovering<D> {
         for (_, number) in &recovered.segments {
             tracked.insert(segment(*number), (0, false));
         }
-        let holding = Holding::of(cell.id, extents.lens());
+        let holding = Holding::try_of(cell.id, extents.lens())?;
         for (extent, entry) in extents.own() {
             match &entry.data {
                 Data::Pieces(pieces) => {
