@@ -934,9 +934,7 @@ fn receive(
                 // cladefs: what the stage operations cost, counted before what waits for them goes
                 // on (TASK-91.16). What says so malformed, nothing replies to: it is dropped, as
                 // what isn't said (TASK-160.9).
-                Ok(Some((message, _)))
-                    if [ACK, STAGE_COUNTS, STAGE_PRIVATE_COUNTS].contains(&message.header.kind) =>
-                {
+                Ok(Some((message, _))) if [ACK, STAGE_COUNTS].contains(&message.header.kind) => {
                     match Made::decode(&message) {
                         Ok(Made::Ack { id, counts }) => {
                             connection.report.stage_counted(counts);
@@ -950,16 +948,15 @@ fn receive(
                                 break;
                             }
                         }
-                        Ok(Made::Counts(counts)) => connection.report.stage_counted(counts),
-                        Ok(Made::PrivateCounts(counts)) => {
-                            connection.report.private_counted(counts)
+                        Ok(Made::Counts { stage, private }) => {
+                            connection.report.stage_counted(stage);
+                            connection.report.private_counted(private);
                         }
                         Err(errno) => log::warn!(
                             "cladefsd: a VM process's malformed {}, dropped ({errno:?}): {:?}",
                             match message.header.kind {
                                 ACK => "ACK",
-                                STAGE_COUNTS => "STAGE_COUNTS",
-                                _ => "STAGE_PRIVATE_COUNTS",
+                                _ => "STAGE_COUNTS",
                             },
                             message.header,
                         ),
@@ -1279,16 +1276,14 @@ fn traced(span: &trace::Span, request: &Request<'_>) {
         Request::Read { len, .. } => (Some(*len), None),
         Request::Write { data: Data::Inline(data), .. } => (Some(data.len() as u64), None),
         Request::Write { data: Data::Transfer { len, .. }, .. } => (Some(*len), None),
-        Request::Map(mapping) => (Some(mapping.len), Some(1)),
-        Request::MapMany { mappings, .. } => {
+        Request::Map { mappings, .. } => {
             // Each within a window, as decoding has them: summed so that no count of them wraps
             // (board 2776).
             let bytes = mappings.iter().fold(0u64, |sum, mapping| sum.saturating_add(mapping.len));
             (Some(bytes), Some(mappings.len() as u64))
         }
         Request::Unmap { len, .. } => (Some(*len), None),
-        Request::Free(_) => (None, Some(1)),
-        Request::FreeMany { rest, .. } => (None, Some(1 + rest.len() as u64)),
+        Request::Free { rest, .. } => (None, Some(1 + rest.len() as u64)),
         Request::Commit { commit, .. } => {
             span.set(trace::LEVEL, commit.level());
             (None, None)
@@ -1591,10 +1586,10 @@ pub(super) fn failpoint(kind: u32) -> Option<&'static str> {
     Some(match kind {
         READ => "cladefsd::read",
         WRITE => "cladefsd::write",
-        MAP | MAP_MANY => "cladefsd::map",
+        MAP => "cladefsd::map",
         UNMAP => "cladefsd::unmap",
         COMMIT => "cladefsd::commit",
-        FREE | FREE_MANY => "cladefsd::free",
+        FREE => "cladefsd::free",
         FORK => "cladefsd::fork",
         _ => return None,
     })
@@ -1661,7 +1656,7 @@ impl Connection {
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, what));
         }
         // cladefs: nor what its stage operations cost, which it says unasked (TASK-91.16).
-        if [ACK, STAGE_COUNTS, STAGE_PRIVATE_COUNTS].contains(&header.kind) {
+        if [ACK, STAGE_COUNTS].contains(&header.kind) {
             return Ok(Charge::none(&self));
         }
         // cladefs: one `MAPPINGS` at a time, the next waiting for the last's reply, as the credit
@@ -1812,8 +1807,9 @@ impl Connection {
             // which every request's future, commits' and writes' too, would hold and be copied
             // with, onto the heap in `serve_future`: some 15% of the daemon's CPU under pgbench
             // (TASK-707).
-            Ok(Request::Open { path, opening }) => {
-                Box::pin(self.clone().serve_open(path, opening, answer)).await
+            Ok(Request::Open { path, opening, build }) => {
+                let build = build.to_owned();
+                Box::pin(self.clone().serve_open(path, opening, build, answer)).await
             }
             Ok(request) => self.serve(&request, answer).await,
         }
@@ -1956,29 +1952,28 @@ impl Connection {
                 // cladefs: within its disk and its tenant's limits, as its cell admits it (doc-22).
                 open_cell.write_with_barriers(*extent, *offset, &[data], *barriers).await
             }
-            Request::Free(extent) => open_cell.free(*extent),
-            // cladefs: and those after it, in order (TASK-92.13).
-            Request::FreeMany { first, rest } => {
+            // cladefs: one extent or many in order (TASK-92.13, board 11697).
+            Request::Free { first, rest } => {
                 let mut extents = std::iter::once(first).chain(rest.iter());
                 extents.try_for_each(|extent| open_cell.free(*extent))
             }
-            Request::Map(mapping @ WindowMapping { window_offset, len, contents }) => {
-                let began = std::time::Instant::now();
-                match *contents {
-                    MappingContents::Zeros => open_cell.map_zeros_at(*window_offset, *len)?,
-                    MappingContents::Extent { extent, offset } => {
-                        open_cell.map(extent, offset, *len, *window_offset).await?
-                    }
-                }
-                self.traced_maps(began, open_cell, std::slice::from_ref(mapping));
-                Ok(())
-            }
-            // cladefs: in one change of the window (TASK-92.14; with optional daemon-side cache
-            // warming via `MAP_MANY_WARM`, board 11681).
-            Request::MapMany { mappings, warm } => {
+            // cladefs: one mapping or many in one change of the window, with optional daemon-side
+            // cache warming via `MAP_WARM` (TASK-92.14, board 11681, board 11697).
+            Request::Map { mappings, warm } => {
                 let began = std::time::Instant::now();
                 if *warm {
                     open_cell.map_many_warm(mappings).await?;
+                } else if let [mapping] = mappings.as_ref() {
+                    match mapping.contents {
+                        MappingContents::Zeros => {
+                            open_cell.map_zeros_at(mapping.window_offset, mapping.len)?
+                        }
+                        MappingContents::Extent { extent, offset } => {
+                            open_cell
+                                .map(extent, offset, mapping.len, mapping.window_offset)
+                                .await?
+                        }
+                    }
                 } else {
                     open_cell.map_many(mappings).await?;
                 }
@@ -2081,7 +2076,6 @@ impl Connection {
                 self.shrinking.answered(*capacity, *took);
                 Ok(())
             }
-            Request::Build(commit) => self.report.said_build(commit),
             Request::Stats { ask, guest } => self.report.answered(*ask, *guest),
             // Served apart, as futures ([`Connection::serve_in_turn`]).
             Request::Open { .. } | Request::Fault(_) => Err(Errno::EINVAL),
@@ -2091,7 +2085,7 @@ impl Connection {
     /// cladefs: resolves the guest's `fault` ([`FAULT`]), and replies: a future, which holds no
     /// thread while it waits for the pager (TASK-92.20), served so ([`serve_future`]).
     async fn fault(self: Arc<Self>, fault: Fault, answer: Answer) {
-        let Fault { offset, page, .. } = fault;
+        let Fault { offset, .. } = fault;
         let began = std::time::Instant::now();
         let faulted = async {
             let window = self.window.with(Mutex::lock).clone().ok_or(Errno::EBADF)?;
@@ -2107,9 +2101,6 @@ impl Connection {
             }
             Err(errno) => Err(errno),
         };
-        if !page {
-            cladefs_core::stats::add(cladefs_core::stats::Counter::FaultStores, 1);
-        }
         // cladefs: an access to a page the window maps nothing at stops its VM if the guest goes on
         // with it for a second, with no more than KVM_RUN's EFAULT to say so: what the window had
         // there, and its latest MAPs and UNMAPs, each refusal of the first thousand, a run's few,
@@ -2155,30 +2146,36 @@ impl Connection {
     }
 
     /// cladefs: serves an [`OPEN`] of the cell at `path` to write, as `how` says
-    /// ([`Connection::open`]), and replies with its cell and physical memory: a future, which
-    /// holds no thread while it waits (TASK-92.5), served so ([`serve_future`]).
-    async fn serve_open(self: Arc<Self>, path: PathBuf, how: codec::Opening, answer: Answer) {
+    /// ([`Connection::open`]), recording its VM process's `build`, and replies with its cell,
+    /// capacity and physical memory: a future, which holds no thread while it waits (TASK-92.5),
+    /// served so ([`serve_future`]).
+    async fn serve_open(
+        self: Arc<Self>,
+        path: PathBuf,
+        how: codec::Opening,
+        build: String,
+        answer: Answer,
+    ) {
         let mut reply = answer.reply_header();
-        let opened = self.open(&path, how).await;
-        let fds = match &opened {
-            Ok((cell, ephemeral)) => {
+        let opened = self.open(&path, how, &build).await;
+        let (payload, fds) = match &opened {
+            Ok((cell, ephemeral, capacity)) => {
                 let (arena, max_map_count) = (self.arena_id(), max_map_count());
-                reply.set_body(
-                    &Opened {
-                        cell: cell.id,
-                        tenant: cell.tenant,
-                        arena,
-                        max_map_count,
-                        ephemeral: *ephemeral,
-                    }
-                    .to_body(),
-                );
-                Vec::from(self.memories())
+                let opened = Opened {
+                    cell: cell.id,
+                    tenant: cell.tenant,
+                    arena,
+                    max_map_count,
+                    ephemeral: *ephemeral,
+                    capacity: *capacity,
+                };
+                reply.set_body(&opened.to_body());
+                (opened.capacity_bytes().to_vec(), Vec::from(self.memories()))
             }
             // Not opened: no memories to send; the failure goes in the answer.
-            Err(_) => Vec::new(),
+            Err(_) => (Vec::new(), Vec::new()),
         };
-        answer.send(opened.map(drop), reply, Vec::new(), fds);
+        answer.send(opened.map(drop), reply, payload, fds);
     }
 
     /// cladefs: records in its trace of its guest's reads, if it keeps one (TASK-702.1), a read of
@@ -2244,7 +2241,8 @@ impl Connection {
         &self,
         path: &Path,
         how: codec::Opening,
-    ) -> Result<(cladefs_core::CellId, bool), Errno> {
+        build: &str,
+    ) -> Result<(cladefs_core::CellId, bool, u64), Errno> {
         let opening = self.opening()?;
         let (resolved, effective_how, named_cell) = if let Some(pool) = self.daemon().disk_pool() {
             let req_cell = self.named(path)?;
@@ -2379,13 +2377,16 @@ impl Connection {
         self.start_behind(move |stopped| flush_behind(flushing_daemon, flushed, stopped));
         let cell = open_cell.cell();
         let ephemeral = open_cell.is_ephemeral();
+        let capacity = open_cell.info()?.capacity;
         // cladefs: should its VM process go, and a writer wait for its cell to close, the cell's
         // uploader stops at once rather than upload what it holds first (TASK-216).
         if let Some(cut_short) = open_cell.cut_short() {
             hold.when_wanted(cut_short);
         }
         opening.opened(&resolved, open_cell, hold);
-        Ok((cell, ephemeral))
+        // Recorded once per connection when OPEN succeeds; `Opening` ensures OPEN succeeds at most once.
+        let _ = self.report.said_build(build);
+        Ok((cell, ephemeral, capacity))
     }
 
     /// Opens the cell at `path`, which `hold` holds, as [`Connection::open`] does: the cell
@@ -2601,26 +2602,12 @@ impl Connection {
     }
 }
 
-/// cladefs: how many `lseek(SEEK_HOLE)` checks [`TransferArea::written`] has run (board 7411).
-#[cfg(test)]
-pub(super) static TRANSFER_SEEK_HOLES: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-
 /// A connection's transfer area ([`TRANSFER`]), shared memory its VM process made, mapped here:
 /// which `READ`s write and `WRITE`s read their data in, as the VM process says, which may change
 /// it meanwhile: it is accessed as volatile memory, its ranges checked against its length.
 struct TransferArea {
     addr: std::ptr::NonNull<u8>,
     len: usize,
-    num_pages: usize,
-    /// cladefs: its memory opened anew, read-only, for [`TransferArea::written`] to seek in with
-    /// an offset of its own, not the VM process's descriptor's.
-    memory: std::os::fd::OwnedFd,
-    /// cladefs: bitmap of pages already verified non-hole by `SEEK_HOLE` (board 7411). Because
-    /// [`TransferArea::map`] seals the memfd with `F_SEAL_FUTURE_WRITE | F_SEAL_GROW | F_SEAL_SEAL`
-    /// before returning, once a page is written by the VM process it can never become a hole again;
-    /// steady-state transfer-area I/O checks this bitmap with zero syscalls.
-    verified: Box<[std::sync::atomic::AtomicU64]>,
 }
 
 // SAFETY: Shared memory mapped for the area's life, accessed as volatile memory alone.
@@ -2631,17 +2618,18 @@ unsafe impl Sync for TransferArea {}
 
 impl TransferArea {
     /// The `len` bytes of the shared memory `fd`, mapped: `EINVAL` unless it has that many, is a
-    /// whole number of host pages, and is sealed against shrinking, which would fault the daemon's
-    /// accesses past its new end.
-    /// cladefs: sealed here, once mapped, against future writes, which takes the VM process's
-    /// punching holes in it away, the VM process's own mappings writing on; and accessed only
-    /// where its VM process wrote it first ([`TransferArea::range`]): the kernel charges a page of
-    /// shared memory to the process that faults it in (`mm/shmem.c`), and one the daemon faulted
-    /// would be charged to the daemon, for as long as the VM process kept the memory, the
-    /// connection gone (TASK-547).
+    /// whole number of host pages, is sealed against shrinking, and every page in `0..len` is
+    /// already written by the VM process.
+    /// cladefs: sealed here, once mapped, against future writes (`F_SEAL_FUTURE_WRITE |
+    /// F_SEAL_GROW | F_SEAL_SEAL`, which blocks `fallocate(FALLOC_FL_PUNCH_HOLE)` and
+    /// `madvise(MADV_REMOVE)` while letting existing mappings write), then checked hole-free once
+    /// with `lseek(fd, 0, SEEK_HOLE)` (TASK-547, board 6881, board 11707, hotbed question 575).
+    /// Because the kernel charges a page of shared memory to the process that faults it in
+    /// (`mm/shmem.c`) and retains swap entries as non-holes in shmem's xarray, a single post-seal
+    /// `SEEK_HOLE >= len` guarantees every page in `0..len` is already charged to the VM process
+    /// (whether resident or swapped out) and can never become a hole again.
     fn map(fd: std::os::fd::BorrowedFd<'_>, len: u64) -> Result<Self, Errno> {
         use std::os::fd::AsRawFd;
-        use std::sync::atomic::AtomicU64;
         let page = cladefs_core::pages::page_size();
         if len == 0 || len > MAX_TRANSFER_AREA || !len.is_multiple_of(page) {
             return Err(Errno::EINVAL);
@@ -2652,16 +2640,13 @@ impl TransferArea {
         // SAFETY: A stat buffer the call fills.
         let mut stat: libc::stat = unsafe { std::mem::zeroed() };
         // SAFETY: As above, of a descriptor the message carried.
-        if unsafe { libc::fstat(fd.as_raw_fd(), &mut stat) } != 0 || (stat.st_size as u64) < len {
+        if unsafe { libc::fstat(fd.as_raw_fd(), &mut stat) } != 0
+            || stat.st_size < 0
+            || (stat.st_size as u64) < len
+        {
             return Err(Errno::EINVAL);
         }
-        let num_pages = usize::try_from(len / page).map_err(|_| Errno::EINVAL)?;
-        let words = num_pages.div_ceil(64);
         let len = usize::try_from(len).map_err(|_| Errno::EINVAL)?;
-        let memory = reopen_read_only(fd).map_err(|err| {
-            log::warn!("cladefsd: a transfer area not to be opened anew: {err}");
-            Errno::EINVAL
-        })?;
         // SAFETY: Maps shared memory, as large as it is, sealed against shrinking.
         let addr = unsafe {
             libc::mmap(
@@ -2677,140 +2662,28 @@ impl TransferArea {
             log::warn!("cladefsd: mapping a transfer area: {}", std::io::Error::last_os_error());
             return Err(Errno::ENOMEM);
         }
-        let verified = (0..words).map(|_| AtomicU64::new(0)).collect();
-        let area = Self {
-            addr: std::ptr::NonNull::new(addr.cast()).unwrap(),
-            len,
-            num_pages,
-            memory,
-            verified,
-        };
+        let area = Self { addr: std::ptr::NonNull::new(addr.cast()).unwrap(), len };
         if let Err(err) = seals::against_writes(fd) {
             log::warn!("cladefsd: a transfer area not to be sealed against writes: {err}");
+            return Err(Errno::EINVAL);
+        }
+        let hole = seals::first_hole(fd, 0).map_err(|err| {
+            log::warn!("cladefsd: a transfer area's holes: {err}");
+            Errno::EINVAL
+        })?;
+        if hole < 0 || (hole as u64) < (len as u64) {
+            log::warn!("cladefsd: a transfer area's bytes its VM process never wrote");
             return Err(Errno::EINVAL);
         }
         Ok(area)
     }
 
-    /// Bitmask for bits `[lo, hi)` within one 64-bit word (`0 <= lo < hi <= 64`).
+    /// The `len` bytes at `offset`, checked: `EINVAL` past its end. Every page within `0..self.len`
+    /// was verified written once at [`TransferArea::map`] after sealing against future writes.
     #[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
-    fn word_mask(lo: u32, hi: u32) -> u64 {
-        let count = hi.saturating_sub(lo);
-        if count >= 64 {
-            u64::MAX
-        } else {
-            1u64.wrapping_shl(count).wrapping_sub(1).wrapping_shl(lo)
-        }
-    }
-
-    /// First page in `from..to` whose bit is not yet set in [`Self::verified`].
-    #[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
-    fn first_unverified(&self, from: usize, to: usize) -> Option<usize> {
-        use std::sync::atomic::Ordering;
-        if from >= to {
-            return None;
-        }
-        let first_word = from / 64;
-        let last_word = to.checked_sub(1)? / 64;
-        for word in first_word..=last_word {
-            let lo = if word == first_word { (from % 64) as u32 } else { 0 };
-            let hi = if word == last_word {
-                let rem = (to % 64) as u32;
-                if rem == 0 { 64 } else { rem }
-            } else {
-                64
-            };
-            let mask = Self::word_mask(lo, hi);
-            let bits = self.verified.get(word).map_or(0, |slot| slot.load(Ordering::Relaxed));
-            let missing = mask & !bits;
-            if missing != 0 {
-                return word.checked_mul(64)?.checked_add(missing.trailing_zeros() as usize);
-            }
-        }
-        None
-    }
-
-    /// Marks every page in `from..to` as verified non-hole in [`Self::verified`].
-    #[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
-    fn mark_verified(&self, from: usize, to: usize) {
-        use std::sync::atomic::Ordering;
-        let to = to.min(self.num_pages);
-        let Some(last_page) = to.checked_sub(1) else {
-            return;
-        };
-        if from >= to {
-            return;
-        }
-        let first_word = from / 64;
-        let last_word = last_page / 64;
-        for word in first_word..=last_word {
-            let lo = if word == first_word { (from % 64) as u32 } else { 0 };
-            let hi = if word == last_word {
-                let rem = (to % 64) as u32;
-                if rem == 0 { 64 } else { rem }
-            } else {
-                64
-            };
-            let mask = Self::word_mask(lo, hi);
-            if let Some(slot) = self.verified.get(word) {
-                slot.fetch_or(mask, Ordering::Relaxed);
-            }
-        }
-    }
-
-    /// cladefs: whether its VM process wrote each page of the `len` bytes at `offset`, within it:
-    /// no hole in its memory there, sealed as the area is against its punching one again. Its
-    /// memory's, not its mapping's: a page written and then swapped out is written still, but in
-    /// no memory, which `mincore` asked before, and refused the reads into it of a host short of
-    /// memory, its guests' reads failing with EIO (board 6881). The daemon faulting such a page
-    /// in charges it to whom it was charged when it went to swap, the VM process.
-    ///
-    /// Verified non-hole pages are cached in [`Self::verified`] (board 7411) so steady-state
-    /// transfer-area I/O makes no `lseek(SEEK_HOLE)` syscalls.
-    #[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
-    fn written(&self, offset: usize, len: usize) -> Result<bool, Errno> {
-        let page = usize::try_from(cladefs_core::pages::page_size()).map_err(|_| Errno::EINVAL)?;
-        if page == 0 {
-            return Err(Errno::EINVAL);
-        }
-        let end = offset.checked_add(len).ok_or(Errno::EINVAL)?;
-        if end > self.len {
-            return Err(Errno::EINVAL);
-        }
-        let start_page = offset.checked_div(page).ok_or(Errno::EINVAL)?;
-        let end_page = end.div_ceil(page);
-        let Some(miss) = self.first_unverified(start_page, end_page) else {
-            return Ok(true);
-        };
-        #[cfg(test)]
-        TRANSFER_SEEK_HOLES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let seek_at = miss.checked_mul(page).ok_or(Errno::EINVAL)?;
-        let seek_at = libc::off_t::try_from(seek_at).map_err(|_| Errno::EINVAL)?;
-        let hole = seals::first_hole(self.memory.as_fd(), seek_at).map_err(|err| {
-            log::warn!("cladefsd: a transfer area's holes: {err}");
-            Errno::EINVAL
-        })?;
-        let hole_pages = usize::try_from(hole)
-            .map_err(|_| Errno::EINVAL)?
-            .checked_div(page)
-            .ok_or(Errno::EINVAL)?;
-        let verified_end = hole_pages.min(self.num_pages);
-        if verified_end > miss {
-            self.mark_verified(miss, verified_end);
-        }
-        Ok(hole_pages >= end_page)
-    }
-
-    /// The `len` bytes at `offset`, checked: `EINVAL` past its end; cladefs: and where its VM
-    /// process didn't write it first, which the daemon would fault in itself, charged to it
-    /// (TASK-547).
     fn range(&self, offset: u64, len: u64) -> Result<*mut u8, Errno> {
         let end = offset.checked_add(len).ok_or(Errno::EINVAL)?;
         if end > self.len as u64 {
-            return Err(Errno::EINVAL);
-        }
-        if len > 0 && !self.written(offset as usize, len as usize)? {
-            log::warn!("cladefsd: a transfer area's bytes its VM process never wrote");
             return Err(Errno::EINVAL);
         }
         // SAFETY: Within the mapping.
@@ -2833,7 +2706,7 @@ impl TransferArea {
 /// cladefs: a transfer area's seals, Linux's (memfd). macOS has none, but a POSIX shared memory
 /// object there, which the VM process makes its area of, is never resized once sized: that is its
 /// seal against shrinking; and as macOS punches no holes in one, no seal against writes is needed
-/// there, nor does [`TransferArea::written`] ask after holes (board 13065, hotbed question 566).
+/// there, nor does [`TransferArea::map`] ask after holes (board 13065, hotbed question 566).
 mod seals {
     use std::os::fd::BorrowedFd;
 
@@ -3849,7 +3722,7 @@ mod refusal_tests {
     /// probes told of as the guest's accesses.
     #[test]
     fn probes_refuse_the_guest_nothing() {
-        let probe = Fault { offset: 0x1000, page: true, probe: true };
+        let probe = Fault { offset: 0x1000, probe: true };
         let guests = Fault { probe: false, ..probe };
         let nothing_mapped = Err(Errno::ENOENT);
         assert_eq!(refusal(&probe, nothing_mapped), None);

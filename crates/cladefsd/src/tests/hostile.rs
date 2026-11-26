@@ -192,14 +192,27 @@ enum Payload {
     /// So many bytes of one.
     Filled(u8, usize),
     Path(Place),
-    /// A `FREE_MANY`'s extents, after the first.
+    /// An `OPEN`'s `<path>\0<build>` payload (board 11697).
+    Open(Place),
+    /// A `FREE`'s extents, after the first.
     Extents(Vec<(Word, u64)>),
+    /// A `MAP`'s encoded `MappingWire` payload (board 11697).
+    Mapping {
+        cell: Word,
+        sequence: Word,
+        offset: Word,
+        len: Word,
+        to: Word,
+        zeros: bool,
+    },
 }
 
 /// A transfer area mallory gives, of the bytes it says.
 #[derive(Clone, Copy, Debug)]
 enum Area {
     Sealed(u64),
+    /// Sealed against shrinking, but pages never written (hole-checked at `TRANSFER`, board 11707).
+    Sparse(u64),
     /// Not sealed against shrinking.
     Unsealed(u64),
     /// Of half the bytes it says.
@@ -445,6 +458,7 @@ fn area() -> BoxedStrategy<Area> {
         4 => Just(Area::Sealed(1 << 20)),
         2 => Just(Area::Sealed(MAX_TRANSFER_AREA)),
         1 => Just(Area::Sealed(MAX_TRANSFER_AREA + page_size())),
+        2 => Just(Area::Sparse(1 << 20)),
         1 => Just(Area::Unsealed(1 << 20)),
         1 => Just(Area::Short(1 << 20)),
         1 => Just(Area::Pipe),
@@ -456,7 +470,7 @@ fn area() -> BoxedStrategy<Area> {
 fn message() -> BoxedStrategy<Said> {
     use Word::*;
     let ps = page_size();
-    const KINDS: [u32; 32] = [
+    const KINDS: [u32; 34] = [
         OPEN,
         READ,
         WRITE,
@@ -478,11 +492,14 @@ fn message() -> BoxedStrategy<Said> {
         23,
         24,
         TRANSFER,
-        FREE_MANY,
+        // 26 (FREE_MANY), 28 (BUILD), 32 (MAP_MANY), 33 (STAGE_PRIVATE_COUNTS) retired (board 11697).
+        26,
         STAGE_COUNTS,
-        BUILD,
+        28,
         // `PRIVATE`'s, which its VM process serves itself now (doc-26).
         30,
+        32,
+        33,
         REPLY,
         STAGE_MAP,
         STAGE_UNMAP,
@@ -527,9 +544,16 @@ fn message() -> BoxedStrategy<Said> {
                 said(WRITE, 0, [Own, extent, Is(at), Is(0), Is(0)], Payload::Filled(0x77, len))
             }
         ),
-        (sequence(), page(), pages(), page(), 0u32..4).prop_map(|(extent, at, len, to, flags)| {
-            said(MAP, flags, [Own, extent, at, len, to], Payload::Bytes(Vec::new()))
-        }),
+        (sequence(), page(), pages(), page(), any::<bool>()).prop_map(
+            |(extent, at, len, to, zeros)| {
+                said(
+                    MAP,
+                    0,
+                    [Is(0); 5],
+                    Payload::Mapping { cell: Own, sequence: extent, offset: at, len, to, zeros },
+                )
+            },
+        ),
         (page(), pages()).prop_map(|(at, len)| said(
             UNMAP,
             0,
@@ -562,7 +586,7 @@ fn message() -> BoxedStrategy<Said> {
     let storms = prop_oneof![
         (prop_oneof![Just(UNMAP), Just(FAULT)], page(), pages(), 16u16..128).prop_map(
             |(kind, at, len, repeat)| {
-                let (flags, second) = if kind == FAULT { (FAULT_PAGE, Is(0)) } else { (0, len) };
+                let (flags, second) = if kind == FAULT { (0, Is(0)) } else { (0, len) };
                 Said {
                     repeat,
                     ..said(
@@ -607,7 +631,19 @@ fn message() -> BoxedStrategy<Said> {
             said(READ, 0, [whose, extent, Is(0), len, Is(0)], Payload::Bytes(Vec::new()))
         }),
         1 => (theirs(), sequence(), page()).prop_map(move |(whose, extent, to)| {
-            said(MAP, 0, [whose, extent, Is(0), Is(ps), to], Payload::Bytes(Vec::new()))
+            said(
+                MAP,
+                0,
+                [Is(0); 5],
+                Payload::Mapping {
+                    cell: whose,
+                    sequence: extent,
+                    offset: Is(0),
+                    len: Is(ps),
+                    to,
+                    zeros: false,
+                },
+            )
         }),
         1 => (theirs(), sequence()).prop_map(|(whose, extent)| {
             said(FREE, 0, [whose, extent, Is(0), Is(0), Is(0)], Payload::Bytes(Vec::new()))
@@ -616,7 +652,7 @@ fn message() -> BoxedStrategy<Said> {
             said(WRITE, 0, [whose, extent, Is(0), Is(0), Is(0)], Payload::Filled(0x66, ps as usize))
         }),
         1 => (theirs(), proptest::collection::vec((theirs(), 1u64..16), 0..8)).prop_map(|(whose, rest)| {
-            said(FREE_MANY, 0, [whose, Is(1), Is(0), Is(0), Is(0)], Payload::Extents(rest))
+            said(FREE, 0, [whose, Is(1), Is(0), Is(0), Is(0)], Payload::Extents(rest))
         }),
         // Forks of its own cell to another's path or its own, and drops of another's version.
         1 => (0u8..4, 0u32..2)
@@ -629,7 +665,7 @@ fn message() -> BoxedStrategy<Said> {
             }),
         // cladefs: and a follower's flag, 1 << 2, gone (board 8237).
         3 => (place(), prop_oneof![Just(0), Just(OPEN_CREATE), Just(1 << 2)]).prop_map(|(at, flags)| {
-            said(OPEN, flags, [Is(CELL_BYTES), Is(0), Is(0), Is(0), Is(VERSION)], Payload::Path(at))
+            said(OPEN, flags, [Is(CELL_BYTES), Is(0), Is(0), Is(0), Is(VERSION)], Payload::Open(at))
         }),
         // Forks of its own cell to anywhere it names.
         1 => (place(), 0u32..2).prop_map(|(to, flags)| {
@@ -638,7 +674,7 @@ fn message() -> BoxedStrategy<Said> {
         // Restores, of versions there are or not, of any cell it names, of any tenant's.
         1 => ((0u8..4).prop_map(Place::Own), prop_oneof![Just(Alice), Just(Bob), Just(Given)], prop_oneof![Just(GivenVersion), any::<u64>().prop_map(Is)], prop_oneof![Just(GivenTenant), (0u64..4).prop_map(Is)])
             .prop_map(|(to, cell, version, tenant)| {
-                said(OPEN, OPEN_FORK, [Is(CELL_BYTES), cell, version, tenant, Is(VERSION)], Payload::Path(to))
+                said(OPEN, OPEN_FORK, [Is(CELL_BYTES), cell, version, tenant, Is(VERSION)], Payload::Open(to))
             }),
     ];
     // The protocol's own: acknowledgements forged, what its stage operations cost, its build, a
@@ -665,11 +701,10 @@ fn message() -> BoxedStrategy<Said> {
         ),
         ([word(), word(), word(), word(), word()], abusing_payload.clone())
             .prop_map(|(args, payload)| said(STAGE_COUNTS, 0, args, Payload::Bytes(payload))),
-        ([word(), word(), word(), word(), word()], abusing_payload).prop_map(|(args, payload)| {
-            said(STAGE_PRIVATE_COUNTS, 0, args, Payload::Bytes(payload))
-        }),
+        ([word(), word(), word(), word(), word()], abusing_payload)
+            .prop_map(|(args, payload)| { said(33, 0, args, Payload::Bytes(payload)) }),
         prop_oneof![Just(b"0123abcd".to_vec()), proptest::collection::vec(any::<u8>(), 0..80)]
-            .prop_map(|commit| said(BUILD, 0, [Is(0); 5], Payload::Bytes(commit))),
+            .prop_map(|commit| said(28, 0, [Is(0); 5], Payload::Bytes(commit))),
         (area(), word()).prop_map(|(area, len)| Said {
             area: Some(area),
             ..said(TRANSFER, 0, [len, Is(0), Is(0), Is(0), Is(0)], Payload::Bytes(Vec::new()))
@@ -1261,17 +1296,41 @@ impl Names {
             Payload::Bytes(bytes) => bytes.clone(),
             Payload::Filled(byte, len) => vec![*byte; *len],
             Payload::Path(place) => self.place(*place).as_os_str().as_bytes().to_vec(),
+            Payload::Open(place) => {
+                let mut bytes = self.place(*place).as_os_str().as_bytes().to_vec();
+                bytes.push(0);
+                bytes.extend_from_slice(cladefs_core::BUILD_COMMIT.as_bytes());
+                bytes
+            }
             Payload::Extents(extents) => (extents.iter())
                 .flat_map(|(cell, sequence)| [self.word(*cell, own), *sequence])
                 .flat_map(u64::to_le_bytes)
                 .collect(),
+            Payload::Mapping { cell, sequence, offset, len, to, zeros } => {
+                let contents = if *zeros {
+                    cladefs_core::MappingContents::Zeros
+                } else {
+                    cladefs_core::MappingContents::Extent {
+                        extent: ExtentId {
+                            cell: self.word(*cell, own),
+                            sequence: self.word(*sequence, own),
+                        },
+                        offset: self.word(*offset, own),
+                    }
+                };
+                crate::codec::mappings_payload(&[cladefs_core::WindowMapping {
+                    window_offset: self.word(*to, own),
+                    len: self.word(*len, own),
+                    contents,
+                }])
+            }
         }
     }
 }
 
 /// A descriptor of `area`, `given` the memory the connection was given: none if it was given none.
 fn area_fd(area: Area, given: &Mutex<Vec<OwnedFd>>) -> Option<OwnedFd> {
-    let memfd = |len: u64, sealed: bool| {
+    let memfd = |len: u64, sealed: bool, populate: bool| {
         // SAFETY: Makes a descriptor, owned below.
         let fd = unsafe { libc::memfd_create(c"transfer".as_ptr(), libc::MFD_ALLOW_SEALING) };
         assert!(fd >= 0);
@@ -1285,8 +1344,8 @@ fn area_fd(area: Area, given: &Mutex<Vec<OwnedFd>>) -> Option<OwnedFd> {
             }
         }
         // cladefs: written, as a VM process writes what of its area it uses, which the daemon
-        // accesses only so (TASK-547).
-        if sealed && len > 0 {
+        // verifies once at `TRANSFER` (TASK-547, board 11707).
+        if populate && len > 0 {
             // SAFETY: Maps it, as large as it is, writes it, and unmaps it.
             unsafe {
                 let len = len as usize;
@@ -1301,9 +1360,10 @@ fn area_fd(area: Area, given: &Mutex<Vec<OwnedFd>>) -> Option<OwnedFd> {
         fd
     };
     Some(match area {
-        Area::Sealed(len) => memfd(len, true),
-        Area::Unsealed(len) => memfd(len, false),
-        Area::Short(len) => memfd(len / 2, true),
+        Area::Sealed(len) => memfd(len, true, true),
+        Area::Sparse(len) => memfd(len, true, false),
+        Area::Unsealed(len) => memfd(len, false, false),
+        Area::Short(len) => memfd(len / 2, true, true),
         Area::Pipe => {
             let mut pipe = [0; 2];
             // SAFETY: Makes a pipe, whose ends are owned here, the write end closed.
@@ -1320,7 +1380,11 @@ fn area_fd(area: Area, given: &Mutex<Vec<OwnedFd>>) -> Option<OwnedFd> {
 /// The bytes a `TRANSFER` of `area` says it has.
 fn area_len(area: Area) -> u64 {
     match area {
-        Area::Sealed(len) | Area::Unsealed(len) | Area::Short(len) | Area::Given(_, len) => len,
+        Area::Sealed(len)
+        | Area::Sparse(len)
+        | Area::Unsealed(len)
+        | Area::Short(len)
+        | Area::Given(_, len) => len,
         Area::Pipe => 1 << 20,
     }
 }
@@ -1663,7 +1727,7 @@ fn run_hostile(
     // is the stage operation's.
     let send =
         |header: Header, payload: &[u8], fd: Option<OwnedFd>| -> Result<u64, std::io::Error> {
-            if ![ACK, STAGE_COUNTS, STAGE_PRIVATE_COUNTS].contains(&header.kind) {
+            if ![ACK, STAGE_COUNTS].contains(&header.kind) {
                 shared.sent.lock().unwrap().insert(header.id, header);
             }
             // What an `OPEN` names, before a restore's NUL.
@@ -1694,11 +1758,17 @@ fn run_hostile(
         Opens::Elsewhere(place) => Some(names.place(place)),
         Opens::Restores | Opens::Twice => None,
     };
+    let open_payload = |path: &std::path::Path| {
+        let mut bytes = path.as_os_str().as_bytes().to_vec();
+        bytes.push(0);
+        bytes.extend_from_slice(cladefs_core::BUILD_COMMIT.as_bytes());
+        bytes
+    };
     if let Some(path) = opened {
         let open = Header::new(OPEN, id())
             .with_body(&OpenBody { capacity: CELL_BYTES, version: VERSION, ..Default::default() })
             .with_flags(OPEN_CREATE);
-        if let Ok(id) = send(open, path.as_os_str().as_bytes(), None) {
+        if let Ok(id) = send(open, &open_payload(&path), None) {
             shared.answers.wait(id);
         }
     }
@@ -1711,7 +1781,7 @@ fn run_hostile(
                     version: VERSION,
                     ..Default::default()
                 });
-                send(open.with_flags(OPEN_CREATE), path.as_os_str().as_bytes(), None)
+                send(open.with_flags(OPEN_CREATE), &open_payload(&path), None)
             })
             .into_iter()
             .collect();
@@ -1730,7 +1800,7 @@ fn run_hostile(
                 version: VERSION,
             })
             .with_flags(OPEN_FORK);
-        if let Ok(id) = send(restore, to.as_os_str().as_bytes(), None) {
+        if let Ok(id) = send(restore, &open_payload(&to), None) {
             shared.answers.wait(id);
         }
     }
@@ -1750,22 +1820,22 @@ fn run_hostile(
         cladefs_core::cache::evict_least_used(Some(names.arena), |_| false);
         for sequence in 1..=GIVEN_EXTENTS {
             let at = (sequence - 1) * ps;
-            let mapped = Header::new(MAP, id()).with_body(&MapBody {
-                cell: names.given,
-                sequence,
-                offset: 0,
-                len: ps,
+            let mapped = Header::new(MAP, id());
+            let payload = crate::codec::mappings_payload(&[cladefs_core::WindowMapping {
                 window_offset: at,
-            });
+                len: ps,
+                contents: cladefs_core::MappingContents::Extent {
+                    extent: ExtentId { cell: names.given, sequence },
+                    offset: 0,
+                },
+            }]);
             shared.flooding.lock().unwrap().insert(mapped.id);
-            let _ = send(mapped, &[], None);
+            let _ = send(mapped, &payload, None);
         }
         for _ in 0..times {
             for sequence in 1..=GIVEN_EXTENTS {
                 let at = (sequence - 1) * ps;
-                let faulted = Header::new(FAULT, id())
-                    .with_body(&FaultBody { offset: at })
-                    .with_flags(FAULT_PAGE);
+                let faulted = Header::new(FAULT, id()).with_body(&FaultBody { offset: at });
                 let _ = send(faulted, &[], None);
             }
         }
@@ -2460,9 +2530,7 @@ fn what_requests_hold_is_within_the_credit() {
     let map_many_in_flight =
         (MAX_STREAM_BYTES / (crate::codec::MAP_MANY_HELD * len)).max(1) as usize;
     let free_manys: Vec<_> = (0..free_many_in_flight as u64)
-        .map(|id| {
-            Header::new(FREE_MANY, 500 + id).with_body(&ExtentBody { cell, sequence: 9_999 + id })
-        })
+        .map(|id| Header::new(FREE, 500 + id).with_body(&ExtentBody { cell, sequence: 9_999 + id }))
         .collect();
     let map_many_mappings: Vec<_> = (0..map_many_count)
         .map(|_| cladefs_core::WindowMapping {
@@ -2472,7 +2540,7 @@ fn what_requests_hold_is_within_the_credit() {
         })
         .collect();
     let map_many_payload = crate::codec::mappings_payload(&map_many_mappings);
-    let map_manys: Vec<_> = (0..2u64).map(|id| Header::new(MAP_MANY, 600 + id)).collect();
+    let map_manys: Vec<_> = (0..2u64).map(|id| Header::new(MAP, 600 + id)).collect();
     let held = [
         burst("roots", roots.collect(), &[], many as usize),
         burst("reads", reads.collect(), &[], stream),
@@ -2576,14 +2644,16 @@ async fn page_ins_in_flight_are_bounded() {
     sender.send(window, &[], &[]).unwrap();
     assert_eq!(answer(2), 0);
     for sequence in 1..=EXTENTS {
-        let mapped = Header::new(MAP, 2 + sequence).with_body(&MapBody {
-            cell: cell.id,
-            sequence,
-            offset: 0,
-            len: MIB,
+        let mapping = cladefs_core::WindowMapping {
             window_offset: (sequence - 1) * MIB,
-        });
-        sender.send(mapped, &[], &[]).unwrap();
+            len: MIB,
+            contents: cladefs_core::MappingContents::Extent {
+                extent: ExtentId { cell: cell.id, sequence },
+                offset: 0,
+            },
+        };
+        let payload = crate::codec::mappings_payload(&[mapping]);
+        sender.send(Header::new(MAP, 2 + sequence), &payload, &[]).unwrap();
         assert_eq!(answer(2 + sequence), 0, "MAP {sequence}");
     }
     let arena = crate::server::default_tenant().unwrap().arena();
@@ -2618,9 +2688,7 @@ async fn page_ins_in_flight_are_bounded() {
     };
     let faults = (1..=EXTENTS).map(|sequence| {
         let at = (sequence - 1) * MIB;
-        Header::new(FAULT, 1000 + sequence)
-            .with_body(&FaultBody { offset: at })
-            .with_flags(FAULT_PAGE)
+        Header::new(FAULT, 1000 + sequence).with_body(&FaultBody { offset: at })
     });
     // A page of each, through the stream.
     let reads = (1..=EXTENTS).map(|sequence| {
@@ -2733,7 +2801,7 @@ fn payloads_of_kinds_that_carry_none_end_their_connections() {
     let (cells, socket, mallory) = served_tenant(dir.path(), "mallory", MALLORY);
     let at_once = Duration::from_secs(2);
     assert!(at_once < STALL);
-    let kinds = [ACK, STAGE_COUNTS, STAGE_PRIVATE_COUNTS, INFO, READ, 0xffff].map(|kind| (kind, 0));
+    let kinds = [ACK, STAGE_COUNTS, 33, INFO, READ, 0xffff].map(|kind| (kind, 0));
     // And a root past the most a root holds, which a commit's payload is.
     let kinds = kinds.into_iter().chain([(COMMIT, COMMIT_ROOT)]);
     for (n, (kind, flags)) in kinds.enumerate() {
@@ -2829,7 +2897,7 @@ fn mappings_asked_for_past_the_credit_let_their_vm_process_go() {
     for first in (0..count).step_by(most as usize) {
         let mappings: Vec<_> = (first..count.min(first + most)).map(mapping).collect();
         let payload = crate::codec::mappings_payload(&mappings);
-        sender.send(Header::new(MAP_MANY, id), &payload, &[]).unwrap();
+        sender.send(Header::new(MAP, id), &payload, &[]).unwrap();
         // Its window's changes acknowledged as they come, then its reply.
         loop {
             let message = receiver.receive(|| 0).unwrap().unwrap();

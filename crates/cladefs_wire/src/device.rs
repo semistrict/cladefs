@@ -32,7 +32,7 @@ impl DaemonDevice {
     /// `client` as a device.
     pub fn new(client: Arc<CellClient>) -> Result<Self, Error> {
         let block_size = cladefs_core::host_cell::BLOCK_SIZE;
-        let capacity = client.info().map_err(Error::new).context("the cell's capacity")?.capacity;
+        let capacity = client.capacity();
         let allocator = TransferBudget::new(block_size as usize, TRANSFER_BUDGET);
         Ok(Self { client, allocator, block_count: capacity / block_size as u64 })
     }

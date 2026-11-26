@@ -318,7 +318,7 @@ impl DaxWindow {
 
     /// The memory in this process where the pages of a window without a second stage, as tests'
     /// are, are mapped.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     pub fn host_base(&self) -> *mut u8 {
         let host_base = self.0.host_base().expect("a test's window has no second stage");
         host_base as *mut u8
@@ -376,7 +376,9 @@ impl std::fmt::Debug for DaxWindow {
 enum Translation {
     /// In its second stage alone, another process's (a VMM's) or another range of this one's.
     Stage(Arc<dyn SecondStage>),
-    /// In host memory: a reservation of host address space, at `base`, as long as the window.
+    /// In host memory: a reservation of host address space, at `base`, as long as the window
+    /// (tests only; production windows always have a [`SecondStage`], board 11697).
+    #[cfg(any(test, feature = "testing"))]
     Host { base: usize },
 }
 
@@ -386,6 +388,38 @@ struct Mapping {
     end: u64,
     source: Arc<dyn Source>,
     source_offset: u64,
+}
+
+/// A contiguous run of host pages staged in the window (`offset..offset + len`), backed by
+/// contiguous physical pages in one arena (`phys_offset..phys_offset + len`), or a single composed
+/// host page (`composed == true`, `len == page_size()`). Replaces per-page PTE entries (board
+/// 11697).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct StagedRun {
+    len: u64,
+    phys_offset: u64,
+    arena: ArenaId,
+    composed: bool,
+}
+
+impl StagedRun {
+    fn phys(self) -> PhysLocation {
+        PhysLocation { arena: self.arena, offset: self.phys_offset }
+    }
+}
+
+/// Coalesces overlapping or adjacent byte ranges, returning them sorted and non-overlapping.
+fn coalesce_ranges(mut ranges: Vec<Range<u64>>) -> Vec<Range<u64>> {
+    ranges.retain(|r| r.start < r.end);
+    ranges.sort_by_key(|r| r.start);
+    let mut joined: Vec<Range<u64>> = Vec::with_capacity(ranges.len());
+    for range in ranges {
+        match joined.last_mut() {
+            Some(last) if last.end >= range.start => last.end = last.end.max(range.end),
+            _ => joined.push(range),
+        }
+    }
+    joined
 }
 
 /// A composed host page in a window whose host page size exceeds its logical mapping unit (e.g.
@@ -406,9 +440,10 @@ struct WindowState {
     mappings: BTreeMap<u64, Mapping>,
     /// The starts of the mappings, by the identity of their source ([`source_identity`]).
     by_source: HashMap<usize, BTreeSet<u64>>,
-    /// The host pages mapped, by host-page-aligned offset: where in physical memory each host page
-    /// is (either directly in a source's slab or in a [`ComposedPage`] below).
-    ptes: BTreeMap<u64, PhysLocation>,
+    /// The contiguous runs of host pages mapped, by host-page-aligned start offset: where in
+    /// physical memory each run is (either directly in a source's slab or in a [`ComposedPage`]
+    /// below; board 11697).
+    ptes: BTreeMap<u64, StagedRun>,
     /// Composed host pages owned by this window, keyed by host-page-aligned window offset (empty
     /// when `unit == page_size()` or when all mapped host pages are directly aligned).
     composed: BTreeMap<u64, ComposedPage>,
@@ -529,11 +564,76 @@ impl WindowState {
         }
     }
 
-    /// Records that the window has mapped the page at `at` at `offset`, where it had mapped nothing.
-    fn insert_pte(&mut self, offset: u64, at: PhysLocation) {
-        let previous = self.ptes.insert(offset, at);
-        debug_assert!(previous.is_none(), "a page mapped over another at {offset:#x}");
-        self.gauges.pages.fetch_add(1, Ordering::Relaxed);
+    /// Whether host page `offset` (host-page-aligned) is currently staged in [`WindowState::ptes`].
+    fn has_pte(&self, offset: u64) -> bool {
+        self.ptes.range(..=offset).next_back().is_some_and(|(&start, run)| start + run.len > offset)
+    }
+
+    /// The sub-ranges of `start..end` (host-page-aligned) not covered by any staged run in `ptes`.
+    fn uncovered_runs(&self, start: u64, end: u64) -> Vec<Range<u64>> {
+        if start >= end {
+            return Vec::new();
+        }
+        let mut cur = start;
+        let mut gaps = Vec::new();
+        if let Some((&r_start, run)) = self.ptes.range(..start).next_back() {
+            let r_end = r_start + run.len;
+            if r_end > cur {
+                cur = r_end.min(end);
+            }
+        }
+        for (&r_start, run) in self.ptes.range(start..end) {
+            if r_start > cur {
+                gaps.push(cur..r_start);
+            }
+            cur = cur.max((r_start + run.len).min(end));
+            if cur >= end {
+                break;
+            }
+        }
+        if cur < end {
+            gaps.push(cur..end);
+        }
+        gaps
+    }
+
+    /// Records that the window has mapped the contiguous `len`-byte host-page run at `phys` at
+    /// `start` (where nothing was mapped), coalescing with physically adjacent direct runs.
+    fn insert_run(&mut self, mut start: u64, mut phys: PhysLocation, mut len: u64, composed: bool) {
+        let ps = page_size();
+        debug_assert!(len > 0 && start.is_multiple_of(ps) && len.is_multiple_of(ps));
+        debug_assert!(!composed || len == ps);
+        debug_assert_eq!(
+            self.uncovered_runs(start, start + len).as_slice(),
+            std::slice::from_ref(&(start..start + len)),
+            "a page mapped over another at {start:#x}"
+        );
+        self.gauges.pages.fetch_add(len / ps, Ordering::Relaxed);
+        if !composed {
+            if let Some((&prev_start, &prev)) = self.ptes.range(..start).next_back()
+                && !prev.composed
+                && prev_start + prev.len == start
+                && prev.arena == phys.arena
+                && prev.phys_offset + prev.len == phys.offset
+            {
+                self.ptes.remove(&prev_start);
+                start = prev_start;
+                phys = prev.phys();
+                len += prev.len;
+            }
+            if let Some(&next) = self.ptes.get(&(start + len))
+                && !next.composed
+                && next.arena == phys.arena
+                && phys.offset + len == next.phys_offset
+            {
+                self.ptes.remove(&(start + len));
+                len += next.len;
+            }
+        }
+        self.ptes.insert(
+            start,
+            StagedRun { len, phys_offset: phys.offset, arena: phys.arena, composed },
+        );
     }
 
     /// cladefs: records that the byte range `start..end` was taken away keeping private pages there
@@ -555,15 +655,6 @@ impl WindowState {
             self.kept.remove(&after);
         }
         self.kept.insert(start, end);
-    }
-
-    /// cladefs: records that the host pages at `offsets`, in order, were taken away keeping the
-    /// private pages there ([`WindowState::kept`]), in runs, joined with those around them.
-    fn keep(&mut self, offsets: &[u64]) {
-        let ps = page_size();
-        for &offset in offsets {
-            self.keep_range(offset, offset + ps);
-        }
     }
 
     /// cladefs: the runs of [`WindowState::kept`] within `start..end`, forgotten: what the guest's
@@ -591,18 +682,60 @@ impl WindowState {
         taken
     }
 
-    /// Records that the window has unmapped the host page at `offset`, which it had mapped, and
-    /// returns any composed [`PartSlab`] owned at `offset` so the caller can drop (and quarantine)
-    /// it only after sending the corresponding second-stage unmap.
-    fn remove_pte(&mut self, offset: u64) -> Option<PartSlab> {
-        if self.ptes.remove(&offset).is_some() {
-            self.gauges.pages.fetch_sub(1, Ordering::Relaxed);
+    /// Removes all staged host pages in `h_start..h_end` (host-page-aligned), splitting any
+    /// straddling runs, and returns the coalesced host-page ranges removed together with any
+    /// composed [`PartSlab`]s dropped (to be released only after sending second-stage unmaps).
+    fn remove_pte_range(&mut self, h_start: u64, h_end: u64) -> (Vec<Range<u64>>, Vec<PartSlab>) {
+        if h_start >= h_end {
+            return (Vec::new(), Vec::new());
         }
-        let slab = self.composed.remove(&offset).map(|composed| composed.slab);
-        if slab.is_some() {
-            self.composed_count.fetch_sub(1, Ordering::Relaxed);
+        let ps = page_size();
+        let before = self
+            .ptes
+            .range(..h_start)
+            .next_back()
+            .filter(|&(start, run)| *start + run.len > h_start)
+            .map(|(&start, &run)| (start, run));
+        let within = self.ptes.range(h_start..h_end).map(|(&start, &run)| (start, run));
+        let overlapping: Vec<(u64, StagedRun)> = before.into_iter().chain(within).collect();
+        let mut removed_runs: Vec<Range<u64>> = Vec::new();
+        let mut removed_pages = 0u64;
+        for (r_start, run) in overlapping {
+            self.ptes.remove(&r_start);
+            let r_end = r_start + run.len;
+            if r_start < h_start {
+                self.ptes.insert(r_start, StagedRun { len: h_start - r_start, ..run });
+            }
+            if r_end > h_end {
+                let shift = h_end - r_start;
+                self.ptes.insert(
+                    h_end,
+                    StagedRun { len: r_end - h_end, phys_offset: run.phys_offset + shift, ..run },
+                );
+            }
+            let c_start = r_start.max(h_start);
+            let c_end = r_end.min(h_end);
+            removed_pages += (c_end - c_start) / ps;
+            match removed_runs.last_mut() {
+                Some(last) if last.end == c_start => last.end = c_end,
+                _ => removed_runs.push(c_start..c_end),
+            }
         }
-        slab
+        if removed_pages > 0 {
+            self.gauges.pages.fetch_sub(removed_pages, Ordering::Relaxed);
+        }
+        let mut dropped = Vec::new();
+        if !self.composed.is_empty() {
+            let composed_keys: Vec<u64> =
+                self.composed.range(h_start..h_end).map(|(&k, _)| k).collect();
+            for offset in composed_keys {
+                if let Some(composed) = self.composed.remove(&offset) {
+                    self.composed_count.fetch_sub(1, Ordering::Relaxed);
+                    dropped.push(composed.slab);
+                }
+            }
+        }
+        (removed_runs, dropped)
     }
 
     /// The mapping `offset` is in, and its start.
@@ -882,7 +1015,13 @@ impl Window {
         }
         let translation = match second_stage {
             Some(stage) => Translation::Stage(stage),
+            #[cfg(any(test, feature = "testing"))]
             None => Translation::Host { base: reserve(None, len).map_err(|_| Errno::ENOMEM)? },
+            #[cfg(not(any(test, feature = "testing")))]
+            None => {
+                let _ = len;
+                return Err(Errno::EINVAL);
+            }
         };
         let composed_count = Arc::new(AtomicUsize::new(0));
         let state = SharedLock::new("window", Mutex::new(WindowState::new(composed_count.clone())));
@@ -907,6 +1046,7 @@ impl Window {
     fn stage(&self) -> Option<&Arc<dyn SecondStage>> {
         match &self.translation {
             Translation::Stage(stage) => Some(stage),
+            #[cfg(any(test, feature = "testing"))]
             Translation::Host { .. } => None,
         }
     }
@@ -920,6 +1060,7 @@ impl Window {
 
     fn host_base(&self) -> Option<usize> {
         match &self.translation {
+            #[cfg(any(test, feature = "testing"))]
             Translation::Host { base } => Some(*base),
             Translation::Stage(_) => None,
         }
@@ -1008,14 +1149,14 @@ impl Window {
         loop {
             let step = {
                 let mut state = self.state.with(Mutex::lock);
-                if state.ptes.contains_key(&offset) {
+                if state.has_pte(offset) {
                     return Ok(waited);
                 }
                 match self.host_page_plan(&state, offset) {
                     HostPagePlan::Unmapped => return Err(Errno::ENOENT),
                     HostPagePlan::DirectZeros => {
                         self.install(&mut state, offset, offset + ps);
-                        if state.ptes.contains_key(&offset) {
+                        if state.has_pte(offset) {
                             return Ok(waited);
                         }
                         continue;
@@ -1045,7 +1186,7 @@ impl Window {
                 ResolveStep::Direct { source, src_page, mapped } => {
                     waited |= source.clone().bring_in(src_page).await?;
                     let mut state = self.state.with(Mutex::lock);
-                    if state.ptes.contains_key(&offset) {
+                    if state.has_pte(offset) {
                         return Ok(waited);
                     }
                     let same = matches!(
@@ -1056,7 +1197,7 @@ impl Window {
                     );
                     if same {
                         self.install(&mut state, offset, offset + mapped * ps);
-                        if state.ptes.contains_key(&offset) {
+                        if state.has_pte(offset) {
                             return Ok(waited);
                         }
                     }
@@ -1073,7 +1214,7 @@ impl Window {
                     };
                     let slab = self.cache.alloc_composed(arena).await?;
                     let mut state = self.state.with(Mutex::lock);
-                    if state.ptes.contains_key(&offset) {
+                    if state.has_pte(offset) {
                         drop(state);
                         drop(slab);
                         return Ok(waited);
@@ -1108,6 +1249,7 @@ impl Window {
         buf: &[u8],
         deps: Vec<(usize, PhysLocation)>,
     ) -> Result<()> {
+        let ps = page_size();
         if let Err(err) = slab.write(0, buf) {
             log::error!("cladefs: writing composed DAX page at {offset:#x}: {err}");
             return Err(Errno::EIO);
@@ -1119,8 +1261,8 @@ impl Window {
         state.composed_clock += 1;
         let touch = state.composed_clock;
         state.insert_composed(offset, ComposedPage { slab, deps, touch });
-        state.insert_pte(offset, phys);
-        self.map_pages(&[(offset, phys)]);
+        state.insert_run(offset, phys, ps, true);
+        self.map_runs(&[(offset, phys, ps)]);
         Ok(())
     }
 
@@ -1157,21 +1299,20 @@ impl Window {
                 if enough(evicted) {
                     break;
                 }
-                gone.push(offset);
+                gone.push(offset..offset + ps);
                 evicted += ps;
             }
             if gone.is_empty() {
                 return 0;
             }
-            gone.sort_unstable();
+            let gone = coalesce_ranges(gone);
             let _change = self.change();
             let mut dropped = Vec::with_capacity(gone.len());
-            for &offset in &gone {
-                if let Some(slab) = state.remove_pte(offset) {
-                    dropped.push(slab);
-                }
+            for range in &gone {
+                let (_, slabs) = state.remove_pte_range(range.start, range.end);
+                dropped.extend(slabs);
             }
-            self.kept(&mut state, &gone);
+            self.kept_ranges(&mut state, &gone);
             (evicted, dropped)
         };
         drop(dropped);
@@ -1271,11 +1412,11 @@ impl Window {
                     stage.window_mapped(run.start, run.end - run.start);
                 }
             }
-            let mut pages = Vec::new();
+            let mut runs = Vec::new();
             for run in &anew {
-                self.present(&mut state, run.start, run.end, &mut pages);
+                self.present(&mut state, run.start, run.end, &mut runs);
             }
-            self.map_pages(&pages);
+            self.map_runs(&runs);
             dropped
         };
         drop(dropped);
@@ -1407,21 +1548,18 @@ impl Window {
         let dropped = {
             let mut state = self.state.with(Mutex::lock);
             let Some(starts) = state.by_source.remove(&source_identity(from)) else { return };
-            let mut gone = BTreeSet::new();
+            let mut gone = Vec::new();
+            let mut dropped = Vec::new();
             for start in &starts {
                 let end = state.mappings[start].end;
                 let (h_start, h_end) = (start - start % ps, end.next_multiple_of(ps));
-                gone.extend(state.ptes.range(h_start..h_end).map(|(offset, _)| *offset));
+                let (removed, slabs) = state.remove_pte_range(h_start, h_end);
+                gone.extend(removed);
+                dropped.extend(slabs);
                 state.mappings.get_mut(start).expect("a mapping's start").source = to.clone();
             }
-            let gone: Vec<u64> = gone.into_iter().collect();
-            let mut dropped = Vec::new();
-            for &offset in &gone {
-                if let Some(slab) = state.remove_pte(offset) {
-                    dropped.push(slab);
-                }
-            }
-            self.kept(&mut state, &gone);
+            let gone = coalesce_ranges(gone);
+            self.kept_ranges(&mut state, &gone);
             state.by_source.entry(source_identity(&to)).or_default().extend(starts);
             dropped
         };
@@ -1441,62 +1579,86 @@ impl Window {
             let Some(starts) = state.by_source.get(&source) else { return };
             let ranges: Vec<(u64, u64)> =
                 starts.iter().map(|start| (*start, state.mappings[start].end)).collect();
-            let mut gone = BTreeSet::new();
+            let mut gone: Vec<Range<u64>> = Vec::new();
             for (start, end) in ranges {
                 let (h_start, h_end) = (start - start % ps, end.next_multiple_of(ps));
-                for (&offset, &at) in state.ptes.range(h_start..h_end) {
-                    let hit = match state.composed.get(&offset) {
-                        Some(composed) => {
-                            composed.deps.iter().any(|&(src, dep)| src == source && evicted(dep))
+                let before = state
+                    .ptes
+                    .range(..h_start)
+                    .next_back()
+                    .filter(|&(r_start, run)| *r_start + run.len > h_start)
+                    .map(|(&r_start, &run)| (r_start, run));
+                let within =
+                    state.ptes.range(h_start..h_end).map(|(&r_start, &run)| (r_start, run));
+                for (r_start, run) in before.into_iter().chain(within) {
+                    if run.composed {
+                        if state.composed.get(&r_start).is_some_and(|c| {
+                            c.deps.iter().any(|&(src, dep)| src == source && evicted(dep))
+                        }) {
+                            gone.push(r_start..r_start + ps);
                         }
-                        None => evicted(at),
-                    };
-                    if hit {
-                        gone.insert(offset);
+                        continue;
+                    }
+                    let c_start = r_start.max(h_start);
+                    let c_end = (r_start + run.len).min(h_end);
+                    let mut cur = c_start;
+                    while cur < c_end {
+                        let phys = PhysLocation {
+                            arena: run.arena,
+                            offset: run.phys_offset + (cur - r_start),
+                        };
+                        if evicted(phys) {
+                            match gone.last_mut() {
+                                Some(last) if last.end == cur => last.end = cur + ps,
+                                _ => gone.push(cur..cur + ps),
+                            }
+                        }
+                        cur += ps;
                     }
                 }
             }
-            let gone: Vec<u64> = gone.into_iter().collect();
+            let gone = coalesce_ranges(gone);
             let mut dropped = Vec::new();
-            for &offset in &gone {
-                if let Some(slab) = state.remove_pte(offset) {
-                    dropped.push(slab);
-                }
+            for range in &gone {
+                let (_, slabs) = state.remove_pte_range(range.start, range.end);
+                dropped.extend(slabs);
             }
-            self.kept(&mut state, &gone);
+            self.kept_ranges(&mut state, &gone);
             dropped
         };
         drop(dropped);
     }
 
-    /// cladefs: unmaps the host pages at `offsets`, in order, which the window took away keeping
-    /// the private pages there ([`Private::Keep`]), and, if its stage copies, records them so
-    /// ([`WindowState::kept`]).
-    fn kept(&self, state: &mut WindowState, offsets: &[u64]) {
-        if self.copying {
-            state.keep(offsets);
+    /// cladefs: unmaps the host-page runs `ranges`, sorted and non-overlapping, which the window
+    /// took away keeping the private pages there ([`Private::Keep`]), and, if its stage copies,
+    /// records them so ([`WindowState::kept`]).
+    fn kept_ranges(&self, state: &mut WindowState, ranges: &[Range<u64>]) {
+        for range in ranges {
+            if self.copying {
+                state.keep_range(range.start, range.end);
+            }
+            self.unmap_range(range.start, range.end - range.start, Private::Keep);
         }
-        self.unmap_runs(offsets, Private::Keep);
     }
 
     /// Maps, where nothing is mapped, the host pages in memory of the mappings of `start..end`
     /// (host-page-aligned): in runs of pages consecutive in the window and in an arena's object,
     /// each one change of the second stage.
     fn install(&self, state: &mut WindowState, start: u64, end: u64) {
-        let mut pages = Vec::new();
-        self.present(state, start, end, &mut pages);
-        self.map_pages(&pages);
+        let mut runs = Vec::new();
+        self.present(state, start, end, &mut runs);
+        self.map_runs(&runs);
     }
 
-    /// Adds to `pages`, in order, the host pages in memory of the mappings of `start..end`
-    /// (host-page-aligned) where nothing is mapped, each its offset in the window and where it is,
-    /// which it takes as mapped from now on: those [`Window::map_pages`] is to map.
+    /// Adds to `runs`, in order, the contiguous host-page runs in memory of the mappings of
+    /// `start..end` (host-page-aligned) where nothing is mapped, each `(window_offset, phys, len)`,
+    /// recording them as mapped from now on for [`Window::map_runs`].
     fn present(
         &self,
         state: &mut WindowState,
         start: u64,
         end: u64,
-        pages: &mut Vec<(u64, PhysLocation)>,
+        runs: &mut Vec<(u64, PhysLocation, u64)>,
     ) {
         let ps = page_size();
         let vm = self.stage().and_then(|stage| stage.vm_process());
@@ -1505,31 +1667,29 @@ impl Window {
                 let mapping = &state.mappings[&mapping_start];
                 let (from, to) = (start.max(mapping_start), end.min(mapping.end));
                 let first = (mapping.source_offset + (from - mapping_start)) / ps;
-                let ptes = &state.ptes;
-                let mut found = Vec::new();
+                let mut found: Vec<(u64, PhysLocation, u64)> = Vec::new();
                 mapping.source.each_present(first..first + (to - from) / ps, &mut |present| {
-                    let mut staged = false;
-                    for page in present.page..present.page + present.count {
-                        let offset = from + (page - first) * ps;
-                        if ptes.contains_key(&offset) {
-                            continue;
-                        }
-                        let within = (page - present.page) * ps;
-                        found.push((
-                            offset,
-                            PhysLocation { offset: present.at.offset + within, ..present.at },
-                        ));
-                        staged = true;
+                    let run_start = from + (present.page - first) * ps;
+                    let run_end = run_start + present.count * ps;
+                    let gaps = state.uncovered_runs(run_start, run_end);
+                    if gaps.is_empty() {
+                        return;
+                    }
+                    for gap in gaps {
+                        let within = gap.start - run_start;
+                        let phys =
+                            PhysLocation { offset: present.at.offset + within, ..present.at };
+                        found.push((gap.start, phys, gap.end - gap.start));
                     }
                     // Once freed, it waits for the VM process to take it away
                     // (`slabs::quarantine_with`, TASK-79.9, doc-26).
-                    if staged && let (Some(vm), Some(slab)) = (vm, present.slab) {
+                    if let (Some(vm), Some(slab)) = (vm, present.slab) {
                         slab.stage_to(vm);
                     }
                 });
-                for (offset, at) in found {
-                    state.insert_pte(offset, at);
-                    pages.push((offset, at));
+                for (offset, at, len) in found {
+                    state.insert_run(offset, at, len, false);
+                    runs.push((offset, at, len));
                 }
             }
             return;
@@ -1538,7 +1698,7 @@ impl Window {
         let h_end = end.next_multiple_of(ps);
         let mut h_page = h_start;
         while h_page < h_end {
-            if state.ptes.contains_key(&h_page) {
+            if state.has_pte(h_page) {
                 h_page += ps;
                 continue;
             }
@@ -1548,8 +1708,8 @@ impl Window {
                     let mut at = None;
                     self.zeros.each_present(0..1, &mut |present| at = Some(present.at));
                     if let Some(at) = at {
-                        state.insert_pte(h_page, at);
-                        pages.push((h_page, at));
+                        state.insert_run(h_page, at, ps, false);
+                        runs.push((h_page, at, ps));
                     }
                     h_page += ps;
                 }
@@ -1558,28 +1718,27 @@ impl Window {
                     let (_, mapping) = state.mapping_at(h_page).expect("direct mapping");
                     let limit = mapping.end.min(h_end);
                     let run_pages = (limit - h_page) / ps;
-                    let mut found = Vec::new();
+                    let mut found: Vec<(u64, PhysLocation, u64)> = Vec::new();
                     source.each_present(src_page..src_page + run_pages, &mut |present| {
-                        let mut staged = false;
-                        for page in present.page..present.page + present.count {
-                            let offset = h_page + (page - src_page) * ps;
-                            if state.ptes.contains_key(&offset) {
-                                continue;
-                            }
-                            let within = (page - present.page) * ps;
-                            found.push((
-                                offset,
-                                PhysLocation { offset: present.at.offset + within, ..present.at },
-                            ));
-                            staged = true;
+                        let run_start = h_page + (present.page - src_page) * ps;
+                        let run_end = run_start + present.count * ps;
+                        let gaps = state.uncovered_runs(run_start, run_end);
+                        if gaps.is_empty() {
+                            return;
                         }
-                        if staged && let (Some(vm), Some(slab)) = (vm, present.slab) {
+                        for gap in gaps {
+                            let within = gap.start - run_start;
+                            let phys =
+                                PhysLocation { offset: present.at.offset + within, ..present.at };
+                            found.push((gap.start, phys, gap.end - gap.start));
+                        }
+                        if let (Some(vm), Some(slab)) = (vm, present.slab) {
                             slab.stage_to(vm);
                         }
                     });
-                    for (offset, at) in found {
-                        state.insert_pte(offset, at);
-                        pages.push((offset, at));
+                    for (offset, at, len) in found {
+                        state.insert_run(offset, at, len, false);
+                        runs.push((offset, at, len));
                     }
                     h_page += run_pages * ps;
                 }
@@ -1597,8 +1756,8 @@ impl Window {
                         state.composed_clock += 1;
                         let touch = state.composed_clock;
                         state.insert_composed(h_page, ComposedPage { slab, deps, touch });
-                        state.insert_pte(h_page, phys);
-                        pages.push((h_page, phys));
+                        state.insert_run(h_page, phys, ps, true);
+                        runs.push((h_page, phys, ps));
                     }
                     h_page += ps;
                 }
@@ -1606,34 +1765,34 @@ impl Window {
         }
     }
 
-    /// Maps `pages`, as [`Window::present`] found them, in order: in runs of pages consecutive in
+    /// Maps `runs`, as [`Window::present`] found them, in order: coalescing runs consecutive in
     /// the window and in an arena's object, each one change of the second stage.
-    fn map_pages(&self, pages: &[(u64, PhysLocation)]) {
-        let ps = page_size();
+    fn map_runs(&self, runs: &[(u64, PhysLocation, u64)]) {
         // cladefs: the runs of pages consecutive in the window, which the maps below are made of
         // (`stage_segments`, TASK-131.1).
-        let segments = 1 + pages.windows(2).filter(|pair| pair[0].0 + ps != pair[1].0).count();
-        if self.stage().is_some() && !pages.is_empty() {
+        if self.stage().is_some() && !runs.is_empty() {
+            let segments =
+                1 + runs.windows(2).filter(|pair| pair[0].0 + pair[0].2 != pair[1].0).count();
             crate::stats::add(crate::stats::Counter::StageSegments, segments as u64);
         }
-        let mut run: Option<(u64, PhysLocation, u64)> = None;
-        for &(offset, location) in pages {
-            match &mut run {
+        let mut current: Option<(u64, PhysLocation, u64)> = None;
+        for &(offset, location, run_len) in runs {
+            match &mut current {
                 Some((at, first, len))
                     if *at + *len == offset
                         && first.arena == location.arena
                         && first.offset + *len == location.offset =>
                 {
-                    *len += ps;
+                    *len += run_len;
                 }
                 _ => {
-                    if let Some((at, first, len)) = run.replace((offset, location, ps)) {
+                    if let Some((at, first, len)) = current.replace((offset, location, run_len)) {
                         self.map_run(at, first, len);
                     }
                 }
             }
         }
-        if let Some((at, first, len)) = run {
+        if let Some((at, first, len)) = current {
             self.map_run(at, first, len);
         }
     }
@@ -1654,26 +1813,19 @@ impl Window {
     ) -> Vec<PartSlab> {
         let ps = page_size();
         let (h_start, h_end) = (start - start % ps, end.next_multiple_of(ps));
-        let gone: Vec<u64> = state.ptes.range(h_start..h_end).map(|(offset, _)| *offset).collect();
-        let mut dropped = Vec::new();
-        for &offset in &gone {
-            if let Some(slab) = state.remove_pte(offset) {
-                dropped.push(slab);
-            }
-        }
+        let (gone, dropped) = state.remove_pte_range(h_start, h_end);
         match private {
-            Private::Keep => self.kept(state, &gone),
+            Private::Keep => self.kept_ranges(state, &gone),
             Private::End if self.copying && rules().guests_changes_end_private => {
                 let mut runs: Vec<Range<u64>> = state.take_kept(start, end);
-                for &h_page in &gone {
-                    let h_page_end = h_page + ps;
-                    if h_page < start {
-                        state.keep_range(h_page, start);
+                for range in &gone {
+                    if range.start < start {
+                        state.keep_range(range.start, start);
                     }
-                    if h_page_end > end {
-                        state.keep_range(end, h_page_end);
+                    if range.end > end {
+                        state.keep_range(end, range.end);
                     }
-                    runs.push(h_page.max(start)..h_page_end.min(end));
+                    runs.push(range.start.max(start)..range.end.min(end));
                 }
                 // On guest UNMAP of a copying window, also clear logical presence (`mapped_mask`)
                 // for never-resident cold mappings so removed sub-page slots cannot later be made
@@ -1684,37 +1836,17 @@ impl Window {
                         runs.push(m_start.max(start)..m_end.min(end));
                     }
                 }
-                runs.sort_by_key(|run| run.start);
-                let mut joined: Vec<Range<u64>> = Vec::new();
-                for run in runs {
-                    match joined.last_mut() {
-                        Some(last) if last.end >= run.start => last.end = last.end.max(run.end),
-                        _ => joined.push(run),
-                    }
-                }
-                for run in joined {
+                for run in coalesce_ranges(runs) {
                     self.unmap_range(run.start, run.end - run.start, private);
                 }
             }
-            Private::End => self.unmap_runs(&gone, private),
-        }
-        dropped
-    }
-
-    /// Unmaps the host pages at `offsets`, in order, in runs of consecutive pages, the private
-    /// pages among them going or staying as `private` says.
-    fn unmap_runs(&self, offsets: &[u64], private: Private) {
-        let ps = page_size();
-        let mut runs: Vec<(u64, u64)> = Vec::new();
-        for &offset in offsets {
-            match runs.last_mut() {
-                Some((start, len)) if *start + *len == offset => *len += ps,
-                _ => runs.push((offset, ps)),
+            Private::End => {
+                for range in &gone {
+                    self.unmap_range(range.start, range.end - range.start, private);
+                }
             }
         }
-        for (start, len) in runs {
-            self.unmap_range(start, len, private);
-        }
+        dropped
     }
 
     /// Unmaps the `len` bytes at `start`, the private pages there going or staying as `private`
@@ -1722,6 +1854,7 @@ impl Window {
     fn unmap_range(&self, start: u64, len: u64, private: Private) {
         match &self.translation {
             Translation::Stage(stage) => stage.unmap(start, len, private),
+            #[cfg(any(test, feature = "testing"))]
             Translation::Host { base } => {
                 let ps = page_size();
                 let h_start = start - start % ps;
@@ -1737,6 +1870,7 @@ impl Window {
     fn map_run(&self, offset: u64, location: PhysLocation, len: u64) {
         match &self.translation {
             Translation::Stage(stage) => stage.map(offset, location, len),
+            #[cfg(any(test, feature = "testing"))]
             Translation::Host { base } => {
                 let fd = self.slabs.arena_fd(location.arena).expect("the page's arena");
                 let prot = libc::PROT_READ;
@@ -1793,6 +1927,7 @@ impl Drop for Window {
         for source in sources {
             source.unmapped(self);
         }
+        #[cfg(any(test, feature = "testing"))]
         if let Translation::Host { base } = self.translation {
             // SAFETY: The reservation is the window's own.
             let status = unsafe { libc::munmap(base as *mut libc::c_void, self.size as usize) };
@@ -1803,6 +1938,7 @@ impl Drop for Window {
 
 /// Reserves `len` bytes of host address space, at `at` if given, over what is there, inaccessible
 /// until pages are mapped there.
+#[cfg(any(test, feature = "testing"))]
 fn reserve(at: Option<usize>, len: usize) -> std::io::Result<usize> {
     let flags = libc::MAP_PRIVATE
         | libc::MAP_ANON
@@ -2766,8 +2902,8 @@ pub mod tests {
         dax.window.unmap_pages_of(source_identity(&a), &|at| at == a_page1);
         {
             let state = dax.window.state.with(Mutex::lock);
-            assert!(state.ptes.contains_key(&0));
-            assert!(!state.ptes.contains_key(&ps));
+            assert!(state.has_pte(0));
+            assert!(!state.has_pte(ps));
             assert!(!state.composed.contains_key(&ps));
         }
 
@@ -2948,5 +3084,81 @@ pub mod tests {
         host.slabs().set_total_cap(None);
         host.cache().set_total_is_the_hosts(false);
         drop((dax, window, src));
+    }
+
+    /// Board 11697: `WindowState::ptes` stores contiguous staged runs rather than one entry per
+    /// host page, coalescing physically adjacent runs, splitting runs on partial unmap/eviction,
+    /// and preserving `kept` ranges for copy-on-write private pages across run splits.
+    #[test]
+    fn slab_runs_coalesce_split_and_preserve_kept_ranges() {
+        struct ContiguousSource {
+            slab: PartSlab,
+            pages: u64,
+        }
+        impl Source for ContiguousSource {
+            fn each_present(&self, pages: Range<u64>, found: &mut dyn FnMut(Present<'_>)) {
+                let start = pages.start.min(self.pages);
+                let end = pages.end.min(self.pages);
+                if start < end {
+                    let at = PhysLocation {
+                        arena: self.slab.location().arena,
+                        offset: self.slab.location().offset + start * page_size(),
+                    };
+                    found(Present { page: start, count: end - start, at, slab: Some(&self.slab) });
+                }
+            }
+            fn bring_in(self: Arc<Self>, _: u64) -> BoxFuture<'static, Result<bool>> {
+                Box::pin(std::future::ready(Ok(false)))
+            }
+            fn origin(&self) -> Origin {
+                Origin::Extent(ExtentId { cell: 99, sequence: 1 })
+            }
+        }
+        let ps = page_size();
+        let slab = crate::slabs::alloc(ArenaId::DEFAULT, 8, crate::slabs::Wait::No).unwrap();
+        let p0 = slab.location().offset;
+        let src: Arc<dyn Source> = Arc::new(ContiguousSource { slab, pages: 8 });
+        let stage = Arc::new(Recorded::default());
+        let (mut dax, _window) = Dax::copying(8 * ps, stage.clone()).unwrap();
+        dax.map(0, &src, 0, 8 * ps);
+        // Contiguous source pages collapse into a single StagedRun.
+        {
+            let state = dax.window.state.with(Mutex::lock);
+            assert_eq!(state.ptes.len(), 1, "8 contiguous pages should coalesce into 1 run");
+            let (&start, run) = state.ptes.iter().next().unwrap();
+            assert_eq!((start, run.len, run.composed), (0, 8 * ps, false));
+            assert_eq!(state.gauges.live().pages, 8);
+        }
+        let _ = stage.unmaps();
+        // Partial eviction in the middle splits the run into [0..2*ps) and [5*ps..8*ps) and keeps
+        // private pages over [2*ps..5*ps).
+        dax.window.unmap_pages_of(source_identity(&src), &|at| {
+            let rel = at.offset.saturating_sub(p0);
+            rel >= 2 * ps && rel < 5 * ps
+        });
+        assert_eq!(stage.unmaps(), [(2, 3, Private::Keep)]);
+        {
+            let state = dax.window.state.with(Mutex::lock);
+            let runs: Vec<(u64, u64)> = state.ptes.iter().map(|(&s, r)| (s, r.len)).collect();
+            assert_eq!(runs, [(0, 2 * ps), (5 * ps, 3 * ps)]);
+            assert_eq!(state.gauges.live().pages, 5);
+            assert_eq!(
+                state.kept.iter().map(|(&s, &e)| (s, e)).collect::<Vec<_>>(),
+                [(2 * ps, 5 * ps)]
+            );
+        }
+        // Unmapping across part of the kept range ends those private pages while splitting the run.
+        dax.unmap(ps, 3 * ps);
+        assert_eq!(stage.unmaps(), [(1, 3, Private::End)]);
+        {
+            let state = dax.window.state.with(Mutex::lock);
+            let runs: Vec<(u64, u64)> = state.ptes.iter().map(|(&s, r)| (s, r.len)).collect();
+            assert_eq!(runs, [(0, ps), (5 * ps, 3 * ps)]);
+            assert_eq!(state.gauges.live().pages, 4);
+            assert_eq!(
+                state.kept.iter().map(|(&s, &e)| (s, e)).collect::<Vec<_>>(),
+                [(4 * ps, 5 * ps)]
+            );
+        }
     }
 }

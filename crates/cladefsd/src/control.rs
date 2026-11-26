@@ -1349,7 +1349,6 @@ impl Cladefsd for Control {
             cache_trims: _,
             cache_trim_ns: _,
             // And the faults by kind (TASK-111.1).
-            fault_stores: _,
             fault_refusals: _,
             fault_waits: _,
             // And the windows' runs of pages (TASK-131.1).

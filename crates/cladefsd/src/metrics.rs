@@ -162,7 +162,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// The kinds of request metrics are kept of, and their names.
-const KINDS: [(u32, &str); 18] = [
+const KINDS: [(u32, &str); 16] = [
     (OPEN, "open"),
     (READ, "read"),
     (WRITE, "write"),
@@ -178,11 +178,8 @@ const KINDS: [(u32, &str); 18] = [
     (RESIZED, "resized"),
     (MAPPINGS, "mappings"),
     (TRANSFER, "transfer"),
-    (FREE_MANY, "free_many"),
     // cladefs: TASK-111.4.
     (STATS, "stats"),
-    // cladefs: TASK-92.14.
-    (MAP_MANY, "map_many"),
 ];
 
 /// The upper bounds of the requests' duration histograms' buckets, in seconds: from what the

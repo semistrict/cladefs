@@ -543,7 +543,7 @@ fn apply_diff_files_overlays_sparse_diffs_and_preserves_base_holes() {
 }
 
 /// board 11681: lazy `MemoryCell::Mapper::map` warms `ExtentCache` daemon-side via
-/// `MAP_MANY | MAP_MANY_WARM` rather than issuing a throwaway 680/688 KiB `READ` IPC copy, while
+/// `MAP | MAP_WARM` rather than issuing a throwaway 680/688 KiB `READ` IPC copy, while
 /// keeping eager prefaulting intact.
 #[test]
 fn lazy_memory_cell_node_map_warms_without_throwaway_ipc_read() {
@@ -609,7 +609,7 @@ fn lazy_memory_cell_node_map_warms_without_throwaway_ipc_read() {
     // Prime BlockDevice's tree metadata first so only the data node map itself is measured.
     let _ = memory_cell.extents().unwrap();
     let read_bytes_before = cladefs::stats::stats().read_bytes;
-    let map_manys_before = served("map_many");
+    let maps_before = served("map");
 
     cladefs::guest_thread_started();
     let got: Vec<u8> = (0..size as usize)
@@ -617,10 +617,7 @@ fn lazy_memory_cell_node_map_warms_without_throwaway_ipc_read() {
         .map(|i| unsafe { (base.as_ptr().add(i) as *const u8).read_volatile() })
         .collect();
     assert_eq!(got, image);
-    assert!(
-        served("map_many") > map_manys_before,
-        "lazy node map should use MAP_MANY with MAP_MANY_WARM"
-    );
+    assert!(served("map") > maps_before, "lazy node map should use MAP with MAP_WARM");
     // `image_mappings` reads at most one 4 KiB radix-tree metadata block; the old throwaway
     // `blocks.read(start, &mut vec![0; size])` copied the entire `size` (32 pages) over IPC.
     let read_bytes = cladefs::stats::stats().read_bytes - read_bytes_before;

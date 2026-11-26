@@ -299,7 +299,7 @@ pub struct WriteBody {
     pub data_len: u64,
 }
 
-/// Inline body of [`FREE`] and [`FREE_MANY`].
+/// Inline body of [`FREE`].
 #[repr(C)]
 #[derive(
     Clone, Copy, Debug, Default, PartialEq, Eq, FromBytes, IntoBytes, Immutable, KnownLayout,
@@ -307,19 +307,6 @@ pub struct WriteBody {
 pub struct ExtentBody {
     pub cell: u64,
     pub sequence: u64,
-}
-
-/// Inline body of [`MAP`].
-#[repr(C)]
-#[derive(
-    Clone, Copy, Debug, Default, PartialEq, Eq, FromBytes, IntoBytes, Immutable, KnownLayout,
-)]
-pub struct MapBody {
-    pub cell: u64,
-    pub sequence: u64,
-    pub offset: u64,
-    pub len: u64,
-    pub window_offset: u64,
 }
 
 /// Inline body of [`UNMAP`], [`STAGE_UNMAP`] and [`STAGE_MAPPED`].
@@ -411,7 +398,8 @@ pub struct StageCountsBody {
     pub private: u32,
 }
 
-/// Inline body of [`STAGE_PRIVATE_COUNTS`].
+/// Payload of [`STAGE_COUNTS`] (board 11697): what a VM process's runs of private pages and
+/// `PRIVATE` requests cost it so far.
 #[repr(C)]
 #[derive(
     Clone, Copy, Debug, Default, PartialEq, Eq, FromBytes, IntoBytes, Immutable, KnownLayout,
@@ -493,7 +481,7 @@ pub struct ForkedBody {
     pub reserved: u32,
 }
 
-/// Wire layout of one extent ID in a [`FREE_MANY`] payload (little-endian, unaligned).
+/// Wire layout of one extent ID in a [`FREE`] payload (little-endian, unaligned).
 #[repr(C)]
 #[derive(
     Clone,
@@ -513,7 +501,7 @@ pub struct ExtentIdWire {
     pub sequence: zerocopy::byteorder::little_endian::U64,
 }
 
-/// Wire layout of one window mapping in a [`MAPPINGS`] reply or [`MAP_MANY`] payload
+/// Wire layout of one window mapping in a [`MAPPINGS`] reply or [`MAP`] payload
 /// (little-endian, unaligned).
 #[repr(C)]
 #[derive(
@@ -566,7 +554,7 @@ const _: () = {
 /// 7: a [`FORK`] names no cell: its reply says the one the daemon gave (TASK-364). Version 8:
 /// an [`OPEN`] may make a memory cell ([`OPEN_MEMORY`], TASK-456.2). Version 9: the
 /// flags doc-4 has too are at doc-4's bits, under its names ([`COMMIT_UPLOADED`], [`COMMIT_ROOT`],
-/// [`MAP_ZEROS`], [`WRITE_UPLOADED`], [`WRITE_ROOT`], TASK-474). Version 10: an [`OPEN`] forks a
+/// `MAP_ZEROS`, [`WRITE_UPLOADED`], [`WRITE_ROOT`], TASK-474). Version 10: an [`OPEN`] forks a
 /// version of a cell it names ([`OPEN_FORK`]), and a [`FORK`] of a VM snapshot's makes a version,
 /// which its reply names (doc-20). Version 11: a [`FORK`] with [`FORK_DROP`] drops a version its
 /// connection made, as a VM snapshot failing after it does (TASK-575). Version 12: a `FREE_MANY`'s
@@ -599,7 +587,12 @@ const _: () = {
 /// returning the window's mappings (live migration snapshot/release without `make_version`).
 /// Version 22: [`MAP_MANY`] takes [`MAP_MANY_WARM`] to warm each mapped extent range in the
 /// daemon's extent cache before installing the mappings (board 11681).
-pub const VERSION: u64 = 22;
+/// Version 23: fold `BUILD` into `OPEN`'s `<path>\0<build>` payload and carry the cell's capacity
+/// in `OPEN`'s 8-byte reply payload; fold `FREE_MANY` into `FREE`, `MAP_MANY` into `MAP` (dropping
+/// `MapBody`/`MAP_ZEROS`, keeping [`MAP_WARM`]), and `STAGE_PRIVATE_COUNTS` into `STAGE_COUNTS`'s
+/// 40-byte payload; drop always-true `FAULT_PAGE` (board 11697); register `TRANSFER` lazily on
+/// first non-DAX I/O and verify hole-free once at registration (board 11707, hotbed question 575).
+pub const VERSION: u64 = 23;
 
 /// cladefs: a flag of any request, which says the guest request it is a call for, the guest's
 /// number of it (`crate::request`, TASK-260): little-endian, not 0, in the first
@@ -632,11 +625,12 @@ pub const READ: u32 = 2;
 /// [`WRITE_ROOT`] too, that commit sets the root to what of the payload follows the data, the
 /// first `args[4]` bytes of it without [`WRITE_TRANSFER`] (TASK-153.13).
 pub const WRITE: u32 = 3;
-/// Frees extent `args[0..2]` (`FREE`).
+/// Frees extent `ExtentBody` and any trailing `ExtentIdWire`s in its payload (`FREE`), in order:
+/// the first that fails fails the request, those before it freed (TASK-92.13, board 11697).
 pub const FREE: u32 = 4;
-/// Maps `args[3]` bytes at `args[2]` in extent `args[0..2]`, sealed, into the window at `args[4]`,
-/// read-only (`MAP`); or zeros there, with [`MAP_ZEROS`], as a snapshot's mappings may
-/// ([`MAPPINGS`]). cladefs: flag 1, writably, was writable DAX's, not reused (backlog doc-13).
+/// Maps each [`MappingWire`] the payload holds (one at least, as a reply to [`MAPPINGS`] carries
+/// them), in order, read-only, in one change of the window: the first that fails fails the
+/// request, those before it mapped (TASK-92.14, board 11697).
 pub const MAP: u32 = 5;
 /// Unmaps `args[1]` bytes of the window at `args[0]` (`UNMAP`).
 pub const UNMAP: u32 = 6;
@@ -655,9 +649,9 @@ pub const INFO: u32 = 9;
 /// of its own, by the mappings the host lets it make ([`OPEN`]'s reply): 0 if it doesn't say, which
 /// the daemon's metrics show (TASK-111.5).
 pub const WINDOW: u32 = 10;
-/// Resolves the guest's fault at `args[0]` in the window, a read, on that page alone if
-/// [`FAULT_PAGE`]: cladefs: a write's too, which its VM process copies or refuses itself once the
-/// window names the page (doc-26). The stage operations it takes come before the reply.
+/// Resolves the guest's fault at `FaultBody::offset` in the window, a read: cladefs: a write's
+/// too, which its VM process copies or refuses itself once the window names the page (doc-26). The
+/// stage operations it takes come before the reply.
 pub const FAULT: u32 = 11;
 /// Acknowledges stage operation `id`, which the VM process has made; and says, as
 /// [`STAGE_COUNTS`] does, what its stage operations have cost it so far.
@@ -690,11 +684,7 @@ pub const MAPPING_BYTES: u64 = 6 * 8;
 /// rather than the stream, whose sending and receiving copy it twice more (TASK-26.18.6). The VM
 /// process says which part of it each uses, which it has no other use for meanwhile.
 pub const TRANSFER: u32 = 25;
-/// cladefs: frees extent `args[0..2]`, and those the payload names after it ([`EXTENT_ID_BYTES`]),
-/// each as [`FREE`] frees it, in order: the first that fails fails the request, those before it
-/// freed, as a guest's `FREE` with doc-4's `FREE_MANY` does, a flush's dead extents in one round
-/// trip, not one each (TASK-92.13).
-pub const FREE_MANY: u32 = 26;
+// 26 was `FREE_MANY`, folded into `FREE` in version 23 (board 11697), not reused.
 /// The most bytes a transfer area holds.
 pub const MAX_TRANSFER_AREA: u64 = 64 << 20;
 
@@ -703,25 +693,18 @@ pub const MAX_TRANSFER_AREA: u64 = 64 << 20;
 /// its replies in, whatever else it asks (TASK-150.3). 750 MiB of those at most, of 4 KiB pages;
 /// the suites' guests' 2 GiB windows, and their soak's, are far within it.
 pub const MAX_WINDOW: u64 = cladefs_core::protocol::MAX_WINDOW;
-/// cladefs: the stage operations the VM process has made of the connection's, `args[0]`, the
-/// nanoseconds they took it, `args[1]`, and those of them that took access away from pages it had
-/// installed, by how, `args[2..4]` (`Stats::stage_overwrites`), so far, which the daemon counts as
-/// its own (`Stats::stage_ops`, TASK-91.16); and the runs of pages it has installed now, `args[4]`'s
-/// low 32 bits, which [`WINDOW`]'s `args[2]` bounds (TASK-111.5), and its window's private pages,
-/// its high 32 (doc-26): said with each [`ACK`]; otherwise once
-/// [`STAGE_COUNTS_EVERY`] has passed since it last said, as it makes them; before each [`STATS`];
-/// and as it closes the connection. Nothing replies. cladefs: its `id` is the runs of pages its
-/// window keeps installed at most now, its share of its process's windows', which [`WINDOW`]'s
-/// `args[2]` said as it was made, 0 before it has one; said again at once as another window of its
-/// process comes or goes, changing it (board 10098).
+/// cladefs: the stage operations the VM process has made of the connection's ([`StageCountsBody`])
+/// and its runs of private pages and `PRIVATE` requests ([`PrivateCountsBody`], carried as the
+/// 40-byte payload, board 11697), which the daemon counts as its own (`Stats::stage_ops`,
+/// TASK-91.16, TASK-164.10): said once [`STAGE_COUNTS_EVERY`] has passed since it last said, as it
+/// makes them; before each [`STATS`]; and as it closes the connection. Nothing replies. cladefs:
+/// its `id` is the runs of pages its window keeps installed at most now, its share of its
+/// process's windows', which [`WINDOW`]'s `budget` said as it was made, 0 before it has one; said
+/// again at once as another window of its process comes or goes, changing it (board 10098).
 pub const STAGE_COUNTS: u32 = 27;
-/// cladefs: the VM process's build, the commit it was built of ([`crate::BUILD_COMMIT`]), the
-/// payload, [`MAX_BUILD`] bytes at most, of letters, digits, `.`, `_` and `-`: which the daemon's
-/// metrics show by its cell (TASK-111.7). Said once, after [`OPEN`], as every VM process
-/// does: refused, the VM process's connection fails (TASK-141.3).
-pub const BUILD: u32 = 28;
+// 28 was `BUILD`, folded into `OPEN`'s `<path>\0<build>` payload in version 23 (board 11697).
 // 29 was the guest's answer to an ask to seal, writable DAX's (TASK-153.15), not reused.
-/// cladefs: the most bytes a [`BUILD`]'s commit has.
+/// cladefs: the most bytes an [`OPEN`] build commit string has (TASK-111.7).
 pub const MAX_BUILD: usize = 64;
 /// cladefs: the most bytes a root holds ([`COMMIT_ROOT`], [`WRITE_ROOT`]), `EINVAL` past it: the
 /// extent device's (doc-4's `max_root`, Firecracker's `MAX_ROOT`), which a guest's root is within
@@ -745,19 +728,8 @@ pub const STATS_GUEST: u32 = 1 << 0;
 /// cladefs: the most bytes of a guest's stats a [`STATS`] carries, many times what the guest's
 /// Fxfs says (a few KiB).
 pub const MAX_STATS: usize = cladefs_core::protocol::MAX_STATS;
-/// cladefs: maps each mapping the payload holds, as a reply to [`MAPPINGS`] has them, in order,
-/// each as [`MAP`] would, in one change of the window: the first that fails fails the request,
-/// those before it mapped. A VM restored from a snapshot maps its window's mappings again so, the
-/// whole window in a request, where a `MAP` each took a round trip and a change of the window's
-/// second stage apiece (TASK-92.14). A request of its own rather than a flag of `MAP`'s, as
-/// [`FREE_MANY`] is: a daemon older than it refuses it (`EINVAL`).
-pub const MAP_MANY: u32 = 32;
-/// cladefs: the runs of private pages the VM process made, each at once, `args[0]`, the pages
-/// they made, `args[1]`, and the nanoseconds they took it, `args[2]`; and the guest's `PRIVATE`s
-/// it served, `args[3]`, and the nanoseconds they took it, `args[4]`, so far (`Stats::stage_private_runs`,
-/// TASK-164.10): said once [`STAGE_COUNTS_EVERY`] has passed since it last said, as it makes them,
-/// and as it closes the connection. Nothing replies.
-pub const STAGE_PRIVATE_COUNTS: u32 = 33;
+// 32 was `MAP_MANY`, folded into `MAP` in version 23 (board 11697), not reused.
+// 33 was `STAGE_PRIVATE_COUNTS`, folded into `STAGE_COUNTS`'s payload in version 23 (board 11697).
 /// cladefs: how long a VM process's stage operations go uncounted at most while it makes them
 /// ([`STAGE_COUNTS`]): within a sample of the daemon's stats file (`CLADEFSD_STATS`).
 pub const STAGE_COUNTS_EVERY: std::time::Duration = std::time::Duration::from_millis(500);
@@ -783,20 +755,16 @@ pub const OPENED_EPHEMERAL: u32 = 1 << 0;
 /// cladefs: [`ForkedBody::flags`] bit indicating a host-local quiesced ephemeral snapshot
 /// (`committed` holds the latest commit number and `version` is 0).
 pub const FORKED_EPHEMERAL: u32 = 1 << 0;
-/// cladefs: doc-4's `MAP_ZEROS`, at its bit. Bit 0 was writable DAX's; doc-4's bits 1 and 2,
-/// `MAP_MANY` and `MAP_PREFAULT`, are no flags here: [`MAP_MANY`] is a request of its own, and a VM
-/// process prefaults by itself.
-pub const MAP_ZEROS: u32 = cladefs_core::protocol::MAP_ZEROS;
 pub const FORK_QUIESCENT: u32 = 1 << 0;
 /// cladefs: a [`FORK`] that drops a version the connection made (TASK-575).
 pub const FORK_DROP: u32 = 1 << 1;
 /// cladefs: a [`MAPPINGS`] that fails with `EBUSY` if any extent is open (`!is_quiescent`), used
 /// when taking a live-migration snapshot or releasing a paused VM's cell without `make_version`.
 pub const MAPPINGS_QUIESCENT: u32 = 1 << 0;
-/// cladefs: a [`MAP_MANY`] that warms each mapped extent range in the daemon's extent cache before
+/// cladefs: a [`MAP`] that warms each mapped extent range in the daemon's extent cache before
 /// installing the mappings, so lazy memory-cell node maps prefault without a throwaway `READ` IPC
-/// copy (board 11681).
-pub const MAP_MANY_WARM: u32 = 1 << 0;
+/// copy (board 11681, board 11697).
+pub const MAP_WARM: u32 = 1 << 0;
 pub const MAPPING_ZEROS: u64 = 1 << 1;
 /// cladefs: a `COMMIT` that completes once uploaded, not once ordered: doc-4's `COMMIT_UPLOADED`,
 /// at its bit, as every flag doc-4 has too is here.
@@ -819,13 +787,13 @@ pub const WRITE_TRANSFER: u32 = 1 << 4;
 /// with [`WRITE_UPLOADED`]. Not doc-4's.
 pub const WRITE_LOCAL: u32 = 1 << 5;
 pub const READ_TRANSFER: u32 = 1 << 0;
-// `FAULT`'s bit 0 said a write (`FAULT_WRITE`), which a VM process copies itself now (doc-26).
-pub const FAULT_PAGE: u32 = 1 << 1;
-/// cladefs: a [`FAULT`] on a page alone, to read, that is the VM process's own probe of the page,
+// `FAULT`'s bit 0 was `FAULT_WRITE` (doc-26) and bit 1 was always-true `FAULT_PAGE` (board 11697),
+// neither reused.
+/// cladefs: a [`FAULT`] on a page, to read, that is the VM process's own probe of the page,
 /// mapping it ahead of the guest's accesses, not the guest's access: the daemon tells of no
 /// refusal of it, as the guest may map nothing there.
 pub const FAULT_PROBE: u32 = 1 << 2;
-/// cladefs: the bytes an extent's ID takes in a [`FREE_MANY`]'s payload: its cell and its
+/// cladefs: the bytes an extent's ID takes in a [`FREE`]'s payload: its cell and its
 /// sequence, little-endian words.
 pub const EXTENT_ID_BYTES: usize = 16;
 

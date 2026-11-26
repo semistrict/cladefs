@@ -70,7 +70,7 @@ pub use dax::uffd::{
     describe_windows, guest_access_failed, guest_thread_ended, guest_thread_started,
     userfaultfd_accessible,
 };
-pub use dax::{Access, DaxWindow, SecondStage};
+pub use dax::{Access, DaxWindow, Private, SecondStage};
 pub use error::{Errno, Error, Result};
 pub use host::Host;
 pub use host_cell::CellOf;

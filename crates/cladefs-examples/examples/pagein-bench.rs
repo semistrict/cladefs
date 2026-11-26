@@ -21,8 +21,16 @@
 //! process spends on it, on every thread, which other work on the host disturbs less: the median of
 //! each kind's over the rounds.
 
-use cladefs::{Access, ExtentId, OpenCell, VolatileSlice};
+use cladefs::pages::PhysLocation;
+use cladefs::{Access, ExtentId, OpenCell, Private, SecondStage, VolatileSlice};
+use std::sync::Arc;
 use std::time::Instant;
+
+struct NoopStage;
+impl SecondStage for NoopStage {
+    fn map(&self, _offset: u64, _phys: PhysLocation, _len: u64) {}
+    fn unmap(&self, _offset: u64, _len: u64, _private: Private) {}
+}
 
 /// The parts of an extent.
 const PARTS: u64 = 4;
@@ -66,7 +74,7 @@ async fn round(mib: u64, mask: u8) -> (f64, f64) {
         let bytes = data(sequence, len as usize, mask);
         open.write(extent, 0, &[VolatileSlice::from(&bytes[..])]).await.unwrap();
     }
-    let window = open.create_dax_window(extents * len, None).unwrap();
+    let window = open.create_dax_window(extents * len, Some(Arc::new(NoopStage))).unwrap();
     open.commit(None).await.unwrap();
     for sequence in 1..=extents {
         let extent = ExtentId { cell: open.cell().id, sequence };

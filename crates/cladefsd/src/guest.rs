@@ -75,8 +75,14 @@ impl Guest {
     /// ID.
     pub async fn open(&self, path: &Path, capacity: u64) -> Result<u64, Errno> {
         let opening = Opening::Create(capacity, Kind::Fxfs);
-        let reply = self.call(&Request::Open { path: path.to_owned(), opening }).await?;
-        Ok(Opened::decode(&reply.header)?.cell)
+        let reply = self
+            .call(&Request::Open {
+                path: path.to_owned(),
+                opening,
+                build: cladefs_core::BUILD_COMMIT,
+            })
+            .await?;
+        Ok(Opened::decode(&reply.header, &reply.payload)?.cell)
     }
 
     /// Opens an existing managed cell `cell` (hotbed question 547).
@@ -122,7 +128,8 @@ impl Guest {
 
     /// Frees `extent`.
     pub async fn free(&self, extent: ExtentId) -> Result<(), Errno> {
-        self.call(&Request::Free(extent)).await.map(drop)
+        let free = Request::Free { first: extent, rest: std::borrow::Cow::Borrowed(&[]) };
+        self.call(&free).await.map(drop)
     }
 
     /// Makes a version of its cell, as a VM snapshot does: its number. cladefs: the reply's

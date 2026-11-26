@@ -607,7 +607,7 @@ impl Mapper {
     }
 
     /// Maps the runs of node `node` of the image, as its last commit has them, and installs its
-    /// pages ahead of the guest's touches: `MAP_MANY` with `MAP_MANY_WARM` warms each mapped
+    /// pages ahead of the guest's touches: `MAP` with `MAP_WARM` warms each mapped
     /// extent range in the daemon's extent cache directly (no throwaway IPC plaintext copy,
     /// board 11681) before installing the mappings, and `prefault` installs the cached pages into
     /// the window. A page installed takes a load of the guest's no fault here (see the module docs).

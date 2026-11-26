@@ -294,9 +294,7 @@ impl Device {
         }
         config_space.cell = cell.cell().to_le();
         let notices = Arc::new(Notices::default());
-        let info =
-            cell.info().map_err(|err| Error::Cell(config.path_on_host.clone(), err.into()))?;
-        notices.resizing.opened(info.capacity);
+        notices.resizing.opened(cell.capacity());
         let changes = notices.clone();
         cell.on_capacity(move |capacity, ask| changes.resizing.changed(capacity, ask));
         hear_stats_asks(&cell, &notices);
@@ -604,9 +602,7 @@ impl Device {
                 found: cell.cell(),
             });
         }
-        let info =
-            cell.info().map_err(|err| Error::Cell(self.config.path_on_host.clone(), err.into()))?;
-        self.notices.resizing.opened(info.capacity);
+        self.notices.resizing.opened(cell.capacity());
         let changes = self.notices.clone();
         cell.on_capacity(move |capacity, ask| changes.resizing.changed(capacity, ask));
         hear_stats_asks(&cell, &self.notices);

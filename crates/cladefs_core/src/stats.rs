@@ -78,10 +78,6 @@ pub struct Stats {
     pub cache_trims: u64,
     /// The nanoseconds they took, under the cache's lock.
     pub cache_trim_ns: u64,
-    /// cladefs: of `faults`, those VM processes asked for as the guest's writes to pages they had
-    /// installed read-only (`cladefsd::wire::FAULT` without `FAULT_PAGE`); the rest were on pages
-    /// they hadn't installed (TASK-111.1).
-    pub fault_stores: u64,
     /// Of `faults`, the writes refused: to a window that doesn't copy on write, or past its private
     /// pages.
     pub fault_refusals: u64,
@@ -145,7 +141,6 @@ pub enum Counter {
     StageLeaveOuts,
     CacheTrims,
     CacheTrimNs,
-    FaultStores,
     FaultRefusals,
     FaultWaits,
     StageSegments,
@@ -161,7 +156,7 @@ pub enum Counter {
 }
 
 /// The counters [`Counter`] names, which this module keeps.
-const COUNTED: usize = 36;
+const COUNTED: usize = 35;
 
 /// The counters a reading holds: those it keeps, and the extent store's.
 const COUNTERS: usize = COUNTED + 3;
@@ -215,7 +210,6 @@ pub fn stats() -> Stats {
         stage_leave_outs: count(Counter::StageLeaveOuts),
         cache_trims: count(Counter::CacheTrims),
         cache_trim_ns: count(Counter::CacheTrimNs),
-        fault_stores: count(Counter::FaultStores),
         fault_refusals: count(Counter::FaultRefusals),
         fault_waits: count(Counter::FaultWaits),
         stage_segments: count(Counter::StageSegments),
@@ -261,7 +255,6 @@ impl Stats {
             self.stage_leave_outs,
             self.cache_trims,
             self.cache_trim_ns,
-            self.fault_stores,
             self.fault_refusals,
             self.fault_waits,
             self.stage_segments,
@@ -307,19 +300,18 @@ impl Stats {
             stage_leave_outs: word(23),
             cache_trims: word(24),
             cache_trim_ns: word(25),
-            fault_stores: word(26),
-            fault_refusals: word(27),
-            fault_waits: word(28),
-            stage_segments: word(29),
-            stage_private_runs: word(30),
-            stage_private_pages: word(31),
-            stage_private_ns: word(32),
-            vm_private_requests: word(33),
-            vm_private_request_ns: word(34),
-            predicted_read: word(35),
-            predicted_unread: word(36),
-            read_unpredicted: word(37),
-            prefetch_page_ins: word(38),
+            fault_refusals: word(26),
+            fault_waits: word(27),
+            stage_segments: word(28),
+            stage_private_runs: word(29),
+            stage_private_pages: word(30),
+            stage_private_ns: word(31),
+            vm_private_requests: word(32),
+            vm_private_request_ns: word(33),
+            predicted_read: word(34),
+            predicted_unread: word(35),
+            read_unpredicted: word(36),
+            prefetch_page_ins: word(37),
         }
     }
 
@@ -360,7 +352,6 @@ impl Stats {
             "stage-leave-outs",
             "cache-trims",
             "cache-trim-ns",
-            "fault-stores",
             "fault-refusals",
             "fault-waits",
             "stage-segments",

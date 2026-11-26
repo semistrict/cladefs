@@ -59,7 +59,7 @@ pub(crate) struct Vm {
     pub cell: cladefs_core::CellId,
     /// Its cell's directory, as the daemon has it: without symbolic links.
     pub path: PathBuf,
-    /// The commit it said it was built of, if it did ([`super::wire::BUILD`]).
+    /// The commit it said it was built of, if it did ([`super::wire::OPEN`]).
     pub build: Option<String>,
     /// Its window's second stage, as it said ([`super::wire::STAGE_COUNTS`]).
     pub stage: StageCounts,
@@ -250,7 +250,7 @@ pub(super) struct Report {
     sender: Weak<AsyncSender>,
     /// Its cell, once it opened one.
     opened: OnceLock<Opened>,
-    /// The build its VM process said ([`super::wire::BUILD`]), once.
+    /// The build its VM process said ([`super::wire::OPEN`]), once.
     build: OnceLock<String>,
     /// What its VM process last said its stage operations cost it, and its second stage has
     /// installed ([`super::wire::STAGE_COUNTS`]).
@@ -259,7 +259,7 @@ pub(super) struct Report {
     /// cladefs: and its window's private pages (doc-26).
     private: AtomicU64,
     /// cladefs: and its runs of private pages, and the `PRIVATE`s it served
-    /// ([`super::wire::STAGE_PRIVATE_COUNTS`], TASK-164.10).
+    /// ([`super::wire::STAGE_COUNTS`], TASK-164.10).
     private_costs: [AtomicU64; 5],
     /// Its window's gauges, once it has one.
     window: OnceLock<Arc<Gauges>>,
@@ -340,7 +340,7 @@ impl Report {
         self.budget.store(budget, Ordering::Relaxed);
     }
 
-    /// Records the build its VM process says, `commit` ([`super::wire::BUILD`], TASK-111.7):
+    /// Records the build its VM process says, `commit` ([`super::wire::OPEN`], TASK-111.7):
     /// `EEXIST` said again.
     pub fn said_build(&self, commit: &str) -> Result<(), Errno> {
         self.build.set(commit.to_owned()).map_err(|_| Errno::EEXIST)
@@ -373,7 +373,7 @@ impl Report {
     }
 
     /// cladefs: counts what its VM process says its runs of private pages have cost it so far,
-    /// `counts` as [`super::wire::STAGE_PRIVATE_COUNTS`] has them, as [`Report::stage_counted`]
+    /// `counts` as [`super::wire::STAGE_COUNTS`] has them, as [`Report::stage_counted`]
     /// counts its stage operations (TASK-164.10).
     pub fn private_counted(&self, counts: crate::codec::PrivateCosts) {
         use cladefs_core::stats::Counter;

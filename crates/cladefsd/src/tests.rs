@@ -539,8 +539,8 @@ fn a_dropped_read_keeps_its_transfer_slot_until_answered() {
     served.join().unwrap();
 }
 
-/// The daemon refuses a transfer area it could fault on, one not sealed against shrinking, and
-/// ranges past the end of the one it has.
+/// The daemon refuses a transfer area it could fault on, one not sealed against shrinking, one
+/// with unwritten holes, and ranges past the end of the one it has.
 #[test]
 #[cfg(target_os = "linux")]
 fn transfer_areas_are_checked() {
@@ -553,6 +553,7 @@ fn transfer_areas_are_checked() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store");
     let (client, served) = connect(&path, 1 << 24);
+    assert_eq!(client.transfers(), 0, "transfer area must be registered lazily");
     // SAFETY: The name is a C string.
     let fd = unsafe { libc::memfd_create(c"unsealed".as_ptr(), libc::MFD_CLOEXEC) };
     assert!(fd >= 0);
@@ -564,7 +565,7 @@ fn transfer_areas_are_checked() {
     let unsealed = Header::new(TRANSFER, 0).with_body(&TransferBody { len: 1 << 20 });
     assert_eq!(client.call(unsealed, &[], &[file.as_fd()]).err(), Some(Errno::EINVAL));
 
-    // The cell's own area, given at its opening: once.
+    // A sealed memfd whose pages were never written is refused up front (TASK-547, board 11707).
     // SAFETY: As above.
     let fd = unsafe {
         libc::memfd_create(c"sealed".as_ptr(), libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING)
@@ -588,8 +589,35 @@ fn transfer_areas_are_checked() {
     let unaligned = Header::new(TRANSFER, 0)
         .with_body(&TransferBody { len: cladefs_core::pages::page_size() + 1 });
     assert_eq!(client.call(unaligned, &[], &[sealed.as_fd()]).err(), Some(Errno::EINVAL));
+    let sparse = Header::new(TRANSFER, 0).with_body(&TransferBody { len: 1 << 20 });
+    assert_eq!(client.call(sparse, &[], &[sealed.as_fd()]).err(), Some(Errno::EINVAL));
+
+    // The first small write lazily registers the cell's own transfer area; a second `TRANSFER`
+    // is then refused with `EEXIST`.
+    let extent = ExtentId { cell: client.cell(), sequence: 1 };
+    write(&client, extent, 0, &pattern(1, BLOCK)).unwrap();
+    assert_eq!(client.transfers(), 1);
+    // SAFETY: Populated, sealed memfd to test duplicate registration.
+    let fd2 = unsafe {
+        libc::memfd_create(c"sealed2".as_ptr(), libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING)
+    };
+    assert!(fd2 >= 0);
+    // SAFETY: Just created, and owned here.
+    let mut sealed2 = std::fs::File::from(unsafe {
+        <std::os::fd::OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(fd2)
+    });
+    std::io::Write::write_all(&mut sealed2, &vec![0u8; 1 << 20]).unwrap();
+    // SAFETY: Seals memory this test made.
+    let seal2 = unsafe {
+        libc::fcntl(
+            std::os::fd::AsRawFd::as_raw_fd(&sealed2),
+            libc::F_ADD_SEALS,
+            libc::F_SEAL_SHRINK,
+        )
+    };
+    assert_eq!(seal2, 0);
     let again = Header::new(TRANSFER, 0).with_body(&TransferBody { len: 1 << 20 });
-    assert_eq!(client.call(again, &[], &[sealed.as_fd()]).err(), Some(Errno::EEXIST));
+    assert_eq!(client.call(again, &[], &[sealed2.as_fd()]).err(), Some(Errno::EEXIST));
     let extent = [client.cell(), 1];
     let area = 8 * crate::client::TRANSFER_SLOT as u64;
     let past = Header::new(READ, 0)
@@ -2060,7 +2088,7 @@ fn snapshots_map_their_windows_again_in_one_request() {
             restored.create_dax_window_in_host_memory(memory, (window_pages * ps) as u64, None, 1)
         }
         .unwrap();
-        let (maps, map_manys) = (served("map"), served("map_many"));
+        let maps = served("map");
         let [ops, ops_ns, ..] = restored.stage_counts().costs;
         let start = std::time::Instant::now();
         if each {
@@ -2083,9 +2111,9 @@ fn snapshots_map_their_windows_again_in_one_request() {
         assert_eq!(restored.window_mappings().unwrap(), mappings);
         assert!(window(memory) == snapshotted, "{name}: the restored window differs");
         let [ops_then, ops_ns_then, ..] = restored.stage_counts().costs;
-        let counted = (served("map") - maps, served("map_many") - map_manys, ops_then - ops);
+        let counted = (served("map") - maps, ops_then - ops);
         eprintln!(
-            "{name}: {} mappings in {took:?}, {counted:?} (MAPs, MAP_MANYs, stage operations), \
+            "{name}: {} mappings in {took:?}, {counted:?} (MAPs, stage operations), \
              the VM process's stage operations {:?} of it",
             mappings.len(),
             std::time::Duration::from_nanos(ops_ns_then - ops_ns),
@@ -2094,11 +2122,11 @@ fn snapshots_map_their_windows_again_in_one_request() {
     };
     let (_each, each) = restore("each", true);
     let (_at_once, at_once) = restore("at-once", false);
-    assert_eq!((each.0, each.1), (mappings.len() as u64, 0));
-    assert_eq!((at_once.0, at_once.1), (0, 1));
+    assert_eq!(each.0, mappings.len() as u64);
+    assert_eq!(at_once.0, 1);
     // The ranges mapped anew told the VM process in runs, not one each, and the pages' maps
     // in runs across mappings, where their pages follow one another.
-    assert!(at_once.2 < each.2, "{at_once:?} against {each:?}");
+    assert!(at_once.1 < each.1, "{at_once:?} against {each:?}");
 }
 
 /// TASK-92.14: a VM whose guest stored to its window, its pages private, is snapshotted once its
@@ -2173,9 +2201,9 @@ fn snapshots_after_private_pages_are_rebound_restore_their_bytes() {
     // SAFETY: As above.
     unsafe { restored.create_dax_window_in_host_memory(restored_memory, size, None, PAGES as u64) }
         .unwrap();
-    let map_manys = served("map_many");
+    let maps = served("map");
     restored.map_many(&mappings).unwrap();
-    assert_eq!(served("map_many") - map_manys, 1);
+    assert_eq!(served("map") - maps, 1);
     // SAFETY: As above.
     let restored_window =
         unsafe { std::slice::from_raw_parts(restored_memory.as_ptr(), PAGES * ps).to_vec() };
@@ -2537,8 +2565,8 @@ async fn fenced_cells_answer_ordered_commits_erofs() {
     assert_eq!(first.free(extent(1)), Err(Errno::EROFS));
 }
 
-/// A transfer area of `len` bytes, its first half written as the slots a VM process used, given
-/// to a daemon serving a connection of its cell: the area's memory and mapping, and the connection.
+/// A transfer area of `len` bytes, populated and given to a daemon serving a connection of its
+/// cell: the area's memory and mapping, and the connection.
 #[cfg(target_os = "linux")]
 struct ServedArea {
     _dir: tempfile::TempDir,
@@ -2554,6 +2582,10 @@ struct ServedArea {
 #[cfg(target_os = "linux")]
 impl ServedArea {
     fn new(len: usize) -> Self {
+        Self::with_setup(len, |_, _| {})
+    }
+
+    fn with_setup(len: usize, before_transfer: impl FnOnce(&std::fs::File, *mut u8)) -> Self {
         use crate::wire::*;
         use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
         host();
@@ -2584,7 +2616,8 @@ impl ServedArea {
         assert_ne!(addr, libc::MAP_FAILED);
         let addr = addr.cast::<u8>();
         // SAFETY: Within the mapping.
-        unsafe { addr.write_bytes(1, len / 2) };
+        unsafe { addr.write_bytes(1, len) };
+        before_transfer(&file, addr);
         let (sender, mut receiver, stream, cell) =
             raw_connection(&socket, &dir.path().join("store"), 1 << 24);
         let transfer = Header::new(TRANSFER, 2).with_body(&TransferBody { len: len as u64 });
@@ -2630,29 +2663,61 @@ impl ServedArea {
     }
 }
 
-/// TASK-547: what of a transfer area the daemon accesses is the VM process's memory, each page of
-/// it written by the VM process first, which the kernel charges to the VM process; and the daemon
-/// seals the area against writes once it has mapped it, so that no page of it is punched out to be
-/// faulted in again by the daemon, charged to the daemon for as long as the VM process keeps it.
-/// A read into bytes of it the VM process never wrote, which the daemon would fault in itself, is
-/// refused; one into bytes it wrote is served.
+/// TASK-547, board 11707: what of a transfer area the daemon accesses is the VM process's memory,
+/// each page of it written by the VM process before `TRANSFER`; the daemon seals the area against
+/// writes once it has mapped it and verifies hole-free once with `lseek(0, SEEK_HOLE)`. A sparse
+/// transfer area is refused at `TRANSFER` with `EINVAL`; a populated one is accepted, serves
+/// reads/writes anywhere within its bounds, and cannot have pages punched out afterward.
 #[test]
 #[cfg(target_os = "linux")]
 fn transfer_areas_are_their_vm_processes_memory() {
     use crate::wire::*;
-    use std::os::fd::AsRawFd;
+    use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
     let len = 1 << 20;
     let page = cladefs_core::pages::page_size() as usize;
+
+    // A partially written (sparse) memfd is refused up front at `TRANSFER` with `EINVAL`.
+    {
+        host();
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("cladefsd.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        std::thread::spawn(move || serve(listener));
+        // SAFETY: The name is a C string.
+        let fd = unsafe { libc::memfd_create(c"sparse".as_ptr(), libc::MFD_ALLOW_SEALING) };
+        assert!(fd >= 0);
+        // SAFETY: Just made, owned here.
+        let file = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) });
+        file.set_len(len as u64).unwrap();
+        let seals = libc::F_SEAL_SHRINK | libc::F_SEAL_GROW;
+        // SAFETY: Seals what this test made.
+        assert_eq!(unsafe { libc::fcntl(file.as_raw_fd(), libc::F_ADD_SEALS, seals) }, 0);
+        // SAFETY: Maps and writes only the first half, leaving the second half a hole.
+        let addr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                file.as_raw_fd(),
+                0,
+            )
+        };
+        assert_ne!(addr, libc::MAP_FAILED);
+        // SAFETY: Within the first half of the mapping.
+        unsafe { addr.cast::<u8>().write_bytes(1, len / 2) };
+        let (sender, mut receiver, _stream, _cell) =
+            raw_connection(&socket, &dir.path().join("store"), 1 << 24);
+        let transfer = Header::new(TRANSFER, 2).with_body(&TransferBody { len: len as u64 });
+        sender.send(transfer, &[], &[file.as_fd()]).unwrap();
+        assert_eq!(receiver.receive(|| 0).unwrap().unwrap().header.status, -Errno::EINVAL.raw());
+        // SAFETY: Unmaps what this block mapped.
+        unsafe { libc::munmap(addr, len) };
+    }
+
     let mut area = ServedArea::new(len);
-    assert_eq!(area.read_into(4, len / 2), -Errno::EINVAL.raw());
-    let seeks = || crate::server::TRANSFER_SEEK_HOLES.load(std::sync::atomic::Ordering::Relaxed);
-    let before_first = seeks();
     assert_eq!(area.read_into(5, 0), 0);
-    assert!(seeks() > before_first, "first access to written pages checks SEEK_HOLE");
     assert_eq!(area.block(0), &pattern(2, BLOCK)[..]);
-    // Repeated reads and writes on already-verified pages make zero SEEK_HOLE calls (board 7411).
-    let after_first = seeks();
-    assert_eq!(area.read_into(50, 0), 0);
     let write_from = Header::new(WRITE, 51)
         .with_body(&WriteBody {
             cell: area.cell,
@@ -2663,27 +2728,19 @@ fn transfer_areas_are_their_vm_processes_memory() {
         })
         .with_flags(WRITE_TRANSFER);
     assert_eq!(area.call(write_from, &[]), 0);
-    assert_eq!(seeks(), after_first, "cached pages must not invoke lseek(SEEK_HOLE)");
-    // A range straddling the last verified page and an unwritten page still fails with EINVAL.
+    assert_eq!(area.read_into(53, len / 2), 0);
+    assert_eq!(area.block(len / 2), &pattern(2, BLOCK)[..]);
+    // Out-of-bounds straddle past the end of the transfer area fails with EINVAL.
     let straddle = Header::new(READ, 52)
         .with_body(&ReadBody {
             cell: area.cell,
             sequence: 1,
             offset: 0,
             len: (2 * page) as u64,
-            transfer_at: (len / 2 - page) as u64,
+            transfer_at: (len - page) as u64,
         })
         .with_flags(READ_TRANSFER);
     assert_eq!(area.call(straddle, &[]), -Errno::EINVAL.raw());
-    // Writing a previously unwritten page makes it verifiable, and subsequent accesses cache it.
-    // SAFETY: Within the mapping, at the start of the second half.
-    unsafe { area.addr.add(len / 2).write_bytes(2, page.max(BLOCK)) };
-    let before_second = seeks();
-    assert_eq!(area.read_into(53, len / 2), 0);
-    assert!(seeks() > before_second, "newly written page checks SEEK_HOLE once");
-    let after_second = seeks();
-    assert_eq!(area.read_into(54, len / 2), 0);
-    assert_eq!(seeks(), after_second, "newly verified page cached on subsequent access");
     // Sealed against writes: no page of it punched out via fallocate or MADV_REMOVE (board 7411).
     let mode = libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE;
     // SAFETY: Of what this test made.
@@ -2696,37 +2753,38 @@ fn transfer_areas_are_their_vm_processes_memory() {
     assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::EPERM));
 }
 
-/// Board 6881: a read into bytes of a transfer area its VM process wrote that went to swap since is
-/// served: they are written still, though in no memory, which the daemon took for never written
-/// once, refusing the reads of a host short of memory, its guests' failing with EIO. Ignored where
-/// shared memory may not be paged out: CI's runners page none out, though they have swap; ubu1's
-/// zram takes it (`--run-ignored all`).
+/// Board 6881, board 11707: a transfer area whose pages were written and paged out to swap before
+/// `TRANSFER` is still accepted by the one-shot `SEEK_HOLE` check (swap entries are non-holes in
+/// shmem's xarray), and a read into pages swapped out before or after `TRANSFER` is served.
+/// Ignored where shared memory may not be paged out: CI's runners page none out, though they have
+/// swap; ubu1's zram takes it (`--run-ignored all`).
 #[test]
 #[ignore = "needs a host that pages shared memory out to swap: ubu1's zram, not CI's runners"]
 #[cfg(target_os = "linux")]
 fn transfer_areas_written_and_swapped_out_are_read_into() {
     let len = 1 << 20;
-    let mut area = ServedArea::new(len);
-    // A block of the written half the daemon never touched, so mapped by this mapping alone, which
-    // MADV_PAGEOUT takes out alone.
-    let at = len / 4;
+    let at_before = len / 4;
+    let at_after = len / 2;
     let page = cladefs_core::pages::page_size() as usize;
     let span = BLOCK.max(page);
-    let mut resident = vec![1u8; span / page];
-    // SAFETY: Of the mapping, page-aligned, a page or more of it.
-    let paged = unsafe { area.addr.add(at) };
-    // SAFETY: As above.
-    assert_eq!(unsafe { libc::madvise(paged.cast(), span, libc::MADV_PAGEOUT) }, 0);
-    // SAFETY: As above, a byte a page.
-    assert_eq!(unsafe { libc::mincore(paged.cast(), span, resident.as_mut_ptr().cast()) }, 0);
-    let meminfo = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
-    let swap = meminfo.lines().filter(|line| line.starts_with("Swap")).collect::<Vec<_>>();
-    assert!(resident.iter().all(|page| page & 1 == 0), "not paged out, the host's swap {swap:?}");
-    let seeks = || crate::server::TRANSFER_SEEK_HOLES.load(std::sync::atomic::Ordering::Relaxed);
-    let before = seeks();
-    assert_eq!(area.read_into(6, at), 0);
-    assert!(seeks() > before, "swapped-out uncached page checked via SEEK_HOLE");
-    assert_eq!(area.block(at), &pattern(2, BLOCK)[..]);
+    let page_out = |addr: *mut u8, at: usize| {
+        let mut resident = vec![1u8; span / page];
+        // SAFETY: Of the mapping, page-aligned, a page or more of it.
+        let paged = unsafe { addr.add(at) };
+        // SAFETY: As above.
+        assert_eq!(unsafe { libc::madvise(paged.cast(), span, libc::MADV_PAGEOUT) }, 0);
+        // SAFETY: As above, a byte a page.
+        assert_eq!(unsafe { libc::mincore(paged.cast(), span, resident.as_mut_ptr().cast()) }, 0);
+        let meminfo = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
+        let swap = meminfo.lines().filter(|line| line.starts_with("Swap")).collect::<Vec<_>>();
+        assert!(resident.iter().all(|p| p & 1 == 0), "not paged out, the host's swap {swap:?}");
+    };
+    let mut area = ServedArea::with_setup(len, |_, addr| page_out(addr, at_before));
+    assert_eq!(area.read_into(6, at_before), 0);
+    assert_eq!(area.block(at_before), &pattern(2, BLOCK)[..]);
+    page_out(area.addr, at_after);
+    assert_eq!(area.read_into(7, at_after), 0);
+    assert_eq!(area.block(at_after), &pattern(2, BLOCK)[..]);
 }
 
 /// TASK-575: a VM process drops a version it made, as its VM snapshot failing after it does, and
@@ -3719,7 +3777,7 @@ async fn forks_to_cells_there_already_fail_with_eexist() {
 /// it makes, naming the cell, what that holds stays unreadable to it.
 #[tokio::test(flavor = "multi_thread")]
 async fn requests_attach_nothing() {
-    use crate::wire::{ACK, Header, REPLY, STAGE_COUNTS, STAGE_PRIVATE_COUNTS};
+    use crate::wire::{ACK, Header, REPLY, STAGE_COUNTS};
     use std::os::unix::ffi::OsStrExt;
     host();
     let dir = tempfile::tempdir().unwrap();
@@ -3734,8 +3792,7 @@ async fn requests_attach_nothing() {
     drop(open_cell);
     let vm = CellClient::connect(&socket, dir.path().join("vm"), 1 << 20).unwrap();
     // But those nothing replies to.
-    for kind in (0..REPLY).filter(|kind| ![ACK, STAGE_COUNTS, STAGE_PRIVATE_COUNTS].contains(kind))
-    {
+    for kind in (0..REPLY).filter(|kind| ![ACK, STAGE_COUNTS].contains(kind)) {
         for (cell, sequence) in [(extent.cell, 1), (0, 0)] {
             let header = Header::new(kind, 0).with_body(&[cell, sequence, 0u64, 4096]);
             // cladefs: named in a payload where its kind has one: past what a kind holds, the
@@ -3771,7 +3828,10 @@ fn vm_processes_are_handed_their_memory_read_only() {
         .with_body(&OpenBody { capacity: 1 << 24, version: VERSION, ..Default::default() })
         .with_flags(OPEN_CREATE);
     let path = dir.path().join("store");
-    sender.send(open, std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str()), &[]).unwrap();
+    let mut payload = std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str()).to_vec();
+    payload.push(0);
+    payload.extend_from_slice(cladefs_core::BUILD_COMMIT.as_bytes());
+    sender.send(open, &payload, &[]).unwrap();
     let opened = receiver.receive(|| 0).unwrap().unwrap();
     assert_eq!((opened.header.status, opened.fds.len()), (0, 2));
     for fd in &opened.fds {
@@ -4202,6 +4262,7 @@ fn window_mappings_past_a_messages_payload_arrive() {
             match request.header.kind {
                 OPEN => {
                     reply.set_body(&opened_body(7));
+                    payload = 0u64.to_le_bytes().to_vec();
                     fds = vec![own.as_fd(), public.as_fd()];
                 }
                 MAPPINGS => {
@@ -4210,7 +4271,7 @@ fn window_mappings_past_a_messages_payload_arrive() {
                         .flat_map(u64::to_le_bytes)
                         .collect();
                 }
-                BUILD | TRANSFER | WINDOW => {}
+                TRANSFER | WINDOW => {}
                 _ => reply.status = -Errno::EINVAL.raw(),
             }
             sender.send(reply, &payload, &fds).unwrap();
@@ -4264,17 +4325,18 @@ fn requests_failed_by_the_daemons_going_find_it_gone() {
         let (own, public) = (memfd(ps), memfd(ps));
         while let Ok(Some(request)) = receiver.receive(|| 0) {
             let mut reply = Header::new(REPLY, request.header.id);
-            let mut fds = Vec::new();
+            let (mut payload, mut fds) = (Vec::new(), Vec::new());
             match request.header.kind {
                 OPEN => {
                     reply.set_body(&opened_body(7));
+                    payload = 0u64.to_le_bytes().to_vec();
                     fds = vec![own.as_fd(), public.as_fd()];
                 }
-                BUILD | TRANSFER => {}
+                TRANSFER => {}
                 // The daemon goes as it is asked to read, answering nothing.
                 _ => return,
             }
-            sender.send(reply, &[], &fds).unwrap();
+            sender.send(reply, &payload, &fds).unwrap();
         }
     });
     let client = CellClient::over(stream, Path::new("store"), Opening::Create(1 << 20, Kind::Fxfs));
@@ -4339,7 +4401,10 @@ fn raw_connection(
     let open = Header::new(OPEN, 1)
         .with_body(&OpenBody { capacity, version: VERSION, ..Default::default() })
         .with_flags(OPEN_CREATE);
-    sender.send(open, std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str()), &[]).unwrap();
+    let mut payload = std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str()).to_vec();
+    payload.push(0);
+    payload.extend_from_slice(cladefs_core::BUILD_COMMIT.as_bytes());
+    sender.send(open, &payload, &[]).unwrap();
     let opened = receiver.receive(|| 0).unwrap().unwrap();
     assert_eq!(opened.header.status, 0);
     (sender, receiver, stream, opened.header.read_body::<OpenedBody>().cell)
@@ -4629,11 +4694,17 @@ fn connections_open_one_cell_at_a_time() {
             .with_body(&OpenBody { capacity: 1 << 24, version: VERSION, ..Default::default() })
             .with_flags(OPEN_CREATE)
     };
-    sender.send(open(1), first.as_os_str().as_bytes(), &[]).unwrap();
+    let open_payload = |path: &Path| {
+        let mut payload = path.as_os_str().as_bytes().to_vec();
+        payload.push(0);
+        payload.extend_from_slice(cladefs_core::BUILD_COMMIT.as_bytes());
+        payload
+    };
+    sender.send(open(1), &open_payload(&first), &[]).unwrap();
     while !table().is_waited_for(&key) {
         std::thread::yield_now();
     }
-    let second_opened = call(&sender, &mut receiver, open(2), second.as_os_str().as_bytes());
+    let second_opened = call(&sender, &mut receiver, open(2), &open_payload(&second));
     drop(held);
     let first_opened = receiver.receive(|| 0).unwrap().unwrap();
     let statuses =
@@ -5237,9 +5308,9 @@ fn extents_freed_together_are_freed_in_one_request() {
         write(&client, *extent, 0, &pattern(extent.sequence as u8, BLOCK)).unwrap();
     }
     client.commit(None).unwrap();
-    let before = (served("free"), served("free_many"));
+    let before = served("free");
     client.free_many(&extents).unwrap();
-    assert_eq!((served("free") - before.0, served("free_many") - before.1), (0, 1));
+    assert_eq!(served("free") - before, 1);
     for extent in [extents[0], extents[128], extents[256]] {
         assert_eq!(read(&client, extent, 0, BLOCK), Err(Errno::ENOENT), "{extent:?}");
     }
@@ -5342,55 +5413,61 @@ fn vm_processes_of_other_wire_versions_are_refused() {
     served.join().unwrap();
 }
 
-/// TASK-141.3: what opening asks of a daemon of the VM process's own version, its build and its
-/// transfer area, is required, not let be as an older daemon's refusal was: refused, opening fails,
-/// and the connection is closed on, which lets the cell go for another to open.
+/// TASK-141.3, board 11707: opening sends `OPEN` alone (no eager `TRANSFER` RTT); on the first
+/// non-DAX read or write, `TRANSFER` is required and fails hard if refused (no silent fallback to
+/// the socket).
 #[test]
 fn openings_fail_on_refusals_of_what_they_ask() {
     use crate::wire::*;
     use std::os::fd::AsFd;
     let ps = page_size();
-    for refusing in [BUILD, TRANSFER] {
-        let (stream, daemon) = UnixStream::pair().unwrap();
-        let answering = std::thread::spawn(move || {
-            let (sender, mut receiver) =
-                (Sender::new(daemon.try_clone().unwrap()).unwrap(), Receiver::new(daemon));
-            let (own, public) = (memfd(ps), memfd(ps));
-            let mut served = Vec::new();
-            while let Ok(Some(request)) = receiver.receive(|| 0) {
-                let mut reply = Header::new(REPLY, request.header.id);
-                let mut fds = Vec::new();
-                served.push(request.header.kind);
-                match request.header.kind {
-                    OPEN => {
-                        reply.set_body(&opened_body(7));
-                        fds = vec![own.as_fd(), public.as_fd()];
-                    }
-                    kind if kind == refusing => reply.status = -Errno::EINVAL.raw(),
-                    BUILD | TRANSFER => {}
-                    _ => reply.status = -Errno::EINVAL.raw(),
+    let (stream, daemon) = UnixStream::pair().unwrap();
+    let answering = std::thread::spawn(move || {
+        let (sender, mut receiver) =
+            (Sender::new(daemon.try_clone().unwrap()).unwrap(), Receiver::new(daemon));
+        let (own, public) = (memfd(ps), memfd(ps));
+        let mut served = Vec::new();
+        while let Ok(Some(request)) = receiver.receive(|| 0) {
+            let mut reply = Header::new(REPLY, request.header.id);
+            let (mut payload, mut fds) = (Vec::new(), Vec::new());
+            served.push(request.header.kind);
+            match request.header.kind {
+                OPEN => {
+                    reply.set_body(&opened_body(7));
+                    payload = 0u64.to_le_bytes().to_vec();
+                    fds = vec![own.as_fd(), public.as_fd()];
                 }
-                sender.send(reply, &[], &fds).unwrap();
+                TRANSFER => reply.status = -Errno::EINVAL.raw(),
+                _ => reply.status = -Errno::EINVAL.raw(),
             }
-            served
-        });
-        let opened =
-            CellClient::over(stream, Path::new("store"), Opening::Create(1 << 20, Kind::Fxfs));
-        let refused = opened.err().expect("opening failed");
-        assert_eq!(refused.errno(), Some(Errno::EINVAL), "{refused:#}");
-        let asked = match refusing {
-            BUILD => vec![OPEN, BUILD],
-            _ => vec![OPEN, BUILD, TRANSFER],
-        };
-        assert_eq!(answering.join().unwrap(), asked);
-    }
+            sender.send(reply, &payload, &fds).unwrap();
+        }
+        served
+    });
+    let client = CellClient::over(stream, Path::new("store"), Opening::Create(1 << 20, Kind::Fxfs))
+        .expect("opening sends OPEN alone");
+    let mut buf = vec![0u8; BLOCK];
+    let err = client
+        .read(ExtentId { cell: 7, sequence: 1 }, 0, &mut [VolatileSliceMut::from(&mut buf[..])])
+        .unwrap_err();
+    assert_eq!(err, Errno::EINVAL);
+    drop(client);
+    assert_eq!(answering.join().unwrap(), vec![OPEN, TRANSFER]);
 }
 
 /// What a daemon by hand replies to an `OPEN`, of its cell of `cell`: the default arena's memory
 /// its own, as of the default tenant, and its wire version this one.
 fn opened_body(cell: u64) -> crate::wire::OpenedBody {
     let arena = cladefs_core::pages::ArenaId(1);
-    crate::codec::Opened { cell, tenant: 0, arena, max_map_count: None, ephemeral: false }.to_body()
+    crate::codec::Opened {
+        cell,
+        tenant: 0,
+        arena,
+        max_map_count: None,
+        ephemeral: false,
+        capacity: 0,
+    }
+    .to_body()
 }
 
 /// TASK-216: a VM booted again on the cell its VM crashed out of opens it at once, while what
@@ -5880,16 +5957,15 @@ async fn shrinks_return_once_the_pages_they_evict_are_free() {
     );
     for sequence in 1..=2 {
         let at = (sequence - 1) * CHUNK;
-        served(
-            Header::new(MAP, 6 + sequence).with_body(&MapBody {
-                cell,
-                sequence,
+        let mapping = cladefs_core::WindowMapping {
+            window_offset: at,
+            len: CHUNK,
+            contents: cladefs_core::MappingContents::Extent {
+                extent: ExtentId { cell, sequence },
                 offset: 0,
-                len: CHUNK,
-                window_offset: at,
-            }),
-            &[],
-        );
+            },
+        };
+        served(Header::new(MAP, 6 + sequence), &crate::codec::mappings_payload(&[mapping]));
     }
     assert_eq!(crate::memory::shrink(Some(1), u64::MAX).await, Ok(2 * CHUNK));
 
@@ -5997,12 +6073,12 @@ impl HandVm {
         let (cell, sequence) = (extent.cell, extent.sequence);
         self.call(READ, &ReadBody { cell, sequence, offset: 0, len, transfer_at: 0 }, &[], true);
         self.call_flagged(WINDOW, WINDOW_COPYING, &WindowBody { size: len, budget: 0 }, &[], true);
-        let (_, staged) = self.call(
-            MAP,
-            &MapBody { cell, sequence, offset: 0, len, window_offset: 0 },
-            &[],
-            true,
-        );
+        let mapping = cladefs_core::WindowMapping {
+            window_offset: 0,
+            len,
+            contents: cladefs_core::MappingContents::Extent { extent, offset: 0 },
+        };
+        let (_, staged) = self.call(MAP, &(), &crate::codec::mappings_payload(&[mapping]), true);
         (staged.into_iter())
             .filter(|header| header.kind == STAGE_MAP)
             .map(|header| {
@@ -6020,13 +6096,12 @@ impl HandVm {
     /// operation it was sent.
     fn freeze_with_an_unmap(&mut self, extent: ExtentId, len: u64) -> u64 {
         use crate::wire::*;
-        let (cell, sequence) = (extent.cell, extent.sequence);
-        let (_, staged) = self.call(
-            MAP,
-            &MapBody { cell, sequence, offset: 0, len, window_offset: 0 },
-            &[],
-            false,
-        );
+        let mapping = cladefs_core::WindowMapping {
+            window_offset: 0,
+            len,
+            contents: cladefs_core::MappingContents::Extent { extent, offset: 0 },
+        };
+        let (_, staged) = self.call(MAP, &(), &crate::codec::mappings_payload(&[mapping]), false);
         assert!(
             staged.iter().any(|header| matches!(header.kind, STAGE_UNMAP | STAGE_REMAP)),
             "{staged:?}"
@@ -6600,9 +6675,14 @@ fn window_mappings_are_answered_beside_the_stream_data_in_flight() {
         if n >= 1024 {
             answers.recv().unwrap();
         }
-        let body = MapBody { cell: 0, sequence: 0, offset: 0, len: ps, window_offset: 2 * n * ps };
-        let zeros = Header::new(MAP, 3 + n).with_body(&body).with_flags(MAP_ZEROS);
-        sender.send(zeros, &[], &[]).unwrap();
+        let mapping = cladefs_core::WindowMapping {
+            window_offset: 2 * n * ps,
+            len: ps,
+            contents: cladefs_core::MappingContents::Zeros,
+        };
+        sender
+            .send(Header::new(MAP, 3 + n), &crate::codec::mappings_payload(&[mapping]), &[])
+            .unwrap();
     }
     let mut receiver = receiving.join().unwrap();
 
@@ -6727,7 +6807,7 @@ fn whatever_a_vm_process_says_harms_no_other() {
     const LAST: u64 = 0x1a57;
     /// The ID of a restore's `OPEN`.
     const RESTORE: u64 = 0x7e57;
-    const KINDS: [u32; 33] = [
+    const KINDS: [u32; 34] = [
         OPEN,
         READ,
         WRITE,
@@ -6750,9 +6830,10 @@ fn whatever_a_vm_process_says_harms_no_other() {
         23,
         24,
         TRANSFER,
-        FREE_MANY,
+        // 26 (FREE_MANY), 28 (BUILD), 32 (MAP_MANY), 33 (STAGE_PRIVATE_COUNTS) retired (board 11697).
+        26,
         STAGE_COUNTS,
-        BUILD,
+        28,
         29,
         // `PRIVATE`'s, which a VM process serves itself now (doc-26).
         30,
@@ -6763,7 +6844,8 @@ fn whatever_a_vm_process_says_harms_no_other() {
         107,
         14,
         0xffff_ffff,
-        MAP_MANY,
+        32,
+        33,
     ];
     let wait = std::time::Duration::from_secs(60);
 
@@ -6854,10 +6936,7 @@ fn whatever_a_vm_process_says_harms_no_other() {
         (sequence(), page(), length()).prop_map(|(extent, at, len)| {
             (READ, 0, 0, [OWN_CELL, extent, at, len, 0], Vec::new())
         }),
-        (sequence(), page(), length(), page(), 0u32..4).prop_map(|(extent, at, len, to, flags)| {
-            (MAP, flags, 0, [OWN_CELL, extent, at, len, to], Vec::new())
-        }),
-        // cladefs: of extents or zeros, some (TASK-92.14).
+        // cladefs: of extents or zeros, one or many (TASK-92.14, board 11697).
         proptest::collection::vec((sequence(), page(), length(), page(), any::<bool>()), 1..4)
             .prop_map(|maps| {
                 let mappings: Vec<cladefs_core::WindowMapping> = (maps.into_iter())
@@ -6873,7 +6952,7 @@ fn whatever_a_vm_process_says_harms_no_other() {
                         },
                     })
                     .collect();
-                (MAP_MANY, 0, 0, [0; 5], crate::codec::mappings_payload(&mappings))
+                (MAP, 0, 0, [0; 5], crate::codec::mappings_payload(&mappings))
             }),
         (page(), length()).prop_map(|(at, len)| (UNMAP, 0, 0, [at, len, 0, 0, 0], Vec::new())),
         (page(), 0u32..4).prop_map(|(at, flags)| (FAULT, flags, 0, [at, 0, 0, 0, 0], Vec::new())),
@@ -6889,12 +6968,18 @@ fn whatever_a_vm_process_says_harms_no_other() {
     let opening = prop_oneof![
         (0u64..4, any::<bool>()).prop_map(|(client, creating)| {
             let flags = if creating { OPEN_CREATE } else { 0 };
-            (OPEN, flags, 0, [1 << 24, 0, 0, 0, VERSION], format!("open-{client}").into_bytes())
+            (
+                OPEN,
+                flags,
+                0,
+                [1 << 24, 0, 0, 0, VERSION],
+                format!("open-{client}\0test").into_bytes(),
+            )
         }),
         (0u64..4, any::<bool>(), prop_oneof![Just(OTHER_CELL), Just(GIVEN_CELL)]).prop_map(
             move |(client, absent, cell)| {
                 let version = if absent { 7 } else { GIVEN_VERSION };
-                let named = format!("open-{client}").into_bytes();
+                let named = format!("open-{client}\0test").into_bytes();
                 (OPEN, OPEN_FORK, RESTORE, [1 << 24, cell, version, 0, VERSION], named)
             }
         ),
@@ -7004,9 +7089,20 @@ fn whatever_a_vm_process_says_harms_no_other() {
                 assert!(fd >= 0);
                 // SAFETY: Just made, and owned here.
                 let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-                // SAFETY: Sizes and seals it.
+                // SAFETY: Sizes, populates, and seals it (board 11707).
                 unsafe {
                     assert_eq!(libc::ftruncate(fd.as_raw_fd(), TRANSFER_BYTES as i64), 0);
+                    let addr = libc::mmap(
+                        std::ptr::null_mut(),
+                        TRANSFER_BYTES as usize,
+                        libc::PROT_READ | libc::PROT_WRITE,
+                        libc::MAP_SHARED,
+                        fd.as_raw_fd(),
+                        0,
+                    );
+                    assert_ne!(addr, libc::MAP_FAILED);
+                    addr.cast::<u8>().write_bytes(0, TRANSFER_BYTES as usize);
+                    assert_eq!(libc::munmap(addr, TRANSFER_BYTES as usize), 0);
                     assert_eq!(
                         libc::fcntl(fd.as_raw_fd(), libc::F_ADD_SEALS, libc::F_SEAL_SHRINK),
                         0
@@ -7518,7 +7614,7 @@ fn calls_for_guest_requests_are_logged_with_them() {
     let mapped = cladefs_core::request::guest_request(43, client.map_zeros_async(8 * ps, ps));
     assert_eq!(futures::executor::block_on(mapped), Err(Errno::EINVAL));
     let saying = format!(" request_id=43 store={named}");
-    refusal(crate::wire::MAP, 1 << 31 | crate::wire::MAP_ZEROS, &saying, &refused());
+    refusal(crate::wire::MAP, 1 << 31, &saying, &refused());
     // A call for no guest request: none.
     assert_eq!(client.call(unknown, &pattern(1, BLOCK), &[]).map(drop), Err(Errno::EINVAL));
     refusal(WRITE, 1 << 20, "", &refused());
@@ -8262,25 +8358,17 @@ fn large_writes_waiting_for_replies_do_not_gather_unbounded_payloads() {
         let mut held_ids = Vec::new();
         let mut released = false;
         let mut header_bytes = [0u8; size_of::<Header>()];
-        // Drain handshake (OPEN, BUILD, TRANSFER) using Receiver so SCM_RIGHTS fds are consumed.
+        // Drain handshake (OPEN) using Receiver so SCM_RIGHTS fds are consumed; writes below
+        // exceed TRANSFER_SLOT so lazy TRANSFER is never sent.
         let mut receiver = Receiver::new(daemon.try_clone().unwrap());
-        loop {
+        {
             let request = receiver.receive(|| 0).unwrap().unwrap();
             let mut reply = Header::new(REPLY, request.header.id);
-            let mut fds = Vec::new();
-            let kind = request.header.kind;
-            match kind {
-                OPEN => {
-                    reply.set_body(&opened_body(7));
-                    fds = vec![own.as_fd(), public.as_fd()];
-                }
-                BUILD | TRANSFER => {}
-                other => panic!("unexpected handshake kind {other}"),
-            }
-            sender.send(reply, &[], &fds).unwrap();
-            if kind == TRANSFER {
-                break;
-            }
+            assert_eq!(request.header.kind, OPEN);
+            reply.set_body(&opened_body(7));
+            let payload = 0u64.to_le_bytes();
+            let fds = [own.as_fd(), public.as_fd()];
+            sender.send(reply, &payload, &fds).unwrap();
         }
         drop(receiver);
 

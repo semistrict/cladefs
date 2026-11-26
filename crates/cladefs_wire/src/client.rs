@@ -51,8 +51,9 @@ pub struct CellClient {
     /// cladefs: what resolves the window's faults through the daemon, once the window is created,
     /// which a `PRIVATE` reads its pages in with too ([`CellClient::make_private`], doc-26).
     window_faults: std::sync::OnceLock<Arc<DaemonFaults>>,
-    /// Its transfer area, which reads and writes move their data through ([`TRANSFER`]).
-    transfer: Arc<Transfer>,
+    /// Its transfer area, registered lazily on the first non-DAX read or write that fits a slot
+    /// ([`TRANSFER`], board 11707, hotbed question 575).
+    transfer: LazyTransfer,
     /// cladefs: whether its window copies on write (backlog doc-13), once created so.
     copying: std::sync::atomic::AtomicBool,
     /// cladefs: how many mappings the host lets a process make, if it limits them, as the daemon
@@ -134,10 +135,12 @@ impl CellClient {
         DaemonConnection::over(stream)?.opening(cell_dir, opening)
     }
 
-    /// Opens the cell at `cell_dir` over `client`'s connection ([`DaemonConnection::opening`]): its
-    /// `OPEN`, the VM process's build, and its transfer area.
+    /// Opens the cell at `cell_dir` over `client`'s connection ([`DaemonConnection::opening`]):
+    /// `OPEN` (including the VM process's build). Its transfer area is registered lazily on the
+    /// first non-DAX read or write (board 11707, hotbed question 575).
     fn open(client: Arc<Client>, cell_dir: &Path, opening: Opening) -> Result<Self, Error> {
-        let open = Request::Open { path: cell_dir.to_owned(), opening };
+        let open =
+            Request::Open { path: cell_dir.to_owned(), opening, build: cladefs_core::BUILD_COMMIT };
         let reply = client.request_blocking(&open).map_err(|errno| match errno {
             Errno::EPROTONOSUPPORT => Error::new(anyhow::Error::new(errno).context(format!(
                 "the extent daemon refused this VM process's wire version {VERSION}: it is of \
@@ -145,27 +148,23 @@ impl CellClient {
             ))),
             errno => Error::from(errno),
         })?;
-        let opened = Opened::decode(&reply.header).map_err(|errno| match errno {
-            Errno::EPROTONOSUPPORT => Error::new(anyhow::Error::new(errno).context(format!(
-                "the extent daemon is of wire version {}, this VM process of {VERSION}",
-                crate::codec::version(&reply.header)
-            ))),
-            errno => Error::new(anyhow::Error::new(errno).context("the daemon named no arena")),
-        })?;
-        let Opened { cell, tenant, arena, max_map_count, ephemeral } = opened;
+        let opened =
+            Opened::decode(&reply.header, &reply.payload).map_err(|errno| match errno {
+                Errno::EPROTONOSUPPORT => Error::new(anyhow::Error::new(errno).context(format!(
+                    "the extent daemon is of wire version {}, this VM process of {VERSION}",
+                    crate::codec::version(&reply.header)
+                ))),
+                errno => Error::new(anyhow::Error::new(errno).context("the daemon named no arena")),
+            })?;
+        let Opened { cell, tenant, arena, max_map_count, ephemeral, capacity } = opened;
+        client.current_capacity.store(capacity, Ordering::Relaxed);
         let mut fds = reply.fds.into_iter();
         let (Some(own), Some(public)) = (fds.next(), fds.next()) else {
             return Err(Error::msg("the daemon sent no physical memory"));
         };
         // Its tenant's arena, and the default one, read-only.
         let memories = vec![(arena, own), (cladefs_core::pages::ArenaId::DEFAULT, public)];
-        // cladefs: its build, which the daemon's metrics show (TASK-111.7).
-        client.request_blocking(&Request::Build(cladefs_core::BUILD_COMMIT)).map_err(|errno| {
-            Error::new(anyhow::Error::new(errno).context("saying this VM process's build"))
-        })?;
-        let transfer = Transfer::give(&client)
-            .map_err(|err| err.context("giving the daemon a transfer area"))?
-            .into();
+        let transfer = LazyTransfer::new();
         let copying = std::sync::atomic::AtomicBool::new(false);
         let (faults, window_faults) = (Mutex::new(None), std::sync::OnceLock::new());
         Ok(Self {
@@ -237,6 +236,12 @@ impl CellClient {
         self.ephemeral
     }
 
+    /// The cell's current capacity in bytes, as reported in `OPEN`'s reply and updated by
+    /// non-ask `CAPACITY` notifications (board 11697).
+    pub fn capacity(&self) -> u64 {
+        self.client.current_capacity.load(Ordering::Relaxed)
+    }
+
     /// The daemon's physical memory, which it handed this VM process as it connected,
     /// and which its window maps pages of: its tenant's arena of it (TASK-43), the default
     /// tenant's if it is of none (TASK-79.17).
@@ -280,15 +285,18 @@ impl CellClient {
     ) -> Result<()> {
         let len: usize = buffers.iter().map(VolatileSliceMut::len).sum();
         let read = |into| Request::Read { extent, offset, len: len as u64, into };
-        if let Some(slot) = Transfer::take(&self.transfer, len) {
-            let into = ReadInto::Transfer { at: slot.offset() };
-            self.client.request_keeping(&read(into), &slot).await?;
-            let data = slot.bytes(len);
-            let mut at = 0;
-            for buffer in buffers {
-                at += buffer.copy_from(&data[at..]);
+        if (1..=Transfer::SLOT).contains(&len) {
+            let transfer = self.transfer.get_or_init(&self.client).await?;
+            if let Some(slot) = Transfer::take(&transfer, len) {
+                let into = ReadInto::Transfer { at: slot.offset() };
+                self.client.request_keeping(&read(into), &slot).await?;
+                let data = slot.bytes(len);
+                let mut at = 0;
+                for buffer in buffers {
+                    at += buffer.copy_from(&data[at..]);
+                }
+                return Ok(());
             }
-            return Ok(());
         }
         let reply = self.client.request(&read(ReadInto::Reply)).await?;
         if reply.payload.len() != len {
@@ -327,11 +335,14 @@ impl CellClient {
         barriers: WriteBarriers<'_>,
     ) -> Result<()> {
         let len: usize = buffers.iter().map(VolatileSlice::len).sum();
-        if let Some(mut slot) = Transfer::take(&self.transfer, len) {
-            cladefs_core::memory::gather(buffers, 0, slot.bytes_mut(len));
-            let data = Data::Transfer { at: slot.offset(), len: len as u64 };
-            let write = Request::Write { extent, offset, data, barriers };
-            return self.client.request_keeping(&write, &slot).await.map(drop);
+        if (1..=Transfer::SLOT).contains(&len) {
+            let transfer = self.transfer.get_or_init(&self.client).await?;
+            if let Some(mut slot) = Transfer::take(&transfer, len) {
+                cladefs_core::memory::gather(buffers, 0, slot.bytes_mut(len));
+                let data = Data::Transfer { at: slot.offset(), len: len as u64 };
+                let write = Request::Write { extent, offset, data, barriers };
+                return self.client.request_keeping(&write, &slot).await.map(drop);
+            }
         }
         // cladefs TASK-661: acquire request-credit backpressure before reading guest buffers, and
         // stream `buffers` through the sender's single bounded scratch buffer instead of gathering
@@ -343,13 +354,15 @@ impl CellClient {
     /// How many reads and writes moved their data through the transfer area.
     #[cfg(any(test, feature = "testing"))]
     pub fn transfers(&self) -> u64 {
-        self.transfer.used.load(Ordering::Relaxed)
+        self.transfer.get().map_or(0, |transfer| transfer.used.load(Ordering::Relaxed))
     }
 
     /// The transfer area's slots, taken until dropped, which no read or write then has.
     #[cfg(any(test, feature = "testing"))]
     pub fn take_transfer_slots(&self) -> Vec<impl Sized> {
-        std::iter::from_fn(|| Transfer::take(&self.transfer, 1)).collect()
+        let transfer = blocking(self.transfer.get_or_init(&self.client))
+            .expect("taking transfer slots registers the transfer area");
+        std::iter::from_fn(|| Transfer::take(&transfer, 1)).collect()
     }
 
     /// Sends `header`, `payload` and `fds`, a request, as they are, however malformed, and
@@ -371,29 +384,27 @@ impl CellClient {
 
     /// [`CellClient::free`], waiting for the daemon holding no thread.
     pub async fn free_async(&self, extent: ExtentId) -> Result<()> {
-        self.client.request(&Request::Free(extent)).await.map(drop)
+        let free = Request::Free { first: extent, rest: Cow::Borrowed(&[]) };
+        self.client.request(&free).await.map(drop)
     }
 
     /// cladefs: frees `extents`, each as [`CellClient::free`] does, in order: the first that
-    /// fails fails the call, those before it freed. In as few requests as their payloads hold
-    /// (`FREE_MANY`), a flush's dead extents in one round trip, rather than one each
-    /// (TASK-92.13).
+    /// fails fails the call, those before it freed. In as few `FREE` requests as their payloads
+    /// hold, a flush's dead extents in one round trip, rather than one each (TASK-92.13, board
+    /// 11697).
     pub fn free_many(&self, extents: &[ExtentId]) -> Result<()> {
         blocking(self.free_many_async(extents))
     }
 
     /// [`CellClient::free_many`], waiting for the daemon holding no thread.
     pub async fn free_many_async(&self, extents: &[ExtentId]) -> Result<()> {
-        // Each request names its first extent in its arguments, and those after it its payload.
+        // Each request names its first extent in its arguments, and those after it in its payload.
         let most = 1 + MAX_PAYLOAD as usize / EXTENT_ID_BYTES;
         for extents in extents.chunks(most) {
-            let free = match extents {
-                [first] => Request::Free(*first),
-                [first, rest @ ..] => {
-                    Request::FreeMany { first: *first, rest: Cow::Borrowed(rest) }
-                }
-                [] => unreachable!("chunks aren't empty"),
+            let [first, rest @ ..] = extents else {
+                unreachable!("chunks aren't empty");
             };
+            let free = Request::Free { first: *first, rest: Cow::Borrowed(rest) };
             self.client.request(&free).await?;
         }
         Ok(())
@@ -488,52 +499,36 @@ impl CellClient {
     }
 
     /// cladefs: maps `mappings`, each at its offset in the window, its extent's bytes or zeros, in
-    /// order, the first that fails failing the call, those before it mapped: a single mapping uses
-    /// `MAP`, and two or more use as few `MAP_MANY` requests as their payloads hold, each one
-    /// change of the window (TASK-92.14, board 6917).
+    /// order, the first that fails failing the call, those before it mapped, in as few `MAP`
+    /// requests as their payloads hold, each one change of the window (TASK-92.14, board 6917,
+    /// board 11697).
     pub fn map_many(&self, mappings: &[WindowMapping]) -> Result<()> {
         blocking(self.map_many_async(mappings))
     }
 
     /// [`CellClient::map_many`], waiting for the daemon holding no thread.
     pub async fn map_many_async(&self, mappings: &[WindowMapping]) -> Result<()> {
-        match mappings {
-            [] => Ok(()),
-            [single] => match single.contents {
-                MappingContents::Extent { extent, offset } => {
-                    self.map_async(extent, offset, single.len, single.window_offset).await
-                }
-                MappingContents::Zeros => {
-                    self.map_zeros_async(single.window_offset, single.len).await
-                }
-            },
-            mappings => {
-                let most = (MAX_PAYLOAD / MAPPING_BYTES) as usize;
-                for mappings in mappings.chunks(most) {
-                    let map = Request::MapMany { mappings: Cow::Borrowed(mappings), warm: false };
-                    self.client.request(&map).await?;
-                }
-                Ok(())
-            }
+        let most = (MAX_PAYLOAD / MAPPING_BYTES) as usize;
+        for mappings in mappings.chunks(most) {
+            let map = Request::Map { mappings: Cow::Borrowed(mappings), warm: false };
+            self.client.request(&map).await?;
         }
+        Ok(())
     }
 
-    /// cladefs: [`CellClient::map_many`] with [`MAP_MANY_WARM`], warming each mapped extent range
+    /// cladefs: [`CellClient::map_many`] with [`MAP_WARM`], warming each mapped extent range
     /// in the daemon's extent cache before installing the mappings so a following
     /// [`CellClient::prefault`] installs already-present pages without a throwaway `READ` IPC copy
-    /// (board 11681). Always sends `MAP_MANY` (even for one mapping) so the warm flag applies.
+    /// (board 11681, board 11697).
     pub fn map_many_warm(&self, mappings: &[WindowMapping]) -> Result<()> {
         blocking(self.map_many_warm_async(mappings))
     }
 
     /// [`CellClient::map_many_warm`], waiting for the daemon holding no thread.
     pub async fn map_many_warm_async(&self, mappings: &[WindowMapping]) -> Result<()> {
-        if mappings.is_empty() {
-            return Ok(());
-        }
         let most = (MAX_PAYLOAD / MAPPING_BYTES) as usize;
         for mappings in mappings.chunks(most) {
-            let map = Request::MapMany { mappings: Cow::Borrowed(mappings), warm: true };
+            let map = Request::Map { mappings: Cow::Borrowed(mappings), warm: true };
             self.client.request(&map).await?;
         }
         Ok(())
@@ -554,7 +549,9 @@ impl CellClient {
         window_offset: u64,
     ) -> Result<()> {
         let contents = MappingContents::Extent { extent, offset };
-        let map = Request::Map(WindowMapping { window_offset, len, contents });
+        let mapping = WindowMapping { window_offset, len, contents };
+        let map =
+            Request::Map { mappings: Cow::Borrowed(std::slice::from_ref(&mapping)), warm: false };
         self.client.request(&map).await.map(drop)
     }
 
@@ -563,7 +560,9 @@ impl CellClient {
     /// private page of zeros, nothing copied.
     pub async fn map_zeros_async(&self, window_offset: u64, len: u64) -> Result<()> {
         let zeros = WindowMapping { window_offset, len, contents: MappingContents::Zeros };
-        self.client.request(&Request::Map(zeros)).await.map(drop)
+        let map =
+            Request::Map { mappings: Cow::Borrowed(std::slice::from_ref(&zeros)), warm: false };
+        self.client.request(&map).await.map(drop)
     }
 
     /// cladefs: makes `len` bytes of the window at `window_offset` private now, as writes to each
@@ -638,7 +637,7 @@ impl CellClient {
     }
 
     /// cladefs: the runs of private pages this process made of the cell's window so far, their
-    /// pages and nanoseconds, which it tells the daemon ([`STAGE_PRIVATE_COUNTS`]).
+    /// pages and nanoseconds, which it tells the daemon ([`STAGE_COUNTS`]).
     #[cfg(any(test, feature = "testing"))]
     pub fn private_counts(&self) -> PrivateCosts {
         self.client.stage_counts.private(self.client.stage.get())
@@ -1088,6 +1087,9 @@ struct Client {
     /// cladefs: held while a [`STAGE_COUNTS`] is made and sent, by whatever thread: the last sent
     /// says its window's budget as it was last set (board 10098).
     telling: Mutex<()>,
+    /// The cell's current capacity in bytes, initialized from `OPEN` and updated on non-ask
+    /// `CAPACITY` notifications (board 11697).
+    current_capacity: AtomicU64,
     /// What the daemon's changes of the cell's capacity go to
     /// ([`CellClient::on_capacity`]).
     capacity: OnceLock<Box<dyn Fn(u64, bool) + Send + Sync>>,
@@ -1111,6 +1113,7 @@ impl Client {
             stage: OnceLock::new(),
             stage_counts: StageCosts::default(),
             telling: Mutex::new(()),
+            current_capacity: AtomicU64::new(0),
             capacity: OnceLock::new(),
             stats_asked: OnceLock::new(),
             closing: Default::default(),
@@ -1296,6 +1299,9 @@ impl Client {
             let stage = match Told::decode(&header, &message.payload) {
                 Ok(Told::Stage(stage)) => stage,
                 Ok(Told::Capacity { capacity, ask }) => {
+                    if !ask {
+                        self.current_capacity.store(capacity, Ordering::Relaxed);
+                    }
                     match self.capacity.get() {
                         Some(changed) => changed(capacity, ask),
                         // No guest to ask: it refuses.
@@ -1327,10 +1333,15 @@ impl Client {
                 break;
             }
             let tell = if taking {
-                let ack = Made::Ack { id: stage.id, counts: self.stage_counts() };
-                self.sender.send(ack.encode(), &[], &[])
+                let (header, payload) =
+                    Made::Ack { id: stage.id, counts: self.stage_counts() }.encode();
+                self.sender.send(header, &payload, &[])
             } else if told.elapsed() >= STAGE_COUNTS_EVERY {
-                self.tell_counts()
+                let sent = self.tell_counts();
+                if sent.is_ok() {
+                    told_private = std::time::Instant::now();
+                }
+                sent
             } else {
                 continue;
             };
@@ -1339,12 +1350,13 @@ impl Client {
                 break;
             }
             told = std::time::Instant::now();
-            // cladefs: the runs of private pages, said as often, apart (TASK-164.10).
+            // cladefs: private page counts ride on `STAGE_COUNTS` too (TASK-164.10, board 11697):
+            // if continuous `taking` acks kept `told` fresh, flush `STAGE_COUNTS` periodically once
+            // any private pages or `PRIVATE` requests were recorded.
             if told.duration_since(told_private) >= STAGE_COUNTS_EVERY {
                 let private = self.stage_counts.private(self.stage.get());
                 if (private[0] | private[3]) != 0
-                    && let Err(err) =
-                        self.sender.send(Made::PrivateCounts(private).encode(), &[], &[])
+                    && let Err(err) = self.tell_counts()
                 {
                     log::error!("telling the extent daemon of the private pages made: {err}");
                     break;
@@ -1375,17 +1387,14 @@ impl Client {
         fail::fail_point!("client::requests_failed");
     }
 
-    /// cladefs: tells the daemon what the stage operations made so far cost, if any were made
-    /// ([`STAGE_COUNTS`]), and its runs of private pages, if any ([`STAGE_PRIVATE_COUNTS`]).
+    /// cladefs: tells the daemon what the stage operations and private-page runs made so far cost,
+    /// if any were made ([`STAGE_COUNTS`]).
     fn tell_stage_counts(&self) {
-        if self.stage_counts().costs[0] == 0 {
+        let private = self.stage_counts.private(self.stage.get());
+        if self.stage_counts().costs[0] == 0 && (private[0] | private[3]) == 0 {
             return;
         }
-        let private = self.stage_counts.private(self.stage.get());
-        let told = self.tell_counts().and_then(|()| match private[0] {
-            0 => Ok(()),
-            _ => self.sender.send(Made::PrivateCounts(private).encode(), &[], &[]),
-        });
+        let told = self.tell_counts();
         // A daemon gone counts nothing more.
         if let Err(err) = told
             && !self.lost.happened()
@@ -1408,10 +1417,15 @@ impl Client {
     }
 
     /// cladefs: tells the daemon what the window's second stage is now ([`STAGE_COUNTS`]), its
-    /// budget among it: the last told, of every thread's, as it is last.
+    /// budget and private-page costs among it: the last told, of every thread's, as it is last.
     fn tell_counts(&self) -> std::io::Result<()> {
         let _telling = self.telling.lock().unwrap();
-        self.sender.send(Made::Counts(self.stage_counts()).encode(), &[], &[])
+        let (header, payload) = Made::Counts {
+            stage: self.stage_counts(),
+            private: self.stage_counts.private(self.stage.get()),
+        }
+        .encode();
+        self.sender.send(header, &payload, &[])
     }
 
     /// cladefs: tells the daemon its window's budget as it is now, which another window of its
@@ -1524,11 +1538,153 @@ impl StageCosts {
     }
 
     /// The runs of private pages `stage` made, if any, and the `PRIVATE`s served, as
-    /// [`STAGE_PRIVATE_COUNTS`] says them.
+    /// [`STAGE_COUNTS`]'s payload says them.
     fn private(&self, stage: Option<&Arc<WindowStage>>) -> PrivateCosts {
         let load = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
         let [runs, pages, ns] = stage.map_or([0; 3], |stage| stage.private_costs());
         [runs, pages, ns, load(&self.private_requests), load(&self.private_request_ns)]
+    }
+}
+
+/// Lazily creates and registers a connection's transfer area on the first non-DAX read or write
+/// that fits a slot (board 11707, hotbed question 575). Idle and DAX-only connections allocate no
+/// shared memory and pay no startup `TRANSFER` RTT. Cancellation-safe and safe under
+/// [`spawn_on_replies`] (which polls inline inside `Waker::wake`): locks are always dropped before
+/// waking waiters, and an in-flight `TRANSFER` stays alive so a later caller awaits the same reply
+/// instead of sending a duplicate `TRANSFER` (`EEXIST`).
+struct LazyTransfer {
+    ready: OnceLock<Arc<Transfer>>,
+    init: Mutex<Option<Arc<TransferInFlight>>>,
+}
+
+struct TransferInFlight {
+    state: Mutex<InFlightState>,
+}
+
+struct InFlightState {
+    reply: Option<BoxFuture<'static, Result<Arc<Transfer>>>>,
+    done: Option<Result<Arc<Transfer>>>,
+    wakes: u64,
+    waiters: Vec<std::task::Waker>,
+}
+
+impl std::task::Wake for TransferInFlight {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        let waiters = {
+            let mut state = self.state.lock().unwrap();
+            state.wakes = state.wakes.wrapping_add(1);
+            std::mem::take(&mut state.waiters)
+        };
+        for waker in waiters {
+            waker.wake();
+        }
+    }
+}
+
+impl LazyTransfer {
+    fn new() -> Self {
+        Self { ready: OnceLock::new(), init: Mutex::new(None) }
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    fn get(&self) -> Option<&Arc<Transfer>> {
+        self.ready.get()
+    }
+
+    async fn get_or_init(&self, client: &Arc<Client>) -> Result<Arc<Transfer>> {
+        if let Some(transfer) = self.ready.get() {
+            return Ok(transfer.clone());
+        }
+        let in_flight = {
+            let mut init = self.init.lock().unwrap();
+            if let Some(transfer) = self.ready.get() {
+                return Ok(transfer.clone());
+            }
+            if let Some(existing) = init.as_ref() {
+                existing.clone()
+            } else {
+                let client = client.clone();
+                let reply: BoxFuture<'static, Result<Arc<Transfer>>> = Box::pin(async move {
+                    let (transfer, file) = Transfer::make()
+                        .map_err(|err| err.raw_os_error().map_or(Errno::EIO, Errno::from_raw))?;
+                    let reply = {
+                        let area = Request::Transfer {
+                            len: transfer.len() as u64,
+                            area: Area(file.as_fd()),
+                        };
+                        client.request(&area)
+                    };
+                    drop(file);
+                    reply.await?;
+                    Ok(Arc::new(transfer))
+                });
+                let created = Arc::new(TransferInFlight {
+                    state: Mutex::new(InFlightState {
+                        reply: Some(reply),
+                        done: None,
+                        wakes: 0,
+                        waiters: Vec::new(),
+                    }),
+                });
+                *init = Some(created.clone());
+                created
+            }
+        };
+        std::future::poll_fn(|cx| {
+            loop {
+                let (mut fut, epoch) = {
+                    let mut state = in_flight.state.lock().unwrap();
+                    if let Some(result) = &state.done {
+                        return std::task::Poll::Ready(result.clone());
+                    }
+                    match state.reply.take() {
+                        Some(fut) => (fut, state.wakes),
+                        None => {
+                            state.waiters.push(cx.waker().clone());
+                            return std::task::Poll::Pending;
+                        }
+                    }
+                };
+                let waker = std::task::Waker::from(in_flight.clone());
+                let mut sub_cx = std::task::Context::from_waker(&waker);
+                match fut.as_mut().poll(&mut sub_cx) {
+                    std::task::Poll::Ready(result) => {
+                        if let Ok(transfer) = &result {
+                            self.ready.get_or_init(|| transfer.clone());
+                        }
+                        let waiters = {
+                            let mut state = in_flight.state.lock().unwrap();
+                            state.done = Some(result.clone());
+                            std::mem::take(&mut state.waiters)
+                        };
+                        {
+                            let mut init = self.init.lock().unwrap();
+                            if init.as_ref().is_some_and(|cur| Arc::ptr_eq(cur, &in_flight)) {
+                                *init = None;
+                            }
+                        }
+                        for waiter in waiters {
+                            waiter.wake();
+                        }
+                        return std::task::Poll::Ready(result);
+                    }
+                    std::task::Poll::Pending => {
+                        let mut state = in_flight.state.lock().unwrap();
+                        state.reply = Some(fut);
+                        if state.wakes != epoch {
+                            continue;
+                        }
+                        state.waiters.push(cx.waker().clone());
+                        return std::task::Poll::Pending;
+                    }
+                }
+            }
+        })
+        .await
     }
 }
 
@@ -1542,9 +1698,6 @@ struct Transfer {
     free: Mutex<Vec<usize>>,
     /// How many reads and writes took a slot.
     used: AtomicU64,
-    /// cladefs: which slots this process wrote, each page, as it first took them
-    /// ([`Transfer::take`]).
-    written: [std::sync::atomic::AtomicBool; Transfer::SLOTS],
 }
 
 // SAFETY: Shared memory mapped for the area's life; each slot is one request's at a time.
@@ -1559,21 +1712,12 @@ impl Transfer {
     /// The slots: as many as the daemon serves a connection's requests at once.
     const SLOTS: usize = 8;
 
-    /// A transfer area, given to the daemon over `client`'s connection: the daemon's errno if it
-    /// refuses it.
-    fn give(client: &Client) -> Result<Self, Error> {
-        let (transfer, file) = Self::make().map_err(Error::new)?;
-        let area = Request::Transfer { len: transfer.len() as u64, area: Area(file.as_fd()) };
-        client.request_blocking(&area)?;
-        Ok(transfer)
-    }
-
     /// The bytes of the area.
     fn len(&self) -> usize {
         Self::SLOT * Self::SLOTS
     }
 
-    /// A transfer area, mapped, and its memory, fixed at its size ([`fixed_shared_memory`]).
+    /// A transfer area, mapped, pre-populated once, and fixed at its size ([`fixed_shared_memory`]).
     fn make() -> std::io::Result<(Self, std::fs::File)> {
         let len = Self::SLOT * Self::SLOTS;
         let file = fixed_shared_memory(len as u64)?;
@@ -1591,11 +1735,20 @@ impl Transfer {
         if addr == libc::MAP_FAILED {
             return Err(std::io::Error::last_os_error());
         }
+        // cladefs: write every page once before handing the memfd to the daemon, so the kernel
+        // charges every page to this VM process and the daemon can verify hole-free once at
+        // `TransferArea::map` (TASK-547, board 11707, hotbed question 575). Written, not advised
+        // (`MADV_POPULATE_WRITE`): a VM process's seccomp filter allows no more calls than it
+        // needs.
+        let page_size = cladefs_core::pages::page_size() as usize;
+        for page in (0..len).step_by(page_size) {
+            // SAFETY: Within the mapping we just made, before sharing it with the daemon.
+            unsafe { addr.cast::<u8>().add(page).write_volatile(0) };
+        }
         let transfer = Self {
             addr: NonNull::new(addr.cast()).unwrap(),
             free: Mutex::new((0..Self::SLOTS).rev().collect()),
             used: AtomicU64::new(0),
-            written: Default::default(),
         };
         Ok((transfer, file))
     }
@@ -1607,18 +1760,6 @@ impl Transfer {
         }
         let index = transfer.free.lock().unwrap().pop()?;
         transfer.used.fetch_add(1, Ordering::Relaxed);
-        // cladefs: each page of it written here first, as this process's memory, which the
-        // kernel charges to whoever faults it in: the daemon touches none it would fault
-        // (TASK-547). As it is first taken, not as the area is made: a connection that moves no
-        // data through it, as most forks' do, holds none of it. Written, not advised
-        // (`MADV_POPULATE_WRITE`): a VM process's seccomp filter allows no more calls than it
-        // needs.
-        if !transfer.written[index].swap(true, Ordering::Relaxed) {
-            for page in (0..Self::SLOT).step_by(cladefs_core::pages::page_size() as usize) {
-                // SAFETY: Within the slot, which this thread alone has, of the area's mapping.
-                unsafe { transfer.addr.as_ptr().add(index * Self::SLOT + page).write_volatile(0) };
-            }
-        }
         Some(Slot(Arc::new(TakenSlot { transfer: transfer.clone(), index })))
     }
 }
@@ -1805,11 +1946,11 @@ impl Faults for DaemonFaults {
     }
 
     fn fault_page(&self, offset: u64) -> BoxFuture<'_, Result<()>> {
-        self.fault_with(Fault { offset, page: true, probe: false })
+        self.fault_with(Fault { offset, probe: false })
     }
 
     fn probe(&self, offset: u64) -> BoxFuture<'_, Result<()>> {
-        self.fault_with(Fault { offset, page: true, probe: true })
+        self.fault_with(Fault { offset, probe: true })
     }
 
     fn lost(&self) -> bool {

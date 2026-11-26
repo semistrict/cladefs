@@ -280,7 +280,7 @@ fn frees_many_in_one_request() {
     cell.commit(None).unwrap();
     let rest: Vec<u8> = ids[1..].iter().flat_map(|id| id.as_bytes().to_vec()).collect();
     let free = bytes(VIRTIO_EXTENT_T_FREE, VIRTIO_EXTENT_FREE_MANY, Some(ids[0]), &rest);
-    let frees = || served("free") + served("free_many");
+    let frees = || served("free");
     let before = frees();
     let start = Instant::now();
     assert_eq!(request(&cell, &free, RESPONSE), (vec![], 0));
@@ -788,12 +788,10 @@ fn maps_many_in_one_request() {
         Some(map_args(1, 0)),
         &entries,
     );
-    let maps = || served("map") + served("map_many");
+    let maps = || served("map");
     let before = maps();
-    let before_many = served("map_many");
     assert_eq!(serve_with(&device, &many, RESPONSE).1, 0);
     assert_eq!(maps() - before, 1, "MAP_MANY fanned out into multiple RPCs");
-    assert_eq!(served("map_many") - before_many, 1);
 
     // Verify mapped extents and zeros actually read back from the DAX window.
     let read_page = |page: u64| -> Vec<u8> {
