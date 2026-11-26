@@ -3196,7 +3196,10 @@ impl<D: Dir> LocalCell<D> {
                 raw.read_at(buf, at)?;
             }
             let end = packer.end();
-            let packed = packer.push(buf);
+            let concurrent = self.dir.concurrent();
+            let packed = packer.push_with(buf, |first, parts, key| {
+                crate::framing::pack_parts(first, parts, key, concurrent)
+            });
             // As they are, where they are, as those before.
             if framed.is_none() && in_place && packer.stored_raw() {
                 continue;
@@ -3266,7 +3269,10 @@ impl<D: Dir> LocalCell<D> {
             let buf = &mut data.as_mut_slice()[..(len - at).min(OWN_CHUNK) as usize];
             read(at, buf)?;
             let end = packer.end();
-            let packed = packer.push(buf);
+            let concurrent = self.dir.concurrent();
+            let packed = packer.push_with(buf, |first, parts, key| {
+                crate::framing::pack_parts(first, parts, key, concurrent)
+            });
             file.write_at(&packed, end)?;
             written::wrote(written::Kind::Own, packed.len());
         }

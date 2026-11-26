@@ -1113,28 +1113,15 @@ mod packing {
         PartPacker::new().packed_len(part)
     }
 
-    /// `data`'s parts, packed, the first part `first` of its object, under `key`, its object's: on
-    /// threads of their own if there are several.
+    /// `data`'s parts, packed inline on the calling thread, the first part `first` of its object,
+    /// under `key`, its object's (board 11683: never spawns raw normal-priority OS threads;
+    /// callers with a bounded worker pool use [`Packer::push_with`]).
     fn pack_parts(data: &[u8], first: u64, key: &ObjectKey) -> Vec<PackedPart> {
-        let parts: Vec<&[u8]> = data.chunks(PART as usize).collect();
-        let threads = std::thread::available_parallelism()
-            .map_or(1, |threads| threads.get())
-            .min(parts.len());
-        let pack = |first: u64, parts: &[&[u8]]| {
-            let mut packer = PartPacker::new();
-            let parts = parts.iter().zip(first..);
-            parts.map(|(part, index)| packer.pack(index, part, key)).collect::<Vec<_>>()
-        };
-        if threads <= 1 {
-            return pack(first, &parts);
-        }
-        let each = parts.len().div_ceil(threads);
-        std::thread::scope(|scope| {
-            let packing: Vec<_> = (parts.chunks(each).zip((first..).step_by(each)))
-                .map(|(parts, first)| scope.spawn(move || pack(first, parts)))
-                .collect();
-            packing.into_iter().flat_map(|thread| thread.join().unwrap()).collect()
-        })
+        let mut packer = PartPacker::new();
+        data.chunks(PART as usize)
+            .zip(first..)
+            .map(|(part, index)| packer.pack(index, part, key))
+            .collect()
     }
 
     /// Frames an object written front to back: its parts, given in order, then its footer.
@@ -1234,11 +1221,30 @@ mod packing {
         }
 
         /// Packs `data`, the object's next parts: whole parts, but for the object's last. Returns the
-        /// object's next bytes, which follow those returned before.
+        /// object's next bytes, which follow those returned before. Packs inline on the calling
+        /// thread (board 11683); callers with a bounded worker pool use [`Packer::push_with`].
         pub fn push(&mut self, data: &[u8]) -> Vec<u8> {
             let mut bytes = Vec::new();
             let packed = pack_parts(data, self.next_part(), self.key());
             for (part, packed) in data.chunks(PART as usize).zip(packed) {
+                self.push_part(&mut bytes, part, &packed);
+            }
+            bytes
+        }
+
+        /// cladefs: packs `data`, the object's next parts, using `pack` to produce each
+        /// [`PackedPart`] in order (e.g. on a bounded worker pool when concurrency is enabled, or
+        /// inline otherwise; board 11683).
+        pub fn push_with(
+            &mut self,
+            data: &[u8],
+            pack: impl FnOnce(u64, &[&[u8]], &ObjectKey) -> Vec<PackedPart>,
+        ) -> Vec<u8> {
+            let mut bytes = Vec::new();
+            let parts: Vec<&[u8]> = data.chunks(PART as usize).collect();
+            let packed = pack(self.next_part(), &parts, self.key());
+            assert_eq!(packed.len(), parts.len(), "packer returned wrong part count");
+            for (part, packed) in parts.into_iter().zip(packed) {
                 self.push_part(&mut bytes, part, &packed);
             }
             bytes
@@ -3088,5 +3094,31 @@ mod tests {
         let compressed = zstd::bulk::compress(&data, 1).unwrap();
         decode(Encoding::Zstd, &compressed, &mut out).unwrap();
         assert_eq!(out, data);
+    }
+
+    /// board 11683: `Packer::push` / `pack_parts` packs multi-part (> 1 MiB) buffers inline on the
+    /// calling thread without spawning raw OS threads, matching `Packer::push_with` byte-for-byte.
+    #[test]
+    fn pack_parts_runs_inline_without_spawning_threads() {
+        let data = pattern(3 * PART + 123);
+        let key = Arc::new(ObjectKey::new(&dek(), ID, Salt([7; SALT_LEN]), Keyed::Encrypted));
+        let caller = std::thread::current().id();
+        let mut seen_threads = Vec::new();
+        let mut p1 = Packer::with(Arc::clone(&key));
+        let mut p2 = Packer::with(key);
+        let inline = p1.push(&data);
+        let via_with = p2.push_with(&data, |first, parts, key| {
+            let mut part_packer = PartPacker::new();
+            parts
+                .iter()
+                .zip(first..)
+                .map(|(part, index)| {
+                    seen_threads.push(std::thread::current().id());
+                    part_packer.pack(index, part, key)
+                })
+                .collect()
+        });
+        assert_eq!(inline, via_with);
+        assert_eq!(seen_threads, vec![caller; 4]);
     }
 }

@@ -722,6 +722,28 @@ pub(crate) fn pack(parts: &mut [Read], key: &ObjectKey) -> u64 {
     waited
 }
 
+/// cladefs: packs `parts`, an own extent's data chunk starting at part index `first`, under `key`:
+/// on the bounded pool (`on_threads`) when `concurrent` is true and there are multiple parts, or
+/// inline on the calling thread with zero spawned threads when `concurrent` is false (board 11683).
+pub(crate) fn pack_parts(
+    first: u64,
+    parts: &[&[u8]],
+    key: &ObjectKey,
+    concurrent: bool,
+) -> Vec<extent_frame::PackedPart> {
+    if !concurrent || parts.len() <= 1 {
+        let mut packer = PACKERS.take(PartPacker::new);
+        let packed =
+            parts.iter().zip(first..).map(|(part, index)| packer.pack(index, part, key)).collect();
+        PACKERS.give(packer);
+        return packed;
+    }
+    let (packed, _) = on_threads(parts.len(), |index, packer| {
+        Ok(packer.pack(first + index as u64, parts[index], key))
+    });
+    packed.expect("packing fails not")
+}
+
 /// cladefs: `each` of `count` parts, on as many threads as the host has CPUs for this process, but
 /// no more than there are parts: the caller's, and those of the pool's free (`crate::pool`, board
 /// 2944), each taking the next run of parts as it is done with one, with a packer of its own, kept
@@ -1189,5 +1211,33 @@ mod tests {
         let failing = RawFile::new(Failing, encryption());
         let error = read(&failing, 8 * PART, true, Vec::new()).err().expect("a part failed");
         assert_eq!(error.to_string(), "failing");
+    }
+
+    /// board 11683: `pack_parts` runs inline with zero spawned pool threads when `concurrent` is
+    /// false (even outside a Shuttle runtime under `--features shuttle`) and matches the
+    /// concurrent pooled path byte-for-byte.
+    #[test]
+    fn pack_parts_respects_concurrent_flag() {
+        let data = text(9, 3 * MIB + 4096);
+        let parts: Vec<&[u8]> = data.chunks(MIB).collect();
+        let encrypting = encrypting();
+        let inline = pack_parts(0, &parts, encrypting.key(), false);
+        #[cfg(not(feature = "shuttle"))]
+        {
+            let pooled = pack_parts(0, &parts, encrypting.key(), true);
+            assert_eq!(inline, pooled);
+        }
+        #[cfg(feature = "shuttle")]
+        {
+            let expected = inline;
+            shuttle::check_random(
+                move || {
+                    let parts: Vec<&[u8]> = data.chunks(MIB).collect();
+                    let pooled = pack_parts(0, &parts, encrypting.key(), true);
+                    assert_eq!(expected, pooled);
+                },
+                5,
+            );
+        }
     }
 }
