@@ -66,8 +66,8 @@ if part clippy; then
     cladefs_crates=(
         -p base32_id -p block_device -p bucket_cell -p cladefs -p cladefs_core -p cladefs_fs -p cladefs_wire -p cladefsd -p cladefs-examples
         -p extent_frame -p extent_keys -p formats -p fxfs-automount -p fxfs-posix
-        -p fxfs-sim-diff -p gc_wasm -p host_fs -p local_cell -p node_local -p sqlite_cladefs
-        -p virtio_extent
+        -p fxfs-sim-diff -p gc_wasm -p host_fs -p libcladefs -p local_cell -p node_local
+        -p sqlite_cladefs -p virtio_extent
     )
     cladefs_lints=(
         -A clippy::all -D clippy::correctness -D clippy::suspicious
@@ -98,7 +98,7 @@ if part clippy; then
     # Linux, went unseen there behind a `cargo check` (board 5652).
     env RUSTFLAGS="$madsim_rustflags" CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$root/target}/madsim" \
         cargo clippy --locked --manifest-path "$root/Cargo.toml" --no-deps -p node_local -p host_fs \
-        -p bucket_cell -p local_cell -p cladefs_core -p cladefs_fs -p cladefs_wire -p cladefsd -p cladefs --lib --test madsim -- "${cladefs_lints[@]}"
+        -p bucket_cell -p local_cell -p cladefs_core -p cladefs_fs -p cladefs_wire -p cladefsd -p cladefs -p libcladefs --lib --test madsim -- "${cladefs_lints[@]}"
 fi
 # The simulation of bucket_cell's protocol over local_cell's extent stores (TASK-88): its profiles'
 # soaks, and its rules' seed searches, each until a seed with the rule off finds what the rule
