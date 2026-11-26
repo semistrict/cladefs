@@ -8,7 +8,7 @@
 //! beside it), unfrozen: a start of another [`PROTOCOL`] is refused.
 //!
 //! - **machined to the helper:** [`Start`] first, once; then [`Request`]s: stop, snapshot,
-//!   suspend and resume, as asked.
+//!   suspend, resume and balloon, as asked.
 //! - **The helper to machined:** [`Started`] once the machine runs (or [`Ended`] if it never
 //!   did); its console's bytes as they come; whether its guest is suspended as that changes; an
 //!   answer to each snapshot, suspend and resume, in the order they were asked; [`Ended`] last,

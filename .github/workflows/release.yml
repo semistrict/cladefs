@@ -4,7 +4,7 @@
 
 # Build and publish static musl Linux release binaries (cladefsd, firecracker with --features
 # cladefs + seccomp) and Firecracker guest kernels (x86_64 vmlinux, arm64 Image) for amd64 and
-# arm64, along with SHA256SUMS. Triggered by pushing a cladefs-* tag or manually via
+# arm64, machined and its machined-vm helper for macOS on Apple silicon, along with SHA256SUMS. Triggered by pushing a cladefs-* tag or manually via
 # workflow_dispatch.
 name: Release
 
@@ -133,10 +133,49 @@ jobs:
           name: release-kernel-${{ matrix.goarch }}
           path: release-out/${{ matrix.asset }}
 
+  # machined for a Mac that is a hotbed worker: hotbed's daemon runs it there (hotbed pins these
+  # assets' SHA-256s), and its VMs boot arm64's Image above. The linker (scripts/macos-link.sh)
+  # signs both ad hoc with the hypervisor entitlement, which machined-vm, the process a VM runs
+  # in, needs.
+  machined-macos:
+    name: machined (darwin-arm64)
+    if: ${{ inputs.binaries-only != true }}
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+      - name: Rust, as rust-toolchain.toml pins it
+        run: rustup toolchain install
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: release-machined-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: release-machined-${{ runner.os }}-
+      - name: Build machined
+        run: |
+          set -euo pipefail
+          cargo build --release -p machined --bins
+          mkdir -p release-out
+          for bin in machined machined-vm; do
+            codesign -d --entitlements - "target/release/$bin" | grep -q com.apple.security.hypervisor
+            cp "target/release/$bin" "release-out/$bin-darwin-arm64"
+          done
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-machined-darwin-arm64
+          path: |
+            release-out/machined-darwin-arm64
+            release-out/machined-vm-darwin-arm64
+
   publish:
     name: publish GitHub release
-    needs: [binaries, guest-kernel]
-    if: ${{ !cancelled() && needs.binaries.result == 'success' && (inputs.binaries-only == true || needs.guest-kernel.result == 'success') }}
+    needs: [binaries, guest-kernel, machined-macos]
+    if: ${{ !cancelled() && needs.binaries.result == 'success' && (inputs.binaries-only == true || (needs.guest-kernel.result == 'success' && needs.machined-macos.result == 'success')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     # Needs contents: write solely to create/update the GitHub Release and upload its assets.
@@ -164,7 +203,7 @@ jobs:
             firecracker-linux-arm64
           )
           if [[ ${BINARIES_ONLY:-false} != "true" ]]; then
-            assets+=(vmlinux-linux-amd64 Image-linux-arm64)
+            assets+=(vmlinux-linux-amd64 Image-linux-arm64 machined-darwin-arm64 machined-vm-darwin-arm64)
           fi
           sha256sum "${assets[@]}" > SHA256SUMS
           cat SHA256SUMS
@@ -186,7 +225,7 @@ jobs:
           if [[ ${BINARIES_ONLY:-false} == "true" ]]; then
             notes="Static musl release binaries (cladefsd, firecracker with cladefs feature + seccomp) built from ${GITHUB_REPOSITORY}@${GITHUB_SHA}."
           else
-            notes="Static musl release binaries (cladefsd, firecracker with cladefs feature + seccomp) and Firecracker guest kernels (x86_64 vmlinux and arm64 Image with BTF, dynamic ftrace, kprobes, syscall tracepoints, BPF JIT, schedstats, and nested KVM) built from ${GITHUB_REPOSITORY}@${GITHUB_SHA}."
+            notes="Static musl release binaries (cladefsd, firecracker with cladefs feature + seccomp), Firecracker guest kernels (x86_64 vmlinux and arm64 Image with BTF, dynamic ftrace, kprobes, syscall tracepoints, BPF JIT, schedstats, and nested KVM), and machined with its machined-vm helper for macOS on Apple silicon, built from ${GITHUB_REPOSITORY}@${GITHUB_SHA}."
           fi
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" --clobber "${assets[@]}" SHA256SUMS
