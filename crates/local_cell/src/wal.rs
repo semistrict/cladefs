@@ -1154,10 +1154,19 @@ pub(crate) fn recover<D: Dir>(
             }
         }
     }
-    let next = (framed.iter().chain(&raw).chain(&logs))
-        .max()
-        .map_or(0, |last| last + 1)
-        .max(ephemeral.flatten().map_or(0, |through| through + 1));
+    let after_files = match framed.iter().chain(&raw).chain(&logs).max() {
+        Some(&last) => last
+            .checked_add(1)
+            .with_context(|| format!("cell {cell} segment number {last} overflows u64"))?,
+        None => 0,
+    };
+    let after_through = match ephemeral.flatten() {
+        Some(through) => through.checked_add(1).with_context(|| {
+            format!("ephemeral cell {cell} checkpoint through {through} overflows u64")
+        })?,
+        None => 0,
+    };
+    let next = after_files.max(after_through);
     Ok(Recovered { start, start_file, segments, next, closing })
 }
 

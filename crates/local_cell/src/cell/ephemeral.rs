@@ -583,7 +583,13 @@ impl<D: Dir> Recovering<D> {
         let capacity = replay.capacity.unwrap_or(capacity);
         let bucket_cell::State { extents: Local { extents, .. }, root, spent, .. } = replay;
         let own = extents.lens().filter(|(extent, _)| extent.cell == cell.id);
-        let next_sequence = own.map(|(extent, _)| extent.sequence + 1).max().unwrap_or(0);
+        let mut next_sequence = 0u64;
+        for (extent, _) in own {
+            let after = extent.sequence.checked_add(1).with_context(|| {
+                format!("ephemeral cell {cell} extent sequence {} overflows u64", extent.sequence)
+            })?;
+            next_sequence = next_sequence.max(after);
+        }
         let root = root.unwrap_or_default();
 
         // Remove any unreferenced segments <= through that a crash left behind after reaping, and
@@ -628,7 +634,9 @@ impl<D: Dir> Recovering<D> {
                     for piece in pieces {
                         let held = tracked.get_mut(&piece.segment);
                         let held = held.with_context(|| format!("{extent:?} in no segment"))?;
-                        held.0 += piece.len;
+                        held.0 = held.0.checked_add(piece.len).with_context(|| {
+                            format!("{extent:?} overflows segment {:?} bytes", piece.segment)
+                        })?;
                     }
                 }
                 Data::Own => bail!("{extent:?} of ephemeral cell {cell} is stored on its own"),
@@ -639,10 +647,20 @@ impl<D: Dir> Recovering<D> {
         // (board 5428): `wal::recover` removes empty open segments, so a reopen after a failed open
         // (or after a covered segment was reaped) could otherwise pick a number `<= through` that
         // `settle` would unlink on the next crash before WAL replay.
-        let next = recovered
-            .next
-            .max(checkpoint.through.map_or(0, |through| through + 1))
-            .max(tracked.keys().map(|id| id.number + 1).max().unwrap_or(0));
+        let after_through = match checkpoint.through {
+            Some(through) => through.checked_add(1).with_context(|| {
+                format!("ephemeral cell {cell} checkpoint through {through} overflows u64")
+            })?,
+            None => 0,
+        };
+        let mut after_tracked = 0u64;
+        for id in tracked.keys() {
+            let after = id.number.checked_add(1).with_context(|| {
+                format!("ephemeral cell {cell} segment number {} overflows u64", id.number)
+            })?;
+            after_tracked = after_tracked.max(after);
+        }
+        let next = recovered.next.max(after_through).max(after_tracked);
         let chain = Chain::new(cell, 0, next, 0);
         let opened = (epoch, next, chain);
         let files = (options.open_files, keys.clone());

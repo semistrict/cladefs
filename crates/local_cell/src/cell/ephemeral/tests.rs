@@ -476,3 +476,59 @@ fn oversized_local_checkpoint_is_refused_before_allocating() {
     let err = LocalCheckpoint::read(&SparseDir).unwrap_err();
     assert!(err.to_string().contains("exceeds limit"), "expected size limit error, got: {err:#}");
 }
+
+/// board 11649: `open_ephemeral` must return an error rather than panicking on arithmetic overflow
+/// when a decoded `LocalCheckpoint` has `u64::MAX` for `through`, an own segment number, or an
+/// own extent sequence.
+#[test]
+fn open_ephemeral_refuses_u64_max_sequence_and_segment_numbers() {
+    let try_open = |mutate: fn(&mut LocalCheckpoint)| {
+        let dir = MemDir::new();
+        let mut checkpoint = LocalCheckpoint::fork(
+            Parent { cell: PARENT, version: 7, at: 3, epoch: 1 },
+            &parent(),
+            b"wrapped".to_vec(),
+        );
+        mutate(&mut checkpoint);
+        let description = Description { block_size: BLOCK as u32, capacity: 1 << 30, cell: CHILD };
+        let ring = keys();
+        LocalCell::make_ephemeral(
+            &dir,
+            description,
+            Some("memory:///p"),
+            Some(Kind::Fxfs),
+            &checkpoint,
+            ring.encrypting(),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let recovering = LocalCell::recover_unmade(dir)?;
+        let opening =
+            EphemeralOpening { parent: Some(parent()), keys: ring, cache: None, held: None };
+        recovering.open_ephemeral(options(), opening)
+    };
+
+    // 1. `checkpoint.through == Some(u64::MAX)`
+    let err = try_open(|cp| {
+        cp.through = Some(u64::MAX);
+    })
+    .err()
+    .expect("through == u64::MAX must be refused");
+    assert!(err.to_string().contains("overflows u64"), "unexpected error: {err:#}");
+
+    // 2. Covered segment number == `u64::MAX`
+    let err = try_open(|cp| {
+        cp.own.push((own(1), Location { key: key(CHILD, u64::MAX), offset: 0, len: BLOCK as u64 }));
+    })
+    .err()
+    .expect("segment number == u64::MAX must be refused");
+    assert!(err.to_string().contains("overflows u64"), "unexpected error: {err:#}");
+
+    // 3. Own extent sequence == `u64::MAX`
+    let err = try_open(|cp| {
+        cp.own.push((own(u64::MAX), Location { key: key(CHILD, 1), offset: 0, len: BLOCK as u64 }));
+    })
+    .err()
+    .expect("extent sequence == u64::MAX must be refused");
+    assert!(err.to_string().contains("overflows u64"), "unexpected error: {err:#}");
+}
