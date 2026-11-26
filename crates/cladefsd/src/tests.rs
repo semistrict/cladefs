@@ -3479,6 +3479,13 @@ fn metrics_are_there_before_any_cell_opens() {
         "cladefsd_otel_spans_exported_total".to_owned(),
         "cladefsd_otel_spans_dropped_total".to_owned(),
         "cladefsd_otel_spans_failed_total".to_owned(),
+        // cladefs: where the host's fetchers found parts and tails, each source's.
+        "cladefsd_part_fetches_total{source=\"memory\"}".to_owned(),
+        "cladefsd_part_fetch_bytes_total{source=\"part_cache\"}".to_owned(),
+        "cladefsd_part_fetches_total{source=\"peer\"}".to_owned(),
+        "cladefsd_part_fetch_bytes_total{source=\"bucket\"}".to_owned(),
+        "cladefsd_tail_fetches_total{source=\"part_cache\"}".to_owned(),
+        "cladefsd_tail_fetches_total{source=\"bucket\"}".to_owned(),
     ] {
         assert_eq!(value(&series), 0.0, "{series}");
     }

@@ -86,7 +86,17 @@
 //! - cladefs: `cladefsd_peer_parts_total{outcome}`: the parts the cells' fetchers asked the
 //!   peers that own them for, by what came of it (`given`, `missing`, `failed`), and
 //!   `cladefsd_peer_served_parts_total{outcome}`, those the daemon's peers asked it for
-//!   (`served`, `missing`), if it serves peers (TASK-406.2).
+//!   (`served`, `missing`), if it serves peers (TASK-406.2); `cladefsd_peer_asked_parts_total`,
+//!   the parts asked, `cladefsd_peer_given_bytes_total`, the stored bytes of those `given`, counted
+//!   once checked against their CRCs: the bytes the peers saved fetching from the bucket;
+//!   and `cladefsd_peer_served_bytes_total`, those of the parts it `served`.
+//! - cladefs: `cladefsd_part_fetches_total{source}` and `cladefsd_part_fetch_bytes_total{source}`:
+//!   the parts the host's fetchers found, for its cells and its peers alike, and their stored
+//!   bytes, by where (`memory`, `part_cache`, `peer`, `bucket`: a GET of a range); each found
+//!   once, however many reads shared its fetch (`bucket_cell::fetch::Memory::fetches`).
+//!   `cladefsd_tail_fetches_total{source}`, alike, the objects' tails they read (`part_cache`,
+//!   `bucket`), which come from no peer: by no bytes, as one from the bucket may take two GETs, of
+//!   more than it keeps.
 //! - cladefs: `cladefsd_process_cpu_seconds_total`, the daemon's CPU time;
 //!   `cladefsd_process_anon_bytes` and `cladefsd_process_anon_max_bytes`, its anonymous
 //!   memory, as last sampled and at most; `cladefsd_process_anon_budget_bytes`, what its
@@ -145,6 +155,7 @@
 
 use crate::Daemon;
 use crate::wire::*;
+use bucket_cell::trace::Source;
 use std::fmt::Write as _;
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -595,7 +606,7 @@ fn render_rest(daemon: &Daemon, mut out: String, mut laps: Laps) -> String {
     }
 
     // cladefs: the parts asked of peers, and served them (TASK-406.2).
-    if let Some((counts, served, served_missing)) = crate::peers::counts_on(daemon) {
+    if let Some((counts, served)) = crate::peers::counts_on(daemon) {
         let name = "cladefsd_peer_parts_total";
         let _ = writeln!(out, "# HELP {name} Parts asked of the peers that own them, by outcome.");
         let _ = writeln!(out, "# TYPE {name} counter");
@@ -607,8 +618,57 @@ fn render_rest(daemon: &Daemon, mut out: String, mut laps: Laps) -> String {
         let name = "cladefsd_peer_served_parts_total";
         let _ = writeln!(out, "# HELP {name} Parts the daemon's peers asked it for, by outcome.");
         let _ = writeln!(out, "# TYPE {name} counter");
-        for (outcome, value) in [("served", served), ("missing", served_missing)] {
+        for (outcome, value) in [("served", served.parts), ("missing", served.missing)] {
             let _ = writeln!(out, "{name}{{outcome=\"{outcome}\"}} {value}");
+        }
+        for (name, help, value) in [
+            (
+                "cladefsd_peer_asked_parts_total",
+                "Parts asked of the peers that own them.",
+                counts.asked,
+            ),
+            (
+                "cladefsd_peer_given_bytes_total",
+                "Stored bytes of the parts the peers that own them gave, checked.",
+                counts.given_bytes,
+            ),
+            (
+                "cladefsd_peer_served_bytes_total",
+                "Stored bytes of the parts the daemon served its peers.",
+                served.bytes,
+            ),
+        ] {
+            let _ = writeln!(out, "# HELP {name} {help}");
+            let _ = writeln!(out, "# TYPE {name} counter");
+            let _ = writeln!(out, "{name} {value}");
+        }
+    }
+
+    // cladefs: where the host's fetchers found the parts and tails they fetched.
+    let fetches = cladefs_core::bucket::memory_on(&daemon.host).fetches();
+    let parts = Source::ALL.map(|source| (source, fetches.parts(source)));
+    let tails = [Source::PartCache, Source::Bucket].map(|source| (source, fetches.tails(source)));
+    for (name, help, values) in [
+        (
+            "cladefsd_part_fetches_total",
+            "Parts the host's fetchers found, by where.",
+            parts.map(|(source, found)| (source, found.count)).to_vec(),
+        ),
+        (
+            "cladefsd_part_fetch_bytes_total",
+            "Stored bytes of the parts the host's fetchers found, by where.",
+            parts.map(|(source, found)| (source, found.bytes)).to_vec(),
+        ),
+        (
+            "cladefsd_tail_fetches_total",
+            "Objects' tails the host's fetchers read, by where.",
+            tails.to_vec(),
+        ),
+    ] {
+        let _ = writeln!(out, "# HELP {name} {help}");
+        let _ = writeln!(out, "# TYPE {name} counter");
+        for (source, value) in values {
+            let _ = writeln!(out, "{name}{{source=\"{}\"}} {value}", source.name());
         }
     }
 

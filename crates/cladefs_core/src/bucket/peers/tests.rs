@@ -13,6 +13,7 @@ use bucket_cell::fetch::{Budget, Fetcher, Limits, Memory, Priority};
 use bucket_cell::layout::{self, Contents, Location, test_cell};
 use bucket_cell::object_bucket::{ObjectBucket, Request, RoutedBucket};
 use bucket_cell::peer::Peers as _;
+use bucket_cell::trace::Source;
 use std::sync::atomic::AtomicBool;
 use storage_device::ExtentId;
 
@@ -53,16 +54,20 @@ pub fn holding(data: &[u8]) -> (Arc<RoutedBucket>, Location) {
 struct Host {
     reads: Fetcher<RoutedBucket>,
     peers: Arc<Peers>,
+    /// The memory its fetchers share, which counts where they found what they fetched.
+    memory: Arc<Memory>,
     _cache: tempfile::TempDir,
 }
 
 /// A link to a host of this process, by its serving fetcher: failing every request, if told to;
-/// or answering that it has no such part, as a host whose read of the object found none would.
+/// or answering that it has no such part, as a host whose read of the object found none would; or
+/// giving a part with a byte flipped.
 struct InProcess {
     serving: Arc<Fetcher<RoutedBucket>>,
     calls: AtomicU64,
     failing: AtomicBool,
     missing: AtomicBool,
+    corrupt: AtomicBool,
     /// cladefs: refusing as of another region (TASK-633.4).
     foreign: AtomicBool,
 }
@@ -80,11 +85,19 @@ impl Link for InProcess {
         if self.missing.load(Ordering::Relaxed) {
             return futures::future::ready(Ok(None)).boxed();
         }
-        let serving = self.serving.clone();
+        let (serving, corrupt) = (self.serving.clone(), self.corrupt.load(Ordering::Relaxed));
         async move {
             let Asked { key, part } = asked;
             let served = serving.stored_part(&key, part).await;
-            let served = served.map(|bytes| bytes.map(|bytes| bytes.to_vec()));
+            let served = served.map(|bytes| {
+                bytes.map(|bytes| {
+                    let mut bytes = bytes.to_vec();
+                    if corrupt {
+                        bytes[0] ^= 1;
+                    }
+                    bytes
+                })
+            });
             served.map_err(|err| Refusal::Failed(err.to_string()))
         }
         .boxed()
@@ -108,29 +121,30 @@ fn hosts(
             std::mem::forget(memory.keys().hold(bucket_cell::testing::ring([test_cell(1)])));
             let fetcher =
                 || Fetcher::new(bucket.clone(), budget.clone(), memory.clone(), Some(kept.clone()));
-            (fetcher(), Arc::new(fetcher()), cache)
+            (fetcher(), Arc::new(fetcher()), memory, cache)
         })
         .collect();
     let links: HashMap<String, Arc<InProcess>> = (addresses.iter().zip(&made))
-        .map(|(address, (_, serving, _))| {
+        .map(|(address, (_, serving, _, _))| {
             let link = InProcess {
                 serving: serving.clone(),
                 calls: AtomicU64::new(0),
                 failing: AtomicBool::new(false),
                 missing: AtomicBool::new(false),
+                corrupt: AtomicBool::new(false),
                 foreign: AtomicBool::new(false),
             };
             ((*address).to_owned(), Arc::new(link))
         })
         .collect();
     let hosts = (addresses.iter().zip(made))
-        .map(|(address, (reads, _, cache))| {
+        .map(|(address, (reads, _, memory, cache))| {
             let links = links.clone();
             let peers = Peers::new(*address, move |to| links[to].clone() as Arc<dyn Link>);
             if peered {
                 peers.set(addresses);
             }
-            Host { reads: reads.asking(peers.clone()), peers, _cache: cache }
+            Host { reads: reads.asking(peers.clone()), peers, memory, _cache: cache }
         })
         .collect();
     (hosts, links)
@@ -159,12 +173,14 @@ fn owned(addresses: &[&str], address: &str, key: &str) -> u64 {
 }
 
 /// Three hosts reading one object fetch each of its parts from the bucket once, its owner's GET,
-/// not once each: 16 GETs fewer for its 8 parts. Each host GETs the object's tail itself.
+/// not once each: 16 GETs fewer for its 8 parts, and as many bytes fewer downloaded as the peers
+/// gave. Each host GETs the object's tail itself. Where the hosts' fetchers found the parts says
+/// so: each part once from the bucket, and twice from a peer.
 #[test]
 fn hosts_asking_their_peers_fetch_each_part_once() {
     let data = noise(PARTS * PART);
     let addresses = ["10.0.0.1:7070", "10.0.0.2:7070", "10.0.0.3:7070"];
-    let mut got = Vec::new();
+    let (mut got, mut downloaded, mut saved) = (Vec::new(), Vec::new(), 0);
     for peered in [false, true] {
         let (bucket, location) = holding(&data);
         let (hosts, _) = hosts(&bucket, &addresses, peered);
@@ -172,10 +188,46 @@ fn hosts_asking_their_peers_fetch_each_part_once() {
             assert!(read_all(host, &location) == data, "{} read other data", host.peers.me());
         }
         got.push(gets(&bucket));
-        let given: u64 = hosts.iter().map(|host| host.peers.counts().given).sum();
+        downloaded.push(bucket.stats().downloaded);
+        let sum = |of: &dyn Fn(&Host) -> u64| hosts.iter().map(of).sum::<u64>();
+        let given = sum(&|host| host.peers.counts().given);
+        let given_bytes = sum(&|host| host.peers.counts().given_bytes);
+        let found = |source| {
+            let count = sum(&|host| host.memory.fetches().parts(source).count);
+            let bytes = sum(&|host| host.memory.fetches().parts(source).bytes);
+            (count, bytes)
+        };
+        let (from_bucket, from_bucket_bytes) = found(Source::Bucket);
         assert_eq!(given, if peered { 2 * PARTS } else { 0 });
+        assert_eq!(found(Source::Peer), (given, given_bytes), "parts found at peers, and given");
+        assert_eq!(from_bucket, if peered { PARTS } else { 3 * PARTS }, "parts from the bucket");
+        // Every part stored alike, of noise: each given twice, and fetched once.
+        assert_eq!(given_bytes, if peered { 2 * from_bucket_bytes } else { 0 });
+        let tails = sum(&|host| host.memory.fetches().tails(Source::Bucket));
+        assert_eq!(tails, 3, "the tails read from the bucket");
+        saved = given_bytes;
     }
     assert_eq!(got[1], got[0] - 2 * PARTS, "GETs without peers, and with: {got:?}");
+    assert_eq!(downloaded[0] - downloaded[1], saved, "bytes downloaded, and given: {downloaded:?}");
+    assert_eq!(saved, 2 * PARTS * PART, "the parts' stored bytes: noise, stored as it is");
+}
+
+/// A part a peer gives that fails its CRC saves nothing: neither it nor its bytes count as given,
+/// nor as found at the peer, but at the bucket, and the peer is down for a while.
+#[test]
+fn a_part_failing_its_crc_counts_as_no_part_given() {
+    let data = noise(PARTS * PART);
+    let (bucket, location) = holding(&data);
+    let addresses = ["10.0.0.1:7070", "10.0.0.2:7070"];
+    let (hosts, links) = hosts(&bucket, &addresses, true);
+    assert!(owned(&addresses, addresses[1], &location.key) > 1, "the test needs two parts owned");
+    links[addresses[1]].corrupt.store(true, Ordering::Relaxed);
+    assert!(read_all(&hosts[0], &location) == data);
+    let counts = hosts[0].peers.counts();
+    assert_eq!(counts, Counts { asked: 1, given: 0, given_bytes: 0, missing: 0, failed: 1 });
+    let fetches = hosts[0].memory.fetches();
+    assert_eq!(fetches.parts(Source::Peer), bucket_cell::fetch::Tally::default());
+    assert_eq!(fetches.parts(Source::Bucket).count, PARTS, "every part from the bucket");
 }
 
 /// A peer that fails is asked nothing for a while: the parts it owns come from the bucket
@@ -192,7 +244,7 @@ fn a_peer_that_fails_is_asked_nothing_for_a_while() {
     assert!(read_all(&hosts[0], &location) == data);
     assert_eq!(other.calls.load(Ordering::Relaxed), 1, "asked again while down");
     let counts = hosts[0].peers.counts();
-    assert_eq!(counts, Counts { asked: 1, given: 0, missing: 0, failed: 1 });
+    assert_eq!(counts, Counts { asked: 1, given: 0, given_bytes: 0, missing: 0, failed: 1 });
     assert_eq!(gets(&bucket), 1 + PARTS, "its tail, and each part, from the bucket");
 
     let member = hosts[0].peers.others.read().unwrap()[0].clone();
@@ -254,7 +306,10 @@ fn a_peer_without_the_part_stays_up() {
     assert!(read_all(&hosts[0], &location) == data);
     assert_eq!(other.calls.load(Ordering::Relaxed), owned);
     let counts = hosts[0].peers.counts();
-    assert_eq!(counts, Counts { asked: owned, given: 0, missing: owned, failed: 0 });
+    assert_eq!(
+        counts,
+        Counts { asked: owned, given: 0, given_bytes: 0, missing: owned, failed: 0 }
+    );
 }
 
 /// Every part has one owner among the hosts, whatever their order; a host added takes about its
@@ -293,6 +348,7 @@ fn peers_set_again_stay_as_they_were() {
         calls: AtomicU64::new(0),
         failing: AtomicBool::new(false),
         missing: AtomicBool::new(false),
+        corrupt: AtomicBool::new(false),
         foreign: AtomicBool::new(false),
     });
     let peers = Peers::new(addresses[0], move |_| link.clone());

@@ -7,6 +7,7 @@
 
 use crate::Daemon;
 use bucket_cell::object_bucket::{RoutedBucket, Stats};
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Weak;
 use std::sync::atomic::Ordering;
@@ -56,6 +57,7 @@ pub(super) fn watch_stats(daemon: Weak<Daemon>, bucket: Weak<RoutedBucket>) {
                     crate::metrics::requests_line(),
                     uploads_line(&daemon),
                     cache_line(&daemon),
+                    fetches_line(&daemon),
                     buckets_line(&bucket),
                     crate::disk::line_on(&daemon),
                     crate::peers::line_on(&daemon).unwrap_or_else(|| "peers: none".to_owned()),
@@ -116,6 +118,25 @@ fn cache_line(daemon: &Daemon) -> String {
         Some(cache) => format!("cache: bytes={} capacity={}", cache.bytes(), cache.capacity()),
         None => "cache: none".to_owned(),
     }
+}
+
+/// cladefs: where `daemon`'s fetchers found the parts and tails they fetched
+/// (`bucket_cell::fetch::Memory::fetches`), as a line of `NAME=COUNT` after `fetches:`: of parts,
+/// `SOURCE` and `SOURCE-bytes` for each source; of tails, `tail-SOURCE` for the part cache and the
+/// bucket.
+fn fetches_line(daemon: &Daemon) -> String {
+    use bucket_cell::trace::Source;
+    let fetches = cladefs_core::bucket::memory_on(&daemon.host).fetches();
+    let mut line = String::from("fetches:");
+    let named = |source: Source| source.name().replace('_', "-");
+    for source in Source::ALL {
+        let found = fetches.parts(source);
+        let _ = write!(line, " {0}={1} {0}-bytes={2}", named(source), found.count, found.bytes);
+    }
+    for source in [Source::PartCache, Source::Bucket] {
+        let _ = write!(line, " tail-{}={}", named(source), fetches.tails(source));
+    }
+    line
 }
 
 /// cladefs: what serving the cells cost `daemon` (`crate::stats::Stats::named`), as a line of

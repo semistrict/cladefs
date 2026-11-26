@@ -108,6 +108,9 @@ pub struct Counts {
     pub asked: u64,
     /// Parts their owners gave, checked: each a GET of the bucket's saved.
     pub given: u64,
+    /// cladefs: the stored bytes of the parts their owners gave, checked: bytes not fetched from
+    /// the bucket.
+    pub given_bytes: u64,
     /// Parts their owners didn't have.
     pub missing: u64,
     /// Peers' failures, each putting it down for [`DOWN`].
@@ -118,6 +121,7 @@ pub struct Counts {
 struct Counters {
     asked: AtomicU64,
     given: AtomicU64,
+    given_bytes: AtomicU64,
     missing: AtomicU64,
     failed: AtomicU64,
 }
@@ -207,6 +211,7 @@ impl Peers {
         Counts {
             asked: count(&counters.asked),
             given: count(&counters.given),
+            given_bytes: count(&counters.given_bytes),
             missing: count(&counters.missing),
             failed: count(&counters.failed),
         }
@@ -263,10 +268,8 @@ impl Peer for Member {
         let getting = self.link.get(Asked { key: key.to_owned(), part });
         async move {
             match getting.await {
-                Ok(Some(bytes)) => {
-                    health.counters.given.fetch_add(1, Ordering::Relaxed);
-                    Some(bytes)
-                }
+                // Counted given once checked ([`Peer::gave`]).
+                Ok(Some(bytes)) => Some(bytes),
                 Ok(None) => {
                     health.counters.missing.fetch_add(1, Ordering::Relaxed);
                     None
@@ -284,9 +287,12 @@ impl Peer for Member {
         .boxed()
     }
 
+    fn gave(&self, bytes: u64) {
+        self.health.counters.given.fetch_add(1, Ordering::Relaxed);
+        self.health.counters.given_bytes.fetch_add(bytes, Ordering::Relaxed);
+    }
+
     fn failed(&self) {
-        // A part it gave, counted given, saved no GET.
-        self.health.counters.given.fetch_sub(1, Ordering::Relaxed);
         self.health.down("a part it gave failed its CRC");
     }
 }

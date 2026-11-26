@@ -55,6 +55,7 @@ use futures::future::{BoxFuture, FutureExt as _, Shared};
 use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use storage_device::ExtentId;
 
@@ -366,16 +367,80 @@ pub struct Memory {
     /// cladefs: the keys of the cells the host serves, which what it keeps is opened with
     /// (TASK-411.3).
     keys: Arc<HostRing>,
+    /// cladefs: where the host's fetchers found the parts and tails they fetched.
+    fetches: Fetches,
 }
 
 impl Default for Memory {
     fn default() -> Self {
-        Self {
-            tails: Mutex::default(),
-            recent: PartMemory::new(RECENT),
-            parts: Mutex::default(),
-            keys: Arc::default(),
+        Self::of(PartMemory::new(RECENT))
+    }
+}
+
+/// cladefs: where a host's fetchers found the parts and the tails they fetched, since its start,
+/// for its cells' reads and its peers' alike, each counted once however many reads shared it: of
+/// each [`Source`], how many parts and their stored bytes, and how many tails. A part kept in memory
+/// counts as one read found it there; a read joining another's fetch in flight counts nothing. A
+/// tail counts only as read from the part cache or the bucket, never kept in memory, which every
+/// read of an object finds; and by no bytes: one from the bucket may take two GETs, of more than it
+/// keeps.
+#[derive(Default)]
+struct Fetches {
+    parts: [Counter; 4],
+    tails: [AtomicU64; 4],
+}
+
+#[derive(Default)]
+struct Counter {
+    count: AtomicU64,
+    bytes: AtomicU64,
+}
+
+impl Counter {
+    fn add(&self, bytes: u64) {
+        self.count.fetch_add(1, Ordering::Relaxed);
+        self.bytes.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    fn load(&self) -> Tally {
+        Tally {
+            count: self.count.load(Ordering::Relaxed),
+            bytes: self.bytes.load(Ordering::Relaxed),
         }
+    }
+}
+
+/// The place of `source` among counts kept one for each [`Source`].
+fn at(source: Source) -> usize {
+    source as usize - 1
+}
+
+/// cladefs: how many parts or tails a host's fetchers found at a [`Source`], and their stored bytes
+/// ([`Memory::fetches`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Tally {
+    /// How many.
+    pub count: u64,
+    /// Their stored bytes, as the bucket holds them.
+    pub bytes: u64,
+}
+
+/// cladefs: where a host's fetchers found the parts and tails they fetched ([`Memory::fetches`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FetchCounts {
+    parts: [Tally; 4],
+    tails: [u64; 4],
+}
+
+impl FetchCounts {
+    /// The parts found at `source`.
+    pub fn parts(&self, source: Source) -> Tally {
+        self.parts[at(source)]
+    }
+
+    /// The tails read from `source`: none in memory, as those are not counted.
+    pub fn tails(&self, source: Source) -> u64 {
+        self.tails[at(source)]
     }
 }
 
@@ -386,12 +451,39 @@ impl Memory {
 
     /// A fetcher memory sharing `recent` with local framed part unpacking (board 6026).
     pub fn with_parts(recent: Arc<PartMemory>) -> Arc<Self> {
-        Arc::new(Self {
+        Arc::new(Self::of(recent))
+    }
+
+    /// A fetcher memory keeping parts in `recent`.
+    fn of(recent: Arc<PartMemory>) -> Self {
+        Self {
             tails: Mutex::default(),
             recent,
             parts: Mutex::default(),
             keys: Arc::default(),
-        })
+            fetches: Fetches::default(),
+        }
+    }
+
+    /// cladefs: where the host's fetchers found the parts and tails they fetched, since its start
+    /// ([`Fetches`]).
+    pub fn fetches(&self) -> FetchCounts {
+        let Fetches { parts, tails } = &self.fetches;
+        FetchCounts {
+            parts: std::array::from_fn(|at| parts[at].load()),
+            tails: std::array::from_fn(|at| tails[at].load(Ordering::Relaxed)),
+        }
+    }
+
+    /// cladefs: counts a part of `bytes` stored bytes found at `source`.
+    fn found_part(&self, source: Source, bytes: u64) {
+        trace::note(Some(source));
+        self.fetches.parts[at(source)].add(bytes);
+    }
+
+    /// cladefs: counts a tail read from `source`.
+    fn found_tail(&self, source: Source) {
+        self.fetches.tails[at(source)].fetch_add(1, Ordering::Relaxed);
     }
 
     /// Bytes held in cached object tails.
@@ -1277,7 +1369,7 @@ impl<B: Bucket> Fetcher<B> {
             return Ok(None);
         }
         if let Some(bytes) = self.shared.recent_stored(key, part) {
-            trace::note(Some(Source::Memory));
+            self.shared.memory.found_part(Source::Memory, bytes.len() as u64);
             return Ok(Some(bytes));
         }
         match self.flight_kind(key, part, &tail, Priority::Demand, None, true).await? {
@@ -1299,7 +1391,7 @@ impl<B: Bucket> Fetcher<B> {
         priority: Priority,
     ) -> Result<FetchedPart, Error> {
         if let Some(fetched) = self.shared.recent_part(key, part) {
-            trace::note(Some(Source::Memory));
+            self.shared.memory.found_part(Source::Memory, tail.part(key, part)?.stored.len);
             return Ok(FetchedPart::Data(fetched));
         }
         let owner = self.shared.peers.as_ref().and_then(|peers| peers.owner(key, part));
@@ -1486,12 +1578,12 @@ impl<B: Bucket> Fetching<B> {
             self.recent_part(key, part)
         };
         if let Some(fetched) = cached {
-            trace::note(Some(Source::Memory));
+            self.memory.found_part(Source::Memory, stored.len);
             return Ok(FetchedPart::Data(fetched));
         }
         let bytes = match self.kept(key, part)? {
             Some(bytes) => {
-                trace::note(Some(Source::PartCache));
+                self.memory.found_part(Source::PartCache, stored.len);
                 bytes
             }
             None => {
@@ -1500,7 +1592,8 @@ impl<B: Bucket> Fetching<B> {
                         Some(bytes)
                             if bytes.len() as u64 == stored.len && stored.check(&bytes).is_ok() =>
                         {
-                            trace::note(Some(Source::Peer));
+                            owner.gave(stored.len);
+                            self.memory.found_part(Source::Peer, stored.len);
                             Some(bytes)
                         }
                         Some(_) => {
@@ -1531,7 +1624,11 @@ impl<B: Bucket> Fetching<B> {
                         let slot = given.await;
                         let fetched = self.fetch_bucket(key, part, &stored).await;
                         drop(slot);
-                        fetched?
+                        let fetched = fetched?;
+                        if fetched.is_some() {
+                            self.memory.found_part(Source::Bucket, stored.len);
+                        }
+                        fetched
                     }
                 };
                 let Some(fetched) = fetched else { return Ok(FetchedPart::Gone) };
@@ -1695,6 +1792,7 @@ impl<B: Bucket> Fetching<B> {
         let tail = match self.kept_tail(key)? {
             Some(tail) => {
                 trace::note(Some(Source::PartCache));
+                self.memory.found_tail(Source::PartCache);
                 tail
             }
             None => {
@@ -1703,6 +1801,7 @@ impl<B: Bucket> Fetching<B> {
                 let read = object::tail(&*self.bucket, key).await;
                 drop(slot);
                 let Some(tail) = read? else { return Ok(None) };
+                self.memory.found_tail(Source::Bucket);
                 self.keep_tail(key, &tail);
                 tail
             }
@@ -3263,6 +3362,8 @@ mod tests {
             let serving = trace::sourced(async move { fetcher.stored_part(&key, part).await });
             async move { Some(serving.await.0.unwrap()?.to_vec()) }.boxed()
         }
+
+        fn gave(&self, _: u64) {}
 
         fn failed(&self) {
             self.failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

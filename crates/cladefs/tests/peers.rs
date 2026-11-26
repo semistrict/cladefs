@@ -33,12 +33,13 @@ impl Drop for KillOnDrop {
 }
 
 /// A daemon of a host sharing a bucket: its process, its VM socket, a client of its control API,
-/// and its stats file.
+/// its stats file, and the address it serves its metrics at.
 struct Daemon {
     _process: KillOnDrop,
     vms: PathBuf,
     control: Control,
     stats: PathBuf,
+    metrics: String,
 }
 
 /// A daemon serving in `dir`, keeping its cells in the file bucket at `bucket`, and its
@@ -48,9 +49,11 @@ fn daemon(dir: &Path, bucket: &Path, peers: Option<&[String]>) -> Daemon {
     std::fs::create_dir_all(&disk).unwrap();
     let (vms, control, stats) =
         (dir.join("cladefsd.sock"), dir.join("control.sock"), dir.join("stats"));
+    let [metrics, _] = addresses();
     let mut command = Command::new(env!("CARGO_BIN_EXE_cladefsd"));
     command
         .arg(&vms)
+        .env("CLADEFSD_METRICS", &metrics)
         .env("CLADEFSD_BUCKET", format!("file://{}/", bucket.display()))
         .env("CLADEFSD_TOKEN", "1")
         .env("CLADEFSD_ROOTS", &disk)
@@ -68,7 +71,7 @@ fn daemon(dir: &Path, bucket: &Path, peers: Option<&[String]>) -> Daemon {
         std::thread::sleep(Duration::from_millis(20));
     }
     let control = Control::connect(&control).unwrap();
-    Daemon { _process: process, vms, control, stats }
+    Daemon { _process: process, vms, control, stats, metrics }
 }
 
 /// Two loopback addresses no one listens at yet, for two daemons' peers.
@@ -98,13 +101,27 @@ fn stat(file: &Path, what: &str, name: &str) -> u64 {
     field.unwrap_or_else(|| panic!("no {name} in {line}")).parse().unwrap()
 }
 
+/// The value of the series `series` (its name and labels) in the metrics the daemon serves at
+/// `address`.
+fn metric(address: &str, series: &str) -> u64 {
+    use std::io::{Read as _, Write as _};
+    let mut stream = std::net::TcpStream::connect(address).unwrap();
+    stream.write_all(b"GET /metrics HTTP/1.0\r\n\r\n").unwrap();
+    let mut page = String::new();
+    stream.read_to_string(&mut page).unwrap();
+    let value = page.lines().find_map(|line| line.strip_prefix(series)?.strip_prefix(' '));
+    value.unwrap_or_else(|| panic!("no {series} in {page}")).parse().unwrap()
+}
+
 /// Waits for what the stats file `file` says of the bucket and the peers to stop changing: the
 /// daemon writes it within 200 ms of each change. Its other lines change as it writes it, counting
 /// its own writes.
 fn settled(file: &Path) {
     let counts = || {
         let text = std::fs::read_to_string(file).unwrap();
-        let read = |line: &&str| line.starts_with("object-store:") || line.starts_with("peers:");
+        let read = |line: &&str| {
+            ["object-store:", "peers:", "fetches:"].iter().any(|what| line.starts_with(what))
+        };
         text.lines().filter(read).collect::<Vec<_>>().join("\n")
     };
     let (mut last, deadline) = (String::new(), Instant::now() + Duration::from_secs(30));
@@ -119,10 +136,21 @@ fn settled(file: &Path) {
     }
 }
 
-/// What the second host's GETs of ranges, the first's, the parts the second's peers gave it, and
-/// the parts the first served came to: a version made on the first host, of [`EXTENTS`] extents,
-/// forked and read whole on the second; each asking the other if `peered`.
-fn run(peered: bool) -> (u64, u64, u64, u64) {
+/// What a run came to, of each host: its GETs of ranges, and its parts found at the bucket and at
+/// peers, each a count and their stored bytes; and the parts the second's peers gave it, and the
+/// first served, each a count and their stored bytes.
+struct Ran {
+    gets: [u64; 2],
+    from_bucket: [(u64, u64); 2],
+    from_peer: [(u64, u64); 2],
+    given: (u64, u64),
+    served: (u64, u64),
+}
+
+/// What a run came to ([`Ran`]): a version made on the first host, of [`EXTENTS`] extents, forked
+/// and read whole on the second; each asking the other if `peered`. What the stats files say of the
+/// peers and the fetches, the metrics say too.
+fn run(peered: bool) -> Ran {
     let dir = tempfile::tempdir().unwrap();
     let bucket = dir.path().join("bucket");
     let hosts = [dir.path().join("first"), dir.path().join("second")];
@@ -184,12 +212,42 @@ fn run(peered: bool) -> (u64, u64, u64, u64) {
     drop(client);
     settled(&second.stats);
     settled(&first.stats);
-    let gets = |daemon: &Daemon| stat(&daemon.stats, "object-store", "get-range");
-    let (given, served) = match peered {
-        true => (stat(&second.stats, "peers", "given"), stat(&first.stats, "peers", "served")),
-        false => (0, 0),
+    let hosts = [&second, &first];
+    let gets = hosts.map(|daemon| stat(&daemon.stats, "object-store", "get-range"));
+    let found = |source: &str| {
+        hosts.map(|daemon| {
+            let (count, bytes) = (
+                stat(&daemon.stats, "fetches", source),
+                stat(&daemon.stats, "fetches", &format!("{source}-bytes")),
+            );
+            let label = source.replace('-', "_");
+            let series = |name| format!("cladefsd_{name}_total{{source=\"{label}\"}}");
+            assert_eq!(metric(&daemon.metrics, &series("part_fetches")), count, "{source}");
+            assert_eq!(metric(&daemon.metrics, &series("part_fetch_bytes")), bytes, "{source}");
+            (count, bytes)
+        })
     };
-    (gets(&second), gets(&first), given, served)
+    let (from_bucket, from_peer) = (found("bucket"), found("peer"));
+    let (given, served) = match peered {
+        false => ((0, 0), (0, 0)),
+        true => {
+            let given = (
+                stat(&second.stats, "peers", "given"),
+                stat(&second.stats, "peers", "given-bytes"),
+            );
+            let served = (
+                stat(&first.stats, "peers", "served"),
+                stat(&first.stats, "peers", "served-bytes"),
+            );
+            let asked = stat(&second.stats, "peers", "asked");
+            assert_eq!(metric(&second.metrics, "cladefsd_peer_asked_parts_total"), asked);
+            assert_eq!(asked, given.0, "parts asked of the first host, which has them all");
+            assert_eq!(metric(&second.metrics, "cladefsd_peer_given_bytes_total"), given.1);
+            assert_eq!(metric(&first.metrics, "cladefsd_peer_served_bytes_total"), served.1);
+            (given, served)
+        }
+    };
+    Ran { gets, from_bucket, from_peer, given, served }
 }
 
 /// The second host fetches from the bucket only the parts it owns: the first gives it the rest,
@@ -197,15 +255,25 @@ fn run(peered: bool) -> (u64, u64, u64, u64) {
 /// read on another host comes from the bucket once, not once on each host that reads it.
 #[test]
 fn a_copy_read_on_another_host_comes_from_its_peer() {
-    let (alone, first_alone, _, _) = run(false);
-    let (second, first, given, served) = run(true);
+    let alone = run(false);
+    let peered = run(true);
+    let (given, given_bytes) = peered.given;
     assert!(given > 0, "the first host owned none of the parts read");
-    assert_eq!(served, given, "parts served, and those given");
+    assert_eq!(peered.served, peered.given, "parts served, and those given, with their bytes");
+    assert_eq!(peered.from_peer[0], peered.given, "parts found at a peer, and given");
+    assert_eq!(alone.from_peer, [(0, 0); 2], "parts found at a peer, with none");
+    // The second host's parts, from the bucket alone, or from it and its peer: the same parts.
+    let (bucket, bucket_bytes) = peered.from_bucket[0];
+    assert_eq!(alone.from_bucket[0], (bucket + given, bucket_bytes + given_bytes));
+    assert_eq!(peered.from_bucket[1], alone.from_bucket[1], "the first host fetched to serve");
+    let (alone, first_alone, second, first) =
+        (alone.gets[0], alone.gets[1], peered.gets[0], peered.gets[1]);
     assert_eq!(second, alone - given, "the second host's GETs of ranges, alone {alone}");
     assert_eq!(first, first_alone, "the first host fetched what it served");
     println!(
         "{EXTENTS} MiB read on a second host: {alone} ranged GETs alone, {second} with peers, \
-         {given} parts given by the first host, which made {first} ranged GETs either way"
+         {given} parts given by the first host ({given_bytes} bytes), which made {first} ranged \
+         GETs either way"
     );
 }
 

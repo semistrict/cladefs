@@ -303,6 +303,9 @@ pub enum Source {
 }
 
 impl Source {
+    /// cladefs: every source, nearest first.
+    pub const ALL: [Source; 4] = [Source::Memory, Source::PartCache, Source::Peer, Source::Bucket];
+
     /// Its name, as [`SOURCE`] says it.
     pub fn name(self) -> &'static str {
         match self {
@@ -315,9 +318,7 @@ impl Source {
 
     /// The source numbered `number`, if one is: none, for 0, as nothing noted is.
     fn numbered(number: u8) -> Option<Self> {
-        [Source::Memory, Source::PartCache, Source::Peer, Source::Bucket]
-            .into_iter()
-            .find(|source| *source as u8 == number)
+        Self::ALL.into_iter().find(|source| *source as u8 == number)
     }
 }
 

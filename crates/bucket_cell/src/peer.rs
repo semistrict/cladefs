@@ -31,6 +31,10 @@ pub trait Peer: Send + Sync {
     /// failed to give it, in time.
     fn part(&self, key: &str, part: u64) -> BoxFuture<'static, Option<Vec<u8>>>;
 
+    /// cladefs: a part it gave, of `bytes` stored bytes, passed the CRC the asker's tail gives it:
+    /// a GET of the bucket's saved.
+    fn gave(&self, bytes: u64);
+
     /// A part it gave failed the CRC the asker's tail gives it: it is no peer to ask for a while.
     fn failed(&self);
 }

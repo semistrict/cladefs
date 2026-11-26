@@ -366,6 +366,9 @@ fn members_most() -> u64 {
 static SERVED: AtomicU64 = AtomicU64::new(0);
 // The process's count, every simulated host's together, as a process's metrics are.
 static SERVED_MISSING: AtomicU64 = AtomicU64::new(0);
+/// cladefs: the stored bytes of the parts the daemon served its peers.
+// The process's count, every simulated host's together, as a process's metrics are.
+static SERVED_BYTES: AtomicU64 = AtomicU64::new(0);
 
 /// Has `daemon` serve the hosts sharing its bucket, at `address` (`CLADEFSD_PEER_ADDRESS`),
 /// on `listening`, bound there (or, under madsim, its address on the simulated network), and its
@@ -545,21 +548,38 @@ fn check_address(address: &str) -> Result<(), String> {
     }
 }
 
-/// What `daemon`'s cells' fetchers asked its peers, and the parts it served them and had not as
-/// they asked, if it serves peers.
+/// What a daemon's peers asked it, since its start.
+pub(super) struct ServedCounts {
+    /// Parts it served them.
+    pub parts: u64,
+    /// cladefs: the stored bytes of those parts.
+    pub bytes: u64,
+    /// Parts it had not as they asked.
+    pub missing: u64,
+}
+
+/// What `daemon`'s cells' fetchers asked its peers, and what its peers asked it, if it serves
+/// peers.
 pub(super) fn counts_on(
     daemon: &Daemon,
-) -> Option<(cladefs_core::bucket::peers::Counts, u64, u64)> {
+) -> Option<(cladefs_core::bucket::peers::Counts, ServedCounts)> {
     let counts = cladefs_core::bucket::peers_on(&daemon.host)?.counts();
-    Some((counts, SERVED.load(Ordering::Relaxed), SERVED_MISSING.load(Ordering::Relaxed)))
+    let served = ServedCounts {
+        parts: SERVED.load(Ordering::Relaxed),
+        bytes: SERVED_BYTES.load(Ordering::Relaxed),
+        missing: SERVED_MISSING.load(Ordering::Relaxed),
+    };
+    Some((counts, served))
 }
 
 /// `daemon`'s line in its stats file (`CLADEFSD_STATS`): its [`counts_on`].
 pub(super) fn line_on(daemon: &Daemon) -> Option<String> {
-    let (counts, served, served_missing) = counts_on(daemon)?;
-    let cladefs_core::bucket::peers::Counts { asked, given, missing, failed } = counts;
+    let (counts, served) = counts_on(daemon)?;
+    let cladefs_core::bucket::peers::Counts { asked, given, given_bytes, missing, failed } = counts;
+    let ServedCounts { parts: served, bytes: served_bytes, missing: served_missing } = served;
     Some(format!(
-        "peers: asked={asked} given={given} missing={missing} failed={failed} served={served} \
+        "peers: asked={asked} given={given} given-bytes={given_bytes} missing={missing} \
+         failed={failed} served={served} served-bytes={served_bytes} \
          served-missing={served_missing}"
     ))
 }
@@ -1513,6 +1533,7 @@ impl proto::peer_server::Peer for Server {
         match self.serving.part(asked).await {
             Ok(Some(bytes)) => {
                 SERVED.fetch_add(1, Ordering::Relaxed);
+                SERVED_BYTES.fetch_add(bytes.len() as u64, Ordering::Relaxed);
                 Ok(Response::new(GetPartResponse { bytes: bytes.to_vec() }))
             }
             Ok(None) => {

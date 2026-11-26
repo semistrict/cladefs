@@ -973,7 +973,15 @@ removed for versions: `NoForksCheckVersions`, `NoForksReferFirstVersions` and
   (`proto/cladefs/peer/v1/peer.proto`): every host reads the whole bucket anyway. cladefsd:
   `CLADEFSD_PEER_ADDRESS` (this host's address, listened at), `CLADEFSD_PEERS` (the
   list at start, comma-separated), `SetPeers` (the list at any time); it needs a part cache. The
-  stats file's `peers:` line counts what was asked, given, missing, failed and served.
+  stats file's `peers:` line counts what was asked, given (and `given-bytes`, their stored bytes:
+  what the peers saved the bucket), missing, failed and served (and `served-bytes`); its
+  `fetches:` line says where the host's fetchers found each part they fetched, for its cells and
+  its peers alike, and its stored bytes: `memory`, `part-cache`, `peer` or `bucket` (each found
+  once, however many reads shared its fetch), and where they read each object's tail,
+  `tail-part-cache` or `tail-bucket`, which no peer gives (counted, not in bytes: a tail from the
+  bucket may take two GETs, of more than it keeps). The metrics say the same: `cladefsd_peer_*`,
+  `cladefsd_part_fetches_total`, `cladefsd_part_fetch_bytes_total` and
+  `cladefsd_tail_fetches_total`, by `source` (`cladefsd::metrics`).
 - **Read-ahead** follows each object's reads (1,024 objects at most): along sequential reads its
   window doubles, from 1 part to 16 (`fetch::AHEAD`), and a read out of sequence starts it again at
   1; the parts read ahead go into the cache, and are read only where a cache is. Profiles of what
