@@ -1,0 +1,23 @@
+[package]
+name = "libmachine-agent"
+description = "libmachine's guest agent, and the wire protocol the host speaks to it"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# The library is the wire protocol, shared with libmachine's host side; the
+# binary is the agent, built static for the guest
+# (x86_64-unknown-linux-musl) by crates/libmachine/scripts/build-test-guest.sh.
+[lib]
+name = "libmachine_agent"
+
+[[bin]]
+name = "libmachine-agent"
+path = "src/main.rs"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true
+
+[lints]
+workspace = true

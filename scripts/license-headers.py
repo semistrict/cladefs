@@ -23,7 +23,8 @@
 Not checked: hand mutants' patches (`*/mutants/*.patch`, and the ordering mutants of
 `*/loom-mutants/*.patch`), whose leading comment is the mutant's fields, which its runner reads
 (`# Killer:`, `# Kind:`): a mutant is a change to a file whose own header covers it, not a source
-of its own.
+of its own. Nor the crates vendored under vendor/ (vendor/smoltcp, 0BSD), which keep their
+upstream's files and license as published.
 
 Without the Fuchsia checkout at the revision the root Cargo.toml records, as in CI, a file citing
 Fuchsia is checked for The Fuchsia Authors' copyright and one license notice; the year, which
@@ -68,6 +69,8 @@ BUILD_FILES = ("Makefile", "Kconfig")
 # Hand mutants' patches: changes to files whose headers cover them, their leading comments their
 # fields (the module's docs).
 MUTANT = re.compile(r"(^|/)(loom-)?mutants/[^/]+\.patch$")
+# Crates vendored as their upstream published them, under their own licenses.
+VENDORED = "vendor/"
 # Under the kernel's license as well as cladefs's: guest/linux's, and what runs it outside the kernel.
 DUAL = ("guest/linux/", "guest/sim/", "crates/fxfs-sim-diff/shim/")
 
@@ -81,7 +84,7 @@ def git(*args, cwd=ROOT):
 def files():
     for path in git("ls-files").splitlines():
         name = path.rsplit("/", 1)[-1]
-        if MUTANT.search(path):
+        if MUTANT.search(path) or path.startswith(VENDORED):
             continue
         if (path.endswith(SUFFIXES) or name in BUILD_FILES) and (ROOT / path).is_file():
             yield path

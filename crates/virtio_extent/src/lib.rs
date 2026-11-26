@@ -4,8 +4,8 @@
 
 //! The virtio extent-store device (backlog doc-4, device type `0x4658`), but its virtio
 //! transport: one copy of it, which every VMM hosting it serves, cladefs's Firecracker
-//! (vendor/firecracker) and libmachine, so that its versioned protocol, which never migrates,
-//! can't drift between them.
+//! (vendor/firecracker) and libmachine (crates/libmachine), so that its versioned protocol,
+//! which never migrates, can't drift between them.
 //!
 //! A guest that runs Fxfs itself stores its filesystem through this device, as extents its Fxfs
 //! names: immutable pieces of data, written once and sealed by the next commit, freed whole, and

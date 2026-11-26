@@ -61,6 +61,11 @@ macOS-only code included: CI's `macos` job compiles and tests that, so push and 
 Local commands stay cheap: editing, `git`, `rg`, `cargo fmt -p CRATE`, `vb`, and fast Python
 checks.
 
+The one exception (the user, 2026-11-26): libmachine's macOS backend, on Hypervisor.framework
+(board 13063), builds and runs its VM tests on the user's Mac, niced: hotbed has no macOS node,
+and GitHub's M1 runners can't nest Hypervisor.framework. That is `cargo build`, `clippy` and
+`nextest` of `-p libmachine` and the crates its macOS tests need, nothing else.
+
 ### Linux runs go to a test host, through hotbed
 
 Linux runs go to a test host: a physical machine others' agents share, with `/dev/kvm` and
@@ -384,5 +389,31 @@ Each file is `dead-ends/<short-kebab-name>.md`, short, with these parts:
 **Why it's dead:** the reason, not the symptom.
 **Reopen if:** what would have to change.
 ```
+
+## libmachine: the library VMM beside Firecracker
+
+`crates/libmachine` (with `libmachine-agent` and `libmachine-py`) is a VMM linked into its
+caller's process, imported from semistrict/libmachine on 2026-11-26 (board 13054); doc-30 is its
+architecture, doc-31 the decisions it made before. Its goal is cladefs's guests in full on macOS
+(Hypervisor.framework, DAX included). Firecracker stays cladefs's production VMM; what the two
+share lives once, in crates of this workspace (`virtio_extent`, the guest kernel). Its tasks are
+`tag.libmachine=yes` on the board; those from its Backlog carry `libmachine=TASK-N`, never cited
+as `TASK-N` (cladefs's own numbers): cite them by board ID.
+
+- **Formats.** libmachine's snapshot, suspension and agent formats are not yet families under
+  `formats/`. Until the user decides whether they join them, treat them as frozen: change none
+  without the user's approval, as above.
+- **Guest code in tests is assembly, never raw bytes:** Rust tests and examples use iced-x86's
+  `code_asm` (`crates/libmachine/tests/common`); Python tests use Keystone in NASM syntax
+  (`crates/libmachine-py/tests/guest.py`, which serializes Keystone calls: it is not thread-safe).
+- **Guests.** Its tests boot a small test guest (`crates/libmachine/scripts/build-test-guest.sh`:
+  an upstream longterm kernel and an initramfs with its agent) and cladefs's own kernel
+  (`scripts/guest-kernel.sh`); a test that needs KVM or a guest skips itself with a note, and
+  `scripts/test.sh`'s `libmachine` part, which provides both, fails on any such note.
+- **Python:** uv for everything (`uv sync`, `uv run pytest`, `uv build --wheel` in
+  `crates/libmachine-py`); `uv run` rebuilds the extension when Rust sources change.
+- **Tenancy.** One libmachine process may run VMs for several tenants (doc-30, "Security and
+  tenancy"), unlike Firecracker's one jailed VM per process: an accepted risk, its callers'
+  choice.
 
 This codebase is yours: what it's for and how it's built are your call, and you'll keep building on it.

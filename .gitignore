@@ -8,6 +8,10 @@ guide/src/generated/
 .agent-name
 # What a mutant runner stopped by SIGKILL left in the tree (scripts/lib/patches.sh).
 .mutant-in
+# libmachine's Python bindings: uv's environment and the extension maturin builds into the package.
+crates/libmachine-py/.venv/
+crates/libmachine-py/python/libmachine/*.so
+.pytest_cache/
 # Bazel convenience symlinks and optional local overrides.
 /bazel-*
 .bazelrc.local

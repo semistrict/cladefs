@@ -1,0 +1,188 @@
+// Copyright 2026 The cladefs Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+//! Emulated devices.
+
+pub(crate) mod bus;
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
+pub(crate) mod guest_tests;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub(crate) mod pci;
+pub(crate) mod serial;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub(crate) mod virtio;
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub(crate) use pc::Pci;
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+mod pc {
+    use std::sync::{Arc, Mutex};
+
+    use vm_memory::GuestMemoryMmap;
+
+    use super::pci::{BarAllocator, PciBus, PciHost};
+    use super::virtio::VirtioDevice;
+    use super::virtio::pci::VirtioPci;
+    use super::virtio::worker::DeviceThread;
+    use crate::arch::x86_64::layout::PCI_MSI_GSI_BASE;
+    use crate::error::{Error, Result};
+
+    /// A PC's PCI bus with its virtio devices, and the thread that runs
+    /// their queues.
+    pub(crate) struct Pci {
+        // Field order: the thread stops before the devices it uses drop.
+        _thread: DeviceThread,
+        bus: PciBus,
+        transports: Vec<Arc<Mutex<VirtioPci>>>,
+    }
+
+    /// Every transport of a bus, held ([`Pci::quiesce`]).
+    pub(crate) struct Quiesced<'a> {
+        transports: Vec<std::sync::MutexGuard<'a, VirtioPci>>,
+    }
+
+    impl Quiesced<'_> {
+        /// Has every device take what the guest gave it and hand over
+        /// what its host side holds, as the device thread would: the type
+        /// of one that had something for the guest, if any (it rang the
+        /// doorbell, and may have interrupted the guest).
+        pub(crate) fn settle(&mut self) -> Option<u16> {
+            self.transports.iter_mut().find_map(|t| t.settle())
+        }
+
+        /// Every function's state, in bus order.
+        pub(crate) fn save(&self, e: &mut crate::snapshot::codec::Encoder) -> Result<()> {
+            e.count(self.transports.len());
+            self.transports.iter().try_for_each(|t| t.save(e))
+        }
+
+        /// Every function's state for a suspension, in bus order: each
+        /// device hands over what must outlive its machine. On an error,
+        /// what was handed over is taken back.
+        pub(crate) fn hand_over(&mut self, e: &mut crate::snapshot::codec::Encoder) -> Result<()> {
+            e.count(self.transports.len());
+            let handed = self.transports.iter_mut().try_for_each(|t| t.hand_over(e));
+            if let Err(e) = handed {
+                return Err(match self.take_back() {
+                    Ok(()) => e,
+                    Err(back) => Error::Snapshot(format!("{e}; then taking back failed: {back}")),
+                });
+            }
+            Ok(())
+        }
+
+        /// Undoes [`hand_over`](Self::hand_over), the suspension having
+        /// failed: every device carries on as before it. The first error,
+        /// after trying every device.
+        pub(crate) fn take_back(&mut self) -> Result<()> {
+            let mut first = Ok(());
+            for t in &mut self.transports {
+                if let Err(e) = t.take_back()
+                    && first.is_ok()
+                {
+                    first = Err(e);
+                }
+            }
+            first
+        }
+    }
+
+    impl Pci {
+        /// Puts `devices` on bus 0 at device numbers 1, 2, ... with their
+        /// BARs assigned and live, and starts the device thread.
+        pub(crate) fn new(
+            devices: Vec<Box<dyn VirtioDevice>>,
+            mem: &GuestMemoryMmap,
+            host: &dyn PciHost,
+            doorbell: &Arc<crate::suspend::Doorbell>,
+        ) -> Result<Self> {
+            if devices.len() > 31 {
+                return Err(Error::InvalidConfig(format!(
+                    "{} PCI devices; bus 0 holds 31",
+                    devices.len()
+                )));
+            }
+            let mut bars = BarAllocator::new();
+            let mut gsi = PCI_MSI_GSI_BASE;
+            let mut bus = PciBus::default();
+            let mut transports = Vec::new();
+            for (i, device) in devices.into_iter().enumerate() {
+                let mut transport = VirtioPci::new(device, mem.clone(), &mut bars, gsi, host)?;
+                transport.set_doorbell(doorbell.clone());
+                gsi += u32::from(transport.vector_count());
+                let transport = Arc::new(Mutex::new(transport));
+                bus.add(i as u8 + 1, transport.clone());
+                transports.push(transport);
+            }
+            let thread = DeviceThread::spawn(transports.clone())?;
+            Ok(Self { _thread: thread, bus, transports })
+        }
+
+        /// A guest read; false if the address is not PCI's.
+        pub(crate) fn mmio_read(&self, addr: u64, data: &mut [u8]) -> bool {
+            self.bus.mmio_read(addr, data)
+        }
+
+        /// A guest write; false if the address is not PCI's.
+        pub(crate) fn mmio_write(
+            &self,
+            addr: u64,
+            data: &[u8],
+            host: &dyn PciHost,
+        ) -> Result<bool> {
+            self.bus.mmio_write(addr, data, host)
+        }
+
+        /// Holds every transport's lock until the returned value drops:
+        /// the device thread waits, so nothing writes guest memory or
+        /// changes a device meanwhile (with every vCPU stopped, nothing
+        /// else does), and a snapshot sees one moment.
+        pub(crate) fn quiesce(&self) -> Quiesced<'_> {
+            Quiesced {
+                transports: self
+                    .transports
+                    .iter()
+                    .map(|t| t.lock().unwrap_or_else(|e| e.into_inner()))
+                    .collect(),
+            }
+        }
+
+        /// Puts back every function's state [`Quiesced::save`] wrote, into
+        /// a bus built with the same devices, then has the bus decode the
+        /// BARs where the guest had them.
+        pub(crate) fn restore(
+            &self,
+            d: &mut crate::snapshot::codec::Decoder<'_>,
+            host: &dyn PciHost,
+        ) -> Result<()> {
+            let n = d.count(1)?;
+            if n != self.transports.len() {
+                return Err(Error::Snapshot(format!(
+                    "the snapshot has {n} PCI devices, this machine {}",
+                    self.transports.len()
+                )));
+            }
+            for t in &self.transports {
+                t.lock().unwrap_or_else(|e| e.into_inner()).restore(d, host)?;
+            }
+            self.bus.refresh_bars();
+            Ok(())
+        }
+
+        /// Interrupts every active queue's driver once: after a restore.
+        pub(crate) fn signal_all_queues(&self) {
+            for t in &self.transports {
+                t.lock().unwrap_or_else(|e| e.into_inner()).signal_all_queues();
+            }
+        }
+
+        /// The transport counters of the device at device number `device`.
+        #[cfg(test)]
+        pub(crate) fn stats(&self, device: u8) -> super::virtio::pci::Stats {
+            let transport = &self.transports[usize::from(device) - 1];
+            transport.lock().unwrap().stats()
+        }
+    }
+}

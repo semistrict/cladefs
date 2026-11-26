@@ -4,7 +4,7 @@ cladefs's virtio extent-store device (backlog doc-4, device type `0x4658`) but i
 transport: one copy of it, which every VMM hosting the device serves, so that its protocol,
 which is versioned and never migrates, can't drift between them. Its VMMs are cladefs's
 Firecracker fork (`vendor/firecracker`, `src/vmm/src/devices/virtio/extent`, the reference
-adapter) and libmachine.
+adapter) and libmachine (`crates/libmachine`, board 13067).
 
 ## What the crate does
 

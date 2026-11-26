@@ -7,11 +7,11 @@
 # tests under Shuttle and the models of memory orderings under loom, the scripts' tests
 # (scripts/tests) and the mutant runners' checks, the Go client's (go/), and on Linux the guest
 # tests' own tests (guest/tests, both halves) and the VMM's own that cladefs adds to
-# (vendor/firecracker, built as cladefs builds it: scripts/firecracker-cargo.sh): what CI runs, a
-# part a job.
+# (vendor/firecracker, built as cladefs builds it: scripts/firecracker-cargo.sh), and libmachine's
+# with their guests (crates/libmachine): what CI runs, a part a job.
 # Arguments are passed to the suite's and the simulation's `cargo nextest run`. CLADEFS_TEST_PARTS
 # names the parts to run, separated by spaces (default: all of clippy, workspace, sim, madsim,
-# shuttle, scripts, go, and guest and firecracker on Linux). The part unit, in no default, runs the
+# shuttle, scripts, go, and guest, firecracker and libmachine on Linux). The part unit, in no default, runs the
 # workspace's unit tests alone, about a minute: the workspace part's tests but the slow ones the
 # nextest profile unit leaves out (.config/nextest.toml).
 #
@@ -26,7 +26,7 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 export LIBC_FATAL_STDERR_=1
 
 parts="clippy workspace sim madsim shuttle scripts go"
-[[ $(uname) != Linux ]] || parts+=" guest firecracker"
+[[ $(uname) != Linux ]] || parts+=" guest firecracker libmachine"
 parts=${CLADEFS_TEST_PARTS:-$parts}
 part() { # name: whether CLADEFS_TEST_PARTS has it
     [[ " $parts " == *" $1 "* ]]
@@ -81,6 +81,16 @@ if part clippy; then
         --features shuttle --tests -- "${cladefs_lints[@]}"
     cargo clippy --locked --manifest-path "$root/Cargo.toml" --no-deps -p cladefs_core -p virtio_extent \
         --features loom --tests -- "${cladefs_lints[@]}"
+    # libmachine's crates (crates/libmachine*, doc-30): all of clippy's default lints, as libmachine
+    # kept them before it came into this repo; its fuzz harness's build, and the synchronous Machine
+    # without the async sandbox (and tokio).
+    libmachine_crates=(-p libmachine -p libmachine-agent -p libmachine-py)
+    cargo clippy --locked --manifest-path "$root/Cargo.toml" --no-deps "${libmachine_crates[@]}" \
+        --all-targets -- -D warnings
+    cargo clippy --locked --manifest-path "$root/Cargo.toml" --no-deps -p libmachine \
+        --all-targets --features fuzzing -- -D warnings
+    cargo clippy --locked --manifest-path "$root/Cargo.toml" --no-deps -p libmachine \
+        --all-targets --no-default-features -- -D warnings
     # The madsim build's (doc-24): the simulated crates and their tests under madsim, built as the
     # madsim part builds them, whose code no other build compiles either: its warnings, 13 on
     # Linux, went unseen there behind a `cargo check` (board 5652).
@@ -204,6 +214,34 @@ if part guest; then
     "${harness[@]}" -p test_cases --features host
     "${harness[@]}" -p test_cases --features guest
     "${harness[@]}" -p runner
+fi
+# libmachine's tests (crates/libmachine, doc-30), with what the workspace part runs them without,
+# where each that needs KVM or a guest skips itself, saying so: the test guest (its kernels and
+# initramfs, crates/libmachine/scripts/build-test-guest.sh) and cladefs's kernel
+# (scripts/guest-kernel.sh). A test that still skips fails the part. Then the Python bindings'
+# tests, with uv (crates/libmachine-py), which build the extension themselves.
+if part libmachine; then
+    libmachine_guest=${LIBMACHINE_GUEST_DIR:-${CARGO_TARGET_DIR:-$root/target}/guest}
+    LIBMACHINE_GUEST_DIR=$libmachine_guest "$root/crates/libmachine/scripts/build-test-guest.sh"
+    libmachine_env=(env LIBMACHINE_GUEST_DIR="$libmachine_guest"
+        CLADEFS_GUEST_KERNEL="$("$root/scripts/guest-kernel.sh")")
+    libmachine_log=$(mktemp)
+    "${libmachine_env[@]}" cargo nextest run --locked --manifest-path "$root/Cargo.toml" \
+        -p libmachine -p libmachine-agent --success-output final "$@" 2>&1 | tee "$libmachine_log"
+    if grep -q "skipping:" "$libmachine_log"; then
+        grep "skipping:" "$libmachine_log" | sort | uniq -c >&2
+        echo "scripts/test.sh: libmachine's tests above skipped themselves" >&2
+        exit 1
+    fi
+    command -v uv > /dev/null ||
+        { echo "scripts/test.sh: the libmachine part needs uv, for the Python bindings' tests" >&2; exit 1; }
+    (cd "$root/crates/libmachine-py" && "${libmachine_env[@]}" uv run --locked pytest -q -rs \
+        --timeout=300) 2>&1 | tee "$libmachine_log"
+    if grep -q "SKIPPED" "$libmachine_log"; then
+        echo "scripts/test.sh: the Python bindings' tests above skipped themselves" >&2
+        exit 1
+    fi
+    rm "$libmachine_log"
 fi
 # The VMM's own tests that cladefs adds to, which no other suite reaches: its extent device's
 # (TASK-79.102), its vCPUs' exits' (TASK-187) and the PCI transport's shared memory BAR's and device
