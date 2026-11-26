@@ -220,7 +220,17 @@ pub struct PageCache {
     writes: AtomicU64,
     /// Each use's number, which says which files were used least recently.
     uses: AtomicU64,
+    /// Its files, those gone pruned as they are walked, or as it doubles past what it held when
+    /// last pruned ([`PageCache::track`]), as no flush pass walks it any more (review 162).
     files: Mutex<Vec<Weak<dyn Paged>>>,
+    /// cladefs: how many files it held when last pruned.
+    files_pruned: AtomicU64,
+    /// cladefs: the files with dirty pages, by their address ([`listing`]): what flush passes and
+    /// writers' write-backs walk, rather than every file, so that what they cost is of what is
+    /// dirty, not of every file open (board 13912: 4,096 idle cells' files cost the flushers 50
+    /// ms a second of sorting). A file enters as its first page dirties and leaves once clean,
+    /// both under its pages' lock, which is taken before this one.
+    dirty_files: Mutex<HashMap<usize, Weak<dyn Paged>>>,
     /// Per-disk flushers, keyed by [`DiskKey`].
     flushers: Mutex<HashMap<DiskKey, Arc<DiskFlusher>>>,
     /// Number of disks (including [`DiskKey::Default`]) with at least one open file, used lock-free
@@ -303,6 +313,8 @@ impl PageCache {
             writes: AtomicU64::new(0),
             uses: AtomicU64::new(0),
             files: Mutex::default(),
+            files_pruned: AtomicU64::new(0),
+            dirty_files: Mutex::default(),
             flushers: Mutex::default(),
             active_disks: AtomicU64::new(0),
             drained: Condvar::new(),
@@ -516,6 +528,50 @@ impl PageCache {
         keyed.into_iter().map(|(_, file)| file).collect()
     }
 
+    /// cladefs: the files with dirty pages, the longest dirty first, each file's age taken once
+    /// (TASK-493); those found clean, or gone, leave its dirty set ([`PageCache::dirty_files`]).
+    fn dirty_files_by_age(&self) -> Vec<Arc<dyn Paged>> {
+        let listed: Vec<(usize, Weak<dyn Paged>)> = (self.dirty_files.lock().unwrap().iter())
+            .map(|(&at, file)| (at, file.clone()))
+            .collect();
+        let mut dirty = Vec::with_capacity(listed.len());
+        for (at, listed) in listed {
+            let unlist = || {
+                let mut files = self.dirty_files.lock().unwrap();
+                // Not another file since made at the same address, listed in its place.
+                if files.get(&at).is_some_and(|file| Weak::ptr_eq(file, &listed)) {
+                    files.remove(&at);
+                }
+            };
+            let Some(file) = listed.upgrade() else {
+                unlist();
+                continue;
+            };
+            if let Some(dirtied) = file.dirtied_or_unlist(&unlist) {
+                dirty.push((dirtied, file));
+            }
+        }
+        dirty.sort_by_key(|(dirtied, _)| *dirtied);
+        dirty.into_iter().map(|(_, file)| file).collect()
+    }
+
+    /// Tracks `file`, one more of its files: the files gone pruned once there are twice as many as
+    /// when last pruned, so that what they hold, their `Shared`s' allocations, never adds up.
+    fn track(&self, file: Weak<dyn Paged>) {
+        let mut files = self.files.lock().unwrap();
+        files.push(file);
+        if files.len() as u64 > 2 * self.files_pruned.load(Ordering::Relaxed) + 64 {
+            files.retain(|file| file.strong_count() > 0);
+            self.files_pruned.store(files.len() as u64, Ordering::Relaxed);
+        }
+    }
+
+    /// cladefs: lists `file` as one with dirty pages ([`PageCache::dirty_files`]): called as its
+    /// first page dirties, holding its pages' lock.
+    fn list_dirty(&self, file: Weak<dyn Paged>) {
+        self.dirty_files.lock().unwrap().insert(listing(&file), file);
+    }
+
     /// A use's number.
     fn used(&self) -> u64 {
         self.uses.fetch_add(1, Ordering::Relaxed)
@@ -537,7 +593,7 @@ impl PageCache {
     /// turn, until no more than `dirty` bytes are dirty: a file whose write-back fails, which its
     /// next sync reports, is passed over, as the flusher passes it over (board 8553).
     fn write_back_to(&self, dirty: u64) {
-        for file in self.files_by(|file| file.dirtied()) {
+        for file in self.dirty_files_by_age() {
             if self.dirty.load(Ordering::Relaxed) <= dirty {
                 return;
             }
@@ -680,7 +736,7 @@ impl PageCache {
                 }
             }
         }
-        for file in self.files_by(|file| file.dirtied()) {
+        for file in self.dirty_files_by_age() {
             let Some(dirtied) = file.dirtied() else { continue };
             let over = self.dirty.load(Ordering::Relaxed) > self.background();
             if !over && now.duration_since(dirtied) < self.options.expire {
@@ -707,7 +763,7 @@ impl PageCache {
                 log::warn!("extent store: writing back a range of a file's pages: {err}");
             }
         }
-        for file in self.files_by(|file| file.dirtied()) {
+        for file in self.dirty_files_by_age() {
             if file.disk_key() != disk_key {
                 continue;
             }
@@ -783,6 +839,12 @@ impl Drop for Dying {
 }
 
 /// A file a [`PageCache`] holds pages of, as its flusher and its eviction see it.
+/// cladefs: what a file is listed by in its cache's dirty set ([`PageCache::dirty_files`]): its
+/// address, which no other file has while it lives.
+fn listing(file: &Weak<dyn Paged>) -> usize {
+    file.as_ptr().cast::<()>() as usize
+}
+
 trait Paged: Send + Sync {
     /// Which per-disk flusher owns this file ([`DiskKey::Default`] when not bound to a
     /// [`HostDisk`]).
@@ -794,6 +856,15 @@ trait Paged: Send + Sync {
     fn used(&self) -> u64;
     /// When its oldest dirty page was dirtied, if it has one.
     fn dirtied(&self) -> Option<Instant>;
+    /// cladefs: [`Paged::dirtied`]; or, if it has no dirty page, none, having run `unlist` with no
+    /// write dirtying it meanwhile ([`PageCache::dirty_files`]): under its pages' lock.
+    fn dirtied_or_unlist(&self, unlist: &dyn Fn()) -> Option<Instant> {
+        let dirtied = self.dirtied();
+        if dirtied.is_none() {
+            unlist();
+        }
+        dirtied
+    }
     /// Writes back up to `most` bytes of its dirty pages, in its order.
     fn write_back(&self, most: u64) -> io::Result<()>;
     /// Writes back its dirty pages in `range`.
@@ -925,7 +996,7 @@ impl<F: File> Cached<F> {
             unlinked: AtomicBool::new(false),
         });
         let paged: Arc<dyn Paged> = shared.clone();
-        cache.files.lock().unwrap().push(Arc::downgrade(&paged));
+        cache.track(Arc::downgrade(&paged));
         Ok(Self { shared })
     }
 
@@ -1320,6 +1391,14 @@ impl<F: File> Paged for Shared<F> {
         self.pages().dirtied
     }
 
+    fn dirtied_or_unlist(&self, unlist: &dyn Fn()) -> Option<Instant> {
+        let pages = self.pages();
+        if pages.dirtied.is_none() {
+            unlist();
+        }
+        pages.dirtied
+    }
+
     fn write_back(&self, most: u64) -> io::Result<()> {
         let wrote = self.write_runs(0..u64::MAX, None, Some(most));
         let limit = self.cache.most();
@@ -1487,8 +1566,10 @@ impl<F: File> File for Cached<F> {
         // it holds go uncounted no more, to be taken off the counts as they go (TASK-433.10).
         pages.size = pages.size.max(at);
         pages.dirty_pages += dirtied;
-        if at > offset {
-            pages.dirtied.get_or_insert_with(Instant::now);
+        if at > offset && pages.dirtied.is_none() {
+            pages.dirtied = Some(Instant::now());
+            let paged: Arc<dyn Paged> = self.shared.clone();
+            shared.cache.list_dirty(Arc::downgrade(&paged));
         }
         let held = shared.cache.held.fetch_add(added * PAGE, Ordering::Relaxed) + added * PAGE;
         shared.cache.peak.fetch_max(held, Ordering::Relaxed);
@@ -1791,6 +1872,46 @@ mod tests {
         assert_eq!(under, pattern(7, 2 * PAGE as usize));
     }
 
+    /// cladefs: a cache's dirty set holds the files with dirty pages alone, which passes walk
+    /// (board 13912): of a thousand files open, those written are listed until written back, then
+    /// none, and a file written again is listed again.
+    #[test]
+    fn passes_walk_only_the_files_with_dirty_pages() {
+        let dir = MemDisk::new();
+        let expire = Duration::from_secs(3600);
+        let cache = PageCache::without_flusher(Options { expire, ..Options::default() });
+        let files: Vec<_> = (0..1000)
+            .map(|at| Cached::new(dir.create(&format!("f{at}"), true).unwrap(), &cache).unwrap())
+            .collect();
+        let listed = || cache.dirty_files.lock().unwrap().len();
+        assert_eq!(listed(), 0);
+        for file in &files[..10] {
+            file.write_at(&pattern(1, PAGE as usize), 0).unwrap();
+            file.write_at(&pattern(2, PAGE as usize), PAGE).unwrap();
+        }
+        assert_eq!((listed(), cache.dirty_files_by_age().len()), (10, 10));
+        cache.flush_pass(Instant::now() + 2 * expire);
+        assert_eq!(cache.usage().dirty, 0);
+        assert_eq!((cache.dirty_files_by_age().len(), listed()), (0, 0));
+        files[500].write_at(&pattern(3, PAGE as usize), 0).unwrap();
+        assert_eq!(listed(), 1);
+        drop(files);
+        assert_eq!((cache.dirty_files_by_age().len(), listed()), (0, 0));
+    }
+
+    /// cladefs: a cache's list of files holds those gone no longer than until it doubles: a
+    /// thousand files opened and closed, one at a time, leave no more than 66 (review 162: every
+    /// one, for good, once flush passes walked the dirty files alone).
+    #[test]
+    fn files_gone_are_pruned_as_more_open() {
+        let dir = MemDisk::new();
+        let cache = PageCache::without_flusher(Options::default());
+        for at in 0..1000 {
+            drop(Cached::new(dir.create(&format!("f{at}"), true).unwrap(), &cache).unwrap());
+        }
+        assert!(cache.files.lock().unwrap().len() <= 66, "{}", cache.files.lock().unwrap().len());
+    }
+
     /// Sized to a governor's room, the cache's bounds are a tenth, a fifth and all of it, the first
     /// two none below what it was made with (TASK-433.8); sized down again, those two go back to
     /// them, and what it holds at most is the room, though below what it was made with (board
@@ -1944,6 +2065,7 @@ mod tests {
         for file in &files {
             let paged: Arc<dyn Paged> = file.clone();
             cache.files.lock().unwrap().push(Arc::downgrade(&paged));
+            cache.list_dirty(Arc::downgrade(&paged));
         }
         files
     }
@@ -2009,6 +2131,7 @@ mod tests {
         let cache = cache(Options { expire: Duration::from_secs(3600), ..Options::default() });
         let file: Arc<dyn Paged> = Arc::new(Panicking);
         cache.files.lock().unwrap().push(Arc::downgrade(&file));
+        cache.list_dirty(Arc::downgrade(&file));
         cache.wake();
         (cache, file)
     }
