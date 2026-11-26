@@ -108,6 +108,12 @@ impl<F> RawFile<F> {
     pub(crate) fn sectors(&self) -> &Arc<ObjectKey> {
         &self.encryption.sectors
     }
+
+    /// cladefs: the encryption of this raw file, kept when a full or framing segment drops its
+    /// open file handle and reopens on demand (board 12887).
+    pub(crate) fn encryption(&self) -> &Arc<RawEncryption> {
+        &self.encryption
+    }
 }
 
 impl<F: File> RawFile<F> {

@@ -3633,8 +3633,16 @@ impl<D: Dir> LocalCell<D> {
                 let file = state.segments.framed_file(&*self.dir, segment)?.file.clone();
                 let mut own = Vec::with_capacity(footer.contents.own.len());
                 for (extent, location) in footer.own() {
-                    let file = state.own_files.file(&*self.dir, extent)?;
-                    own.push((location.key, file.file.clone()));
+                    let path = extent_path(extent);
+                    let size = match state.own_files.size(extent) {
+                        Some(size) => size,
+                        None => state.own_files.file(&*self.dir, extent)?.size(),
+                    };
+                    let dir = self.dir.clone();
+                    own.push(crate::uploads::ClosedOwn::new(location.key, size, move || {
+                        let file = dir.open(&path, true)?;
+                        crate::framed::read_object(&file)
+                    }));
                 }
                 let keys = self.keys.clone();
                 closed.push(Closed { number, footer, file, own, restamped, keys, data_len });

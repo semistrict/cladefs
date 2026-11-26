@@ -321,9 +321,11 @@ const FLOOR_CELLS: u64 = if cfg!(target_os = "macos") { 32 } else { 256 };
 const OWN_OPEN_FILES: u64 = 1024;
 
 /// cladefs: the open files a cell keeps at most beside its segments', its sealed extents' and its
-/// open extents' raw files (each `local_cell::Options::open_files`): its open segment's, its commit
-/// log, its lock, and its VM process's connection, two sockets, and that VM process's pidfd.
-const CELL_OPEN_FILES_BESIDE: u64 = 8;
+/// open extents' raw files (each `local_cell::Options::open_files`): its open segment's raw + log
+/// (2), its prepared next segment's raw + log (2), up to 2 full segments kept open between commits
+/// (board 12887), its directory handle and flock (2), its VM process's connection sockets and pidfd
+/// (3), and transient flush syncs (`AT_ONCE` = 8) plus an active framing (1).
+const CELL_OPEN_FILES_BESIDE: u64 = 20;
 
 /// cladefs: the open files a cell keeps at most, as the daemon opens cells
 /// (`cladefs_core::host_cell::options`), its VM process's connection's among them: its segments',

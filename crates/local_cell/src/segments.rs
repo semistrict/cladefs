@@ -61,6 +61,12 @@ impl Unsectored {
     }
 }
 
+/// cladefs: how many full segments filled between commits (`Phase::Full`) keep their raw file
+/// handles open for fast look-ahead before older full segments close their handles and reopen on
+/// demand; full segments drop their log handles immediately (`Segments::log_file` reopens on
+/// demand). Counted in `cladefsd::CELL_OPEN_FILES_BESIDE` (board 12887).
+const FULL_OPEN_LIMIT: usize = 2;
+
 /// Where a segment the cell tracks is in its life.
 enum Phase<F> {
     /// Taking writes, in its raw file; cladefs: its commits recorded in its log, which the flushes
@@ -69,18 +75,26 @@ enum Phase<F> {
     /// cladefs: filled between commits, taking no more writes, which go to the next: the next
     /// commit seals in place what is one run in it, and closes it, its footer naming those runs as
     /// the commit's, which the segments after it go on with, after what the commits before made in
-    /// it, as `window` folds them (TASK-92.41). Read from its raw file until then.
-    Full { raw: Arc<RawFile<F>>, log: Log<F>, window: Window },
+    /// it, as `window` folds them (TASK-92.41). At most [`FULL_OPEN_LIMIT`] full segments keep
+    /// `raw` open (none keep `log` open); excess full segments reopen on demand (board 12887).
+    Full { raw: Option<Arc<RawFile<F>>>, encryption: Arc<RawEncryption>, window: Window },
     /// cladefs: closed by commit `last`, its data being framed off the commit, on a thread of its
     /// own, which ends the framing itself ([`Segments::framed`], TASK-153.8): read from its raw
-    /// file, which stays open, until then; its commits' records still appended to its log by the
-    /// flushes that make them durable, which wait for no framing (TASK-165.9). cladefs: its framed
-    /// file `written`, whole, once the framing wrote it, being made durable then, which the
-    /// uploader waits for no more (TASK-384): the bucket's object is what makes its commits
-    /// durable, its raw file and log holding them here until it is.
-    Framing { raw: Arc<RawFile<F>>, log: Log<F>, last: u64, written: Option<Arc<Framed<F>>> },
-    /// cladefs: its framing failed, which failed the cell: read from its raw file, which stays.
-    Failed { raw: Arc<RawFile<F>>, log: Log<F>, error: String },
+    /// file (upgrading `raw` while held by its framing or reopening on demand; board 12887) until
+    /// then; its commits' records still appended to its log by the flushes that make them durable,
+    /// which wait for no framing (TASK-165.9). cladefs: its framed file `written`, whole, once the
+    /// framing wrote it, being made durable then, which the uploader waits for no more (TASK-384):
+    /// the bucket's object is what makes its commits durable, its raw file and log holding them
+    /// here until it is.
+    Framing {
+        raw: std::sync::Weak<RawFile<F>>,
+        encryption: Arc<RawEncryption>,
+        last: u64,
+        written: Option<Arc<Framed<F>>>,
+    },
+    /// cladefs: its framing failed, which failed the cell: read from its raw file, reopened on
+    /// demand.
+    Failed { encryption: Arc<RawEncryption>, error: String },
     /// Closed, a segment of the write-ahead log until acknowledged in the bucket (or covered by
     /// an ephemeral cell's local checkpoint). Its framed file, if open, is among those kept open
     /// (`Segments::files`).
@@ -254,8 +268,9 @@ pub(crate) struct Segments<F> {
     written: bool,
     /// cladefs: the raw files of the segments closed since the last commit, written since the one
     /// before, which the next commit's flush syncs (TASK-165.9); and those filled since, which the
-    /// commit closing them seals extents in (TASK-92.41).
-    closed_unsynced: Vec<Arc<F>>,
+    /// commit closing them seals extents in (TASK-92.41). Synced by path with a `Weak` handle so
+    /// closing many filled segments never holds unbounded raw FDs (board 12887).
+    closed_unsynced: Vec<(String, std::sync::Weak<F>)>,
     /// Whether a segment closed since the last commit, which syncs the directories of open
     /// segments and of logs, the next's raw file's and log's entries. cladefs: its framed file's,
     /// its framing makes durable (`make_durable`, TASK-310).
@@ -561,10 +576,11 @@ impl<F: File> Segments<F> {
         let segment = self.tracked.get(&number)?;
         let look = segment.ahead.as_ref()?.look;
         match &segment.phase {
-            Phase::Open { raw, .. } | Phase::Full { raw, .. } | Phase::Framing { raw, .. } => {
+            Phase::Open { raw, .. } | Phase::Full { raw: Some(raw), .. } => {
                 Some((raw.clone(), look, self.ephemeral))
             }
-            Phase::Failed { .. } | Phase::Closed => None,
+            Phase::Framing { raw, .. } => raw.upgrade().map(|raw| (raw, look, self.ephemeral)),
+            Phase::Full { raw: None, .. } | Phase::Failed { .. } | Phase::Closed => None,
         }
     }
 
@@ -698,12 +714,7 @@ impl<F: File> Segments<F> {
     /// ([`Segments::raw`]).
     pub fn log_file<D: Dir<File = F>>(&self, dir: &D, number: SegmentId) -> Result<Log<F>, Error> {
         match self.tracked.get(&number).map(|segment| &segment.phase) {
-            Some(
-                Phase::Open { log, .. }
-                | Phase::Full { log, .. }
-                | Phase::Framing { log, .. }
-                | Phase::Failed { log, .. },
-            ) => Ok(log.clone()),
+            Some(Phase::Open { log, .. }) => Ok(log.clone()),
             _ => {
                 let file = dir.open(&log_path(number), false)?;
                 let mut header = [0; crate::wal::LOG_HEADER];
@@ -721,12 +732,12 @@ impl<F: File> Segments<F> {
     /// cladefs: encrypted, as its records hold its runs (TASK-411.5).
     pub fn raw_file<D: Dir<File = F>>(&self, dir: &D, number: SegmentId) -> Result<Arc<F>, Error> {
         match self.tracked.get(&number).map(|segment| &segment.phase) {
-            Some(
-                Phase::Open { raw, .. }
-                | Phase::Full { raw, .. }
-                | Phase::Framing { raw, .. }
-                | Phase::Failed { raw, .. },
-            ) => Ok(raw.file().clone()),
+            Some(Phase::Open { raw, .. } | Phase::Full { raw: Some(raw), .. }) => {
+                Ok(raw.file().clone())
+            }
+            Some(Phase::Framing { raw, .. }) if let Some(raw) = raw.upgrade() => {
+                Ok(raw.file().clone())
+            }
             _ => Ok(Arc::new(dir.open(&open_segment_path(number), false)?)),
         }
     }
@@ -923,11 +934,19 @@ impl<F: File> Segments<F> {
         let commits = last.map(|last| vec![self.chain.tag(last)]).unwrap_or_default();
         let footer = self.chain.close(window.contents(commits, next_sequence));
         let segment = self.tracked.get_mut(&number).unwrap();
-        let (raw, log) = match &segment.phase {
-            Phase::Open { raw, log } | Phase::Full { raw, log, .. } => (raw.clone(), log.clone()),
+        let (raw, encryption) = match &segment.phase {
+            Phase::Open { raw, .. } => (Some(raw.clone()), raw.encryption().clone()),
+            Phase::Full { raw, encryption, .. } => (raw.clone(), encryption.clone()),
             _ => unreachable!("{number:?}, closing, is open or full"),
         };
-        segment.phase = Phase::Framing { raw: raw.clone(), log, last: epoch, written: None };
+        let weak_raw = raw.as_ref().map(Arc::downgrade).unwrap_or_default();
+        let weak_file = raw.as_ref().map(|r| Arc::downgrade(r.file())).unwrap_or_default();
+        segment.phase = Phase::Framing {
+            raw: weak_raw,
+            encryption: encryption.clone(),
+            last: epoch,
+            written: None,
+        };
         debug_assert!(
             segment.live > 0 || footer.contents.runs().next().is_none(),
             "{number:?} names runs, holding none"
@@ -936,12 +955,13 @@ impl<F: File> Segments<F> {
         // Written to in place, its framing would change what the frame says of it.
         let quiet = segment.writers == 0;
         if written {
-            self.closed_unsynced.push(raw.file().clone());
+            self.closed_unsynced.push((open_segment_path(number), weak_file));
         }
         self.closed_since = true;
         Unframed {
             number,
             raw,
+            encryption,
             len,
             footer,
             quiet,
@@ -967,11 +987,22 @@ impl<F: File> Segments<F> {
         let (phase, synced) = create_open(dir, next, placing, salt, (&dek, key))?;
         let window = std::mem::replace(&mut self.window, Window::starting(number.cell, epoch + 1));
         let segment = self.tracked.get_mut(&number).unwrap();
-        let Phase::Open { raw, log } = &segment.phase else {
+        let Phase::Open { raw, .. } = &segment.phase else {
             unreachable!("the open segment is open")
         };
-        segment.phase = Phase::Full { raw: raw.clone(), log: log.clone(), window };
+        let encryption = raw.encryption().clone();
+        segment.phase = Phase::Full { raw: Some(raw.clone()), encryption, window };
         self.full.push(number);
+        // cladefs: keep at most `FULL_OPEN_LIMIT` full segments' raw handles open between commits
+        // so unbounded writes between commits never exhaust `RLIMIT_NOFILE` (board 12887).
+        if self.full.len() > FULL_OPEN_LIMIT {
+            let evict = self.full[self.full.len() - FULL_OPEN_LIMIT - 1];
+            if let Some(Phase::Full { raw, .. }) =
+                self.tracked.get_mut(&evict).map(|s| &mut s.phase)
+            {
+                *raw = None;
+            }
+        }
         self.tracked.insert(next, Segment::new_in(phase, self.ephemeral));
         if !synced {
             self.unsynced_entries.insert(next);
@@ -1046,10 +1077,10 @@ impl<F: File> Segments<F> {
     /// from its raw file, which stays.
     pub fn framing_failed(&mut self, number: SegmentId, error: String) {
         let segment = self.tracked.get_mut(&number).expect("a segment being framed is tracked");
-        let Phase::Framing { raw, log, .. } = &segment.phase else {
+        let Phase::Framing { encryption, .. } = &segment.phase else {
             unreachable!("{number:?}, whose framing failed, was being framed")
         };
-        segment.phase = Phase::Failed { raw: raw.clone(), log: log.clone(), error };
+        segment.phase = Phase::Failed { encryption: encryption.clone(), error };
         self.framing.remove(&number);
     }
 
@@ -1293,11 +1324,18 @@ impl<F: File> Segments<F> {
     ) -> Result<Source<F>, Error> {
         let segment = self.tracked.get(&number).ok_or_else(|| anyhow!("no segment {number:?}"))?;
         match &segment.phase {
-            Phase::Open { raw, .. }
-            | Phase::Full { raw, .. }
-            | Phase::Framing { raw, .. }
-            | Phase::Failed { raw, .. } => {
+            Phase::Open { raw, .. } | Phase::Full { raw: Some(raw), .. } => {
                 return Ok(Source::Raw(raw.clone()));
+            }
+            Phase::Framing { raw, .. } if let Some(raw) = raw.upgrade() => {
+                return Ok(Source::Raw(raw));
+            }
+            Phase::Full { encryption, .. }
+            | Phase::Framing { encryption, .. }
+            | Phase::Failed { encryption, .. } => {
+                let path = open_segment_path(number);
+                let file = dir.open(&path, true).with_context(|| format!("opening {path}"))?;
+                return Ok(Source::Raw(Arc::new(RawFile::new(file, encryption.clone()))));
             }
             Phase::Closed => {}
         }
@@ -1370,8 +1408,8 @@ impl<F: File> Segments<F> {
             };
             syncs.cached(raw.file().clone());
         }
-        for raw in self.closed_unsynced.drain(..) {
-            syncs.cached(raw);
+        for (path, open) in self.closed_unsynced.drain(..) {
+            syncs.cached_path(path, open);
         }
         // cladefs: none if the segments opened since had theirs made durable as they were placed
         // (TASK-384).
@@ -1472,7 +1510,8 @@ impl Recount {
 /// ends itself (TASK-153.8).
 pub(crate) struct Unframed<F> {
     number: SegmentId,
-    raw: Arc<RawFile<F>>,
+    raw: Option<Arc<RawFile<F>>>,
+    encryption: Arc<RawEncryption>,
     len: u64,
     pub footer: Footer,
     /// cladefs: whether no write was in progress in it as it closed, none to come: what framing it
@@ -1512,19 +1551,25 @@ impl<F: File> Unframed<F> {
         // cladefs: timed, phase by phase (TASK-165.9), with its waits to run (TASK-336).
         let mut timing = Timing::since(Instant::now());
         // The extents stored on their own it names, durable before it is, as a flush syncs them,
-        // several at once: one at a time, each a journal commit of the host's file system's, they
-        // held up for as long the syncs of the flushes of cladefsd's turns, which wait on the same
-        // files, up to 0.9 s under pgbench (GCE r730, TASK-165.9).
+        // several at once: synced by path so a segment naming many large extents never holds
+        // unbounded open FDs at once (board 12887).
         let mut own = Syncs::default();
         for (extent, _) in self.footer.own() {
-            own.file(Arc::new(dir.open(&extent_path(extent), true)?));
+            own.own_file(extent_path(extent), std::sync::Weak::new());
             own.dir(cell_dir(EXTENTS, self.number.cell));
         }
         own.sync(dir)?;
         timing.took(framing_phase::OWN);
         let footer = bucket_cell::layout::encode_segment_footer(&self.footer);
         let (path, raw_path) = (framing_path(self.number), open_segment_path(self.number));
-        let raw = (raw_path.as_str(), &self.raw);
+        let raw_file = match self.raw {
+            Some(raw) => raw,
+            None => Arc::new(RawFile::new(
+                dir.open(&raw_path, true).with_context(|| format!("opening {raw_path}"))?,
+                self.encryption,
+            )),
+        };
+        let raw = (raw_path.as_str(), &raw_file);
         let data = (self.len, self.quiet, self.ephemeral, ahead);
         let (dek, key) = self.keys.try_encrypting()?;
         let (framed, how) =
@@ -2996,8 +3041,7 @@ mod tests {
         let syncs = |segments: &mut Segments<MemFile>| {
             let mut syncs = Syncs::default();
             segments.take_syncs(&mut syncs);
-            let (files, cached) = syncs.files();
-            ((files.len(), cached.len()), syncs.dirs().iter().cloned().collect::<Vec<_>>())
+            (syncs.counts(), syncs.dirs().iter().cloned().collect::<Vec<_>>())
         };
         assert_eq!(syncs(&mut segments), ((0, 0), vec![]));
         write(&mut segments, 1);
@@ -3009,5 +3053,48 @@ mod tests {
         assert_eq!(syncs(&mut segments), ((0, 1), dirs));
         segments.append(BLOCK).unwrap();
         assert_eq!(syncs(&mut segments), ((0, 1), vec![]));
+    }
+
+    /// board 12887: filling many segments between commits keeps at most `FULL_OPEN_LIMIT` full
+    /// segments' raw handles open (and zero log handles), and still reads, closes, frames, and
+    /// syncs every filled segment cleanly.
+    #[test]
+    fn many_full_segments_bound_open_raw_and_log_handles() {
+        const FILLED: usize = 8;
+        let dir = MemDir::new();
+        let mut segments = opened(&dir, 64);
+        let mut filled_ids = Vec::new();
+        for i in 0..FILLED {
+            let number = segments.open_segment();
+            filled_ids.push(number);
+            let (raw, at) = segments.append(BLOCK).unwrap();
+            raw.write_at(&[i as u8 + 1; BLOCK as usize], at).unwrap();
+            segments.appended(number, at, BLOCK);
+            segments.fill(&dir, 0).unwrap();
+        }
+        let open_full = segments
+            .tracked
+            .values()
+            .filter(|s| matches!(s.phase, Phase::Full { raw: Some(_), .. }))
+            .count();
+        assert_eq!(open_full, FULL_OPEN_LIMIT);
+        // Every full segment — including those whose raw handle was dropped — is still readable.
+        for (i, &number) in filled_ids.iter().enumerate() {
+            let Source::Raw(raw) = segments.source(&dir, number).unwrap() else {
+                panic!("{number:?} should read from raw");
+            };
+            let mut got = [0u8; BLOCK as usize];
+            raw.read_at(&mut got, 0).unwrap();
+            assert_eq!(got, [i as u8 + 1; BLOCK as usize]);
+        }
+        let closed = segments.close_full(1, 1);
+        assert_eq!(closed.len(), FILLED);
+        let mut syncs = Syncs::default();
+        segments.take_syncs(&mut syncs);
+        syncs.sync(&dir).unwrap();
+        for unframed in closed {
+            let framed = unframed.frame(&dir, Vec::new()).unwrap();
+            assert_eq!(framed.parts.frame.data_len, BLOCK);
+        }
     }
 }

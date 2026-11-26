@@ -381,7 +381,7 @@ pub(super) const RESERVED_CONNECTIONS: usize = 64;
 /// share, failed to connect (`EMFILE`), as their cells would have to open. Past it, an accept that
 /// failed for files held every tenant's new VM processes, retried every [`ACCEPT_AGAIN`],
 /// whichever tenant had taken them.
-fn most_connections() -> usize {
+pub(crate) fn most_connections() -> usize {
     let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
     // SAFETY: Reads the process's limit into `limit`.
     if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {

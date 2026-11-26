@@ -249,15 +249,29 @@ pub struct FileSyncs {
 /// directories whose entries they changed.
 pub(crate) struct Syncs<F> {
     files: Vec<Arc<F>>,
+    /// cladefs: sealed own-extent files synced by path (reusing the open handle via `Weak` when
+    /// still cached in `OwnFiles::open`, else opening, syncing, and closing on demand so a commit
+    /// sealing many large extents never holds unbounded open FDs until its flush; board 12887).
+    paths: Vec<(String, std::sync::Weak<F>)>,
     /// cladefs: those of them written and synced again and again, as the open segment's raw file
     /// is: synced as the others are, and counted apart ([`FileSyncs::cached`]).
     cached: Vec<Arc<F>>,
+    /// cladefs: closed raw segment files synced by path (reusing `Weak` if still open, else
+    /// opening on demand so committing many filled segments never holds unbounded raw FDs;
+    /// board 12887).
+    cached_paths: Vec<(String, std::sync::Weak<F>)>,
     dirs: BTreeSet<String>,
 }
 
 impl<F> Default for Syncs<F> {
     fn default() -> Self {
-        Self { files: Vec::new(), cached: Vec::new(), dirs: BTreeSet::new() }
+        Self {
+            files: Vec::new(),
+            paths: Vec::new(),
+            cached: Vec::new(),
+            cached_paths: Vec::new(),
+            dirs: BTreeSet::new(),
+        }
     }
 }
 
@@ -267,20 +281,36 @@ impl<F: File> Syncs<F> {
         self.files.push(file);
     }
 
+    /// cladefs: syncs the own-extent file at `path`, reusing `open` if still cached (board 12887).
+    pub fn own_file(&mut self, path: String, open: std::sync::Weak<F>) {
+        self.paths.push((path, open));
+    }
+
     /// cladefs: syncs `file`, written and synced again and again, keeping its pages in the host's
     /// page cache.
     pub fn cached(&mut self, file: Arc<F>) {
         self.cached.push(file);
     }
 
+    /// cladefs: syncs the closed raw segment file at `path`, reusing `open` if still open,
+    /// counted as cached (board 12887).
+    pub fn cached_path(&mut self, path: String, open: std::sync::Weak<F>) {
+        self.cached_paths.push((path, open));
+    }
+
     /// cladefs: whether it syncs extents stored on their own, whose data no commit's record checks.
     pub fn holds_own(&self) -> bool {
-        !self.files.is_empty()
+        !self.files.is_empty() || !self.paths.is_empty()
     }
 
     /// cladefs: whether it syncs any file, or any directory, beside a flush's records.
     pub fn holds_any(&self, files: bool) -> bool {
-        (files && !(self.files.is_empty() && self.cached.is_empty())) || !self.dirs.is_empty()
+        (files
+            && !(self.files.is_empty()
+                && self.paths.is_empty()
+                && self.cached.is_empty()
+                && self.cached_paths.is_empty()))
+            || !self.dirs.is_empty()
     }
 
     /// Syncs the directory at `path`.
@@ -288,27 +318,35 @@ impl<F: File> Syncs<F> {
         self.dirs.insert(path);
     }
 
-    /// cladefs: syncs `files`, as [`Syncs::cached`] does each, once each, those it syncs already
-    /// left; and no more those nothing else holds: a segment's raw file, which its segment lets go
-    /// of once framed, its framed file durable then, holding its data.
-    pub fn carry(&mut self, files: Vec<Arc<F>>) {
+    /// cladefs: syncs `files` and `paths`, as [`Syncs::cached`] and [`Syncs::cached_path`] do
+    /// each, once each, those it syncs already left; and no more those nothing else holds: a
+    /// segment's raw file, which its segment lets go of once framed, its framed file durable then,
+    /// holding its data.
+    pub fn carry(&mut self, (files, paths): (Vec<Arc<F>>, Vec<(String, std::sync::Weak<F>)>)) {
         self.cached.retain(|carried| Arc::strong_count(carried) > 1);
         for file in files {
             if !self.cached.iter().any(|carried| Arc::ptr_eq(carried, &file)) {
                 self.cached.push(file);
             }
         }
+        for (path, open) in paths {
+            if !self.cached_paths.iter().any(|(carried, _)| carried == &path) {
+                self.cached_paths.push((path, open));
+            }
+        }
     }
 
     /// cladefs: the files it syncs keeping their pages cached, which it syncs no more.
-    pub fn take_cached(&mut self) -> Vec<Arc<F>> {
-        std::mem::take(&mut self.cached)
+    pub fn take_cached(&mut self) -> (Vec<Arc<F>>, Vec<(String, std::sync::Weak<F>)>) {
+        (std::mem::take(&mut self.cached), std::mem::take(&mut self.cached_paths))
     }
 
     /// Syncs what `other` does, too.
     pub fn extend(&mut self, other: Syncs<F>) {
         self.files.extend(other.files);
+        self.paths.extend(other.paths);
         self.cached.extend(other.cached);
+        self.cached_paths.extend(other.cached_paths);
         self.dirs.extend(other.dirs);
     }
 
@@ -323,23 +361,64 @@ impl<F: File> Syncs<F> {
     /// cladefs: syncs the files, as [`Syncs::sync`] does first; returns how many of each kind, and
     /// how long the longest of each took (TASK-165.9).
     pub fn sync_files<D: Dir<File = F>>(&self, dir: &D) -> Result<FileSyncs, Error> {
-        let mut seen = HashSet::new();
-        let files: Vec<_> = (self.files.iter().map(|file| (file, false)))
-            .chain(self.cached.iter().map(|file| (file, true)))
-            .filter(|(file, _)| seen.insert(Arc::as_ptr(file)))
-            .collect();
+        enum Target<'a, F> {
+            Open(&'a Arc<F>, bool),
+            Path(&'a str, &'a std::sync::Weak<F>, bool),
+        }
+        let mut seen_ptrs = HashSet::new();
+        let mut seen_paths = HashSet::new();
+        let mut targets: Vec<Target<'_, F>> = Vec::new();
+        for (file, cached) in
+            self.files.iter().map(|f| (f, false)).chain(self.cached.iter().map(|f| (f, true)))
+        {
+            if seen_ptrs.insert(Arc::as_ptr(file)) {
+                targets.push(Target::Open(file, cached));
+            }
+        }
+        for ((path, open), cached) in
+            self.paths.iter().map(|p| (p, false)).chain(self.cached_paths.iter().map(|p| (p, true)))
+        {
+            if seen_paths.insert(path.as_str()) {
+                targets.push(Target::Path(path.as_str(), open, cached));
+            }
+        }
         let longest = [AtomicU64::new(0), AtomicU64::new(0)];
         let most = if dir.concurrent() { AT_ONCE } else { 1 };
-        at_once(&files, most, |(file, cached)| {
+        at_once(&targets, most, |target| {
             let started = std::time::Instant::now();
-            file.sync().context("syncing extents' data")?;
+            let cached = match target {
+                Target::Open(file, cached) => {
+                    file.sync().context("syncing extents' data")?;
+                    *cached
+                }
+                Target::Path(path, open, cached) => {
+                    match open.upgrade() {
+                        Some(file) => file.sync().context("syncing extents' data")?,
+                        None => match dir.open(path, false) {
+                            Ok(file) => file.sync().context("syncing extents' data")?,
+                            // A carried closed raw segment already framed and removed has its
+                            // framed file durable on disk (matches `carry`'s `strong_count > 1`).
+                            Err(err) if *cached && err.kind() == std::io::ErrorKind::NotFound => {}
+                            Err(err) => {
+                                return Err(
+                                    Error::new(err).context(format!("opening {path} to sync"))
+                                );
+                            }
+                        },
+                    }
+                    *cached
+                }
+            };
             let took = started.elapsed().as_micros() as u64;
-            longest[usize::from(*cached)].fetch_max(took, Ordering::Relaxed);
+            longest[usize::from(cached)].fetch_max(took, Ordering::Relaxed);
             Ok(())
         })?;
-        let cached = files.iter().filter(|(_, cached)| *cached).count();
+        let cached = targets
+            .iter()
+            .filter(|target| matches!(target, Target::Open(_, true) | Target::Path(_, _, true)))
+            .count();
         Ok(FileSyncs {
-            files: files.len() - cached,
+            files: targets.len() - cached,
             cached,
             longest_file_us: longest[0].load(Ordering::Relaxed),
             longest_cached_us: longest[1].load(Ordering::Relaxed),
@@ -358,6 +437,13 @@ impl<F: File> Syncs<F> {
     #[cfg(test)]
     pub fn files(&self) -> (&[Arc<F>], &[Arc<F>]) {
         (&self.files, &self.cached)
+    }
+
+    /// Count of `(non_cached, cached)` file sync targets, including path-backed targets
+    /// (board 12887).
+    #[cfg(test)]
+    pub fn counts(&self) -> (usize, usize) {
+        (self.files.len() + self.paths.len(), self.cached.len() + self.cached_paths.len())
     }
 
     /// The directories it syncs.

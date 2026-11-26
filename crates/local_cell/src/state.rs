@@ -1152,8 +1152,11 @@ pub(crate) struct OwnFiles<F> {
     open: Files<ExtentId, F>,
     sizes: HashMap<ExtentId, u64>,
     /// cladefs: in order, which their flush syncs them in, rather than the order of a map that
-    /// differs from one run to the next (TASK-79.79).
-    unsynced: BTreeMap<ExtentId, Arc<F>>,
+    /// differs from one run to the next (TASK-79.79). Holds `Weak<F>` rather than `Arc<F>` so a
+    /// commit sealing many large extents never keeps unbounded open file handles past `open`'s
+    /// bound; `Syncs` reuses the handle if still cached in `open` or opens by path on demand
+    /// (board 12887).
+    unsynced: BTreeMap<ExtentId, std::sync::Weak<F>>,
     /// Their directory, the cell's, and whether its entries changed since the last commit.
     dir: String,
     written: bool,
@@ -1195,7 +1198,7 @@ impl<F: File> OwnFiles<F> {
     /// `extent`'s file is `framed`, just written: its commit's flush syncs it, and its directory.
     pub fn sealed(&mut self, extent: ExtentId, framed: Arc<Framed<F>>) {
         self.sizes.insert(extent, framed.size());
-        self.unsynced.insert(extent, framed.file.clone());
+        self.unsynced.insert(extent, Arc::downgrade(&framed.file));
         self.open.insert(extent, framed);
         self.written = true;
     }
@@ -1210,12 +1213,17 @@ impl<F: File> OwnFiles<F> {
     /// Adds to `syncs` what the next commit's flush syncs of them: the files written since the
     /// last commit, and their directory.
     pub fn take_syncs(&mut self, syncs: &mut Syncs<F>) {
-        for file in std::mem::take(&mut self.unsynced).into_values() {
-            syncs.file(file);
+        for (extent, open) in std::mem::take(&mut self.unsynced) {
+            syncs.own_file(extent_path(extent), open);
         }
         if std::mem::take(&mut self.written) {
             syncs.dir(self.dir.clone());
         }
+    }
+
+    /// The bytes `extent`'s own file takes, if tracked.
+    pub fn size(&self, extent: ExtentId) -> Option<u64> {
+        self.sizes.get(&extent).copied()
     }
 
     /// The bytes they take.

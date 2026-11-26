@@ -11,6 +11,31 @@ use extent_frame::segment::Footer;
 use std::io;
 use std::sync::Arc;
 
+/// cladefs: one own-extent object named by a [`Closed`] segment, read on demand when uploaded
+/// rather than holding its file descriptor open while queued in `Closed::own` (board 12887).
+#[derive(Clone)]
+pub struct ClosedOwn {
+    pub key: String,
+    pub size: u64,
+    read: Arc<dyn Fn() -> io::Result<Vec<u8>> + Send + Sync>,
+}
+
+impl ClosedOwn {
+    /// Creates an on-demand reader for an own extent object at `key` of `size` bytes.
+    pub fn new(
+        key: String,
+        size: u64,
+        read: impl Fn() -> io::Result<Vec<u8>> + Send + Sync + 'static,
+    ) -> Self {
+        Self { key, size, read: Arc::new(read) }
+    }
+
+    /// Reads and CRC-verifies the own extent's bytes on demand.
+    pub fn bytes(&self) -> io::Result<Vec<u8>> {
+        (self.read)()
+    }
+}
+
 /// cladefs: a segment the cell closed, for its uploader to upload: its footer, its file, framed,
 /// and the files of the extents stored on their own its footer names, by their keys; and whether
 /// its writer's chain stamped it anew after a takeover, which its framed file says not
@@ -20,7 +45,7 @@ pub struct Closed<F> {
     pub number: u64,
     pub footer: Footer,
     pub file: Arc<F>,
-    pub own: Vec<(String, Arc<F>)>,
+    pub own: Vec<ClosedOwn>,
     pub restamped: bool,
     /// cladefs: the cell's keys, which an encrypted segment is restamped under (TASK-411.3).
     pub keys: std::sync::Arc<bucket_cell::keys::Ring>,
@@ -48,7 +73,7 @@ impl<F: File> Closed<F> {
 
     /// The bytes of the files of its extents stored on their own, by their keys, checked.
     pub fn own_bytes(&self) -> io::Result<Vec<(String, Vec<u8>)>> {
-        self.own.iter().map(|(key, file)| Ok((key.clone(), read_object(&**file)?))).collect()
+        self.own.iter().map(|own| Ok((own.key.clone(), own.bytes()?))).collect()
     }
 
     /// The cell's epoch of the last commit it holds.

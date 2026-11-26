@@ -55,9 +55,7 @@ mod tests;
 pub use crate::fast_wal::{FastWalConfig, FastWalOpener, FastWalStatus};
 pub use replication::{Members, MembersOf, Replicated, ReplicationStatus};
 
-use crate::{
-    Dir, DirHold, File, HeldParts, LocalCell, Opening, Recovering, read_object, relocations,
-};
+use crate::{Dir, DirHold, File, HeldParts, LocalCell, Opening, Recovering, relocations};
 use bucket_cell::cache::Cache;
 use bucket_cell::fetch::Budget;
 use bucket_cell::keys::{self, CellKeys, Ring, RingHold};
@@ -2535,8 +2533,15 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             // cladefs: what reads its files, on a blocking thread, as `blocking` gives (board
             // 2944).
             let (own, size) = blocking(|| -> Result<_, Failure> {
-                let own = closed.own.iter().map(|(key, file)| Ok((key.clone(), stored(file)?)));
-                let own = own.collect::<Result<_, Failure>>()?;
+                let own = closed
+                    .own
+                    .iter()
+                    .map(|own| {
+                        let reader = own.clone();
+                        let body = Body::new(own.size, move || blocking(|| reader.bytes()));
+                        Ok((own.key.clone(), body))
+                    })
+                    .collect::<Result<_, Failure>>()?;
                 let size = closed.file.size().map_err(|err| Failure::local(err, "a segment"))?;
                 Ok((own, size))
             })?;
@@ -2632,15 +2637,6 @@ async fn first_read<B: bucket_cell::Bucket>(
         return Err(bucket_cell::Error::NoCell.into());
     }
     Ok(read)
-}
-
-/// The bytes of `file`, an extent's of its own a segment of the write-ahead log names, read only
-/// as its upload goes, and checked: a byte the host's disk damaged is not uploaded under the CRC
-/// it fails (`read_object`, TASK-153.11).
-fn stored<F: File>(file: &Arc<F>) -> Result<Body, Failure> {
-    let size = file.size().map_err(|err| Failure::local(err, "a file to upload"))?;
-    let file = file.clone();
-    Ok(Body::new(size, move || blocking(|| read_object(&*file))))
 }
 
 /// What a gather did ([`Shared::gather`]).

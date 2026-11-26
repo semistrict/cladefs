@@ -563,7 +563,7 @@ What only failed once it served, the daemon refuses as it starts, saying why (bo
   daemon's changes to its window. On an older kernel it refuses to start: the pid of the process
   that connected, opened after the fact, may be another process's by then, which it would kill.
   `architecture.md` lists the rest of what it needs of the kernel.
-- **52,224 open files** (`RLIMIT_NOFILE`: its own 1,024, and 200 for each of 256 cells): the
+- **55,296 open files** (`RLIMIT_NOFILE`: its own 1,024, and 212 for each of 256 cells): the
   systemd unit's `LimitNOFILE` (below, Running under systemd).
 - **Every `CLADEFSD_ROOTS` directory there**, and a directory: one missing is refused as it
   starts, rather than every cell under it later.

@@ -3282,15 +3282,13 @@ fn a_tenants_cells_files_leave_another_tenant_room() {
     assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
 }
 
-/// board 12555: a tenant's extents written large, uncommitted, leave another tenant room, under a
-/// low limit of open files: mallory's one VM process writes a block ending at `large_extent` in
-/// each of more extents than the process may open files, committing none; then alice's VM process
-/// connects, opens its cell and commits. Before, each such extent held a raw file of its own open
-/// until its commit, unbounded by the cell's options (`cell_open_files` counted none of them):
-/// mallory's writes failed for want of files (`EMFILE`), and so would every other cell's opening.
-/// Past the cell's bound they go to segments, which its commit copies into files of their own:
-/// mallory's commit, the limit raised again, reads them back as written. Not under the low limit:
-/// a commit holds the files of the extents it seals until its flush syncs them (board 12887).
+/// board 12555, board 12887: a tenant's extents written large, uncommitted and then committed,
+/// leave another tenant room under a low limit of open files: mallory's one VM process writes a
+/// block ending at `large_extent` in each of more extents than the process may open files, then
+/// commits them under the low limit; alice's VM process connects, opens its cell and commits both
+/// before and after mallory's commit. Before board 12555, each uncommitted large extent held a raw
+/// file open; before board 12887, committing held every sealed own file open in `OwnFiles::unsynced`
+/// / `Syncs` until its flush (`EMFILE`).
 #[test]
 fn a_tenants_uncommitted_large_extents_leave_another_tenant_room() {
     const KEPT: usize = 2;
@@ -3332,14 +3330,119 @@ fn a_tenants_uncommitted_large_extents_leave_another_tenant_room() {
         }
     }
     assert!(open() < files, "{} files open of {files}", open());
-    drop(alice);
-    // SAFETY: As above, its limit as it was.
-    assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
-    assert_eq!(mallory.commit(None), Ok(()));
+    // board 12887: committing mallory's `extents` large extents under the low limit stays bounded
+    // and leaves alice room to keep committing.
+    assert_eq!(mallory.commit(None), Ok(()), "mallory's commit under low RLIMIT_NOFILE");
+    let alice_after = ExtentId { cell: alice.cell(), sequence: ALICES + 1 };
+    assert_eq!(write(&alice, alice_after, 0, &block(ALICES + 1)), Ok(()));
+    assert_eq!(alice.commit(None), Ok(()), "alice's commit after mallory's");
+    assert!(open() < files, "{} files open of {files} after commit", open());
     for sequence in [1, extents / 2, extents] {
         let read = read(&mallory, extent(sequence), large - BLOCK as u64, BLOCK);
         assert_eq!(read, Ok(block(sequence).to_vec()), "mallory's extent {sequence}, committed");
     }
+    drop((alice, mallory));
+    // SAFETY: As above, its limit as it was.
+    assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
+}
+
+/// board 12887 (comment 12929): verifies `cladefsd::cell_open_files()` covers every open-file kind
+/// a single cell holds simultaneously — closed segments' cache (`Segments::files`), sealed own
+/// extents' cache (`OwnFiles::open`), open large extents' raw files (`Uncommitted`), plus segment
+/// raw/log, directory lock, connection sockets, and transient syncs. Uses real `most_connections()`
+/// (no `CONNECTION_LIMITS_GIVEN`) and asserts both that the actual FD delta of one fully-populated
+/// connection stays `<= cell_open_files()` and that a second connection still opens and commits
+/// under `open() + most_connections() * cell_open_files()`.
+#[test]
+fn a_cell_filling_every_open_file_kind_stays_within_cell_open_files() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let (mallorys, mallory_socket, _) = served_tenant(dir.path(), "mallory", 10);
+    let (alices, alice_socket, _) = served_tenant(dir.path(), "alice", 11);
+    let open = || std::fs::read_dir("/proc/self/fd").unwrap().count() as u64;
+    let per_cell = crate::cell_open_files();
+    let open_files = cladefs_core::host_cell::options().open_files as u64;
+    let large = cladefs_core::host_cell::options().large_extent;
+    // Choose a limit where real `most_connections() = (files - files / 4) / cell_open_files()`
+    // admits at least 2 connections (no `CONNECTION_LIMITS_GIVEN`), sized from `open()` and
+    // `most_connections() * cell_open_files()`.
+    let base = open();
+    let files = (base + 2 * per_cell).max(4 * (2 * per_cell) / 3 + 4);
+    let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    // SAFETY: Reads the process's limit into `limit`.
+    assert_eq!(unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) }, 0);
+    let lowered = libc::rlimit { rlim_cur: files, ..limit };
+    // SAFETY: Lowers the process's own limit, a test's process's alone.
+    assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &lowered) }, 0);
+    let allowed = crate::server::most_connections() as u64;
+    assert!(allowed >= 2, "expected at least 2 connections from most_connections(), got {allowed}");
+    let budget = base + allowed * per_cell;
+
+    let capacity = (3 * open_files + 64) * large;
+    let mallory = CellClient::connect(&mallory_socket, mallorys.join("store"), capacity).unwrap();
+    let extent = |sequence| ExtentId { cell: mallory.cell(), sequence };
+    let block = |sequence: u64| [sequence as u8; BLOCK];
+    let mut seq = 1u64;
+
+    // 1. Fill closed segments LRU (`Segments::files`) to `open_files`: each `make_version` closes
+    //    the open segment, then reading every segment brings `open_files` framed segment files open.
+    let seg_start = seq;
+    for _ in 0..open_files + 2 {
+        assert_eq!(write(&mallory, extent(seq), 0, &block(seq)), Ok(()));
+        assert_eq!(mallory.commit(None), Ok(()));
+        mallory.make_version().unwrap();
+        seq += 1;
+    }
+    let seg_end = seq;
+
+    // 2. Fill sealed own-extents LRU (`OwnFiles::open`) to `open_files` and exercise commit syncs.
+    let own_start = seq;
+    for _ in 0..open_files + 4 {
+        assert_eq!(write(&mallory, extent(seq), large - BLOCK as u64, &block(seq)), Ok(()));
+        seq += 1;
+    }
+    let own_end = seq;
+    assert_eq!(mallory.commit(None), Ok(()));
+
+    // Read every closed segment and every sealed own extent so both LRU caches sit at full bound.
+    for s in seg_start..seg_end {
+        assert_eq!(read(&mallory, extent(s), 0, BLOCK), Ok(block(s).to_vec()));
+    }
+    for s in own_start..own_end {
+        assert_eq!(read(&mallory, extent(s), large - BLOCK as u64, BLOCK), Ok(block(s).to_vec()));
+    }
+
+    // 3. Fill uncommitted open large-extent raw files (`Uncommitted` `Packing::Own`) to `open_files`
+    //    plus overflow into segments.
+    for _ in 0..open_files + 8 {
+        assert_eq!(write(&mallory, extent(seq), large - BLOCK as u64, &block(seq)), Ok(()));
+        seq += 1;
+    }
+
+    // With all three `open_files` caches and open/prepared/connection handles held at once,
+    // one connection's FD growth must stay within `cell_open_files()`.
+    let used_by_one = open().saturating_sub(base);
+    assert!(
+        used_by_one <= per_cell,
+        "one connection holding every kind used {used_by_one} FDs, past cell_open_files() = {per_cell}"
+    );
+    assert_eq!(mallory.commit(None), Ok(()));
+
+    // A second tenant's connection still fits cleanly under the real `most_connections()` limit.
+    let alice = CellClient::connect(&alice_socket, alices.join("store"), CELL_BYTES)
+        .unwrap_or_else(|err| panic!("alice's cell, {} open of {files}: {err:#}", open()));
+    assert_eq!(write(&alice, ExtentId { cell: alice.cell(), sequence: 1 }, 0, &block(1)), Ok(()));
+    assert_eq!(alice.commit(None), Ok(()));
+    assert!(open() < files, "{} files open of {files}", open());
+    assert!(
+        open() <= budget,
+        "{} files open, past base + {allowed} * {per_cell} = {budget}",
+        open()
+    );
+
+    drop((alice, mallory));
+    // SAFETY: Restores the original RLIMIT_NOFILE.
+    assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
 }
 
 /// `len` bytes of `seed`'s that don't compress, as a closed segment's framing would otherwise
