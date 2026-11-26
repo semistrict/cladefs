@@ -385,7 +385,7 @@ impl FxFilesystemBuilder {
             objects: objects.clone(),
             journal,
             commit_mutex: futures::lock::Mutex::new(()),
-            fsck_active: std::sync::atomic::AtomicUsize::new(0),
+            fsck_reach_lock: futures::lock::Mutex::new(()),
             lock_manager: LockManager::new(),
             flush_task: Mutex::new(None),
             closed: AtomicBool::new(true),
@@ -493,11 +493,11 @@ pub struct FxFilesystem {
     objects: Arc<ObjectManager>,
     journal: Arc<Journal>,
     commit_mutex: futures::lock::Mutex<()>,
-    /// cladefs: count of active `fsck` checks reading filesystem state under `commit_mutex`
-    /// (`lock_commits_for_fsck` / `enter_fsck`), so `Journal::flush` knows whether a held
-    /// `commit_mutex` belongs to `fsck` (wait) vs a `holding_commits` sync waiting on `flush_task`
-    /// (never wait; board 7617, board 11651).
-    fsck_active: std::sync::atomic::AtomicUsize,
+    /// cladefs: serializes locked `fsck` checks against `Journal::flush` reach commits
+    /// (`record_reaches_for_flush`) without ever requiring `flush_task` to wait on `commit_mutex`
+    /// (strict lock DAG: `commit_mutex` -> `fsck_reach_lock` -> `writer_mutex`, preventing FIFO
+    /// and `no_lock` `fsck` AB-BA deadlocks with `holding_commits` syncs; board 7617, board 11651).
+    fsck_reach_lock: futures::lock::Mutex<()>,
     lock_manager: LockManager,
     flush_task: Mutex<Option<fasync::Task<()>>>,
     closed: AtomicBool,
@@ -670,28 +670,18 @@ impl FxFilesystem {
         self.closed.load(Ordering::Acquire)
     }
 
-    /// cladefs: non-blocking attempt to lock `commit_mutex` for `Journal::flush` reach recording
-    /// (board 7617, board 11651).
-    pub(crate) fn try_lock_commits(&self) -> Option<futures::lock::MutexGuard<'_, ()>> {
-        self.commit_mutex.try_lock()
+    /// cladefs: serializes `record_reaches_for_flush` against locked `fsck` without touching
+    /// `commit_mutex` (board 7617, board 11651).
+    pub(crate) async fn lock_fsck_for_reaches(&self) -> futures::lock::MutexGuard<'_, ()> {
+        self.fsck_reach_lock.lock().await
     }
 
-    /// cladefs: whether an `fsck` check is currently active under `commit_mutex` (board 11651).
-    pub(crate) fn fsck_active(&self) -> bool {
-        self.fsck_active.load(Ordering::Acquire) > 0
-    }
-
-    /// cladefs: marks an `fsck` check active while the returned guard is alive (board 11651).
-    pub(crate) fn enter_fsck(&self) -> FsckActiveGuard<'_> {
-        self.fsck_active.fetch_add(1, Ordering::Release);
-        FsckActiveGuard { fs: self }
-    }
-
-    /// cladefs: acquires `commit_mutex` for `fsck` while marking `fsck_active` (board 11651).
+    /// cladefs: acquires `commit_mutex` and then `fsck_reach_lock` for a locked `fsck` (board
+    /// 7617, board 11651).
     pub(crate) async fn lock_commits_for_fsck(&self) -> FsckCommitGuard<'_> {
-        let _guard = self.commit_mutex.lock().await;
-        let _active = self.enter_fsck();
-        FsckCommitGuard { _active, _guard }
+        let _commits = self.commit_mutex.lock().await;
+        let _reaches = self.fsck_reach_lock.lock().await;
+        FsckCommitGuard { _reaches, _commits }
     }
 
     /// cladefs: compacts if accumulated `Root::journal_spans` reached `COMPACT_SPAN_THRESHOLD`,
@@ -988,21 +978,11 @@ impl FxFilesystem {
 #[allow(dead_code)]
 pub struct TruncateGuard<'a>(WriteGuard<'a>);
 
-/// cladefs: RAII guard decrementing `FxFilesystem::fsck_active` on drop (board 11651).
-pub(crate) struct FsckActiveGuard<'a> {
-    fs: &'a FxFilesystem,
-}
-
-impl Drop for FsckActiveGuard<'_> {
-    fn drop(&mut self) {
-        self.fs.fsck_active.fetch_sub(1, Ordering::Release);
-    }
-}
-
-/// cladefs: holds both `fsck_active` and `commit_mutex` for the duration of an `fsck` (board 11651).
+/// cladefs: holds `fsck_reach_lock` and `commit_mutex` for the duration of a locked `fsck`
+/// (dropped in reverse order: `_reaches` before `_commits`; board 7617, board 11651).
 pub(crate) struct FsckCommitGuard<'a> {
-    _active: FsckActiveGuard<'a>,
-    _guard: futures::lock::MutexGuard<'a, ()>,
+    _reaches: futures::lock::MutexGuard<'a, ()>,
+    _commits: futures::lock::MutexGuard<'a, ()>,
 }
 
 impl<'a> TruncateGuard<'a> {
@@ -2503,5 +2483,320 @@ mod tests {
             );
         }
         reopened.close().await.unwrap();
+    }
+
+    #[fuchsia_async::run_singlethreaded(test)]
+    async fn adv_atomic_commits_journal_sync_already_flushed_seals_unrecorded_reach() {
+        use crate::fsck::{FsckOptions, fsck_with_options};
+
+        let fake = FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE).with_atomic_commits();
+        let device = DeviceHolder::new(fake);
+        let fs = FxFilesystemBuilder::new()
+            .format(true)
+            .barriers_enabled(true)
+            .open(device)
+            .await
+            .expect("format failed");
+        let root_store = fs.root_store();
+        let root_dir = Directory::open(&root_store, root_store.root_directory_object_id())
+            .await
+            .expect("open root");
+        let dir_lock =
+            lock_keys![LockKey::object(root_store.store_object_id(), root_dir.object_id())];
+
+        let mut txn =
+            root_store.new_transaction(dir_lock.clone(), Options::default()).await.unwrap();
+        let f1 = root_dir.create_child_file(&mut txn, "f1").await.unwrap();
+        txn.commit().await.unwrap();
+        f1.write_many(&[(0, &[0x11; 4096])]).await.unwrap();
+
+        // Flush journal to device without a barrier so the journal has no unflushed bytes left.
+        f1.write_many(&[(4096, &[0x22; 4096])]).await.unwrap();
+        fs.journal().sync(SyncOptions { flush_device: false, ..Default::default() }).await.unwrap();
+        fs.journal().wait_for_flush(fs.journal().file_offset()).await.unwrap();
+
+        let range = {
+            let mut dropped =
+                root_store.new_transaction(lock_keys![], Options::default()).await.unwrap();
+            let range = fs
+                .allocator()
+                .allocate_shared(&mut dropped, root_store.store_object_id(), 4096)
+                .await
+                .unwrap();
+            let device = fs.device();
+            let mut buf = device.allocate_buffer(4096).await;
+            buf.as_mut_slice().fill(0xaa);
+            device.write(range.extent, range.range.start, buf.as_ref()).await.unwrap();
+            drop(dropped);
+            range
+        };
+        assert!(fs.allocator().has_unrecorded_reaches());
+
+        fs.journal()
+            .sync(SyncOptions { flush_device: true, ..Default::default() })
+            .await
+            .expect("journal sync failed");
+
+        let still_unrecorded = fs.allocator().has_unrecorded_reaches();
+        let crashed = fs.device().snapshot().unwrap();
+        fs.close().await.unwrap();
+
+        let reopened = FxFilesystemBuilder::new()
+            .barriers_enabled(true)
+            .open(crashed)
+            .await
+            .expect("remount failed");
+        let fsck_opts = FsckOptions { fail_on_warning: true, ..Default::default() };
+        fsck_with_options(reopened.clone(), &fsck_opts).await.expect("fsck failed");
+        let reopened_size = reopened.allocator().extent_size(range.extent);
+        let reopened_counted = reopened.extent_counted(range.extent);
+        reopened.close().await.unwrap();
+
+        assert!(
+            !still_unrecorded
+                && reopened_size.is_some_and(|s| s >= range.range.end)
+                && reopened_counted >= range.range.end,
+            "sealed unrecorded reach! still_unrecorded={still_unrecorded}, \
+             expected >= {}, reopened_size={reopened_size:?}, reopened_counted={reopened_counted}",
+            range.range.end
+        );
+    }
+
+    #[fuchsia_async::run_singlethreaded(test)]
+    async fn adv_atomic_commits_flush_for_frees_seals_unrecorded_reach() {
+        use crate::fsck::{FsckOptions, fsck_with_options};
+
+        let fake = FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE).with_atomic_commits();
+        let device = DeviceHolder::new(fake);
+        let fs = FxFilesystemBuilder::new()
+            .format(true)
+            .barriers_enabled(true)
+            .open(device)
+            .await
+            .expect("format failed");
+        let root_store = fs.root_store();
+        let root_dir = Directory::open(&root_store, root_store.root_directory_object_id())
+            .await
+            .expect("open root");
+        let dir_lock =
+            lock_keys![LockKey::object(root_store.store_object_id(), root_dir.object_id())];
+        let mut txn = root_store.new_transaction(dir_lock, Options::default()).await.unwrap();
+        let f1 = root_dir.create_child_file(&mut txn, "f1").await.unwrap();
+        txn.commit().await.unwrap();
+        f1.write_many(&[(0, &[0x11; 4096])]).await.unwrap();
+        fs.journal().sync(SyncOptions { flush_device: false, ..Default::default() }).await.unwrap();
+        let offset = fs.journal().file_offset();
+        fs.journal().wait_for_flush(offset).await.unwrap();
+
+        let range = {
+            let mut dropped =
+                root_store.new_transaction(lock_keys![], Options::default()).await.unwrap();
+            let range = fs
+                .allocator()
+                .allocate_shared(&mut dropped, root_store.store_object_id(), 4096)
+                .await
+                .unwrap();
+            let dev = fs.device();
+            let mut buf = dev.allocate_buffer(4096).await;
+            buf.as_mut_slice().fill(0xaa);
+            dev.write(range.extent, range.range.start, buf.as_ref()).await.unwrap();
+            range
+        };
+        assert!(fs.allocator().has_unrecorded_reaches());
+
+        fs.journal().flush_for_frees().await.expect("flush_for_frees failed");
+
+        let crashed = fs.device().snapshot().unwrap();
+        let still_unrecorded = fs.allocator().has_unrecorded_reaches();
+        fs.close().await.unwrap();
+
+        let reopened = FxFilesystemBuilder::new()
+            .barriers_enabled(true)
+            .open(crashed)
+            .await
+            .expect("remount after atomic crash failed");
+        let fsck_opts = FsckOptions { fail_on_warning: true, ..Default::default() };
+        fsck_with_options(reopened.clone(), &fsck_opts).await.expect("fsck failed");
+        let size = reopened.allocator().extent_size(range.extent);
+        let counted = reopened.extent_counted(range.extent);
+        reopened.close().await.unwrap();
+        assert!(
+            !still_unrecorded
+                && size.is_some_and(|s| s >= range.range.end)
+                && counted >= range.range.end,
+            "Journal::flush_for_frees sealed unrecorded reach without journaling it: \
+             still_unrecorded={still_unrecorded}, extent={:?}, expected_end={}, \
+             reopened_size={size:?}, reopened_counted={counted}",
+            range.extent,
+            range.range.end,
+        );
+    }
+
+    #[fuchsia_async::run_singlethreaded(test)]
+    async fn adv_record_reaches_for_flush_deadlocks_commit_mutex_after_fsck() {
+        use crate::object_store::journal::{JournalOptions, LazyFlush};
+        use futures::FutureExt as _;
+        use std::time::Duration;
+
+        let fake = FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE);
+        let device = DeviceHolder::new(fake);
+        let fs = FxFilesystemBuilder::new()
+            .format(true)
+            .journal_options(JournalOptions {
+                barriers_enabled: true,
+                lazy_flush: Some(LazyFlush { bytes: 1 << 20, delay: Duration::from_millis(100) }),
+                ..Default::default()
+            })
+            .open(device)
+            .await
+            .expect("format failed");
+        let root_store = fs.root_store();
+        let root_dir = Directory::open(&root_store, root_store.root_directory_object_id())
+            .await
+            .expect("open root");
+        let dir_lock =
+            lock_keys![LockKey::object(root_store.store_object_id(), root_dir.object_id())];
+
+        let mut txn =
+            root_store.new_transaction(dir_lock.clone(), Options::default()).await.unwrap();
+        let f1 = root_dir.create_child_file(&mut txn, "f1").await.unwrap();
+        txn.commit().await.unwrap();
+        f1.write_many(&[(0, &[0x11; 4096])]).await.unwrap();
+        fs.sync(SyncOptions { flush_device: true, ..Default::default() }).await.unwrap();
+
+        let mut writes = Vec::new();
+        for i in 1..=64u64 {
+            writes.push((i * 4096, [i as u8; 4096]));
+        }
+        for (off, buf) in &writes {
+            f1.write_many(&[(*off, &buf[..])]).await.unwrap();
+        }
+        {
+            let mut dropped =
+                root_store.new_transaction(lock_keys![], Options::default()).await.unwrap();
+            let range = fs
+                .allocator()
+                .allocate_shared(&mut dropped, root_store.store_object_id(), 4096)
+                .await
+                .unwrap();
+            let device = fs.device();
+            let mut buf = device.allocate_buffer(4096).await;
+            buf.as_mut_slice().fill(0xaa);
+            device.write(range.extent, range.range.start, buf.as_ref()).await.unwrap();
+        }
+        assert!(fs.allocator().has_unrecorded_reaches());
+
+        let fsck_guard = fs.lock_commits_for_fsck().await;
+
+        let fs_a = fs.clone();
+        let caller_a = fasync::Task::spawn(async move {
+            let _commits = fs_a.lock_commits().await;
+            fs_a.sync(SyncOptions {
+                flush_device: true,
+                holding_commits: true,
+                ..Default::default()
+            })
+            .await
+        });
+
+        fasync::Timer::new(Duration::from_millis(250)).await;
+        drop(fsck_guard);
+
+        let result = futures::select! {
+            res = caller_a.fuse() => Ok(res),
+            _ = fasync::Timer::new(Duration::from_secs(2)).fuse() => Err("AB-BA deadlock"),
+        };
+        assert!(
+            result.is_ok(),
+            "DEADLOCK: holding_commits sync timed out after 2s waiting on flush_task"
+        );
+        result.unwrap().expect("holding_commits sync failed");
+        fs.close().await.unwrap();
+    }
+
+    #[fuchsia_async::run_singlethreaded(test)]
+    async fn adv_holding_commits_sync_deadlocks_during_no_lock_fsck() {
+        use crate::fsck::{FsckOptions, fsck_with_options};
+        use futures::future::{Either, select};
+        use storage_device::fake_device::RoundTrips;
+
+        let trips = Arc::new(RoundTrips::default());
+        let fake = FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE)
+            .with_atomic_commits()
+            .with_round_trips(trips);
+        let device = DeviceHolder::new(fake);
+        let fs = FxFilesystemBuilder::new()
+            .format(true)
+            .barriers_enabled(true)
+            .open(device)
+            .await
+            .expect("format failed");
+        let root_store = fs.root_store();
+        let root_dir = Directory::open(&root_store, root_store.root_directory_object_id())
+            .await
+            .expect("open root");
+        let dir_lock =
+            lock_keys![LockKey::object(root_store.store_object_id(), root_dir.object_id())];
+        let mut txn = root_store.new_transaction(dir_lock, Options::default()).await.unwrap();
+        let f1 = root_dir.create_child_file(&mut txn, "f1").await.unwrap();
+        txn.commit().await.unwrap();
+        f1.write_many(&[(0, &[0x11; 4096])]).await.unwrap();
+        fs.journal().force_compact().await.unwrap();
+        f1.write_many(&[(4096, &[0x22; 4096])]).await.unwrap();
+
+        let _commits = fs.lock_commits().await;
+        let fsck_opts = FsckOptions { no_lock: true, quiet: true, ..Default::default() };
+        let mut fsck_fut = Box::pin(fsck_with_options(fs.clone(), &fsck_opts));
+        assert!(
+            futures::poll!(&mut fsck_fut).is_pending(),
+            "no_lock fsck should yield on async device read"
+        );
+
+        {
+            let mut dropped =
+                root_store.new_transaction(lock_keys![], Options::default()).await.unwrap();
+            let range = fs
+                .allocator()
+                .allocate_shared(&mut dropped, root_store.store_object_id(), 4096)
+                .await
+                .unwrap();
+            let dev = fs.device();
+            let mut buf = dev.allocate_buffer(4096).await;
+            buf.as_mut_slice().fill(0xaa);
+            dev.write(range.extent, range.range.start, buf.as_ref()).await.unwrap();
+        }
+        assert!(fs.allocator().has_unrecorded_reaches());
+
+        let mut sync_fut = Box::pin(fs.journal().sync(SyncOptions {
+            flush_device: true,
+            holding_commits: true,
+            ..Default::default()
+        }));
+        let wait_park = Box::pin(fuchsia_async::Timer::new(
+            std::time::Instant::now() + std::time::Duration::from_millis(50),
+        ));
+        if let Either::Left((res, _)) = select(&mut sync_fut, wait_park).await {
+            res.expect("sync failed");
+            fsck_fut.await.expect("fsck failed");
+            drop(_commits);
+            fs.close().await.unwrap();
+            return;
+        }
+
+        fsck_fut.await.expect("fsck failed");
+
+        let timer = Box::pin(fuchsia_async::Timer::new(
+            std::time::Instant::now() + std::time::Duration::from_secs(2),
+        ));
+        match select(sync_fut, timer).await {
+            Either::Left((res, _)) => {
+                res.expect("sync failed");
+            }
+            Either::Right(_) => {
+                panic!("DEADLOCK: holding_commits sync + no_lock fsck deadlocked flush_task");
+            }
+        }
+        drop(_commits);
+        fs.close().await.unwrap();
     }
 }

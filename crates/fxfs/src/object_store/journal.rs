@@ -1644,8 +1644,8 @@ impl Journal {
             let _guard = self.writer_mutex.lock();
             self.pad_to_block()?
         };
-        self.flush_device(checkpoint.file_offset, true).await?;
-        self.flush_device(checkpoint.file_offset, true).await?;
+        let flushed = self.flush_device(checkpoint.file_offset, true).await?;
+        self.flush_device(flushed, true).await?;
         self.objects.allocator().freed().await.context("freeing dead extents")
     }
 
@@ -1667,14 +1667,33 @@ impl Journal {
     }
 
     /// Flushes the device, `always`, or if the journal has written more than was flushed.
-    async fn flush_device(&self, checkpoint_offset: u64, always: bool) -> Result<(), Error> {
+    /// Returns the journal offset flushed through (which may advance past `checkpoint_offset` if
+    /// pending shared-extent reaches were recorded before sealing).
+    async fn flush_device(&self, mut checkpoint_offset: u64, always: bool) -> Result<u64, Error> {
         self.wait_for_flush(checkpoint_offset).await?;
         // cladefs: the frees the last flush let die are sealed by this one, as they would be if it
         // had waited for them; and a sync for room to allocate in waits for them here.
         self.objects.allocator().freed().await.context("flush: freeing dead extents failed")?;
 
-        let flush = self.inner.lock().position.flushing(checkpoint_offset);
+        let mut flush = self.inner.lock().position.flushing(checkpoint_offset);
         if !flush.durable || always {
+            // cladefs: when buffered journal blocks were already flushed without a barrier (or
+            // during `flush_for_frees`), `Journal::flush` did not run above. Record any dropped
+            // shared-extent reaches and wait for their journal block to flush BEFORE
+            // `flush_device_recording()` issues `commit_root` and seals extents (board 11651).
+            if !flush.barriered {
+                let allocator = self.objects.allocator();
+                if !allocator.filesystem_closed() && allocator.has_unrecorded_reaches() {
+                    crate::boxed(|| allocator.record_reaches_for_flush()).await?;
+                    let (reach_cp, _) = {
+                        let _guard = self.writer_mutex.lock();
+                        self.pad_to_block()?
+                    };
+                    checkpoint_offset = checkpoint_offset.max(reach_cp.file_offset);
+                    self.wait_for_flush(checkpoint_offset).await?;
+                    flush = self.inner.lock().position.flushing(checkpoint_offset);
+                }
+            }
             if !flush.barriered {
                 self.objects.allocator().will_flush_device();
                 self.flush_device_recording().await?;
@@ -1691,7 +1710,7 @@ impl Journal {
             allocator.did_flush_device(checkpoint_offset, recorded).await;
         }
 
-        Ok(())
+        Ok(checkpoint_offset)
     }
 
     /// cladefs: flushes the device, recording in `Root` how far the journal is written (`journal_end`),

@@ -1575,11 +1575,7 @@ impl Allocator {
                         .hooks()
                         .on_pre_commit(&transaction)
                         .context("recording what dropped allocations took")?;
-                    let _commit_guard = match filesystem.try_lock_commits() {
-                        Some(guard) => Some(guard),
-                        None if filesystem.fsck_active() => Some(filesystem.lock_commits().await),
-                        None => None,
-                    };
+                    let _fsck_guard = filesystem.lock_fsck_for_reaches().await;
                     filesystem
                         .journal()
                         .commit_holding_commits(&mut transaction)
