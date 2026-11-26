@@ -1773,8 +1773,14 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         // cladefs: a replicated cell's configuration kept whole beside (TASK-537.3.5).
         self.spawn_keeper(&writer);
         // The segments uploaded, and as many as were when the last checkpoint was begun; and
-        // whether any segment since the last checkpoint freed extents (hotbed question 535).
-        let (mut segments, mut checkpointed, mut freed_since_checkpoint) = (0u64, 0u64, false);
+        // whether any segment since the last checkpoint freed extents or created a named version
+        // (hotbed question 535, board 11995).
+        let (
+            mut segments,
+            mut checkpointed,
+            mut freed_since_checkpoint,
+            mut versioned_since_checkpoint,
+        ) = (0u64, 0u64, false, false);
         let mut in_flight = InFlight::default();
         // cladefs: head acknowledgements (`Writer::acknowledge`) and periodic checkpoint uploads
         // (`Writer::checkpoint`) run in separate slots beside segment uploads: checkpoint PUTs
@@ -1853,6 +1859,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                 urgent &= !gathered.closed;
                 more = gathered.took;
                 freed_since_checkpoint |= gathered.freed;
+                versioned_since_checkpoint |= gathered.versioned;
                 credit.uploaded(gathered.data);
                 if more {
                     continue;
@@ -1866,12 +1873,16 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                 {
                     // A checkpoint on clean shutdown (doc-7, Checkpoints), skipped below
                     // `checkpoint_min_on_close` once the cell already has a checkpoint and no
-                    // extents were freed since the last checkpoint (hotbed question 535).
+                    // extents were freed or named versions created since the last checkpoint
+                    // (hotbed question 535, board 11995).
                     let uncheckpointed = segments.saturating_sub(checkpointed);
                     let no_checkpoint_yet =
                         writer.taken().head.checkpoint.is_none() && checkpointed == 0;
                     if (uncheckpointed >= self.options.checkpoint_min_on_close
-                        || (uncheckpointed > 0 && (freed_since_checkpoint || no_checkpoint_yet)))
+                        || (uncheckpointed > 0
+                            && (freed_since_checkpoint
+                                || versioned_since_checkpoint
+                                || no_checkpoint_yet)))
                         && let Err(err) = writer.checkpoint().await
                     {
                         log::warn!("cladefs: checkpointing cell {}: {err}", writer.cell());
@@ -1993,6 +2004,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                             {
                                 checkpointed = segments;
                                 freed_since_checkpoint = false;
+                                versioned_since_checkpoint = false;
                                 checkpoint_work = Some(Self::checkpointing(writer.clone()));
                             }
                             if in_flight.ready_to_ack() {
@@ -2484,6 +2496,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         let mut segments = Vec::with_capacity(closed.len());
         let data = closed.iter().map(|closed| closed.data_len).sum();
         let freed = closed.iter().any(|closed| !closed.footer.contents.frees.is_empty());
+        let versioned = closed.iter().any(|closed| !closed.footer.contents.versions.is_empty());
         for closed in closed {
             let (number, tag) = (closed.number, closed.tag());
             let continues = closed.footer.contents.continued.is_some();
@@ -2503,7 +2516,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         }
         let took = !segments.is_empty();
         in_flight.upload(writer, segments);
-        Ok(Gathered { took, data, closed: closing, freed })
+        Ok(Gathered { took, data, closed: closing, freed, versioned })
     }
 
     /// Acknowledges what the writer has uploaded: the commits of the segments it acknowledges are
@@ -2609,6 +2622,8 @@ struct Gathered {
     closed: bool,
     /// Whether any segment taken freed extents (hotbed question 535).
     freed: bool,
+    /// Whether any segment taken created a named version (board 11995).
+    versioned: bool,
 }
 
 /// A segment uploading: its number in the cell, and in the open cell; the tag of the open cell's
