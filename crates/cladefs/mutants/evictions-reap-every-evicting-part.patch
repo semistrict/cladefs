@@ -6,7 +6,7 @@
 # Killer: cache::shuttle_tests::evictions_race_page_ins_and_maps_in_any_order
 --- a/crates/cladefs_core/src/cache.rs
 +++ b/crates/cladefs_core/src/cache.rs
-@@ -826,7 +826,7 @@
+@@ -1398,7 +1398,7 @@
      Present(PartSlab),
      /// Being evicted, by the eviction holding the token, which holds the slab: unmapped from the
      /// windows that map it, then freed.
@@ -15,10 +15,10 @@
      /// Its read in failed, as the next waiting for it are told; asked for again, it is read in
      /// anew.
      Failed(Errno),
-@@ -1142,50 +1142,48 @@
-     /// window set; their slots then absent, and their slabs freed, by this call alone. A part
-     /// another eviction is evicting is that one's: this one leaves it.
-     fn evict_pages(&self, pages: Range<u64>) -> u64 {
+@@ -1859,68 +1859,66 @@
+     }
+ 
+     fn evict_pages_with_cause(&self, pages: Range<u64>, by_governor: bool) -> u64 {
 -        let (evictions, windows) = {
 +        let (runs, windows) = {
              let mut parts = self.parts.with(Mutex::lock);
@@ -38,10 +38,27 @@
 +                let at = slab.location().offset;
 +                runs.insert(at, at + slab.len());
 +                *slot = PartSlot::Evicting(slab);
+                 parts.cold_strikes[part] = 0;
                  self.present.fetch_sub(1, Ordering::Relaxed);
 -                evictions.push(Eviction { part, slab, token });
              }
              parts.windows.retain(|_, window| window.strong_count() > 0);
+             let mapped = !parts.windows.is_empty();
+             let was_mapped = self.mapped.swap(mapped, Ordering::Relaxed);
+-            if !evictions.is_empty() && self.present.load(Ordering::Relaxed) == 0 {
++            if !runs.is_empty() && self.present.load(Ordering::Relaxed) == 0 {
+                 if let Some(cache) = self.cache.upgrade() {
+                     cache.eviction_remove(self.eviction_id);
+                 }
+             } else if was_mapped != mapped && self.present.load(Ordering::Relaxed) > 0 {
+                 if let Some(cache) = self.cache.upgrade() {
+                     cache.eviction_set_mapped(
+                         self.eviction_id,
+                         mapped,
+                         self.used.load(Ordering::Relaxed),
+                     );
+                 }
+             }
 -            (evictions, parts.windows.values().filter_map(Weak::upgrade).collect::<Vec<_>>())
 +            (runs, parts.windows.values().filter_map(Weak::upgrade).collect::<Vec<_>>())
          };
@@ -56,6 +73,8 @@
              window.unmap_pages_of(identity, &|at| evicted.contains(at));
 -        }
 -        {
+-            let at_ms =
+-                self.cache.upgrade().map_or(1, |cache| cache.clock_ms.load(Ordering::Relaxed));
 -            let mut parts = self.parts.with(Mutex::lock);
 -            for eviction in &evictions {
 -                let slot = &mut parts.slots[eviction.part];
@@ -65,13 +84,15 @@
 -                    eviction.part,
 -                    self.extent
 -                );
--                *slot = PartSlot::Absent;
+-                *slot = PartSlot::Evicted { at_ms, by_governor };
 -            }
          }
 +        let reaped: Vec<PartSlab> = {
++            let at_ms =
++                self.cache.upgrade().map_or(1, |cache| cache.clock_ms.load(Ordering::Relaxed));
 +            let mut parts = self.parts.with(Mutex::lock);
 +            (parts.slots.iter_mut())
-+                .filter_map(|slot| match std::mem::replace(slot, PartSlot::Absent) {
++                .filter_map(|slot| match std::mem::replace(slot, PartSlot::Evicted { at_ms, by_governor }) {
 +                    PartSlot::Evicting(slab) => Some(slab),
 +                    other => {
 +                        *slot = other;

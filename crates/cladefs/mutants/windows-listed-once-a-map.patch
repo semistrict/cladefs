@@ -5,25 +5,32 @@
 # Killer: open_cell::tests::maps_over_an_extents_own_range_put_its_window_on_it_once
 --- a/crates/cladefs_core/src/cache.rs
 +++ b/crates/cladefs_core/src/cache.rs
-@@ -1347,11 +1347,13 @@
+@@ -2149,18 +2149,20 @@
      /// registerOnce, TASK-602).
      fn mapped(&self, window: &Arc<Window>) {
          let mut table = self.parts.with(Mutex::lock);
 -        table.windows.insert(window_identity(window), Arc::downgrade(window));
 +        let key = window_identity(window) + 1 + table.windows.len();
 +        table.windows.insert(key, Arc::downgrade(window));
+         if !self.mapped.swap(true, Ordering::Relaxed)
+             && self.present.load(Ordering::Relaxed) > 0
+             && let Some(cache) = self.cache.upgrade()
+         {
+             cache.eviction_set_mapped(self.eviction_id, true, self.used.load(Ordering::Relaxed));
+         }
      }
  
      fn unmapped(&self, window: &Window) {
--        self.parts.with(Mutex::lock).windows.remove(&window_identity(window));
+         let mut table = self.parts.with(Mutex::lock);
+-        table.windows.remove(&window_identity(window));
 +        let window = window as *const Window;
-+        self.parts.with(Mutex::lock).windows.retain(|_, mapped| !std::ptr::eq(mapped.as_ptr(), window));
-     }
- 
-     fn origin(&self) -> Origin {
++        table.windows.retain(|_, mapped| !std::ptr::eq(mapped.as_ptr(), window));
+         table.windows.retain(|_, window| window.strong_count() > 0);
+         let mapped = !table.windows.is_empty();
+         let flipped = self.mapped.swap(mapped, Ordering::Relaxed) != mapped;
 --- a/crates/cladefs_core/src/dax.rs
 +++ b/crates/cladefs_core/src/dax.rs
-@@ -1116,11 +1116,9 @@
+@@ -1293,11 +1293,9 @@
          private: Private,
      ) -> (Vec<PartSlab>, Vec<Arc<dyn Source>>) {
          let end = offset + len;
