@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 //! The FUSE protocol's messages that the server reads and writes, as Linux's
-//! `include/uapi/linux/fuse.h` defines them, at version 7.36: little-endian, `repr(C)`, each read
+//! `include/uapi/linux/fuse.h` defines them, at version 7.41: little-endian, `repr(C)`, each read
 //! and written whole through `zerocopy`. Only the messages and flags the server uses.
 
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
@@ -12,7 +12,7 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 pub const KERNEL_VERSION: u32 = 7;
 
 /// The protocol's minor version the server speaks: the kernel speaks the lower of its own and this.
-pub const KERNEL_MINOR_VERSION: u32 = 36;
+pub const KERNEL_MINOR_VERSION: u32 = 41;
 
 /// The oldest minor version the server serves: 7.27's messages are as the server reads them.
 pub const OLDEST_MINOR_VERSION: u32 = 27;
@@ -48,11 +48,14 @@ pub const DO_READDIRPLUS: u64 = 1 << 13;
 pub const READDIRPLUS_AUTO: u64 = 1 << 14;
 pub const ASYNC_DIO: u64 = 1 << 15;
 pub const WRITEBACK_CACHE: u64 = 1 << 16;
+pub const NO_OPEN_SUPPORT: u64 = 1 << 17;
 pub const PARALLEL_DIROPS: u64 = 1 << 18;
 pub const MAX_PAGES: u64 = 1 << 22;
 pub const CACHE_SYMLINKS: u64 = 1 << 23;
+pub const EXPLICIT_INVAL_DATA: u64 = 1 << 25;
 pub const HANDLE_KILLPRIV_V2: u64 = 1 << 28;
 pub const INIT_EXT: u64 = 1 << 30;
+pub const NO_EXPORT_SUPPORT: u64 = 1 << 38;
 
 // `WriteIn::write_flags`.
 /// Delayed write from the kernel's writeback page cache.

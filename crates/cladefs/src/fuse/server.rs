@@ -70,6 +70,8 @@ pub type Notifier = Box<dyn Fn(&[u8]) -> std::io::Result<()> + Send + Sync>;
 /// whatever carries them, as `Mount` does `/dev/fuse`'s. See the module docs.
 pub struct Server {
     shape: Shape,
+    /// Whether `INIT` advertises `FUSE_WRITEBACK_CACHE` (default `true`).
+    writeback_cache: bool,
     /// `INIT` flags negotiated with the kernel (bitmask of `InitIn::flags | (flags2 << 32)`).
     negotiated: AtomicU64,
     /// Tells the kernel of nodes changed ([`Server::changed`]) and names detached.
@@ -551,6 +553,7 @@ impl Server {
         }
         Self {
             shape,
+            writeback_cache: true,
             negotiated: AtomicU64::new(0),
             notify,
             cells,
@@ -560,6 +563,17 @@ impl Server {
             counters: Counters::default(),
             _registered: registered,
         }
+    }
+
+    #[cfg_attr(madsim, allow(dead_code))]
+    pub(crate) fn with_writeback_cache(mut self, enabled: bool) -> Self {
+        self.writeback_cache = enabled;
+        self
+    }
+
+    #[cfg_attr(madsim, allow(dead_code))]
+    pub(crate) fn is_many(&self) -> bool {
+        matches!(self.shape, Shape::Many { .. })
     }
 
     fn handle_killpriv_v2(&self) -> bool {
@@ -865,6 +879,53 @@ impl Server {
         }
     }
 
+    /// The reply to `request` rejected by per-tenant admission once the tenant's waiting buffer is
+    /// full: `EAGAIN` in a stack-allocated `OutHeader`, unless the opcode takes no reply
+    /// (board 9850, review 131).
+    #[cfg_attr(madsim, allow(dead_code))]
+    pub(crate) fn rejected(request: &[u8]) -> Option<[u8; size_of::<OutHeader>()]> {
+        let (header, _) = InHeader::read_from_prefix(request).ok()?;
+        match header.opcode {
+            opcode::DESTROY | opcode::FORGET | opcode::BATCH_FORGET | opcode::INTERRUPT => None,
+            _ => {
+                let out = OutHeader {
+                    len: size_of::<OutHeader>() as u32,
+                    error: -Errno::EAGAIN.raw(),
+                    unique: header.unique,
+                };
+                let mut buf = [0u8; size_of::<OutHeader>()];
+                buf.copy_from_slice(out.as_bytes());
+                Some(buf)
+            }
+        }
+    }
+
+    /// Handles fire-and-forget opcodes (`FORGET`, `BATCH_FORGET`, `INTERRUPT`) synchronously inline
+    /// on the reader thread with zero heap allocation and no async task spawn (board 12092).
+    /// Returns `None` if `request` requires async handling or a reply.
+    #[cfg_attr(madsim, allow(dead_code))]
+    pub(crate) fn try_handle_inline(&self, request: &[u8]) -> Option<Result<(), Error>> {
+        let (header, rest) = InHeader::read_from_prefix(request).ok()?;
+        if !matches!(header.opcode, opcode::FORGET | opcode::BATCH_FORGET | opcode::INTERRUPT) {
+            return None;
+        }
+        let body_len = (header.len as usize).checked_sub(size_of::<InHeader>())?;
+        let body = rest.get(..body_len)?;
+        self.counters.requests.fetch_add(1, Ordering::Relaxed);
+        let mut body = Body(body);
+        match header.opcode {
+            opcode::FORGET => {
+                if let Ok(ForgetIn { nlookup }) = body.read() {
+                    self.forget(header.nodeid, nlookup);
+                }
+            }
+            opcode::BATCH_FORGET => self.batch_forget(&mut body),
+            opcode::INTERRUPT => {}
+            _ => unreachable!(),
+        }
+        Some(Ok(()))
+    }
+
     /// Handles the request whose bytes are `request`, as the kernel sent it, and returns its
     /// reply, unless it has none (`FORGET`, `BATCH_FORGET`, `INTERRUPT` and `DESTROY`).
     ///
@@ -882,7 +943,7 @@ impl Server {
         };
         let mut body = Body(body);
         let payload = match header.opcode {
-            opcode::INIT => self.init(&mut body),
+            opcode::INIT => self.init(&mut body).map(Payload::Bytes),
             opcode::DESTROY => {
                 self.unmount().await?;
                 return Ok(None);
@@ -899,40 +960,40 @@ impl Server {
             }
             // Requests are not interruptible: each completes, as Fxfs completes it.
             opcode::INTERRUPT => return Ok(None),
-            opcode::LOOKUP => self.lookup(&header, &mut body).await,
-            opcode::GETATTR => self.getattr(&header).await,
-            opcode::SETATTR => self.setattr(&header, &mut body).await,
-            opcode::READLINK => self.readlink(&header).await,
-            opcode::SYMLINK => self.symlink(&header, &mut body).await,
-            opcode::MKNOD => self.mknod(&header, &mut body).await,
-            opcode::MKDIR => self.mkdir(&header, &mut body).await,
-            opcode::UNLINK => self.remove(&header, &mut body, false).await,
-            opcode::RMDIR => self.remove(&header, &mut body, true).await,
-            opcode::RENAME => self.rename(&header, &mut body, false).await,
-            opcode::RENAME2 => self.rename(&header, &mut body, true).await,
-            opcode::LINK => self.link(&header, &mut body).await,
-            opcode::CREATE => self.create(&header, &mut body).await,
-            opcode::READ => self.read(&header, &mut body).await,
-            opcode::WRITE => self.write(&header, &mut body).await,
-            opcode::STATFS => self.statfs(&header).await,
+            opcode::LOOKUP => self.lookup(&header, &mut body).await.map(Payload::Bytes),
+            opcode::GETATTR => self.getattr(&header).await.map(Payload::Bytes),
+            opcode::SETATTR => self.setattr(&header, &mut body).await.map(Payload::Bytes),
+            opcode::READLINK => self.readlink(&header).await.map(Payload::Bytes),
+            opcode::SYMLINK => self.symlink(&header, &mut body).await.map(Payload::Bytes),
+            opcode::MKNOD => self.mknod(&header, &mut body).await.map(Payload::Bytes),
+            opcode::MKDIR => self.mkdir(&header, &mut body).await.map(Payload::Bytes),
+            opcode::UNLINK => self.remove(&header, &mut body, false).await.map(Payload::Bytes),
+            opcode::RMDIR => self.remove(&header, &mut body, true).await.map(Payload::Bytes),
+            opcode::RENAME => self.rename(&header, &mut body, false).await.map(Payload::Bytes),
+            opcode::RENAME2 => self.rename(&header, &mut body, true).await.map(Payload::Bytes),
+            opcode::LINK => self.link(&header, &mut body).await.map(Payload::Bytes),
+            opcode::CREATE => self.create(&header, &mut body).await.map(Payload::Bytes),
+            opcode::READ => self.read(&header, &mut body).await.map(Payload::Prefixed),
+            opcode::WRITE => self.write(&header, &mut body).await.map(Payload::Bytes),
+            opcode::STATFS => self.statfs(&header).await.map(Payload::Bytes),
             // Files have no handles: there is nothing to open, flush or release. Refused, OPEN and
             // FLUSH are not sent again, and nor is RELEASE once OPEN is not.
             opcode::OPEN | opcode::FLUSH => Err(Errno::ENOSYS),
-            opcode::RELEASE => Ok(Vec::new()),
-            opcode::FSYNC | opcode::FSYNCDIR => self.fsync(&header).await,
-            opcode::SETXATTR => self.setxattr(&header, &mut body).await,
-            opcode::GETXATTR => self.getxattr(&header, &mut body).await,
-            opcode::LISTXATTR => self.listxattr(&header, &mut body).await,
-            opcode::REMOVEXATTR => self.removexattr(&header, &mut body).await,
-            opcode::OPENDIR => self.opendir(&header).await,
-            opcode::READDIR => self.readdir(&mut body, false).await,
-            opcode::READDIRPLUS => self.readdir(&mut body, true).await,
-            opcode::RELEASEDIR => self.releasedir(&mut body),
-            opcode::FALLOCATE => self.fallocate(&header, &mut body).await,
+            opcode::RELEASE => Ok(Payload::Bytes(Vec::new())),
+            opcode::FSYNC | opcode::FSYNCDIR => self.fsync(&header).await.map(Payload::Bytes),
+            opcode::SETXATTR => self.setxattr(&header, &mut body).await.map(Payload::Bytes),
+            opcode::GETXATTR => self.getxattr(&header, &mut body).await.map(Payload::Bytes),
+            opcode::LISTXATTR => self.listxattr(&header, &mut body).await.map(Payload::Bytes),
+            opcode::REMOVEXATTR => self.removexattr(&header, &mut body).await.map(Payload::Bytes),
+            opcode::OPENDIR => self.opendir(&header).await.map(Payload::Bytes),
+            opcode::READDIR => self.readdir(&mut body, false).await.map(Payload::Bytes),
+            opcode::READDIRPLUS => self.readdir(&mut body, true).await.map(Payload::Bytes),
+            opcode::RELEASEDIR => self.releasedir(&mut body).map(Payload::Bytes),
+            opcode::FALLOCATE => self.fallocate(&header, &mut body).await.map(Payload::Bytes),
             _ => Err(Errno::ENOSYS),
         };
         Ok(Some(match payload {
-            Ok(payload) => reply.ok(&payload),
+            Ok(payload) => reply.ok(payload),
             Err(errno) => {
                 if errno != Errno::ENOENT && errno != Errno::ENOSYS {
                     self.counters.errors.fetch_add(1, Ordering::Relaxed);
@@ -1178,13 +1239,16 @@ impl Server {
             | PARALLEL_DIROPS
             | BIG_WRITES
             | ASYNC_DIO
-            | WRITEBACK_CACHE
+            | if self.writeback_cache { WRITEBACK_CACHE } else { 0 }
+            | NO_OPEN_SUPPORT
             | DO_READDIRPLUS
             | READDIRPLUS_AUTO
             | MAX_PAGES
             | CACHE_SYMLINKS
+            | EXPLICIT_INVAL_DATA
             | HANDLE_KILLPRIV_V2
-            | INIT_EXT;
+            | INIT_EXT
+            | NO_EXPORT_SUPPORT;
         let enabled = (((flags2 as u64) << 32) | init.flags as u64) & supported;
         self.negotiated.store(enabled, Ordering::Relaxed);
         let max_pages = (MAX_WRITE as u64).div_ceil(crate::pages::page_size());
@@ -1429,7 +1493,10 @@ impl Server {
         if size > MAX_WRITE {
             return Err(Errno::EINVAL);
         }
-        self.node(header.nodeid, Errno::EISDIR)?.1.read_vec(offset, size as usize).await
+        self.node(header.nodeid, Errno::EISDIR)?
+            .1
+            .read_prefixed(offset, size as usize, size_of::<OutHeader>())
+            .await
     }
 
     async fn write(&self, header: &InHeader, body: &mut Body<'_>) -> Result<Vec<u8>> {
@@ -1929,21 +1996,26 @@ impl Drop for Reserved<'_> {
     }
 }
 
+const INVAL_INODE_LEN: usize = size_of::<OutHeader>() + size_of::<NotifyInvalInodeOut>();
+
 /// A notification that the node `ino`'s attributes are stale, its cached pages left alone.
-fn inval_inode(ino: u64) -> Vec<u8> {
-    let body = NotifyInvalInodeOut { ino, off: -1, len: 0 };
-    let len = size_of::<OutHeader>() + size_of::<NotifyInvalInodeOut>();
-    let header = OutHeader { len: len as u32, error: notify::INVAL_INODE, unique: 0 };
-    [header.as_bytes(), body.as_bytes()].concat()
+fn inval_inode(ino: u64) -> [u8; INVAL_INODE_LEN] {
+    inval_inode_msg(ino, -1)
 }
 
 /// cladefs: a notification that both `ino`'s attributes and all of its cached page-cache data
 /// (`off = 0, len = 0`) are stale and must be dropped by the kernel (TASK-562, board 2520).
-fn inval_inode_pages(ino: u64) -> Vec<u8> {
-    let body = NotifyInvalInodeOut { ino, off: 0, len: 0 };
-    let len = size_of::<OutHeader>() + size_of::<NotifyInvalInodeOut>();
-    let header = OutHeader { len: len as u32, error: notify::INVAL_INODE, unique: 0 };
-    [header.as_bytes(), body.as_bytes()].concat()
+fn inval_inode_pages(ino: u64) -> [u8; INVAL_INODE_LEN] {
+    inval_inode_msg(ino, 0)
+}
+
+fn inval_inode_msg(ino: u64, off: i64) -> [u8; INVAL_INODE_LEN] {
+    let body = NotifyInvalInodeOut { ino, off, len: 0 };
+    let header = OutHeader { len: INVAL_INODE_LEN as u32, error: notify::INVAL_INODE, unique: 0 };
+    let mut message = [0u8; INVAL_INODE_LEN];
+    message[..size_of::<OutHeader>()].copy_from_slice(header.as_bytes());
+    message[size_of::<OutHeader>()..].copy_from_slice(body.as_bytes());
+    message
 }
 
 /// A notification that the kernel drop the entry of `name` in the directory `parent`.
@@ -1983,19 +2055,36 @@ impl<'a> Body<'a> {
     }
 }
 
+/// A handler's reply payload: either plain bytes or a buffer that already reserves
+/// `size_of::<OutHeader>()` leading bytes for in-place header stamping (board 12092).
+enum Payload {
+    Bytes(Vec<u8>),
+    Prefixed(Vec<u8>),
+}
+
 /// A reply to the request `unique`.
 struct Reply {
     unique: u64,
 }
 
 impl Reply {
-    fn ok(&self, payload: &[u8]) -> Vec<u8> {
-        let len = size_of::<OutHeader>() + payload.len();
-        let mut reply = Vec::with_capacity(len);
-        let header = OutHeader { len: len as u32, error: 0, unique: self.unique };
-        reply.extend_from_slice(header.as_bytes());
-        reply.extend_from_slice(payload);
-        reply
+    fn ok(&self, payload: Payload) -> Vec<u8> {
+        match payload {
+            Payload::Prefixed(mut buf) => {
+                debug_assert!(buf.len() >= size_of::<OutHeader>());
+                let header = OutHeader { len: buf.len() as u32, error: 0, unique: self.unique };
+                buf[..size_of::<OutHeader>()].copy_from_slice(header.as_bytes());
+                buf
+            }
+            Payload::Bytes(payload) => {
+                let len = size_of::<OutHeader>() + payload.len();
+                let mut reply = Vec::with_capacity(len);
+                let header = OutHeader { len: len as u32, error: 0, unique: self.unique };
+                reply.extend_from_slice(header.as_bytes());
+                reply.extend_from_slice(&payload);
+                reply
+            }
+        }
     }
 
     fn error(&self, errno: Errno) -> Vec<u8> {

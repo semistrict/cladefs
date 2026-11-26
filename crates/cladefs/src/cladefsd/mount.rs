@@ -27,7 +27,7 @@ use crate::fuse::control::{self, CellSource};
 use crate::fuse::{CellsMount, MountOptions};
 use std::path::PathBuf;
 #[cfg(not(madsim))]
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(not(madsim))]
 use std::sync::{Arc, Mutex};
 
@@ -94,6 +94,9 @@ pub(super) struct State {
     mounted: AtomicBool,
     /// Whether [`close_on`] closed the mount, its cells written back.
     closed: AtomicBool,
+    /// Bytes of FUSE requests currently queued in per-tenant admission (board 9850), counted by
+    /// the daemon's memory governor without locking `mount`.
+    queued_bytes: Arc<AtomicU64>,
 }
 
 /// Mounts `daemon`'s directory of cells as `config` says, its cells taken from the bucket at
@@ -106,7 +109,10 @@ pub(super) fn start_on(daemon: &Daemon, config: &Config, bucket: String) -> Resu
         })?;
     }
     let mut options = MountOptions::new();
-    options.allow_other(config.allow_other);
+    options
+        .allow_other(config.allow_other)
+        .threads(MountOptions::default_threads())
+        .queued_bytes_counter(Arc::clone(&daemon.mount.queued_bytes));
     let mount = options.mount_cells(&config.mountpoint).map_err(|err| {
         err.context(format!("mounting a directory of cells at {}", config.mountpoint.display()))
     })?;
@@ -175,6 +181,17 @@ pub(super) fn counts_on(daemon: &Daemon) -> (usize, usize, crate::fuse::Counts) 
 pub(super) fn has_attached_on(daemon: &Daemon) -> bool {
     let (attached, detaching, _) = counts_on(daemon);
     attached + detaching > 0
+}
+
+/// Bytes of FUSE requests currently queued in per-tenant admission on `daemon` (board 9850).
+pub(super) fn queued_bytes_on(daemon: &Daemon) -> u64 {
+    #[cfg(not(madsim))]
+    return daemon.mount.queued_bytes.load(Ordering::Relaxed);
+    #[cfg(madsim)]
+    {
+        let _ = daemon;
+        0
+    }
 }
 
 /// Whether `daemon` mounted its cells and has not closed them, as [`close_on`] does, or failed to:

@@ -27,6 +27,8 @@ use crate::filesystem::Filesystem;
 use crate::node::Owner;
 use crate::storage::Storage;
 use anyhow::{Context as _, bail};
+use event_listener::{Event, Listener as _};
+use futures::FutureExt as _;
 use std::collections::{HashMap, VecDeque};
 use std::ffi::CString;
 use std::fs::File;
@@ -39,11 +41,17 @@ use std::os::unix::process::CommandExt as _;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 
 /// The setuid program that mounts FUSE filesystems for users without `CAP_SYS_ADMIN`: libfuse 3's.
 const FUSERMOUNT: &str = "fusermount3";
+
+/// `_IOR(229, 0, uint32_t)` from `<linux/fuse.h>`: binds a fresh `/dev/fuse` fd to an existing
+/// FUSE connection so each reader thread has its own kernel queue without lock contention
+/// (board 12092).
+const FUSE_DEV_IOC_CLONE: libc::c_ulong = 0x8004_e500;
 
 /// The room a request is read into: the largest, a write's, its headers, and more. The kernel
 /// refuses reads into less than its headers and `max_write`.
@@ -54,12 +62,26 @@ const REQUEST_ROOM: usize = MAX_WRITE as usize + 4096;
 pub struct MountOptions {
     allow_other: bool,
     threads: NonZeroUsize,
+    writeback_cache: bool,
+    queued_bytes: Option<Arc<AtomicU64>>,
 }
 
 impl MountOptions {
-    /// The default options: the mounting user's alone, served by 8 threads.
+    /// The default options: the mounting user's alone, served by 8 workers.
     pub fn new() -> Self {
-        Self { allow_other: false, threads: NonZeroUsize::new(8).unwrap() }
+        Self {
+            allow_other: false,
+            threads: NonZeroUsize::new(8).unwrap(),
+            writeback_cache: true,
+            queued_bytes: None,
+        }
+    }
+
+    /// Recommended worker count for host mounts (`cladefsd`, `cladefs-mount`): scales with host
+    /// CPUs, clamped to `8..=32` (board 12092).
+    pub fn default_threads() -> NonZeroUsize {
+        let cpus = std::thread::available_parallelism().map_or(8, NonZeroUsize::get);
+        NonZeroUsize::new(cpus.clamp(8, 32)).unwrap()
     }
 
     /// Whether users other than the mounting one may use the filesystem, as its permissions say
@@ -70,9 +92,23 @@ impl MountOptions {
         self
     }
 
-    /// How many threads serve the kernel's requests, each one at a time.
+    /// How many reader threads and async FUSE runtime workers serve the kernel's requests.
     pub fn threads(&mut self, threads: NonZeroUsize) -> &mut Self {
         self.threads = threads;
+        self
+    }
+
+    /// Whether `INIT` advertises `FUSE_WRITEBACK_CACHE` (default `true`). Disabling it forces
+    /// synchronous writethrough `FUSE_WRITE` requests.
+    pub fn writeback_cache(&mut self, enabled: bool) -> &mut Self {
+        self.writeback_cache = enabled;
+        self
+    }
+
+    /// Supplies a shared counter updated with bytes currently queued in per-tenant admission so
+    /// `cladefsd`'s memory governor counts them (board 9850).
+    pub(crate) fn queued_bytes_counter(&mut self, counter: Arc<AtomicU64>) -> &mut Self {
+        self.queued_bytes = Some(counter);
         self
     }
 
@@ -83,7 +119,9 @@ impl MountOptions {
     /// The filesystem is its cell's only writer, as the cell directory is its process's
     /// alone, which the kernel's caches count on: they are kept as long as it likes.
     pub fn mount(&self, fs: Filesystem, mountpoint: impl AsRef<Path>) -> Result<Mount, Error> {
-        let served = self.serve(mountpoint.as_ref(), |device| Server::new(fs, notifier(device)))?;
+        let served = self.serve(mountpoint.as_ref(), |device| {
+            Server::new(fs, notifier(device)).with_writeback_cache(self.writeback_cache)
+        })?;
         Ok(Mount { served })
     }
 
@@ -94,30 +132,67 @@ impl MountOptions {
     pub fn mount_cells(&self, mountpoint: impl AsRef<Path>) -> Result<CellsMount, Error> {
         // SAFETY: Plain calls returning the process's IDs.
         let owner = unsafe { Owner { uid: libc::getuid(), gid: libc::getgid() } };
-        let served =
-            self.serve(mountpoint.as_ref(), |device| Server::cells(owner, notifier(device)))?;
+        let served = self.serve(mountpoint.as_ref(), |device| {
+            Server::cells(owner, notifier(device)).with_writeback_cache(self.writeback_cache)
+        })?;
         Ok(CellsMount { served })
     }
 
     /// Mounts a FUSE filesystem at `mountpoint`, and serves it with the server `server` makes,
-    /// given the device it is served through, with threads of the mount's own.
+    /// given the device it is served through: one cloned `/dev/fuse` reader per thread dispatching
+    /// requests asynchronously onto a dedicated Tokio runtime (board 9850, board 12092).
     fn serve(
         &self,
         mountpoint: &Path,
         server: impl FnOnce(Arc<File>) -> Server,
     ) -> Result<Served, Error> {
+        // Build the Tokio runtime BEFORE mounting `/dev/fuse` so runtime creation failures (e.g.
+        // EMFILE) never leak a disconnected mountpoint (hotbed review 131).
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(self.threads.get())
+            .thread_name("fuse worker")
+            .enable_all()
+            .build()
+            .map_err(|error| {
+                Error::new(anyhow::Error::new(error).context("starting the FUSE runtime"))
+            })?;
         let mountpoint = mountpoint.to_owned();
         let (device, how) = mount(&mountpoint, self.allow_other).map_err(Error::new)?;
         let unmounter = Unmounter { mountpoint, how };
         let device = Arc::new(device);
         let server = Arc::new(server(device.clone()));
-        let mut served = Served { unmounter, server: Some(server.clone()), workers: Vec::new() };
-        let admission = Arc::new(Admission::of(self.threads));
+        let in_flight = Arc::new(InFlight::default());
+        let queued_bytes = self.queued_bytes.clone().unwrap_or_default();
+        let admission = Arc::new(Admission::of(self.threads, Arc::clone(&queued_bytes)));
+        let plain_budget = Arc::new(PlainBudget::new(64 * MAX_WRITE as usize));
+        let mut served = Served {
+            unmounter,
+            _device: device.clone(),
+            server: Some(server.clone()),
+            workers: Vec::with_capacity(self.threads.get()),
+            in_flight: in_flight.clone(),
+            queued_bytes,
+            runtime: Some(runtime),
+        };
+        let handle = served.runtime.as_ref().unwrap().handle().clone();
         for index in 0..self.threads.get() {
-            let (theirs, server, admission) = (device.clone(), server.clone(), admission.clone());
+            let cloned = match clone_device(&device) {
+                Ok(fd) => Arc::new(fd),
+                Err(error) => {
+                    drop(served);
+                    return Err(Error::new(anyhow::Error::new(error).context("cloning /dev/fuse")));
+                }
+            };
+            let (server, admission, plain_budget, handle, in_flight) = (
+                server.clone(),
+                admission.clone(),
+                plain_budget.clone(),
+                handle.clone(),
+                in_flight.clone(),
+            );
             let spawned =
                 std::thread::Builder::new().name(format!("fuse {index}")).spawn(move || {
-                    serve(&theirs, &server, &admission);
+                    serve(cloned, server, admission, plain_budget, handle, in_flight);
                 });
             match spawned {
                 Ok(worker) => served.workers.push(worker),
@@ -203,6 +278,12 @@ impl CellsMount {
         self.served.unmounter.unmount(lazily)
     }
 
+    /// Bytes currently retained in memory by in-flight and queued FUSE requests for this mount
+    /// (reported to `cladefsd`'s memory governor; board 9850).
+    pub fn queued_bytes(&self) -> u64 {
+        self.served.queued_bytes.load(Ordering::Relaxed)
+    }
+
     /// Waits until it is unmounted and the kernel is done with it, then unmounts the cells still
     /// attached, writing back what is dirty, and closes their cells: once those sharing the
     /// server, which attach no more, have let it go. Fails with the first unmount's error.
@@ -224,13 +305,56 @@ fn notifier(device: Arc<File>) -> Notifier {
     })
 }
 
-/// A FUSE filesystem served by threads of its own until it is unmounted.
+/// Tracks async FUSE request tasks in flight so unmount waits for every task to finish before
+/// dropping the server or runtime.
+#[derive(Debug, Default)]
+struct InFlight {
+    count: AtomicUsize,
+    idle: Event,
+}
+
+impl InFlight {
+    fn enter(self: &Arc<Self>) -> InFlightGuard {
+        self.count.fetch_add(1, Ordering::Relaxed);
+        InFlightGuard(Arc::clone(self))
+    }
+
+    fn wait_idle(&self) {
+        loop {
+            if self.count.load(Ordering::Acquire) == 0 {
+                return;
+            }
+            let listener = self.idle.listen();
+            if self.count.load(Ordering::Acquire) == 0 {
+                return;
+            }
+            listener.wait();
+        }
+    }
+}
+
+struct InFlightGuard(Arc<InFlight>);
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        if self.0.count.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.0.idle.notify(usize::MAX);
+        }
+    }
+}
+
+/// A FUSE filesystem served by reader threads and an async worker runtime until it is unmounted.
 #[derive(Debug)]
 struct Served {
     unmounter: Unmounter,
+    /// Master `/dev/fuse` fd kept open for the lifetime of the mount (notifications and clones).
+    _device: Arc<File>,
     /// The server, which the workers share until they end: taken by a join.
     server: Option<Arc<Server>>,
     workers: Vec<JoinHandle<()>>,
+    in_flight: Arc<InFlight>,
+    queued_bytes: Arc<AtomicU64>,
+    runtime: Option<tokio::runtime::Runtime>,
 }
 
 impl Served {
@@ -249,13 +373,23 @@ impl Served {
         self.server.take().expect("joined once")
     }
 
-    /// Waits for the workers, which end once the filesystem is unmounted: the first one's panic,
-    /// if one panicked outside its handlers, which answer theirs.
+    /// Waits for all reader threads and in-flight async tasks to finish, then shuts down the FUSE
+    /// runtime cleanly without panicking if called from inside another Tokio runtime's blocking
+    /// pool.
     fn join_workers(&mut self) -> Option<Box<dyn std::any::Any + Send>> {
         let mut panicked = None;
         for worker in self.workers.drain(..) {
             if let Err(panic) = worker.join() {
                 panicked.get_or_insert(panic);
+            }
+        }
+        self.in_flight.wait_idle();
+        if let Some(rt) = self.runtime.take() {
+            if tokio::runtime::Handle::try_current().is_ok() {
+                // Dropping a Tokio runtime inside a `spawn_blocking` thread panics; offload drop.
+                let _ = std::thread::spawn(move || drop(rt)).join();
+            } else {
+                drop(rt);
             }
         }
         panicked
@@ -314,65 +448,172 @@ impl Unmounter {
     }
 }
 
-/// How many requests of each tenant are in service on a mount's workers, and those waiting for
-/// one of its own to end (board 8539): a request waiting on its cell, as one waiting on the bucket
-/// does (a cold read, an outage), holds its worker, and a tenant's take at most [`Admission::most`]
-/// of them, the rest left for the other tenants' cells and the mount's own directories. Its
-/// waiting requests are served by its own as they end, in the order the kernel sent them, so
-/// none is refused (`EAGAIN` would fail its caller) and none waits on another tenant's. What its
-/// waiting requests hold is bounded ([`Admission::most_waiting`]): past it, a request is served
-/// at once, as all were before, so that writes waiting do not take the daemon's memory (hotbed
-/// review 57).
+/// A FUSE request buffer whose byte size is charged to `counter` for as long as it is held in
+/// memory (both while waiting in [`Admission`] and while being served asynchronously), so
+/// `cladefsd`'s memory governor counts every buffered request and dropping it on completion,
+/// panic, or unmount always releases the charge (board 9850).
 #[derive(Debug)]
-struct Admission {
-    /// The most workers a tenant's requests take at once: all but two, one at least.
+struct TrackedRequest {
+    bytes: Vec<u8>,
+    counter: Arc<AtomicU64>,
+}
+
+impl TrackedRequest {
+    fn new(bytes: Vec<u8>, counter: Arc<AtomicU64>) -> Self {
+        counter.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+        Self { bytes, counter }
+    }
+
+    fn len(&self) -> usize {
+        self.bytes.len()
+    }
+}
+
+impl std::ops::Deref for TrackedRequest {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+impl Drop for TrackedRequest {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(self.bytes.len() as u64, Ordering::Relaxed);
+    }
+}
+
+/// Outcome of per-tenant admission for a newly read FUSE request (board 9850, review 131).
+#[derive(Debug)]
+enum Decision<D> {
+    /// Serve immediately on a new async task.
+    Serve(D, TrackedRequest),
+    /// Buffered in the tenant's FIFO waiting queue (within `most_waiting`).
+    Queued,
+    /// The tenant already holds `most` active tasks and `most_waiting` queued bytes: reject
+    /// immediately with `EAGAIN` without retaining the request buffer so a stalled tenant can
+    /// neither starve other tenants nor exhaust daemon memory.
+    Rejected,
+}
+
+/// Bounds in-flight request bytes on a single-filesystem mount (`!server.is_many()`) via reader
+/// thread backpressure: there are no other tenants to starve on a single-cell mount, so waiting
+/// once `limit` (64 MiB) is in flight keeps excess requests in the kernel with zero errors and
+/// bounded memory (board 9850, review 131).
+#[derive(Debug)]
+struct PlainBudget {
+    limit: usize,
+    used: Mutex<usize>,
+    changed: Condvar,
+}
+
+impl PlainBudget {
+    fn new(limit: usize) -> Self {
+        Self { limit, used: Mutex::new(0), changed: Condvar::new() }
+    }
+
+    fn acquire(self: &Arc<Self>, len: usize) -> PlainPermit {
+        let mut used = self.used.lock().unwrap();
+        while *used > 0 && used.saturating_add(len) > self.limit {
+            used = self.changed.wait(used).unwrap();
+        }
+        *used += len;
+        PlainPermit { budget: Arc::clone(self), len }
+    }
+}
+
+struct PlainPermit {
+    budget: Arc<PlainBudget>,
+    len: usize,
+}
+
+impl Drop for PlainPermit {
+    fn drop(&mut self) {
+        let mut used = self.budget.used.lock().unwrap();
+        *used -= self.len;
+        self.budget.changed.notify_all();
+    }
+}
+
+/// Bounds a tenant's concurrent FUSE tasks and kept request memory (board 8539, board 9850,
+/// review 131): requests run asynchronously on Tokio rather than blocking `/dev/fuse` reader
+/// threads, so a stalled tenant never holds OS reader threads or Tokio workers. Each tenant runs
+/// at most `most` concurrent tasks and buffers at most `most_waiting` (64 MiB) waiting; any
+/// further request while stalled is rejected immediately with `EAGAIN` without allocating a
+/// buffer. All retained request bytes (active and queued) are charged to `queued_bytes` via
+/// [`TrackedRequest`] for `cladefsd`'s memory governor.
+#[derive(Debug)]
+struct Admission<D = Arc<File>> {
+    /// The most concurrent tasks a tenant runs.
     most: usize,
     /// The most bytes a tenant's waiting requests hold: 64 [`MAX_WRITE`]s.
     most_waiting: usize,
-    tenants: Mutex<HashMap<Arc<str>, Admitted>>,
+    /// Live total of bytes held by buffered requests across all tenants (counted by the governor).
+    queued_bytes: Arc<AtomicU64>,
+    tenants: Mutex<HashMap<Arc<str>, Admitted<D>>>,
 }
 
-/// A tenant's requests on a mount's workers.
-#[derive(Debug, Default)]
-struct Admitted {
-    /// How many workers serve its requests.
+/// A tenant's in-flight tasks and queued requests.
+#[derive(Debug)]
+struct Admitted<D> {
+    /// How many async tasks are currently serving this tenant's requests.
     serving: usize,
-    /// Its requests read, waiting for one of those to end.
-    waiting: VecDeque<Vec<u8>>,
+    /// Its requests read, waiting for one of its active tasks to finish.
+    waiting: VecDeque<(D, TrackedRequest)>,
     /// The bytes they hold.
     waiting_bytes: usize,
 }
 
-impl Admission {
-    /// The bound of a mount served by `threads` workers.
-    fn of(threads: NonZeroUsize) -> Self {
+impl<D> Default for Admitted<D> {
+    fn default() -> Self {
+        Self { serving: 0, waiting: VecDeque::new(), waiting_bytes: 0 }
+    }
+}
+
+impl<D> Admission<D> {
+    /// The bound of a mount configured with `threads` workers.
+    fn of(threads: NonZeroUsize, queued_bytes: Arc<AtomicU64>) -> Self {
         let most = threads.get().saturating_sub(2).max(1);
-        Self { most, most_waiting: 64 * MAX_WRITE as usize, tenants: Mutex::default() }
+        Self {
+            most,
+            most_waiting: 64 * MAX_WRITE as usize,
+            queued_bytes,
+            tenants: Mutex::default(),
+        }
     }
 
-    /// Whether the caller serves `request`, one of `tenant`'s, now: if not, it waits, kept, for
-    /// one of the tenant's in service to end ([`Admission::next`]).
-    fn admit(&self, tenant: &Arc<str>, request: &[u8]) -> bool {
+    fn track(&self, bytes: Vec<u8>) -> TrackedRequest {
+        TrackedRequest::new(bytes, Arc::clone(&self.queued_bytes))
+    }
+
+    /// Admits `(device, request)` for `tenant`. Only copies `request` onto the heap if it is
+    /// accepted (`Serve` or `Queued`); returns `Decision::Rejected` without allocating when
+    /// `tenant` already has `most` active tasks and `most_waiting` queued bytes.
+    fn admit(&self, tenant: &Arc<str>, device: D, request: &[u8]) -> Decision<D> {
         let mut tenants = self.tenants.lock().unwrap();
         let admitted = tenants.entry(tenant.clone()).or_default();
-        let room = admitted.waiting_bytes + request.len() <= self.most_waiting;
-        if admitted.serving < self.most || !room {
+        if admitted.serving < self.most {
             admitted.serving += 1;
-            return true;
+            let tracked = self.track(request.to_vec());
+            return Decision::Serve(device, tracked);
         }
-        admitted.waiting_bytes += request.len();
-        admitted.waiting.push_back(request.to_vec());
-        false
+        if admitted.waiting_bytes.saturating_add(request.len()) > self.most_waiting {
+            return Decision::Rejected;
+        }
+        let tracked = self.track(request.to_vec());
+        admitted.waiting_bytes += tracked.len();
+        admitted.waiting.push_back((device, tracked));
+        Decision::Queued
     }
 
-    /// One of `tenant`'s requests in service ended: the next of its waiting, for the caller to
-    /// serve, if any.
-    fn next(&self, tenant: &Arc<str>) -> Option<Vec<u8>> {
+    /// One of `tenant`'s active tasks finished a request: returns the next queued `(device, req)`
+    /// for it to serve, or releases its permit if none remain.
+    fn next(&self, tenant: &Arc<str>) -> Option<(D, TrackedRequest)> {
         let mut tenants = self.tenants.lock().unwrap();
         let admitted = tenants.get_mut(tenant).expect("a tenant in service");
-        if let Some(next) = admitted.waiting.pop_front() {
+        if let Some((device, next)) = admitted.waiting.pop_front() {
             admitted.waiting_bytes -= next.len();
-            return Some(next);
+            return Some((device, next));
         }
         admitted.serving -= 1;
         if admitted.serving == 0 {
@@ -382,10 +623,32 @@ impl Admission {
     }
 }
 
-/// Serves the kernel's requests from `device` until the filesystem is unmounted, a tenant's as
-/// `admission` lets it.
-fn serve(device: &File, server: &Server, admission: &Admission) {
+/// Clones `master` (`/dev/fuse`) via `FUSE_DEV_IOC_CLONE` so each reader thread gets its own
+/// kernel `fuse_dev` queue without lock contention (board 12092).
+fn clone_device(master: &File) -> io::Result<File> {
+    let cloned = File::options().read(true).write(true).open("/dev/fuse")?;
+    let master_fd = master.as_raw_fd() as u32;
+    // SAFETY: `FUSE_DEV_IOC_CLONE` reads a `uint32_t` master `/dev/fuse` fd from `&master_fd` and
+    // binds `cloned` to that FUSE connection; both fds stay open across the ioctl.
+    if unsafe { libc::ioctl(cloned.as_raw_fd(), FUSE_DEV_IOC_CLONE as _, &master_fd) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(cloned)
+}
+
+/// Reads the kernel's requests from its cloned `device` until the filesystem is unmounted,
+/// handling fire-and-forget opcodes inline and dispatching all other requests asynchronously onto
+/// `runtime` (board 9850, board 12092).
+fn serve(
+    device: Arc<File>,
+    server: Arc<Server>,
+    admission: Arc<Admission<Arc<File>>>,
+    plain_budget: Arc<PlainBudget>,
+    runtime: tokio::runtime::Handle,
+    in_flight: Arc<InFlight>,
+) {
     let mut request = vec![0; REQUEST_ROOM];
+    let is_many = server.is_many();
     loop {
         let len = match (&*device).read(&mut request) {
             Ok(len) => len,
@@ -400,42 +663,77 @@ fn serve(device: &File, server: &Server, admission: &Admission) {
                 }
             },
         };
-        let request = &request[..len];
-        match server.tenant_of(request) {
-            None => answer(device, server, request),
-            Some(tenant) if admission.admit(&tenant, request) => {
-                tenant_failpoint(&tenant);
-                answer(device, server, request);
-                while let Some(waited) = admission.next(&tenant) {
-                    tenant_failpoint(&tenant);
-                    answer(device, server, &waited);
-                }
+        let slice = &request[..len];
+        if let Some(result) = server.try_handle_inline(slice) {
+            if let Err(error) = result {
+                log::error!("fuse: handling inline request: {error:#}");
             }
-            // Kept, for one of its tenant's to serve as it ends.
-            Some(_) => {}
+            continue;
+        }
+        match server.tenant_of(slice) {
+            None => {
+                // Single-cell mounts bound in-flight bytes via reader backpressure; multi-tenant
+                // root ops are tiny in-memory metadata requests that never wait on a cell.
+                let permit = (!is_many).then(|| plain_budget.acquire(slice.len()));
+                let owned = admission.track(slice.to_vec());
+                let guard = in_flight.enter();
+                let (dev, srv) = (device.clone(), server.clone());
+                runtime.spawn(async move {
+                    let (_guard, _permit) = (guard, permit);
+                    answer_async(&dev, &srv, &owned).await;
+                });
+            }
+            Some(tenant) => match admission.admit(&tenant, device.clone(), slice) {
+                Decision::Serve(dev, req) => {
+                    let guard = in_flight.enter();
+                    let (srv, adm) = (server.clone(), admission.clone());
+                    runtime.spawn(async move {
+                        let _guard = guard;
+                        let mut current = Some((dev, req));
+                        while let Some((cur_dev, cur_req)) = current {
+                            tenant_failpoint_async(&tenant).await;
+                            answer_async(&cur_dev, &srv, &cur_req).await;
+                            drop(cur_req);
+                            current = adm.next(&tenant);
+                        }
+                    });
+                }
+                Decision::Queued => {}
+                Decision::Rejected => {
+                    if let Some(reply) = Server::rejected(slice)
+                        && let Err(error) = (&*device).write(&reply)
+                        && error.raw_os_error() != Some(libc::ENOENT)
+                    {
+                        log::error!("fuse: writing admission rejection reply: {error}");
+                    }
+                }
+            },
         }
     }
 }
 
 /// A test's failpoint, `fuse::tenant::TENANT`, before each of `tenant`'s requests is handled: to
-/// hold them, as a bucket that never answers holds a cell's.
+/// hold them, as a bucket that never answers holds a cell's. Runs on Tokio's blocking pool so a
+/// test callback blocking on a `Condvar` never stalls Tokio's async worker threads (board 9850).
 #[cfg(feature = "failpoints")]
-fn tenant_failpoint(tenant: &str) {
-    fail::fail_point!(&format!("fuse::tenant::{tenant}"));
+async fn tenant_failpoint_async(tenant: &str) {
+    let name = format!("fuse::tenant::{tenant}");
+    // Failpoint callbacks in tests are synchronous; ignore JoinError only if shutting down.
+    let _ = tokio::task::spawn_blocking(move || {
+        fail::fail_point!(&name);
+    })
+    .await;
 }
 
 #[cfg(not(feature = "failpoints"))]
-fn tenant_failpoint(_: &str) {}
+async fn tenant_failpoint_async(_: &str) {}
 
-/// Has `server` handle `request` and writes its reply to `device`: `EIO` if its handling panicked
-/// (board 8539), the worker going on, where a panic ended the worker for good, and with the eighth
-/// every request of the mount went unread, its callers hung in the kernel for the daemon's life.
-fn answer(device: &File, server: &Server, request: &[u8]) {
+/// Has `server` handle `request` asynchronously and writes its reply to the same cloned `device`
+/// fd that read it: `EIO` if its handling panicked (board 8539).
+async fn answer_async(device: &File, server: &Server, request: &[u8]) {
     // Unwind safe as far as the server needs: its tables are behind locks a panic poisons, and a
     // panic through a cell's locks halts the cell (`crate::halt`).
-    let handled = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        futures::executor::block_on(server.handle(request))
-    }));
+    let handled = AssertUnwindSafe(server.handle(request)).catch_unwind().await;
     let reply = match handled {
         Ok(Ok(Some(reply))) => reply,
         Ok(Ok(None)) => return,
@@ -758,28 +1056,108 @@ mod tests {
     use super::*;
 
     /// A tenant's requests past the most in service wait, in order, until what they hold would
-    /// pass the most it keeps: then one is served at once, beside the others (hotbed review 57).
-    /// Each tenant's apart, and one served ending takes the next waiting.
+    /// pass `most_waiting`: then excess requests are rejected without allocating so a stalled
+    /// tenant's kept memory stays hard-bounded even under thousands of concurrent writes
+    /// (hotbed review 57, board 9850, review 131).
     #[test]
     fn a_tenants_waiting_requests_are_bounded_in_bytes() {
-        let admission = Admission { most: 2, most_waiting: 10, tenants: Mutex::default() };
+        let queued = Arc::new(AtomicU64::new(0));
+        let admission = Admission::<()>::of(NonZeroUsize::new(4).unwrap(), queued.clone());
+        let admission = Admission::<()> {
+            most: 2,
+            most_waiting: 10,
+            queued_bytes: queued.clone(),
+            tenants: admission.tenants,
+        };
         let (slow, fast): (Arc<str>, Arc<str>) = (Arc::from("slow"), Arc::from("fast"));
-        assert!(admission.admit(&slow, b"1"));
-        assert!(admission.admit(&slow, b"2"));
-        assert!(!admission.admit(&slow, b"three"));
-        assert!(!admission.admit(&slow, b"four"));
-        // Five bytes more would hold eleven.
-        assert!(admission.admit(&slow, b"fifth"));
-        assert!(admission.admit(&fast, b"f"));
-        assert_eq!(admission.next(&slow), Some(b"three".to_vec()));
-        assert!(!admission.admit(&slow, b"six"));
-        assert_eq!(admission.next(&slow), Some(b"four".to_vec()));
-        assert_eq!(admission.next(&slow), Some(b"six".to_vec()));
-        for _ in 0..3 {
-            assert_eq!(admission.next(&slow), None);
+        let r1 = match admission.admit(&slow, (), b"1") {
+            Decision::Serve((), r) => r,
+            other => panic!("expected Serve, got {other:?}"),
+        };
+        let r2 = match admission.admit(&slow, (), b"2") {
+            Decision::Serve((), r) => r,
+            other => panic!("expected Serve, got {other:?}"),
+        };
+        assert!(matches!(admission.admit(&slow, (), b"three"), Decision::Queued));
+        assert!(matches!(admission.admit(&slow, (), b"four"), Decision::Queued));
+        // 2 in-flight bytes ("1", "2") + 9 queued bytes ("three", "four").
+        assert_eq!(queued.load(Ordering::Relaxed), 11);
+        // Five bytes more would hold eleven in waiting: rejected with zero extra bytes retained.
+        assert!(matches!(admission.admit(&slow, (), b"fifth"), Decision::Rejected));
+        assert_eq!(queued.load(Ordering::Relaxed), 11);
+        let rf = match admission.admit(&fast, (), b"f") {
+            Decision::Serve((), r) => r,
+            other => panic!("expected Serve for fast, got {other:?}"),
+        };
+        assert_eq!(queued.load(Ordering::Relaxed), 12);
+        drop((r1, r2, rf));
+        assert_eq!(queued.load(Ordering::Relaxed), 9);
+        let next = admission.next(&slow).unwrap();
+        assert_eq!(&*next.1, b"three");
+        drop(next);
+        assert_eq!(queued.load(Ordering::Relaxed), 4);
+        assert!(matches!(admission.admit(&slow, (), b"six"), Decision::Queued));
+        assert_eq!(queued.load(Ordering::Relaxed), 7);
+        let next = admission.next(&slow).unwrap();
+        assert_eq!(&*next.1, b"four");
+        drop(next);
+        let next = admission.next(&slow).unwrap();
+        assert_eq!(&*next.1, b"six");
+        drop(next);
+        assert_eq!(queued.load(Ordering::Relaxed), 0);
+        for _ in 0..2 {
+            assert!(admission.next(&slow).is_none());
         }
-        assert_eq!(admission.next(&fast), None);
+        assert!(admission.next(&fast).is_none());
         assert!(admission.tenants.lock().unwrap().is_empty(), "tenants left in service");
+
+        // Regression for review 131: 1,000 concurrent MAX_WRITE requests for a stalled tenant
+        // stay hard-bounded at (most + 64) * MAX_WRITE.
+        let full_queued = Arc::new(AtomicU64::new(0));
+        let full = Admission::<()>::of(NonZeroUsize::new(8).unwrap(), full_queued.clone());
+        let big = vec![0u8; MAX_WRITE as usize];
+        let mut active = Vec::new();
+        let (mut queued_count, mut rejected_count) = (0usize, 0usize);
+        for _ in 0..1000 {
+            match full.admit(&slow, (), &big) {
+                Decision::Serve((), r) => active.push(r),
+                Decision::Queued => queued_count += 1,
+                Decision::Rejected => rejected_count += 1,
+            }
+        }
+        assert_eq!(active.len(), 6);
+        assert_eq!(queued_count, 64);
+        assert_eq!(rejected_count, 930);
+        assert_eq!(full_queued.load(Ordering::Relaxed), (6 + 64) * MAX_WRITE as u64);
+        drop(active);
+        while let Some(((), r)) = full.next(&slow) {
+            drop(r);
+        }
+        for _ in 0..5 {
+            assert!(full.next(&slow).is_none());
+        }
+        assert_eq!(full_queued.load(Ordering::Relaxed), 0);
+    }
+
+    /// Plain single-cell mounts apply reader backpressure once in-flight request bytes reach the
+    /// budget, waking waiters as soon as an in-flight request completes (review 131).
+    #[test]
+    fn plain_mount_budget_bounds_in_flight_bytes() {
+        let budget = Arc::new(PlainBudget::new(10));
+        let p1 = budget.acquire(6);
+        let p2 = budget.acquire(4);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let b2 = Arc::clone(&budget);
+        let waiter = std::thread::spawn(move || {
+            let _p3 = b2.acquire(5);
+            tx.send(()).unwrap();
+        });
+        assert!(rx.recv_timeout(std::time::Duration::from_millis(50)).is_err());
+        drop(p1);
+        rx.recv_timeout(std::time::Duration::from_secs(1)).unwrap();
+        drop(p2);
+        waiter.join().unwrap();
+        assert_eq!(*budget.used.lock().unwrap(), 0);
     }
 
     /// A mount point is found as mountinfo escapes it, its space, tab, newline and backslash in

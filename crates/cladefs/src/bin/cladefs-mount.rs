@@ -105,6 +105,7 @@ fn main() -> anyhow::Result<()> {
     // die of it rather than leave it to the thread waiting for it.
     cladefs::bucket::require_kms().map_err(anyhow::Error::msg)?;
     let mut options = cladefs::fuse::MountOptions::new();
+    options.threads(cladefs::fuse::MountOptions::default_threads());
     let (mut paths, mut new) = (Vec::new(), None);
     let mut args = filtered_args.into_iter();
     while let Some(arg) = args.next() {

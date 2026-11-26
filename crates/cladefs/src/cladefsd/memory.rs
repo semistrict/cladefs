@@ -204,6 +204,7 @@ pub(super) fn governed_bytes_on(daemon: &Daemon) -> u64 {
         + daemon.host.local().pages().bytes()
         + local_cell::framing_buffers_bytes()
         + crate::host_cell::decoded_kept_bytes_on(&daemon.host)
+        + super::mount::queued_bytes_on(daemon)
 }
 
 /// cladefs: the memory the process's default daemon's governor governs.

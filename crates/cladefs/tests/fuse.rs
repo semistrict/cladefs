@@ -270,17 +270,19 @@ impl Client {
     }
 
     async fn init(&mut self) -> Vec<u8> {
-        // 7.39, with flags a Linux kernel sends, extended: ASYNC_READ, POSIX_LOCKS,
+        // 7.41, with flags a Linux kernel sends, extended: ASYNC_READ, POSIX_LOCKS,
         // ATOMIC_O_TRUNC, BIG_WRITES, AUTO_INVAL_DATA, DO_READDIRPLUS, READDIRPLUS_AUTO,
-        // ASYNC_DIO, WRITEBACK_CACHE, PARALLEL_DIROPS, POSIX_ACL, MAX_PAGES, CACHE_SYMLINKS,
-        // HANDLE_KILLPRIV_V2, SETXATTR_EXT, INIT_EXT and HAS_INODE_DAX.
-        let flags: u64 = [0, 1, 3, 5, 12, 13, 14, 15, 16, 18, 20, 22, 23, 28, 29, 30, 33]
-            .iter()
-            .map(|bit| 1 << bit)
-            .sum();
+        // ASYNC_DIO, WRITEBACK_CACHE, NO_OPEN_SUPPORT, PARALLEL_DIROPS, POSIX_ACL, MAX_PAGES,
+        // CACHE_SYMLINKS, EXPLICIT_INVAL_DATA, HANDLE_KILLPRIV_V2, SETXATTR_EXT, INIT_EXT,
+        // HAS_INODE_DAX, and NO_EXPORT_SUPPORT.
+        let flags: u64 =
+            [0, 1, 3, 5, 12, 13, 14, 15, 16, 17, 18, 20, 22, 23, 25, 28, 29, 30, 33, 38]
+                .iter()
+                .map(|bit| 1 << bit)
+                .sum();
         let body = Body::default()
             .u32(7)
-            .u32(39)
+            .u32(41)
             .u32(1 << 17)
             .u32(flags as u32)
             .u32((flags >> 32) as u32)
@@ -407,17 +409,19 @@ fn init_negotiates() {
         let mut client = Client::new().await;
         let out = client.init().await;
         assert_eq!(out.len(), 64);
-        assert_eq!((u32_at(&out, 0), u32_at(&out, 4)), (7, 36));
+        assert_eq!((u32_at(&out, 0), u32_at(&out, 4)), (7, 41));
         assert_eq!(u32_at(&out, 8), 1 << 17, "max_readahead");
         // Of what was offered: async reads and direct I/O, big writes, writeback cache,
-        // readdirplus (auto), parallel directory operations, max pages, cached symlinks,
-        // KILLPRIV_V2 (sets SB_NOSEC so the kernel does not send GETXATTR("security.capability")
-        // on every write), and the extension; not locks, ACLs or extended setxattr, which the
-        // server doesn't serve, atomic O_TRUNC (opens are refused), automatic invalidation of
-        // cached data (the mount is the only writer), or DAX.
-        let flags = u32_at(&out, 12) as u64 | (u32_at(&out, 52) as u64) << 32;
+        // zero-message opens, readdirplus (auto), parallel directory operations, max pages, cached
+        // symlinks, explicit data invalidation, KILLPRIV_V2 (sets SB_NOSEC so the kernel does not
+        // send GETXATTR("security.capability") on every write), the extension, and no NFS export
+        // support; not locks, ACLs or extended setxattr, which the server doesn't serve, atomic
+        // O_TRUNC (opens are refused), automatic invalidation of cached data (the mount is the
+        // only writer), or DAX.
+        // `InitOut::flags2` sits at byte offset 32 (after `map_alignment` at 30..32).
+        let flags = u32_at(&out, 12) as u64 | (u32_at(&out, 32) as u64) << 32;
         let expected: u64 =
-            [0, 5, 13, 14, 15, 16, 18, 22, 23, 28, 30].iter().map(|bit| 1 << bit).sum();
+            [0, 5, 13, 14, 15, 16, 17, 18, 22, 23, 25, 28, 30, 38].iter().map(|bit| 1 << bit).sum();
         assert_eq!(flags, expected, "{flags:#x}");
         assert_eq!(u32_at(&out, 20), 1 << 20, "max_write");
         let max_pages = u16::from_le_bytes(out[28..30].try_into().unwrap());
@@ -426,7 +430,7 @@ fn init_negotiates() {
         // A newer major version is answered with the server's, for the kernel to ask again.
         let body = Body::default().u32(8).u32(0).u32(0).u32(0);
         let out = client.call(INIT, 0, body).await.ok();
-        assert_eq!((u32_at(&out, 0), u32_at(&out, 4), u32_at(&out, 12)), (7, 36, 0));
+        assert_eq!((u32_at(&out, 0), u32_at(&out, 4), u32_at(&out, 12)), (7, 41, 0));
         // Older versions are refused.
         for (major, minor) in [(6, 40), (7, 26)] {
             let body = Body::default().u32(major).u32(minor).u32(0).u32(0);
@@ -1058,4 +1062,60 @@ fn an_encrypted_cell_served_reads_back_and_holds_nothing_in_the_clear() {
         drop(client.server.into_filesystem().close().await.unwrap());
     });
     assert_eq!(cladefs::testing::files_holding(dir.path(), &[&data[..64]]), Vec::<String>::new());
+}
+
+/// Regression for hotbed review 131: concurrent truncation during `FUSE_READ` (`read_prefixed`)
+/// must return a valid short or empty read, never `InvalidArgs` or a subslice panic (`EIO`).
+#[test]
+fn concurrent_read_and_truncate_never_panics_or_errors() {
+    block_on(async {
+        let mut client = Client::init_new().await;
+        let (file, _) = client.create(ROOT, b"file", 0o644).await;
+        let full = vec![0x5a_u8; 8192];
+        assert_eq!(u32_at(&client.write(file, 0, &full, 0).await.ok(), 0), 8192);
+        for round in 0..64u64 {
+            let b0 = Body::default().u64(0).u64(0).u32(8192).u32(0).u64(0).u32(0).u32(0);
+            let req_read0 = client.request(READ, file, &b0);
+            let u0 = client.unique;
+            let b3k = Body::default().u64(0).u64(3000).u32(5192).u32(0).u64(0).u32(0).u32(0);
+            let req_read3k = client.request(READ, file, &b3k);
+            let u3k = client.unique;
+            let bt = Body::default()
+                .u32(8) // FATTR_SIZE
+                .u32(0)
+                .u64(0)
+                .u64(1000)
+                .u64(0)
+                .u64(0)
+                .u64(0)
+                .u64(0)
+                .u32(0)
+                .u32(0)
+                .u32(0)
+                .u32(0)
+                .u32(0)
+                .u32(0)
+                .u32(0)
+                .u32(0);
+            let req_trunc = client.request(SETATTR, file, &bt);
+            let ut = client.unique;
+            let (r0, r3k, rt) = futures::join!(
+                client.server.handle(&req_read0),
+                client.server.handle(&req_read3k),
+                client.server.handle(&req_trunc),
+            );
+            let r0 = decode(&r0.unwrap().unwrap(), u0);
+            let r3k = decode(&r3k.unwrap().unwrap(), u3k);
+            let rt = decode(&rt.unwrap().unwrap(), ut);
+            assert_eq!(rt.error, 0, "truncate failed on round {round}");
+            assert_eq!(r0.error, 0, "read@0 failed on round {round}");
+            assert!(r0.payload.len() == 1000 || r0.payload.len() == 8192);
+            assert!(r0.payload.iter().all(|&b| b == 0x5a));
+            assert_eq!(r3k.error, 0, "read@3000 failed on round {round}");
+            assert!(r3k.payload.is_empty() || r3k.payload.len() == 5192);
+            assert!(r3k.payload.iter().all(|&b| b == 0x5a));
+            // Grow back to 8192 for the next race round.
+            assert_eq!(u32_at(&client.write(file, 0, &full, 0).await.ok(), 0), 8192);
+        }
+    })
 }

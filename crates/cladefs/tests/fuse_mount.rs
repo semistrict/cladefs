@@ -912,6 +912,140 @@ fn one_tenant_waiting_holds_no_other_tenants_requests() {
     mount.join().unwrap();
 }
 
+/// Board 9850: stalling one tenant with more than 64 MiB of concurrent 1 MiB writes in flight
+/// must not prevent another tenant's lookup or the mount root's listing from answering within a
+/// second, and excess writes past the 64 MiB per-tenant queue are rejected with `EAGAIN` so daemon
+/// memory stays bounded (review 131).
+#[test]
+fn a_tenant_stalled_past_64_mib_of_writes_holds_no_other_tenant() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Condvar, Mutex};
+    type Held = Arc<(Mutex<(usize, bool)>, Condvar)>;
+    struct LetGo(Held);
+    impl Drop for LetGo {
+        fn drop(&mut self) {
+            let (state, changed) = &*self.0;
+            state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).1 = true;
+            changed.notify_all();
+            fail::remove("fuse::tenant::slow");
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let m = dir.path().join(".gvfs");
+    std::fs::create_dir(&m).unwrap();
+    // Unprivileged `fusermount3` caps `WRITEBACK_CACHE`/`ASYNC_DIO` background requests at
+    // `max_user_bgreq = 12` (12 MiB << 64 MiB). Mount writethrough here so the kernel submits
+    // synchronous foreground 1 MiB `FUSE_WRITE` requests directly through `/dev/fuse` and
+    // genuinely overflows the 64 MiB per-tenant waiting queue.
+    let mut opts = MountOptions::new();
+    opts.writeback_cache(false);
+    let mount = opts.mount_cells(&m).unwrap();
+    for (name, cell) in [("slow/a", "a"), ("fast/b", "b")] {
+        let fs = format(&dir.path().join(cell));
+        block_on(mount.server().attach(name, std::future::ready(Ok(fs)))).unwrap();
+    }
+    // Perform a 1-byte warmup write on each file while writethrough is active so the kernel sets
+    // `S_NOSEC` on every inode before the failpoint is armed; then each thread's 1 MiB write sends
+    // a 1 MiB `FUSE_WRITE` directly.
+    let files: Vec<_> = (0..76)
+        .map(|n| {
+            let p = m.join("slow/a").join(format!("w-{n}"));
+            let mut f = std::fs::File::create(&p).unwrap();
+            f.write_all(b"x").unwrap();
+            f.seek(std::io::SeekFrom::Start(0)).unwrap();
+            f
+        })
+        .collect();
+    std::fs::metadata(m.join("fast/b")).unwrap();
+
+    let held: Held = Arc::new((Mutex::new((0usize, false)), Condvar::new()));
+    let holding = held.clone();
+    fail::cfg_callback("fuse::tenant::slow", move || {
+        let (state, changed) = &*holding;
+        let mut state = state.lock().unwrap();
+        state.0 += 1;
+        changed.notify_all();
+        while !state.1 {
+            state = changed.wait(state).unwrap();
+        }
+    })
+    .unwrap();
+    let let_go = LetGo(held.clone());
+    let rejected = Arc::new(AtomicUsize::new(0));
+    let payload = Arc::new(vec![0xab_u8; 1 << 20]);
+    let writers: Vec<_> = files
+        .into_iter()
+        .map(|mut file| {
+            let buf = payload.clone();
+            let rejected = rejected.clone();
+            let held = held.clone();
+            std::thread::spawn(move || {
+                let res = file.write_all(&buf);
+                if let Err(ref err) = res
+                    && err.raw_os_error() == Some(libc::EAGAIN)
+                {
+                    rejected.fetch_add(1, Ordering::Relaxed);
+                    held.1.notify_all();
+                }
+                res
+            })
+        })
+        .collect();
+    // Wait until all 6 active tasks are held AND at least one writer past the 64 MiB waiting queue
+    // has been rejected with `EAGAIN` (proving the queue filled and overflowed without unbounded
+    // allocation or worker starvation).
+    {
+        let (state, changed) = &*held;
+        let state = state.lock().unwrap();
+        let timeout = std::time::Duration::from_secs(30);
+        let (state, _) = changed
+            .wait_timeout_while(state, timeout, |state| {
+                state.0 < 6 || rejected.load(Ordering::Relaxed) == 0
+            })
+            .unwrap();
+        let count = state.0;
+        drop(state);
+        let retained = mount.queued_bytes();
+        assert_eq!(count, 6, "stalled tenant must stay capped at most=6 active tasks");
+        assert!(
+            rejected.load(Ordering::Relaxed) >= 1,
+            "expected excess writes past 64 MiB queue to be rejected with EAGAIN (retained={retained} bytes)"
+        );
+        // Kept request memory must stay bounded at <= (6 active + 64 queued) * ~1 MiB.
+        assert!(
+            retained >= (64 << 20) && retained <= (72 << 20),
+            "expected retained bytes in 64..=72 MiB, got {retained}"
+        );
+    }
+
+    let (sent, answered) = std::sync::mpsc::channel();
+    let listing = m.clone();
+    std::thread::spawn(move || {
+        let fast = std::fs::metadata(listing.join("fast/b/missing")).unwrap_err().raw_os_error();
+        sent.send((fast, names(&listing))).unwrap();
+    });
+    let answered = answered.recv_timeout(std::time::Duration::from_secs(1));
+    drop(let_go);
+    let (mut ok_count, mut eagain_count) = (0usize, 0usize);
+    for w in writers {
+        match w.join().unwrap() {
+            Ok(()) => ok_count += 1,
+            Err(err) if err.raw_os_error() == Some(libc::EAGAIN) => eagain_count += 1,
+            Err(err) => panic!("unexpected writer error: {err}"),
+        }
+    }
+    // Each 1 MiB FUSE_WRITE carries 80 bytes of InHeader + WriteIn (1,048,656 bytes), so 63 fit
+    // in the 64 MiB waiting queue alongside the 6 active tasks (69 total) and the rest get EAGAIN.
+    assert!(
+        ok_count >= 69,
+        "expected at least 6 active + 63 queued writes to succeed, got {ok_count}"
+    );
+    assert!(eagain_count >= 1, "expected overflow writes to fail with EAGAIN, got {eagain_count}");
+    assert_eq!(answered, Ok((Some(libc::ENOENT), vec!["fast".to_owned(), "slow".to_owned()])));
+    mount.unmount(true).unwrap();
+    mount.join().unwrap();
+}
+
 /// Board 8537: a daemon killed with its mount of cells leaves it in the kernel, its connection
 /// aborted, answering `ENOTCONN`: the next daemon to mount there detaches it, a cladefs's, and
 /// mounts anew. Until then mount(2) failed with `ENOTCONN`, and no daemon started until someone
