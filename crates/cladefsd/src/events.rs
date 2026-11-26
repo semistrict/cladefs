@@ -74,26 +74,50 @@ async fn run(
     bucket: Arc<bucket_cell::object_bucket::RoutedBucket>,
     interval: Duration,
 ) {
-    let mut poller = Poller::new();
-    let mut state = Applied::default();
-    let mut resolved: Option<(Arc<bucket_cell::object_bucket::ObjectBucket>, u32)> = None;
-
+    let mut runner = EventsRunner::new();
     loop {
-        if resolved.is_none() {
-            match (events::authority(&bucket).await, events::bucket_number(&bucket).await) {
-                (Ok(auth), Ok(number)) => resolved = Some((auth, number)),
+        runner.tick(&daemon, &bucket).await;
+        tokio::time::sleep(interval).await;
+    }
+}
+
+/// Stateful runner for the background `events` polling loop.
+struct EventsRunner {
+    poller: Poller,
+    state: Applied,
+    resolved: Option<(Arc<bucket_cell::object_bucket::ObjectBucket>, u32)>,
+}
+
+impl EventsRunner {
+    fn new() -> Self {
+        Self { poller: Poller::new(), state: Applied::default(), resolved: None }
+    }
+
+    async fn tick(&mut self, daemon: &Daemon, bucket: &bucket_cell::object_bucket::RoutedBucket) {
+        // board 11661: an unformatted bucket reports `my_bucket == 0`. Never permanently cache
+        // `0`; re-resolve until the bucket has a formatted non-zero identity number, and reset the
+        // conditional poller on the `0 -> non-zero` transition so `PeersUpdated` entries already
+        // present in `events` are not skipped via 304 Not Modified.
+        if self.resolved.as_ref().is_none_or(|(_, number)| *number == 0) {
+            let was_zero = self.resolved.as_ref().is_some_and(|(_, number)| *number == 0);
+            match (events::authority(bucket).await, events::bucket_number(bucket).await) {
+                (Ok(auth), Ok(number)) => {
+                    if was_zero && number != 0 {
+                        self.poller = Poller::new();
+                    }
+                    self.resolved = Some((auth, number));
+                }
                 (Err(err), _) | (_, Err(err)) => {
                     log::warn!("cladefsd: resolving events authority bucket: {err}");
-                    tokio::time::sleep(interval).await;
-                    continue;
+                    return;
                 }
             }
         }
-        if let Some((auth, my_bucket)) = &resolved {
-            match poller.poll(&**auth).await {
-                Ok(Some(update)) => state.apply(&daemon, &bucket, update, *my_bucket).await,
-                Ok(None) if !state.reconcile_pending.is_empty() => {
-                    state.reconcile(&daemon, &bucket).await;
+        if let Some((auth, my_bucket)) = &self.resolved {
+            match self.poller.poll(&**auth).await {
+                Ok(Some(update)) => self.state.apply(daemon, bucket, update, *my_bucket).await,
+                Ok(None) if !self.state.reconcile_pending.is_empty() => {
+                    self.state.reconcile(daemon, bucket).await;
                 }
                 Ok(None) => {}
                 Err(err) => {
@@ -101,7 +125,6 @@ async fn run(
                 }
             }
         }
-        tokio::time::sleep(interval).await;
     }
 }
 
@@ -362,6 +385,84 @@ mod tests {
                 .await
                 .expect("unavailable member bucket stalled follow-up event processing");
             assert!(halt2.is_halted(), "healthy member cell should be fenced by CellShredded");
+        });
+    }
+
+    struct DummyLink;
+
+    impl cladefs_core::bucket::peers::Link for DummyLink {
+        fn get(
+            &self,
+            _asked: cladefs_core::bucket::peers::Asked,
+        ) -> BoxFuture<'static, Result<Option<Vec<u8>>, cladefs_core::bucket::peers::Refusal>>
+        {
+            Box::pin(async { Ok(None) })
+        }
+    }
+
+    /// board 11661: starting the `events` poller against an unformatted bucket must not cache
+    /// `my_bucket = 0` forever; once the bucket is formatted as bucket `1`, the poller must
+    /// re-resolve its bucket number and apply `PeersUpdated` for bucket `1` (both already-present
+    /// updates despite a cached ETag and subsequent updates).
+    #[test]
+    fn unformatted_bucket_learns_number_and_applies_peers_after_format() {
+        let daemon = Daemon::new();
+        daemon.block_on(async {
+            let routed = Arc::new(
+                ObjectBucket::new(
+                    Arc::new(object_store::memory::InMemory::new()),
+                    "events-unformatted-home",
+                )
+                .unrouted(),
+            );
+            let home = routed.own();
+            let peers =
+                cladefs_core::bucket::peers::Peers::new("10.0.0.1:9000", |_| Arc::new(DummyLink));
+            cladefs_core::bucket::ask_peers_on(
+                &daemon.host,
+                Arc::clone(&routed),
+                Arc::clone(&peers),
+            )
+            .unwrap();
+
+            // Publish `PeersUpdated` for bucket 1 BEFORE formatting `home`, so the initial poll on
+            // the unformatted bucket caches `events`'s ETag with `my_bucket = 0`.
+            events::publish(
+                &*home,
+                events::Publish::PeersUpdated {
+                    bucket: 1,
+                    addresses: vec!["10.0.0.1:9000".into(), "10.0.0.2:9000".into()],
+                },
+            )
+            .await
+            .unwrap();
+
+            let mut runner = EventsRunner::new();
+            runner.tick(&daemon, &routed).await;
+            assert_eq!(runner.resolved.as_ref().map(|(_, n)| *n), Some(0));
+            assert_eq!(peers.addresses(), vec!["10.0.0.1:9000"]);
+
+            // Format `home` as bucket 1 without changing `events`; the next tick must re-resolve
+            // `my_bucket = 1`, reset the conditional poller, and apply generation 1.
+            bucket_cell::identity::format(&*home, &bucket_cell::identity::Details::default())
+                .await
+                .unwrap();
+            runner.tick(&daemon, &routed).await;
+            assert_eq!(runner.resolved.as_ref().map(|(_, n)| *n), Some(1));
+            assert_eq!(peers.addresses(), vec!["10.0.0.1:9000", "10.0.0.2:9000"]);
+
+            // Subsequent `PeersUpdated` for bucket 1 continues to apply normally.
+            events::publish(
+                &*home,
+                events::Publish::PeersUpdated {
+                    bucket: 1,
+                    addresses: vec!["10.0.0.1:9000".into(), "10.0.0.3:9000".into()],
+                },
+            )
+            .await
+            .unwrap();
+            runner.tick(&daemon, &routed).await;
+            assert_eq!(peers.addresses(), vec!["10.0.0.1:9000", "10.0.0.3:9000"]);
         });
     }
 }
