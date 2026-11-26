@@ -17,14 +17,26 @@ use std::thread::JoinHandle;
 
 const BLOCK: usize = OpenCell::BLOCK_SIZE as usize;
 
-/// Makes this process a host of the multi-node system, as the daemon's must be: its cells
-/// in a bucket in its memory, as of placement 1; its log on standard error.
 /// The ID of the cell at `path`, as its description names it (TASK-364): what a VM process's
 /// cell, which names its ID alone, is in the bucket.
 fn cell_at(path: &std::path::Path) -> cladefs_core::CellId {
     host_fs::may_block(|| local_cell::host_cell(path).unwrap())
 }
 
+/// The data of `extent`, uploaded at `location` in `bucket` by this process's daemon, which
+/// encrypts under cladefs_core's tests' KMS (`tests-kms`: every tenant's KEK one known key), not
+/// bucket_cell's (board 13675).
+async fn read_back<B: bucket_cell::Bucket>(
+    bucket: &std::sync::Arc<B>,
+    extent: ExtentId,
+    location: &bucket_cell::layout::Location,
+) -> Vec<u8> {
+    let kms = std::sync::Arc::new(extent_keys::testing::KnownKms);
+    bucket_cell::testing::read_under(bucket, extent, location, kms).await.unwrap()
+}
+
+/// Makes this process a host of the multi-node system, as the daemon's must be: its cells
+/// in a bucket in its memory, as of placement 1; its log on standard error.
 fn host() {
     let _ = crate::logging::to_stderr();
     // SAFETY: nextest runs each test in a process of its own, whose other threads don't read the
@@ -196,8 +208,7 @@ fn keeps_cells_in_object_storage() {
         let cell = cell_at(&dir.path().join("store"));
         let state = bucket_cell::recover(&*bucket, cell, None).await.unwrap().state;
         assert_eq!(state.root, Some(b"root".to_vec()));
-        let data =
-            bucket_cell::testing::read(&bucket, extent, &state.extents[&extent]).await.unwrap();
+        let data = read_back(&bucket, extent, &state.extents[&extent]).await;
         assert_eq!(data, pattern(1, 2 * BLOCK));
     });
     drop(client);
@@ -2453,8 +2464,7 @@ fn deleted_cells_keep_what_their_forks_need() {
         assert!(!record.deleted());
         bucket_cell::collector::collect(&*bucket, 1).await.unwrap();
         let state = bucket_cell::recover(&*bucket, fork_cell, record.origin()).await.unwrap();
-        let data =
-            bucket_cell::testing::read(&bucket, base, &state.state.extents[&base]).await.unwrap();
+        let data = read_back(&bucket, base, &state.state.extents[&base]).await;
         assert_eq!(data, pattern(3, 2 * BLOCK));
     });
     let forked = CellClient::connect(&socket, &fork, 1 << 24).unwrap();

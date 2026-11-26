@@ -1380,8 +1380,17 @@ pub async fn ring_of(
     bucket: &impl Bucket,
     cell: CellId,
 ) -> Result<Arc<crate::keys::Ring>, crate::Error> {
+    ring_under(bucket, cell, crate::keys::testing::host_kms()).await
+}
+
+/// cladefs: [`ring_of`], its KEK unwrapped by `kms`, a host's that its writer encrypted under.
+async fn ring_under(
+    bucket: &impl Bucket,
+    cell: CellId,
+    kms: Arc<crate::keys::CachingKms>,
+) -> Result<Arc<crate::keys::Ring>, crate::Error> {
     let head = crate::head::get(bucket, cell).await?.ok_or(crate::Error::NoCell)?;
-    let keys = crate::keys::CellKeys::of(cell, &head, crate::keys::testing::host_kms());
+    let keys = crate::keys::CellKeys::of(cell, &head, kms);
     crate::keys::ring(bucket, &keys, cell, &head, false).await
 }
 
@@ -1392,9 +1401,21 @@ pub async fn read<B: Bucket>(
     extent: storage_device::ExtentId,
     location: &layout::Location,
 ) -> Result<Vec<u8>, crate::Error> {
+    read_under(bucket, extent, location, crate::keys::testing::kms()).await
+}
+
+/// cladefs: [`read`], the cell's KEK unwrapped by `kms`, the KMS its writer encrypted under: a
+/// daemon's of another crate's tests, whose host encrypts under its own tests' KMS rather than
+/// [`crate::keys::testing::kms`] (board 13675).
+pub async fn read_under<B: Bucket>(
+    bucket: &Arc<B>,
+    extent: storage_device::ExtentId,
+    location: &layout::Location,
+    kms: extent_keys::kms::Shared,
+) -> Result<Vec<u8>, crate::Error> {
     let cell = cell_of_key(&location.key)
         .ok_or_else(|| crate::Error::Corrupt(format!("{} is of no cell", location.key)))?;
-    let keys = ring_of(&**bucket, cell).await?;
+    let keys = ring_under(&**bucket, cell, crate::keys::CachingKms::new(kms)).await?;
     crate::fetch::read(bucket, &keys, extent, location).await
 }
 
