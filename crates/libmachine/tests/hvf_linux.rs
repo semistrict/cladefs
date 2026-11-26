@@ -124,3 +124,36 @@ fn the_agent_runs_a_command() {
     assert_eq!(out.stdout, b"hi\naarch64\n", "console:\n{console}");
     assert_eq!(exit.expect("run"), ExitReason::Stopped);
 }
+
+/// With nested virtualization the guest's kernel boots at EL2 and brings KVM up: the guest has
+/// /dev/kvm, to run VMs of its own (Apple M3 and later).
+#[test]
+fn nested_virtualization_gives_the_guest_kvm() {
+    let Some((kernel, initrd)) = guest() else {
+        return;
+    };
+    let _one = one_machine();
+    let boot =
+        LinuxBoot { kernel, initrd: Some(initrd), cmdline: "quiet libmachine_action=agent".into() };
+    let config = MachineConfig { nested_virtualization: true, ..config(2) };
+    let mut m = Machine::boot_linux(config, &boot).expect("boot");
+    let agent = m.agent().expect("a board has the agent's vsock");
+    let stop = m.stop_handle();
+    let runner = std::thread::spawn(move || {
+        let exit = m.run_for(Duration::from_secs(60));
+        (exit, String::from_utf8_lossy(&m.serial_output()).into_owned())
+    });
+    let ready = agent.wait_ready(Duration::from_secs(30));
+    let out = ready.and_then(|()| {
+        agent.exec(
+            Command::new("sh").args(["-c", "test -c /dev/kvm && echo kvm; dmesg | grep 'kvm \\['"]),
+        )
+    });
+    stop.stop();
+    let (exit, console) = runner.join().expect("the run thread");
+    let out = out.unwrap_or_else(|e| panic!("exec: {e}; exit {exit:?}; console:\n{console}"));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    eprintln!("{stdout}");
+    assert!(stdout.starts_with("kvm\n"), "{stdout}; console:\n{console}");
+    assert_eq!(exit.expect("run"), ExitReason::Stopped);
+}

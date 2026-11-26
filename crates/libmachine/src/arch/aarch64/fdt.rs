@@ -26,6 +26,9 @@ const GIC_SPI: u32 = 0;
 const GIC_PPI: u32 = 1;
 const IRQ_TYPE_EDGE_RISING: u32 = 1;
 const IRQ_TYPE_LEVEL_HIGH: u32 = 4;
+/// The GIC's maintenance interrupt, a PPI by INTID, which the framework raises with EL2
+/// (`HV_GIC_INT_MAINTENANCE`).
+const GIC_MAINTENANCE_PPI: u32 = 25;
 /// PCI's address cells' space codes (IEEE 1275 PCI bus binding): 32-bit and 64-bit memory.
 const PCI_SPACE_MEM32: u32 = 0x0200_0000;
 const PCI_SPACE_MEM64: u32 = 0x0300_0000;
@@ -44,6 +47,9 @@ pub(crate) struct Board<'a> {
     pub(crate) gic_msi_size: u64,
     /// Entropy for the kernel's RNG before any driver (`/chosen/rng-seed`).
     pub(crate) rng_seed: [u8; 64],
+    /// Whether the vCPUs have EL2 (nested virtualization): the GIC then raises its maintenance
+    /// interrupt, which the guest's hypervisor takes.
+    pub(crate) el2: bool,
 }
 
 fn fdt_err(e: vm_fdt::Error) -> Error {
@@ -120,6 +126,12 @@ fn build(b: &Board<'_>) -> std::result::Result<Vec<u8>, vm_fdt::Error> {
         &[GIC_DIST_ADDR, b.gic_dist_size, GIC_REDIST_ADDR, u64::from(b.vcpus) * GIC_REDIST_SIZE],
     )?;
     fdt.property_u32("phandle", GIC_PHANDLE)?;
+    if b.el2 {
+        fdt.property_array_u32(
+            "interrupts",
+            &[GIC_PPI, GIC_MAINTENANCE_PPI - 16, IRQ_TYPE_LEVEL_HIGH],
+        )?;
+    }
     let msi = fdt.begin_node(&format!("v2m@{GIC_MSI_ADDR:x}"))?;
     fdt.property_string("compatible", "arm,gic-v2m-frame")?;
     fdt.property_null("msi-controller")?;

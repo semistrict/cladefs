@@ -100,6 +100,8 @@ pub(crate) struct Shared {
     /// Device memory mapped into the guest, by slot: (guest address, size).
     slots: Mutex<BTreeMap<u32, (u64, u64)>>,
     next_slot: AtomicU32,
+    /// Whether the vCPUs have EL2 (nested virtualization): they start there.
+    el2: bool,
     /// Whether the VM exists, for the DAX windows' maps, which their cells' connections make, and
     /// may make as the machine goes, after its VM: none once it is gone, which mapped nothing
     /// more ([`Shared::map_window`]).
@@ -199,6 +201,19 @@ impl Vm {
         vcpu_count: u32,
         ram: Ram,
     ) -> Result<(Self, Vec<Vcpu>)> {
+        Self::with_el2(mem_size, cpu_model, platform, vcpu_count, ram, false)
+    }
+
+    /// [`Vm::new`], its vCPUs given EL2 if `el2` (nested virtualization): they start at EL2, as
+    /// a kernel that runs VMs of its own boots, which the host must allow (Apple M3 and later).
+    pub(crate) fn with_el2(
+        mem_size: usize,
+        cpu_model: CpuModel,
+        platform: Platform,
+        vcpu_count: u32,
+        ram: Ram,
+        el2: bool,
+    ) -> Result<(Self, Vec<Vcpu>)> {
         let Ram::Anonymous = ram;
         if cpu_model != CpuModel::Host {
             return Err(Error::CpuModel(
@@ -220,7 +235,7 @@ impl Vm {
                  at most {max}"
             )));
         }
-        create_vm()?;
+        create_vm(el2)?;
         // From here the VM exists: a failure destroys it.
         let made = (|| {
             let gic = create_gic(vcpu_count)?;
@@ -266,6 +281,7 @@ impl Vm {
             slots: Mutex::default(),
             next_slot: AtomicU32::new(0),
             live: RwLock::new(true),
+            el2,
         });
         let irqfds = irqfd::Forwarder::spawn(shared.clone())?;
         let vcpus = (0..vcpu_count)
@@ -391,8 +407,23 @@ fn max_vcpus() -> Result<u32> {
 }
 
 /// Creates the process's VM with the map's IPA size and 4 KiB stage 2 pages, where the host
-/// can (macOS 26), so that a DAX window maps the guest's pages one by one.
-fn create_vm() -> Result<()> {
+/// can (macOS 26), so that a DAX window maps the guest's pages one by one; and EL2 if `el2`,
+/// refused if the host has none.
+fn create_vm(el2: bool) -> Result<()> {
+    if el2 {
+        let mut supported = false;
+        // SAFETY: writes into a live local.
+        check("ask whether VMs may have EL2", unsafe {
+            hv_vm_config_get_el2_supported(&mut supported)
+        })?;
+        if !supported {
+            return Err(Error::InvalidConfig(
+                "this host's Hypervisor.framework gives VMs no EL2 (nested virtualization: \
+                 Apple M3 and later, macOS 15 and later); nested_virtualization must be false"
+                    .into(),
+            ));
+        }
+    }
     let mut max_ipa = 0;
     // SAFETY: writes the size into a live local.
     check("get the largest IPA size", unsafe { hv_vm_config_get_max_ipa_size(&mut max_ipa) })?;
@@ -417,7 +448,13 @@ fn create_vm() -> Result<()> {
             if let Some(set_ipa_granule) = hv_vm_config_set_ipa_granule() {
                 let _ = set_ipa_granule(config, HV_IPA_GRANULE_4KB);
             }
-            hv_vm_create(config)
+            match el2 {
+                true => match hv_vm_config_set_el2_enabled(config, true) {
+                    HV_SUCCESS => hv_vm_create(config),
+                    refused => refused,
+                },
+                false => hv_vm_create(config),
+            }
         }
     };
     // SAFETY: the VM keeps what it needs of the config.
@@ -601,14 +638,16 @@ impl Vcpu {
             kick::Power::Kicked => return Ok(Exit::Interrupted),
             kick::Power::Start { entry, context } => {
                 // As a CPU coming out of reset: MMU and caches off (PSCI CPU_ON's entry state),
-                // which a vCPU powered off after running has on.
+                // which a vCPU powered off after running has on, at the EL it boots at.
+                let (sctlr, reset) = match self.shared.el2 {
+                    true => (HV_SYS_REG_SCTLR_EL2, SCTLR_EL2_RESET),
+                    false => (HV_SYS_REG_SCTLR_EL1, SCTLR_EL1_RESET),
+                };
                 // SAFETY: this thread owns the vCPU.
-                check("reset SCTLR_EL1", unsafe {
-                    hv_vcpu_set_sys_reg(id, HV_SYS_REG_SCTLR_EL1, SCTLR_EL1_RESET)
-                })?;
+                check("reset SCTLR", unsafe { hv_vcpu_set_sys_reg(id, sctlr, reset) })?;
                 set_regs(
                     id,
-                    &[(HV_REG_PC, entry), (HV_REG_X0, context), (HV_REG_CPSR, PSTATE_EL1H_MASKED)],
+                    &[(HV_REG_PC, entry), (HV_REG_X0, context), (HV_REG_CPSR, self.entry_pstate())],
                 )?;
             }
             kick::Power::On => {}
@@ -644,13 +683,25 @@ impl Vcpu {
         check("set MPIDR_EL1", unsafe {
             hv_vcpu_set_sys_reg(id, HV_SYS_REG_MPIDR_EL1, mpidr(self.index))
         })?;
+        if self.shared.el2 {
+            hide_from_el2(id)?;
+        }
         if let Some(boot) = self.boot.take() {
-            let mut regs = vec![(HV_REG_PC, boot.pc), (HV_REG_CPSR, PSTATE_EL1H_MASKED)];
+            let mut regs = vec![(HV_REG_PC, boot.pc), (HV_REG_CPSR, self.entry_pstate())];
             regs.extend(boot.x.iter().enumerate().map(|(i, &x)| (HV_REG_X0 + i as u32, x)));
             set_regs(id, &regs)?;
         }
         self.slot.created(id);
         Ok((id, exit))
+    }
+
+    /// PSTATE at a kernel's entry: EL2 with EL2's stack pointer if the vCPU has EL2, else EL1's,
+    /// everything masked.
+    fn entry_pstate(&self) -> u64 {
+        match self.shared.el2 {
+            true => PSTATE_EL2H_MASKED,
+            false => PSTATE_EL1H_MASKED,
+        }
     }
 
     /// Gives a pending load its value and moves past it.
@@ -726,12 +777,30 @@ impl Vcpu {
                 Ok(Exit::Handled(ExitKind::Wait))
             }
             EC_SYSREG => {
-                // Read as zero, writes ignored: the registers the framework leaves to the VMM
-                // (debug, OS lock) have nothing behind them here.
                 let read = syndrome & 1 == 1;
                 let rt = ((syndrome >> 5) & 0x1f) as u32;
-                if read && rt != 31 {
-                    set_regs(id, &[(HV_REG_X0 + rt, 0)])?;
+                // The register, as the framework numbers its own (`hv_sys_reg_t`): op0, op1, CRn,
+                // CRm, op2, as MRS and MSR encode them.
+                let reg = (((syndrome >> 20) & 0x3) << 14
+                    | ((syndrome >> 14) & 0x7) << 11
+                    | ((syndrome >> 10) & 0xf) << 7
+                    | ((syndrome >> 1) & 0xf) << 3
+                    | ((syndrome >> 17) & 0x7)) as hv_sys_reg_t;
+                // One the framework keeps, which it hands over with EL2 (a guest hypervisor's
+                // CNTHCTL_EL2 and the like), is the vCPU's own; the rest (debug, OS lock, LORegions)
+                // read as zero, their writes ignored, as nothing is behind them here.
+                if read {
+                    let mut value = 0;
+                    // SAFETY: this thread owns the vCPU; writes into a live local.
+                    let kept = unsafe { hv_vcpu_get_sys_reg(id, reg, &mut value) } == HV_SUCCESS;
+                    if rt != 31 {
+                        set_regs(id, &[(HV_REG_X0 + rt, if kept { value } else { 0 })])?;
+                    }
+                } else {
+                    let value = if rt == 31 { 0 } else { get_reg(id, HV_REG_X0 + rt)? };
+                    // SAFETY: this thread owns the vCPU. A register the framework doesn't keep is
+                    // refused, the write ignored.
+                    let _ = unsafe { hv_vcpu_set_sys_reg(id, reg, value) };
                 }
                 advance_pc(id)?;
                 Ok(Exit::Handled(ExitKind::SystemRegister))
@@ -803,12 +872,34 @@ const ESR_CM: u64 = 1 << 8;
 
 /// PSTATE at a kernel's entry: EL1 with SP_EL1 (EL1h), debug, SError, IRQ and FIQ masked.
 const PSTATE_EL1H_MASKED: u64 = 0x3c5;
+/// The same at EL2 (EL2h), a vCPU with EL2's.
+const PSTATE_EL2H_MASKED: u64 = 0x3c9;
 /// SCTLR_EL1 out of reset: its RES1 bits (29, 28, 23, 22, 20, 11), the MMU and caches off.
 const SCTLR_EL1_RESET: u64 = 0x30d0_0800;
+/// SCTLR_EL2 out of reset, without VHE: its RES1 bits (29, 28, 23, 22, 18, 16, 11, 5, 4), the MMU
+/// and caches off.
+const SCTLR_EL2_RESET: u64 = 0x30c5_0830;
 
 /// The MPIDR_EL1 of vCPU `index`: 16 to a cluster (Aff0), as GICv3's SGIs address them.
 pub(crate) fn mpidr(index: u32) -> u64 {
     u64::from(index % 16) | (u64::from(index / 16) << 8)
+}
+
+/// Hides from a vCPU with EL2 what the framework's EL2 lacks though the CPU has it, so that the
+/// guest never uses it: SME (ID_AA64PFR1_EL1.SME), which Apple's nested virtualization doesn't
+/// implement, its SMCR_EL2 undefined there, the kernel's write of it at boot an exception it never
+/// returns from (QEMU hides it so too).
+fn hide_from_el2(id: hv_vcpu_t) -> Result<()> {
+    const SME: u64 = 0xf << 24;
+    let mut pfr1 = 0;
+    // SAFETY: this thread owns the vCPU; writes into a live local.
+    check("read ID_AA64PFR1_EL1", unsafe {
+        hv_vcpu_get_sys_reg(id, HV_SYS_REG_ID_AA64PFR1_EL1, &mut pfr1)
+    })?;
+    // SAFETY: this thread owns the vCPU.
+    check("write ID_AA64PFR1_EL1", unsafe {
+        hv_vcpu_set_sys_reg(id, HV_SYS_REG_ID_AA64PFR1_EL1, pfr1 & !SME)
+    })
 }
 
 /// This thread's vCPU, if it has created one.

@@ -58,6 +58,10 @@ pub struct MachineConfig {
     /// [`extent_daemon`](MachineConfig::extent_daemon) as the machine is made. A machine with any
     /// is neither snapshotted nor suspended, nor restored (board 13139).
     pub extent_stores: Vec<crate::ExtentStore>,
+    /// Gives the guest the CPU's virtualization extensions, EL2, so that it runs VMs of its own
+    /// with KVM (nested virtualization): its kernel boots at EL2. Hypervisor.framework's on hosts
+    /// that have it (Apple M3 and later, macOS 15 and later); refused elsewhere, KVM's included.
+    pub nested_virtualization: bool,
 }
 
 impl MachineConfig {
@@ -80,6 +84,7 @@ impl Default for MachineConfig {
             serial_capture_limit: Self::DEFAULT_SERIAL_CAPTURE_LIMIT,
             extent_daemon: None,
             extent_stores: Vec::new(),
+            nested_virtualization: false,
         }
     }
 }
@@ -498,6 +503,17 @@ fn write_generation_id(vm: &backend::Vm) -> Result<()> {
     vm.write_memory(crate::arch::x86_64::layout::VMGENID_ADDR, &id)
 }
 
+/// Refuses nested virtualization where libmachine gives none: on KVM, and to a bare machine.
+fn no_nested(config: &MachineConfig, what: &str) -> Result<()> {
+    if config.nested_virtualization {
+        return Err(Error::InvalidConfig(format!(
+            "{what} has no nested virtualization, which machines on Hypervisor.framework alone \
+             get; nested_virtualization must be false"
+        )));
+    }
+    Ok(())
+}
+
 fn check_mem_size(mem_size: usize) -> Result<()> {
     if mem_size == 0 || !mem_size.is_multiple_of(PAGE_SIZE) {
         return Err(Error::InvalidConfig(format!(
@@ -642,6 +658,7 @@ impl Machine {
     /// local APICs, so no way to start a second vCPU.
     pub fn new(config: MachineConfig) -> Result<Self> {
         check_mem_size(config.mem_size)?;
+        no_nested(&config, "a bare machine")?;
         if config.network.is_some() {
             return Err(Error::InvalidConfig(
                 "a bare machine has no network card; network must be None".into(),
@@ -789,6 +806,7 @@ impl Machine {
 
         check_mem_size(config.mem_size)?;
         check_vcpus(config.vcpus)?;
+        no_nested(&config, "a machine on KVM")?;
         let (vm, mut vcpus) = backend::Vm::new(
             config.mem_size,
             config.cpu_model,
@@ -867,12 +885,13 @@ impl Machine {
                 "machines on Hypervisor.framework have no network yet; network must be None".into(),
             ));
         }
-        let (vm, mut vcpus) = backend::Vm::new(
+        let (vm, mut vcpus) = backend::Vm::with_el2(
             config.mem_size,
             config.cpu_model,
             Platform::Board,
             config.vcpus,
             backend::Ram::Anonymous,
+            config.nested_virtualization,
         )?;
         let loaded = linux::load(
             vm.guest_memory(),
@@ -895,6 +914,7 @@ impl Machine {
             gic_dist_size: gic.dist_size,
             gic_msi_size: gic.msi_size,
             rng_seed,
+            el2: config.nested_virtualization,
         })?;
         if tree.len() as u64 > linux::FDT_MAX {
             return Err(Error::InvalidConfig(format!(
@@ -1289,6 +1309,7 @@ impl Machine {
             // No machine with extent store devices is suspended.
             extent_daemon: None,
             extent_stores: Vec::new(),
+            nested_virtualization: false,
         };
         let network = self.network.as_ref().map(|n| {
             NetCard::Adopt(
@@ -1380,6 +1401,7 @@ impl Machine {
 
         check_mem_size(config.mem_size)?;
         check_vcpus(config.vcpus)?;
+        no_nested(&config, "a machine on KVM")?;
         if !config.extent_stores.is_empty() {
             return Err(Error::Snapshot(
                 "machines with extent store devices are not restored yet (board 13139)".into(),

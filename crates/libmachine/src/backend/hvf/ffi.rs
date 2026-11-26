@@ -37,6 +37,9 @@ pub(crate) const HV_REG_CPSR: hv_reg_t = 34;
 
 pub(crate) const HV_SYS_REG_MPIDR_EL1: hv_sys_reg_t = 0xc005;
 pub(crate) const HV_SYS_REG_SCTLR_EL1: hv_sys_reg_t = 0xc080;
+pub(crate) const HV_SYS_REG_ID_AA64PFR1_EL1: hv_sys_reg_t = 0xc021;
+/// EL2's, which a VM with EL2 has (macOS 15).
+pub(crate) const HV_SYS_REG_SCTLR_EL2: hv_sys_reg_t = 0xe080;
 pub(crate) const HV_SYS_REG_CNTV_CTL_EL0: hv_sys_reg_t = 0xdf19;
 pub(crate) const HV_SYS_REG_CNTV_CVAL_EL0: hv_sys_reg_t = 0xdf1a;
 
@@ -88,6 +91,12 @@ unsafe extern "C" {
     pub(crate) fn hv_vm_config_set_ipa_size(
         config: os_object_t,
         ipa_bit_length: u32,
+    ) -> hv_return_t;
+    /// Nested virtualization (macOS 15): whether this host gives VMs EL2.
+    pub(crate) fn hv_vm_config_get_el2_supported(el2_supported: *mut bool) -> hv_return_t;
+    pub(crate) fn hv_vm_config_set_el2_enabled(
+        config: os_object_t,
+        el2_enabled: bool,
     ) -> hv_return_t;
     pub(crate) fn hv_vm_create(config: os_object_t) -> hv_return_t;
     pub(crate) fn hv_vm_destroy() -> hv_return_t;

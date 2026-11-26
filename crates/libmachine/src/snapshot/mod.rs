@@ -332,6 +332,7 @@ impl Snapshot {
             serial_capture_limit: MachineConfig::DEFAULT_SERIAL_CAPTURE_LIMIT,
             extent_daemon: None,
             extent_stores: Vec::new(),
+            nested_virtualization: false,
         }
     }
 
