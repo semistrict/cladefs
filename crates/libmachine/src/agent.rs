@@ -68,6 +68,11 @@ const MAX_RETRY_DELAY: Duration = Duration::from_millis(50);
 /// how long the agent remembers a command whose connection went (60 s), so
 /// that it never takes a request sent again for a new one.
 pub const MAX_RECONNECT: Duration = Duration::from_secs(30);
+/// The largest file [`Agent::read_file`] takes from the guest unless
+/// [`Agent::max_file_size`] says otherwise: what the guest sends is
+/// untrusted, and a guest that sends without end must not take the host's
+/// memory with it (board 13488).
+pub const DEFAULT_MAX_FILE_SIZE: usize = 64 << 20;
 /// How much of what it wrote to a process's stdin the client keeps, to
 /// send again what had not reached the agent when a connection was reset:
 /// more than libmachine's vsock can have in flight (the host's 256 KiB send
@@ -388,6 +393,7 @@ pub struct Agent {
     port: u32,
     retry_for: Duration,
     timeout: Option<Duration>,
+    max_file_size: usize,
 }
 
 impl std::fmt::Debug for Agent {
@@ -396,6 +402,7 @@ impl std::fmt::Debug for Agent {
             .field("port", &self.port)
             .field("retry_for", &self.retry_for)
             .field("timeout", &self.timeout)
+            .field("max_file_size", &self.max_file_size)
             .finish_non_exhaustive()
     }
 }
@@ -407,7 +414,22 @@ impl Agent {
     }
 
     pub(crate) fn with_dial(dial: Arc<dyn Dial>) -> Self {
-        Self { dial, port: DEFAULT_PORT, retry_for: Duration::from_secs(1), timeout: None }
+        Self {
+            dial,
+            port: DEFAULT_PORT,
+            retry_for: Duration::from_secs(1),
+            timeout: None,
+            max_file_size: DEFAULT_MAX_FILE_SIZE,
+        }
+    }
+
+    /// The largest file [`read_file`](Self::read_file) takes
+    /// ([`DEFAULT_MAX_FILE_SIZE`] by default): a larger one fails with
+    /// [`Error::Guest`] (`EFBIG`), the client holding no more of it than
+    /// this.
+    pub fn max_file_size(mut self, bytes: usize) -> Self {
+        self.max_file_size = bytes;
+        self
     }
 
     /// The agent listens on `port` instead.
@@ -656,7 +678,9 @@ impl Agent {
         })
     }
 
-    /// The contents of the guest's file `path`.
+    /// The contents of the guest's file `path`: at most
+    /// [`max_file_size`](Self::max_file_size) bytes, else it fails with
+    /// [`Error::Guest`] (`EFBIG`).
     pub fn read_file(&self, path: impl AsRef<OsStr>) -> Result<Vec<u8>> {
         let path = path.as_ref();
         let what = format!("read {}", path.to_string_lossy());
@@ -667,6 +691,16 @@ impl Agent {
             loop {
                 match s.recv(&what)? {
                     Frame::Data(d) if d.is_empty() => return Ok(data),
+                    // Refused before it is held: the guest's sizes are its own.
+                    Frame::Data(d) if d.len() > self.max_file_size - data.len() => {
+                        return Err(Failure::Fatal(Error::Guest {
+                            what: format!(
+                                "{what}: the file is larger than the {} bytes a read takes",
+                                self.max_file_size
+                            ),
+                            source: io::Error::from_raw_os_error(libc::EFBIG),
+                        }));
+                    }
                     Frame::Data(d) => data.extend_from_slice(&d),
                     Frame::Error { errno, message } => {
                         return Err(guest_error(&what, errno, message));
@@ -1834,6 +1868,22 @@ mod tests {
             "{err}"
         );
         assert_eq!(dial.dials(), 1);
+    }
+
+    #[test]
+    fn a_file_past_the_bound_is_refused_before_it_is_held() {
+        let chunk = Frame::Data(vec![7; 8]);
+        let (a, _) = agent(vec![talk(&[chunk.clone(), chunk, Frame::Data(Vec::new())])]);
+        let a = a.max_file_size(15);
+        let err = a.read_file("/big").unwrap_err();
+        let Error::Guest { what, source } = &err else { panic!("{err}") };
+        assert_eq!(source.raw_os_error(), Some(libc::EFBIG), "{err}");
+        assert!(what.contains("/big"), "{what}");
+
+        // At the bound exactly, it is read.
+        let chunk = Frame::Data(vec![7; 8]);
+        let (a, _) = agent(vec![talk(&[chunk.clone(), chunk, Frame::Data(Vec::new())])]);
+        assert_eq!(a.max_file_size(16).read_file("/big").unwrap(), vec![7; 16]);
     }
 
     #[test]
