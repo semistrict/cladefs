@@ -1924,13 +1924,14 @@ async fn takeover_seeded_with_continued_only_segment_preserves_new_commits() {
     cell.close_segment().unwrap();
     uploader.uploaded(cell.last_commit().unwrap()).await.unwrap();
 
-    // Write two inline extents (< large_extent = 24 KiB, total > segment_size = 16 KiB) in one
-    // commit so its first segment holds only a `continued` partial record and no complete commit.
+    // Write four inline extents (< large_extent = 24 KiB, total = 80 KiB > segment_limit() =
+    // segment_size + max_extent = 64 KiB) in one commit so its first segment holds only a
+    // `continued` partial record and no complete commit (board 13978).
     let seq = cell.info().unwrap().next_sequence;
-    let e1 = ExtentId { cell: DESCRIPTION.cell.id, sequence: seq };
-    let e2 = ExtentId { cell: DESCRIPTION.cell.id, sequence: seq + 1 };
-    cell.write(e1, 0, &common::noise(1, 12 << 10)).await.unwrap();
-    cell.write(e2, 0, &common::noise(2, 12 << 10)).await.unwrap();
+    for i in 0..4u64 {
+        let e = ExtentId { cell: DESCRIPTION.cell.id, sequence: seq + i };
+        cell.write(e, 0, &common::noise(i + 1, 20 << 10)).await.unwrap();
+    }
     cell.commit_ordered(Some(b"split")).await.unwrap();
     cell.flush().await.unwrap();
 
@@ -1942,6 +1943,13 @@ async fn takeover_seeded_with_continued_only_segment_preserves_new_commits() {
         all["b"].read(b_key, log, 0, 1).is_ok_and(|bytes| !bytes.is_empty())
     })
     .await;
+    let first_log = allowed.lock().unwrap().unwrap();
+    let log_bytes = all["b"].read(b_key, first_log, 0, 1 << 20).unwrap();
+    assert_eq!(
+        local_cell::replicate::last_commit(DESCRIPTION.cell, &[(first_log, log_bytes)]),
+        None,
+        "member b's first replicated segment must be continued-only (no complete commit)"
+    );
 
     // Lose writer `a`; members hold only the `continued`-only segment (no complete commit).
     let replicator = cell.replicator().unwrap();
