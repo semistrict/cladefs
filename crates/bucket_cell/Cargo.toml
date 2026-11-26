@@ -26,6 +26,9 @@ bincode.workspace = true
 bytes = "1.12.1"
 extent_frame = { path = "../extent_frame", default-features = false }
 extent_keys = { path = "../extent_keys", default-features = false }
+# cladefs: the environment bucket options are read from, an embedder's over the process's
+# (`node_local::env::vars_os`, board 13471).
+node_local = { workspace = true, optional = true }
 fail = "0.5.1"
 futures.workspace = true
 # cladefs: HTTP date parsing and formatting for the bucket's clock and test S3 server (board 10238).
@@ -81,6 +84,7 @@ workspace = true
 # or aws-lc dependencies.
 default = ["full"]
 full = [
+    "dep:node_local",
     "extent_frame/crypto",
     "extent_keys/crypto",
     "storage_device/fake-device",

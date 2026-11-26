@@ -65,7 +65,7 @@ impl Vars {
     /// refused, naming it, never taken for unset.
     pub fn from_env() -> Result<Self, String> {
         let mut vars = Vec::new();
-        for (name, value) in std::env::vars_os() {
+        for (name, value) in node_local::env::vars_os() {
             // A name not text is none of these.
             let Some(name) = name.to_str().filter(|name| kept(name)) else { continue };
             let value = value.into_string().map_err(|value| {

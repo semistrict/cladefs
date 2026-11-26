@@ -8,22 +8,56 @@
 //! are configured apart, each as its own process would be, by the same code: its socket, its
 //! token, its peers' address, its directories. A node killed loses it ([`crate::kill`]): its
 //! restart gives it again, as a host's boot does.
+//!
+//! cladefs: a process embedding the daemon (libcladefs, board 13471) configures it through
+//! [`set_embedded_vars`] instead: variables read over the process's own, as setting the process's
+//! environment is unsound once it runs threads, as an embedder's process does.
 
 use std::env::VarError;
 use std::ffi::{OsStr, OsString};
 
-/// The variable `name` of the environment, as [`std::env::var_os`]: the process's, or the
-/// simulated node's.
+/// The variable `name` of the environment, as [`std::env::var_os`]: the simulated node's, or the
+/// embedder's ([`set_embedded_vars`]) over the process's.
 pub fn var_os(name: impl AsRef<OsStr>) -> Option<OsString> {
+    let name = name.as_ref();
     #[cfg(madsim)]
     {
         let of = key();
         let all = VARS.lock().unwrap();
         if let Some((_, vars)) = all.iter().find(|(k, _)| *k == of) {
-            return vars.iter().find(|(k, _)| k == name.as_ref()).map(|(_, value)| value.clone());
+            return vars.iter().find(|(k, _)| k == name).map(|(_, value)| value.clone());
         }
     }
-    std::env::var_os(name)
+    let embedded = EMBEDDED.read().unwrap();
+    match embedded.iter().find(|(k, _)| k == name) {
+        Some((_, value)) => Some(value.clone()),
+        None => std::env::var_os(name),
+    }
+}
+
+/// Every variable of the process's environment, as [`std::env::vars_os`], with the embedder's
+/// ([`set_embedded_vars`]) over it, each name once. Never a simulated node's: what reads them all
+/// (a KMS's variables, a bucket's options) reads the process's in the simulation, as it did.
+pub fn vars_os() -> Vec<(OsString, OsString)> {
+    let embedded = EMBEDDED.read().unwrap();
+    let process = std::env::vars_os().filter(|(name, _)| !embedded.iter().any(|(k, _)| k == name));
+    embedded.iter().cloned().chain(process).collect()
+}
+
+/// The embedder's variables, read over the process's ([`set_embedded_vars`]). The process's, not
+/// a host's: one daemon is embedded in a process (libcladefs refuses a second), and the
+/// simulation's nodes read their own ([`set_vars`]) before these.
+static EMBEDDED: std::sync::RwLock<Vec<(OsString, OsString)>> = std::sync::RwLock::new(Vec::new());
+
+/// Has [`var_os`] and [`vars_os`] read `vars` over the process's environment from now on, in place
+/// of any given before: the configuration of a daemon embedded in this process (libcladefs, board
+/// 13471), given before it boots, without `std::env::set_var`, unsound in a process running
+/// threads.
+pub fn set_embedded_vars<K: Into<OsString>, V: Into<OsString>>(
+    vars: impl IntoIterator<Item = (K, V)>,
+) {
+    let vars = vars.into_iter().map(|(name, value)| (name.into(), value.into())).collect();
+    *EMBEDDED.write().unwrap() = vars;
 }
 
 /// The variable `name` of the environment, as [`std::env::var`]: not there, or not Unicode.

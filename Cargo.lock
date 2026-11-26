@@ -1779,6 +1779,7 @@ dependencies = [
  "fprint",
  "futures",
  "libc",
+ "node_local",
  "object_store",
  "reqwest",
  "serde",

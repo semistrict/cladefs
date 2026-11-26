@@ -983,7 +983,7 @@ fn filter_os_bucket_options(
 /// Reads only bucket-option variables (host and `CLADEFSD_BUCKET_<N>_*`) from the process
 /// environment, wrapping values in [`Zeroizing`] so secrets are scrubbed on drop (board 9684).
 fn env_bucket_options() -> Vec<(String, OptionValue)> {
-    filter_os_bucket_options(std::env::vars_os())
+    filter_os_bucket_options(node_local::env::vars_os())
 }
 
 /// Resolves selected [`OptionValue`] entries to UTF-8 strings, failing if any selected option

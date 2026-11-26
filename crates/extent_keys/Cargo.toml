@@ -19,6 +19,9 @@ aws-lc-sys = { workspace = true, optional = true }
 # cladefs: atexit(3), which stops random draws as the process exits (src/random.rs, TASK-650).
 formats.workspace = true
 fprint.workspace = true
+# cladefs: the environment a KMS's variables are read from, an embedder's over the process's
+# (`node_local::env::vars_os`, board 13471).
+node_local = { workspace = true, optional = true }
 libc = { workspace = true, optional = true }
 # cladefs: AWS KMS (kms/aws.rs, TASK-411.17), its calls on the shared KMS runtime.
 aws-config = { workspace = true, optional = true }
@@ -72,6 +75,7 @@ workspace = true
 # `Wrapped`, `Secret`, `xts::SECTOR`) for keyless wasm32 builds without aws-lc or OS/HTTP deps.
 default = ["crypto"]
 crypto = [
+    "dep:node_local",
     "dep:aes",
     "dep:aws-lc-rs",
     "dep:aws-lc-sys",

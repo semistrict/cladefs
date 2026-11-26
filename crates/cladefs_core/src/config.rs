@@ -632,15 +632,13 @@ impl Config {
         self.gc.bucket.as_deref().or(self.bucket.url.as_deref())
     }
 
-    /// Exports environment-backed process settings (bucket URL, token, KMS, per-bucket overrides,
-    /// logging, compression, telemetry) before threads start in CLI binaries (`cladefsd`,
-    /// `cladefs-mount`, `cladefs-gc`, `cladefsctl`).
-    ///
-    /// # Safety
-    /// Must only be called during single-threaded process startup before spawning worker threads.
-    pub unsafe fn apply_process_env(&self) {
-        // SAFETY: caller guarantees single-threaded process startup before spawning threads.
-        let set = |k: &str, v: &str| unsafe { std::env::set_var(k, v) };
+    /// cladefs: the environment-backed process settings this configuration gives (bucket URL,
+    /// token, KMS, per-bucket overrides, logging, compression, telemetry), by variable: what
+    /// [`Config::apply_process_env`] exports, and what a process embedding the daemon reads over
+    /// its own environment instead (`node_local::env::set_embedded_vars`, board 13471).
+    pub fn process_env(&self) -> Vec<(String, String)> {
+        let mut vars: Vec<(String, String)> = Vec::new();
+        let mut set = |k: &str, v: &str| vars.push((k.to_owned(), v.to_owned()));
         if let Some(url) = &self.bucket.url {
             set("CLADEFSD_BUCKET", url);
         }
@@ -724,6 +722,20 @@ impl Config {
         }
         if let Some(timeout) = self.ctl.timeout_secs {
             set("CLADEFSCTL_TIMEOUT", &timeout.to_string());
+        }
+        vars
+    }
+
+    /// Exports environment-backed process settings (bucket URL, token, KMS, per-bucket overrides,
+    /// logging, compression, telemetry) before threads start in CLI binaries (`cladefsd`,
+    /// `cladefs-mount`, `cladefs-gc`, `cladefsctl`).
+    ///
+    /// # Safety
+    /// Must only be called during single-threaded process startup before spawning worker threads.
+    pub unsafe fn apply_process_env(&self) {
+        for (name, value) in self.process_env() {
+            // SAFETY: caller guarantees single-threaded process startup before spawning threads.
+            unsafe { std::env::set_var(name, value) };
         }
     }
 }

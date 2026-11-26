@@ -25,11 +25,13 @@ _BASE_DEPS = [
 _PROD_DEPS = _BASE_DEPS + [
     "//crates/extent_frame",
     "//crates/extent_keys",
+    "//crates/node_local",
 ]
 
 _TEST_DEPS = _BASE_DEPS + [
     "//crates/extent_frame:extent_frame_testing",
     "//crates/extent_keys:extent_keys_testing",
+    "//crates/node_local",
 ]
 
 cladefs_rust_library(
@@ -144,7 +146,6 @@ cladefs_rust_test(
     },
     deps = [
         ":bucket_cell_testing",
-        "//crates/node_local",
     ] + _TEST_DEPS + all_crate_deps(normal = True, normal_dev = True),
 )
 
@@ -160,6 +161,5 @@ cladefs_rust_test(
     }),
     deps = [
         ":bucket_cell_testing",
-        "//crates/node_local",
     ] + _TEST_DEPS + all_crate_deps(normal = True, normal_dev = True),
 )

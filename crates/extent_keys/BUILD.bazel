@@ -18,6 +18,7 @@ _COMMON_DEPS = [
     "//crates/base32_id",
     "//crates/formats",
     "//crates/fprint",
+    "//crates/node_local",
     "//crates/storage_xts",
 ]
 
