@@ -13,9 +13,10 @@
 
 --- a/guest/linux/fs/cladefs/dax.c
 +++ b/guest/linux/fs/cladefs/dax.c
-@@ -2486,24 +2486,11 @@
+@@ -2056,26 +2056,12 @@
   */
- static long cladefs_dax_rebind(struct cladefs_dax *dax, struct cladefs_dax_file *file, long target)
+ static long cladefs_dax_rebind(struct cladefs_dax *dax, struct cladefs_dax_file *file, long target,
+ 			       bool seal)
  {
 -	struct cladefs_dax_volume *volume;
  	unsigned long open = 0;
@@ -26,7 +27,8 @@
  	rebound = cladefs_dax_rebind_ranges(dax, file, target, &open);
 -	/* A volume going (cladefs_dax_remove_volume) stops the worker first. */
 -	volume = READ_ONCE(file->volume);
--	if (open && volume && atomic_long_read(&dax->private) > target) {
+-	/* Never fsync while frozen (`!seal`): hold_commits and the closed device gate deadlock (board 12113). */
+-	if (seal && open && volume && atomic_long_read(&dax->private) > target) {
 -		atomic64_inc(&dax->seals_made);
 -		err = cladefs_nofs(cladefs_fsync(volume->fs));
 -		if (err)
