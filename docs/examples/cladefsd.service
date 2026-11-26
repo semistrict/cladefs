@@ -72,9 +72,9 @@ OOMScoreAdjust=-900
 
 # Each cell keeps its files open, and each VM process's connection a few: the daemon raises its
 # limit to the hard limit this sets (cladefs::cladefsd::raise_open_files_limit), and serves at most
-# three quarters of it over a connection's cell's files at their most, 136 by default (board 9975):
-# 5,782 connections at 1,048,576; under 35,840 it refuses to start (board 8595, hotbed question
-# 507).
+# three quarters of it over a connection's cell's files at their most, 212 by default (board 9975,
+# board 12555, board 12887): 3,709 connections at 1,048,576; under 55,296 it refuses to start
+# (board 8595, hotbed question 507).
 LimitNOFILE=1048576
 
 # SIGTERM drains it: no new VM processes or control calls, every connection closed (its VM exits

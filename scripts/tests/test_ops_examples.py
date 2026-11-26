@@ -58,6 +58,42 @@ class Examples(unittest.TestCase):
         self.assertIn("process.signal(0)", (DAEMON / "server.rs").read_text())
         self.assertIn('dir.join("memory.reclaim")', (DAEMON / "governor.rs").read_text())
 
+    def test_the_docs_open_files_are_the_daemons(self):
+        """board 12889: the docs restated a cell's open files (136), the floor (35,840) and the
+        connections at a limit after board 12555, then board 12887, had raised them in the daemon. Derive each from
+        the sources the daemon computes them from (`cell_open_files`, `open_files_floor`,
+        `server::most_connections`) and require every doc that states them to say these."""
+        lib = (DAEMON / "lib.rs").read_text()
+
+        def const(name, text=lib):
+            value = re.search(rf"const {name}: u64 = (?:if [^{{]+\{{ \d+ \}} else \{{ )?(\d+)",
+                              text)
+            return int(value.group(1))
+
+        cell = (ROOT / "crates" / "local_cell" / "src" / "cell.rs").read_text()
+        open_files = int(re.search(r"^\s+open_files: (\d+),$", cell, re.MULTILINE).group(1))
+        per_cell = 3 * open_files + const("CELL_OPEN_FILES_BESIDE")
+        floor = const("OWN_OPEN_FILES") + const("FLOOR_CELLS") * per_cell
+        unit = (EXAMPLES / "cladefsd.service").read_text()
+        limit = int(re.search(r"^LimitNOFILE=(\d+)$", unit, re.MULTILINE).group(1))
+
+        def connections(files):
+            return (files - files // 4) // per_cell
+
+        said = {
+            "docs/operating-a-host.md": [per_cell, floor, connections(limit), connections(floor)],
+            "docs/architecture.md": [per_cell, floor],
+            "docs/examples/cladefsd.service": [per_cell, floor, connections(limit)],
+        }
+        for path, numbers in said.items():
+            text = (ROOT / path).read_text()
+            stated = {int(n.replace(",", "")) for n in re.findall(r"\b\d{1,3}(?:,\d{3})*\b", text)}
+            for number in numbers:
+                self.assertIn(number, stated, f"{path} doesn't state {number:,}")
+            # Before board 12555 (136 a cell), and before board 12887 (200 a cell).
+            for stale in [136, 35840, 5782, 197, 52224, 3932]:
+                self.assertNotIn(stale, stated, f"{path} still states {stale:,}")
+
     def test_the_units_stop_outlasts_its_drain(self):
         unit = (EXAMPLES / "cladefsd.service").read_text()
         drain = int(re.search(r"^Environment=CLADEFSD_DRAIN=(\d+)$", unit, re.MULTILINE).group(1))

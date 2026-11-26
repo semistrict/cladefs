@@ -664,9 +664,10 @@ What it sets, and why:
   daemon stops, a crash included: a daemon started over a dead one's sockets refuses them (board
   5227).
 - `LimitNOFILE=1048576`: the daemon raises its soft limit to this hard one and serves at most
-  three quarters of it over a connection's cell's files at their most (136 by default: its
-  segments', its extents', its sockets and its VM process's pidfd; board 9975), 5,782 connections
-  at 1,048,576, 197 at the floor; it refuses to start under 35,840 (board 8595).
+  three quarters of it over a connection's cell's files at their most (212 by default: its
+  segments', its sealed and open extents' raw files, its open and full segments', its flushes',
+  its sockets and its VM process's pidfd; board 9975, board 12555, board 12887), 3,709
+  connections at 1,048,576, 195 at the floor; it refuses to start under 55,296 (board 8595).
 - `TimeoutStopSec=90` above `CLADEFSD_DRAIN=60`: SIGTERM drains (`docs/upgrading-a-host.md`), and
   systemd's SIGKILL at the stop timeout would cut a longer drain short, its cells not uploaded.
 - `MemoryLow` set to at least the daemon's shared DAX cache floor (by default `1/8` of the host's
