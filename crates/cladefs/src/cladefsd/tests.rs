@@ -3400,6 +3400,89 @@ fn metrics_are_there_before_any_cell_opens() {
     assert_eq!(families.len(), count, "a family named twice");
 }
 
+/// Board 10482: the daemon's metrics, once it has served a VM process's requests, its window's
+/// among them, control calls, and a migration with its peer calls (one its peer, speaking no TLS,
+/// fails), parse as a scraper parses Prometheus' text format, strictly
+/// ([`super::metrics::parsed`]), every family among them. Until then its tests matched lines: a
+/// family's HELP said twice, a histogram without `+Inf`, a series said twice, passed them all and
+/// failed the scrape.
+#[test]
+fn the_daemons_metrics_parse_as_a_scraper_parses_them() {
+    use super::control::proto::GetStatsRequest;
+    host();
+    let ps = page_size() as usize;
+    let dir = tempfile::tempdir().unwrap();
+    let root = host_fs::canonicalize(dir.path()).unwrap();
+    let path = root.join("store");
+    let (client, served) = connect(&path, 1 << 24);
+    let memory = memory(2);
+    // SAFETY: The memory is the test's, and outlives the cell.
+    unsafe { client.create_dax_window_in_host_memory(memory, 2 * ps as u64, None, 1) }.unwrap();
+    let extent = ExtentId { cell: client.cell(), sequence: 1 };
+    write(&client, extent, 0, &pattern(6, ps)).unwrap();
+    client.commit(None).unwrap();
+    client.map(extent, 0, ps as u64, 0).unwrap();
+    assert_eq!(read(&client, extent, 0, ps).unwrap(), pattern(6, ps));
+    // Another cell, closed, to migrate.
+    let moving = root.join("moving");
+    let (closed, closed_served) = connect(&moving, 1 << 24);
+    write(&closed, ExtentId { cell: closed.cell(), sequence: 1 }, 0, &pattern(7, ps)).unwrap();
+    closed.commit(None).unwrap();
+    drop(closed);
+    closed_served.join().unwrap();
+
+    let control_socket = root.join("control.sock");
+    let listener = UnixListener::bind(&control_socket).unwrap();
+    let tenants = root.join("tenants");
+    std::fs::create_dir(&tenants).unwrap();
+    std::thread::spawn(move || super::control::serve_control(listener, tenants));
+    let api = crate::testing::Control::connect(&control_socket).unwrap();
+    api.call(async |client| client.get_stats(GetStatsRequest::default()).await).unwrap();
+    // A peer serving gRPC in plaintext, no peer API: each of the migration's calls fails its TLS
+    // handshake at once, its prepare tried thrice, unanswered, then given up and aborted.
+    let peer = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    peer.set_nonblocking(true).unwrap();
+    let address = peer.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async move {
+            let incoming = tokio_stream::wrappers::TcpListenerStream::new(
+                tokio::net::TcpListener::from_std(peer).unwrap(),
+            );
+            let (_, health) = tonic_health::server::health_reporter();
+            tonic::transport::Server::builder()
+                .add_service(health)
+                .serve_with_incoming(incoming)
+                .await
+                .unwrap();
+        })
+    });
+    // As `MigrateCell` begins it, which finds the cell in the daemon's disks, that this one has
+    // none of.
+    let migrated = control(super::migration::migrate_on(super::Daemon::process(), moving, address));
+    assert_eq!(migrated, Err(Errno::ENOTCONN));
+
+    let page = super::metrics::render();
+    let value = |series: &str| {
+        let line = page.lines().find_map(|line| line.strip_prefix(&format!("{series} ")));
+        line.unwrap_or_else(|| panic!("no {series} in {page}")).parse::<u64>().unwrap()
+    };
+    let cell = cell_at(&path);
+    assert_eq!(value(&format!("cladefsd_vm_window_mappings{{cell=\"{cell}\"}}")), 1);
+    assert_eq!(value("cladefsd_migrations_total{outcome=\"aborted\"}"), 1);
+    let prepare = "service=\"cladefs.peer.v1.Peer\",method=\"MigratePrepare\"";
+    assert_eq!(value(&format!("cladefsd_grpc_client_errors_total{{{prepare}}}")), 3);
+    let stats = "service=\"cladefs.cladefsd.v1.Cladefsd\",method=\"GetStats\"";
+    assert_eq!(value(&format!("cladefsd_grpc_server_calls_total{{{stats}}}")), 1);
+    let families = super::metrics::parsed(&page).unwrap_or_else(|err| panic!("{err}: {page}"));
+    let declared = page.lines().filter(|line| line.starts_with("# TYPE ")).count();
+    assert_eq!(families.len(), declared, "{families:?}");
+    drop(client);
+    served.join().unwrap();
+    // SAFETY: Unmaps the memory, which nothing uses any more.
+    assert_eq!(unsafe { libc::munmap(memory.as_ptr().cast(), 2 * ps) }, 0);
+}
+
 /// board 8563: a cell is labelled alike in every family, `TENANT/CELL`, as cells name it: its VM
 /// process's window gauges, its builds, and its uploads', which a query joins on; and not by
 /// connection, whose number made a series of each VM process.

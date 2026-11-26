@@ -102,6 +102,10 @@ madsim = "=0.2.34"
 # cladefs: the tests' OTLP collector over HTTPS (tests/tracing.rs, board 8569): rustls (Apache-2.0
 # OR ISC OR MIT), over aws-lc-rs, as tonic's TLS here.
 rustls = { version = "0.23.46", default-features = false, features = ["aws-lc-rs", "std"] }
+# cladefs: the daemon's /metrics checked by a strict parser of Prometheus' text format, as a
+# scraper parses it (`cladefsd::metrics`, board 10482): openmetrics-parser (LGPL-3.0, a test's
+# alone, in no binary; hotbed question on its licence), over pest (MIT OR Apache-2.0).
+openmetrics-parser = "0.5.1"
 
 [lints]
 workspace = true
