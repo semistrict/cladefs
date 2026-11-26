@@ -66,7 +66,7 @@ use crate::ephemeral_host::{self, Entry, Migrating, staging};
 use crate::{CellId, Errno};
 use bucket_cell::layout::Origin;
 use host_fs::FileExt as _;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -269,19 +269,24 @@ pub(super) struct State {
     /// The cells migrations are taking here, each held by the request of its migrations being
     /// served (`target::Taking`).
     taking: Mutex<HashMap<CellId, Arc<tokio::sync::Mutex<()>>>>,
-    /// When each migration being taken here was last heard of, by its ID (board 5734).
-    heard: Mutex<HashMap<u64, tokio::time::Instant>>,
-    /// The migrations this daemon, since it started, prepared to take, the only ones it takes on
-    /// with (board 5721): what a migration staged before is written but not synced, which its
-    /// host's restart may have lost part of, so that a migration being taken does not outlive its
-    /// daemon (specs/ephemeral: `Crash` makes a cell being received none), whether or not its
-    /// start, giving it up, could retire its entry.
-    prepared: Mutex<BTreeSet<u64>>,
-    /// cladefs: the staging directories of the migrations being taken here, each open, its files
-    /// counted in its footprint as they are written, so that the disk governor admits what a peer
-    /// stages (board 8451). Like `prepared` and `heard`, of migrations being taken alone: each
-    /// goes as its migration does.
-    staging: Mutex<HashMap<u64, local_cell::HostDir>>,
+    /// Monotonic sequence stamped whenever a migration is inserted into `prepared`, `staging`, or
+    /// `heard`, so `reap_idle` captures a cutoff before snapshotting active migrations and never
+    /// prunes entries prepared concurrently (board 11653).
+    prep_seq: AtomicU64,
+    /// When each migration being taken here was last heard of, by its ID, paired with its
+    /// `prep_seq` stamp (board 5734, board 11653).
+    heard: Mutex<HashMap<u64, (u64, tokio::time::Instant)>>,
+    /// The migrations this daemon, since it started, prepared to take, paired with their
+    /// `prep_seq` stamp (board 5721, board 11653): what a migration staged before is written but
+    /// not synced, which its host's restart may have lost part of, so that a migration being taken
+    /// does not outlive its daemon (specs/ephemeral: `Crash` makes a cell being received none),
+    /// whether or not its start, giving it up, could retire its entry.
+    prepared: Mutex<BTreeMap<u64, u64>>,
+    /// cladefs: the staging directories of the migrations being taken here, each open, paired with
+    /// its `prep_seq` stamp, its files counted in its footprint as they are written, so that the
+    /// disk governor admits what a peer stages (board 8451, board 11653). Like `prepared` and
+    /// `heard`, of migrations being taken alone: each goes as its migration does.
+    staging: Mutex<HashMap<u64, (u64, local_cell::HostDir)>>,
     /// Random odd incarnation of this daemon boot, returned by `MigratePrepare` for bucket-backed
     /// migrations so a restarted target answers `FAILED_PRECONDITION` and the source reconciles
     /// against the bucket head.
@@ -290,6 +295,10 @@ pub(super) struct State {
     epoch_counter: AtomicU64,
     /// Incoming and recently accepted bucket-backed migrations on this target under one lock.
     bucket_migrations: Mutex<BucketMigrations>,
+    /// Test-only one-shot errno injected into `take_over_bucket`'s `open_here` after rename
+    /// (board 11655).
+    #[cfg(test)]
+    fail_bucket_open_once: Mutex<Option<Errno>>,
 }
 
 impl State {
@@ -301,12 +310,15 @@ impl State {
         Self {
             outgoing: Mutex::new(BTreeMap::new()),
             taking: Mutex::new(HashMap::new()),
+            prep_seq: AtomicU64::new(0),
             heard: Mutex::new(HashMap::new()),
-            prepared: Mutex::new(BTreeSet::new()),
+            prepared: Mutex::new(BTreeMap::new()),
             staging: Mutex::new(HashMap::new()),
             boot_incarnation: rand::random::<u64>() | 1,
             epoch_counter: AtomicU64::new(seed),
             bucket_migrations: Mutex::new(BucketMigrations::default()),
+            #[cfg(test)]
+            fail_bucket_open_once: Mutex::new(None),
         }
     }
 
@@ -1914,6 +1926,13 @@ pub(super) mod target {
         daemon.migrations.staging.lock().unwrap().remove(&migration);
     }
 
+    /// cladefs: allocates the next monotonic `prep_seq` stamp with Release ordering so any
+    /// prior `host.note` or `bucket_migrations.receiving.insert` is visible to a `reap_idle` that
+    /// loaded a cutoff >= this stamp (board 11653).
+    fn next_prep_seq(daemon: &Daemon) -> u64 {
+        daemon.migrations.prep_seq.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
     /// cladefs: migration `migration`'s staging directory at `staged`, open: the one open, or
     /// opened now, counted as its files are written.
     fn staging_dir(
@@ -1922,11 +1941,12 @@ pub(super) mod target {
         staged: &Path,
     ) -> std::io::Result<local_cell::HostDir> {
         let mut open = daemon.migrations.staging.lock().unwrap();
-        if let Some(dir) = open.get(&migration) {
+        if let Some((_, dir)) = open.get(&migration) {
             return Ok(dir.clone());
         }
         let dir = local_cell::HostDir::new_on(daemon.host.local(), staged)?;
-        open.insert(migration, dir.clone());
+        let seq = next_prep_seq(daemon);
+        open.insert(migration, (seq, dir.clone()));
         Ok(dir)
     }
 
@@ -1988,7 +2008,7 @@ pub(super) mod target {
         else {
             return Ok(None);
         };
-        if !daemon.migrations.prepared.lock().unwrap().contains(&migration) {
+        if !daemon.migrations.prepared.lock().unwrap().contains_key(&migration) {
             log::warn!("cladefsd: migration {migration:x} prepared by a daemon before: given up");
             refuse(daemon, host, &entry).await?;
             return Ok(None);
@@ -2027,9 +2047,10 @@ pub(super) mod target {
         })
     }
 
-    /// Notes migration `migration` heard of now (board 5734).
+    /// Notes migration `migration` heard of now (board 5734, board 11653).
     fn heard(daemon: &Daemon, migration: u64) {
-        daemon.migrations.heard.lock().unwrap().insert(migration, Instant::now());
+        let seq = next_prep_seq(daemon);
+        daemon.migrations.heard.lock().unwrap().insert(migration, (seq, Instant::now()));
     }
 
     /// Runs `work`, a request's, to its end however its asker goes: a request cancelled leaves
@@ -2453,7 +2474,7 @@ pub(super) mod target {
             )));
         }
         let found = entries.into_iter().find(|found| found.child == child);
-        let prepared = |id: &u64| daemon.migrations.prepared.lock().unwrap().contains(id);
+        let prepared = |id: &u64| daemon.migrations.prepared.lock().unwrap().contains_key(id);
         let mut superseded = None;
         let token = match found.as_ref().map(|found| (found, &found.migrating)) {
             None => None,
@@ -2562,7 +2583,8 @@ pub(super) mod target {
             refuse(&daemon, &host, &entry).await?;
             return Err(status("staging", err));
         }
-        daemon.migrations.prepared.lock().unwrap().insert(migration);
+        let seq = next_prep_seq(&daemon);
+        daemon.migrations.prepared.lock().unwrap().insert(migration, seq);
         log::info!(
             "cladefsd: migration {migration:x} of {child} prepared, to {}",
             entry.path.display()
@@ -2702,7 +2724,8 @@ pub(super) mod target {
             before_head: None,
         };
         daemon.migrations.bucket_migrations.lock().unwrap().receiving.insert(migration, record);
-        daemon.migrations.prepared.lock().unwrap().insert(migration);
+        let seq = next_prep_seq(&daemon);
+        daemon.migrations.prepared.lock().unwrap().insert(migration, seq);
         heard(&daemon, migration);
         log::info!(
             "cladefsd: bucket-backed migration {migration:x} of {child} prepared, to {}",
@@ -3352,9 +3375,18 @@ pub(super) mod target {
         crate::faults::crashpoint!("migration::renamed");
         // Take ownership in the bucket (head CAS fencing the source) and immediately cut short
         // and close so no bucket data uploads block the pause.
-        match tokio::time::timeout(BUCKET_BOUND, super::super::cells::open_here(&daemon, &into))
-            .await
-        {
+        #[cfg(test)]
+        let injected_open_err = daemon.migrations.fail_bucket_open_once.lock().unwrap().take();
+        #[cfg(not(test))]
+        let injected_open_err: Option<Errno> = None;
+        let open_result = match injected_open_err {
+            Some(errno) => Ok(Err(errno)),
+            None => {
+                tokio::time::timeout(BUCKET_BOUND, super::super::cells::open_here(&daemon, &into))
+                    .await
+            }
+        };
+        match open_result {
             Ok(Ok(open_cell)) => {
                 if let Some(cut) = open_cell.cut_short() {
                     cut();
@@ -3507,6 +3539,136 @@ pub(super) mod target {
         Ok(())
     }
 
+    /// Reconciles a bucket-backed migration whose directory was already renamed into place
+    /// (`receiving.moved == true`) when `give_up` or `reap_idle` runs (board 11655).
+    ///
+    /// Preserves fail-closed hand-over safety:
+    /// - If the bucket is unreachable, returns `Err(UNAVAILABLE)` and leaves `into` / `receiving`
+    ///   intact for a later retry.
+    /// - If the bucket head still matches `receiving.before_head`, our `open_here` CAS never
+    ///   landed: drops `into`, removes `receiving`, and returns `Ok(false)`.
+    /// - Otherwise retries `open_here`: if it succeeds, cuts short, closes, registers `into`,
+    ///   records `accepted`, and returns `Ok(true)`; if it fails with a deterministic refusal while
+    ///   the bucket head moved past `before_head`, drops the fenced `into`, removes `receiving`,
+    ///   and returns `Ok(false)`; on any transient error/timeout, fails closed with `Err`.
+    async fn reconcile_moved_bucket(
+        daemon: &Arc<Daemon>,
+        receiving: &BucketReceiving,
+    ) -> Result<bool, Status> {
+        let migration = receiving.migration;
+        let into = receiving.path.clone();
+        let bucket = crate::host_cell::bucket_on(&daemon.host, &receiving.bucket)
+            .map_err(|err| status("its bucket", err))?;
+        let head_identity = |head: Option<&bucket_cell::layout::Head>| {
+            head.map(|h| (h.epoch, h.token, h.holder, h.swaps))
+        };
+        let hold = super::super::cells::hold_cell_alone(daemon, &into).await.map_err(|errno| {
+            Status::unavailable(format!("holding migrated cell {}: {errno}", into.display()))
+        })?;
+        let after_head = match tokio::time::timeout(
+            BUCKET_BOUND,
+            bucket_cell::head::get(&*bucket, receiving.child),
+        )
+        .await
+        {
+            Ok(Ok(head)) => head_identity(head.as_ref()),
+            Ok(Err(err)) => {
+                drop(hold);
+                return Err(Status::unavailable(format!(
+                    "reading {}'s bucket head: {err}",
+                    receiving.child
+                )));
+            }
+            Err(_elapsed) => {
+                drop(hold);
+                return Err(Status::unavailable(format!(
+                    "reading {}'s bucket head timed out",
+                    receiving.child
+                )));
+            }
+        };
+        if receiving.before_head.is_some_and(|before| after_head == before) {
+            log::warn!(
+                "cladefsd: reconciling moved bucket-backed migration {migration:x} of {}: \
+                 bucket head unchanged; dropping {}",
+                receiving.child,
+                into.display()
+            );
+            let local = Arc::clone(daemon.host.local());
+            let remove = into.clone();
+            let removed = local_cell::upload::blocking(|| drop_staged(&local, &remove));
+            drop(hold);
+            if let Err(err) = removed {
+                return Err(status("dropping unreconciled cell", err));
+            }
+            refuse_bucket(daemon, receiving);
+            return Ok(false);
+        }
+        match tokio::time::timeout(BUCKET_BOUND, super::super::cells::open_here(daemon, &into))
+            .await
+        {
+            Ok(Ok(open_cell)) => {
+                if let Some(cut) = open_cell.cut_short() {
+                    cut();
+                }
+                open_cell.close().await;
+                drop(hold);
+                if let Some(pool) = daemon.disk_pool() {
+                    pool.register_cell(receiving.child, into);
+                }
+                {
+                    let mut state = daemon.migrations.bucket_migrations.lock().unwrap();
+                    state.receiving.remove(&migration);
+                    state.accepted.insert(migration, tokio::time::Instant::now());
+                }
+                forget(daemon, migration);
+                Ok(true)
+            }
+            Ok(Err(errno)) => {
+                let fenced_refusal = matches!(
+                    errno,
+                    Errno::ESTALE
+                        | Errno::ENOENT
+                        | Errno::EACCES
+                        | Errno::EPERM
+                        | Errno::EINVAL
+                        | Errno::ENOTSUP
+                );
+                if fenced_refusal
+                    && receiving.before_head.is_some_and(|before| after_head != before)
+                {
+                    log::warn!(
+                        "cladefsd: reconciling moved bucket-backed migration {migration:x} of {}: \
+                         bucket head advanced and open_here refused ({errno}); dropping {}",
+                        receiving.child,
+                        into.display()
+                    );
+                    let local = Arc::clone(daemon.host.local());
+                    let remove = into.clone();
+                    let removed = local_cell::upload::blocking(|| drop_staged(&local, &remove));
+                    drop(hold);
+                    if let Err(err) = removed {
+                        return Err(status("dropping fenced migrated cell", err));
+                    }
+                    refuse_bucket(daemon, receiving);
+                    return Ok(false);
+                }
+                drop(hold);
+                Err(Status::unavailable(format!(
+                    "reconciling migrated cell {}: {errno}",
+                    into.display()
+                )))
+            }
+            Err(_elapsed) => {
+                drop(hold);
+                Err(Status::unavailable(format!(
+                    "reconciling migrated cell {} timed out",
+                    into.display()
+                )))
+            }
+        }
+    }
+
     /// Drops a staged bucket-backed migration and forgets its target state.
     fn refuse_bucket(daemon: &Daemon, receiving: &BucketReceiving) {
         let migration = receiving.migration;
@@ -3558,9 +3720,13 @@ pub(super) mod target {
                 state.receiving.get(&migration).cloned()
             };
             if let Some(receiving) = receiving {
-                // Once renamed into place (`moved == true`), never drop `into` on abort: the
-                // bucket head CAS may have landed, so `HandOverCell` must finish or reconcile it.
+                // Once renamed into place (`moved == true`), reconcile against the bucket head
+                // before dropping `into` so we neither lose a landed CAS nor permanently wedge the
+                // cell/path (board 11655).
                 if receiving.moved {
+                    if !reconcile_moved_bucket(&daemon, &receiving).await? {
+                        count(&COUNTS.taken_given_up, 1);
+                    }
                     return Ok(());
                 }
                 refuse_bucket(&daemon, &receiving);
@@ -3677,6 +3843,22 @@ pub(super) mod target {
     }
 
     async fn reap_idle(daemon: &Arc<Daemon>, idle: Duration) -> Result<(), Status> {
+        reap_idle_with_hook(daemon, idle, || std::future::ready(())).await
+    }
+
+    async fn reap_idle_with_hook<F, Fut>(
+        daemon: &Arc<Daemon>,
+        idle: Duration,
+        before_retain: F,
+    ) -> Result<(), Status>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        // Capture `prep_seq` BEFORE snapshotting active ephemeral/bucket migrations so any
+        // migration inserted concurrently into `prepared`/`staging`/`heard` gets a sequence
+        // strictly greater than `cutoff` and can never be pruned by this pass (board 11653).
+        let cutoff = daemon.migrations.prep_seq.load(Ordering::Acquire);
         // `ENOTSUP` when `CLADEFSD_EPHEMERAL` is unset: still reap idle bucket-backed migrations.
         let ephemeral_host = ephemeral_host::host_on(&daemon.host).ok();
         let ephemeral_taken: Vec<u64> = match &ephemeral_host {
@@ -3688,7 +3870,7 @@ pub(super) mod target {
                 .collect(),
             None => Vec::new(),
         };
-        let (bucket_all, bucket_reapable): (Vec<u64>, Vec<u64>) = {
+        let bucket_all: Vec<u64> = {
             let mut state = daemon.migrations.bucket_migrations.lock().unwrap();
             // Bound `accepted` memory if a source drops `MigrateRelease` (board 11530). Once any
             // entry is evicted, unknown migrations answer `FAILED_PRECONDITION` instead of
@@ -3699,41 +3881,46 @@ pub(super) mod target {
             if state.accepted.len() < before {
                 state.evicted = true;
             }
-            let all = state.receiving.keys().copied().collect();
-            let reapable =
-                state.receiving.values().filter(|r| !r.moved).map(|r| r.migration).collect();
-            (all, reapable)
+            state.receiving.keys().copied().collect()
         };
         let all_taken: HashSet<u64> =
             ephemeral_taken.iter().copied().chain(bucket_all.iter().copied()).collect();
-        // cladefs: what is kept of migrations being taken no more (board 8451, board 11369).
+        before_retain().await;
+        // cladefs: what is kept of migrations being taken no more (board 8451, board 11369,
+        // board 11653). Entries stamped after `cutoff` were prepared concurrently and must stay.
         daemon
             .migrations
             .prepared
             .lock()
             .unwrap()
-            .retain(|migration| all_taken.contains(migration));
+            .retain(|migration, seq| *seq > cutoff || all_taken.contains(migration));
         daemon
             .migrations
             .staging
             .lock()
             .unwrap()
-            .retain(|migration, _| all_taken.contains(migration));
+            .retain(|migration, (seq, _)| *seq > cutoff || all_taken.contains(migration));
         let (ephemeral_idle, bucket_idle): (Vec<u64>, Vec<u64>) = {
             let mut heard = daemon.migrations.heard.lock().unwrap();
-            heard.retain(|migration, _| all_taken.contains(migration));
+            heard.retain(|migration, (seq, _)| *seq > cutoff || all_taken.contains(migration));
             let now = tokio::time::Instant::now();
-            let mut quiet = |migration: &u64| now - *heard.entry(*migration).or_insert(now) >= idle;
+            let mut quiet = |migration: &u64| {
+                let (_, last) = heard.entry(*migration).or_insert_with(|| {
+                    let seq = next_prep_seq(daemon);
+                    (seq, now)
+                });
+                now - *last >= idle
+            };
             (
                 ephemeral_taken.into_iter().filter(|m| quiet(m)).collect(),
-                bucket_reapable.into_iter().filter(|m| quiet(m)).collect(),
+                bucket_all.into_iter().filter(|m| quiet(m)).collect(),
             )
         };
         if let Some(host) = &ephemeral_host {
             for migration in ephemeral_idle {
                 let Some((_taking, entry)) = held(daemon, host, migration).await? else { continue };
                 // Heard of while this waited its turn.
-                let last = daemon.migrations.heard.lock().unwrap().get(&migration).copied();
+                let last = daemon.migrations.heard.lock().unwrap().get(&migration).map(|(_, t)| *t);
                 if last.is_some_and(|last| last.elapsed() < idle) {
                     continue;
                 }
@@ -3753,7 +3940,6 @@ pub(super) mod target {
                 .unwrap()
                 .receiving
                 .get(&migration)
-                .filter(|r| !r.moved)
                 .map(|r| r.child)
             else {
                 continue;
@@ -3766,13 +3952,37 @@ pub(super) mod target {
                 .unwrap()
                 .receiving
                 .get(&migration)
-                .filter(|r| !r.moved)
                 .cloned()
             else {
                 continue;
             };
-            let last = daemon.migrations.heard.lock().unwrap().get(&migration).copied();
+            let last = daemon.migrations.heard.lock().unwrap().get(&migration).map(|(_, t)| *t);
             if last.is_some_and(|last| last.elapsed() < idle) {
+                continue;
+            }
+            if receiving.moved {
+                // Reconcile idle post-rename bucket migrations against the bucket head so a
+                // non-refusal `open_here` failure cannot permanently wedge the cell/path
+                // (board 11655).
+                match reconcile_moved_bucket(daemon, &receiving).await {
+                    Ok(true) => {
+                        log::info!(
+                            "cladefsd: idle moved bucket-backed migration {migration:x} of {} \
+                             reconciled as accepted",
+                            receiving.child
+                        );
+                    }
+                    Ok(false) => {
+                        count(&COUNTS.taken_given_up, 1);
+                    }
+                    Err(err) => {
+                        log::warn!(
+                            "cladefsd: reconciling idle moved bucket-backed migration {migration:x} \
+                             of {} failed: {err}; will retry",
+                            receiving.child
+                        );
+                    }
+                }
                 continue;
             }
             log::warn!(
@@ -4693,7 +4903,7 @@ pub(super) mod target {
             assert!(failed.is_err(), "prepare must fail when staging directory cannot be created");
             assert_eq!(host.entries().unwrap(), vec![], "failed prepare rolled back journal entry");
             assert!(
-                !daemon.migrations.prepared.lock().unwrap().contains(&migration),
+                !daemon.migrations.prepared.lock().unwrap().contains_key(&migration),
                 "failed prepare must not be marked prepared"
             );
 
@@ -4751,7 +4961,244 @@ pub(super) mod target {
             assert_eq!(incarnation, host.incarnation());
             assert_ne!(token, 0x99, "replay of un-prepared entry must prepare afresh");
             assert!(staged.is_dir(), "replayed prepare created staging directory");
-            assert!(daemon.migrations.prepared.lock().unwrap().contains(&migration));
+            assert!(daemon.migrations.prepared.lock().unwrap().contains_key(&migration));
+        }
+
+        /// board 11653: `reap_idle` must not prune an ephemeral or bucket-backed migration that
+        /// was prepared concurrently between snapshotting active entries and retaining
+        /// `prepared`/`staging`/`heard`, while still pruning genuinely stale entries.
+        #[test]
+        fn reap_idle_does_not_prune_concurrently_prepared_migrations() {
+            let daemon = Daemon::new();
+            let dir = tempfile::tempdir().unwrap();
+            let (host, root) = target_host(&daemon, dir.path());
+            let runtime =
+                tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+
+            // Plant a genuinely stale entry from before `reap_idle` starts.
+            let stale_id = 0xdead_beef;
+            let stale_seq = next_prep_seq(&daemon);
+            daemon.migrations.prepared.lock().unwrap().insert(stale_id, stale_seq);
+            daemon.migrations.heard.lock().unwrap().insert(stale_id, (stale_seq, Instant::now()));
+
+            let eph_id = 0x11653_e;
+            let eph_cell = root.join("vm-eph");
+            let bkt_id = 0x11653_b;
+            let bkt_cell = root.join("vm-bkt");
+
+            runtime.block_on(async {
+                reap_idle_with_hook(&daemon, Duration::from_secs(60), || {
+                    let daemon = Arc::clone(&daemon);
+                    let eph_cell = eph_cell.clone();
+                    let bkt_cell = bkt_cell.clone();
+                    async move {
+                        prepare(&daemon, prepare_of(eph_id, &eph_cell)).await.unwrap();
+                        prepare(
+                            &daemon,
+                            MigratePrepareRequest {
+                                cell: 8,
+                                bucket_backed: true,
+                                ..prepare_of(bkt_id, &bkt_cell)
+                            },
+                        )
+                        .await
+                        .unwrap();
+                        let staged_eph = staging(&eph_cell, eph_id);
+                        local_cell::upload::blocking(|| staging_dir(&daemon, eph_id, &staged_eph))
+                            .unwrap();
+                    }
+                })
+                .await
+                .unwrap();
+
+                assert!(
+                    !daemon.migrations.prepared.lock().unwrap().contains_key(&stale_id),
+                    "stale entry from before cutoff must still be pruned"
+                );
+                assert!(
+                    !daemon.migrations.heard.lock().unwrap().contains_key(&stale_id),
+                    "stale heard entry from before cutoff must still be pruned"
+                );
+                assert!(
+                    daemon.migrations.prepared.lock().unwrap().contains_key(&eph_id),
+                    "concurrently prepared ephemeral migration must not be pruned"
+                );
+                assert!(
+                    daemon.migrations.staging.lock().unwrap().contains_key(&eph_id),
+                    "concurrently opened staging dir must not be pruned"
+                );
+                assert!(
+                    daemon.migrations.heard.lock().unwrap().contains_key(&eph_id),
+                    "concurrently prepared ephemeral heard entry must not be pruned"
+                );
+                assert!(
+                    daemon.migrations.prepared.lock().unwrap().contains_key(&bkt_id),
+                    "concurrently prepared bucket migration must not be pruned"
+                );
+                assert!(
+                    daemon.migrations.heard.lock().unwrap().contains_key(&bkt_id),
+                    "concurrently prepared bucket heard entry must not be pruned"
+                );
+                // Ephemeral `held()` must still accept the migration rather than refusing it.
+                assert!(
+                    held(&daemon, &host, eph_id).await.unwrap().is_some(),
+                    "concurrently prepared ephemeral migration must remain held, not refused"
+                );
+            });
+        }
+
+        /// board 11655: a post-rename non-refusal `open_here` failure in `take_over_bucket`
+        /// leaves `moved = true` for immediate retry, and subsequently reconciles cleanly via both
+        /// `abort` (`give_up`) and `reap_idle` when the bucket head did not advance—removing
+        /// `into` and `receiving` so a new migration for the same cell/path succeeds without
+        /// restarting the daemon.
+        #[test]
+        fn post_rename_non_refusal_open_here_failure_reconciles_without_wedging() {
+            crate::bucket::testing::encrypted();
+            let daemon = Daemon::new();
+            let dir = tempfile::tempdir().unwrap();
+            let root = host_fs::canonicalize(dir.path()).unwrap();
+            let bucket_url = "memory:///bucket-11655";
+            // SAFETY: nextest runs each test in its own process; no other threads read env here.
+            unsafe {
+                std::env::set_var("CLADEFSD_BUCKET", bucket_url);
+                std::env::set_var("CLADEFSD_TOKEN", "1");
+                std::env::set_var("CLADEFSD_ROOTS", &root);
+                std::env::remove_var("CLADEFSD_EPHEMERAL");
+                std::env::remove_var("CLADEFSD_EPHEMERAL_CELLS");
+            }
+            let runtime =
+                tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            let cell_id = CellId { tenant: 1, id: 77 };
+            let src_dir = root.join("src-cell");
+            runtime.block_on(async {
+                let created = crate::open_cell::Opening::here_on(daemon.host.clone())
+                    .unwrap()
+                    .guest(false)
+                    .create_kept(&src_dir, 1 << 24, crate::CellOf::Named(cell_id), bucket_url)
+                    .await
+                    .unwrap();
+                created.close().await;
+            });
+
+            // Helper that stages `src_dir`'s files into a prepared bucket-backed migration, fails
+            // `open_here` with a non-refusal `EIO` right after rename, and verifies `moved = true`.
+            let target_path = root.join("target-cell");
+            let stage_and_fail_open = |migration: u64, epoch: u64| {
+                let req = MigratePrepareRequest {
+                    cell: cell_id.id,
+                    bucket: bucket_url.into(),
+                    epoch,
+                    bucket_backed: true,
+                    ..prepare_of(migration, &target_path)
+                };
+                let (incarnation, token) = runtime.block_on(prepare(&daemon, req)).unwrap();
+                let mut manifest = Vec::new();
+                fn copy_tree(
+                    base: &Path,
+                    cur: &Path,
+                    migration: u64,
+                    daemon: &Arc<Daemon>,
+                    runtime: &tokio::runtime::Runtime,
+                    manifest: &mut Vec<FileDigest>,
+                ) {
+                    for entry in std::fs::read_dir(cur).unwrap() {
+                        let entry = entry.unwrap();
+                        let p = entry.path();
+                        if p.is_dir() {
+                            copy_tree(base, &p, migration, daemon, runtime, manifest);
+                        } else {
+                            let rel = p.strip_prefix(base).unwrap().to_string_lossy().into_owned();
+                            let bytes = std::fs::read(&p).unwrap();
+                            let len = bytes.len() as u64;
+                            runtime
+                                .block_on(file(
+                                    daemon,
+                                    MigrateFileRequest {
+                                        migration,
+                                        path: rel.clone(),
+                                        offset: 0,
+                                        bytes,
+                                        len,
+                                        holes: Vec::new(),
+                                    },
+                                ))
+                                .unwrap();
+                            manifest.push(FileDigest { path: rel, len, crc: None });
+                        }
+                    }
+                }
+                copy_tree(&src_dir, &src_dir, migration, &daemon, &runtime, &mut manifest);
+                *daemon.migrations.fail_bucket_open_once.lock().unwrap() = Some(Errno::EIO);
+                let err = runtime
+                    .block_on(hand_over(
+                        &daemon,
+                        MigrateHandOverRequest {
+                            migration,
+                            incarnation,
+                            files: manifest,
+                            token,
+                            placement_token: None,
+                            bucket_backed: true,
+                        },
+                    ))
+                    .unwrap_err();
+                assert_eq!(err.code(), tonic::Code::Unavailable);
+                assert!(target_path.is_dir(), "rename into place must have happened");
+                assert!(
+                    daemon
+                        .migrations
+                        .bucket_migrations
+                        .lock()
+                        .unwrap()
+                        .receiving
+                        .get(&migration)
+                        .is_some_and(|r| r.moved),
+                    "entry must be marked moved after post-rename EIO"
+                );
+            };
+
+            // 1. Reconcile via `abort` (`give_up`): bucket head unchanged -> unwedged.
+            stage_and_fail_open(0x11655_1, 1);
+            runtime.block_on(abort(&daemon, MigrateAbortRequest { migration: 0x11655_1 })).unwrap();
+            assert!(!target_path.exists(), "abort must drop unreconciled moved dir");
+            assert!(
+                !daemon
+                    .migrations
+                    .bucket_migrations
+                    .lock()
+                    .unwrap()
+                    .receiving
+                    .contains_key(&0x11655_1),
+                "abort must remove reconciled moved entry"
+            );
+
+            // 2. Re-preparing the same cell/path succeeds immediately, and `reap_idle` reconciles
+            // an idle post-rename non-refusal failure without wedging.
+            stage_and_fail_open(0x11655_2, 2);
+            runtime.block_on(reap_idle(&daemon, Duration::ZERO)).unwrap();
+            assert!(!target_path.exists(), "reap_idle must drop unreconciled moved dir");
+            assert!(
+                !daemon
+                    .migrations
+                    .bucket_migrations
+                    .lock()
+                    .unwrap()
+                    .receiving
+                    .contains_key(&0x11655_2),
+                "reap_idle must remove reconciled moved entry"
+            );
+
+            // 3. A third prepare for the same cell/path succeeds on the same daemon without restart.
+            let fresh = MigratePrepareRequest {
+                cell: cell_id.id,
+                bucket: bucket_url.into(),
+                epoch: 3,
+                bucket_backed: true,
+                ..prepare_of(0x11655_3, &target_path)
+            };
+            runtime.block_on(prepare(&daemon, fresh)).unwrap();
+            runtime.block_on(abort(&daemon, MigrateAbortRequest { migration: 0x11655_3 })).unwrap();
         }
     }
 }
