@@ -1558,7 +1558,13 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     /// Why uploading stopped, if it did.
     pub(crate) fn failed(&self) -> Option<Failure> {
         let failed = self.progress().failed.clone();
-        failed.or_else(|| self.fast_wal_sink.get().and_then(|sink| sink.failed()))
+        failed.or_else(|| self.fast_wal_sink.get().and_then(|sink| sink.failed())).or_else(|| {
+            self.cell
+                .get()
+                .and_then(|cell| cell.replicator())
+                .and_then(|replicator| replicator.fenced())
+                .map(|_| Failure::Bucket(bucket_cell::Error::Fenced))
+        })
     }
 
     /// The cell's writer, once one took it.
@@ -1665,7 +1671,13 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             Waiting::Told(replicator, epoch) if replicator.told(progress.uploaded) >= *epoch => {
                 Some(Ok(()))
             }
-            Waiting::Told(..) => progress.failed.clone().map(Err),
+            Waiting::Told(replicator, _) => progress
+                .failed
+                .clone()
+                .or_else(|| {
+                    replicator.fenced().map(|_| Failure::Bucket(bucket_cell::Error::Fenced))
+                })
+                .map(Err),
             Waiting::FastWal(sink, epoch)
                 if sink.durable().max(sink.head_acked()).max(progress.uploaded) >= *epoch =>
             {

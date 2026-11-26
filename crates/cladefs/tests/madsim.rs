@@ -616,7 +616,13 @@ async fn take(host: u8, cell: u64, token: u64, force: bool) {
             Ok(_) => return,
             Err(status) if status.code() == tonic::Code::AlreadyExists => {
                 // Drop stale local copy from an earlier round on this host before re-taking.
-                let _ = daemon.drop_cell(DropCellRequest { tenant: 0, cell }).await;
+                if let Err(err) = daemon.drop_cell(DropCellRequest { tenant: 0, cell }).await {
+                    eprintln!(
+                        "host {host} dropping stale cell {cell}: {:?} {}",
+                        err.code(),
+                        err.message()
+                    );
+                }
                 madsim::time::sleep(Duration::from_millis(200)).await;
             }
             Err(status) => {

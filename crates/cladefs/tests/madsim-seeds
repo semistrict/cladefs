@@ -31,3 +31,4 @@
 109     board 6032: ephemeral disk-faults profile host 3 never answered under live-migration disk faults
 199     board 6032: ephemeral disk-faults profile cell noted on every host under live-migration disk faults
 1795627792743012262 board 12293: a host's crash tore its part cache's .disk-id, written unsynced, and its reboot refused the cache on the bytes (invalid utf-8), its daemon never booting: red at eebea4edf, fixed by board 12102 (Linux)
+1795700008  board 13821: replicated writer fenced by member kept waiting in Waiting::Told instead of failing EROFS, leaving zombie open and blocking drop_cell/take
