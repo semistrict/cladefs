@@ -2501,7 +2501,6 @@ impl Connection {
 
     /// How many of its requests it received and has not answered.
     #[cfg(test)]
-    #[cfg(target_os = "linux")]
     pub(super) fn unanswered(&self) -> usize {
         self.requests.with(Mutex::lock).in_flight()
     }
