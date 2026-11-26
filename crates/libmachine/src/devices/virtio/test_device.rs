@@ -4,9 +4,10 @@
 
 //! A virtio device for tests: type 0x4658 (cladefs's extent device's, past
 //! 63), a 16-byte device configuration, a shared memory region, two queues
-//! it never uses.
+//! it never uses; it counts its activations.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use vm_memory::{GuestMemoryMmap, MmapRegion};
 
@@ -19,12 +20,18 @@ pub(crate) const TEST_CONFIG: &[u8; 16] = b"libmachine-test!";
 pub(crate) struct TestDevice {
     config: [u8; 16],
     shm: Vec<ShmRegion>,
+    /// How many times the driver activated it.
+    pub(crate) activations: Arc<AtomicUsize>,
 }
 
 impl TestDevice {
     /// The device, with `shm` as its shared memory region 0.
     pub(crate) fn new(shm: Arc<MmapRegion>) -> Self {
-        Self { config: *TEST_CONFIG, shm: vec![ShmRegion { id: 0, memory: shm }] }
+        Self {
+            config: *TEST_CONFIG,
+            shm: vec![ShmRegion { id: 0, memory: shm }],
+            activations: Arc::default(),
+        }
     }
 }
 
@@ -57,6 +64,10 @@ impl VirtioDevice for TestDevice {
 
     fn shm_regions(&self) -> &[ShmRegion] {
         &self.shm
+    }
+
+    fn activate(&mut self, _features: u64) {
+        self.activations.fetch_add(1, Ordering::Relaxed);
     }
 
     fn process_queue(&mut self, _: usize, _: &mut [DeviceQueue], _: &GuestMemoryMmap) {}

@@ -274,6 +274,14 @@ impl Msix {
         }
     }
 
+    /// Vector `v`'s eventfd, for a device whose own threads interrupt the guest
+    /// (`VirtioDevice::serves_its_queues`): a signal on it is a [`trigger`](Self::trigger) that
+    /// needs no access to this table, delivered once the vector is deliverable, pending until
+    /// then. None for an out-of-range vector.
+    pub(crate) fn vector_event(&self, v: u16) -> Option<std::io::Result<EventFd>> {
+        self.vectors.get(usize::from(v)).map(|vector| vector.irqfd.try_clone())
+    }
+
     fn deliverable(&self, v: usize) -> bool {
         self.enabled && !self.function_mask && !self.entries[v].masked()
     }

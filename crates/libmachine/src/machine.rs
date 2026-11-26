@@ -50,6 +50,14 @@ pub struct MachineConfig {
     /// set with [`Machine::set_console`] still sees every byte). Bounds the
     /// memory a chatty guest costs the host.
     pub serial_capture_limit: usize,
+    /// cladefs's extent daemon, which this process's machines share ([`crate::extent`]): the
+    /// one every device of [`extent_stores`](MachineConfig::extent_stores) opens its cell on.
+    pub extent_daemon: Option<Arc<crate::ExtentDaemon>>,
+    /// The machine's extent store devices (PC machines on KVM, [`Machine::boot_linux`]): a
+    /// virtio-PCI device each, with a request queue per vCPU, its cell opened on
+    /// [`extent_daemon`](MachineConfig::extent_daemon) as the machine is made. A machine with any
+    /// is neither snapshotted nor suspended, nor restored (board 13139).
+    pub extent_stores: Vec<crate::ExtentStore>,
 }
 
 impl MachineConfig {
@@ -70,6 +78,8 @@ impl Default for MachineConfig {
             vcpus: 1,
             network: None,
             serial_capture_limit: Self::DEFAULT_SERIAL_CAPTURE_LIMIT,
+            extent_daemon: None,
+            extent_stores: Vec::new(),
         }
     }
 }
@@ -246,16 +256,23 @@ impl Live {
     ) -> Result<Self> {
         let vm = Arc::new(vm);
         let bus = Arc::new(bus);
-        let runners = vcpus
-            .into_iter()
-            .zip(exits)
-            .map(|(vcpu, exits)| MachineVcpu {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        let windows = vm.maps_dax_windows().then(|| vm.memory_fault_info());
+        let mut runners = Vec::with_capacity(vcpus.len());
+        for (vcpu, exits) in vcpus.into_iter().zip(exits) {
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+            let index = runners.len() as u32;
+            runners.push(MachineVcpu {
                 vcpu,
                 bus: bus.clone(),
                 vm: vm.clone(),
                 exits: exits.clone(),
-            })
-            .collect();
+                #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+                accesses: windows.map(|memory_fault_info| {
+                    virtio_extent::vcpu::FailingAccesses::new(index, memory_fault_info)
+                }),
+            });
+        }
         Ok(Self { vcpus: Vcpus::spawn(runners, stop.clone())?, vm, pci: None, bus })
     }
 }
@@ -310,11 +327,34 @@ struct MachineVcpu {
     bus: Arc<Bus>,
     vm: Arc<backend::Vm>,
     exits: Arc<ExitCounters>,
+    /// Its accesses to an extent store device's DAX window failing as cladefs changes the
+    /// window's memory, which it retries, and gives up on as they keep failing: of a machine
+    /// with a window alone (`Vm::maps_dax_windows`). Without one, an access KVM fails is the
+    /// hypervisor's error.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    accesses: Option<virtio_extent::vcpu::FailingAccesses>,
 }
 
 impl VcpuLoop for MachineVcpu {
     fn kick_target(&mut self) -> crate::backend::kick::KickTarget {
         self.vcpu.kick_target()
+    }
+
+    // cladefs: this thread's faults on a DAX window that copies on write are the guest's own
+    // accesses, a store a store, unlike KVM's asynchronous page fault worker's (doc-13); until it
+    // exits, whose ID the kernel then reuses.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    fn thread_started(&mut self) {
+        if self.accesses.is_some() {
+            cladefs::guest_thread_started();
+        }
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    fn thread_ended(&mut self) {
+        if self.accesses.is_some() {
+            cladefs::guest_thread_ended();
+        }
     }
 
     fn run(&mut self, ctl: &RunControl<'_>) -> Option<Result<ExitReason>> {
@@ -342,6 +382,30 @@ impl MachineVcpu {
                 Err(e) => {
                     self.exits.count(ExitKind::Other);
                     return Some(Err(e));
+                }
+            };
+            // cladefs: an access KVM failed as cladefs changes a DAX window's memory is retried;
+            // one that keeps failing (refused for good: past the window's private_max) stops the
+            // machine, telling what it can of it (virtio_extent::vcpu).
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+            let exit = match exit {
+                backend::Exit::AccessFailed(fault) => {
+                    let Some(accesses) = &mut self.accesses else {
+                        self.exits.count(ExitKind::Other);
+                        let source = std::io::Error::from_raw_os_error(libc::EFAULT);
+                        return Some(Err(Error::Hypervisor { op: "run vCPU", source }));
+                    };
+                    self.exits.count(ExitKind::AccessRetried);
+                    match accesses.failed(fault) {
+                        Ok(()) => continue,
+                        Err(why) => return Some(Err(Error::ExtentStore(why))),
+                    }
+                }
+                exit => {
+                    if let Some(accesses) = &mut self.accesses {
+                        accesses.ran();
+                    }
+                    exit
                 }
             };
             match self.bus.handle(exit, &self.vm, &self.exits) {
@@ -384,6 +448,7 @@ impl PcDevices {
         extra: Vec<Box<dyn crate::devices::virtio::VirtioDevice>>,
         vsock: Option<crate::Vsock>,
         doorbell: Arc<Doorbell>,
+        bars: crate::devices::pci::BarAllocator,
     ) -> Result<Self> {
         use crate::arch::x86_64::layout;
         use crate::devices::virtio::net::NetDevice;
@@ -407,7 +472,7 @@ impl PcDevices {
             None => {}
         }
         all.extend(extra);
-        let pci = Arc::new(crate::devices::Pci::new(all, vm.guest_memory(), vm, &doorbell)?);
+        let pci = Arc::new(crate::devices::Pci::new(all, vm.guest_memory(), vm, &doorbell, bars)?);
         Ok(Self { uart_irq, vsock, pci, doorbell })
     }
 }
@@ -462,6 +527,65 @@ fn check_vcpus(vcpus: u32) -> Result<()> {
     Ok(())
 }
 
+/// The extent store devices of `config`'s ([`MachineConfig::extent_stores`]), on `vm`, with a
+/// request queue per vCPU, their DAX windows' BARs from `bars`, stopping the machine through
+/// `stop` as one can't go on.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn extent_devices(
+    config: &MachineConfig,
+    vm: &backend::Vm,
+    bars: &mut crate::devices::pci::BarAllocator,
+    stop: &Arc<StopShared>,
+) -> Result<Vec<Box<dyn crate::devices::virtio::VirtioDevice>>> {
+    use crate::devices::virtio::extent::{ExtentDevice, Failing};
+
+    if config.extent_stores.is_empty() {
+        return Ok(Vec::new());
+    }
+    let Some(daemon) = &config.extent_daemon else {
+        return Err(Error::InvalidConfig(
+            "extent store devices need an extent daemon: extent_daemon is None".into(),
+        ));
+    };
+    for (i, store) in config.extent_stores.iter().enumerate() {
+        if config.extent_stores[..i].iter().any(|other| other.id == store.id) {
+            return Err(Error::InvalidConfig(format!(
+                "two extent store devices are named {}",
+                store.id
+            )));
+        }
+    }
+    // KVM's prefault of the windows' pages, on a vCPU of its own after the guest's, if any
+    // device has a window and KVM can.
+    let windows = config.extent_stores.iter().any(|store| store.dax_window_size.is_some());
+    if windows {
+        vm.map_dax_windows();
+    }
+    let prefault: Option<Arc<dyn virtio_extent::PrefaultGuestMemory>> = match windows {
+        true => vm
+            .prefault_vcpu(config.vcpus)?
+            .map(|vcpu| Arc::new(virtio_extent::kvm::KvmPrefault::new(vcpu)) as _),
+        false => None,
+    };
+    let queues = u16::try_from(config.vcpus).expect("check_vcpus bounds them");
+    config
+        .extent_stores
+        .iter()
+        .map(|store| {
+            let device = ExtentDevice::new(
+                store,
+                daemon,
+                queues,
+                bars,
+                vm.memory_slots(),
+                prefault.clone(),
+                Failing::new(stop),
+            )?;
+            Ok(Box::new(device) as Box<dyn crate::devices::virtio::VirtioDevice>)
+        })
+        .collect()
+}
+
 /// The error for anything asked of a machine whose wake failed.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn lost(why: &str) -> Error {
@@ -479,6 +603,11 @@ impl Machine {
                 "a bare machine has no network card; network must be None".into(),
             ));
         }
+        if !config.extent_stores.is_empty() {
+            return Err(Error::InvalidConfig(
+                "a bare machine has no PCI bus; extent_stores must be empty".into(),
+            ));
+        }
         if config.vcpus != 1 {
             return Err(Error::InvalidConfig(format!(
                 "a bare machine has exactly one vCPU, got vcpus = {}",
@@ -494,20 +623,24 @@ impl Machine {
         )?;
         let output = serial::output(config.serial_capture_limit);
         let bus = Bus::bare(serial::new(IrqLine::None, output.clone()));
-        Self::assemble(vm, vcpus, bus, Platform::Bare, config.mem_size, Arc::default(), output)
+        let doorbell = Arc::<Doorbell>::default();
+        let stop = Arc::new(StopShared::with_doorbell(doorbell.clone()));
+        Self::assemble(vm, vcpus, bus, Platform::Bare, config.mem_size, stop, doorbell, output)
     }
 
-    /// The machine from its parts, with its vCPU threads started.
+    /// The machine from its parts, with its vCPU threads started, stopped through `stop`, whose
+    /// suspensions wait on `doorbell`.
+    #[allow(clippy::too_many_arguments)]
     fn assemble(
         vm: backend::Vm,
         vcpus: Vec<backend::Vcpu>,
         bus: Bus,
         platform: Platform,
         mem_size: usize,
+        stop: Arc<StopShared>,
         doorbell: Arc<Doorbell>,
         serial: serial::SharedOutput,
     ) -> Result<Self> {
-        let stop = Arc::new(StopShared::with_doorbell(doorbell.clone()));
         let exits: Vec<Arc<ExitCounters>> = vcpus.iter().map(|_| Arc::default()).collect();
         let live = Live::spawn(vm, vcpus, bus, &stop, &exits)?;
         Ok(Self::from_live(live, platform, mem_size, stop, exits, doorbell, serial))
@@ -642,12 +775,20 @@ impl Machine {
         let caller_devices = !devices.is_empty();
         let net_slot = NetSlot::default();
         let card = network.as_ref().map(|n| NetCard::New(n.shared(), net_slot.clone()));
-        let pc = PcDevices::new(&vm, card, devices, None, Arc::default())?;
+        let doorbell = Arc::<Doorbell>::default();
+        let stop = Arc::new(StopShared::with_doorbell(doorbell.clone()));
+        // The extent store devices first, before the caller's: their DAX windows' BARs before
+        // any transport's.
+        let mut bars = crate::devices::pci::BarAllocator::new();
+        let mut all = extent_devices(&config, &vm, &mut bars, &stop)?;
+        all.extend(devices);
+        let pc = PcDevices::new(&vm, card, all, None, doorbell, bars)?;
         let output = serial::output(config.serial_capture_limit);
         let serial = serial::new(IrqLine::EventFd(pc.uart_irq), output.clone());
         let bus = Bus::board(serial, pc.pci.clone());
+        let (mem_size, doorbell) = (config.mem_size, pc.doorbell);
         let mut machine =
-            Self::assemble(vm, vcpus, bus, Platform::Board, config.mem_size, pc.doorbell, output)?;
+            Self::assemble(vm, vcpus, bus, Platform::Board, mem_size, stop, doorbell, output)?;
         if let Body::Live(live) = &mut machine.body {
             live.pci = Some(pc.pci);
         }
@@ -680,6 +821,14 @@ impl Machine {
         if config.network.is_some() {
             return Err(Error::InvalidConfig(
                 "machines on Hypervisor.framework have no network yet; network must be None".into(),
+            ));
+        }
+        if !config.extent_stores.is_empty() {
+            return Err(Error::InvalidConfig(
+                "machines on Hypervisor.framework have no extent store devices yet, which wait \
+                 on cladefs's daemon and its client building on macOS (board 13471); \
+                 extent_stores must be empty"
+                    .into(),
             ));
         }
         let (vm, mut vcpus) = backend::Vm::new(
@@ -724,12 +873,23 @@ impl Machine {
         let (vsock_device, vsock) = VsockDevice::new(GUEST_CID)?;
         let devices: Vec<Box<dyn VirtioDevice>> = vec![Box::new(Rng), Box::new(vsock_device)];
         let doorbell: Arc<Doorbell> = Arc::default();
-        let pci = Arc::new(crate::devices::Pci::new(devices, vm.guest_memory(), &vm, &doorbell)?);
+        let bars = crate::devices::pci::BarAllocator::new();
+        let pci =
+            Arc::new(crate::devices::Pci::new(devices, vm.guest_memory(), &vm, &doorbell, bars)?);
         let output = serial::output(config.serial_capture_limit);
         let uart = IrqLine::Spi(vm.shared().clone(), layout::UART_SPI);
         let bus = Bus::board(serial::new(uart, output.clone()), pci.clone());
-        let mut machine =
-            Self::assemble(vm, vcpus, bus, Platform::Board, config.mem_size, doorbell, output)?;
+        let stop = Arc::new(StopShared::with_doorbell(doorbell.clone()));
+        let mut machine = Self::assemble(
+            vm,
+            vcpus,
+            bus,
+            Platform::Board,
+            config.mem_size,
+            stop,
+            doorbell,
+            output,
+        )?;
         machine.live_mut()?.pci = Some(pci);
         machine.vsock = Some(vsock);
         Ok(machine)
@@ -1088,6 +1248,9 @@ impl Machine {
             vcpus: self.vcpu_count,
             network: None,
             serial_capture_limit: 0,
+            // No machine with extent store devices is suspended.
+            extent_daemon: None,
+            extent_stores: Vec::new(),
         };
         let network = self.network.as_ref().map(|n| {
             NetCard::Adopt(
@@ -1179,6 +1342,11 @@ impl Machine {
 
         check_mem_size(config.mem_size)?;
         check_vcpus(config.vcpus)?;
+        if !config.extent_stores.is_empty() {
+            return Err(Error::Snapshot(
+                "machines with extent store devices are not restored yet (board 13139)".into(),
+            ));
+        }
         snapshot.check(&config, &layout::memory_layout(config.mem_size as u64))?;
         let doorbell = Arc::<Doorbell>::default();
         let stop = Arc::new(StopShared::with_doorbell(doorbell.clone()));
@@ -1250,7 +1418,8 @@ impl Machine {
         let vcpu_states =
             (0..n).map(|_| backend::VcpuState::decode(d)).collect::<Result<Vec<_>>>()?;
 
-        let pc = PcDevices::new(&vm, kept.network, Vec::new(), kept.vsock, kept.doorbell)?;
+        let bars = crate::devices::pci::BarAllocator::new();
+        let pc = PcDevices::new(&vm, kept.network, Vec::new(), kept.vsock, kept.doorbell, bars)?;
         let serial = serial::restore(d, IrqLine::EventFd(pc.uart_irq), kept.serial)?;
         // KVM's state first, so that what the devices do next (MSI routes,
         // irqfds, interrupts) lands on the restored interrupt controllers.

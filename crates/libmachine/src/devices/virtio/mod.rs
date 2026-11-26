@@ -5,6 +5,8 @@
 //! Virtio devices (virtio 1.2), all attached over the modern virtio-PCI
 //! transport (doc-30), and the thread that runs their queues.
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub(crate) mod extent;
 #[cfg(target_os = "linux")]
 pub(crate) mod net;
 pub(crate) mod pci;
@@ -38,6 +40,38 @@ pub(crate) struct ShmRegion {
     pub(crate) id: u8,
     /// The host memory; its size is a multiple of 4 KiB.
     pub(crate) memory: Arc<MmapRegion>,
+}
+
+/// A shared memory region a device placed in the guest's physical address space and maps there
+/// itself, rather than the transport ([`ShmRegion`]): the extent store device's DAX window,
+/// whose guest addresses it reserved and whose memory slot it adds, as cladefs maps the window's
+/// pages (`virtio_extent::WindowVm`). The transport puts BAR 2 there and describes the region,
+/// and never maps or moves it: a guest that moves the BAR moves no window, as on Firecracker,
+/// which relocates no BAR either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PlacedShm {
+    /// The region's ID, as the device type defines them.
+    pub(crate) id: u8,
+    /// Where the region starts: BAR 2's address, aligned to `bar_size`.
+    pub(crate) guest_addr: u64,
+    /// The region's length, a multiple of 4 KiB.
+    pub(crate) len: u64,
+    /// BAR 2's size: a power of two, `len` at least.
+    pub(crate) bar_size: u64,
+}
+
+/// What a device whose own threads serve its queues ([`VirtioDevice::serves_its_queues`]) is
+/// given as the driver activates it: the queues the driver set up, guest memory, each queue's
+/// notification event, and the eventfds of the MSI-X vectors the driver chose for each queue and
+/// for configuration changes, which interrupt the guest when signalled, from any thread, without
+/// the transport (whose lock a reset holds while the device's threads finish).
+pub(crate) struct OwnQueues<'a> {
+    pub(crate) queues: &'a [DeviceQueue],
+    pub(crate) mem: &'a GuestMemoryMmap,
+    pub(crate) notify: &'a [EventFd],
+    /// Each queue's vector's eventfd: none for a queue with no vector.
+    pub(crate) queue_vectors: Vec<Option<EventFd>>,
+    pub(crate) config_vector: Option<EventFd>,
 }
 
 /// A device's own state in a snapshot: what it keeps outside guest memory
@@ -88,8 +122,30 @@ pub(crate) trait VirtioDevice: Send {
     fn shm_regions(&self) -> &[ShmRegion] {
         &[]
     }
+    /// The shared memory region it placed and maps itself, if any ([`PlacedShm`]); a device has
+    /// it or [`shm_regions`](Self::shm_regions), not both.
+    fn placed_shm(&self) -> Option<PlacedShm> {
+        None
+    }
+    /// Whether threads of its own serve its queues, rather than the device thread through
+    /// [`process_queue`](Self::process_queue): the device thread then leaves its queues'
+    /// notification events alone, and the driver's DRIVER_OK reaches it as
+    /// [`activate_queues`](Self::activate_queues).
+    fn serves_its_queues(&self) -> bool {
+        false
+    }
     /// The driver set DRIVER_OK having accepted `features`.
     fn activate(&mut self, _features: u64) {}
+    /// The driver set DRIVER_OK having accepted `features`, for a device that
+    /// [serves its queues](Self::serves_its_queues): it starts serving `own`'s, copies of the
+    /// transport's, until the driver resets it. An error refuses the activation: the device
+    /// needs a reset (DEVICE_NEEDS_RESET); telling of it is the device's.
+    fn activate_queues(&mut self, _features: u64, _own: OwnQueues<'_>) -> crate::error::Result<()> {
+        Err(crate::error::Error::InvalidConfig(format!(
+            "virtio device type {:#x} does not serve its own queues",
+            self.device_type()
+        )))
+    }
     /// The driver reset the device.
     fn reset(&mut self) {}
     /// Takes what the driver made available on queue `index` (which is

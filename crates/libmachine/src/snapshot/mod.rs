@@ -318,7 +318,8 @@ impl Snapshot {
     }
 
     /// The configuration of the machine the snapshot was taken of (no
-    /// network: a networked machine is never snapshotted). Host-side
+    /// network, no extent store devices: a machine with either is never
+    /// snapshotted). Host-side
     /// settings the snapshot does not record, such as
     /// [`serial_capture_limit`](MachineConfig::serial_capture_limit), are
     /// the defaults; a restore may choose them freely.
@@ -329,6 +330,8 @@ impl Snapshot {
             vcpus: self.machine.vcpus,
             network: None,
             serial_capture_limit: MachineConfig::DEFAULT_SERIAL_CAPTURE_LIMIT,
+            extent_daemon: None,
+            extent_stores: Vec::new(),
         }
     }
 

@@ -200,6 +200,24 @@ class Network:
     def dns_ttl(self) -> int: ...
     def stats(self) -> dict[str, int]: ...
 
+class ExtentDaemon:
+    def __init__(self, socket: str | os.PathLike[str]) -> None: ...
+
+class ExtentStore:
+    def __init__(
+        self,
+        tag: str,
+        cell: str | os.PathLike[str],
+        capacity: int,
+        *,
+        dax_window_size: int | None = None,
+        dax_private_max_bytes: int | None = None,
+        cache: Literal["writeback", "unsafe"] = "writeback",
+        id: str | None = None,
+    ) -> None: ...
+    @property
+    def tag(self) -> str: ...
+
 class Machine:
     @staticmethod
     def boot_linux(
@@ -211,6 +229,8 @@ class Machine:
         cpu_model: Literal["host", "baseline"] = "host",
         vcpus: int = 1,
         network: EgressPolicy | NetworkConfig | None = None,
+        extent_daemon: ExtentDaemon | None = None,
+        extent_stores: list[ExtentStore] = ...,
     ) -> Machine: ...
     def __init__(
         self, *, mem_size: int = ..., cpu_model: Literal["host", "baseline"] = "host"

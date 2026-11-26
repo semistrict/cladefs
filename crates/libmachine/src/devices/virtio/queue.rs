@@ -126,6 +126,15 @@ impl DeviceQueue {
         self.avail_idx(mem) != Some(seen)
     }
 
+    /// A copy of the queue as it is, for a device whose own threads serve it
+    /// (`VirtioDevice::serves_its_queues`): the transport keeps its own, as the
+    /// driver set it up.
+    pub(crate) fn duplicate(&self) -> Self {
+        let queue =
+            Queue::try_from(self.queue.state()).expect("a queue's own state is a valid queue's");
+        Self { queue }
+    }
+
     // What the transport uses.
 
     /// How many buffers the device has put in the used ring.

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from libmachine import Machine
+from libmachine import ExtentDaemon, ExtentStore, Machine, MachineError
 
 GUEST = Path(os.environ.get("LIBMACHINE_GUEST_DIR", Path(__file__).parents[3] / "target" / "guest"))
 MARKER = b"libmachine-init: up "
@@ -124,3 +124,32 @@ def test_a_dropped_machine_takes_its_vcpu_threads_with_it():
         assert m.run(timeout=30).kind == "poweroff"
         del m
         assert vcpu_threads() == 0
+
+
+def test_extent_stores_need_an_extent_daemon(tmp_path):
+    store = ExtentStore("extents", tmp_path / "cell", 64 << 20)
+    with pytest.raises(
+        ValueError,
+        match="^invalid configuration: extent store devices need an extent daemon: extent_daemon is None$",
+    ):
+        Machine.boot_linux(GUEST / "vmlinux", GUEST / "initramfs.cpio", extent_stores=[store])
+
+
+def test_an_extent_daemon_not_there_fails_the_machine(tmp_path):
+    # The machine's devices connect to the daemon as it is made: one nobody listens at fails it,
+    # naming the device and the socket.
+    daemon = ExtentDaemon(tmp_path / "no-daemon.sock")
+    store = ExtentStore("extents", tmp_path / "cell", 64 << 20, dax_window_size=32 << 20, id="root")
+    with pytest.raises(MachineError) as e:
+        Machine.boot_linux(
+            GUEST / "vmlinux", GUEST / "initramfs.cpio", extent_daemon=daemon, extent_stores=[store]
+        )
+    assert str(e.value).startswith(
+        f"extent store device: root: connecting to the extent daemon: connecting to the extent "
+        f"daemon at {tmp_path / 'no-daemon.sock'}: "
+    ), str(e.value)
+
+
+def test_an_extent_store_cache_is_writeback_or_unsafe(tmp_path):
+    with pytest.raises(ValueError, match='^cache is "writeback" or "unsafe", not \'always\'$'):
+        ExtentStore("extents", tmp_path / "cell", 64 << 20, cache="always")

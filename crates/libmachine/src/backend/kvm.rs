@@ -76,6 +76,9 @@ pub(crate) struct Vm {
     msi_routes: Mutex<BTreeMap<u32, MsiMessage>>,
     /// The MSRs KVM saves (KVM_GET_MSR_INDEX_LIST), for snapshots.
     msr_indices: Vec<u32>,
+    /// Whether a device maps a DAX window into the guest ([`Vm::map_dax_windows`]), set before
+    /// the vCPUs' threads start, which then take part in the windows' accesses.
+    dax_windows: std::sync::atomic::AtomicBool,
 }
 
 /// Where a new VM's RAM comes from.
@@ -205,6 +208,7 @@ impl Vm {
             cpu_fingerprint,
             msi_routes: Mutex::default(),
             msr_indices,
+            dax_windows: std::sync::atomic::AtomicBool::new(false),
         };
         if let Some(boot) = vcpus.first_mut() {
             boot.set_real_mode_entry(0)?;
@@ -230,6 +234,55 @@ impl Vm {
 
     pub(crate) fn memory_slots(&self) -> &MemorySlots {
         &self.slots
+    }
+
+    /// A vCPU of its own past the guest's `vcpu_count`, never run, the guest's CPUID set on it,
+    /// for KVM to map guest memory ahead of the guest's accesses with (`KVM_PRE_FAULT_MEMORY`,
+    /// `virtio_extent::kvm`): its descriptor; none if KVM can't.
+    pub(crate) fn prefault_vcpu(&self, vcpu_count: u32) -> Result<Option<std::os::fd::OwnedFd>> {
+        use std::os::fd::{AsRawFd, FromRawFd};
+
+        let cap = virtio_extent::kvm::KVM_CAP_PRE_FAULT_MEMORY;
+        if self.vm.check_extension_raw(cap.into()) <= 0 {
+            return Ok(None);
+        }
+        let fd = self
+            .vm
+            .create_vcpu(vcpu_count.into())
+            .map_err(kvm_err("create a vCPU to prefault with"))?;
+        let cpuid = CpuId::from_entries(&self.cpuid.iter().map(to_kvm_entry).collect::<Vec<_>>())
+            .map_err(|_| Error::CpuModel("CPUID table too large".into()))?;
+        fd.set_cpuid2(&cpuid).map_err(kvm_err("set the prefault vCPU's CPUID"))?;
+        // Its own descriptor of the vCPU, which outlives `fd` (whose run structure goes with it),
+        // close-on-exec as `fd` is: a child process holding it would keep the VM.
+        // SAFETY: duplicates a descriptor `fd` owns; the result is checked.
+        let dup = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+        if dup < 0 {
+            return Err(Error::Hypervisor {
+                op: "duplicate the prefault vCPU's descriptor",
+                source: std::io::Error::last_os_error(),
+            });
+        }
+        // SAFETY: A new descriptor, owned here alone.
+        Ok(Some(unsafe { std::os::fd::OwnedFd::from_raw_fd(dup) }))
+    }
+
+    /// Says that a device maps a DAX window into the guest (an extent store device's), before the
+    /// vCPUs' threads start: they then tell cladefs their accesses are the guest's, and retry
+    /// those KVM fails as cladefs changes a window's memory (virtio_extent::vcpu).
+    pub(crate) fn map_dax_windows(&self) {
+        self.dax_windows.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether a device maps a DAX window into the guest ([`Vm::map_dax_windows`]).
+    pub(crate) fn maps_dax_windows(&self) -> bool {
+        self.dax_windows.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Whether KVM says where some accesses it fails with `EFAULT` failed
+    /// (`KVM_CAP_MEMORY_FAULT_INFO`, `KVM_EXIT_MEMORY_FAULT`).
+    pub(crate) fn memory_fault_info(&self) -> bool {
+        self.vm.check_extension_raw(kvm_bindings::KVM_CAP_MEMORY_FAULT_INFO.into()) > 0
     }
 
     pub(crate) fn memory_layout(&self) -> MemoryLayout {
@@ -396,6 +449,9 @@ impl Vcpu {
             // An AP waiting for its startup IPI got it (or an INIT): KVM_RUN
             // returns without running the guest, to be entered again.
             Err(e) if e.errno() == EAGAIN => return Ok(Exit::Startup),
+            // cladefs: an access failed, which the vCPU loop retries as cladefs changes a DAX
+            // window's memory (virtio_extent::vcpu).
+            Err(e) if e.errno() == libc::EFAULT => return Ok(Exit::AccessFailed(None)),
             Err(e) => return Err(kvm_err("run vCPU")(e)),
         };
         Ok(match exit {
@@ -418,6 +474,10 @@ impl Vcpu {
             VcpuExit::MmioWrite(addr, data) => Exit::MmioWrite { addr, data },
             VcpuExit::FailEntry(reason, _cpu) => Exit::Done(ExitReason::FailEntry { reason }),
             VcpuExit::InternalError => Exit::Done(ExitReason::InternalError),
+            // cladefs: where an access failed, as KVM says of some (KVM_CAP_MEMORY_FAULT_INFO).
+            VcpuExit::MemoryFault { flags, gpa, size } => {
+                Exit::AccessFailed(Some(virtio_extent::vcpu::MemoryFault { flags, gpa, size }))
+            }
             other => Exit::Done(ExitReason::Other(format!("{other:?}"))),
         })
     }

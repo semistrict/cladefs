@@ -66,6 +66,7 @@ fn every_exit_is_counted_by_its_kind() {
         ("hypercall", 0),
         ("wait", 0),
         ("system_register", 0),
+        ("access_retried", 0),
         ("other", 0),
     ];
     assert_eq!(c.kinds(), expected, "{c}");

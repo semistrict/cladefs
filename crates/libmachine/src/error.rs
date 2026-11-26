@@ -88,6 +88,12 @@ pub enum Error {
     #[error("snapshot: {0}")]
     Snapshot(String),
 
+    /// An extent store device stopped the machine for good: its extent daemon went, its guest's
+    /// accesses to its DAX window kept failing (past `private_max`, or refused), or it could not
+    /// be activated. Every run of the machine ends at once with it from then on.
+    #[error("extent store device: {0}")]
+    ExtentStore(String),
+
     /// The guest is not idle, so it cannot be suspended now
     /// ([`Machine::suspend`](crate::Machine::suspend)): a vCPU is running
     /// or has an interrupt to take.

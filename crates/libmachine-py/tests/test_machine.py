@@ -34,7 +34,7 @@ def test_exit_counts():
     assert m.exit_counts() == dict.fromkeys(
         ["serial", "acpi", "unclaimed_io", "pci_config", "pci_bar", "unclaimed_mmio",
          "halt", "interrupted", "startup", "hypercall", "wait",
-         "system_register", "other"],
+         "system_register", "access_retried", "other"],
         0,
     )
     assert m.run().kind == "halt"

@@ -32,7 +32,7 @@ use crate::sys::{EFD_NONBLOCK, EventFd};
 use vm_memory::GuestMemoryMmap;
 
 use super::queue::DeviceQueue;
-use super::{DeviceState, VIRTIO_F_VERSION_1, VIRTIO_RING_F_EVENT_IDX, VirtioDevice};
+use super::{DeviceState, OwnQueues, VIRTIO_F_VERSION_1, VIRTIO_RING_F_EVENT_IDX, VirtioDevice};
 use crate::devices::pci::config::{Bar, ConfigSpace, Header, overlaps};
 use crate::devices::pci::msix::{self, Msix};
 use crate::devices::pci::{BarAllocator, PciFunction, PciHost};
@@ -242,6 +242,22 @@ impl VirtioPci {
         if shm_sizes.iter().any(|&s| s == 0 || s % 4096 != 0) {
             return Err(invalid("a shared memory region is not a whole number of pages".into()));
         }
+        let placed = device.placed_shm();
+        if let Some(placed) = placed {
+            let window = BarAllocator::window64();
+            let fits = placed.bar_size.is_power_of_two()
+                && placed.len.is_multiple_of(4096)
+                && (4096..=placed.bar_size).contains(&placed.len)
+                && placed.guest_addr.is_multiple_of(placed.bar_size)
+                && window.start <= placed.guest_addr
+                && placed
+                    .guest_addr
+                    .checked_add(placed.bar_size)
+                    .is_some_and(|end| end <= window.end);
+            if !regions.is_empty() || !fits {
+                return Err(invalid(format!("a placed shared memory region {placed:x?}")));
+            }
+        }
 
         // A vector for configuration changes, and one per queue.
         let msix = Msix::new(queue_count as u16 + 1, first_gsi)?;
@@ -264,15 +280,15 @@ impl VirtioPci {
         let bar0_addr = bars.allocate(CAPABILITY_BAR_SIZE, false)?;
         config.add_bar(usize::from(CAPABILITY_BAR), bar0, bar0_addr);
         let (shm_offsets, shm_bar_size) = shm_layout(&shm_sizes);
-        if !regions.is_empty() {
-            let bar2 = Bar {
-                size: shm_bar_size,
-                is_64bit: true,
-                prefetchable: true,
-                window: BarAllocator::window64(),
-            };
-            let bar2_addr = bars.allocate(shm_bar_size, true)?;
-            config.add_bar(usize::from(SHM_BAR), bar2, bar2_addr);
+        let shm_bar = match placed {
+            Some(placed) => Some((placed.bar_size, placed.guest_addr)),
+            None if !regions.is_empty() => Some((shm_bar_size, bars.allocate(shm_bar_size, true)?)),
+            None => None,
+        };
+        if let Some((size, addr)) = shm_bar {
+            let bar2 =
+                Bar { size, is_64bit: true, prefetchable: true, window: BarAllocator::window64() };
+            config.add_bar(usize::from(SHM_BAR), bar2, addr);
         }
 
         let cap = |cfg_type, range: Range<u64>| {
@@ -305,18 +321,16 @@ impl VirtioPci {
         let (msix_body, msix_writable) =
             msix.capability(CAPABILITY_BAR, MSIX_TABLE_OFFSET as u32, MSIX_PBA_OFFSET as u32);
         let msix_cap = config.add_capability(&msix_body, &msix_writable);
-        for (region, &offset) in regions.iter().zip(&shm_offsets) {
-            let len = region.memory.size() as u64;
+        let described = regions
+            .iter()
+            .map(|region| (region.id, region.memory.size() as u64))
+            .zip(shm_offsets.iter().copied())
+            .chain(placed.map(|placed| ((placed.id, placed.len), 0)));
+        for ((id, len), offset) in described {
             let mut high = ((offset >> 32) as u32).to_le_bytes().to_vec();
             high.extend_from_slice(&((len >> 32) as u32).to_le_bytes());
-            let cap = virtio_cap(
-                CAP_SHARED_MEMORY_CFG,
-                SHM_BAR,
-                region.id,
-                offset as u32,
-                len as u32,
-                &high,
-            );
+            let cap =
+                virtio_cap(CAP_SHARED_MEMORY_CFG, SHM_BAR, id, offset as u32, len as u32, &high);
             config.add_capability(&cap, &[]);
         }
         // Firmware leaves the device decoding its BARs.
@@ -372,8 +386,13 @@ impl VirtioPci {
         self.stats
     }
 
-    /// Each queue's notification eventfd, for the device thread to wait on.
+    /// Each queue's notification eventfd, for the device thread to wait on: none of a device
+    /// that serves its own queues ([`VirtioDevice::serves_its_queues`]), whose threads wait on
+    /// them.
     pub(crate) fn notify_fds(&self) -> Result<Vec<EventFd>> {
+        if self.device.serves_its_queues() {
+            return Ok(Vec::new());
+        }
         self.notify
             .iter()
             .map(|evt| {
@@ -644,7 +663,10 @@ impl VirtioPci {
                 status &= !STATUS_FEATURES_OK;
             }
         }
-        let newly_ok = status & STATUS_DRIVER_OK != 0 && self.status & STATUS_DRIVER_OK == 0;
+        // Once until a reset: a driver that clears DRIVER_OK without one and sets it again does not
+        // activate the device again over the running one (board 13067's review: the extent store
+        // device's workers would have served its queues twice, from where it started).
+        let newly_ok = status & STATUS_DRIVER_OK != 0 && !self.activated;
         if newly_ok && !self.activate() {
             status |= STATUS_DEVICE_NEEDS_RESET;
         }
@@ -665,13 +687,42 @@ impl VirtioPci {
                 q.set_event_idx(event_idx);
             }
         }
-        self.device.activate(self.driver_features);
+        if !self.start_device() {
+            return false;
+        }
         self.activated = true;
         // Buffers the driver made available before DRIVER_OK.
         for i in 0..self.queues.len() {
             self.process_queue(i);
         }
         true
+    }
+
+    /// Activates the device with the features the driver accepted: one that serves its own
+    /// queues is handed them ([`OwnQueues`]), and may refuse.
+    fn start_device(&mut self) -> bool {
+        if !self.device.serves_its_queues() {
+            self.device.activate(self.driver_features);
+            return true;
+        }
+        let vector = |v: u16| match v {
+            NO_VECTOR => Ok(None),
+            v => self.msix.vector_event(v).transpose(),
+        };
+        let vectors = self.queue_vectors.iter().map(|&v| vector(v)).collect();
+        let (queue_vectors, config_vector) = match (vectors, vector(self.config_vector)) {
+            (Ok(queues), Ok(config)) => (queues, config),
+            // No eventfd to interrupt with: the activation fails as the device's would.
+            _ => return false,
+        };
+        let own = OwnQueues {
+            queues: &self.queues,
+            mem: &self.mem,
+            notify: &self.notify,
+            queue_vectors,
+            config_vector,
+        };
+        self.device.activate_queues(self.driver_features, own).is_ok()
     }
 
     fn reset(&mut self) {
@@ -820,8 +871,10 @@ impl VirtioPci {
                 self.driver_features & !self.device_features
             )));
         }
-        if self.activated {
-            self.device.activate(self.driver_features);
+        if self.activated && !self.start_device() {
+            return Err(Error::Snapshot(format!(
+                "virtio device type {device_type} refused its activation as it was restored"
+            )));
         }
         self.device.restore(&state)?;
         self.sync_bars(host)
@@ -1217,6 +1270,35 @@ mod tests {
         assert_eq!(read16(&mut t, 24), 16);
         assert_eq!(read16(&mut t, 26), NO_VECTOR);
         assert_eq!(read16(&mut t, 28), 0);
+    }
+
+    /// A driver that clears DRIVER_OK without a reset and sets it again activates the device
+    /// once: activated over itself, the extent store device's workers would serve its queues twice,
+    /// the second from where they began (board 13067's review). After a reset, again.
+    #[test]
+    fn driver_ok_set_again_without_a_reset_activates_once() {
+        let host = FakeHost::default();
+        let shm = Arc::new(MmapRegion::new(2 << 20).unwrap());
+        let device = TestDevice::new(shm);
+        let activations = device.activations.clone();
+        let mut t = VirtioPci::new(Box::new(device), memory(), &mut BarAllocator::new(), 40, &host)
+            .unwrap();
+        let negotiate = |t: &mut VirtioPci| {
+            write(t, &host, 8, &1u32.to_le_bytes());
+            write(t, &host, 12, &1u32.to_le_bytes());
+            write(t, &host, 20, &[FEATURES_OK]);
+        };
+        negotiate(&mut t);
+        write(&mut t, &host, 20, &[ALL_OK]);
+        assert_eq!(activations.load(std::sync::atomic::Ordering::Relaxed), 1);
+        write(&mut t, &host, 20, &[FEATURES_OK]);
+        write(&mut t, &host, 20, &[ALL_OK]);
+        assert_eq!(status(&mut t), ALL_OK);
+        assert_eq!(activations.load(std::sync::atomic::Ordering::Relaxed), 1);
+        write(&mut t, &host, 20, &[0]);
+        negotiate(&mut t);
+        write(&mut t, &host, 20, &[ALL_OK]);
+        assert_eq!(activations.load(std::sync::atomic::Ordering::Relaxed), 2);
     }
 
     #[test]

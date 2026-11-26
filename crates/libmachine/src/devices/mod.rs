@@ -87,12 +87,15 @@ mod pc {
 
     impl Pci {
         /// Puts `devices` on bus 0 at device numbers 1, 2, ... with their
-        /// BARs assigned and live, and starts the device thread.
+        /// BARs assigned from `bars` and live, and starts the device thread.
+        /// `bars` may have handed out addresses already: those of the
+        /// shared memory devices placed themselves (`VirtioDevice::placed_shm`).
         pub(crate) fn new(
             devices: Vec<Box<dyn VirtioDevice>>,
             mem: &GuestMemoryMmap,
             host: &dyn PciHost,
             doorbell: &Arc<crate::suspend::Doorbell>,
+            mut bars: BarAllocator,
         ) -> Result<Self> {
             if devices.len() > 31 {
                 return Err(Error::InvalidConfig(format!(
@@ -100,7 +103,6 @@ mod pc {
                     devices.len()
                 )));
             }
-            let mut bars = BarAllocator::new();
             let mut gsi = PCI_MSI_GSI_BASE;
             let mut bus = PciBus::default();
             let mut transports = Vec::new();

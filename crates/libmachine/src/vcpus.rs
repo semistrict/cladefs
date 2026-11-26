@@ -46,6 +46,12 @@ pub(crate) trait VcpuLoop: Send + 'static {
     /// byte the kick signal sets, which must stay valid as long as the value lives.
     fn kick_target(&mut self) -> KickTarget;
 
+    /// Sets up the vCPU's thread, once, before the vCPU first runs on it.
+    fn thread_started(&mut self) {}
+
+    /// Undoes [`thread_started`](Self::thread_started) as the thread exits, the machine dropped.
+    fn thread_ended(&mut self) {}
+
     /// Runs the vCPU until it ends the run (`Some(outcome)`), or until
     /// [`RunControl::check`], which it calls before every entry into the
     /// guest, says to stop.
@@ -67,6 +73,9 @@ impl RunControl<'_> {
     pub(crate) fn check(&self) -> ControlFlow<Option<Result<ExitReason>>> {
         if self.shared.stopping.load(Ordering::SeqCst) {
             return ControlFlow::Break(None);
+        }
+        if let Some(failure) = self.shared.stop.failure() {
+            return ControlFlow::Break(Some(Err(failure)));
         }
         if self.shared.stop.take_request() {
             return ControlFlow::Break(Some(Ok(ExitReason::Stopped)));
@@ -253,6 +262,9 @@ impl<V: VcpuLoop> Vcpus<V> {
     pub(crate) fn start(&mut self, deadline: Option<Instant>) -> Option<Result<ExitReason>> {
         assert!(!self.in_run, "a run is already in progress");
         self.last_vcpu = None;
+        if let Some(failure) = self.shared.stop.failure() {
+            return Some(Err(failure));
+        }
         if self.shared.stop.take_request() {
             return Some(Ok(ExitReason::Stopped));
         }
@@ -369,6 +381,8 @@ fn vcpu_thread<V: VcpuLoop>(
     // Dropped before `_scope`: the thread is never kicked once it
     // unregisters.
     let _registration = shared.stop.register(_scope.kicker());
+    // Undone as the thread quits, below.
+    lock(&vcpu).thread_started();
     let _ = ready.send(Ok(()));
     drop(ready);
 
@@ -380,6 +394,8 @@ fn vcpu_thread<V: VcpuLoop>(
                 state = shared.start.wait(state).unwrap_or_else(|e| e.into_inner());
             }
             if state.quit {
+                drop(state);
+                lock(&vcpu).thread_ended();
                 return;
             }
             seen = state.generation;

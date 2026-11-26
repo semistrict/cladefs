@@ -2871,6 +2871,8 @@ name = "libmachine"
 version = "0.1.0"
 dependencies = [
  "acpi_tables",
+ "cladefs",
+ "cladefs_core",
  "dynasm",
  "dynasmrt",
  "iced-x86",
@@ -2885,6 +2887,7 @@ dependencies = [
  "socket2",
  "thiserror",
  "virtio-queue",
+ "virtio_extent",
  "vm-fdt",
  "vm-memory",
  "vm-superio",

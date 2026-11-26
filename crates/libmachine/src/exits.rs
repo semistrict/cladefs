@@ -58,6 +58,9 @@ pub struct ExitCounts {
     /// A system register access the hypervisor left to libmachine (arm64:
     /// debug and OS lock registers, read as zero).
     pub system_register: u64,
+    /// A guest access KVM failed (`EFAULT`) as cladefs changed an extent store device's DAX
+    /// window's memory, which the vCPU retried (`virtio_extent::vcpu`).
+    pub access_retried: u64,
     /// Anything else: a triple fault, an entry failure, an internal error,
     /// an exit libmachine does not handle, an error from the hypervisor.
     pub other: u64,
@@ -77,9 +80,10 @@ const NAMES: [&str; KINDS] = [
     "hypercall",
     "wait",
     "system_register",
+    "access_retried",
     "other",
 ];
-const KINDS: usize = 13;
+const KINDS: usize = 14;
 
 impl ExitCounts {
     /// Every kind's name (the field's) and count, in a fixed order.
@@ -107,6 +111,7 @@ impl ExitCounts {
             self.hypercall,
             self.wait,
             self.system_register,
+            self.access_retried,
             self.other,
         ]
     }
@@ -125,6 +130,7 @@ impl ExitCounts {
             hypercall,
             wait,
             system_register,
+            access_retried,
             other,
         ] = v;
         Self {
@@ -140,6 +146,7 @@ impl ExitCounts {
             hypercall,
             wait,
             system_register,
+            access_retried,
             other,
         }
     }
@@ -208,6 +215,9 @@ pub(crate) enum ExitKind {
     Wait,
     #[cfg_attr(target_os = "linux", allow(dead_code, reason = "HVF's exits"))]
     SystemRegister,
+    // KVM's: no DAX window on Hypervisor.framework yet (board 13069).
+    #[cfg_attr(target_os = "macos", allow(dead_code, reason = "KVM's exits"))]
+    AccessRetried,
     Other,
 }
 
@@ -247,6 +257,7 @@ mod tests {
         ExitKind::Hypercall,
         ExitKind::Wait,
         ExitKind::SystemRegister,
+        ExitKind::AccessRetried,
         ExitKind::Other,
     ];
 
@@ -278,6 +289,7 @@ mod tests {
             ("hypercall", counts.hypercall),
             ("wait", counts.wait),
             ("system_register", counts.system_register),
+            ("access_retried", counts.access_retried),
             ("other", counts.other),
         ]
         .to_vec();

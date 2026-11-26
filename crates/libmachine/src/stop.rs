@@ -31,6 +31,9 @@ pub(crate) struct StopShared {
     threads: Mutex<Vec<Kicker>>,
     /// A suspended machine waits on it: a stop ends that wait too.
     doorbell: Arc<Doorbell>,
+    /// Why a device stopped the machine for good ([`StopShared::fail`]): every run from then on
+    /// ends at once with it. Read before every entry into the guest, so without a lock.
+    failed: std::sync::OnceLock<String>,
 }
 
 impl StopHandle {
@@ -55,6 +58,23 @@ impl StopShared {
 
     fn lock_threads(&self) -> std::sync::MutexGuard<'_, Vec<Kicker>> {
         self.threads.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Stops the machine for good, as a device that can't go on does (an extent store device
+    /// whose extent daemon went, or whose guest's accesses cladefs refuses): the run ends with
+    /// [`Error::ExtentStore`](crate::Error::ExtentStore) saying `why`, as does every run after it.
+    /// The first reason given is the one told.
+    pub(crate) fn fail(&self, why: String) {
+        // A reason given already is the one told: this one is dropped.
+        let _ = self.failed.set(why);
+        self.requested.store(true, Ordering::SeqCst);
+        self.kick_all();
+        self.doorbell.stop_requested();
+    }
+
+    /// Why a device stopped the machine for good, if one did ([`StopShared::fail`]).
+    pub(crate) fn failure(&self) -> Option<crate::Error> {
+        self.failed.get().cloned().map(crate::Error::ExtentStore)
     }
 
     /// Consumes a pending stop request.

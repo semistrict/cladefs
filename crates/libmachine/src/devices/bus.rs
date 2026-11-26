@@ -210,6 +210,9 @@ impl Bus {
             Exit::Interrupted => counts.count(ExitKind::Interrupted),
             Exit::Handled(kind) => counts.count(kind),
             Exit::Startup => counts.count(ExitKind::Startup),
+            // The vCPU loop retries a failed access, or ends the run, before the bus sees it.
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+            Exit::AccessFailed(_) => unreachable!("the vCPU loop handles failed accesses"),
             Exit::Done(reason) => {
                 counts.count(match reason {
                     ExitReason::Halt => ExitKind::Halt,

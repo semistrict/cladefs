@@ -25,6 +25,10 @@ kvm-bindings.workspace = true
 kvm-ioctls.workspace = true
 linux-loader.workspace = true
 smoltcp.workspace = true
+# cladefs's extent store device (board 13067): the device, and the daemon client it opens its cell
+# with, which build on Linux alone until the daemon comes to macOS (board 13471).
+cladefs = { path = "../cladefs" }
+virtio_extent = { path = "../virtio_extent" }
 # Sandbox's (board 13399 brings it to macOS).
 tokio = { workspace = true, features = ["rt", "sync"], optional = true }
 socket2.workspace = true
@@ -44,6 +48,8 @@ sandbox = ["dep:tokio"]
 fuzzing = []
 
 [target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dev-dependencies]
+# kvm_extent's daemon's cells encrypt under the tests' KMS (TASK-411.28).
+cladefs_core = { workspace = true, features = ["tests-kms"] }
 # The tests' and examples' guest programs, assembled (AGENTS.md: never raw bytes).
 iced-x86 = { version = "1.22.0", default-features = false, features = ["std", "code_asm"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync"] }

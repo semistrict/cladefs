@@ -63,6 +63,10 @@ pub(crate) enum Exit<'a> {
     /// system register), counted as `kind`; re-enter the guest.
     #[cfg_attr(target_os = "linux", allow(dead_code, reason = "KVM handles these in the kernel"))]
     Handled(ExitKind),
+    /// A guest access KVM failed (`EFAULT`), where it said if it did: an extent store device's
+    /// DAX window changing its memory, which the vCPU loop retries (`virtio_extent::vcpu`).
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    AccessFailed(Option<virtio_extent::vcpu::MemoryFault>),
     /// An exit the device layer does not handle; returned to the caller.
     Done(ExitReason),
 }

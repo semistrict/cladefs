@@ -77,6 +77,76 @@ fn to_py_err(err: libmachine::Error) -> PyErr {
     }
 }
 
+/// cladefs's extent daemon, which this process's machines share: made once, given to each
+/// machine with extent store devices (`Machine.boot_linux(extent_daemon=...)`). For now the
+/// daemon listening at `socket` (a host's cladefsd, or a test's); embedded in this process once
+/// libcladefs lands (board 13471).
+#[pyclass(module = "libmachine", frozen)]
+struct ExtentDaemon(std::sync::Arc<libmachine::ExtentDaemon>);
+
+#[pymethods]
+impl ExtentDaemon {
+    #[new]
+    fn new(socket: std::path::PathBuf) -> Self {
+        Self(std::sync::Arc::new(libmachine::ExtentDaemon::at_socket(socket)))
+    }
+}
+
+/// An extent store device: the cell at `cell` (created with `capacity` bytes if it isn't there),
+/// which the guest mounts its Fxfs from by `tag` (`mount -t cladefs TAG DIR`). `dax_window_size`
+/// (a multiple of 2 MiB) gives it a DAX window, `dax_private_max_bytes` bounds the window's
+/// private pages, and `cache` ("writeback", the default, or "unsafe") says whether the guest's
+/// syncs wait for the bucket. `id` names it in errors, its tag by default.
+#[pyclass(module = "libmachine", frozen)]
+struct ExtentStore(libmachine::ExtentStore);
+
+#[pymethods]
+impl ExtentStore {
+    #[new]
+    #[pyo3(signature = (
+        tag,
+        cell,
+        capacity,
+        *,
+        dax_window_size = None,
+        dax_private_max_bytes = None,
+        cache = "writeback",
+        id = None,
+    ))]
+    fn new(
+        tag: String,
+        cell: std::path::PathBuf,
+        capacity: u64,
+        dax_window_size: Option<u64>,
+        dax_private_max_bytes: Option<u64>,
+        cache: &str,
+        id: Option<String>,
+    ) -> PyResult<Self> {
+        let cache = match cache {
+            "writeback" => libmachine::ExtentCache::Writeback,
+            "unsafe" => libmachine::ExtentCache::Unsafe,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "cache is \"writeback\" or \"unsafe\", not {other:?}"
+                )));
+            }
+        };
+        let mut store = libmachine::ExtentStore::new(tag, cell, capacity);
+        if let Some(id) = id {
+            store.id = id;
+        }
+        store.dax_window_size = dax_window_size;
+        store.dax_private_max_bytes = dax_private_max_bytes;
+        store.cache = cache;
+        Ok(Self(store))
+    }
+
+    #[getter]
+    fn tag(&self) -> &str {
+        &self.0.tag
+    }
+}
+
 /// Why `Machine.run()` returned.
 ///
 /// `kind` is one of: "poweroff", "reset", "stopped", "timed_out", "halt",
@@ -1072,8 +1142,9 @@ impl Machine {
     /// `cmdline` is appended to "console=ttyS0 panic=-1". `vcpus` is how
     /// many vCPUs the guest gets, from 1 to 254. `network`, an
     /// EgressPolicy or a NetworkConfig, gives the guest a network card
-    /// whose connections the policy filters (None: no network). Run it until the guest powers off
-    /// ("poweroff") or reboots ("reset").
+    /// whose connections the policy filters (None: no network). `extent_stores`, ExtentStores,
+    /// are cladefs's extent store devices, their cells opened on `extent_daemon`, an
+    /// ExtentDaemon. Run it until the guest powers off ("poweroff") or reboots ("reset").
     #[staticmethod]
     #[pyo3(signature = (
         kernel,
@@ -1084,6 +1155,8 @@ impl Machine {
         cpu_model = "host",
         vcpus = 1,
         network = None,
+        extent_daemon = None,
+        extent_stores = Vec::new(),
     ))]
     #[allow(clippy::too_many_arguments, reason = "Python keyword arguments")]
     fn boot_linux(
@@ -1095,6 +1168,8 @@ impl Machine {
         cpu_model: &str,
         vcpus: i64,
         network: Option<&Bound<'_, PyAny>>,
+        extent_daemon: Option<PyRef<'_, ExtentDaemon>>,
+        extent_stores: Vec<PyRef<'_, ExtentStore>>,
     ) -> PyResult<Self> {
         let cpu_model: libmachine::CpuModel = cpu_model.parse().map_err(PyValueError::new_err)?;
         let config = libmachine::MachineConfig {
@@ -1102,6 +1177,8 @@ impl Machine {
             cpu_model,
             vcpus: vcpu_count(vcpus)?,
             network: network.map(network_arg).transpose()?,
+            extent_daemon: extent_daemon.map(|daemon| daemon.0.clone()),
+            extent_stores: extent_stores.iter().map(|store| store.0.clone()).collect(),
             ..Default::default()
         };
         let boot = libmachine::LinuxBoot { kernel, initrd, cmdline: cmdline.to_owned() };
@@ -1235,7 +1312,7 @@ impl Machine {
     /// created, over all its vCPUs: a dict from kind ("serial", "acpi",
     /// "unclaimed_io", "pci_config", "pci_bar", "unclaimed_mmio", "halt",
     /// "interrupted", "startup", "hypercall", "wait", "system_register",
-    /// "other") to count.
+    /// "access_retried", "other") to count.
     fn exit_counts<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let counts = PyDict::new(py);
         for (kind, n) in self.inner.exit_counts().kinds() {
@@ -2004,6 +2081,8 @@ impl Snapshot {
 #[pymodule]
 fn _libmachine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Machine>()?;
+    m.add_class::<ExtentDaemon>()?;
+    m.add_class::<ExtentStore>()?;
     m.add_class::<Exit>()?;
     m.add_class::<Registers>()?;
     m.add_class::<StopHandle>()?;
