@@ -67,7 +67,7 @@ impl<D: Dir> CachedDir<D> {
     /// if an opening of it is.
     fn file(&self, path: &str, file: D::File, data: bool) -> io::Result<CachedFile<D::File>> {
         let mut files = self.shared.files.lock().unwrap();
-        files.retain(|_, file| file.upgrade().is_some());
+        files.retain(|_, file| file.held());
         if let Some(open) = files.get(path).and_then(WeakCached::upgrade) {
             return Ok(CachedFile::Cached(open));
         }
@@ -80,10 +80,12 @@ impl<D: Dir> CachedDir<D> {
     }
 
     /// `gone`, a file no longer at a name of `files`, unlinked unless it is still at another: its
-    /// last opening drops its pages unwritten.
+    /// last opening drops its pages unwritten. Opening none of them, under the directory's lock:
+    /// an opening made here, gone as its file's last, would wait there for the file's write-back
+    /// (board 14235).
     fn forget(files: &HashMap<String, WeakCached<D::File>>, gone: Option<WeakCached<D::File>>) {
-        let Some(gone) = gone.as_ref().and_then(WeakCached::upgrade) else { return };
-        if !files.values().filter_map(WeakCached::upgrade).any(|other| other.same(&gone)) {
+        let Some(gone) = gone.filter(WeakCached::held) else { return };
+        if !files.values().any(|other| other.same(&gone)) {
             gone.unlink();
         }
     }
@@ -355,6 +357,76 @@ mod tests {
         dir.open("kept", true).unwrap().read_at(&mut read, 0).unwrap();
         assert_eq!(read, [8; PAGE]);
         assert!(dir.list("").unwrap().contains(&"kept".to_owned()));
+    }
+
+    /// board 14235: a data file opened by its name as its last opening goes, writing back what of
+    /// it is dirty, reads what was written: it shares the pages being written back, as any
+    /// opening of the file does, rather than read the file under them. A segment's raw file whose
+    /// handle its cell let go (`segments::FULL_OPEN_LIMIT`), reopened to read an extent in it as a
+    /// look ahead dropped the last opening, read zeros where the extent's blocks were.
+    #[test]
+    fn files_opened_as_their_last_opening_goes_read_what_was_written() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Mutex};
+        let temp = tempfile::tempdir().unwrap();
+        let dir = host_dir(temp.path());
+        let file = dir.create("raw", true).unwrap();
+        file.write_at(&[9; PAGE], 0).unwrap();
+        assert_eq!(dir.cache().usage().dirty, PAGE as u64);
+
+        let scenario = fail::FailScenario::setup();
+        let (opener, once) = (dir.clone(), Arc::new(AtomicBool::new(false)));
+        let read = Arc::new(Mutex::new(None));
+        let into = read.clone();
+        // As the last opening goes, before it writes anything back: once, as the opening made
+        // here goes last itself.
+        fail::cfg_callback("pages::closed", move || {
+            if once.swap(true, Ordering::Relaxed) {
+                return;
+            }
+            let mut bytes = vec![0; PAGE];
+            let got = opener.open("raw", true).and_then(|file| file.read_at(&mut bytes, 0));
+            *into.lock().unwrap() = Some(got.map(|()| bytes).map_err(|err| err.to_string()));
+        })
+        .unwrap();
+        drop(file);
+        scenario.teardown();
+
+        assert_eq!(read.lock().unwrap().take(), Some(Ok(vec![9; PAGE])));
+        assert_eq!(dir.cache().usage().dirty, 0, "written back as its last opening went");
+        assert_eq!(std::fs::read(temp.path().join("raw")).unwrap(), [9; PAGE]);
+    }
+
+    /// board 14235: a file removed while another's last opening goes opens none of the files it
+    /// walks past, under the directory's lock: an opening made there, gone as that file's last,
+    /// would close it again, waiting for its write-back, every opening of the directory's behind.
+    #[test]
+    fn files_removed_open_none_of_the_others() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let temp = tempfile::tempdir().unwrap();
+        let dir = host_dir(temp.path());
+        // Open still, so that its removal looks for it at other names.
+        let removed = dir.create("removed", true).unwrap();
+        let file = dir.create("raw", true).unwrap();
+        file.write_at(&[9; PAGE], 0).unwrap();
+
+        let scenario = fail::FailScenario::setup();
+        let (remover, closings) = (dir.clone(), Arc::new(AtomicUsize::new(0)));
+        let counted = closings.clone();
+        fail::cfg_callback("pages::closed", move || {
+            if counted.fetch_add(1, Ordering::Relaxed) == 0 {
+                remover.remove("removed").unwrap();
+            }
+        })
+        .unwrap();
+        drop(file);
+        scenario.teardown();
+        drop(removed);
+
+        assert_eq!(closings.load(Ordering::Relaxed), 1, "closed once, by its own last opening");
+        assert_eq!(std::fs::read(temp.path().join("raw")).unwrap(), [9; PAGE]);
+        assert_eq!(dir.list("").unwrap(), ["raw"]);
     }
 
     /// TASK-539.3: a file of the host's replaced holds what replaced it, and leaves nothing of the

@@ -69,7 +69,7 @@ use shuttle::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io;
 use std::ops::Range;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 #[cfg(not(feature = "shuttle"))]
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -937,7 +937,8 @@ struct Pages {
     failing: Option<io::Error>,
 }
 
-/// A file, `F`, through the page cache: what [`File`] it is to its cell.
+/// A file, `F`, through the page cache: what [`File`] it is to its cell. An opening of it: the
+/// last to go writes back what of it is dirty ([`Shared::closed`]).
 pub struct Cached<F: File> {
     shared: Arc<Shared<F>>,
 }
@@ -962,6 +963,13 @@ pub(crate) struct Shared<F: File> {
     /// Whether the file is at no name any more ([`Cached::unlink`]): its last opening drops its
     /// pages unwritten.
     unlinked: AtomicBool,
+    /// cladefs: how many openings ([`Cached`]) hold it, which the flusher's and the evictor's
+    /// passing holds of it are not. The last to go writes its dirty pages back still holding it,
+    /// so that an opening of its name meanwhile ([`WeakCached::upgrade`]) shares them, rather than
+    /// find it gone and read the file under them, as it did when its going wrote them back: a
+    /// segment's raw file reopened by name, its last holder a look ahead, read zeros where its
+    /// blocks were (board 14235).
+    openings: AtomicUsize,
 }
 
 /// A file through the page cache that keeps it open no more ([`Cached::downgrade`]): what a
@@ -977,15 +985,45 @@ impl<F: File> Clone for WeakCached<F> {
 }
 
 impl<F: File> WeakCached<F> {
-    /// The file, if an opening of it holds it still.
+    /// An opening of the file, if anything holds it still: its last opening going, writing its
+    /// dirty pages back, too.
     pub fn upgrade(&self) -> Option<Cached<F>> {
-        self.shared.upgrade().map(|shared| Cached { shared })
+        self.shared.upgrade().map(Cached::opening)
+    }
+
+    /// Whether anything holds the file still, without opening it.
+    pub fn held(&self) -> bool {
+        self.shared.strong_count() > 0
+    }
+
+    /// Whether `other` names the same file.
+    pub fn same(&self, other: &Self) -> bool {
+        Weak::ptr_eq(&self.shared, &other.shared)
+    }
+
+    /// The file is at no name any more: its openings read and write it on, and the last of them
+    /// drops its pages, the dirty ones unwritten ([`crate::CachedDir`]'s `remove`). Opening
+    /// nothing: an opening made here, gone as the file's last, would write it back, under the
+    /// directory's lock (board 14235).
+    pub fn unlink(&self) {
+        if let Some(shared) = self.shared.upgrade() {
+            shared.unlinked.store(true, Ordering::Relaxed);
+        }
     }
 }
 
 impl<F: File> Clone for Cached<F> {
     fn clone(&self) -> Self {
-        Self { shared: self.shared.clone() }
+        Self::opening(self.shared.clone())
+    }
+}
+
+/// The last opening of a file to go writes its dirty pages back ([`Shared::closed`]).
+impl<F: File> Drop for Cached<F> {
+    fn drop(&mut self) {
+        if self.shared.openings.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.shared.closed();
+        }
     }
 }
 
@@ -1024,10 +1062,19 @@ impl<F: File> Cached<F> {
             backing: RwLock::new(()),
             used: AtomicU64::new(cache.used()),
             unlinked: AtomicBool::new(false),
+            openings: AtomicUsize::new(0),
         });
         let paged: Arc<dyn Paged> = shared.clone();
         cache.track(Arc::downgrade(&paged));
-        Ok(Self { shared })
+        Ok(Self::opening(shared))
+    }
+
+    /// An opening of `shared`, counted ([`Shared::openings`]).
+    fn opening(shared: Arc<Shared<F>>) -> Self {
+        // Relaxed, as an `Arc`'s clone is: what it opens is held already, by `shared`; the last
+        // opening's going (AcqRel) orders the writes before it ahead of its writing back.
+        shared.openings.fetch_add(1, Ordering::Relaxed);
+        Self { shared }
     }
 
     /// The file under the cache.
@@ -1047,20 +1094,9 @@ impl<F: File> Cached<F> {
         self.shared.drop_pages(0..u64::MAX);
     }
 
-    /// The file is at no name any more: its openings read and write it on, and the last of them
-    /// drops its pages, the dirty ones unwritten ([`crate::CachedDir`]'s `remove`).
-    pub(crate) fn unlink(&self) {
-        self.shared.unlinked.store(true, Ordering::Relaxed);
-    }
-
     /// This, held no more: what a directory names it by.
     pub(crate) fn downgrade(&self) -> WeakCached<F> {
         WeakCached { shared: Arc::downgrade(&self.shared) }
-    }
-
-    /// Whether `other` is an opening of the same file.
-    pub(crate) fn same(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.shared, &other.shared)
     }
 }
 
@@ -1376,12 +1412,14 @@ impl<F: File> Drop for InFlight<'_, '_, F> {
     }
 }
 
-/// A file whose every opening went: what of it is dirty is written back, as a file closed keeps
-/// what was written to it, unless it is at no name; then its pages go, counted out.
-impl<F: File> Drop for Shared<F> {
-    fn drop(&mut self) {
+impl<F: File> Shared<F> {
+    /// Its last opening is going ([`Cached`]'s drop), holding it still: what of it is dirty is
+    /// written back, as a file closed keeps what was written to it, unless it is at no name, its
+    /// pages to go unwritten. An opening of it meanwhile shares them ([`Shared::openings`]).
+    fn closed(&self) {
+        fail::fail_point!("pages::closed");
         // Not as a panic unwinds: its pages' lock may be poisoned, and a second panic aborts.
-        // Dirty pages flushed on drop move off an async worker (board 10824).
+        // Dirty pages flushed on closing move off an async worker (board 10824).
         if !self.unlinked.load(Ordering::Relaxed)
             && !std::thread::panicking()
             && self.dirtied().is_some()
@@ -1389,6 +1427,13 @@ impl<F: File> Drop for Shared<F> {
         {
             log::warn!("extent store: writing back a file closed: {err}");
         }
+    }
+}
+
+/// A file nothing holds any more, its last opening having written back what of it was dirty
+/// ([`Shared::closed`]): its pages go, counted out.
+impl<F: File> Drop for Shared<F> {
+    fn drop(&mut self) {
         let pages = self.pages.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner);
         let dirty = pages.pages.values().filter(|page| page.dirty.is_some()).count() as u64;
         let failing = pages.failing.is_some();
