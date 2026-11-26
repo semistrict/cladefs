@@ -47,6 +47,12 @@ const TRANSFER_PIECE: usize = 1 << 20;
 /// wrote the device keeps meanwhile, to read from memory: 4 MiB at most (TASK-552).
 pub(crate) const REMAP_BATCH: u64 = 1024;
 
+/// Maximum number of committed radix-tree nodes cached in [`Tree::nodes`] (board 11677).
+/// At `block_size = 4096` (`fanout = 170`, ~5.4 KiB/node), 4096 nodes cap memory at ~22 MiB
+/// (~2.7 GiB of contiguous hot working set) instead of growing unboundedly to ~540 MiB on a
+/// 64 GiB memory cell.
+pub(crate) const MAX_CACHED_NODES: usize = 4096;
+
 /// A node's children: a ref, or a hole, for each of `fanout`, holes past the tree's end.
 type Node = Box<[Option<Ref>]>;
 
@@ -135,8 +141,13 @@ struct Tree {
     top: Option<Ref>,
     /// The counts of its levels ([`level_counts`]).
     counts: Vec<u64>,
-    /// The nodes read, or written by a commit: their children.
-    nodes: HashMap<Place, Node>,
+    /// The nodes read, or written by a commit: their last-used tick and children, bounded by
+    /// `max_nodes` via [`Self::trim_keeping`] (board 11677).
+    nodes: HashMap<Place, (u64, Node)>,
+    /// Monotonic recency counter for LRU eviction of clean cached nodes.
+    tick: u64,
+    /// Maximum cached nodes retained after a lookup/visit/apply completes.
+    max_nodes: usize,
 }
 
 impl Tree {
@@ -154,6 +165,45 @@ impl Tree {
         (level + 1, index / self.fanout)
     }
 
+    fn next_tick(&mut self) -> u64 {
+        self.tick = self.tick.wrapping_add(1);
+        self.tick
+    }
+
+    /// Evicts least-recently-used cached nodes past `self.max_nodes` (preferring leaf levels on
+    /// ties), keeping the top node (when `max_nodes > 0`) and any node in `keep` (board 11677).
+    fn trim_keeping(&mut self, keep: &BTreeSet<Place>) {
+        if self.nodes.len() <= self.max_nodes {
+            return;
+        }
+        let top = (self.max_nodes > 0 && self.height() > 0).then_some((self.height(), 0));
+        let excess = self.nodes.len() - self.max_nodes;
+        let mut evictable: Vec<(u64, u32, Place)> = self
+            .nodes
+            .iter()
+            .filter_map(|(&place, &(used, _))| {
+                if Some(place) == top || keep.contains(&place) {
+                    None
+                } else {
+                    Some((used, place.0, place))
+                }
+            })
+            .collect();
+        if evictable.len() > excess {
+            evictable.select_nth_unstable(excess);
+            evictable.truncate(excess);
+        }
+        for (_, _, place) in evictable {
+            self.nodes.remove(&place);
+        }
+    }
+
+    fn trim(&mut self) {
+        if self.nodes.len() > self.max_nodes {
+            self.trim_keeping(&BTreeSet::new());
+        }
+    }
+
     /// The ref at `place`, a chunk or a node, its node above it read: none for a hole, or outside
     /// the tree.
     fn at(&self, place: Place) -> Option<Ref> {
@@ -163,7 +213,7 @@ impl Tree {
         if place.0 == self.height() {
             return self.top;
         }
-        let node = self.nodes.get(&self.parent(place)).expect("the node above a lookup read");
+        let (_, node) = self.nodes.get(&self.parent(place)).expect("the node above a lookup read");
         node[(place.1 % self.fanout) as usize]
     }
 
@@ -174,10 +224,16 @@ impl Tree {
         device: &dyn Device,
         places: impl IntoIterator<Item = Place>,
     ) -> Result<(), Error> {
+        let now = self.next_tick();
         let mut wanted: BTreeSet<Place> = BTreeSet::new();
         for place in places {
             let mut place = place;
-            while place.0 >= 1 && self.has(place) && !self.nodes.contains_key(&place) {
+            while place.0 >= 1 && self.has(place) {
+                if let Some((used, _)) = self.nodes.get_mut(&place) {
+                    *used = now;
+                    place = self.parent(place);
+                    continue;
+                }
                 if !wanted.insert(place) {
                     break;
                 }
@@ -205,14 +261,15 @@ impl Tree {
                 .buffered(READS_IN_FLIGHT);
             while let Some(read) = read.next().await {
                 let (index, node) = read?;
-                self.nodes.insert((level, index), node);
+                self.nodes.insert((level, index), (now, node));
             }
         }
         Ok(())
     }
 
     /// Visits allocated places on paths to `chunks`, top down, each level in order: reading the
-    /// nodes holding any, and no node of holes.
+    /// nodes holding any, and no node of holes. Processes each level in bounded chunks and trims
+    /// cached nodes so full-tree walks stay within `max_nodes` (board 11677).
     async fn visit(
         &mut self,
         device: &dyn Device,
@@ -231,27 +288,45 @@ impl Tree {
             boundary.push((first / self.fanout, last / self.fanout));
         }
         visit((self.height(), 0), top);
+        let chunk_len = self.max_nodes.clamp(1, 256);
         let mut nodes = vec![0];
         for level in (1..=self.height()).rev() {
-            self.load(device, nodes.iter().map(|&index| (level, index))).await?;
             let mut below = Vec::new();
-            for index in nodes {
-                for (slot, child) in self.nodes[&(level, index)].iter().enumerate() {
-                    let child_index = index * self.fanout + slot as u64;
-                    let (first, last) = boundary[level as usize - 1];
-                    if let Some(child) = child
-                        && (first..=last).contains(&child_index)
-                    {
-                        visit((level - 1, child_index), *child);
-                        if level > 1 {
-                            below.push(child_index);
+            for batch in nodes.chunks(chunk_len) {
+                self.load(device, batch.iter().map(|&index| (level, index))).await?;
+                for &index in batch {
+                    for (slot, child) in self.nodes[&(level, index)].1.iter().enumerate() {
+                        let child_index = index * self.fanout + slot as u64;
+                        let (first, last) = boundary[level as usize - 1];
+                        if let Some(child) = child
+                            && (first..=last).contains(&child_index)
+                        {
+                            visit((level - 1, child_index), *child);
+                            if level > 1 {
+                                below.push(child_index);
+                            }
                         }
                     }
                 }
+                self.trim();
             }
             nodes = below;
         }
         Ok(())
+    }
+
+    /// The refs at `places`, read as needed, keeping `keep` pinned during eviction.
+    async fn lookup_keeping(
+        &mut self,
+        device: &dyn Device,
+        places: &[Place],
+        keep: &BTreeSet<Place>,
+    ) -> Result<Vec<Option<Ref>>, Error> {
+        let parents: Vec<Place> = places.iter().map(|place| self.parent(*place)).collect();
+        self.load(device, parents).await?;
+        let found = places.iter().map(|place| self.at(*place)).collect();
+        self.trim_keeping(keep);
+        Ok(found)
     }
 
     /// The refs at `places`, read as needed.
@@ -260,9 +335,7 @@ impl Tree {
         device: &dyn Device,
         places: &[Place],
     ) -> Result<Vec<Option<Ref>>, Error> {
-        let parents: Vec<Place> = places.iter().map(|place| self.parent(*place)).collect();
-        self.load(device, parents).await?;
-        Ok(places.iter().map(|place| self.at(*place)).collect())
+        self.lookup_keeping(device, places, &BTreeSet::new()).await
     }
 }
 
@@ -356,7 +429,15 @@ impl Pages {
         );
         ensure!(root.top.is_none() || height > 0, "contents of no chunks with a top node");
         let cut = counts[0];
-        let tree = Tree { block_size, fanout, top: root.top, counts, nodes: HashMap::new() };
+        let tree = Tree {
+            block_size,
+            fanout,
+            top: root.top,
+            counts,
+            nodes: HashMap::new(),
+            tick: 0,
+            max_nodes: MAX_CACHED_NODES,
+        };
         Ok(Self {
             committed: root.clone(),
             tree,
@@ -423,6 +504,13 @@ impl Pages {
         self.tree.nodes.len()
     }
 
+    /// Sets the cached radix-tree node cap for tests (board 11677).
+    #[cfg(test)]
+    pub fn set_max_nodes(&mut self, max_nodes: usize) {
+        self.tree.max_nodes = max_nodes;
+        self.tree.trim();
+    }
+
     /// The extents the contents hold as of the last commit: every one its tree names, read whole,
     /// none of it kept.
     pub async fn extents(&self, device: &dyn Device) -> Result<BTreeSet<ExtentId>, Error> {
@@ -432,6 +520,8 @@ impl Pages {
             top: self.tree.top,
             counts: self.tree.counts.clone(),
             nodes: HashMap::new(),
+            tick: 0,
+            max_nodes: self.tree.max_nodes,
         };
         let mut extents = BTreeSet::new();
         tree.visit(device, 0..u64::MAX, |_, at| {
@@ -595,7 +685,9 @@ impl Pages {
                 && !self.discarded(index)
                 && self.committed_chunk(index).is_some()
         };
-        if !chunks.into_iter().all(clean) {
+        let all_clean = chunks.into_iter().all(clean);
+        self.tree.trim();
+        if !all_clean {
             return Ok(None);
         }
         Ok(self.mapped(offset, len))
@@ -645,6 +737,7 @@ impl Pages {
             }
             runs.push((index..index + 1, next));
         }
+        self.tree.trim();
         Ok(runs)
     }
 
@@ -711,6 +804,7 @@ impl Pages {
             }
             at += len as u64;
         }
+        self.tree.trim();
         Ok((end - offset) as usize)
     }
 
@@ -728,6 +822,7 @@ impl Pages {
             } else if !whole {
                 self.load_chunks(device, index..index + 1).await?;
                 self.read_committed(device, index, &mut chunk).await?;
+                self.tree.trim();
             }
             self.dirty.insert(index, chunk);
         }
@@ -852,6 +947,7 @@ impl Pages {
                     && !rewritten.contains_key(&index)
                 {
                     let mut chunk = vec![0; block_size].into_boxed_slice();
+                    self.load_chunks(device, index..index + 1).await?;
                     self.read_committed(device, index, &mut chunk).await?;
                     rewritten.insert(index, chunk);
                 }
@@ -933,7 +1029,7 @@ impl Pages {
             .filter(|(_, _, place)| !left.contains(place))
             .collect();
         let places: Vec<Place> = survivors.iter().map(|(_, _, place)| *place).collect();
-        let found = self.tree.lookup(device, &places).await?;
+        let found = self.tree.lookup_keeping(device, &places, &rebuilt).await?;
         let mut live: HashMap<ExtentId, u32> = HashMap::new();
         for ((extent, block, _), at) in survivors.into_iter().zip(found) {
             if at.is_some_and(|at| at.extent == extent && at.block == block) {
@@ -1068,16 +1164,18 @@ impl Pages {
         let n = counts[0];
         let height = counts.len() as u32 - 1;
         let tree = &mut self.tree;
+        let now = tree.next_tick();
         tree.nodes.retain(|(level, index), _| {
             *level <= height && *index < counts.get(*level as usize).copied().unwrap_or(0)
         });
         for (place, node) in nodes {
             match node {
-                Some(node) => tree.nodes.insert(place, node),
+                Some(node) => tree.nodes.insert(place, (now, node)),
                 None => tree.nodes.remove(&place),
             };
         }
         (tree.top, tree.counts) = (root.top, counts);
+        tree.trim();
         self.committed = root;
         self.cut = n;
         let dirty = std::mem::take(&mut self.dirty);
@@ -1540,6 +1638,60 @@ mod tests {
         assert_eq!(model.pages.holes, [10..12, 13..30]);
         model.check();
         model.commit();
+        model.check();
+    }
+
+    /// board 11677: reading and committing across a large sparse/dense tree keeps `Tree.nodes`
+    /// bounded by `max_nodes` while every read, commit, and sparse-extent compaction remains exact.
+    #[test]
+    fn cached_tree_nodes_stay_bounded_across_large_reads_and_commits() {
+        let mut model = Model::new(16);
+        let fanout = format::fanout(BLOCK) as u64;
+        // Write chunks across 64 distinct level-1 leaf nodes (sparse + dense regions) and commit.
+        let leaf_count = 64u64;
+        for leaf in 0..leaf_count {
+            let chunk = leaf * fanout + (leaf % 3);
+            let pattern = vec![(leaf as u8).wrapping_mul(7).wrapping_add(1); BLOCK];
+            model.write(chunk * BLOCK as u64, &pattern);
+        }
+        model.commit();
+
+        let cap = 8usize;
+        let mut opened = Pages::open(BLOCK, &model.pages.root()).unwrap();
+        opened.set_max_nodes(cap);
+        // Read across all 64 leaves: cached nodes must stay within `cap` and data must match.
+        for leaf in 0..leaf_count {
+            let chunk = leaf * fanout + (leaf % 3);
+            let mut got = vec![0u8; BLOCK];
+            block_on(opened.read(&model.device, chunk * BLOCK as u64, &mut got)).unwrap();
+            let expected = vec![(leaf as u8).wrapping_mul(7).wrapping_add(1); BLOCK];
+            assert_eq!(got, expected, "mismatch at leaf {leaf}");
+            assert!(
+                opened.nodes_held() <= cap,
+                "cached nodes {} exceeded cap {cap} after reading leaf {leaf}",
+                opened.nodes_held()
+            );
+        }
+
+        // Also exercise commits + sparse compaction + discards under the tight cap.
+        model.pages.set_max_nodes(cap);
+        for leaf in 0..leaf_count {
+            let chunk = leaf * fanout + (leaf % 3);
+            let pattern = vec![(leaf as u8).wrapping_mul(13).wrapping_add(3); BLOCK];
+            model.write(chunk * BLOCK as u64, &pattern);
+            if leaf % 8 == 7 {
+                model.commit();
+                assert!(
+                    model.pages.nodes_held() <= cap,
+                    "cached nodes {} exceeded cap {cap} after commit at leaf {leaf}",
+                    model.pages.nodes_held()
+                );
+            }
+        }
+        model.discard(0..fanout * 16);
+        assert!(model.pages.nodes_held() <= cap);
+        model.commit();
+        assert!(model.pages.nodes_held() <= cap);
         model.check();
     }
 }
