@@ -232,6 +232,7 @@ macro_rules! checks {
             cow_dirty_truncate_punch_clone: Dax, 3 => test_cow_dirty_truncate_punch_clone;
             cow_commit_after_bytes: Dax, 3 => test_cow_commit_after_bytes;
             cow_created_in_page_cache: Dax, 3 => test_cow_created_in_page_cache;
+            cow_created_behind_a_dax_inode: Dax, 3 => test_cow_created_behind_a_dax_inode;
             cow_fork_after_a_split_pmd: Dax, 3 => test_cow_fork_after_a_split_pmd;
             cow_mremap_after_a_split_pmd: Dax, 3 => test_cow_mremap_after_a_split_pmd;
             cow_mprotect_after_a_split_pmd: Dax, 3 => test_cow_mprotect_after_a_split_pmd;

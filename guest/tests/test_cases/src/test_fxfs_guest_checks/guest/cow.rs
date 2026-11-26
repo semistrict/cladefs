@@ -537,6 +537,49 @@ pub(super) fn test_cow_created_in_page_cache() {
     fs::remove_file(&name).unwrap();
 }
 
+/// cladefs: files created in the mount, sealed and evicted, read in again as DAX with an unused
+/// DAX inode ahead of them on the kernel's inode list, one whose mapping holds one DAX entry, at
+/// index 0 (board 13582). The inode shrinker took that inode for one with a shadow entry, as
+/// cleared as it is invalidated, and retried it for good: no inode behind it was evicted under
+/// memory pressure, nor by drop_caches but once (dropping the page cache took a reference of the
+/// inode ahead, and its last one let it pass once), and a build's outputs stayed in the page
+/// cache. So the created files' pages go file by file and their inodes by `drop_caches 2`, as
+/// reclaim's, which drops no page cache. Fails if a created file reads in again in the page cache.
+pub(super) fn test_cow_created_behind_a_dax_inode() {
+    const PAGE: usize = 4096;
+    // A page read through a mapping of a file read in from sealed extents: its one DAX entry.
+    let first = path("cow-behind-first");
+    fs::write(&first, vec![0x5a; PAGE]).unwrap();
+    evict(&first);
+    assert!(is_dax(&first), "{first}, read in once sealed, isn't DAX");
+    let file = fs::OpenOptions::new().read(true).write(true).open(&first).unwrap();
+    assert_eq!(CowMapping::new(&file, PAGE).bytes()[0], 0x5a, "{first} read through the window");
+    // The time the read set written back: an inode dirty leaves the list, and returns clean
+    // behind the created files', as a build's sources, read before, never are.
+    file.sync_all().unwrap();
+    drop(file);
+    // Its inode unused, on the inode list before the created files'.
+    fs::write("/proc/sys/vm/drop_caches", b"2").unwrap();
+    let names: Vec<String> = (0..8).map(|i| path(&format!("cow-behind-{i}"))).collect();
+    for (i, name) in names.iter().enumerate() {
+        fs::write(name, vec![i as u8; 16 * PAGE]).unwrap();
+        assert!(!is_dax(name), "{name}, created here, is DAX");
+    }
+    for name in &names {
+        drop_pages(name);
+    }
+    fs::write("/proc/sys/vm/drop_caches", b"2").unwrap();
+    for name in &names {
+        assert!(
+            is_dax(name),
+            "{name}, created, sealed and evicted, read in again in the page cache"
+        );
+    }
+    for name in names.iter().chain([&first]) {
+        fs::remove_file(name).unwrap();
+    }
+}
+
 /// cladefs: copying on write (doc-13), a rebind paused before its MAP over a private page,
 /// holding the file's semaphore for writing (Pauses::REBIND): a load through another process's
 /// PTE of the page reads what was stored there, and a write to it by a process with no PTE of

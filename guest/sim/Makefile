@@ -6,7 +6,7 @@
 #
 #   make KERNEL=<the kernel's tree> [BUILD=<where>]
 
-KERNEL ?= $(HOME)/cladefs-guest-kernel/kernel6.18-6.18.54-121.166.amzn2023-arm64
+KERNEL ?= $(HOME)/cladefs-guest-kernel/kernel6.18-6.18.62-127.179.amzn2023-arm64
 BUILD ?= build
 CLADEFS := ../linux/fs/cladefs
 CC := clang

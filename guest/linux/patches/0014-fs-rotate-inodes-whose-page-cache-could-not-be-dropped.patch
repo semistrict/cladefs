@@ -1,0 +1,84 @@
+# SPDX-License-Identifier: GPL-2.0
+# Copyright 2026 The cladefs Authors.
+# Linux's own change (upstream 8ee09f597763; 6.18 stable c61b2125a21e, in 6.18.64), rebased onto
+# Amazon Linux 6.18.62, until the release scripts/lib/guest-kernel-release.sh names has it
+# (board 13582).
+fs: rotate inodes whose page cache could not be dropped
+
+Author: Nikolaos Karaolidis <nick@karaolidis.com>
+
+[ Upstream commit 8ee09f597763acfd31c62a578ba88b792fc41b24 ]
+
+When inode_lru_isolate() drops the page cache of an unused inode, it
+has to unlock the list, so it returns LRU_RETRY and the walk restarts
+at the head of the list, where the inode still is. If
+invalidate_mapping_pages() could not empty the mapping, the restarted
+walk strips the same inode again, and so on until nr_to_walk runs out.
+Every walk of that list then ends on this inode, and nothing behind it
+is reclaimed for as long as its cache stays.
+
+Before commit 2a0629834cd8 ("vfs: Don't evict inode under the inode lru
+traversing context") the walker pinned the inode with a reference, and
+dropping it in iput_final() set I_REFERENCED, so the restarted walk
+rotated the inode to the tail. Set I_REFERENCED again when the mapping
+is still populated after the invalidation, in the same i_lock section
+that clears I_LRU_ISOLATING. inode_unpin_lru_isolating() now expects
+i_lock to be held, like inode_pin_lru_isolating().
+
+On CONFIG_HIGHMEM kernels this can happen to any unused inode: a folio
+is left behind if it is locked, under writeback, spliced into a pipe,
+or still in another CPU's LRU-add batch after being read. Without
+HIGHMEM it happens to DAX inodes whose only entry is at index 0, which
+mapping_shrinkable() lets onto the LRU and invalidate_mapping_pages()
+never removes.
+
+Fixes: 2a0629834cd8 ("vfs: Don't evict inode under the inode lru traversing context")
+Cc: stable@vger.kernel.org
+Signed-off-by: Nikolaos Karaolidis <nick@karaolidis.com>
+Link: https://patch.msgid.link/20261016102515.111285-1-nick@karaolidis.com
+Reviewed-by: Jan Kara <jack@suse.cz>
+Reviewed-by: Zhihao Cheng <chengzhihao1@huawei.com>
+Signed-off-by: Christian Brauner (Amutable) <brauner@kernel.org>
+[ sashal: Adjusted context for direct i_state accesses in inode_unpin_lru_isolating() where upstream uses inode state accessors. ]
+Signed-off-by: Sasha Levin <sashal@kernel.org>
+
+[ cladefs: rebased onto 6.18.62's inode_lru_isolate(), which still drops an
+  inode's metadata buffers there: 6.18.64 carries 972b9dd4e418 ("fs: Ignore
+  inode metadata buffers in inode_lru_isolate()") as this change's
+  prerequisite, which without 77ff1ff2f3c5 ("ext4: Sync and invalidate
+  metadata buffers from ext4_evict_inode()") lets an ext4 filesystem with no
+  journal lose a dirty metadata buffer as its inode is evicted (hotbed review
+  155). A leftover is a buffer or a page; i_state is set directly, as 6.18
+  does, without d8753f788ab4's accessors. ]
+
+diff --git a/fs/inode.c b/fs/inode.c
+--- a/fs/inode.c
++++ b/fs/inode.c
+@@ -583,12 +583,11 @@ static void inode_pin_lru_isolating(struct inode *inode)
+ 
+ static void inode_unpin_lru_isolating(struct inode *inode)
+ {
+-	spin_lock(&inode->i_lock);
++	lockdep_assert_held(&inode->i_lock);
+ 	WARN_ON(!(inode->i_state & I_LRU_ISOLATING));
+ 	inode->i_state &= ~I_LRU_ISOLATING;
+ 	/* Called with inode->i_lock which ensures memory ordering. */
+ 	inode_wake_up_bit(inode, __I_LRU_ISOLATING);
+-	spin_unlock(&inode->i_lock);
+ }
+ 
+ static void inode_wait_for_lru_isolating(struct inode *inode)
+@@ -967,7 +966,13 @@ static enum lru_status inode_lru_isolate(struct list_head *item,
+ 				__count_vm_events(PGINODESTEAL, reap);
+ 			mm_account_reclaimed_pages(reap);
+ 		}
++
++		spin_lock(&inode->i_lock);
++		/* The walk restarts here: don't retry leftovers right away */
++		if (inode_has_buffers(inode) || !mapping_empty(&inode->i_data))
++			inode->i_state |= I_REFERENCED;
+ 		inode_unpin_lru_isolating(inode);
++		spin_unlock(&inode->i_lock);
+ 		return LRU_RETRY;
+ 	}
+ 

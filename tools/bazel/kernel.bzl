@@ -5,8 +5,8 @@
 """Bzlmod repository extension for the pinned Amazon Linux 6.18 guest kernel sources."""
 
 # Matches scripts/lib/guest-kernel-release.sh (board 8601).
-_KERNEL_TAG = "kernel6.18-6.18.54-121.166.amzn2023"
-_KERNEL_COMMIT = "8296a3f652c27c093d2c6bc4ce1fe2f797984f90"
+_KERNEL_TAG = "kernel6.18-6.18.62-127.179.amzn2023"
+_KERNEL_COMMIT = "b7522fb67989bd879de78486e9e253fd2f21f1dd"
 _KERNEL_URL = "https://github.com/amazonlinux/linux.git"
 _KERNEL_BUILD_DATE = "2026-04-08T00:00:00Z"
 
