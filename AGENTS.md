@@ -400,9 +400,10 @@ share lives once, in crates of this workspace (`virtio_extent`, the guest kernel
 `tag.libmachine=yes` on the board; those from its Backlog carry `libmachine=TASK-N`, never cited
 as `TASK-N` (cladefs's own numbers): cite them by board ID.
 
-- **Formats.** libmachine's snapshot, suspension and agent formats are not yet families under
-  `formats/`. Until the user decides whether they join them, treat them as frozen: change none
-  without the user's approval, as above.
+- **Formats are not frozen** (the user, 2026-11-26): libmachine's snapshot and suspension files
+  and its agent's wire protocol stay outside `formats/`. Each changes outright when the design is
+  better, with its version bumped; the new code refuses every other version by name, with no
+  migration, conversion or dual reader.
 - **Guest code in tests is assembly, never raw bytes:** Rust tests and examples use iced-x86's
   `code_asm` (`crates/libmachine/tests/common`); Python tests use Keystone in NASM syntax
   (`crates/libmachine-py/tests/guest.py`, which serializes Keystone calls: it is not thread-safe).
