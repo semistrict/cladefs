@@ -22,8 +22,11 @@ pub struct Config {
     /// machined's own directory: its machines' vsock sockets, snapshots and suspensions. Made
     /// mode 0700 if it isn't there; what machined left in it before is removed as it starts.
     /// On disk, not tmpfs (suspensions refuse tmpfs), and short: its vsock sockets' paths, past
-    /// it, must fit a Unix socket's (about 100 bytes).
+    /// it, must fit a Unix socket's (about 100 bytes). A hotbed node keeps what it joined as in it
+    /// (`hotbed-node.json`), across starts.
     pub state: PathBuf,
+    /// A node of hotbed to be too, if any: its machines then hotbed's workspaces.
+    pub hotbed: Option<crate::hotbed::Hotbed>,
 }
 
 /// TCP with mutual TLS.

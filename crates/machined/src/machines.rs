@@ -63,6 +63,14 @@ impl Current {
     pub(crate) fn to_proto(&self) -> proto::MachineStatus {
         proto::MachineStatus { state: self.state.into(), last_exit: self.last_exit.clone() }
     }
+
+    pub(crate) fn state(&self) -> MachineState {
+        self.state
+    }
+
+    pub(crate) fn last_exit(&self) -> Option<&proto::Exit> {
+        self.last_exit.as_ref()
+    }
 }
 
 fn exit(reason: proto::ExitReason, detail: impl Into<String>) -> proto::Exit {
@@ -108,6 +116,10 @@ struct Running {
 }
 
 impl Entry {
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
     pub(crate) fn status(&self) -> watch::Receiver<Current> {
         self.status.subscribe()
     }
@@ -347,6 +359,11 @@ impl Machines {
         });
         entries.insert(name.to_owned(), entry.clone());
         Ok(entry)
+    }
+
+    /// Checks that `spec` makes a machine, as [`create`](Self::create) would.
+    pub(crate) fn check(&self, spec: &proto::MachineSpec) -> Result<(), Status> {
+        checks::plan(&self.images, spec).map(drop)
     }
 
     /// Makes a machine, CREATED.

@@ -16,6 +16,8 @@
 //! - A machine's guest's vsock is reached through a Unix socket speaking Firecracker's protocol
 //!   (`vsock`); its console is kept and streamed with offsets (`console`).
 //! - [`client`] connects a Rust client to a machined's Unix socket.
+//! - [`hotbed`] makes it a node of hotbed (board 13896), its machines hotbed's workspaces, the
+//!   controller's calls coming down hotbed's tunnel.
 //!
 //! Machines' roots on cells of the extent daemon machined embeds (libcladefs, board 13471), and
 //! that daemon's Cladefsd service on machined's endpoint, wait on board 13553.
@@ -35,6 +37,7 @@ mod config;
 mod console;
 mod errors;
 mod guest;
+pub mod hotbed;
 mod listen;
 mod machines;
 mod service;

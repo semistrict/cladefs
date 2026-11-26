@@ -96,6 +96,22 @@ holds it to the last build's with `buf breaking`).
 | `src/console.rs` | The console kept with offsets |
 | `tests/machined.rs` | End to end over gRPC: KVM (`scripts/test.sh`'s libmachine part) and Hypervisor.framework (its hvf part) |
 
+## A node of hotbed
+
+With `--hotbed-controller URL --hotbed-token-file PATH --hotbed-node NAME --hotbed-kernel KERNEL`
+(and `--hotbed-initramfs`, `--hotbed-command-line`, `--hotbed-vcpus`, `--hotbed-memory-mib` for
+each workspace's machine), machined is a node of hotbed (`src/hotbed`, board 13896), ported from
+hotbed's worker: it joins once (a join token, `hotbed org join-token create`, traded for the
+node's worker token, kept in `<state>/hotbed-node.json`), heartbeats every 5 s, and keeps hotbed's
+`/ws/worker` WebSocket to the controller, down which the controller calls WorkspaceService: a
+workspace is a machine, a command an agent exec in it, its output followed and tailed. hotbed's
+proto is copied in `hotbed/` (its README says from which commit).
+
+Not served yet (PLATFORM_NOT_SUPPORTED, hotbed's unimplemented): Sync, files, shells, pause and
+resume, output queries, input, inspection and profiles, daemon logs, upgrades. The node reports
+no runtime and is not on hotbed's build, so hotbed's placement lists it but sends it no runs until
+hotbed places on machined's runtime.
+
 ## What a hotbed node on a Mac still needs
 
 hotbed's worker runs each workspace as a Firecracker VM today (`internal/vm` in hotbed); machined

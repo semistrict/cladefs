@@ -132,6 +132,7 @@ pub struct Server {
     socket: Option<PathBuf>,
     tcp: Option<SocketAddr>,
     machines: Arc<Machines>,
+    hotbed: Option<crate::hotbed::Node>,
     shutdown: watch::Sender<bool>,
     serving: Vec<tokio::task::JoinHandle<Result<(), tonic::transport::Error>>>,
 }
@@ -147,9 +148,13 @@ impl Server {
         self.tcp
     }
 
-    /// Stops serving: takes no more callers, stops every machine and waits until each is freed,
-    /// ends the streams on them (watches, consoles, execs), then waits for the calls under way.
+    /// Stops serving: takes no more callers (its hotbed node leaves its tunnel), stops every
+    /// machine and waits until each is freed, ends the streams on them (watches, consoles, execs),
+    /// then waits for the calls under way.
     pub async fn shutdown(self) -> io::Result<()> {
+        if let Some(node) = self.hotbed {
+            node.shutdown().await;
+        }
         self.shutdown.send_replace(true);
         // Before the servers' graceful ends, which wait for every stream to end.
         self.machines.close().await;
@@ -178,6 +183,12 @@ pub async fn start(config: Config) -> io::Result<Server> {
         ));
     }
     let machines = Arc::new(Machines::new(&config.images, &config.state)?);
+    // Joined first, run last: a node that can't join fails the start with nothing bound, and
+    // runs only once machined serves.
+    let joining = match &config.hotbed {
+        Some(hotbed) => Some(crate::hotbed::join(hotbed, machines.clone(), &config.state).await?),
+        None => None,
+    };
     let service = Service::new(machines.clone());
     let (reporter, health) = tonic_health::server::health_reporter();
     reporter.set_serving::<MachinedServer<Service>>().await;
@@ -217,5 +228,6 @@ pub async fn start(config: Config) -> io::Result<Server> {
             .serve_with_incoming_shutdown(incoming, stopped(&shutdown));
         serving.push(tokio::spawn(server));
     }
-    Ok(Server { socket: config.socket, tcp: bound_tcp, machines, shutdown, serving })
+    let hotbed = joining.map(crate::hotbed::Joining::run);
+    Ok(Server { socket: config.socket, tcp: bound_tcp, machines, hotbed, shutdown, serving })
 }
