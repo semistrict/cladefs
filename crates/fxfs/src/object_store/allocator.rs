@@ -193,6 +193,14 @@ use std::any::Any;
 use std::borrow::Borrow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::Hash;
+
+/// cladefs: how `Allocator::record_reaches_inner` commits its `AllocatorMutation::Reach`
+/// transaction (board 7617, board 11651).
+enum ReachCommitMode {
+    Normal,
+    HoldingCommits,
+    ForFlush,
+}
 use std::marker::PhantomData;
 use std::num::Saturating;
 use std::ops::Range;
@@ -1488,6 +1496,30 @@ impl Allocator {
     /// A mount counted such an extent only as far as its allocations that committed, short of what
     /// the device holds (TASK-213). A transaction that drops gives its ranges back to record.
     pub async fn record_reaches(&self) -> Result<(), Error> {
+        self.record_reaches_inner(ReachCommitMode::Normal).await
+    }
+
+    /// cladefs: as [`Self::record_reaches`], when the caller already holds `commit_mutex` (such as
+    /// `SyncOptions::holding_commits` during `Journal::make_room` or guest `FIFREEZE`; board
+    /// 11651, TASK-233), committing directly under `writer_mutex` without re-acquiring
+    /// `commit_mutex`.
+    pub(crate) async fn record_reaches_holding_commits(&self) -> Result<(), Error> {
+        self.record_reaches_inner(ReachCommitMode::HoldingCommits).await
+    }
+
+    /// cladefs: whether the owning filesystem has begun `close()` (board 11651).
+    pub(crate) fn filesystem_closed(&self) -> bool {
+        self.filesystem.upgrade().is_none_or(|fs| fs.is_closed())
+    }
+
+    /// cladefs: as [`Self::record_reaches`], called from `Journal::flush` (`flush_task`) before a
+    /// barrier: acquires `commit_mutex` non-blockingly unless `fsck` holds it so a `holding_commits`
+    /// sync waiting on `flush_task` can never deadlock (board 7617, board 11651).
+    pub(crate) async fn record_reaches_for_flush(&self) -> Result<(), Error> {
+        self.record_reaches_inner(ReachCommitMode::ForFlush).await
+    }
+
+    async fn record_reaches_inner(&self, mode: ReachCommitMode) -> Result<(), Error> {
         /// Reaches a transaction records at most: a few bytes of the journal each.
         const REACHES_A_TRANSACTION: usize = 256;
         let filesystem = self.filesystem.upgrade().unwrap();
@@ -1519,7 +1551,41 @@ impl Allocator {
                 let reach = AllocatorMutation::Reach { device_range, owner_object_id };
                 transaction.add(self.object_id(), Mutation::Allocator(reach));
             }
-            transaction.commit().await.context("recording what dropped allocations took")?;
+            match mode {
+                ReachCommitMode::Normal => {
+                    transaction
+                        .commit()
+                        .await
+                        .context("recording what dropped allocations took")?;
+                }
+                ReachCommitMode::HoldingCommits => {
+                    transaction.holding_commits = true;
+                    filesystem
+                        .hooks()
+                        .on_pre_commit(&transaction)
+                        .context("recording what dropped allocations took")?;
+                    filesystem
+                        .journal()
+                        .commit_holding_commits(&mut transaction)
+                        .context("recording what dropped allocations took")?;
+                }
+                ReachCommitMode::ForFlush => {
+                    transaction.holding_commits = true;
+                    filesystem
+                        .hooks()
+                        .on_pre_commit(&transaction)
+                        .context("recording what dropped allocations took")?;
+                    let _commit_guard = match filesystem.try_lock_commits() {
+                        Some(guard) => Some(guard),
+                        None if filesystem.fsck_active() => Some(filesystem.lock_commits().await),
+                        None => None,
+                    };
+                    filesystem
+                        .journal()
+                        .commit_holding_commits(&mut transaction)
+                        .context("recording what dropped allocations took")?;
+                }
+            }
         }
     }
 

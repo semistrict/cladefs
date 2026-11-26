@@ -385,6 +385,7 @@ impl FxFilesystemBuilder {
             objects: objects.clone(),
             journal,
             commit_mutex: futures::lock::Mutex::new(()),
+            fsck_active: std::sync::atomic::AtomicUsize::new(0),
             lock_manager: LockManager::new(),
             flush_task: Mutex::new(None),
             closed: AtomicBool::new(true),
@@ -492,6 +493,11 @@ pub struct FxFilesystem {
     objects: Arc<ObjectManager>,
     journal: Arc<Journal>,
     commit_mutex: futures::lock::Mutex<()>,
+    /// cladefs: count of active `fsck` checks reading filesystem state under `commit_mutex`
+    /// (`lock_commits_for_fsck` / `enter_fsck`), so `Journal::flush` knows whether a held
+    /// `commit_mutex` belongs to `fsck` (wait) vs a `holding_commits` sync waiting on `flush_task`
+    /// (never wait; board 7617, board 11651).
+    fsck_active: std::sync::atomic::AtomicUsize,
     lock_manager: LockManager,
     flush_task: Mutex<Option<fasync::Task<()>>>,
     closed: AtomicBool,
@@ -605,10 +611,13 @@ impl FxFilesystem {
     pub async fn sync(&self, options: SyncOptions<'_>) -> Result<(), Error> {
         let wait_for_frees = options.flush_device && !options.background_frees;
         // cladefs: what dropped allocations left in shared extents, before the barrier that seals it:
-        // boxed, as an allocation short of room syncs, and this commits a transaction; but not as
-        // the caller holds the commit lock, which that transaction would wait for (TASK-233).
+        // boxed, as an allocation short of room syncs, and this commits a transaction; when the
+        // caller already holds the commit lock (`options.holding_commits`, TASK-233), commit
+        // directly under `writer_mutex` rather than skipping reaches (board 11651).
         if !self.options.read_only && !options.holding_commits {
             Box::pin(self.allocator().record_reaches()).await?;
+        } else if !self.options.read_only {
+            Box::pin(self.allocator().record_reaches_holding_commits()).await?;
         }
         self.journal.sync(options).await?;
         if wait_for_frees {
@@ -653,6 +662,36 @@ impl FxFilesystem {
     /// lock.
     pub async fn lock_commits(&self) -> futures::lock::MutexGuard<'_, ()> {
         self.commit_mutex.lock().await
+    }
+
+    /// cladefs: whether `close()` has begun (so `Journal::flush` does not retry `record_reaches`
+    /// after `close()` already attempted it; TASK-623, board 11651).
+    pub(crate) fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+
+    /// cladefs: non-blocking attempt to lock `commit_mutex` for `Journal::flush` reach recording
+    /// (board 7617, board 11651).
+    pub(crate) fn try_lock_commits(&self) -> Option<futures::lock::MutexGuard<'_, ()>> {
+        self.commit_mutex.try_lock()
+    }
+
+    /// cladefs: whether an `fsck` check is currently active under `commit_mutex` (board 11651).
+    pub(crate) fn fsck_active(&self) -> bool {
+        self.fsck_active.load(Ordering::Acquire) > 0
+    }
+
+    /// cladefs: marks an `fsck` check active while the returned guard is alive (board 11651).
+    pub(crate) fn enter_fsck(&self) -> FsckActiveGuard<'_> {
+        self.fsck_active.fetch_add(1, Ordering::Release);
+        FsckActiveGuard { fs: self }
+    }
+
+    /// cladefs: acquires `commit_mutex` for `fsck` while marking `fsck_active` (board 11651).
+    pub(crate) async fn lock_commits_for_fsck(&self) -> FsckCommitGuard<'_> {
+        let _guard = self.commit_mutex.lock().await;
+        let _active = self.enter_fsck();
+        FsckCommitGuard { _active, _guard }
     }
 
     /// cladefs: compacts if accumulated `Root::journal_spans` reached `COMPACT_SPAN_THRESHOLD`,
@@ -948,6 +987,23 @@ impl FxFilesystem {
 /// A wrapper around a guard that needs to be taken when truncating an object.
 #[allow(dead_code)]
 pub struct TruncateGuard<'a>(WriteGuard<'a>);
+
+/// cladefs: RAII guard decrementing `FxFilesystem::fsck_active` on drop (board 11651).
+pub(crate) struct FsckActiveGuard<'a> {
+    fs: &'a FxFilesystem,
+}
+
+impl Drop for FsckActiveGuard<'_> {
+    fn drop(&mut self) {
+        self.fs.fsck_active.fetch_sub(1, Ordering::Release);
+    }
+}
+
+/// cladefs: holds both `fsck_active` and `commit_mutex` for the duration of an `fsck` (board 11651).
+pub(crate) struct FsckCommitGuard<'a> {
+    _active: FsckActiveGuard<'a>,
+    _guard: futures::lock::MutexGuard<'a, ()>,
+}
 
 impl<'a> TruncateGuard<'a> {
     pub fn into_owned(self, fs: Arc<FxFilesystem>) -> TruncateGuard<'static> {
@@ -2323,6 +2379,129 @@ mod tests {
         let reopened_f2 =
             ObjectStore::open_object(&reopened_root, f2_id, Default::default()).await.unwrap();
         assert_eq!(reopened_f2.contents(usize::MAX).await.unwrap()[..], [0x22; 4096]);
+        reopened.close().await.unwrap();
+    }
+
+    /// board 11651 & board 7617: on an `atomic_commits() == true` device with `barriers_enabled`,
+    /// dropped shared-extent allocations (`unrecorded_reaches`) must be journaled before sealing
+    /// across:
+    /// 1. `FxFilesystem::sync` with `holding_commits: true` (while `commit_mutex` is held — no
+    ///    deadlock),
+    /// 2. `Journal::write_super_block`, and
+    /// 3. `Journal::flush` (`POST_BARRIER` flush),
+    /// and a crash + remount must preserve the extent's reach and pass `fsck`.
+    #[fuchsia_async::run_singlethreaded(test)]
+    async fn test_atomic_commits_records_reaches_across_holding_commits_sync_and_superblock() {
+        use crate::fsck::{FsckOptions, fsck_with_options};
+
+        let fake = FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE).with_atomic_commits();
+        let device = DeviceHolder::new(fake);
+        let fs = FxFilesystemBuilder::new()
+            .format(true)
+            .barriers_enabled(true)
+            .open(device)
+            .await
+            .expect("format failed");
+        let root_store = fs.root_store();
+        let root_dir = Directory::open(&root_store, root_store.root_directory_object_id())
+            .await
+            .expect("open root");
+        let dir_lock =
+            lock_keys![LockKey::object(root_store.store_object_id(), root_dir.object_id())];
+
+        let mut txn =
+            root_store.new_transaction(dir_lock.clone(), Options::default()).await.unwrap();
+        let f1 = root_dir.create_child_file(&mut txn, "f1").await.unwrap();
+        txn.commit().await.unwrap();
+        // Establish a live shared staging extent.
+        f1.write_many(&[(0, &[0x11; 4096])]).await.unwrap();
+
+        let drop_shared_alloc = || async {
+            let mut dropped =
+                root_store.new_transaction(lock_keys![], Options::default()).await.unwrap();
+            let range = fs
+                .allocator()
+                .allocate_shared(&mut dropped, root_store.store_object_id(), 4096)
+                .await
+                .unwrap();
+            let device = fs.device();
+            let mut buf = device.allocate_buffer(4096).await;
+            buf.as_mut_slice().fill(0xaa);
+            device.write(range.extent, range.range.start, buf.as_ref()).await.unwrap();
+            drop(dropped);
+            assert!(fs.allocator().has_unrecorded_reaches());
+            range
+        };
+
+        // 1. `holding_commits: true` sync while `commit_mutex` is held must record reaches
+        // without deadlocking `commit_mutex`.
+        let range1 = drop_shared_alloc().await;
+        {
+            let _commits = fs.lock_commits().await;
+            fs.sync(SyncOptions {
+                flush_device: true,
+                holding_commits: true,
+                ..Default::default()
+            })
+            .await
+            .expect("holding_commits sync failed");
+        }
+        assert!(
+            !fs.allocator().has_unrecorded_reaches(),
+            "holding_commits sync must record pending reaches"
+        );
+
+        // 2. `Journal::write_super_block` must record pending reaches before flushing/saving.
+        f1.write_many(&[(4096, &[0x22; 4096])]).await.unwrap();
+        let range2 = drop_shared_alloc().await;
+        fs.journal().write_super_block().await.expect("write_super_block failed");
+        assert!(
+            !fs.allocator().has_unrecorded_reaches(),
+            "write_super_block must record pending reaches"
+        );
+
+        // 3. `Journal::flush` (`POST_BARRIER`) must record reaches even when `Journal::sync` is
+        // called directly (bypassing `FxFilesystem::sync`) on an `atomic_commits()` device.
+        f1.write_many(&[(8192, &[0x33; 4096])]).await.unwrap();
+        let range3 = drop_shared_alloc().await;
+        fs.journal()
+            .sync(SyncOptions { flush_device: true, ..Default::default() })
+            .await
+            .expect("journal POST_BARRIER sync failed");
+        assert!(
+            !fs.allocator().has_unrecorded_reaches(),
+            "POST_BARRIER Journal::flush on atomic_commits device must record pending reaches"
+        );
+
+        // Simulate a crash right after the barrier and verify remounted allocator reach matches
+        // what the device holds for all three shared staging extents.
+        let crashed = fs.device().snapshot().unwrap();
+        fs.close().await.unwrap();
+
+        let reopened = FxFilesystemBuilder::new()
+            .barriers_enabled(true)
+            .open(crashed)
+            .await
+            .expect("remount after atomic crash failed");
+        let fsck_opts = FsckOptions { fail_on_warning: true, ..Default::default() };
+        fsck_with_options(reopened.clone(), &fsck_opts).await.expect("fsck failed");
+        for range in [range1, range2, range3] {
+            let size = reopened.allocator().extent_size(range.extent);
+            assert!(
+                size.is_some_and(|s| s >= range.range.end),
+                "reopened allocator extent {:?} size {:?} fell short of recorded reach {}",
+                range.extent,
+                size,
+                range.range.end
+            );
+            assert!(
+                reopened.extent_counted(range.extent) >= range.range.end,
+                "reopened counted bytes {} for {:?} fell short of recorded reach {}",
+                reopened.extent_counted(range.extent),
+                range.extent,
+                range.range.end
+            );
+        }
         reopened.close().await.unwrap();
     }
 }

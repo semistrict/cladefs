@@ -110,6 +110,12 @@ impl JournalWriter {
         self.block_size.align_down(self.buf.len() as u64) as usize
     }
 
+    /// cladefs: file offset of the next byte to be returned by [`Self::take_flushable`]
+    /// (board 11651).
+    pub fn flushed_offset(&self) -> u64 {
+        self.checkpoint.file_offset
+    }
+
     /// Fills `buf` with as many outstanding complete blocks from the journal object as possible, so
     /// they can be flushed.  Part blocks can be flushed by calling pad_to_block first.  Returns the
     /// checkpoint of the last flushed bit of data.  The caller must ensure there's data available

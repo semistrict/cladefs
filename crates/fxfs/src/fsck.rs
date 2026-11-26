@@ -123,7 +123,9 @@ pub async fn fsck_with_options(
         info!("Starting fsck");
     }
 
-    let _guard = if options.no_lock { None } else { Some(filesystem.lock_commits().await) };
+    let _guard =
+        if options.no_lock { None } else { Some(filesystem.lock_commits_for_fsck().await) };
+    let _active = options.no_lock.then(|| filesystem.enter_fsck());
 
     let mut fsck = Fsck::new(options);
 
@@ -279,7 +281,9 @@ pub async fn fsck_volume_with_options(
 
     let store = filesystem.object_manager().store(store_id).context("open_store failed").unwrap();
 
-    let _guard = if options.no_lock { None } else { Some(filesystem.lock_commits().await) };
+    let _guard =
+        if options.no_lock { None } else { Some(filesystem.lock_commits_for_fsck().await) };
+    let _active = options.no_lock.then(|| filesystem.enter_fsck());
 
     let mut fsck = Fsck::new(options);
     fsck.check_child_store(store.as_ref(), &mut result).await?;

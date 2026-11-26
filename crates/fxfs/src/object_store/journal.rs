@@ -1534,6 +1534,13 @@ impl Journal {
     /// `Root`, freeing the superseded super-block and superseded journal blocks afterwards.
     /// Callers must ensure that we do not make concurrent calls.
     pub(crate) async fn write_super_block(&self) -> Result<(), Error> {
+        // cladefs: record any dropped shared-extent reaches before `flush_device` /
+        // `super_block_manager.save` seals extents on the device (board 11651).
+        if self.objects.allocator().has_unrecorded_reaches() {
+            let allocator = self.objects.allocator();
+            crate::boxed(|| allocator.record_reaches()).await?;
+        }
+
         let root_parent_store = self.objects.root_parent_store();
 
         let old_layers;
@@ -1823,11 +1830,26 @@ impl Journal {
         records
     }
 
+    /// cladefs: commits a transaction directly under `writer_mutex` without re-acquiring
+    /// `commit_mutex`, ensuring span room and pending framing records first (used by
+    /// `Allocator::record_reaches_holding_commits` / `record_reaches_for_flush`; board 7617,
+    /// board 11651).
+    pub(crate) fn commit_holding_commits(
+        &self,
+        transaction: &mut Transaction<'_>,
+    ) -> Result<u64, Error> {
+        if transaction.is_empty() {
+            return Ok(self.inner.lock().writer.journal_file_checkpoint().file_offset);
+        }
+        self.write_and_apply_mutations(transaction)
+    }
+
     fn write_and_apply_mutations(&self, transaction: &mut Transaction<'_>) -> Result<u64, Error> {
         ensure!(
             self.inner.lock().terminate_reason.is_none(),
             anyhow!(FxfsError::JournalFlushError).context("The journal stopped on an error")
         );
+        let room = self.room_for(transaction);
         let serialized = self.serialize_records(transaction);
         let checkpoint_before;
         let checkpoint_after;
@@ -1835,6 +1857,11 @@ impl Journal {
             let _guard = self.writer_mutex.lock();
             checkpoint_before = {
                 let mut inner = self.inner.lock();
+                // cladefs: re-check span room under `writer_mutex` so a concurrent
+                // `commit_holding_commits` (e.g. `record_reaches_for_flush`) advancing the writer
+                // between `pre_commit` and here can never overrun the active span (board 11651).
+                self.ensure_span_room(&mut inner, room)?;
+                Self::write_pending_records(&mut inner)?;
                 if transaction.includes_write() {
                     inner.needs_barrier = true;
                 }
@@ -1880,12 +1907,15 @@ impl Journal {
                 self.record_writer_end(after.file_offset);
                 after
             };
+            // Keep `did_commit_transaction` under `writer_mutex` so `last_end_offset` always
+            // advances monotonically even when `commit_holding_commits` runs from `flush_task`
+            // (board 11651).
+            self.objects.did_commit_transaction(
+                transaction,
+                &checkpoint_before,
+                checkpoint_after.file_offset,
+            );
         }
-        self.objects.did_commit_transaction(
-            transaction,
-            &checkpoint_before,
-            checkpoint_after.file_offset,
-        );
 
         {
             let mut inner = self.inner.lock();
@@ -2027,25 +2057,49 @@ impl Journal {
             }
             pre
         };
+        // cladefs: record any dropped shared-extent reaches before issuing either a `PRE_BARRIER`
+        // (non-atomic device) or a `POST_BARRIER` (including `atomic_commits() == true`), using
+        // `record_reaches_for_flush` so a `holding_commits` sync waiting on `flush_task` cannot
+        // deadlock `commit_mutex` (TASK-213, board 6011, board 7617, board 11651).
         let mut recorded_reaches = false;
-        if barrier_on_first_write && self.objects.allocator().has_unrecorded_reaches() {
-            let allocator = self.objects.allocator();
-            crate::boxed(|| allocator.record_reaches()).await?;
+        let allocator = self.objects.allocator();
+        let (mut buf, range, mut barrier_after_last_write) = loop {
+            let wants_barrier_after = {
+                let inner = self.inner.lock();
+                let offset = inner.writer.flushed_offset();
+                inner.position.wants_barrier_after(&(offset..offset + amount as u64))
+            };
+            if (barrier_on_first_write || wants_barrier_after)
+                && !recorded_reaches
+                && !allocator.filesystem_closed()
+                && allocator.has_unrecorded_reaches()
             {
-                let _guard = self.writer_mutex.lock();
-                self.pad_to_block()?;
+                crate::boxed(|| allocator.record_reaches_for_flush()).await?;
+                {
+                    let _guard = self.writer_mutex.lock();
+                    self.pad_to_block()?;
+                }
+                amount = self.inner.lock().writer.flushable_bytes();
+                recorded_reaches = true;
             }
-            amount = self.inner.lock().writer.flushable_bytes();
-            recorded_reaches = true;
-        }
-        let mut buf = handle.allocate_buffer(amount).await;
-        let (range, mut barrier_after_last_write) = {
+            let mut buf = handle.allocate_buffer(amount).await;
             let mut inner = self.inner.lock();
-            let offset = inner.writer.take_flushable(buf.as_mut());
-            // cladefs: as far as a sync flushing the device wants a barrier after.
+            let offset = inner.writer.flushed_offset();
             let range = offset..offset + buf.len() as u64;
+            // cladefs: as far as a sync flushing the device wants a barrier after.
             let barrier_after = inner.position.wants_barrier_after(&range) || recorded_reaches;
-            (range, barrier_after)
+            if barrier_after
+                && !recorded_reaches
+                && !allocator.filesystem_closed()
+                && allocator.has_unrecorded_reaches()
+            {
+                // A sync arrived during `allocate_buffer` while unrecorded reaches exist; record
+                // them before taking flushable bytes so the POST_BARRIER seals no unrecorded reach.
+                continue;
+            }
+            let taken = inner.writer.take_flushable(buf.as_mut());
+            debug_assert_eq!(taken, offset);
+            break (buf, range, barrier_after);
         };
         let handle = self.handle.get().unwrap();
         if barrier_after_last_write {

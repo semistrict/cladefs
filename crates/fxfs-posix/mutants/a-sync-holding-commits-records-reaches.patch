@@ -1,11 +1,11 @@
 --- a/crates/fxfs/src/filesystem.rs
 +++ b/crates/fxfs/src/filesystem.rs
-@@ -796,7 +796,7 @@
-         // cladefs: what dropped allocations left in shared extents, before the barrier that seals it:
-         // boxed, as an allocation short of room syncs, and this commits a transaction; but not as
-         // the caller holds the commit lock, which that transaction would wait for (TASK-233).
+@@ -614,7 +614,7 @@
+         // boxed, as an allocation short of room syncs, and this commits a transaction; when the
+         // caller already holds the commit lock (`options.holding_commits`, TASK-233), commit
+         // directly under `writer_mutex` rather than skipping reaches (board 11651).
 -        if !self.options.read_only && !options.holding_commits {
 +        if !self.options.read_only {
              Box::pin(self.allocator().record_reaches()).await?;
-         }
-         self.journal.sync(options).await?;
+         } else if !self.options.read_only {
+             Box::pin(self.allocator().record_reaches_holding_commits()).await?;
