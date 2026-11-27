@@ -114,7 +114,7 @@ fn peers_are_served_parts_over_grpc() {
     assert_eq!(gets(&bucket) - before, 2, "its tail and the part");
     assert_eq!(ask(&address, URL, asked), Ok(Some(bytes)));
     assert_eq!(gets(&bucket) - before, 2, "fetched again");
-    assert_eq!(SERVED.load(Ordering::Relaxed), 2);
+    assert_eq!(Daemon::process().peers_served.parts.load(Ordering::Relaxed), 2);
 }
 
 /// A part the object holds not, past its end, isn't there to give: NOT_FOUND, no failure.
@@ -125,7 +125,7 @@ fn parts_the_object_holds_not_are_not_found() {
     let address = serving(&bucket, dir.path());
     let past = Asked { key: location.key.clone(), part: 5 };
     assert_eq!(ask(&address, URL, past), Ok(None));
-    assert_eq!(SERVED_MISSING.load(Ordering::Relaxed), 1);
+    assert_eq!(Daemon::process().peers_served.missing.load(Ordering::Relaxed), 1);
 }
 
 /// Peers asking for what is not served, or of another bucket, are refused: failures, which put
@@ -498,7 +498,8 @@ fn peers_unauthenticated_are_refused_every_call() {
         }
     }
     assert_eq!(answered, expected, "true: refused by its transport");
-    assert_eq!(SERVED.load(Ordering::Relaxed) + SERVED_MISSING.load(Ordering::Relaxed), 0);
+    let parts = &Daemon::process().peers_served;
+    assert_eq!(parts.parts.load(Ordering::Relaxed) + parts.missing.load(Ordering::Relaxed), 0);
     assert_eq!(ask(&served.address, URL, part_asked), Ok(Some(expected_bytes)));
 }
 

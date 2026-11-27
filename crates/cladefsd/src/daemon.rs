@@ -109,6 +109,8 @@ pub struct Daemon {
     /// list updates so a racing `SetPeers` RPC cannot overwrite a newer polled generation
     /// (hotbed review 140 finding 520).
     pub(super) peers_generation: Mutex<u64>,
+    /// What this daemon's peers asked it, and it served them (`peers::PartsServed`).
+    pub(super) peers_served: peers::PartsServed,
     /// Outgoing and incoming ephemeral cell migration state.
     pub(super) migrations: migration::State,
     /// Active VM connection reports for `GetStats` and `/metrics`.
@@ -168,6 +170,7 @@ impl Daemon {
             peer_credentials: Mutex::new(None),
             peer_channels: OnceLock::new(),
             peers_generation: Mutex::new(0),
+            peers_served: peers::PartsServed::default(),
             migrations: migration::State::new(),
             stats_reports: Mutex::new(Vec::new()),
             process: process::State::new(),
@@ -183,6 +186,13 @@ impl Daemon {
     /// The per-host context backing this daemon.
     pub fn host(&self) -> &Arc<cladefs_core::Host> {
         &self.host
+    }
+
+    /// Its metrics as of now, in Prometheus' text format: what `GET /metrics` answers
+    /// (`CLADEFSD_METRICS`), for a process that embeds the daemon and serves them itself, and for
+    /// the simulation, whose hosts each say their own.
+    pub fn metrics(&self) -> String {
+        crate::metrics::render_on(self)
     }
 
     /// The process's default daemon instance, for standalone tests and legacy free-function entry

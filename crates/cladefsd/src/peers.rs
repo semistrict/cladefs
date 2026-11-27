@@ -179,14 +179,19 @@ pub(crate) fn check_migration_formats(
     SupportedFormats::current().check_migration(migration, theirs)
 }
 
-/// The parts the daemon served its peers, and those it had not as they asked.
-// The process's count, every simulated host's together, as a process's metrics are.
-static SERVED: AtomicU64 = AtomicU64::new(0);
-// The process's count, every simulated host's together, as a process's metrics are.
-static SERVED_MISSING: AtomicU64 = AtomicU64::new(0);
-/// cladefs: the stored bytes of the parts the daemon served its peers.
-// The process's count, every simulated host's together, as a process's metrics are.
-static SERVED_BYTES: AtomicU64 = AtomicU64::new(0);
+/// What a daemon's peers asked it, since its start: the daemon's own, as its metrics say them
+/// (`Daemon::peers_served`), a simulated host's apart from another's (board 14521: counted for
+/// the process, the simulation's hosts of one cloud region had no way to say they served none of
+/// another's).
+#[derive(Default)]
+pub(super) struct PartsServed {
+    /// Parts it served them.
+    parts: AtomicU64,
+    /// Parts it had not as they asked.
+    missing: AtomicU64,
+    /// cladefs: the stored bytes of the parts it served them.
+    bytes: AtomicU64,
+}
 
 /// Has `daemon` serve the hosts sharing its bucket, at `address` (`CLADEFSD_PEER_ADDRESS`),
 /// on `listening`, bound there (or, under madsim, its address on the simulated network), and its
@@ -339,9 +344,9 @@ pub(super) fn counts_on(
 ) -> Option<(cladefs_core::bucket::peers::Counts, ServedCounts)> {
     let counts = cladefs_core::bucket::peers_on(&daemon.host)?.counts();
     let served = ServedCounts {
-        parts: SERVED.load(Ordering::Relaxed),
-        bytes: SERVED_BYTES.load(Ordering::Relaxed),
-        missing: SERVED_MISSING.load(Ordering::Relaxed),
+        parts: daemon.peers_served.parts.load(Ordering::Relaxed),
+        bytes: daemon.peers_served.bytes.load(Ordering::Relaxed),
+        missing: daemon.peers_served.missing.load(Ordering::Relaxed),
     };
     Some((counts, served))
 }
@@ -810,12 +815,13 @@ impl proto::peer_server::Peer for Server {
         let asked = Asked { key, part };
         match self.serving.part(asked).await {
             Ok(Some(bytes)) => {
-                SERVED.fetch_add(1, Ordering::Relaxed);
-                SERVED_BYTES.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                let served = &self.daemon.peers_served;
+                served.parts.fetch_add(1, Ordering::Relaxed);
+                served.bytes.fetch_add(bytes.len() as u64, Ordering::Relaxed);
                 Ok(Response::new(GetPartResponse { bytes: bytes.to_vec() }))
             }
             Ok(None) => {
-                SERVED_MISSING.fetch_add(1, Ordering::Relaxed);
+                self.daemon.peers_served.missing.fetch_add(1, Ordering::Relaxed);
                 Err(Status::not_found(format!("part {part}: none")))
             }
             Err(err) => {
