@@ -4,7 +4,10 @@
 # found in the LICENSE file.
 
 # Refuses a commit that changes Cargo.lock, a workspace crate manifest, vendor/firecracker, or
-# scripts/firecracker-cargo.sh while vendor/firecracker.lock is stale or unstaged (board 10216).
+# scripts/firecracker-cargo.sh while vendor/firecracker.lock is stale or unstaged (board 10216),
+# or while guest/tests/Cargo.lock, the guest harness's, which builds the workspace's crates
+# --locked too, is: a dependency of cladefs's crates changed without them broke scripts/test.sh's
+# guest and firecracker parts three times on 2026-11-27.
 # Commits touching none of those files return at once with no cargo invocation.
 # `git config core.hooksPath scripts/hooks` installs it alongside commit-msg.
 set -euo pipefail
@@ -12,14 +15,14 @@ set -euo pipefail
 root=$(git rev-parse --show-toplevel)
 cd "$root"
 
-trigger='^(Cargo\.(toml|lock)|crates/.*/Cargo\.toml|vendor/firecracker(\.lock)?|scripts/firecracker-cargo\.sh)$'
+trigger='^(Cargo\.(toml|lock)|crates/.*/Cargo\.toml|guest/tests/(.*/)?Cargo\.(toml|lock)|vendor/firecracker(\.lock)?|scripts/firecracker-cargo\.sh)$'
 staged=$(git diff --cached --name-only | grep -E "$trigger" || true)
 [[ -n $staged ]] || exit 0
 
 # Ensure the lockfile and every manifest/lock Cargo resolves in the working tree match what is
 # staged, so --check cannot pass against unstaged edits while committing a stale lockfile.
-if ! git diff --quiet -- vendor/firecracker.lock; then
-    echo "pre-commit: vendor/firecracker.lock has unstaged changes; stage it before committing (git add vendor/firecracker.lock)" >&2
+if ! git diff --quiet -- vendor/firecracker.lock guest/tests/Cargo.lock; then
+    echo "pre-commit: vendor/firecracker.lock or guest/tests/Cargo.lock has unstaged changes; stage it before committing" >&2
     exit 1
 fi
 dirty=$(git diff --name-only | grep -E "$trigger" || true)
@@ -33,3 +36,8 @@ if [[ -n $dirty ]]; then
 fi
 
 "$root/scripts/firecracker-cargo.sh" --check
+if ! cargo metadata --locked --offline --format-version 1 --manifest-path "$root/guest/tests/Cargo.toml" >/dev/null 2>&1 &&
+    ! cargo metadata --locked --format-version 1 --manifest-path "$root/guest/tests/Cargo.toml" >/dev/null; then
+    echo "pre-commit: guest/tests/Cargo.lock is not as Cargo resolves the guest harness: run cargo metadata --manifest-path guest/tests/Cargo.toml and stage it" >&2
+    exit 1
+fi
