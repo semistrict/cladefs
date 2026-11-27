@@ -889,14 +889,16 @@ fn peers_and_migrations_through_the_daemon() {
     let cell = run(&["create", "16777216"]).unwrap().trim().to_owned();
     let refused = run(&["migrate", &cell, "127.0.0.1:1"]).unwrap_err();
     assert!(refused.contains(&format!("migrating cell {cell}")), "{refused}");
+    assert!(refused.contains("ENOTSUP"), "{refused}");
     let refused = run(&["hand-over", &cell]).unwrap_err();
     assert!(refused.contains(&format!("handing cell {cell} over")), "{refused}");
+    assert!(refused.contains("ENOTSUP"), "{refused}");
     let refused = run(&["abort-migration", &cell]).unwrap_err();
     let aborting = format!("aborting the migration of cell {cell}");
     assert!(refused.contains(&aborting), "{refused}");
-    // Bucket-backed migrations are supported even without CLADEFSD_EPHEMERAL (board 11369), so
-    // aborting when no migration is under way returns ENOENT rather than ENOTSUP (board 11587).
-    assert!(refused.contains("ENOENT"), "{refused}");
+    // Peer migration RPCs serve ephemeral cells only (board 14467): bucket-backed cells are
+    // refused with ENOTSUP.
+    assert!(refused.contains("ENOTSUP"), "{refused}");
 }
 
 /// board 8585: `--timeout`, or CLADEFSCTL_TIMEOUT, bounds a call the daemon holds, here a GetStats
