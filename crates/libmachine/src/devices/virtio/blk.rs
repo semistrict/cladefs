@@ -9,7 +9,7 @@
 use std::fs::File;
 use std::os::unix::fs::FileExt;
 
-use vm_memory::{Bytes, GuestAddress, GuestMemoryMmap};
+use vm_memory::{Bytes, GuestAddress, GuestMemoryBackend, GuestMemoryMmap};
 
 use super::queue::DeviceQueue;
 use super::{DeviceState, VirtioDevice, other_version};
@@ -96,6 +96,10 @@ impl Block {
 
     /// Serves one request of type `kind` at `sector` over the buffers `data`: its status, and the
     /// bytes it wrote into the guest's buffers.
+    ///
+    /// A guest's chain is untrusted (AGENTS.md, Trust boundaries): each buffer is checked to be
+    /// guest memory before the disk is touched for it, and its bytes pass through a buffer of
+    /// [`CHUNK`] bytes at most, whatever its descriptor's length says (board 14346).
     fn serve(&self, mem: &GuestMemoryMmap, kind: u32, sector: u64, data: &[Segment]) -> (u8, u32) {
         let total: u64 = data.iter().map(|s| u64::from(s.len)).sum();
         // The request's bytes, within the disk.
@@ -103,33 +107,51 @@ impl Block {
             let start = sector.checked_mul(SECTOR)?;
             (start.checked_add(total)? <= self.len).then_some(start)
         };
+        // Every buffer of the request's direction, guest memory.
+        let in_memory = |writable: bool| {
+            (data.iter())
+                .filter(|s| s.writable == writable)
+                .all(|s| mem.check_range(s.addr, s.len as usize))
+        };
         match kind {
             VIRTIO_BLK_T_IN => {
-                let Some(mut at) = within() else { return (VIRTIO_BLK_S_IOERR, 0) };
-                let mut buf = Vec::new();
-                for seg in data.iter().filter(|s| s.writable) {
-                    buf.resize(seg.len as usize, 0);
-                    if self.file.read_exact_at(&mut buf, at).is_err()
-                        || mem.write_slice(&buf, seg.addr).is_err()
-                    {
-                        return (VIRTIO_BLK_S_IOERR, 0);
-                    }
-                    at += u64::from(seg.len);
+                // What it writes, the status byte with it, is a used length: a u32.
+                let Ok(written) = u32::try_from(total) else { return (VIRTIO_BLK_S_IOERR, 0) };
+                if written == u32::MAX || !in_memory(true) {
+                    return (VIRTIO_BLK_S_IOERR, 0);
                 }
-                (VIRTIO_BLK_S_OK, u32::try_from(total).unwrap_or(u32::MAX))
+                let Some(mut at) = within() else { return (VIRTIO_BLK_S_IOERR, 0) };
+                let mut buf = vec![0; CHUNK.min(total as usize)];
+                for seg in data.iter().filter(|s| s.writable) {
+                    for (addr, len) in chunks(seg) {
+                        let buf = &mut buf[..len];
+                        if self.file.read_exact_at(buf, at).is_err()
+                            || mem.write_slice(buf, addr).is_err()
+                        {
+                            return (VIRTIO_BLK_S_IOERR, 0);
+                        }
+                        at += len as u64;
+                    }
+                }
+                (VIRTIO_BLK_S_OK, written)
             }
             VIRTIO_BLK_T_OUT if self.read_only => (VIRTIO_BLK_S_IOERR, 0),
             VIRTIO_BLK_T_OUT => {
+                if !in_memory(false) {
+                    return (VIRTIO_BLK_S_IOERR, 0);
+                }
                 let Some(mut at) = within() else { return (VIRTIO_BLK_S_IOERR, 0) };
-                let mut buf = Vec::new();
+                let mut buf = vec![0; CHUNK.min(total as usize)];
                 for seg in data.iter().filter(|s| !s.writable) {
-                    buf.resize(seg.len as usize, 0);
-                    if mem.read_slice(&mut buf, seg.addr).is_err()
-                        || self.file.write_all_at(&buf, at).is_err()
-                    {
-                        return (VIRTIO_BLK_S_IOERR, 0);
+                    for (addr, len) in chunks(seg) {
+                        let buf = &mut buf[..len];
+                        if mem.read_slice(buf, addr).is_err()
+                            || self.file.write_all_at(buf, at).is_err()
+                        {
+                            return (VIRTIO_BLK_S_IOERR, 0);
+                        }
+                        at += len as u64;
                     }
-                    at += u64::from(seg.len);
                 }
                 (VIRTIO_BLK_S_OK, 0)
             }
@@ -153,11 +175,22 @@ impl Block {
     }
 }
 
+/// The most bytes of a request the device holds at once, however long its buffers.
+const CHUNK: usize = 1 << 20;
+
 /// A data buffer of a request.
 struct Segment {
     addr: GuestAddress,
     len: u32,
     writable: bool,
+}
+
+/// `seg`'s bytes in pieces of [`CHUNK`] bytes at most: each one's guest address and length.
+fn chunks(seg: &Segment) -> impl Iterator<Item = (GuestAddress, usize)> + '_ {
+    (0..u64::from(seg.len)).step_by(CHUNK).map(move |from| {
+        let len = (u64::from(seg.len) - from).min(CHUNK as u64) as usize;
+        (GuestAddress(seg.addr.0.wrapping_add(from)), len)
+    })
 }
 
 impl VirtioDevice for Block {
@@ -192,10 +225,14 @@ impl VirtioDevice for Block {
             let head = chain.head_index();
             let descriptors: Vec<_> = chain.collect();
             // The header, the data, then the status byte (virtio 1.2, section 5.2.6): what the
-            // device wrote, the status byte with it; a chain not so is used with nothing written.
+            // device wrote, the status byte with it; a chain not so, its status descriptor
+            // holding no byte among them, is used with nothing written.
             let written = match descriptors.as_slice() {
                 [header, data @ .., status]
-                    if !header.is_write_only() && status.is_write_only() && header.len() >= 16 =>
+                    if !header.is_write_only()
+                        && status.is_write_only()
+                        && status.len() >= 1
+                        && header.len() >= 16 =>
                 {
                     let mut bytes = [0u8; 16];
                     let (code, written) = match mem.read_slice(&mut bytes, header.addr()) {
@@ -237,6 +274,9 @@ impl VirtioDevice for Block {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod hostile_tests;
 
 #[cfg(test)]
 mod tests {
