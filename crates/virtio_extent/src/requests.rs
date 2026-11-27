@@ -2,9 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Serving the device's requests: each request's buffers ([`Buffers`]) read, the cell asked
-//! ([`Backend`]), and what it returns and the response written back. The device applies requests in
-//! any order but across barriers (doc-4), so a guest's `MAP` doesn't wait for the writes and
+//! Serving the device's requests: a guest's, as doc-4 has them ([`Guest`]), with the interpreter
+//! every transport of doc-4's requests shares ([`handle`], board 14378). The device applies requests
+//! in any order but across barriers (doc-4), so a guest's `MAP` doesn't wait for the writes and
 //! uploaded commits queued before it: each is served as a future ([`handle`]), several at once. On
 //! Linux, [`Requests`] serves them on the threads receiving the daemon's replies, which go on with
 //! them, completing each request (`cladefs::cladefsd::spawn_on_replies`): no thread is woken
@@ -12,14 +12,13 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use cladefs::{Errno, MappingContents, WindowMapping};
-use log::{error, info};
+use cladefs::Errno;
+use cladefs::extent_requests::protocol::*;
+use cladefs::extent_requests::{Dialect, GuestBackend, Reader, Writer, handle};
+use log::info;
 
-use crate::backend::Backend;
-use crate::buffers::{Buffers, Reader, Writer};
 use crate::config::CacheType;
 use crate::notices::Notices;
-use crate::protocol::*;
 
 /// The requests served, and the time serving them took, by type, logged as a VMM's worker stops:
 /// against what the guest waits for a request (its driver's request_ns), what the transport
@@ -66,268 +65,85 @@ impl Served {
     }
 }
 
-/// Serves the request whose buffers are `buffers` with `cell`, its guest's notices `notices`,
-/// refusing what is out of the device's `bounds` before `cell` sees it, and returns the length of
-/// what the device writes to it: its writable buffers, whose last bytes hold the response. The VMM
-/// returns the request to the driver with that length.
-pub async fn handle<S: Backend>(
-    cell: &S,
-    notices: &Notices,
-    cache: CacheType,
-    bounds: Bounds,
-    buffers: Buffers,
-) -> u32 {
-    // The response is the chain's last bytes, after what the request returns.
-    let writable = buffers.writable_len();
-    let Some(room) = writable.checked_sub(size_of::<Response>()) else {
-        error!("extent device: a request has no room for its response");
-        return 0;
-    };
-    let mut reader = Reader::new(&buffers);
-    let writer = Writer::new(&buffers);
-    // cladefs: more room than any request returns into, refused, its response alone written: none
-    // of it zeroed, which a chain naming 4 GiB had the device do (board 2768).
-    if writable > MAX_WRITABLE {
-        writer.obj(
-            room,
-            &Response { status: Errno::EINVAL.raw().cast_unsigned().to_le(), reserved: 0 },
-        );
-        return u32::try_from(writable)
-            .expect("a request's buffers' writable length fits in u32 (Buffers)");
-    }
-    let served = serve(cell, notices, cache, bounds, &mut reader, &writer, room).await;
-    let (status, written) = match served {
-        Ok(written) => (0, written),
-        Err(errno) => (errno.raw().cast_unsigned(), 0),
-    };
-    // What the request didn't return reads as zeros, as drivers read the buffers whole.
-    writer.zero(written, room - written);
-    writer.obj(room, &Response { status: status.to_le(), reserved: 0 });
-    u32::try_from(writable).expect("a request's buffers' writable length fits in u32 (Buffers)")
+/// A guest's requests, as its extent device has them: doc-4 as it is, with the guest's notices of
+/// its freezes and resizes, and its cache's uploaded commits ordered if it is `Unsafe` (TASK-363).
+/// The [`Dialect`] the VMM serves its virtqueues in; a local process's ring is another
+/// ([`cladefs::extent_requests::Process`], board 14378).
+pub struct Guest<'a> {
+    pub notices: &'a Notices,
+    pub cache: CacheType,
 }
 
-/// Serves the request `reader` holds, within `bounds`, writing what it returns with `writer`, which
-/// has `room` bytes for it, and returns how many it wrote.
-async fn serve<S: Backend>(
-    cell: &S,
-    notices: &Notices,
-    cache: CacheType,
-    bounds: Bounds,
-    reader: &mut Reader<'_>,
-    writer: &Writer<'_>,
-    room: usize,
-) -> Result<usize, Errno> {
-    let header: RequestHeader = reader.obj()?;
-    let type_ = u32::from_le(header.type_);
-    // cladefs: a flag its type doesn't know, refused before anything of it is served (doc-4,
-    // board 2774); and a type no request is of.
-    let known = known_flags(type_).ok_or(Errno::EINVAL)?;
-    if u32::from_le(header.flags) & !known != 0 {
-        return Err(Errno::EINVAL);
+impl<S: GuestBackend> Dialect<S> for Guest<'_> {
+    // Its commits complete once uploaded or ordered, its cell kept in the bucket: no local flag,
+    // nor any warming, which its MAPs ask of no one.
+    const COMMIT_LOCAL: Option<u32> = None;
+    const WRITE_LOCAL: Option<u32> = None;
+    const MAP_WARM: Option<u32> = None;
+
+    fn known_flags(&self, type_: u32) -> Option<u32> {
+        known_flags(type_)
     }
-    let flags = match cache {
-        CacheType::Writeback => u32::from_le(header.flags),
-        CacheType::Unsafe => ordered_only(type_, u32::from_le(header.flags)),
-    };
-    match type_ {
-        VIRTIO_EXTENT_T_READ => {
-            let args: IoArgs = reader.obj()?;
-            let len = u32::from_le(args.len);
-            if len > MAX_TRANSFER || room < len as usize {
-                return Err(Errno::EINVAL);
-            }
-            let offset = u64::from_le(args.offset);
-            bounds.io(offset, len.into())?;
-            let extent = args.id.decode()?;
-            let mut slices = writer.slices(0, len as usize).ok_or(Errno::EINVAL)?;
-            cell.read(extent, offset, &mut slices).await?;
-            Ok(len as usize)
+
+    fn served_flags(&self, type_: u32, flags: u32) -> u32 {
+        match self.cache {
+            CacheType::Writeback => flags,
+            CacheType::Unsafe => ordered_only(type_, flags),
         }
-        VIRTIO_EXTENT_T_WRITE => {
-            let args: IoArgs = reader.obj()?;
-            let len = u32::from_le(args.len);
-            let offset = u64::from_le(args.offset);
-            if len > MAX_TRANSFER {
-                return Err(Errno::EINVAL);
-            }
-            bounds.io(offset, len.into())?;
-            let extent = args.id.decode()?;
-            let data = reader.slices(len as usize)?;
-            // A barrier before orders, without waiting for the disk or the bucket (doc-4); one
-            // after, with WRITE_COMMIT, waits as a COMMIT does. One round trip to the daemon either
-            // way.
-            let (mut barriers, has_root) = cladefs::protocol::decode_write_barriers(flags, None)?;
-            // cladefs: the root that commit sets, after the data (WRITE_ROOT).
-            let root;
-            if has_root {
-                let len = u32::from_le(args.root_len);
-                cladefs::protocol::check_root_len(len as usize)?;
-                root = reader.bytes(len as usize)?;
-                barriers.root = Some(&root);
-            }
-            cell.write(extent, offset, &data, barriers).await?;
-            Ok(0)
-        }
-        VIRTIO_EXTENT_T_FREE => {
-            let id: ExtentIdLe = reader.obj()?;
-            let mut extents = vec![id.decode()?];
-            // cladefs: the rest of a flush's dead extents, each freed as it would be alone, in one
-            // request of the daemon's, not one each (TASK-92.13): the first error fails the
-            // request, the extents before it freed (`F_FREE_MANY`); refused past `MAX_MANY_DATA`.
-            if flags & VIRTIO_EXTENT_FREE_MANY != 0 {
-                if reader.available() > MAX_MANY_DATA {
+    }
+
+    fn prefault(&self, cell: &S, window_offset: u64, len: u64) {
+        cell.prefault(window_offset, len);
+    }
+
+    async fn serve_own(
+        &self,
+        cell: &S,
+        type_: u32,
+        flags: u32,
+        bounds: Bounds,
+        reader: &mut Reader<'_>,
+        _: &Writer<'_>,
+        _: usize,
+    ) -> Result<usize, Errno> {
+        match type_ {
+            // cladefs: a window that copies on write's (backlog doc-13), its arguments UNMAP's.
+            VIRTIO_EXTENT_T_PRIVATE => {
+                if !cell.copies_on_write() {
                     return Err(Errno::EINVAL);
                 }
-                while reader.available() > 0 {
-                    let id: ExtentIdLe = reader.obj()?;
-                    extents.push(id.decode()?);
-                }
-            }
-            cell.free_many(&extents).await?;
-            Ok(0)
-        }
-        VIRTIO_EXTENT_T_MAP => {
-            let args: MapArgs = reader.obj()?;
-            // cladefs: every map is read-only; a window that copies on write maps zeros too
-            // (backlog doc-13).
-            let map_flags = VIRTIO_EXTENT_MAP_PREFAULT
-                | if cell.copies_on_write() { VIRTIO_EXTENT_MAP_ZEROS } else { 0 };
-            if flags & !(map_flags | VIRTIO_EXTENT_MAP_MANY) != 0 {
-                return Err(Errno::EINVAL);
-            }
-            let mut mappings = Vec::new();
-            let mut prefault = Vec::new();
-            let mut push = |args: MapArgs, flags: u32| -> Result<(), Errno> {
+                let args: UnmapArgs = reader.obj()?;
                 let (window_offset, len) =
                     (u64::from_le(args.window_offset), u64::from_le(args.len));
                 bounds.window(window_offset, len)?;
-                let contents = if flags & VIRTIO_EXTENT_MAP_ZEROS != 0 {
-                    MappingContents::Zeros
-                } else {
-                    let offset = u64::from_le(args.offset);
-                    bounds.mapped(offset, len)?;
-                    let extent = args.id.decode()?;
-                    MappingContents::Extent { extent, offset }
-                };
-                mappings.push(WindowMapping { window_offset, len, contents });
-                if flags & VIRTIO_EXTENT_MAP_PREFAULT != 0 {
-                    prefault.push((window_offset, len));
-                }
-                Ok(())
-            };
-            // cladefs: each within the window, and an extent's within a u64 (TASK-470), or none is
-            // sent.
-            push(args, flags & map_flags)?;
-            // cladefs: the rest of a chunk's pieces (`F_MAP_MANY`), each with its own flags;
-            // refused past `MAX_MANY_DATA`.
-            if flags & VIRTIO_EXTENT_MAP_MANY != 0 {
-                if reader.available() > MAX_MANY_DATA {
+                cell.make_private(window_offset, len).await?;
+                Ok(0)
+            }
+            VIRTIO_EXTENT_T_FREEZE => {
+                self.notices.set_frozen(flags & VIRTIO_EXTENT_FREEZE_FROZEN != 0);
+                Ok(0)
+            }
+            // cladefs: the guest's stats, which the daemon asked for (TASK-111.4).
+            VIRTIO_EXTENT_T_STATS => {
+                let args: StatsArgs = reader.obj()?;
+                if reader.available() > MAX_STATS {
                     return Err(Errno::EINVAL);
                 }
-                while reader.available() > 0 {
-                    let entry: MapEntry = reader.obj()?;
-                    let flags = u32::from_le(entry.flags);
-                    if flags & !map_flags != 0 {
-                        return Err(Errno::EINVAL);
-                    }
-                    push(entry.map, flags)?;
-                }
+                let text = reader.bytes(reader.available())?;
+                let text = cladefs::protocol::check_stats_text(&text)?;
+                cell.answer_stats(u64::from_le(args.asked), Some(text)).await?;
+                Ok(0)
             }
-            // cladefs board 6917: forwarded directly to `cladefsd`'s `MAP_MANY` (or `MAP` for a
-            // single entry), in order, one change of the window: the first error fails the
-            // request, those before it mapped, with no trailing concurrent RPCs (TASK-563).
-            cell.map_many(&mappings).await?;
-            // cladefs: what the guest reads next (`F_MAP_PREFAULT`) is then mapped for it
-            // (TASK-112.1).
-            for (window_offset, len) in prefault {
-                cell.prefault(window_offset, len);
+            VIRTIO_EXTENT_T_RESIZED => {
+                let args: ResizedArgs = reader.obj()?;
+                let capacity = u64::from_le(args.capacity);
+                let took = flags & VIRTIO_EXTENT_RESIZED_TOOK != 0;
+                self.notices.resizing.answered(capacity, took);
+                cell.resized(capacity, took).await?;
+                Ok(0)
             }
-            Ok(0)
+            _ => Err(Errno::EINVAL),
         }
-        VIRTIO_EXTENT_T_UNMAP => {
-            let args: UnmapArgs = reader.obj()?;
-            let (window_offset, len) = (u64::from_le(args.window_offset), u64::from_le(args.len));
-            bounds.window(window_offset, len)?;
-            cell.unmap(window_offset, len).await?;
-            Ok(0)
-        }
-        // cladefs: a window that copies on write's (backlog doc-13), its arguments UNMAP's.
-        VIRTIO_EXTENT_T_PRIVATE => {
-            if !cell.copies_on_write() {
-                return Err(Errno::EINVAL);
-            }
-            let args: UnmapArgs = reader.obj()?;
-            let (window_offset, len) = (u64::from_le(args.window_offset), u64::from_le(args.len));
-            bounds.window(window_offset, len)?;
-            cell.make_private(window_offset, len).await?;
-            Ok(0)
-        }
-        VIRTIO_EXTENT_T_COMMIT => {
-            let args: CommitArgs = reader.obj()?;
-            let (commit, has_root) = cladefs::protocol::decode_commit_flags(flags, None)?;
-            let mut root = None;
-            if has_root {
-                let len = u32::from_le(args.root_len);
-                cladefs::protocol::check_root_len(len as usize)?;
-                root = Some(reader.bytes(len as usize)?);
-            }
-            cell.commit(root.as_deref(), commit).await?;
-            Ok(0)
-        }
-        VIRTIO_EXTENT_T_ROOT => {
-            let returned = MAX_ROOT as usize + size_of::<RootLen>();
-            let root = cell.root().await?;
-            if room < returned || root.len() > MAX_ROOT as usize {
-                return Err(Errno::EINVAL);
-            }
-            writer.write(0, &root);
-            writer.zero(root.len(), MAX_ROOT as usize - root.len());
-            let len = u32::try_from(root.len()).expect("the root is short");
-            writer.obj(MAX_ROOT as usize, &RootLen { len: len.to_le(), reserved: 0 });
-            Ok(returned)
-        }
-        VIRTIO_EXTENT_T_INFO => {
-            // cladefs: the whole of it, the cell too, which a driver without F_FREEZE had no room
-            // for, served before: a driver of this protocol has (TASK-141.3).
-            if room < size_of::<Info>() {
-                return Err(Errno::EINVAL);
-            }
-            let info = cell.info().await?;
-            let info = Info {
-                capacity: info.capacity.to_le(),
-                used: info.used.to_le(),
-                available: info.available.to_le(),
-                next_sequence: info.next_sequence.to_le(),
-                sequence_floor: info.sequence_floor.to_le(),
-                cell: cell.cell().to_le(),
-            };
-            writer.obj(0, &info);
-            Ok(size_of::<Info>())
-        }
-        VIRTIO_EXTENT_T_FREEZE => {
-            notices.set_frozen(flags & VIRTIO_EXTENT_FREEZE_FROZEN != 0);
-            Ok(0)
-        }
-        // cladefs: the guest's stats, which the daemon asked for (TASK-111.4).
-        VIRTIO_EXTENT_T_STATS => {
-            let args: StatsArgs = reader.obj()?;
-            if reader.available() > MAX_STATS {
-                return Err(Errno::EINVAL);
-            }
-            let text = reader.bytes(reader.available())?;
-            let text = cladefs::protocol::check_stats_text(&text)?;
-            cell.answer_stats(u64::from_le(args.asked), Some(text)).await?;
-            Ok(0)
-        }
-        VIRTIO_EXTENT_T_RESIZED => {
-            let args: ResizedArgs = reader.obj()?;
-            let capacity = u64::from_le(args.capacity);
-            let took = flags & VIRTIO_EXTENT_RESIZED_TOOK != 0;
-            notices.resizing.answered(capacity, took);
-            cell.resized(capacity, took).await?;
-            Ok(0)
-        }
-        _ => Err(Errno::EINVAL),
     }
 }
 
@@ -354,11 +170,12 @@ mod serving {
     use cladefs::CellClient;
     use log::error;
 
-    use super::{Served, handle, type_of};
-    use crate::buffers::Buffers;
+    use cladefs::extent_requests::Buffers;
+    use cladefs::extent_requests::protocol::Bounds;
+
+    use super::{Guest, Served, handle, type_of};
     use crate::config::CacheType;
     use crate::notices::Notices;
-    use crate::protocol::Bounds;
 
     /// The requests of one of the device's queues, which its VMM's worker takes off the queue:
     /// served on the thread taking them until they wait for the daemon, then on the threads
@@ -430,8 +247,8 @@ mod serving {
             let served = async move {
                 let len = match buffers {
                     Ok(buffers) => {
-                        let (cell, notices) = (&*requests.cell, &requests.notices);
-                        handle(cell, notices, requests.cache, requests.bounds, buffers).await
+                        let guest = Guest { notices: &requests.notices, cache: requests.cache };
+                        handle(&*requests.cell, &guest, requests.bounds, buffers).await.len
                     }
                     Err(err) => {
                         error!("extent device: {err}");
@@ -489,7 +306,11 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::{Mutex, PoisonError};
 
-    use cladefs::{Commit, ExtentId, ExtentInfo, VolatileSlice, VolatileSliceMut, WriteBarriers};
+    use cladefs::extent_requests::{Backend, Buffers, Handled};
+    use cladefs::{
+        Commit, ExtentId, ExtentInfo, MappingContents, VolatileSlice, VolatileSliceMut,
+        WindowMapping, WriteBarriers,
+    };
     use zerocopy::{Immutable, IntoBytes};
 
     use super::*;
@@ -673,7 +494,8 @@ mod tests {
 
         /// As `OpenCell::map_many`: maps each entry in order, stopping at the first error,
         /// leaving entries before it mapped.
-        async fn map_many(&self, mappings: &[WindowMapping]) -> Result<(), Errno> {
+        async fn map_many(&self, mappings: &[WindowMapping], warm: bool) -> Result<(), Errno> {
+            assert!(!warm, "a guest's MAP warms nothing: no flag of doc-4's asks it");
             let held = self.held.lock().unwrap_or_else(PoisonError::into_inner).take();
             if let Some((sequence, gate)) = held {
                 let matches = mappings.iter().any(|m| {
@@ -708,27 +530,10 @@ mod tests {
             Ok(())
         }
 
-        fn prefault(&self, window_offset: u64, len: u64) {
-            let mut state = self.state();
-            // Of what a MAP mapped, whose range was checked: it answers nothing, but one out of
-            // the window is recorded.
-            if u128::from(window_offset) + u128::from(len) > u128::from(WINDOW) {
-                state.out_of_range.push(("MAP_AHEAD", window_offset, len));
-            }
-            state.prefaulted.push((window_offset, len));
-        }
-
         async fn unmap(&self, window_offset: u64, len: u64) -> Result<(), Errno> {
             let mut state = self.state();
             state.window_range("UNMAP", window_offset, len)?;
             state.unmapped.push((window_offset, len));
-            Ok(())
-        }
-
-        async fn make_private(&self, window_offset: u64, len: u64) -> Result<(), Errno> {
-            let mut state = self.state();
-            state.window_range("PRIVATE", window_offset, len)?;
-            state.private.push((window_offset, len));
             Ok(())
         }
 
@@ -755,6 +560,25 @@ mod tests {
                 next_sequence: 3,
                 sequence_floor: 1 << 40,
             })
+        }
+    }
+
+    impl GuestBackend for FakeBackend {
+        fn prefault(&self, window_offset: u64, len: u64) {
+            let mut state = self.state();
+            // Of what a MAP mapped, whose range was checked: it answers nothing, but one out of
+            // the window is recorded.
+            if u128::from(window_offset) + u128::from(len) > u128::from(WINDOW) {
+                state.out_of_range.push(("MAP_AHEAD", window_offset, len));
+            }
+            state.prefaulted.push((window_offset, len));
+        }
+
+        async fn make_private(&self, window_offset: u64, len: u64) -> Result<(), Errno> {
+            let mut state = self.state();
+            state.window_range("PRIVATE", window_offset, len)?;
+            state.private.push((window_offset, len));
+            Ok(())
         }
 
         async fn answer_stats(&self, ask: u64, guest: Option<&str>) -> Result<(), Errno> {
@@ -807,10 +631,13 @@ mod tests {
             // SAFETY: As above, which nothing else accesses meanwhile.
             unsafe { buffers.push_writable(part.as_mut_ptr(), part.len()) }.unwrap();
         }
-        let used =
-            futures::executor::block_on(handle(cell, notices, cache, BOUNDS, buffers)) as usize;
+        let handled =
+            futures::executor::block_on(handle(cell, &Guest { notices, cache }, BOUNDS, buffers));
+        let used = handled.len as usize;
         assert_eq!(used, writable, "the device wrote {used} of {writable} bytes");
         let response: Response = read_obj(&written[writable - RESPONSE..]);
+        let status = handled.status.err().map_or(0, |errno| errno.raw().cast_unsigned());
+        assert_eq!(status, u32::from_le(response.status), "the status handled, the response's");
         written.truncate(writable - RESPONSE);
         (written, u32::from_le(response.status))
     }
@@ -1053,7 +880,8 @@ mod tests {
         // SAFETY: As above.
         unsafe { buffers.push_writable(written.as_mut_ptr(), written.len()) }.unwrap();
         let notices = Notices::default();
-        let mut handling = Box::pin(handle(&cell, &notices, CacheType::Writeback, BOUNDS, buffers));
+        let guest = Guest { notices: &notices, cache: CacheType::Writeback };
+        let mut handling = Box::pin(handle(&cell, &guest, BOUNDS, buffers));
         let waker = futures::task::noop_waker();
         let mut context = std::task::Context::from_waker(&waker);
         let polled = handling.poll_unpin(&mut context);
@@ -1061,7 +889,7 @@ mod tests {
         assert_eq!(cell.state().maps, vec![]);
         open.send(()).unwrap();
         let polled = handling.poll_unpin(&mut context);
-        assert_eq!(polled, std::task::Poll::Ready(RESPONSE as u32));
+        assert_eq!(polled.map(|handled| handled.len), std::task::Poll::Ready(RESPONSE as u32));
         drop(handling);
         let response: Response = read_obj(&written);
         assert_eq!(u32::from_le(response.status), errno(Errno::EPERM));
@@ -1162,9 +990,10 @@ mod tests {
         // SAFETY: The test's memory, which outlives the request.
         unsafe { buffers.push_readable(header.as_mut_ptr(), header.len()) };
         let notices = Notices::default();
-        let served = handle(&cell, &notices, CacheType::Writeback, BOUNDS, buffers);
-        let used = futures::executor::block_on(served);
-        assert_eq!(used, 0);
+        let guest = Guest { notices: &notices, cache: CacheType::Writeback };
+        let served = handle(&cell, &guest, BOUNDS, buffers);
+        let handled = futures::executor::block_on(served);
+        assert_eq!(handled, Handled { len: 0, status: Err(Errno::EINVAL) });
         assert_eq!(
             request(&cell, &bytes::<Info>(99, 0, None, &[]), RESPONSE).1,
             errno(Errno::EINVAL)

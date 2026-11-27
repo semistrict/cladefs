@@ -2,15 +2,16 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! A request's buffers: the guest memory its descriptors name, in their order, as the host maps
-//! it. The VMM's adapter walks a descriptor chain and gives each descriptor's memory to
-//! [`Buffers`], readable or writable as the descriptor says; nothing here knows of any VMM's
-//! queues or guest memory.
+//! A request's buffers: the memory its descriptors name, in their order, as this process maps it:
+//! a guest's, which the VMM's adapter walks a descriptor chain of; or what a local process shares
+//! with the extent daemon, a ring's buffers (board 14378). Each descriptor's memory is given to
+//! [`Buffers`], readable or writable as the descriptor says; nothing here knows of any queue, nor
+//! whose memory it is.
 
-use cladefs::Errno;
+use crate::Errno;
 use zerocopy::{FromBytes, IntoBytes};
 
-use crate::protocol::RequestHeader;
+use super::protocol::RequestHeader;
 
 /// A part of a request's buffers in host memory: guest memory a descriptor names.
 #[derive(Clone, Copy, Debug)]
@@ -59,7 +60,7 @@ impl Buffers {
     /// # Safety
     ///
     /// The `len` bytes at `ptr` are host memory mapping the guest's, readable until the request
-    /// is served ([`handle`](crate::handle)'s future completes or is dropped). The guest may
+    /// is served ([`handle`](super::handle)'s future completes or is dropped). The guest may
     /// change them meanwhile: they are only copied from.
     pub unsafe fn push_readable(&mut self, ptr: *mut u8, len: usize) {
         self.readable.push(Segment { ptr, len });
@@ -73,7 +74,7 @@ impl Buffers {
     /// # Safety
     ///
     /// The `len` bytes at `ptr` are host memory mapping the guest's, writable until the request
-    /// is served ([`handle`](crate::handle)'s future completes or is dropped), which the host
+    /// is served ([`handle`](super::handle)'s future completes or is dropped), which the host
     /// accesses nowhere else meanwhile. The guest may access them meanwhile: they are only copied
     /// to.
     pub unsafe fn push_writable(&mut self, ptr: *mut u8, len: usize) -> Result<(), BuffersError> {
@@ -121,31 +122,31 @@ fn range(segments: &[Segment], mut offset: usize, mut len: usize) -> Option<Vec<
 }
 
 /// Reads what the driver wrote, in order.
-pub(crate) struct Reader<'a> {
+pub struct Reader<'a> {
     segments: &'a [Segment],
     offset: usize,
 }
 
 impl<'a> Reader<'a> {
-    pub(crate) fn new(buffers: &'a Buffers) -> Self {
+    pub fn new(buffers: &'a Buffers) -> Self {
         Self { segments: &buffers.readable, offset: 0 }
     }
 
     /// The next `len` bytes, as the cell copies them out of guest memory: as long as the request
     /// lives, so that what comes after them can be read too.
-    pub(crate) fn slices(&mut self, len: usize) -> Result<Vec<cladefs::VolatileSlice<'a>>, Errno> {
+    pub fn slices(&mut self, len: usize) -> Result<Vec<crate::VolatileSlice<'a>>, Errno> {
         let parts = range(self.segments, self.offset, len).ok_or(Errno::EINVAL)?;
         self.offset += len;
         Ok(parts
             .iter()
             // SAFETY: Guest memory the request names, which outlives it, and which the guest may
             // change as it is copied (`Buffers::push_readable`).
-            .map(|part| unsafe { cladefs::VolatileSlice::from_raw_parts(part.ptr, part.len) })
+            .map(|part| unsafe { crate::VolatileSlice::from_raw_parts(part.ptr, part.len) })
             .collect())
     }
 
     /// The next `len` bytes, copied.
-    pub(crate) fn bytes(&mut self, len: usize) -> Result<Vec<u8>, Errno> {
+    pub fn bytes(&mut self, len: usize) -> Result<Vec<u8>, Errno> {
         let mut bytes = vec![0; len];
         let mut at = 0;
         for slice in self.slices(len)? {
@@ -155,48 +156,42 @@ impl<'a> Reader<'a> {
     }
 
     /// How many bytes are left to read.
-    pub(crate) fn available(&self) -> usize {
+    pub fn available(&self) -> usize {
         let len: usize = self.segments.iter().map(|segment| segment.len).sum();
         len.saturating_sub(self.offset)
     }
 
     /// The next object, copied.
-    pub(crate) fn obj<T: FromBytes>(&mut self) -> Result<T, Errno> {
+    pub fn obj<T: FromBytes>(&mut self) -> Result<T, Errno> {
         let bytes = self.bytes(size_of::<T>())?;
         Ok(T::read_from_bytes(&bytes).expect("as many bytes as the object has"))
     }
 }
 
 /// Writes what the device returns into the writable buffers, from their start.
-pub(crate) struct Writer<'a> {
+pub struct Writer<'a> {
     segments: &'a [Segment],
 }
 
 impl Writer<'_> {
-    pub(crate) fn new(buffers: &Buffers) -> Writer<'_> {
+    pub fn new(buffers: &Buffers) -> Writer<'_> {
         Writer { segments: &buffers.writable }
     }
 
     /// `len` bytes at `offset`, as the cell copies into guest memory.
-    pub(crate) fn slices(
-        &self,
-        offset: usize,
-        len: usize,
-    ) -> Option<Vec<cladefs::VolatileSliceMut<'_>>> {
+    pub fn slices(&self, offset: usize, len: usize) -> Option<Vec<crate::VolatileSliceMut<'_>>> {
         Some(
             range(self.segments, offset, len)?
                 .iter()
                 // SAFETY: Guest memory the request gives the device to write, which outlives it,
                 // and which the guest may access as it is copied (`Buffers::push_writable`).
-                .map(|part| unsafe {
-                    cladefs::VolatileSliceMut::from_raw_parts(part.ptr, part.len)
-                })
+                .map(|part| unsafe { crate::VolatileSliceMut::from_raw_parts(part.ptr, part.len) })
                 .collect(),
         )
     }
 
     /// Writes `bytes` at `offset`, which must be within the buffers.
-    pub(crate) fn write(&self, offset: usize, bytes: &[u8]) {
+    pub fn write(&self, offset: usize, bytes: &[u8]) {
         let mut at = 0;
         for mut slice in
             self.slices(offset, bytes.len()).expect("a write past the request's buffers")
@@ -206,12 +201,12 @@ impl Writer<'_> {
     }
 
     /// Writes `obj` at `offset`, which must be within the buffers.
-    pub(crate) fn obj<T: IntoBytes + zerocopy::Immutable>(&self, offset: usize, obj: &T) {
+    pub fn obj<T: IntoBytes + zerocopy::Immutable>(&self, offset: usize, obj: &T) {
         self.write(offset, obj.as_bytes());
     }
 
     /// Zeroes `len` bytes at `offset`, which must be within the buffers.
-    pub(crate) fn zero(&self, offset: usize, len: usize) {
+    pub fn zero(&self, offset: usize, len: usize) {
         for part in range(self.segments, offset, len).expect("zeroing past the request's buffers") {
             // SAFETY: Guest memory the request gives the device to write.
             unsafe { std::ptr::write_bytes(part.ptr, 0, part.len) };

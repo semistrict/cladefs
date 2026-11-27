@@ -17,7 +17,7 @@ use std::time::Instant;
 use cladefs::{CellClient, Errno, OpenCell};
 use virtio_extent::protocol::*;
 use virtio_extent::{
-    BoxError, Buffers, CacheType, Config, ConfigInterrupt, Device, Notices, WindowVm, handle,
+    BoxError, Buffers, CacheType, Config, ConfigInterrupt, Device, Guest, Notices, WindowVm, handle,
 };
 use zerocopy::{FromBytes, Immutable, IntoBytes};
 
@@ -144,8 +144,9 @@ fn serve(cell: &CellClient, readable: &[u8], writable: usize, split: usize) -> (
     let mut written = vec![0xa5; writable];
     let buffers = buffers(&mut readable, &mut written, split);
     let notices = Notices::default();
-    let served = handle(cell, &notices, CacheType::Writeback, bounds(), buffers);
-    let used = futures::executor::block_on(served);
+    let guest = Guest { notices: &notices, cache: CacheType::Writeback };
+    let served = handle(cell, &guest, bounds(), buffers);
+    let used = futures::executor::block_on(served).len;
     (used as usize, written)
 }
 

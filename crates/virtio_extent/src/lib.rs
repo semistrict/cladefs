@@ -15,13 +15,15 @@
 //! host's VMs share.
 //!
 //! - [`protocol`]: the requests, flags, features and configuration space, and the version a
-//!   driver and a snapshot are checked against.
+//!   driver and a snapshot are checked against: `cladefs::extent_requests`'s, which a local
+//!   process's ring to the extent daemon carries too (board 14378).
 //! - [`Config`]: a device's configuration, as a VMM's user gives it.
 //! - [`Device`]: a device's cell, configuration space, notices, DAX window (on macOS mapped by
 //!   the VMM as cladefs's stage says, [`window_fault`] taking the guest's faults, board 13069) and
 //!   snapshots, which a VMM's adapter holds beside its transport's state.
-//! - [`Buffers`], [`handle`] and [`Requests`]: serving a request whose buffers the
-//!   adapter took off a queue, over any [`Backend`]; [`Workers`], a thread each queue, taking
+//! - [`Buffers`], [`handle`], [`Guest`] and [`Requests`]: serving a request whose buffers the
+//!   adapter took off a queue, over any [`GuestBackend`], with the interpreter every transport of
+//!   doc-4's requests shares, in the guest's [`Dialect`]; [`Workers`], a thread each queue, taking
 //!   requests off a [`RequestQueue`] of the VMM's transport as its event (an eventfd, or a pipe on
 //!   macOS) is notified, and returning them.
 //! - [`RequestQueue`], [`QueueInterrupt`], [`ConfigInterrupt`], [`WindowVm`] and
@@ -36,15 +38,12 @@
 // Every unsafe block says why it is sound, other threads included (TASK-444.4).
 #![deny(clippy::undocumented_unsafe_blocks)]
 
-mod backend;
-mod buffers;
 mod config;
 mod device;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub mod kvm;
 mod notices;
 pub mod persist;
-pub mod protocol;
 mod requests;
 mod sync;
 #[cfg(target_os = "linux")]
@@ -52,13 +51,16 @@ pub mod vcpu;
 mod window;
 mod workers;
 
-pub use backend::Backend;
-pub use buffers::{Buffers, BuffersError};
 pub use config::{CacheType, Config, ConfigError, PRIVATE_MAX_DEFAULT, private_max};
 pub use device::{ActivateError, Device, Error, OnLost, ReleaseError, ShmRegion};
 pub use notices::{ConfigInterrupt, Notices, Resizing, StatsAsks};
 pub use persist::SnapshotMode;
-pub use requests::{Requests, Served, handle};
+// cladefs: doc-4's protocol, its buffers, backends and interpreter, which a local process's ring to
+// the extent daemon shares (board 14378).
+pub use cladefs::extent_requests::{
+    Backend, Buffers, BuffersError, Dialect, GuestBackend, handle, protocol,
+};
+pub use requests::{Guest, Requests, Served};
 #[cfg(target_os = "linux")]
 pub use window::dax_window_at;
 #[cfg(not(target_os = "linux"))]
