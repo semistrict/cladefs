@@ -6,6 +6,21 @@
 terms in new code, docs and tasks; where it lists a word as ambiguous, say the qualified form.
 A new term of art, or one that changed meaning, goes into it with the change.
 
+## Crate names: underscores
+
+A crate of cladefs's own is named in lower case with underscores (`bucket_cell`, `cladefs_fuse`),
+and lives in the directory of that name in `crates/`: the name Rust code says (`use
+cladefs_fuse::Server`), so that one spelling finds a crate in code, manifests, Bazel labels and
+scripts (the user asked for a convention, 2026-11-27; hotbed question 621). A crate copied from
+Fuchsia keeps the name it came with, hyphen or not (`fuchsia-async`, `storage_device`). Commands
+keep their hyphens, whatever crate builds them: binaries (`cladefs-gc`) and examples
+(`fuse-bench`).
+
+`scripts/tests/test_crate_names.py` holds every crate to it, but the five named before it, which
+its `HYPHENATED` lists until board 14600 renames them (`fxfs-posix`, `fxfs-sim-diff`,
+`cladefs-examples`, `libmachine-agent`, `libmachine-firecracker`): a new crate is never added to
+that list.
+
 ## Batch Rust changes; compile and test once per batch
 
 Write a large batch of changes before compiling or testing anything: several features or
