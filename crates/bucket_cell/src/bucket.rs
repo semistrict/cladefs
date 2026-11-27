@@ -960,7 +960,8 @@ async fn probe_append_once(bucket: &impl Bucket, key: &str) -> Result<(), ProbeA
 /// `root`, which it leaves as it found them: a bucket in memory, on the host's filesystem, the
 /// simulation's, and S3's and Azure's servers alike run it.
 /// Delegates pass-through [`Bucket`] methods to `self.$inner` for test wrapper buckets that
-/// intercept only `get` or `put`.
+/// intercept only `get` (`except_get`), or every read of an object's bytes, whole and ranged
+/// (`except_reads`: `get` and `get_range`), as a recovery may read a checkpoint either way.
 #[cfg(test)]
 macro_rules! delegate_bucket_methods {
     (except_get $inner:tt) => {
@@ -972,6 +973,9 @@ macro_rules! delegate_bucket_methods {
             self.$inner.get_range(key, range)
         }
 
+        crate::bucket::delegate_bucket_methods!(except_reads $inner);
+    };
+    (except_reads $inner:tt) => {
         fn head(
             &self,
             key: &str,

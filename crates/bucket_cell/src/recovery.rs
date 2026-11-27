@@ -396,16 +396,6 @@ impl Layered {
         }
     }
 
-    /// Where it holds `extent`: in its own layer, or where it inherited it, if it holds it there
-    /// still.
-    fn get(&self, extent: ExtentId) -> Option<&Location> {
-        match self.own.get(&extent) {
-            Some(location) => Some(location),
-            None if self.shadowed.contains(&extent) => None,
-            None => self.inherited.as_ref()?.extents.get(&extent),
-        }
-    }
-
     /// Where its extents are, in one: what it inherited and holds still, and its own. What it
     /// inherited is shared, not copied: the map is persistent, so this costs what its own layer
     /// holds, not what it inherited (TASK-92.55).
@@ -555,12 +545,6 @@ async fn recover_layers_from<B: Bucket>(
     Err(Error::Lost(format!("cell {cell}: what its recovery starts from keeps going")))
 }
 
-/// cladefs: the state of `cell` as of the end of its segment `at`, which its head names: a fork
-/// version's, as a fork made there inherits it; and what reading it read, which the collector keeps
-/// for the forks referring to it (doc-7, A pass over a cell; TASK-395.4). Its newest checkpoint up
-/// to there, or its origin's state, then its segments to there, starting again where it finds one
-/// gone that a newer checkpoint covers: [`Error::Lost`] once it keeps going, or what it needs is
-/// gone.
 /// Retries a recovery walk up to [`RESTARTS`] times when `Attempt::Restart` signals a concurrently
 /// deleted checkpoint/segment, returning `(value, touched)` or [`Error::Lost`].
 macro_rules! retry_recovery {
@@ -577,6 +561,13 @@ macro_rules! retry_recovery {
     }};
 }
 
+/// cladefs: the state of `cell` as of the end of its segment `at`, which its head names: a fork
+/// version's, as a fork made there inherits it; and what reading it read, which a mirror copies
+/// (doc-23) and tests check what a pass kept against. Its newest checkpoint up to there, or its
+/// origin's state, then its segments to there, starting again where it finds one gone that a
+/// newer checkpoint covers: [`Error::Lost`] once it keeps going, or what it needs is gone. The
+/// collector keeps such states keys-only ([`keys_at`]).
+#[cfg(feature = "full")]
 pub(crate) async fn recover_at<B: Bucket>(
     checkpoints: &Checkpoints<'_, B>,
     cell: CellId,
@@ -588,21 +579,6 @@ pub(crate) async fn recover_at<B: Bucket>(
             "cell {cell} at {at}: what its recovery starts from keeps going",
             at = base32_id::Short(at)
         )
-    )
-}
-
-/// cladefs: the states of `cell` as of each of its segments `ats`, which its head names, as
-/// [`recover_at`] has each, read in one walk where they share a checkpoint ([`states_at`],
-/// TASK-476): a pass's of a cell's versions and origins. And what reading them read, which
-/// the collector keeps for them all. [`Error::Lost`] if any is: which, [`recover_at`] says.
-pub(crate) async fn recover_ats<B: Bucket>(
-    checkpoints: &Checkpoints<'_, B>,
-    cell: CellId,
-    ats: &BTreeSet<u64>,
-) -> Result<(Walked, BTreeSet<String>), Error> {
-    retry_recovery!(
-        |touched| states_at(checkpoints, cell, ats, touched, true),
-        format!("cell {cell} at {ats:x?}: what its recovery starts from keeps going")
     )
 }
 
@@ -1341,100 +1317,48 @@ fn state_at<'a, B: Bucket>(
     kept: bool,
 ) -> BucketFuture<'a, Result<Arc<State>, Attempt>> {
     Box::pin(async move {
-        let ats = BTreeSet::from([at]);
-        let walked = states_at(checkpoints, cell, &ats, touched, kept).await?;
-        Ok(walked.states.into_iter().next().expect("the state at its one segment"))
-    })
-}
-
-/// cladefs: the states of `cell` as of each of its segments `ats`, which [`state_at`] recovers of
-/// each, read in one walk (TASK-476): its versions', a pass keeps, are states of one history.
-fn states_at<'a, B: Bucket>(
-    checkpoints: &'a Checkpoints<'_, B>,
-    cell: CellId,
-    ats: &'a BTreeSet<u64>,
-    touched: &'a mut BTreeSet<String>,
-    kept: bool,
-) -> BucketFuture<'a, Result<Walked, Attempt>> {
-    Box::pin(async move {
         let bucket = checkpoints.bucket;
-        let mut walked = Walked::default();
-        let mut unread: Vec<u64> = ats.iter().copied().collect();
         // cladefs: no head, no segment named, whatever is kept (board 8543): the cell removed, or
         // being removed, its checkpoints listed still.
         let Some(head) = head::get(bucket, cell).await? else {
             return Err(Attempt::Failed(Error::Lost(layout::head(cell))));
         };
         if kept {
-            let mut keys = Vec::with_capacity(unread.len());
-            for &at in &unread {
-                let Some(epoch) = head.epoch_of(at) else {
-                    return Err(Attempt::Failed(Error::Lost(format!(
-                        "segment {at} of {cell}",
-                        at = base32_id::Short(at)
-                    ))));
-                };
-                keys.push((at, layout::checkpoint(cell, at, epoch)));
-            }
-            let mut reads = futures::stream::iter(keys)
-                .map(|(at, key)| async move {
-                    let state = checkpoints.read_key(&key, cell).await;
-                    (at, key, state)
-                })
-                .buffered(AT_ONCE);
-            unread.clear();
-            while let Some((at, key, state)) = reads.next().await {
-                match state? {
-                    Some(state) if state.through != Some(at) => {
-                        let corrupt = Error::Corrupt(format!("{key} holds another state"));
-                        return Err(Attempt::Failed(corrupt));
-                    }
-                    Some(state) => {
-                        touched.insert(key);
-                        walked.states.push(state);
-                    }
-                    None => unread.push(at),
+            let Some(epoch) = head.epoch_of(at) else {
+                return Err(Attempt::Failed(Error::Lost(format!(
+                    "segment {at} of {cell}",
+                    at = base32_id::Short(at)
+                ))));
+            };
+            let key = layout::checkpoint(cell, at, epoch);
+            match checkpoints.read_key(&key, cell).await? {
+                Some(state) if state.through != Some(at) => {
+                    let corrupt = Error::Corrupt(format!("{key} holds another state"));
+                    return Err(Attempt::Failed(corrupt));
                 }
-            }
-        }
-        let Some(&first) = unread.first() else { return Ok(walked) };
-        let listed = checkpoints.list(cell, kept.then_some(first)).await?;
-        // The states sharing their newest checkpoint up to them, in order: the newest only grows.
-        let mut walks: Vec<(Option<&Meta>, Vec<u64>)> = Vec::new();
-        for at in unread {
-            let newest = newest_to(&listed, at);
-            match walks.last_mut() {
-                Some((start, ats))
-                    if start.map(|meta| &meta.key) == newest.map(|meta| &meta.key) =>
-                {
-                    ats.push(at);
+                Some(state) => {
+                    touched.insert(key);
+                    return Ok(state);
                 }
-                _ => walks.push((newest, vec![at])),
+                None => {}
             }
         }
-        for (start, ats) in walks {
-            walk(checkpoints, cell, &head, start, &ats, touched, &mut walked).await?;
-        }
-        Ok(walked)
+        let listed = checkpoints.list(cell, kept.then_some(at)).await?;
+        walk(checkpoints, cell, &head, newest_to(&listed, at), at, touched).await
     })
 }
 
-/// cladefs: the states of `cell` as of its segments `ats`, ascending, into `walked`: from `start`,
-/// the newest checkpoint up to each, or, with none, its origin's state, then the segments `head`
-/// names up to the last, each footer read once ([`states_at`]).
+/// cladefs: the state of `cell` as of its segment `at`: from `start`, the newest checkpoint up to
+/// it, or, with none, its origin's state, then the segments `head` names up to it ([`state_at`]).
 async fn walk<B: Bucket>(
     checkpoints: &Checkpoints<'_, B>,
     cell: CellId,
     head: &Head,
     start: Option<&Meta>,
-    ats: &[u64],
+    at: u64,
     touched: &mut BTreeSet<String>,
-    walked: &mut Walked,
-) -> Result<(), Attempt> {
+) -> Result<Arc<State>, Attempt> {
     let bucket = checkpoints.bucket;
-    let (Some(&first), Some(&last)) = (ats.first(), ats.last()) else { return Ok(()) };
-    let mut ats = ats.iter().copied().peekable();
-    let mut taking = Taking::default();
     let mut state = match start {
         Some(meta) => {
             let Some(state) = checkpoints.read(meta, cell).await? else {
@@ -1442,14 +1366,8 @@ async fn walk<B: Bucket>(
             };
             touched.insert(meta.key.clone());
             // At the checkpoint itself: the state, as read, which the forks made there share.
-            if state.through == Some(first) {
-                ats.next();
-                if ats.peek().is_none() {
-                    walked.states.push(state);
-                    return Ok(());
-                }
-                walked.states.push(state.clone());
-                taking.whole = false;
+            if state.through == Some(at) {
+                return Ok(state);
             }
             Layered::of(Arc::unwrap_or_clone(state))
         }
@@ -1462,13 +1380,13 @@ async fn walk<B: Bucket>(
             match inherited {
                 Ok(None) => Layered::of(State::new(cell)),
                 Ok(Some(inherited)) => Layered::inheriting(inherited, cell),
-                Err(failed) => return Err(unless_checkpointed(bucket, cell, first, failed).await),
+                Err(failed) => return Err(unless_checkpointed(bucket, cell, at, failed).await),
             }
         }
     };
     let from = state.through.map_or(0, |segment| segment + 1);
     let mut footers =
-        futures::stream::iter(head.segments(from).take_while(|&(segment, _)| segment <= last))
+        futures::stream::iter(head.segments(from).take_while(|&(segment, _)| segment <= at))
             .map(|(segment, epoch)| async move {
                 let key = layout::segment(cell, segment, epoch);
                 Ok::<_, Error>((
@@ -1480,84 +1398,12 @@ async fn walk<B: Bucket>(
     while let Some((key, footer)) = footers.try_next().await? {
         // A segment the head names goes only once a checkpoint covers it.
         let Some((footer, len)) = footer else { return Err(Attempt::Restart) };
-        taking.note(&state, &footer.contents, cell);
         state.apply(&footer, len);
         touched.insert(key);
-        if ats.next_if_eq(&footer.segment).is_some() && ats.peek().is_some() {
-            taking.take(&state, walked);
-        }
     }
     drop(footers);
-    // The last; and any the head names not, past its end, as of there, as [`state_at`] has them.
-    taking.take_last(state, walked);
-    Ok(())
-}
-
-/// cladefs: the states [`states_at`] recovered: whole, the first of each walk; and, of those after
-/// it, what changed of the one before, each extent the footers between named, where it is then.
-/// Together they hold every place any of the states names an extent at, which is what a pass keeps
-/// of them ([`recover_ats`]).
-#[derive(Default)]
-pub(crate) struct Walked {
-    pub states: Vec<Arc<State>>,
-    pub changed: Vec<(ExtentId, Location)>,
-}
-
-/// cladefs: what a walk ([`walk`]) takes of the states it passes: whole, until it took one; then
-/// the extents the footers applied since the last it took named.
-struct Taking {
-    whole: bool,
-    changed: BTreeSet<ExtentId>,
-}
-
-impl Default for Taking {
-    fn default() -> Self {
-        Self { whole: true, changed: BTreeSet::new() }
-    }
-}
-
-impl Taking {
-    /// Notes what applying `contents`, the next segment's of `cell`, to `state` changes: the
-    /// extents it seals, frees and holds for a later segment to seal, and those `state` holds so
-    /// that it seals them.
-    fn note(&mut self, state: &Layers, contents: &Contents, cell: CellId) {
-        if self.whole {
-            return;
-        }
-        let begun = state.begun.iter().flat_map(|begun| &begun.runs);
-        self.changed.extend(begun.map(|&(extent, _)| extent));
-        self.changed.extend(contents.extents.iter().map(|&(extent, ..)| extent));
-        let own = contents.own.iter();
-        self.changed.extend(own.map(|&(sequence, _)| ExtentId { cell: cell.id, sequence }));
-        self.changed.extend(&contents.frees);
-        let continued = contents.continued.iter().flat_map(|continued| &continued.extents);
-        self.changed.extend(continued.map(|&(extent, ..)| extent));
-    }
-
-    /// Takes `state`, more to come, into `walked`.
-    fn take(&mut self, state: &Layers, walked: &mut Walked) {
-        match self.whole {
-            true => walked.states.push(Arc::new(state.clone().placed(Layered::flatten))),
-            false => self.take_changed(state, walked),
-        }
-        self.whole = false;
-    }
-
-    /// Takes `state`, the walk's last, into `walked`.
-    fn take_last(mut self, state: Layers, walked: &mut Walked) {
-        match self.whole {
-            true => walked.states.push(Arc::new(state.placed(Layered::flatten))),
-            false => self.take_changed(&state, walked),
-        }
-    }
-
-    fn take_changed(&mut self, state: &Layers, walked: &mut Walked) {
-        let changed = std::mem::take(&mut self.changed).into_iter();
-        let places = changed.filter_map(|extent| {
-            state.extents.get(extent).map(|location| (extent, location.clone()))
-        });
-        walked.changed.extend(places);
-    }
+    // As of `at`; or, the head naming no segment that far, as of its end, as [`state_at`] has it.
+    Ok(Arc::new(state.placed(Layered::flatten)))
 }
 
 /// cladefs: makes sure `cell` has a checkpoint as of its segment `at`, which its head names: the
@@ -1630,9 +1476,11 @@ async fn unless_checkpointed(
     if newest_to(&listed, at).is_some() { Attempt::Restart } else { failed }
 }
 
-/// What the collector needs from a live cell's recovery when streaming checkpoints: its head,
-/// the objects read to recover it, and the object keys holding its live extents, without
-/// materializing the full `imbl::OrdMap<ExtentId, Location>` in memory.
+/// cladefs: what the collector needs of a live cell's recovery (doc-7, A pass over a cell): its
+/// head, the objects read to recover it, and the keys of the objects holding its extents; never the
+/// map of its extents ([`State::extents`]), which a checkpoint of millions decodes to hundreds of
+/// MiB. Keys-only recovery, the collector's only one, natively and in the Cloudflare Worker
+/// (`gc_wasm`, whose isolate has 128 MiB): [`recover_keys`], [`keys_at`].
 pub(crate) struct RecoveredKeys {
     pub head: Option<Head>,
     pub touched: BTreeSet<String>,
@@ -1653,8 +1501,10 @@ impl RecoveredKeys {
     }
 }
 
-/// Minimal `Places` implementation for streaming GC recovery: tracks only extents sealed in tail
-/// segments since the base checkpoint and which extent IDs those tail segments freed or overwrote.
+/// What keys-only recovery keeps of the segments it applies after its base checkpoint, the
+/// [`Places`] of its [`State`]: the key of each extent they seal, until one frees it; and, if
+/// `track_shadowed`, every extent they seal or free, whose place in the base checkpoint is then no
+/// longer the cell's.
 struct KeyReplay {
     own: FxHashMap<ExtentId, String>,
     shadowed: FxHashSet<ExtentId>,
@@ -1681,6 +1531,24 @@ impl Places for KeyReplay {
         }
         self.own.remove(&extent);
     }
+}
+
+/// Adds `keys` to `named`, cloning only those it holds not yet: a pass's versions name mostly the
+/// same objects.
+fn name_all<'a>(named: &mut FxHashSet<String>, keys: impl IntoIterator<Item = &'a String>) {
+    for key in keys {
+        if !named.contains(key) {
+            named.insert(key.clone());
+        }
+    }
+}
+
+/// cladefs: what keys-only recovery refuses, where the full one would recurse without bound
+/// (board 14525): a cell whose head names the cell itself as its origin, with no checkpoint of its
+/// own up to where it needs one. No writer makes such a head since forks are of versions alone, into
+/// other cells (2026-11-18): a crafted or corrupt one.
+fn own_origin(cell: CellId) -> Attempt {
+    Attempt::Failed(Error::Corrupt(format!("{cell}'s head names the cell itself as its origin")))
 }
 
 /// Reads only a checkpoint's tail (`object::tail`) and decodes its `TableFooter` and extent-less
@@ -1797,10 +1665,12 @@ async fn checkpoint_live_keys(
     Ok(Some(kept))
 }
 
-/// Streaming low-memory equivalent of [`recover_layers`] for the keyless collector: recovers
-/// `cell`'s head, touched objects, and live extent object keys without materializing checkpoints
-/// into `imbl::OrdMap`.
-pub(crate) async fn recover_live_keys<B: Bucket>(
+/// cladefs: keys-only recovery of `cell`, forked from `origin`, as the collector needs it
+/// ([`RecoveredKeys`]): as [`recover_layers`] recovers it, from its head, starting again where it
+/// finds what its head names gone and its head changed; reading its base checkpoint's tail alone,
+/// and its parts, a ranged read each, only if a segment since frees or seals again an extent it
+/// names ([`checkpoint_live_keys`]).
+pub(crate) async fn recover_keys<B: Bucket>(
     checkpoints: &Checkpoints<'_, B>,
     cell: CellId,
     origin: Option<Origin>,
@@ -1816,6 +1686,9 @@ pub(crate) async fn recover_live_keys<B: Bucket>(
     Err(Error::Lost(format!("cell {cell}: what its recovery starts from keeps going")))
 }
 
+/// [`recover_keys`]'s attempt from `head`, as [`attempt`] is [`recover_layers`]'s: its base the
+/// checkpoint the head names, or the one of its origin's parent at the origin, read by its key
+/// (board 6017); then the segments the head names after it.
 async fn attempt_keys<B: Bucket>(
     checkpoints: &Checkpoints<'_, B>,
     cell: CellId,
@@ -1823,34 +1696,13 @@ async fn attempt_keys<B: Bucket>(
     head: Option<Head>,
 ) -> Result<RecoveredKeys, Attempt> {
     let bucket = checkpoints.bucket;
-    // Same-cell origin forks have no direct origin checkpoint key; fall back to full recovery.
-    if head.as_ref().and_then(|h| h.checkpoint(cell)).is_none()
-        && origin.is_some_and(|o| o.parent == cell)
-    {
-        let recovered = attempt(checkpoints, cell, origin, head).await?;
-        let mut named = FxHashSet::default();
-        let Layered { inherited, own, shadowed } = recovered.state.extents;
-        for location in own.values() {
-            if !named.contains(&location.key) {
-                named.insert(location.key.clone());
-            }
-        }
-        for (extent, location) in inherited.iter().flat_map(|s| &s.extents) {
-            if !shadowed.contains(extent) && !named.contains(&location.key) {
-                named.insert(location.key.clone());
-            }
-        }
-        return Ok(RecoveredKeys { head: recovered.head, touched: recovered.touched, named });
-    }
-
     let mut touched = BTreeSet::new();
-    let checkpoint = head.as_ref().and_then(|head| head.checkpoint(cell));
     let mut base: Option<(String, object::Tail, TableFooter)> = None;
     let mut from = 0u64;
     let mut replay_state = State::of(cell, KeyReplay::new(false));
 
-    match checkpoint {
-        Some(key) => {
+    match (head.as_ref().and_then(|head| head.checkpoint(cell)), origin) {
+        (Some(key), _) => {
             let Some((tail, footer, cp_state)) = checkpoint_tail(bucket, &key, cell).await? else {
                 return Err(moved(bucket, cell, head.as_ref()).await);
             };
@@ -1866,26 +1718,26 @@ async fn attempt_keys<B: Bucket>(
             };
             base = Some((key, tail, footer));
         }
-        None => {
-            if let Some(origin) = origin {
-                let key = layout::checkpoint(origin.parent, origin.at, origin.epoch);
-                match checkpoint_tail(bucket, &key, origin.parent).await? {
-                    Some((tail, footer, cp_state)) if cp_state.through == Some(origin.at) => {
-                        touched.insert(key.clone());
-                        replay_state = State::of(cell, KeyReplay::new(true));
-                        base = Some((key, tail, footer));
-                    }
-                    Some(_) => {
-                        return Err(Attempt::Failed(Error::Corrupt(format!(
-                            "{key} holds another state"
-                        ))));
-                    }
-                    None => {
-                        return Err(match moved(bucket, cell, head.as_ref()).await {
-                            Attempt::Restart => Attempt::Restart,
-                            Attempt::Failed(_) => Attempt::Failed(Error::Lost(key)),
-                        });
-                    }
+        (None, None) => {}
+        (None, Some(origin)) if origin.parent == cell => return Err(own_origin(cell)),
+        (None, Some(origin)) => {
+            let key = layout::checkpoint(origin.parent, origin.at, origin.epoch);
+            match checkpoint_tail(bucket, &key, origin.parent).await? {
+                Some((tail, footer, cp_state)) if cp_state.through == Some(origin.at) => {
+                    touched.insert(key.clone());
+                    replay_state = State::of(cell, KeyReplay::new(true));
+                    base = Some((key, tail, footer));
+                }
+                Some(_) => {
+                    return Err(Attempt::Failed(Error::Corrupt(format!(
+                        "{key} holds another state"
+                    ))));
+                }
+                None => {
+                    return Err(match moved(bucket, cell, head.as_ref()).await {
+                        Attempt::Restart => Attempt::Restart,
+                        Attempt::Failed(_) => Attempt::Failed(Error::Lost(key)),
+                    });
                 }
             }
         }
@@ -1910,56 +1762,37 @@ async fn attempt_keys<B: Bucket>(
         }
     }
 
-    let mut named: FxHashSet<String> = FxHashSet::default();
-    for key in replay_state.extents.own.into_values() {
-        if !named.contains(&key) {
-            named.insert(key);
-        }
-    }
+    let KeyReplay { own, shadowed, .. } = replay_state.extents;
+    let mut named: FxHashSet<String> = own.into_values().collect();
     if let Some((cp_key, cp_tail, cp_footer)) = base {
-        let Some(kept) = checkpoint_live_keys(
-            bucket,
-            &cp_key,
-            &cp_tail,
-            &cp_footer,
-            &replay_state.extents.shadowed,
-        )
-        .await?
+        let Some(kept) =
+            checkpoint_live_keys(bucket, &cp_key, &cp_tail, &cp_footer, &shadowed).await?
         else {
             return Err(moved(bucket, cell, head.as_ref()).await);
         };
-        for key in kept {
-            if !named.contains(&key) {
-                named.insert(key);
-            }
-        }
+        named.extend(kept);
     }
     Ok(RecoveredKeys { head, touched, named })
 }
 
-/// Streaming low-memory equivalent of [`recover_at`] for the keyless collector.
-pub(crate) async fn recover_at_keys<B: Bucket>(
-    checkpoints: &Checkpoints<'_, B>,
-    cell: CellId,
-    at: u64,
-) -> Result<(FxHashSet<String>, BTreeSet<String>), Error> {
-    let ats = BTreeSet::from([at]);
-    recover_ats_keys(checkpoints, cell, &ats).await
-}
-
-/// Streaming low-memory equivalent of [`recover_ats`] for the keyless collector.
-pub(crate) async fn recover_ats_keys<B: Bucket>(
+/// cladefs: keys-only recovery of the states of `cell` as of each of its segments `ats`, which
+/// its head names, a pass keeps (its versions', the origins its references name): the keys of the
+/// objects holding the extents any of them names, read in one walk where they share a checkpoint,
+/// and what reading them read, as [`recover_at`] has each. [`Error::Lost`] if any is.
+pub(crate) async fn keys_at<B: Bucket>(
     checkpoints: &Checkpoints<'_, B>,
     cell: CellId,
     ats: &BTreeSet<u64>,
 ) -> Result<(FxHashSet<String>, BTreeSet<String>), Error> {
     retry_recovery!(
-        |touched| states_at_keys(checkpoints, cell, ats, touched),
+        |touched| attempt_keys_at(checkpoints, cell, ats, touched),
         format!("cell {cell} at {ats:x?}: what its recovery starts from keeps going")
     )
 }
 
-async fn states_at_keys<B: Bucket>(
+/// [`keys_at`]'s attempt: the checkpoint at each of `ats`, by its exact key, its tail alone; the
+/// rest walked from the newest checkpoint up to them ([`walk_keys`]).
+async fn attempt_keys_at<B: Bucket>(
     checkpoints: &Checkpoints<'_, B>,
     cell: CellId,
     ats: &BTreeSet<u64>,
@@ -1967,14 +1800,12 @@ async fn states_at_keys<B: Bucket>(
 ) -> Result<FxHashSet<String>, Attempt> {
     let bucket = checkpoints.bucket;
     let mut named = FxHashSet::default();
-    let mut unread: Vec<u64> = ats.iter().copied().collect();
     let Some(head) = head::get(bucket, cell).await? else {
         return Err(Attempt::Failed(Error::Lost(layout::head(cell))));
     };
 
-    // Fast path: check exact checkpoint at each requested `at` using tail-only reads.
-    let mut keys = Vec::with_capacity(unread.len());
-    for &at in &unread {
+    let mut keys = Vec::with_capacity(ats.len());
+    for &at in ats {
         let Some(epoch) = head.epoch_of(at) else {
             return Err(Attempt::Failed(Error::Lost(format!(
                 "segment {at} of {cell}",
@@ -1989,7 +1820,7 @@ async fn states_at_keys<B: Bucket>(
             (at, key, tail)
         })
         .buffered(AT_ONCE);
-    unread.clear();
+    let mut unread = Vec::new();
     while let Some((at, key, tail)) = reads.next().await {
         match tail? {
             Some((_, _, cp_state)) if cp_state.through != Some(at) => {
@@ -1997,11 +1828,7 @@ async fn states_at_keys<B: Bucket>(
             }
             Some((_, cp_footer, _)) => {
                 touched.insert(key);
-                for k in cp_footer.keys {
-                    if !named.contains(&k) {
-                        named.insert(k);
-                    }
-                }
+                named.extend(cp_footer.keys);
             }
             None => unread.push(at),
         }
@@ -2009,6 +1836,7 @@ async fn states_at_keys<B: Bucket>(
 
     let Some(&first) = unread.first() else { return Ok(named) };
     let listed = checkpoints.list(cell, Some(first)).await?;
+    // The states sharing their newest checkpoint up to them, in order: the newest only grows.
     let mut walks: Vec<(Option<&Meta>, Vec<u64>)> = Vec::new();
     for at in unread {
         let newest = newest_to(&listed, at);
@@ -2025,6 +1853,10 @@ async fn states_at_keys<B: Bucket>(
     Ok(named)
 }
 
+/// cladefs: the keys of the objects holding the extents the states of `cell` as of its segments
+/// `ats`, ascending, name, into `named`: from `start`, the newest checkpoint up to each, or, with
+/// none, its origin's parent's checkpoint at the origin; then the segments `head` names up to the
+/// last, each footer read once ([`attempt_keys_at`]).
 async fn walk_keys<B: Bucket>(
     checkpoints: &Checkpoints<'_, B>,
     cell: CellId,
@@ -2036,24 +1868,6 @@ async fn walk_keys<B: Bucket>(
 ) -> Result<(), Attempt> {
     let bucket = checkpoints.bucket;
     let (Some(&first), Some(&last)) = (ats.first(), ats.last()) else { return Ok(()) };
-    if start.is_none() && head.origin().is_some_and(|o| o.parent == cell) {
-        let mut walked = Walked::default();
-        walk(checkpoints, cell, head, start, ats, touched, &mut walked).await?;
-        for state in &walked.states {
-            for loc in state.extents.values() {
-                if !named.contains(&loc.key) {
-                    named.insert(loc.key.clone());
-                }
-            }
-        }
-        for (_, loc) in &walked.changed {
-            if !named.contains(&loc.key) {
-                named.insert(loc.key.clone());
-            }
-        }
-        return Ok(());
-    }
-
     let mut ats_iter = ats.iter().copied().peekable();
     let mut base: Option<(String, object::Tail, TableFooter)> = None;
     let mut from = 0u64;
@@ -2067,11 +1881,7 @@ async fn walk_keys<B: Bucket>(
             };
             touched.insert(meta.key.clone());
             if cp_state.through == Some(first) {
-                for k in footer.keys {
-                    if !named.contains(&k) {
-                        named.insert(k);
-                    }
-                }
+                named.extend(footer.keys);
                 ats_iter.next();
                 if ats_iter.peek().is_none() {
                     return Ok(());
@@ -2094,27 +1904,26 @@ async fn walk_keys<B: Bucket>(
         }
         None => {
             touched.insert(layout::head(cell));
-            if let Some(origin) = head.origin() {
-                let key = layout::checkpoint(origin.parent, origin.at, origin.epoch);
-                match checkpoint_tail(bucket, &key, origin.parent).await? {
-                    Some((tail, footer, cp_state)) if cp_state.through == Some(origin.at) => {
-                        touched.insert(key.clone());
-                        replay_state = State::of(cell, KeyReplay::new(true));
-                        base = Some((key, tail, footer));
-                    }
-                    Some(_) => {
-                        return Err(Attempt::Failed(Error::Corrupt(format!(
-                            "{key} holds another state"
-                        ))));
-                    }
-                    None => {
-                        return Err(unless_checkpointed(
-                            bucket,
-                            cell,
-                            first,
-                            Attempt::Failed(Error::Lost(key)),
-                        )
-                        .await);
+            match head.origin() {
+                None => {}
+                Some(origin) if origin.parent == cell => return Err(own_origin(cell)),
+                Some(origin) => {
+                    let key = layout::checkpoint(origin.parent, origin.at, origin.epoch);
+                    match checkpoint_tail(bucket, &key, origin.parent).await? {
+                        Some((tail, footer, cp_state)) if cp_state.through == Some(origin.at) => {
+                            touched.insert(key.clone());
+                            replay_state = State::of(cell, KeyReplay::new(true));
+                            base = Some((key, tail, footer));
+                        }
+                        Some(_) => {
+                            return Err(Attempt::Failed(Error::Corrupt(format!(
+                                "{key} holds another state"
+                            ))));
+                        }
+                        None => {
+                            let lost = Attempt::Failed(Error::Lost(key));
+                            return Err(unless_checkpointed(bucket, cell, first, lost).await);
+                        }
                     }
                 }
             }
@@ -2137,45 +1946,27 @@ async fn walk_keys<B: Bucket>(
         replay_state.apply(&footer, len);
         touched.insert(key);
         if ats_iter.next_if_eq(&footer.segment).is_some() {
-            for k in replay_state.extents.own.values() {
-                if !named.contains(k) {
-                    named.insert(k.clone());
-                }
-            }
+            name_all(named, replay_state.extents.own.values());
             // Any free/overwrite strictly after `first` cannot hide an extent still live at `first`.
             replay_state.extents.track_shadowed = false;
         }
     }
     drop(footers);
     if ats_iter.peek().is_some() {
-        for k in replay_state.extents.own.values() {
-            if !named.contains(k) {
-                named.insert(k.clone());
-            }
-        }
+        name_all(named, replay_state.extents.own.values());
     }
     if let Some((cp_key, cp_tail, cp_footer)) = base {
-        let Some(kept) = checkpoint_live_keys(
-            bucket,
-            &cp_key,
-            &cp_tail,
-            &cp_footer,
-            &replay_state.extents.shadowed,
-        )
-        .await?
+        let shadowed = &replay_state.extents.shadowed;
+        let Some(kept) =
+            checkpoint_live_keys(bucket, &cp_key, &cp_tail, &cp_footer, shadowed).await?
         else {
             return Err(Attempt::Restart);
         };
-        for k in kept {
-            if !named.contains(&k) {
-                named.insert(k);
-            }
-        }
+        named.extend(kept);
     }
     Ok(())
 }
 
-/// Whether the cell `origin` names holds the fork made at the end of its segment there to
 #[cfg(all(test, feature = "full"))]
 mod tests {
     use super::*;

@@ -9,10 +9,12 @@ Queue message (`cladefs-gc-cells`) on a 6-hour cron trigger (`0 */6 * * *`).
 - **Keyless, pure-Rust WASM** (`crates/gc_wasm` -> `bucket_cell` with `default-features = false,
   features = ["keyless-gc"]`): no C dependencies (`aws-lc`, `zstd-sys`, `crc-fast`), no tokio, no
   disk I/O, and zero encryption keys. Uses pure-Rust `ruzstd` and Castagnoli CRC32C.
-- **Streaming low-memory checkpoint recovery** (`Collector::stream_checkpoints(true)`): reads only
-  a checkpoint's `TableFooter` (~50 KiB) when no tail segments shadowed checkpointed extents, and
-  streams 1 MiB parts with a <=64 KiB carry buffer when tail frees exist — staying well under
-  Cloudflare Workers' 128 MiB isolate RAM limit even on 50+ MiB checkpoints.
+- **Keys-only recovery**, the collector's one recovery path, here as in native `cladefs-gc`
+  (`bucket_cell::recovery::recover_keys`): a pass needs the keys of the objects a cell's extents are
+  in, never the map of its extents. It reads a checkpoint's tail (its `TableFooter`, ~50 KiB) when
+  no segment since frees or seals again an extent it names, and its 1 MiB parts by ranged reads,
+  with a <=64 KiB carry buffer, when one does — well under Cloudflare Workers' 128 MiB isolate
+  limit even on 50+ MiB checkpoints.
 - **Per-cell queue fan-out**: `scheduled` lists all cells and reads `events` for shredded tenants,
   then enqueues one message per cell to `cladefs-gc-cells` (`maxBatchSize: 1, maxConcurrency: 16`).
   Each cell runs in its own Worker invocation with full CPU/memory headroom and coordinates via

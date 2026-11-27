@@ -478,11 +478,8 @@ mod wasm_api {
         let bucket = JsBucket(bridge);
         let holding = Holding { lease: lease_ms as u64, since };
         let shared = Arc::new(bucket_cell::gc_metrics::Shared::<SweepReport>::default());
-        let collector = Collector::new()
-            .holding(holding)
-            .shredded(shredded)
-            .stream_checkpoints(true)
-            .observer(Some(shared.clone()));
+        let collector =
+            Collector::new().holding(holding).shredded(shredded).observer(Some(shared.clone()));
         let result = match collector.collect_cell(&bucket, cell, holder).await {
             Ok(report) => CollectResult {
                 cell: cell.to_string(),
@@ -524,7 +521,7 @@ mod wasm_api {
         let cell = parse_cell_id(cell_id).map_err(err_to_js)?;
         let shredded = Arc::new(parse_shredded(shredded_json).map_err(err_to_js)?);
         let bucket = JsBucket(bridge);
-        let collector = Collector::new().shredded(shredded).stream_checkpoints(true);
+        let collector = Collector::new().shredded(shredded);
         let dry = collector.dry_run_cell(&bucket, cell).await.map_err(err_to_js)?;
         let doomed_bytes = dry.doomed.iter().map(|m| m.size).sum();
         let doomed = dry
