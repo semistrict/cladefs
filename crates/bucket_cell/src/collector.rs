@@ -4384,6 +4384,41 @@ mod tests {
         });
     }
 
+    /// cladefs: a pass over a cell of two versions after a checkpoint, an extent the checkpoint
+    /// names live at the first and freed before the second, the cell checkpointed past both, keeps
+    /// the extent's object for the first: one walk to both versions from the older checkpoint
+    /// subtracts what segments shadow up to the first version alone (hotbed review 184).
+    #[test]
+    fn passes_keep_what_a_version_names_that_a_later_one_freed() {
+        block_on(async {
+            let direct = Arc::new(Direct(SimBucket::new()));
+            let cell = test_cell(1);
+            lifecycle::create(&*direct, cell, 0).await.unwrap();
+            let writer = Writer::open(direct.clone(), cell, 10, 0).await.unwrap();
+            let held = ExtentId::new(1, writer.chain().next_sequence());
+            commit(
+                &writer,
+                Commit { tag: 1, extents: vec![(held, b"held".to_vec())], ..Commit::default() },
+            )
+            .await;
+            let object = writer.location(held).unwrap().key;
+            writer.checkpoint().await.unwrap();
+            let first = crate::testing::versioned_by(&writer, Vec::new(), 0x10).await;
+            commit(&writer, Commit { tag: 3, frees: vec![held], ..Commit::default() }).await;
+            crate::testing::versioned_by(&writer, Vec::new(), 0x20).await;
+            commit(&writer, Commit { tag: 5, ..Commit::default() }).await;
+            writer.checkpoint().await.unwrap();
+
+            Collector::new().collect_cell(&*direct, cell, 1).await.unwrap();
+            assert!(keys(&*direct).await.contains(&object), "the first version's extent went");
+            let checkpoints = Checkpoints::new(&*direct, 0);
+            let (state, _) = recovery::recover_at(&checkpoints, cell, first).await.unwrap();
+            let location = state.extents.get(&held).expect("the first version names it");
+            let read = crate::testing::read(&direct, held, location).await;
+            assert_eq!(read, Ok(b"held".to_vec()));
+        });
+    }
+
     /// cladefs: a pass over a cell whose head names the cell itself as its origin, with no
     /// checkpoint of its own, refuses it as corrupt, deleting nothing (board 14525): no writer
     /// makes such a head, and recovering what it inherits would recurse without end.
