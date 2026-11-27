@@ -83,8 +83,6 @@ mod host {
     const WINDOW: crate::common::Window = crate::common::Window::Large;
     const MEMORY_MIB: u32 = 1024;
     const VCPUS: u8 = 2;
-    /// The memory each daemon's kernel takes at most.
-    const CLADEFSD_MEMORY: u64 = 4 << 30;
     /// How long past its load a VM may run before it is hung.
     const GRACE: Duration = Duration::from_secs(120);
     /// How long a daemon may take to stop on SIGTERM, and its VMs to exit once it is killed.
@@ -407,8 +405,10 @@ mod host {
                 ("FAILPOINTS", failpoints.as_ref()),
             ];
             let name = format!("cladefsd-{}", self.daemons);
-            let child =
-                spawn_daemon(self.setup, &self.paths.socket, &name, &env, Some(CLADEFSD_MEMORY))?;
+            // Governed, as production's (board 14529): 4 GiB, fixed, until then. Its peak memory,
+            // its cache's pages among it, grows with what the soak's cells hold, as `CELLS`' bound
+            // lets them grow, and is held to `MEMORY`'s.
+            let child = spawn_daemon(self.setup, &self.paths.socket, &name, &env, None)?;
             self.say(format_args!("{name} (pid {}) serves, token {token}", child.id()));
             Ok(Daemon { child })
         }

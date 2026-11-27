@@ -62,8 +62,6 @@ mod host {
     use std::path::Path;
     use std::time::{Duration, Instant};
 
-    /// The daemon's memory, its extent cache's: the guests' files' worth and more.
-    const DAEMON_MEMORY: u64 = 2 << 30;
     /// Its upload memory: as much as its cells upload at once, so that its uploads holding each
     /// object twice, TASK-317's bug, hold more than every other part of its budget may, as
     /// `cladefs::cladefsd::tests::soak`'s.
@@ -190,13 +188,9 @@ mod host {
                 ("AWS_ENDPOINT", endpoint.as_ref()),
                 ("CLADEFSD_UPLOAD_MEMORY", upload_memory.as_ref()),
             ];
-            let mut daemon = crate::common::spawn_daemon(
-                test_setup,
-                &socket,
-                "cladefsd",
-                &env,
-                Some(DAEMON_MEMORY),
-            )?;
+            // Governed, as production's (board 14529): its extent cache 2 GiB, fixed, until then.
+            let mut daemon =
+                crate::common::spawn_daemon(test_setup, &socket, "cladefsd", &env, None)?;
             let failing: f64 = PHASES.iter().filter(|phase| phase.3).map(|phase| phase.1).sum();
             let rate = (WRITTEN_WHILE_FAILING as f64 / (vms as f64 * failing * secs as f64)) as u64;
             eprintln!("bucket-soak: {secs} s, {vms} VMs writing {} MiB/s each", rate >> 20);

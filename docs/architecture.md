@@ -48,7 +48,9 @@ extent store             crates/local_cell: segments, large extents' files,
   reread through an 8 GiB window took 13.15 s with a daemon of 1 GiB,
   600 ms with 8 GiB, against ext4's 586 ms from its guest's page cache. The
   guest tests' windows are the host's memory (at most 64 GiB) and their daemons
-  8 GiB, unless a case says.
+  governed, as production's (board 14529), but for the cases that say why they
+  fix a size (several hosts on one machine), and `CLADEFSD_MEMORY` fixing
+  every daemon's for an A/B's fixed side.
 - **Hypervisor mirror:** the daemon maps pages at the window's addresses, and
   the VM process maps the same pages of the daemon's physical memory (memfds)
   into the host memory KVM follows for the window, keeping it in step with

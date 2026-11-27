@@ -424,9 +424,13 @@ fn mem_total(meminfo: &str) -> anyhow::Result<u64> {
 }
 
 /// An extent daemon of the test's own, CLADEFSD_BIN, serving at `socket`, and its control API
-/// beside it ([`control`]), once this returns, with `env` in its environment, and `memory` bytes of
-/// memory if given; otherwise, as production's, its memory a page cache of what of the host's is
-/// free (TASK-358). It logs to `<name>.log` in the test's directory.
+/// beside it ([`control`]), once this returns, with `env` in its environment. Its memory is
+/// `memory` bytes, fixed, if given: a case that tests the daemon at a known size passes one, and
+/// says why. Otherwise it is CLADEFSD_MEMORY's, `env`'s or this process's, if set (an A/B's fixed
+/// side, scripts/test-e2e.sh); otherwise governed, as production's daemon is (no MEMORY_BYTES:
+/// `cladefsd::governor`, board 14529), and on a host that can't run governed the daemon refuses
+/// to start, saying why (`cladefsd --doctor`), and so does the case: no case quietly tests another
+/// mode than production's. It logs to `<name>.log` in the test's directory.
 /// cladefs: it keeps what its cells read from their bucket in a part cache of its own,
 /// `<name>-cache` in the test's directory, as production's daemon keeps it on the host's disk
 /// (`CLADEFSD_PART_CACHE`, doc-7), unless `env` or this process says otherwise, empty for none: one
@@ -434,43 +438,12 @@ fn mem_total(meminfo: &str) -> anyhow::Result<u64> {
 /// `<name>-stats.txt` beside its log, unless `env` names a file (`CLADEFSD_STATS`): what it
 /// downloaded against what it read, which the run's summary says (scripts/guest_results.py,
 /// TASK-165.12).
-/// Default explicit memory budget (1 GiB) passed to test daemons launched via [`spawn_daemon`]
-/// when the host does not support Linux governed mode (e.g. hotbed VMs with MGLRU disabled,
-/// board 13373 / board 13393). Production `cladefsd` still fails hard in governed mode; tests
-/// exercising governed mode itself use [`spawn_governed_daemon`].
-const DEFAULT_TEST_DAEMON_MEMORY: u64 = 1 << 30;
-
-/// Spawns `cladefsd` in governed mode (no fixed memory budget argument) so tests that specifically
-/// exercise the memory governor fail hard if the host lacks governor support (board 13373).
-pub fn spawn_governed_daemon(
-    test_setup: &TestSetup,
-    socket: &Path,
-    name: &str,
-    env: &[(&str, &std::ffi::OsStr)],
-) -> anyhow::Result<std::process::Child> {
-    spawn_daemon_inner(test_setup, socket, name, env, None, true)
-}
-
-/// Spawns `cladefsd` for a test case. When `memory` is `None`, honors `CLADEFSD_MEMORY` if set;
-/// otherwise runs governed when the host supports it, or falls back to
-/// [`DEFAULT_TEST_DAEMON_MEMORY`] on hosts without MGLRU/governor support (board 13373).
 pub fn spawn_daemon(
     test_setup: &TestSetup,
     socket: &Path,
     name: &str,
     env: &[(&str, &std::ffi::OsStr)],
     memory: Option<u64>,
-) -> anyhow::Result<std::process::Child> {
-    spawn_daemon_inner(test_setup, socket, name, env, memory, false)
-}
-
-fn spawn_daemon_inner(
-    test_setup: &TestSetup,
-    socket: &Path,
-    name: &str,
-    env: &[(&str, &std::ffi::OsStr)],
-    memory: Option<u64>,
-    require_governed: bool,
 ) -> anyhow::Result<std::process::Child> {
     use std::time::{Duration, Instant};
 
@@ -487,20 +460,15 @@ fn spawn_daemon_inner(
     };
     let mut command = std::process::Command::new(bin);
     command.arg(socket).env("CLADEFSD_GRPC", socket.with_extension("control"));
-    if let Some(memory) = memory {
-        command.arg(memory.to_string());
-    } else if !require_governed {
-        let env_memory = env
-            .iter()
-            .find(|(var, _)| *var == "CLADEFSD_MEMORY")
-            .map(|(_, value)| value.to_os_string())
-            .or_else(|| std::env::var_os("CLADEFSD_MEMORY"))
-            .filter(|value| !value.is_empty());
-        if let Some(memory) = env_memory {
-            command.arg(memory);
-        } else if !cladefs::cladefsd::governor::host_supported() {
-            command.arg(DEFAULT_TEST_DAEMON_MEMORY.to_string());
-        }
+    let fixed: Option<std::ffi::OsString> =
+        memory.map(|memory| memory.to_string().into()).or_else(|| {
+            (env.iter().find(|(var, _)| *var == "CLADEFSD_MEMORY"))
+                .map(|(_, value)| value.to_os_string())
+                .or_else(|| std::env::var_os("CLADEFSD_MEMORY"))
+                .filter(|value| !value.is_empty())
+        });
+    if let Some(memory) = fixed {
+        command.arg(memory);
     }
     if !named("CLADEFSD_BUCKET") {
         let bucket = test_setup.tmp_dir.join(format!("{name}.bucket"));

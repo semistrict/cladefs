@@ -138,6 +138,9 @@ mod host {
             let sockets = tempfile::Builder::new().prefix("cladefs-mig").tempdir()?;
             let src_sock = sockets.path().join("src.sock");
             let dst_sock = sockets.path().join("dst.sock");
+            // Both fixed, 1 GiB, not governed as production's (board 14529): two hosts on one
+            // machine, where each governed daemon would take the machine's free memory as its
+            // own; what this tests is the migration, at any size.
             let _src_daemon = spawn_daemon(
                 test_setup,
                 &src_sock,
