@@ -87,6 +87,27 @@ class Budgets(unittest.TestCase):
                       "800.0 MiB for it, it says 151.6 MiB at most: cells 150.0 MiB, pages 1.6 "
                       "MiB, stats 0.0 MiB, log 0.0 MiB, bucket 0.0 MiB, cache 0.0 MiB", said)
 
+    def test_an_idle_daemon_passes_with_its_stats_files_last_write(self):
+        """Board 14557: a run's daemon that served nothing rewrote its stats file 27 times, a page
+        each, which the kernel counted, 110,592 bytes; the file said 26 of them, as it was written
+        before its own write was counted, and the run failed."""
+        lines = [
+            "daemon: fetched-bytes=0 written_raw_bytes=0 written_copied_bytes=0 "
+            "written_framed_bytes=0 written_own_bytes=0 written_log_bytes=0 written_writes=0 "
+            "stats_written_bytes=106496 io_write_bytes=110592 io_cancelled_write_bytes=0",
+            f"uploads: held=0 max-held=0 budget={512 * MIB}",
+            f"process: cpu-ns=54590000 anon=14315520 max-anon=14315520 shmem=0 max-shmem=0 "
+            "anon-budget=817889280 over-budget=0 max-over-budget=0",
+        ]
+        (self.results / "cladefsd-stats.txt").write_text("\n".join(lines) + "\n")
+        (self.results / "cladefsd.log").write_text("x" * 1396)
+        status, said, _ = self.run_budgets("--bucket-in-memory",
+                                           self.results / "cladefsd-stats.txt")
+        self.assertEqual(status, 0, said)
+        self.assertIn("cladefsd-stats.txt: disk: ok: the kernel wrote 0.1 MiB for it, it says "
+                      "0.1 MiB at most: cells 0.0 MiB, pages 0.0 MiB, stats 0.1 MiB, log 0.0 MiB, "
+                      "bucket 0.0 MiB, cache 0.0 MiB", said)
+
 
 if __name__ == "__main__":
     unittest.main()

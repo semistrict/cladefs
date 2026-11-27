@@ -88,7 +88,10 @@ def check(stats, bucket_in_memory=False):
         allowed = {
             "cells": sum(written.values()),
             "pages": daemon["written_writes"] * PAGE,
-            "stats": daemon.get("stats_written_bytes", 0),
+            # Its stats file's pages as it counts them, and the write of the file itself, in
+            # pages: what the file says it wrote was counted before it was (board 14557).
+            "stats": daemon.get("stats_written_bytes", 0)
+            + -(-stats.stat().st_size // PAGE) * PAGE,
             "log": log.stat().st_size if log.exists() else 0,
             # Its objects uploaded, and those whose PUTs it had in flight as it stopped, killed, as
             # a case's daemon is: no more than its uploads hold at once, their budget.
