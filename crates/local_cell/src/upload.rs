@@ -2420,6 +2420,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                 sink,
                 cfg.max_writer_appends,
                 cfg.max_segment_bytes,
+                self.clock.clone(),
             );
             let (done_tx, done_rx) = futures::channel::oneshot::channel();
             *self.fast_wal_done.lock().unwrap() = Some(done_rx);

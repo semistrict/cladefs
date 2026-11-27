@@ -31,18 +31,19 @@
 //!   and atomically switches `head.fast_wal` in the same head CAS (`activateAfterFlush`).
 
 use crate::replicate::{Holding, HotBudget};
-use crate::upload::Failure;
+use crate::upload::{Clock, Failure};
+use bucket_cell::any_bucket::AnyBucket;
 use bucket_cell::batch::{Commit, SegmentBuilder};
 use bucket_cell::bucket::{self, Appended, Bucket};
 use bucket_cell::fetch::Priority;
 use bucket_cell::keys::Ring;
 use bucket_cell::layout::{self, ActiveWal, CellId, FastWal, Kind, NewVersion, epoch_of};
-use bucket_cell::{Bytes, Writer};
+use bucket_cell::{Bytes, Writer, rules};
 use event_listener::Event;
 use extent_keys::{Aead, Salt};
 use fprint::TypeFingerprint;
 use futures::StreamExt as _;
-use futures::future::BoxFuture;
+use futures::future::{BoxFuture, Either, FutureExt as _};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -147,10 +148,7 @@ pub trait FastWalOpener: Send + Sync + 'static {
         Ok(())
     }
 
-    fn open(
-        &self,
-        url: &str,
-    ) -> BoxFuture<'static, Result<Arc<bucket_cell::object_bucket::ObjectBucket>, String>>;
+    fn open(&self, url: &str) -> BoxFuture<'static, Result<Arc<AnyBucket>, String>>;
 }
 
 /// Configuration passed into `upload::Options` for fast WAL cells.
@@ -158,8 +156,9 @@ pub trait FastWalOpener: Send + Sync + 'static {
 pub struct FastWalConfig {
     /// URL of this daemon's local appendable zonal bucket (`CLADEFSD_FAST_WAL_BUCKET`).
     pub bucket_url: String,
-    /// Already-opened and append-probed local fast WAL bucket.
-    pub bucket: Arc<bucket_cell::object_bucket::ObjectBucket>,
+    /// Already-opened and append-probed local fast WAL bucket: an object store's in production,
+    /// the simulation's in its world (board 14433).
+    pub bucket: Arc<AnyBucket>,
     /// Opener for cross-AZ fast WAL buckets named in a previous epoch's `head.fast_wal.active`.
     pub opener: Arc<dyn FastWalOpener>,
     /// Maximum writer appends per WAL segment before rolling (defaults to
@@ -181,11 +180,7 @@ impl std::fmt::Debug for FastWalConfig {
 
 impl FastWalConfig {
     /// Creates a config with default rollover limits and the standard URL opener.
-    pub fn new(
-        bucket_url: String,
-        bucket: Arc<bucket_cell::object_bucket::ObjectBucket>,
-        opener: Arc<dyn FastWalOpener>,
-    ) -> Self {
+    pub fn new(bucket_url: String, bucket: Arc<AnyBucket>, opener: Arc<dyn FastWalOpener>) -> Self {
         Self {
             bucket_url,
             bucket,
@@ -996,17 +991,21 @@ pub struct FastWalWriter<C: Bucket, F: Bucket> {
     rolled: VecDeque<(u64, u64)>,
     /// Consecutive failures reclaiming a rolled segment, used for exponential retry backoff.
     reclaim_failures: u32,
-    /// Earliest instant to retry reclaiming a rolled segment after a transient failure.
-    reclaim_retry_at: Option<tokio::time::Instant>,
+    /// The back-off after a failed reclaim, while it runs: no reclaim is tried until it ends.
+    reclaim_wait: Option<BoxFuture<'static, ()>>,
+    /// What lingers and back-offs wait on: the uploader's clock, the host runtime's sleep in
+    /// production and the world's in the simulation (board 14433).
+    clock: Clock,
 }
 
 impl<C: Bucket, F: Bucket> FastWalWriter<C, F> {
-    pub fn new(
+    pub(crate) fn new(
         cold_writer: Arc<Writer<C>>,
         fast_bucket: Arc<F>,
         sink: Arc<FastWalSink>,
         max_writer_appends: u32,
         max_segment_bytes: u64,
+        clock: Clock,
     ) -> Self {
         let cell = cold_writer.cell();
         let epoch = cold_writer.epoch();
@@ -1023,7 +1022,8 @@ impl<C: Bucket, F: Bucket> FastWalWriter<C, F> {
             next_segment: 0,
             rolled: VecDeque::new(),
             reclaim_failures: 0,
-            reclaim_retry_at: None,
+            reclaim_wait: None,
+            clock,
         }
     }
 
@@ -1048,19 +1048,29 @@ impl<C: Bucket, F: Bucket> FastWalWriter<C, F> {
 
     fn rolled_ready(&self) -> bool {
         let acked = self.sink.head_acked.load(Ordering::Acquire);
-        self.rolled.front().is_some_and(|&(_, max_epoch)| max_epoch <= acked)
+        self.rolled.front().is_some_and(|&(_, max_epoch)| reclaimable(max_epoch, acked))
     }
 
-    fn has_reclaimable_rolled(&self) -> bool {
-        self.rolled_ready()
-            && self.reclaim_retry_at.is_none_or(|at| tokio::time::Instant::now() >= at)
+    /// Whether a back-off after a failed reclaim still runs, dropping it once it ended.
+    fn reclaim_backing_off(&mut self) -> bool {
+        let Some(wait) = self.reclaim_wait.as_mut() else { return false };
+        if wait.as_mut().now_or_never().is_none() {
+            return true;
+        }
+        self.reclaim_wait = None;
+        false
+    }
+
+    fn has_reclaimable_rolled(&mut self) -> bool {
+        self.rolled_ready() && !self.reclaim_backing_off()
     }
 
     /// Waits for staged commits and applies [`AdaptiveBatcher`]'s linger window.
     async fn take_batch(&mut self) -> (Vec<(StagedCommit, Holding)>, bool) {
         loop {
             // Register wake listener before inspecting state so no push is missed.
-            let notified = self.sink.wake_writer.notified();
+            let sink = self.sink.clone();
+            let notified = sink.wake_writer.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
             let head_acked = self.sink.head_acked.load(Ordering::Acquire);
@@ -1086,12 +1096,13 @@ impl<C: Bucket, F: Bucket> FastWalWriter<C, F> {
                     return (Vec::new(), false);
                 }
                 if self.rolled_ready()
-                    && let Some(retry_at) = self.reclaim_retry_at
+                    && let Some(wait) = self.reclaim_wait.as_mut()
                 {
-                    let sleep = tokio::time::sleep_until(retry_at);
-                    tokio::pin!(sleep);
-                    // Either a new wakeup or the backoff deadline fired; loop re-checks state.
-                    let _ = futures::future::select(notified, sleep).await;
+                    // Either a new wakeup or the back-off ended; the loop checks again.
+                    if let Either::Right(_) = futures::future::select(notified, wait.as_mut()).await
+                    {
+                        self.reclaim_wait = None;
+                    }
                     continue;
                 }
                 notified.await;
@@ -1100,7 +1111,7 @@ impl<C: Bucket, F: Bucket> FastWalWriter<C, F> {
             self.batcher.note_queued(count);
             let linger = if stopped { Duration::ZERO } else { self.batcher.linger(count, bytes) };
             if !linger.is_zero() {
-                let deadline = tokio::time::Instant::now() + linger;
+                let mut sleep = (self.clock)(linger);
                 loop {
                     let wake = self.sink.wake_writer.notified();
                     tokio::pin!(wake);
@@ -1114,11 +1125,9 @@ impl<C: Bucket, F: Bucket> FastWalWriter<C, F> {
                     if ready {
                         break;
                     }
-                    let sleep = tokio::time::sleep_until(deadline);
-                    tokio::pin!(sleep);
-                    match futures::future::select(wake, sleep).await {
-                        futures::future::Either::Left(_) => continue,
-                        futures::future::Either::Right(_) => break,
+                    match futures::future::select(wake, sleep.as_mut()).await {
+                        Either::Left(_) => continue,
+                        Either::Right(_) => break,
                     }
                 }
             }
@@ -1160,19 +1169,8 @@ impl<C: Bucket, F: Bucket> FastWalWriter<C, F> {
                 large_uploads.push((key, std::mem::take(&mut large.framed_bytes)));
             }
         }
-        if !large_uploads.is_empty() {
-            let writer = self.cold_writer.clone();
-            let results: Vec<Result<(), bucket_cell::Error>> = futures::stream::iter(large_uploads)
-                .map(|(key, bytes)| {
-                    let writer = writer.clone();
-                    async move { writer.put_large_extent(&key, bytes).await }
-                })
-                .buffer_unordered(LARGE_PUTS_AT_ONCE)
-                .collect()
-                .await;
-            for result in results {
-                result?;
-            }
+        if rules().wal_after_large {
+            put_large(&self.cold_writer, std::mem::take(&mut large_uploads)).await?;
         }
 
         let wire_commits: Vec<FastWalCommit> =
@@ -1204,7 +1202,8 @@ impl<C: Bucket, F: Bucket> FastWalWriter<C, F> {
 
         // Step 2: check if the current WAL segment must proactively roll (`rollBeforeLimit`).
         if let Some(open) = &self.open {
-            let hit_parts = open.appends >= self.max_writer_appends;
+            let hit_parts =
+                rules().wal_rolls_before_limit && open.appends >= self.max_writer_appends;
             let hit_bytes = open.offset > 0
                 && open.offset.saturating_add(approx_record_len).saturating_add(64)
                     > self.max_segment_bytes;
@@ -1227,6 +1226,7 @@ impl<C: Bucket, F: Bucket> FastWalWriter<C, F> {
 
         let started = Instant::now();
         let landed = self.append_record(&record, last_epoch).await?;
+        put_large(&self.cold_writer, large_uploads).await?;
         if landed {
             let rtt = started.elapsed();
             self.batcher.observe(batch_len, rtt);
@@ -1242,7 +1242,10 @@ impl<C: Bucket, F: Bucket> FastWalWriter<C, F> {
         let Some(open) = &self.open else { return Ok(()) };
         let seg_num = open.segment;
         let max_epoch = open.max_commit_epoch;
-        let rolled = self.append_record(&WalRecord::Rolled, max_epoch).await?;
+        let rolled = match rules().wal_rolls_before_next {
+            true => self.append_record(&WalRecord::Rolled, max_epoch).await?,
+            false => true,
+        };
         if rolled {
             self.open = None;
             self.rolled.push_back((seg_num, max_epoch));
@@ -1285,6 +1288,16 @@ impl<C: Bucket, F: Bucket> FastWalWriter<C, F> {
                     open.appends = open.appends.saturating_add(1);
                     open.max_commit_epoch = open.max_commit_epoch.max(last_epoch);
                     return Ok(true);
+                }
+                Err(bucket::Error::Precondition | bucket::Error::AlreadyExists)
+                    if !rules().wal_offset_checked =>
+                {
+                    // Re-reads where the object ends, and appends there, or creates it again.
+                    let encoded = wire::encode_record(&open.header_bytes, &open.aead, seq, record)?;
+                    (offset, payload) = match bucket::head(&*self.fast_bucket, &key).await? {
+                        Some(meta) => (meta.size, Bytes::from(encoded)),
+                        None => (0, Bytes::from([&open.header_bytes[..], &encoded].concat())),
+                    };
                 }
                 Err(bucket::Error::Precondition | bucket::Error::AlreadyExists) => {
                     // Either:
@@ -1360,7 +1373,8 @@ impl<C: Bucket, F: Bucket> FastWalWriter<C, F> {
                     // `Rolled` marker we need to land), stop waiting on the degraded fast bucket
                     // for this batch (`walContiguous`: we drop the whole batch only if covered).
                     if !matches!(record, WalRecord::Rolled)
-                        && self.sink.head_acked.load(Ordering::Acquire) >= last_epoch
+                        && (!rules().wal_contiguous
+                            || self.sink.head_acked.load(Ordering::Acquire) >= last_epoch)
                     {
                         return Ok(false);
                     }
@@ -1377,12 +1391,12 @@ impl<C: Bucket, F: Bucket> FastWalWriter<C, F> {
     /// with an authenticated 36-byte `CFTR` rolled tombstone carrying `max_commit_epoch`
     /// (`noDeleteBeforeAck`, `rolledTombstoneOnDelete`, board 12299).
     async fn reclaim_rolled(&mut self) {
-        if self.reclaim_retry_at.is_some_and(|at| tokio::time::Instant::now() < at) {
+        if self.reclaim_backing_off() {
             return;
         }
         let acked = self.sink.head_acked.load(Ordering::Acquire);
         while let Some(&(seg, max_epoch)) = self.rolled.front() {
-            if max_epoch > acked {
+            if !reclaimable(max_epoch, acked) {
                 break;
             }
             let key = layout::wal(self.cell, self.epoch, seg);
@@ -1399,16 +1413,19 @@ impl<C: Bucket, F: Bucket> FastWalWriter<C, F> {
                     break;
                 }
             };
-            match self.fast_bucket.put(&key, tombstone, bucket::PutMode::Overwrite).await {
+            let reclaimed = match rules().wal_rolled_tombstones {
+                true => self.fast_bucket.put(&key, tombstone, bucket::PutMode::Overwrite).await,
+                false => self.fast_bucket.delete(&key).await.map(|()| bucket::Version::default()),
+            };
+            match reclaimed {
                 Ok(_) => {
                     self.rolled.pop_front();
                     self.reclaim_failures = 0;
-                    self.reclaim_retry_at = None;
                 }
                 Err(err) => {
                     self.reclaim_failures = self.reclaim_failures.saturating_add(1);
                     let backoff = Duration::from_millis(100u64 << self.reclaim_failures.min(8));
-                    self.reclaim_retry_at = Some(tokio::time::Instant::now() + backoff);
+                    self.reclaim_wait = Some((self.clock)(backoff));
                     log::warn!(
                         "cladefs: reclaiming rolled fast WAL segment {key}: {err} (retry in \
                          {backoff:?})"
@@ -1418,6 +1435,28 @@ impl<C: Bucket, F: Bucket> FastWalWriter<C, F> {
             }
         }
     }
+}
+
+/// Uploads `uploads`, large own-extents framed under their keys, to the cold bucket by `writer`.
+async fn put_large<C: Bucket>(
+    writer: &Arc<Writer<C>>,
+    uploads: Vec<(String, Vec<u8>)>,
+) -> Result<(), Failure> {
+    let results: Vec<Result<(), bucket_cell::Error>> = futures::stream::iter(uploads)
+        .map(|(key, bytes)| async move { writer.put_large_extent(&key, bytes).await })
+        .buffer_unordered(LARGE_PUTS_AT_ONCE)
+        .collect()
+        .await;
+    for result in results {
+        result?;
+    }
+    Ok(())
+}
+
+/// Whether a rolled segment whose commits reach `max_epoch` may be reclaimed, the cold bucket's
+/// head having acknowledged through `acked` (`deleteWalAfterAck`).
+fn reclaimable(max_epoch: u64, acked: u64) -> bool {
+    max_epoch <= acked || !rules().wal_reclaims_after_ack
 }
 
 /// Fences every WAL segment of `old_active.epoch` in `old_active.bucket`, recovers all commits
@@ -1444,6 +1483,12 @@ pub async fn fence_and_recover<C: Bucket, F: Bucket>(
     let mut last_seen_epoch = writer.state().last_commit.map_or(0, epoch_of);
     let mut recovered_count = 0usize;
     let mut seg = 0u64;
+    // The segment and length at which a fence was last refused: refused again there, nobody
+    // appended meanwhile, so the store refuses it for good, the segment at its appends' limit.
+    let mut refused_at: Option<(u64, u64)> = None;
+    if !rules().wal_activates_after_flush {
+        writer.activate_fast_wal(target_fast_wal.clone()).await?;
+    }
 
     loop {
         let key = layout::wal(cell, old_epoch, seg);
@@ -1466,6 +1511,7 @@ pub async fn fence_and_recover<C: Bucket, F: Bucket>(
             }
         };
         let (seg_commits, done) = match obj_opt {
+            None if !rules().wal_fences => (Vec::new(), true),
             None => {
                 // Segment does not exist yet: fence it at offset 0 with an authenticated 36-byte
                 // empty-segment fence tombstone (`CFTF`). If the old writer raced and created it,
@@ -1503,8 +1549,12 @@ pub async fn fence_and_recover<C: Bucket, F: Bucket>(
                             ))
                             .into());
                         }
-                        seg += 1;
-                        continue;
+                        if !rules().wal_fence_follows_roll {
+                            (Vec::new(), true)
+                        } else {
+                            seg += 1;
+                            continue;
+                        }
                     }
                     Tombstone::Swept { head_epoch } => {
                         return Err(bucket_cell::Error::Corrupt(format!(
@@ -1528,10 +1578,10 @@ pub async fn fence_and_recover<C: Bucket, F: Bucket>(
                         WalRecord::Fence { .. } => ended_by_fence = true,
                     }
                 }
-                if ended_by_fence {
+                if ended_by_fence || !rules().wal_fences {
                     (seg_commits, true)
                 } else if ended_by_roll {
-                    (seg_commits, false)
+                    (seg_commits, !rules().wal_fence_follows_roll)
                 } else {
                     // Segment is still open: append domain-separated authenticated `CFWF` fence
                     // record at exact end offset (zero nonce reuse with concurrent writer).
@@ -1542,8 +1592,17 @@ pub async fn fence_and_recover<C: Bucket, F: Bucket>(
                         .await?
                     {
                         Appended::Appended(_) => (seg_commits, true),
+                        Appended::Precondition if refused_at == Some((seg, rec_offset)) => {
+                            return Err(Failure::msg(format!(
+                                "fast WAL segment {key} refuses a fence at its end, {rec_offset}: \
+                                 its appends' limit reached, it can be fenced never"
+                            )));
+                        }
                         // Old writer appended another batch or `Rolled`: re-read this segment.
-                        Appended::Precondition => continue,
+                        Appended::Precondition => {
+                            refused_at = Some((seg, rec_offset));
+                            continue;
+                        }
                     }
                 }
             }
@@ -1705,7 +1764,13 @@ pub async fn sweep_superseded<F: Bucket>(
         }
         let tomb =
             wire::encode_tombstone(cell, epoch, segment, keys, Tombstone::Swept { head_epoch })?;
-        bucket::overwrite(&**fast_bucket, &meta.key, Bytes::from(tomb.to_vec())).await?;
+        if rules().wal_sweep_tombstones {
+            bucket::overwrite(&**fast_bucket, &meta.key, Bytes::from(tomb.to_vec())).await?;
+        } else if let Err(error) = fast_bucket.delete(&meta.key).await {
+            // Left as it was, for the next sweep, as a failed overwrite is.
+            log::warn!("cladefs: deleting superseded fast WAL segment {}: {error}", meta.key);
+            continue;
+        }
         swept += 1;
     }
     Ok(swept)
@@ -1718,8 +1783,12 @@ mod tests {
     use bucket_cell::lifecycle;
     use bucket_cell::object_bucket::ObjectBucket;
     use bucket_cell::testing::SimBucket;
-    use futures::FutureExt as _;
     use object_store::memory::InMemory;
+
+    /// The host runtime's sleep, as the uploader's clock is in production.
+    fn tokio_clock() -> Clock {
+        Arc::new(|interval| tokio::time::sleep(interval).boxed())
+    }
 
     fn memory_bucket() -> Arc<ObjectBucket> {
         Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""))
@@ -1825,6 +1894,7 @@ mod tests {
                     sink.clone(),
                     1,
                     DEFAULT_MAX_SEGMENT_BYTES,
+                    tokio_clock(),
                 )
                 .run(),
             );
@@ -1975,10 +2045,96 @@ mod tests {
         assert_eq!(run(false), (1, false));
     }
 
-    struct MapOpener(std::collections::HashMap<String, Arc<ObjectBucket>>);
+    /// `tombstoneOnSweep` (rule `wal_sweep_tombstones`, `SweepDeletesFence.cfg`): a writer taken
+    /// over tries its create of a segment again, the first having landed with its answer lost, and
+    /// the retry lands only after the take fenced the segment, recovered it and swept it. Swept to
+    /// a tombstone, the retry is refused; deleted, it recreates the segment without its fence, and
+    /// the writer appends on, a commit told durable that the take never recovered. The simulation
+    /// reaches this only by luck (board 14433): a retry in flight across a whole take and its sweep,
+    /// its writer alive through them; no seed of 5,000 of its zombie profile did.
+    #[test]
+    fn sweeps_need_tombstones() {
+        /// Whether writer 1's commit after its retried create lands is told durable.
+        fn told_after_sweep(rules: bucket_cell::Rules) -> bool {
+            bucket_cell::set_rules(rules);
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            let told = rt.block_on(async {
+                let (cold, fast) = (memory_bucket(), memory_bucket());
+                let cell = layout::test_cell(12);
+                lifecycle::create(&*cold, cell, 1).await.unwrap();
+                let w1 = Arc::new(Writer::open(cold.clone(), cell, 10, 1).await.unwrap());
+                let active1 = ActiveWal { epoch: w1.epoch(), bucket: "memory:///fast".into() };
+                let fast_wal =
+                    |active| Some(FastWal { fsync: Fsync::FastWal, active: Some(active) });
+                w1.activate_fast_wal(fast_wal(active1.clone())).await.unwrap();
+                let sink = FastWalSink::new(
+                    "memory:///fast".into(),
+                    0,
+                    Arc::new(Event::new()),
+                    Arc::new(|| {}),
+                    None,
+                );
+                let mut writer = FastWalWriter::new(
+                    w1.clone(),
+                    fast.clone(),
+                    sink,
+                    DEFAULT_MAX_WRITER_APPENDS,
+                    DEFAULT_MAX_SEGMENT_BYTES,
+                    tokio_clock(),
+                );
+                writer.open = Some(OpenSegment::new(cell, w1.epoch(), 0, w1.keys()).unwrap());
+                let sequence = w1.chain().next_sequence();
+                let batch = |epoch: u64| {
+                    WalRecord::Batch(vec![FastWalCommit {
+                        epoch,
+                        tag: layout::tag(w1.epoch(), epoch),
+                        inline_extents: vec![(ExtentId::new(cell.id, sequence + epoch), vec![7])],
+                        large_refs: Vec::new(),
+                        frees: Vec::new(),
+                        root: None,
+                        capacity: Some(1 << 20),
+                        next_sequence: sequence + epoch + 1,
+                        versions: Vec::new(),
+                    }])
+                };
+                // Writer 1's create of segment 0, which lands: its bytes, tried again later.
+                assert!(writer.append_record(&batch(1), 1).await.unwrap());
+                let key = layout::wal(cell, w1.epoch(), 0);
+                let create = fast.get(&key).await.unwrap().bytes;
+
+                // Writer 2 takes the cell, fences and recovers segment 0, and sweeps it.
+                let w2 = Arc::new(Writer::open(cold.clone(), cell, 20, 2).await.unwrap());
+                let active2 = ActiveWal { epoch: w2.epoch(), bucket: "memory:///fast".into() };
+                let recovered =
+                    fence_and_recover(&w2, &cold, &fast, &active1, fast_wal(active2)).await;
+                assert_eq!(recovered.unwrap(), 1);
+                sweep_superseded(&fast, cell, w2.epoch(), Some(w2.epoch()), w2.keys())
+                    .await
+                    .unwrap();
+
+                // Writer 1's retry of its create lands now, or is refused; then its next commit.
+                match fast.append(&key, 0, Bytes::from(create)).await {
+                    Ok(_) => writer.append_record(&batch(2), 2).await.unwrap(),
+                    Err(error) => {
+                        assert_eq!(error, bucket::Error::Precondition);
+                        false
+                    }
+                }
+            });
+            bucket_cell::set_rules(bucket_cell::Rules::ALL);
+            told
+        }
+
+        assert!(!told_after_sweep(bucket_cell::Rules::ALL));
+        let deleting =
+            bucket_cell::Rules { wal_sweep_tombstones: false, ..bucket_cell::Rules::ALL };
+        assert!(told_after_sweep(deleting));
+    }
+
+    struct MapOpener(std::collections::HashMap<String, Arc<AnyBucket>>);
 
     impl FastWalOpener for MapOpener {
-        fn open(&self, url: &str) -> BoxFuture<'static, Result<Arc<ObjectBucket>, String>> {
+        fn open(&self, url: &str) -> BoxFuture<'static, Result<Arc<AnyBucket>, String>> {
             let found =
                 self.0.get(url).cloned().ok_or_else(|| format!("unknown fast WAL bucket {url}"));
             async move { found }.boxed()
@@ -2002,8 +2158,9 @@ mod tests {
         let fast_az1 = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "az1"));
         let fast_az2 = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "az2"));
         let mut map = std::collections::HashMap::new();
-        map.insert("memory:///fast-az1".to_owned(), fast_az1.clone());
-        map.insert("memory:///fast-az2".to_owned(), fast_az2.clone());
+        let any = |bucket: &Arc<ObjectBucket>| Arc::new(AnyBucket::new(bucket.clone()));
+        map.insert("memory:///fast-az1".to_owned(), any(&fast_az1));
+        map.insert("memory:///fast-az2".to_owned(), any(&fast_az2));
         let opener: Arc<dyn FastWalOpener> = Arc::new(MapOpener(map));
 
         let cell_id = layout::test_cell(42);
@@ -2021,7 +2178,7 @@ mod tests {
             fast_wal: Some(Some(Fsync::FastWal)),
             fast_wal_config: Some(FastWalConfig::new(
                 "memory:///fast-az1".to_owned(),
-                fast_az1.clone(),
+                any(&fast_az1),
                 opener.clone(),
             )),
             fast_wal_large_extent: 256 << 10,
@@ -2082,7 +2239,7 @@ mod tests {
             fast_wal: None, // inherits FastWal from head
             fast_wal_config: Some(FastWalConfig::new(
                 "memory:///fast-az2".to_owned(),
-                fast_az2.clone(),
+                any(&fast_az2),
                 opener.clone(),
             )),
             fast_wal_large_extent: 256 << 10,
@@ -2189,7 +2346,7 @@ mod tests {
             fast_wal: Some(None),
             fast_wal_config: Some(FastWalConfig::new(
                 "memory:///fast-az2".to_owned(),
-                fast_az2.clone(),
+                any(&fast_az2),
                 opener,
             )),
             ..upload::Options::default()
@@ -2365,6 +2522,7 @@ mod tests {
                 sink,
                 DEFAULT_MAX_WRITER_APPENDS,
                 DEFAULT_MAX_SEGMENT_BYTES,
+                tokio_clock(),
             );
             let seg = OpenSegment::new(cell, w1.epoch(), 0, w1.keys()).unwrap();
             let key = layout::wal(cell, w1.epoch(), 0);
@@ -2659,6 +2817,7 @@ mod tests {
                     sink.clone(),
                     DEFAULT_MAX_WRITER_APPENDS,
                     DEFAULT_MAX_SEGMENT_BYTES,
+                    tokio_clock(),
                 )
                 .run(),
             );

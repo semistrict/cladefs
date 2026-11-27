@@ -202,7 +202,9 @@ pub async fn take(
             next.replication = Some(Replication { wish, configuration });
         }
         if let Some(fast_wal) = taking.fast_wal {
+            // cladefs: kept until the taker's activation replaces it (`wal_kept_on_take`).
             let active = next.fast_wal.take().and_then(|had| had.active);
+            let active = active.filter(|_| rules().wal_kept_on_take);
             next.fast_wal = match fast_wal {
                 Some(fsync) => Some(layout::FastWal { fsync, active }),
                 // Preserve any active fast WAL until recovery flushes it and clears fast_wal.

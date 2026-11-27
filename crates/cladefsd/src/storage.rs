@@ -6,6 +6,7 @@
 //! lifecycle and registry (`super::cells`).
 
 use crate::Daemon;
+use bucket_cell::any_bucket::AnyBucket;
 use bucket_cell::cache::Cache;
 use bucket_cell::object_bucket::{ObjectBucket, RoutedBucket};
 use cladefs_core::Errno;
@@ -382,7 +383,7 @@ impl FastWalOpener for UrlFastWalOpener {
         ))
     }
 
-    fn open(&self, url: &str) -> BoxFuture<'static, Result<Arc<ObjectBucket>, String>> {
+    fn open(&self, url: &str) -> BoxFuture<'static, Result<Arc<AnyBucket>, String>> {
         if let Err(msg) = self.is_allowed(url) {
             return async move { Err(msg) }.boxed();
         }
@@ -390,7 +391,7 @@ impl FastWalOpener for UrlFastWalOpener {
         async move {
             let bucket = Arc::new(ObjectBucket::from_url(&url)?);
             bucket.probed_append(rand::random()).await?;
-            Ok(bucket)
+            Ok(Arc::new(AnyBucket::new(bucket)))
         }
         .boxed()
     }
@@ -470,6 +471,7 @@ pub(super) async fn open_fast_wal(daemon: &Daemon) -> Result<Option<(FastWalConf
         .probed_append(rand::random())
         .await
         .map_err(|err| format!("CLADEFSD_FAST_WAL_BUCKET: {url}: {err}"))?;
+    let bucket = Arc::new(AnyBucket::new(bucket));
     let config = FastWalConfig::new(url, bucket, Arc::new(UrlFastWalOpener { allowed }));
     let mut slot = daemon.fast_wal.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     Ok(slot.get_or_insert(Some((config, large_extent))).clone())
@@ -507,6 +509,7 @@ pub(super) fn fast_wal_config(daemon: &Daemon) -> Result<Option<(FastWalConfig, 
         log::error!("cladefsd: CLADEFSD_FAST_WAL_BUCKET: {url}: {err}");
         return Err(Errno::EIO);
     }
+    let bucket = Arc::new(AnyBucket::new(bucket));
     let config = FastWalConfig::new(url, bucket, Arc::new(UrlFastWalOpener { allowed }));
     let mut slot = daemon.fast_wal.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     Ok(slot.get_or_insert(Some((config, large_extent))).clone())

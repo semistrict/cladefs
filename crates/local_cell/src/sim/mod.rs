@@ -21,6 +21,10 @@
 //! cladefs: and replicated cells (doc-21, TASK-680), their members on the other hosts, over a
 //! network that breaks, delays, duplicates and drops calls, whose disks crash corrupting what
 //! they never synced: every commit told replicated must survive every take.
+//!
+//! cladefs: and fast WAL cells (doc-29, board 14433), their commits appended to their zones'
+//! appendable buckets: every commit told durable must survive every take, its host's disk lost or
+//! not; each rule of `specs/fast-wal` the code keeps has a test that turns it off.
 
 mod world;
 
@@ -226,6 +230,19 @@ fn one() {
             "versions_carried" => rules.versions_carried = false,
             "versions_acked" => rules.versions_acked = false,
             "installs_own" => rules.installs_own = false,
+            "protect_wal_epoch" => rules.protect_wal_epoch = false,
+            "wal_fences" => rules.wal_fences = false,
+            "wal_offset_checked" => rules.wal_offset_checked = false,
+            "wal_rolls_before_next" => rules.wal_rolls_before_next = false,
+            "wal_fence_follows_roll" => rules.wal_fence_follows_roll = false,
+            "wal_rolls_before_limit" => rules.wal_rolls_before_limit = false,
+            "wal_kept_on_take" => rules.wal_kept_on_take = false,
+            "wal_activates_after_flush" => rules.wal_activates_after_flush = false,
+            "wal_after_large" => rules.wal_after_large = false,
+            "wal_reclaims_after_ack" => rules.wal_reclaims_after_ack = false,
+            "wal_sweep_tombstones" => rules.wal_sweep_tombstones = false,
+            "wal_rolled_tombstones" => rules.wal_rolled_tombstones = false,
+            "wal_contiguous" => rules.wal_contiguous = false,
             other => panic!("no rule {other}"),
         }
     }
@@ -257,6 +274,9 @@ fn one() {
         "replicated" => replicated(),
         "retakes" => retakes(),
         "relocations" => relocations(),
+        "fast_wals" => fast_wals(),
+        "fast_wal_takeovers" => fast_wal_takeovers(),
+        "fast_wal_zombies" => fast_wal_zombies(),
         other => panic!("no profile {other}"),
     };
     let count = std::env::var("SIM_SEEDS").map_or(1, |count| count.parse().unwrap());
@@ -284,6 +304,7 @@ fn seeds_replay() {
         regions(),
         mirrors(),
         replicated(),
+        fast_wals(),
     ];
     for profile in profiles {
         replays(profile, 0..20);
@@ -317,7 +338,7 @@ fn buggify_sites_are_reached() {
 fn swarm(seed: u64) -> Profile {
     use rand::{RngExt as _, SeedableRng as _};
     let mut rng = rand::rngs::StdRng::seed_from_u64(seed ^ 0x5a5a_f00d);
-    let bases: [fn() -> Profile; 25] = [
+    let bases: [fn() -> Profile; 26] = [
         Profile::default,
         forks,
         deleted_bases,
@@ -343,6 +364,7 @@ fn swarm(seed: u64) -> Profile {
         versions,
         replicated,
         retakes,
+        fast_wals,
     ];
     let mut profile = bases[rng.random_range(0..bases.len())]();
     profile.weights.scale(|name, weight| match name {
@@ -954,3 +976,112 @@ fn retakes() -> Profile {
 test_holds!(replicated_cells_retaken_on_their_writers_disks, retakes());
 
 test_needs!(retakes_need_to_install_their_own_logs, installs_own, retakes(), 0..2_000);
+
+/// cladefs: fast WAL cells (doc-29, board 14433), most of a world's, beside plain ones, on four
+/// hosts in two zones: their writers appending to their zones' fast buckets, which fail appends
+/// before or after they land, hold an object to a few appends and go down at times, while the cold
+/// bucket's uploads trail; hosts crashing, keeping their disks or losing them, and taking their
+/// cells back at once; hosts of either zone taking them over, fencing and recovering the fast WAL
+/// the head names; collectors running. Every commit told durable survives every take.
+fn fast_wals() -> Profile {
+    let mut profile = weights(|weights| {
+        weights.crash = 4;
+        weights.open = 8;
+        weights.takeover = 4;
+        weights.close = 4;
+        weights.collect = 2;
+        weights.version = 0;
+        weights.restore_version = 0;
+        weights.delete = 0;
+    });
+    profile.hosts = 4;
+    profile.fast_wal = 0.8;
+    profile.fail_after = 0.1;
+    profile.restarts = true;
+    profile
+}
+
+test_holds!(fast_wal_commits_survive_takes_crashes_and_lost_hosts, fast_wals());
+
+/// cladefs: [`fast_wals`] with writers taken over while their appends are in flight, and their
+/// hosts lost: what doc-29's fencing is for. Half the takeovers hold the creates of segments the
+/// writer taken over has in flight, its fast WAL's among them, each until something deletes what
+/// is at its key ([`Profile::hold`]): a zombie's create landing late.
+fn fast_wal_takeovers() -> Profile {
+    let mut profile = fast_wals();
+    profile.weights.takeover = 10;
+    profile.weights.crash = 6;
+    profile.weights.close = 2;
+    profile.fast_wal = 1.0;
+    profile.hold = 0.5;
+    profile.restarts = false;
+    profile
+}
+
+test_holds!(fast_wal_takeovers_fence_writers_in_flight, fast_wal_takeovers());
+
+/// cladefs: [`fast_wal_takeovers`] whose every takeover holds the creates of the writer taken
+/// over, many of its appends landing with their answers lost: its create of a segment that landed,
+/// tried again, waits until a sweep deletes the segment the take fenced, then lands again, and
+/// the writer appends on, past the fence that was there.
+fn fast_wal_zombies() -> Profile {
+    let mut profile = fast_wal_takeovers();
+    profile.hold = 1.0;
+    profile.fail_after = 0.3;
+    profile
+}
+
+test_holds!(fast_wal_zombies_land_on_tombstones, fast_wal_zombies());
+
+// specs/fast-wal's rules, each turned off: some seed loses a commit told durable, finds a large
+// extent missing, or a take that never ends.
+test_needs!(fast_wal_takes_need_fences, wal_fences, fast_wal_takeovers(), 0..2_000);
+test_needs!(fast_wal_appends_need_offsets, wal_offset_checked, fast_wal_takeovers(), 0..2_000);
+test_needs!(
+    fast_wal_rolls_need_their_markers,
+    wal_rolls_before_next,
+    fast_wal_takeovers(),
+    0..2_000
+);
+test_needs!(
+    fast_wal_takes_need_to_follow_rolls,
+    wal_fence_follows_roll,
+    fast_wal_takeovers(),
+    0..2_000
+);
+test_needs!(fast_wal_segments_need_room_for_fences, wal_rolls_before_limit, fast_wals(), 0..2_000);
+test_needs!(
+    fast_wal_takes_need_the_old_wal_named,
+    wal_kept_on_take,
+    fast_wal_takeovers(),
+    0..2_000
+);
+test_needs!(
+    fast_wal_takes_need_to_flush_first,
+    wal_activates_after_flush,
+    fast_wal_takeovers(),
+    0..2_000
+);
+test_needs!(
+    fast_wal_batches_need_their_large_extents,
+    wal_after_large,
+    fast_wal_takeovers(),
+    0..2_000
+);
+test_needs!(
+    fast_wal_collectors_need_the_wal_epoch,
+    protect_wal_epoch,
+    fast_wal_takeovers(),
+    0..2_000
+);
+test_needs!(fast_wal_reclaims_need_acknowledgements, wal_reclaims_after_ack, fast_wals(), 0..2_000);
+// `wal_sweep_tombstones` (SweepDeletesFence) is `fast_wal::tests::sweeps_need_tombstones`'s: its case
+// needs a retried create in flight across a whole take and its sweep, which no seed of 5,000 of
+// fast_wal_zombies() reached.
+test_needs!(fast_wal_reclaims_need_tombstones, wal_rolled_tombstones, fast_wals(), 0..2_000);
+test_needs!(
+    fast_wal_degraded_writers_need_contiguous_batches,
+    wal_contiguous,
+    fast_wals(),
+    0..2_000
+);

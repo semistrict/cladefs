@@ -53,6 +53,8 @@ compile_error!(
 );
 
 #[cfg(feature = "full")]
+pub mod any_bucket;
+#[cfg(feature = "full")]
 pub mod batch;
 pub mod bucket;
 #[cfg(feature = "full")]
@@ -496,6 +498,67 @@ pub struct Rules {
     /// `head.epoch` past it, until the taker flushes the fast WAL and switches `active` (doc-29).
     /// TLA+: `specs/fast-wal/mutations/GcDeletesWalExtents.cfg`.
     pub protect_wal_epoch: bool,
+    /// cladefs: a take of a cell with an active fast WAL fences each of the old epoch's segments
+    /// it ends its walk at, an open one with a `Fence` record and a missing one with an empty
+    /// fence tombstone, before it recovers them (`local_cell::fast_wal::fence_and_recover`,
+    /// doc-29, board 14433): without it, the writer taken over appends on, its commits told
+    /// durable, past what the take recovered.
+    /// TLA+: `specs/fast-wal/mutations/NoFence.cfg`.
+    pub wal_fences: bool,
+    /// cladefs: a fast WAL writer appends only at the offset where it last left its segment,
+    /// halting on a mismatch (`Bucket::append`): without it, a writer that finds its segment
+    /// longer re-reads its length and appends there, past a taker's fence or tombstone.
+    /// TLA+: `specs/fast-wal/mutations/NoOffsetCheck.cfg`.
+    pub wal_offset_checked: bool,
+    /// cladefs: a fast WAL writer begins its next segment only once its `Rolled` record on the
+    /// segment before landed: without it, a taker fences the segment open, ends its walk there,
+    /// and loses what the writer appends to the next.
+    /// TLA+: `specs/fast-wal/mutations/NoRollBeforeNext.cfg`.
+    pub wal_rolls_before_next: bool,
+    /// cladefs: a take walks on past a rolled segment, a `Rolled` record's or a rolled tombstone's,
+    /// to the next: without it, it ends its walk at a rolled segment and loses the next's commits.
+    /// TLA+: `specs/fast-wal/mutations/NoFenceFollowsRoll.cfg`.
+    pub wal_fence_follows_roll: bool,
+    /// cladefs: a fast WAL writer rolls its segment before the store's limit of appends to an
+    /// object, keeping room for its `Rolled` record and a taker's `Fence`: without it, a take
+    /// finds a segment full, open, that it can fence never.
+    /// TLA+: `specs/fast-wal/mutations/NoRollBeforeLimit.cfg`.
+    pub wal_rolls_before_limit: bool,
+    /// cladefs: a take's swap of a cell's head keeps `head.fast_wal.active` as it was, naming the
+    /// old epoch's fast WAL, until the taker's activation replaces it ([`head::take_from`]):
+    /// without it, the head forgets the fast WAL holding commits told durable, which nobody then
+    /// fences or recovers.
+    /// TLA+: `specs/fast-wal/mutations/ClearWalOnTake.cfg`.
+    pub wal_kept_on_take: bool,
+    /// cladefs: a take names its own fast WAL in the head only in the swap acknowledging what it
+    /// recovered of the old one: without it, a take that stops between the two leaves a head
+    /// naming the new fast WAL, the old one's commits unrecovered and forgotten.
+    /// TLA+: `specs/fast-wal/mutations/ActivateBeforeFlush.cfg`.
+    pub wal_activates_after_flush: bool,
+    /// cladefs: a fast WAL writer appends a batch referring to large extents only once their
+    /// uploads to the cold bucket landed: without it, a take recovers a commit whose extents are
+    /// in no bucket.
+    /// TLA+: `specs/fast-wal/mutations/WalBeforeLarge.cfg`.
+    pub wal_after_large: bool,
+    /// cladefs: a fast WAL writer reclaims a rolled segment only once the cold bucket's head
+    /// acknowledged every commit in it: without it, a take finds commits told durable in neither.
+    /// TLA+: `specs/fast-wal/mutations/DeleteWalBeforeAck.cfg`.
+    pub wal_reclaims_after_ack: bool,
+    /// cladefs: a sweep of superseded fast WAL segments overwrites each with a tombstone, never
+    /// deleting it while its cell lives: without it, a writer taken over recreates a deleted
+    /// segment by a create landing late, its commits told durable after the take.
+    /// TLA+: `specs/fast-wal/mutations/SweepDeletesFence.cfg`.
+    pub wal_sweep_tombstones: bool,
+    /// cladefs: a fast WAL writer reclaims a rolled segment by overwriting it with a rolled
+    /// tombstone, never deleting it: without it, a take finds the segment missing, fences it
+    /// empty, and ends its walk before the segments after it.
+    /// TLA+: `specs/fast-wal/mutations/DeleteClearsRolled.cfg`.
+    pub wal_rolled_tombstones: bool,
+    /// cladefs: a fast WAL writer whose fast bucket fails gives up on a batch only once the cold
+    /// bucket's head acknowledged all of it: without it, a batch dropped leaves a gap, which the
+    /// next batch's durability covers.
+    /// TLA+: `specs/fast-wal/mutations/WalSkipsUnacked.cfg`.
+    pub wal_contiguous: bool,
 }
 
 impl Rules {
@@ -523,6 +586,18 @@ impl Rules {
         versions_acked: true,
         installs_own: true,
         protect_wal_epoch: true,
+        wal_fences: true,
+        wal_offset_checked: true,
+        wal_rolls_before_next: true,
+        wal_fence_follows_roll: true,
+        wal_rolls_before_limit: true,
+        wal_kept_on_take: true,
+        wal_activates_after_flush: true,
+        wal_after_large: true,
+        wal_reclaims_after_ack: true,
+        wal_sweep_tombstones: true,
+        wal_rolled_tombstones: true,
+        wal_contiguous: true,
     };
 }
 

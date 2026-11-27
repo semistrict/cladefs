@@ -17,12 +17,21 @@
 //! keeps a replica directory, corrupting what it never synced, or loses it, its incarnation with
 //! it. Every commit a guest was told is replicated must be in the history of its cell's writer
 //! once one serves, as every commit told uploaded must be in the bucket's.
+//!
+//! cladefs: fast WAL cells (doc-29, board 14433): each host appends its fast WAL cells' commits to
+//! its zone's appendable bucket, a region of the one bucket the seed orders every request of, which
+//! fails appends before or after they land, refuses past its limit of appends to an object, and
+//! goes down at times; takes, on a host of either zone, fence and recover the fast WAL the head
+//! names. Every commit a fast WAL told its guest is durable must be in the history of its cell's
+//! writer once one serves, its host crashed, its disk lost, before it was uploaded or not.
 
+use crate::fast_wal::{FastWalConfig, FastWalOpener};
 use crate::replica::{Key, Replicas};
 use crate::replicate::{LinkError, MemberLink, Replicator};
 use crate::upload::{self, Awaited, Clock, Failure, Members, MembersOf, Shared, Spawn};
 use crate::{Description, LocalCell, MemDir, Place, Recovering};
 use base32_id::Short;
+use bucket_cell::any_bucket::AnyBucket;
 use bucket_cell::collector;
 use bucket_cell::fetch::{Budget, Limits};
 use bucket_cell::layout::{self, Origin, epoch_of, writer_of};
@@ -134,6 +143,10 @@ pub struct Profile {
     /// cladefs: the chance that a call between hosts the network lets through is answered as out
     /// of reach, landing or not, or lands later, again or for the first time.
     pub net_faults: f64,
+    /// cladefs: the chance that a cell keeps its unuploaded commits in a fast WAL (doc-29, board
+    /// 14433), if it is not replicated: none draws nothing of the seed's, and gives the hosts no
+    /// fast buckets.
+    pub fast_wal: f64,
     /// cladefs: whether a crash corrupts what a disk kept of the writes its files never synced
     /// ([`MemDir::crash_corrupting`]), its cells' and replica directories', at random.
     pub corrupting: bool,
@@ -205,6 +218,7 @@ impl Default for Profile {
             forget: 0.0,
             regions: 0,
             replicated: 0.0,
+            fast_wal: 0.0,
             net_faults: 0.0,
             corrupting: false,
             teardown: false,
@@ -318,6 +332,50 @@ impl Intervals {
             let _ = ran_out.send(());
         }
         any
+    }
+}
+
+/// cladefs: the fast WAL buckets' regions of the world's bucket (doc-29, board 14433): one a zone,
+/// zone Z's `FAST_REGION + Z`, past any cloud region's; host H's zone `H % FAST_ZONES`.
+const FAST_REGION: u16 = 1000;
+const FAST_ZONES: usize = 2;
+
+/// cladefs: how many appends a fast WAL writer makes to a segment before it rolls it, and how many
+/// the fast buckets take of an object: room for its `Rolled` record and a taker's `Fence` after
+/// them, and not one more, as S3 Express's 10,000 parts leave room past the writers' 5,000.
+const FAST_APPENDS: u32 = 3;
+const FAST_PARTS: u32 = FAST_APPENDS + 2;
+
+/// cladefs: the URL of zone `zone`'s fast bucket, as heads name it.
+fn fast_url(zone: usize) -> String {
+    format!("sim-fast://{zone}")
+}
+
+/// cladefs: the hosts' opener of the fast buckets heads name (doc-29), every zone's allowed: a
+/// region of the world's bucket each.
+struct FastBuckets(Arc<SimBucket>);
+
+impl FastBuckets {
+    fn zone(url: &str) -> Result<usize, String> {
+        let zone = url.strip_prefix("sim-fast://").and_then(|zone| zone.parse().ok());
+        zone.filter(|&zone| zone < FAST_ZONES).ok_or_else(|| format!("no fast bucket {url:?}"))
+    }
+
+    /// Zone `zone`'s fast bucket, as its hosts ask it.
+    fn of(&self, zone: usize) -> Arc<AnyBucket> {
+        let region = FAST_REGION + u16::try_from(zone).unwrap();
+        Arc::new(AnyBucket::new(self.0.at(region).own()))
+    }
+}
+
+impl FastWalOpener for FastBuckets {
+    fn is_allowed(&self, url: &str) -> Result<(), String> {
+        Self::zone(url).map(drop)
+    }
+
+    fn open(&self, url: &str) -> BoxFuture<'static, Result<Arc<AnyBucket>, String>> {
+        let opened = Self::zone(url).map(|zone| self.of(zone));
+        async move { opened }.boxed()
     }
 }
 
@@ -674,6 +732,9 @@ struct CellId {
     /// cladefs: whether a take of it is forced ([`World::force`]), which may lose what was told
     /// replicated past what it recovered, and no more.
     forcing: bool,
+    /// cladefs: what its guests' syncs wait for, if it keeps its commits in a fast WAL (doc-29):
+    /// what its takings ask.
+    fast_wal: Option<layout::Fsync>,
 }
 
 impl CellId {
@@ -688,6 +749,7 @@ impl CellId {
             replicated: None,
             told: BTreeSet::new(),
             forcing: false,
+            fast_wal: None,
         }
     }
 }
@@ -735,6 +797,8 @@ struct Host {
     /// (`bucket_cell::mirror::Mirrors`, as a routed `ObjectBucket` keeps them): its crash's to
     /// forget.
     known: bucket_cell::mirror::Mirrors,
+    /// cladefs: its zone's fast bucket, of a world with fast WAL cells ([`Profile::fast_wal`]).
+    fast_wal: Option<FastWalConfig>,
 }
 
 impl Default for Host {
@@ -744,7 +808,8 @@ impl Default for Host {
         let held = crate::HeldParts::new();
         let keys = bucket_cell::keys::testing::host();
         let (mirrors, known) = (BTreeMap::new(), Default::default());
-        Self { disks, sessions, uploads: Budget::new(limits), held, keys, mirrors, known }
+        let uploads = Budget::new(limits);
+        Self { disks, sessions, uploads, held, keys, mirrors, known, fast_wal: None }
     }
 }
 
@@ -996,6 +1061,17 @@ impl World {
             let net = Net { rng, faults, replicas, dirs, blocked, late, replicators };
             world.net = Some(Arc::new(Mutex::new(net)));
         }
+        if profile.fast_wal > 0.0 {
+            world.bucket.set_max_appends(Some(FAST_PARTS));
+            let buckets = Arc::new(FastBuckets(world.bucket.clone()));
+            for (host, found) in world.hosts.iter_mut().enumerate() {
+                let zone = host % FAST_ZONES;
+                let mut config =
+                    FastWalConfig::new(fast_url(zone), buckets.of(zone), buckets.clone());
+                config.max_writer_appends = FAST_APPENDS;
+                found.fast_wal = Some(config);
+            }
+        }
         world.format_regions();
         let (root, owner) = (world.cell_id(1), world.id());
         block_on(lifecycle::create(&Direct(world.bucket.clone()), sim_cell(root), owner)).unwrap();
@@ -1040,6 +1116,17 @@ impl World {
             let f = self.rng.random_range(1..=most.max(1));
             found.replicated = layout::Wish::new(f, layout::Fsync::Replicated);
         }
+        // cladefs: or in a fast WAL, its guests' syncs waiting for it, or for uploads alone.
+        if self.profile.fast_wal > 0.0
+            && found.replicated.is_none()
+            && self.rng.random_bool(self.profile.fast_wal)
+        {
+            let fsync = match self.rng.random_bool(0.5) {
+                true => layout::Fsync::FastWal,
+                false => layout::Fsync::Ordered,
+            };
+            found.fast_wal = Some(fsync);
+        }
         found
     }
 
@@ -1080,6 +1167,18 @@ impl World {
                 self.down.insert(region);
             }
             trace!("region {region}'s bucket {}", if down { "down" } else { "up" });
+            self.bucket.down(region, down);
+        }
+        // cladefs: a zone's fast bucket down, or up again (doc-29): its writers' cells degraded to
+        // uploading alone.
+        if self.profile.fast_wal > 0.0 && self.faults && self.rng.random_bool(REGION_FLIPS) {
+            let zone = self.rng.random_range(0..FAST_ZONES);
+            let region = FAST_REGION + u16::try_from(zone).unwrap();
+            let down = !self.down.remove(&region);
+            if down {
+                self.down.insert(region);
+            }
+            trace!("zone {zone}'s fast bucket {}", if down { "down" } else { "up" });
             self.bucket.down(region, down);
         }
         let w = self.profile.weights;
@@ -1405,14 +1504,21 @@ impl World {
                     .map(|(_, &tag)| tag)
                     .filter(|tag| commits[tag].cell == cell)
                     .collect();
-                // cladefs: and of what was replicated, by its replicator's word (TASK-680).
-                let replicator = session.cell.as_ref().and_then(|open_cell| open_cell.replicator());
-                let told: Vec<u64> = match replicator {
-                    Some(replicator) => (self.lineages[&lineage]
-                        .range(..=replicator.told(uploaded)))
-                    .map(|(_, &tag)| tag)
-                    .filter(|tag| commits[tag].cell == cell)
-                    .collect(),
+                // cladefs: and of what was replicated, by its replicator's word (TASK-680); or
+                // appended to its fast WAL, by its sink's (doc-29, board 14433).
+                let open_cell = session.cell.as_ref();
+                let replicator = open_cell.and_then(|open_cell| open_cell.replicator());
+                let fast_wal = open_cell.and_then(|open_cell| open_cell.fast_wal());
+                let told_through = match (replicator, fast_wal) {
+                    (Some(replicator), _) => Some(replicator.told(uploaded)),
+                    (None, Some(sink)) => Some(sink.durable()),
+                    (None, None) => None,
+                };
+                let told: Vec<u64> = match told_through {
+                    Some(through) => (self.lineages[&lineage].range(..=through))
+                        .map(|(_, &tag)| tag)
+                        .filter(|tag| commits[tag].cell == cell)
+                        .collect(),
                     None => Vec::new(),
                 };
                 if let Some(found) = self.cells.get_mut(&cell) {
@@ -1561,8 +1667,8 @@ impl World {
             // model follows: its uploaders run none, whose commits it would not know of.
             relocate: false,
             fetching: None,
-            fast_wal: None,
-            fast_wal_config: None,
+            fast_wal: self.cells.get(&cell).and_then(|found| found.fast_wal).map(Some),
+            fast_wal_config: self.hosts[host].fast_wal.clone(),
             fast_wal_large_extent: crate::fast_wal::DEFAULT_LARGE_EXTENT,
         };
         let (uploads, keys) = (self.hosts[host].uploads.clone(), self.hosts[host].keys.clone());
@@ -3278,7 +3384,8 @@ impl World {
                 }
             }
             // cladefs: every commit told replicated is in the history of the cell's writer that
-            // serves, the head's (TASK-680): the spec's ReplicatedSurvives.
+            // serves, the head's (TASK-680): the spec's ReplicatedSurvives. And every commit its
+            // fast WAL told durable (doc-29): FastWal.tla's DurableSurvives.
             if !cell.told.is_empty() {
                 let serving =
                     self.hosts.iter().filter_map(|host| host.sessions.get(&id)).find(|session| {
@@ -3292,8 +3399,8 @@ impl World {
                     for &told in &cell.told {
                         if !self.precedes(told, serving.guest.head) {
                             violations.push(format!(
-                                "cell {id} lost commit {told}, told replicated: its writer of \
-                                 epoch {} holds {:?}",
+                                "cell {id} lost commit {told}, told durable off its host: its \
+                                 writer of epoch {} holds {:?}",
                                 record.epoch,
                                 serving.guest.head,
                                 id = Short(id)

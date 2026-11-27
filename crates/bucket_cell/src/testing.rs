@@ -82,6 +82,10 @@ struct Inner {
     random_state: u64,
 }
 
+/// cladefs: the magic a fast WAL segment's header begins with (`local_cell::fast_wal::HEADER_MAGIC`,
+/// format `fast wal` 1), by which a writer's create of one is told from a take's tombstone.
+const FAST_WAL_HEADER: &[u8] = b"CFWAL001";
+
 /// How a request the simulation completes fails.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Fault {
@@ -208,7 +212,8 @@ impl SimBucket {
         self.inner.lock().unwrap().queue.len()
     }
 
-    /// Holds the creates of segments of `cell` by its writers of epoch `epoch` and before,
+    /// Holds the creates of segments of `cell` by its writers of epoch `epoch` and before, cladefs:
+    /// of fast WAL segments too,
     /// those waiting and those to come, each until a delete of an object at its key takes effect,
     /// when it waits again: a writer taken over, whose creates are in flight while the next one's
     /// segments take their places, which the collector deletes, landing then
@@ -386,6 +391,14 @@ fn in_region(region: u16, described: String) -> String {
     }
 }
 
+/// cladefs: whether the object kept at `stored` is of the bucket of region `region`: bucket 0's
+/// are kept at their keys, which no other region's prefix `@REGION/` begins, so that a listing of
+/// bucket 0 lists none of another region's, a fast WAL bucket's beside it among them (board
+/// 14433).
+fn of_region(region: u16, stored: &str) -> bool {
+    region != 0 || !stored.starts_with('@')
+}
+
 /// cladefs: where the object at `key` of the bucket of region `region` is kept: at `key` for bucket
 /// 0, else under `@REGION/`.
 fn stored_at(region: u16, key: &str) -> String {
@@ -452,8 +465,17 @@ impl Inner {
             let Some(&held) = self.held.get(&cell) else { return false };
             layout::Segment::footer(bytes).is_ok_and(|footer| footer.epoch <= held)
         };
+        // cladefs: and its creates of fast WAL segments, each beginning with its segment's header
+        // (doc-29, board 14433): a writer taken over whose create lands only after a sweep deleted
+        // what the take left at its key. Not a take's tombstone fencing the key empty.
+        let held_wal = |key: &str, bytes: &[u8]| {
+            let Kind::Wal { cell, epoch, .. } = layout::kind(key) else { return false };
+            bytes.starts_with(FAST_WAL_HEADER)
+                && self.held.get(&cell).is_some_and(|&held| epoch <= held)
+        };
         match &request.op {
             Op::Put(key, bytes, PutMode::Create) if held(key, bytes) => self.parked.push(request),
+            Op::Append(key, 0, bytes) if held_wal(key, bytes) => self.parked.push(request),
             _ => self.queue.push(request),
         }
     }
@@ -504,6 +526,7 @@ impl Inner {
                 Ok(Reply::List(
                     (self.objects.range(kept.clone()..))
                         .take_while(|(stored, _)| stored.starts_with(&kept))
+                        .filter(|(stored, _)| of_region(region, stored))
                         .map(|(stored, _)| {
                             self.meta(stored, &key_of(&prefix, &kept, stored)).unwrap()
                         })
@@ -515,7 +538,8 @@ impl Inner {
                 let kept = at(&prefix);
                 let mut listing = Listing::default();
                 let under = self.objects.range(kept.clone()..);
-                for (stored, _) in under.take_while(|(stored, _)| stored.starts_with(&kept)) {
+                let under = under.take_while(|(stored, _)| stored.starts_with(&kept));
+                for (stored, _) in under.filter(|(stored, _)| of_region(region, stored)) {
                     let key = key_of(&prefix, &kept, stored);
                     match key[prefix.len()..].find('/') {
                         Some(slash) => {
@@ -586,7 +610,8 @@ impl Inner {
                     let (unparked, parked) =
                         std::mem::take(&mut self.parked).into_iter().partition(|request| {
                             request.region == region
-                                && matches!(&request.op, Op::Put(at, ..) if *at == key)
+                                && matches!(&request.op, Op::Put(at, ..) | Op::Append(at, ..)
+                                    if *at == key)
                         });
                     self.parked = parked;
                     self.queue.extend::<Vec<_>>(unparked);

@@ -246,6 +246,50 @@ All 14 protocol rules have dedicated mutations under `specs/fast-wal/mutations/`
 | `rolledTombstoneOnDelete` | `DeleteClearsRolled` | `DurableSurvives` |
 | `walContiguous` | `WalSkipsUnacked` | `NoGaps` |
 
+## Simulation (`crates/local_cell/src/sim`, board 14433)
+
+The fast WAL runs in local_cell's simulated world beside plain and replicated cells, its production
+code unchanged: each host's zone has a fast bucket, a region of the world's one `SimBucket`, whose
+seed orders every request of the cold and fast buckets alike, fails appends before or after they
+land, refuses an object past `FAST_PARTS` appends (the writers roll at `FAST_APPENDS`, two fewer:
+room for `Rolled` and a `Fence`), and goes down at times, degrading its writers to uploading alone.
+`FastWalConfig` and `FastWalOpener` take any bucket (`bucket_cell::any_bucket::AnyBucket`), and
+the writer's lingers and back-offs wait on the uploader's clock. Hosts crash, keeping or losing
+their disks, and take their cells back; hosts of either zone take cells over while their writers
+append on, fencing and recovering the fast WAL the head names; takeovers may hold the writer taken
+over's creates until something deletes what is at their keys (`SimBucket::hold`); collectors run.
+After every step, every commit a fast WAL told its guest is durable must be in the history of its
+cell's serving writer (`DurableSurvives`).
+
+`fast_wal_commits_survive_takes_crashes_and_lost_hosts`, `fast_wal_takeovers_fence_writers_in_flight`
+and `fast_wal_zombies_land_on_tombstones` hold; each rule the code keeps is a `bucket_cell::Rules`
+switch, and a `test_needs!` case turns it off and expects a seed to find what it prevents:
+
+| Rule | `Rules` field | Simulated case |
+|---|---|---|
+| `fenceBeforeRecover` | `wal_fences` | `fast_wal_takes_need_fences` |
+| `offsetChecked` | `wal_offset_checked` | `fast_wal_appends_need_offsets` |
+| `rollBeforeNext` | `wal_rolls_before_next` | `fast_wal_rolls_need_their_markers` |
+| `fenceFollowsRoll` | `wal_fence_follows_roll` | `fast_wal_takes_need_to_follow_rolls` |
+| `rollBeforeLimit` | `wal_rolls_before_limit` | `fast_wal_segments_need_room_for_fences` |
+| `keepOldWalInHead` | `wal_kept_on_take` | `fast_wal_takes_need_the_old_wal_named` |
+| `activateAfterFlush` | `wal_activates_after_flush` | `fast_wal_takes_need_to_flush_first` |
+| `largeBeforeWal` | `wal_after_large` | `fast_wal_batches_need_their_large_extents` |
+| `protectWalEpoch` | `protect_wal_epoch` | `fast_wal_collectors_need_the_wal_epoch` |
+| `deleteWalAfterAck` | `wal_reclaims_after_ack` | `fast_wal_reclaims_need_acknowledgements` |
+| `tombstoneOnSweep` | `wal_sweep_tombstones` | `fast_wal::tests::sweeps_need_tombstones`, scripted: its retried create in flight across a whole take and sweep, no seed of 5,000 reached |
+| `rolledTombstoneOnDelete` | `wal_rolled_tombstones` | `fast_wal_reclaims_need_tombstones` |
+| `walContiguous` | `wal_contiguous` | `fast_wal_degraded_writers_need_contiguous_batches` |
+
+`sweepOnlySuperseded` (`SweepByHeadEpoch`) has no case: the code's one sweeper,
+`fast_wal::sweep_superseded`, runs only after its own take activated, naming its own epoch both as
+`head.epoch` and as `head.fast_wal.active.epoch`, so no epoch below `head.epoch` is ever the active
+one when it sweeps, and dropping the check changes nothing the code does. It stays in the model,
+for a background sweeper that sweeps cells it did not take.
+
+A take whose `Fence` the store refuses at a length nobody changed, the segment at its appends'
+limit, fails (`refuses a fence at its end`) rather than re-reading and trying again for ever.
+
 ## Frozen format change (requires explicit user approval before Rust implementation)
 
 Per doc-28 (`AGENTS.md`, **Frozen formats**), implementing this in Rust requires one additive
