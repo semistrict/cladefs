@@ -135,7 +135,7 @@ mod telemetry;
 pub use cladefs_wire::wire;
 #[cfg(all(target_os = "linux", not(madsim)))]
 pub mod fuse_control;
-#[cfg(all(any(test, feature = "testing"), target_os = "linux", not(madsim)))]
+#[cfg(all(any(test, feature = "testing"), not(madsim)))]
 pub mod testing_control;
 pub mod zpages;
 

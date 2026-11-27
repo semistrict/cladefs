@@ -35,7 +35,7 @@ pub mod fuse {
 #[cfg(any(test, feature = "testing"))]
 pub mod testing {
     pub use cladefs_core::testing::*;
-    #[cfg(all(target_os = "linux", not(madsim)))]
+    #[cfg(not(madsim))]
     pub use cladefsd::testing_control::{Control, control_path};
 }
 
