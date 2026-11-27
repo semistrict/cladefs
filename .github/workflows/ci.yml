@@ -178,7 +178,8 @@ jobs:
   # files (doc-26), extent_store's syncs (F_FULLFSYNC), extent_bucket's cache, cladefs's storage I/O; and the
   # daemon's build under madsim, which runs on Macs too, its default 20 seeds (board 2912); and the
   # daemon itself, embedded (libcladefs) and as cladefsd, its client and their tests but those of
-  # Linux's features (board 13065). The guest's and the VMM's are Linux's.
+  # Linux's features (board 13065); and the guest tests' harness, its host's half and runner, which
+  # boot their guests on libmachine there (board 14336). The guest's half and the VMM's are Linux's.
   macos:
     name: macos (${{ matrix.parts }})
     needs: firecracker-lock
@@ -187,7 +188,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        parts: [workspace, shuttle, madsim]
+        parts: [workspace, shuttle, madsim, guest]
     env:
       CLADEFS_TEST_PARTS: ${{ matrix.parts }}
     steps:
@@ -206,7 +207,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-${{ runner.os }}-${{ matrix.parts }}-${{ hashFiles('Cargo.lock') }}
+            guest/tests/target
+          key: cargo-${{ runner.os }}-${{ matrix.parts }}-${{ hashFiles('Cargo.lock', 'guest/tests/Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-${{ matrix.parts }}-
       # cladefs: the files a daemon may keep open, as a host's (board 13850): macOS lets a process
       # keep 10,240 (kern.maxfilesperproc), which serves 38 VM processes' connections, fewer than

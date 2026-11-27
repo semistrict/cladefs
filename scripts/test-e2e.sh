@@ -3,8 +3,8 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# Run cladefs's guest tests (guest/tests) on this host, Linux with KVM (elsewhere, use
-# scripts/test-host.sh, which runs them on a test host). Arguments select the test cases, by name or
+# Run cladefs's guest tests (guest/tests) on this host, Linux with KVM, or an arm64 Mac (below;
+# elsewhere, use scripts/test-host.sh, which runs them on a test host). Arguments select the test cases, by name or
 # by suite, `--tag SUITE` (the guest tests' runner's `list`, whose --help names the suites;
 # default: --tag e2e), which boot cladefs's Firecracker (vendor/firecracker,
 # with its cladefs feature), which this builds, and the guest kernel
@@ -42,6 +42,18 @@
 # run's (CLADEFS_KMS), and checked so, holding no key, case by case and at the end (TASK-411.15,
 # below). LIBCLANG_PATH names libclang's directory where
 # llvm-config cannot, and DAX needs access to /dev/userfaultfd (docs/operating-a-host.md).
+#
+# cladefs: on an arm64 Mac (board 14336), the guests boot on libmachine's Firecracker-compatible VMM
+# on Hypervisor.framework (crates/libmachine-firecracker, which this builds, unless
+# CLADEFS_FIRECRACKER names a VMM), one level of guest, served by cladefsd, natively; the guest
+# agent cross-built for aarch64-unknown-linux-musl (Homebrew's musl-cross: scripts/lib/musl.sh);
+# the arm64 guest kernel CLADEFS_GUEST_KERNEL's, else target/arm64-guest/Image
+# (crates/libmachine/scripts/arm64-guest.sh fetches it, built on Linux); the root filesystems made
+# with Homebrew's e2fsprogs, the cases' images built with podman or docker (OrbStack's), whichever
+# runs; the results on a case-sensitive volume (scripts/lib/e2e-macos.sh). What is Linux's alone,
+# Firecracker's seccomp filter and jailer, prebuilt artifacts, huge pages and the host's sysctls, it
+# refuses; the cases that need Linux say so as they skip (`Test::linux_only`). Needs `brew install
+# musl-cross e2fsprogs`.
 set -euo pipefail
 root=$(cd "${CLADEFS_E2E_ROOT:-$(dirname "$0")/..}" && pwd)
 harness="$root/guest/tests"
@@ -49,15 +61,6 @@ selectors=("$@")
 if (( ${#selectors[@]} == 0 )); then
     selectors=(--tag e2e)
 fi
-if [[ -n ${CLADEFS_E2E_RESULTS:-} ]]; then
-    results=$CLADEFS_E2E_RESULTS
-    mkdir -p "$results"
-else
-    # Reachable by others, as a jailed VM's user must reach it (below), unlike mktemp's own.
-    results=$(mktemp -d "${TMPDIR:-/tmp}/cladefs-e2e.XXXXXX")
-    chmod 755 "$results"
-fi
-results=$(cd "$results" && pwd)
 build_only=${CLADEFS_E2E_BUILD_ONLY:-} prebuilt=${CLADEFS_E2E_PREBUILT:-}
 if [[ -n $build_only && -n $prebuilt ]]; then
     echo "CLADEFS_E2E_BUILD_ONLY and CLADEFS_E2E_PREBUILT: one or the other" >&2
@@ -100,15 +103,55 @@ else
     measurement_refuses "test-e2e.sh${build_only:+ (CLADEFS_E2E_BUILD_ONLY)}, CLADEFS_E2E_PREBUILT unset,"
 fi
 
-if [[ $(uname -s) != Linux ]]; then
-    echo "cladefs's guests run on Linux only: use scripts/test-host.sh" >&2
-    exit 2
+# The host: Linux, or an arm64 Mac (above), whose guest is arm64; and where the results go, on a
+# Mac a case-sensitive volume (scripts/lib/e2e-macos.sh).
+os=$(uname -s)
+case "$os/$(uname -m)" in
+    Linux/*) results_in=${TMPDIR:-/tmp} guest_arch=$(uname -m) ;;
+    Darwin/arm64)
+        source "$(dirname "${BASH_SOURCE[0]}")/lib/containers.sh"
+        source "$(dirname "${BASH_SOURCE[0]}")/lib/e2e-macos.sh"
+        for knob in CLADEFS_E2E_BUILD_ONLY CLADEFS_E2E_PREBUILT CLADEFS_E2E_HARNESS \
+            CLADEFS_FIRECRACKER_JAIL CLADEFS_GUEST_HUGE_PAGES CLADEFS_MAX_MAP_COUNT \
+            CLADEFSD_MEMORY_MAX; do
+            [[ -z ${!knob:-} ]] || { echo "$knob is Linux's" >&2; exit 2; }
+        done
+        [[ ${CLADEFS_FIRECRACKER_SECCOMP:-none} == none ]] ||
+            { echo "CLADEFS_FIRECRACKER_SECCOMP is Firecracker's, on Linux" >&2; exit 2; }
+        CLADEFS_FIRECRACKER_SECCOMP=none
+        # The runner's sockets' directory, as short as a socket's path needs (SUN_LEN), not
+        # macOS's own, under /var/folders.
+        export TMPDIR=/tmp
+        results_in=$(e2e_macos_volume) guest_arch=aarch64
+        ;;
+    *) echo "cladefs's guests run on Linux and arm64 macOS only: use scripts/test-host.sh" >&2; exit 2 ;;
+esac
+if [[ -n ${CLADEFS_E2E_RESULTS:-} ]]; then
+    results=$CLADEFS_E2E_RESULTS
+    mkdir -p "$results"
+    [[ $os != Darwin ]] || e2e_macos_case_sensitive "$results"
+else
+    # Reachable by others, as a jailed VM's user must reach it (below), unlike mktemp's own.
+    results=$(mktemp -d "$results_in/cladefs-e2e.XXXXXX")
+    chmod 755 "$results"
 fi
+results=$(cd "$results" && pwd)
 if [[ -z ${LIBCLANG_PATH:-} ]] && command -v llvm-config > /dev/null; then
     LIBCLANG_PATH=$(llvm-config --libdir)
 fi
 if [[ -n ${LIBCLANG_PATH:-} ]]; then export LIBCLANG_PATH; fi
 
+# On a Mac, the guest kernel CLADEFS_GUEST_KERNEL's, or else the arm64 kernel Linux builds, fetched
+# (crates/libmachine/scripts/arm64-guest.sh).
+if [[ $os == Darwin && -z ${CLADEFS_GUEST_KERNEL:-} ]]; then
+    CLADEFS_GUEST_KERNEL=$root/target/arm64-guest/Image
+    [[ -f $CLADEFS_GUEST_KERNEL ]] || {
+        echo "no $CLADEFS_GUEST_KERNEL: crates/libmachine/scripts/arm64-guest.sh fetches it," \
+            "or name one in CLADEFS_GUEST_KERNEL" >&2
+        exit 2
+    }
+    export CLADEFS_GUEST_KERNEL
+fi
 # cladefs: the guest kernel, CLADEFS_GUEST_KERNEL's, or else this tree's, from the checkout's
 # cache of kernels, built there if none of these sources is, only what changed since the last
 # (scripts/guest-kernel.sh: in a hotbed workspace, the workspace's, whose base built main's; board
@@ -147,7 +190,8 @@ fi
 tests=()
 if [[ -z $build_only ]]; then
     listed=$("$runner" list "${selectors[@]}")
-    mapfile -t tests <<< "$listed"
+    # A line each, as macOS's bash 3.2, which has no mapfile, reads them.
+    while IFS= read -r test; do tests+=("$test"); done <<< "$listed"
     repeats=${CLADEFS_E2E_REPEATS:-1}
     [[ $repeats =~ ^[1-9][0-9]*$ ]] || { echo "CLADEFS_E2E_REPEATS is a count" >&2; exit 2; }
     # The run as data, its knobs as it was given them, before this sets any (TASK-160.31).
@@ -183,8 +227,26 @@ fi
 # The run's directory, by which a case that goes on from repeat to repeat keys what it keeps
 # (fxfs-guest-soak).
 export CLADEFS_E2E_RUN="$results"
-if [[ -z $prebuilt ]]; then
 source "$root/scripts/lib/musl.sh"
+if [[ $os == Darwin ]]; then
+    # cladefs: the daemon and its tools, native (board 13065); the VMM, libmachine's, signed with
+    # the hypervisor entitlement as it links (scripts/macos-link.sh), unless CLADEFS_FIRECRACKER
+    # names one.
+    (cd "$root" && cargo build --locked --profile "$cladefsd_profile" -p cladefs --bin cladefsd \
+        --bin cladefsctl ${cladefsd_features[@]+"${cladefsd_features[@]}"})
+    (cd "$root" && cargo build --locked --release -p bucket_cell --bin cladefs-gc)
+    root_target=$(target_dir "$root")
+    cladefsd_bin="$root_target/$cladefsd_profile/cladefsd"
+    export CLADEFSCTL_BIN="$root_target/$cladefsd_profile/cladefsctl"
+    export CLADEFS_GC_BIN="$root_target/release/cladefs-gc"
+    if [[ -z ${CLADEFS_FIRECRACKER:-} ]]; then
+        (cd "$root" && cargo build --locked -p libmachine-firecracker)
+        export CLADEFS_FIRECRACKER="$root_target/debug/libmachine-firecracker"
+    fi
+    # mkfs.ext4, for the cases' root filesystems and images.
+    PATH=$(e2e_macos_e2fsprogs):$PATH
+fi
+if [[ -z $prebuilt && $os == Linux ]]; then
 musl_setup
 (cd "$root" && env "${MUSL_ENV[@]}" cargo build --locked --profile "$cladefsd_profile" \
     --target "$MUSL_TARGET" -p cladefs --bin cladefsd --bin cladefsctl \
@@ -297,6 +359,13 @@ fi
 # too, and Docker's buildx plugin (Apache-2.0), which builds with BuildKit (TASK-311); and
 # fxfs-guest-sandboxes', whose builders build so (TASK-330.1).
 builds=" fxfs-guest-docker-build-dax fxfs-guest-sandboxes "
+# sha256_is SUM FILE fails, saying so, unless FILE's sha256 is SUM: computed and compared here, as
+# macOS's sha256sum takes no --check --quiet.
+sha256_is() {
+    local sum
+    sum=$(sha256sum < "$2") || return
+    [[ ${sum%% *} == "$1" ]] || { echo "$2: its sha256 is ${sum%% *}, not $1" >&2; return 1; }
+}
 selected() { # CASE...: whether the run selects one of the CASEs
     local case
     for case in "$@"; do
@@ -307,31 +376,34 @@ selected() { # CASE...: whether the run selects one of the CASEs
 # shellcheck disable=SC2086 # the cases, a word each
 if [[ -z ${CLADEFS_DOCKER_STATIC:-} ]] && selected fxfs-guest-docker-dax $builds; then
     docker_version=29.9.1
-    case $(uname -m) in
+    case $guest_arch in
         x86_64) docker_sha256=c158ecc55adb3afb01bbd3539ed3b997d20c26dbdc418080506cc1bf5243ff57 ;;
         aarch64) docker_sha256=3e93cc6d1a686456a3b18eefdde26467a837a7a2b257af22e27cba1dbc1b2018 ;;
     esac
     docker_dir=$(user_cache "docker-$docker_version")
     if [[ ! -x $docker_dir/dockerd ]]; then
         curl -fsSL -o "$docker_dir.tgz" \
-            "https://download.docker.com/linux/static/stable/$(uname -m)/docker-$docker_version.tgz"
-        echo "$docker_sha256  $docker_dir.tgz" | sha256sum --check --quiet
+            "https://download.docker.com/linux/static/stable/$guest_arch/docker-$docker_version.tgz"
+        sha256_is "$docker_sha256" "$docker_dir.tgz"
         tar -xzf "$docker_dir.tgz" -C "$docker_dir" --strip-components=1
         rm "$docker_dir.tgz"
+    fi
+    if [[ -z ${CLADEFS_BUSYBOX:-} && $os == Darwin ]]; then
+        CLADEFS_BUSYBOX=$(e2e_macos_busybox)
     fi
     export CLADEFS_DOCKER_STATIC="$docker_dir" CLADEFS_BUSYBOX="${CLADEFS_BUSYBOX:-/bin/busybox}"
 fi
 # shellcheck disable=SC2086 # the cases, a word each
 if [[ -z ${CLADEFS_DOCKER_BUILDX:-} ]] && selected $builds; then
     buildx_version=0.38.2
-    case $(uname -m) in
+    case $guest_arch in
         x86_64) buildx_arch=amd64 buildx_sha256=7992ec09413b80ff57ba4e081f56fc833d7bac1d5e71143c6c809e7e6065f6d6 ;;
         aarch64) buildx_arch=arm64 buildx_sha256=46c0f334772de3cb0b341cc415caf7339fb5cfc8b8438ebcb5a10e7f23800d36 ;;
     esac
     buildx=$(user_cache)/docker-buildx-$buildx_version
     if [[ ! -x $buildx ]]; then
         curl -fsSL -o "$buildx.download" "https://github.com/docker/buildx/releases/download/v$buildx_version/buildx-v$buildx_version.linux-$buildx_arch"
-        echo "$buildx_sha256  $buildx.download" | sha256sum --check --quiet
+        sha256_is "$buildx_sha256" "$buildx.download"
         chmod +x "$buildx.download"
         mv "$buildx.download" "$buildx"
     fi
@@ -339,16 +411,26 @@ if [[ -z ${CLADEFS_DOCKER_BUILDX:-} ]] && selected $builds; then
 fi
 # The harness's guest agent, a static binary each guest runs as its init. pjdfstest's cases take
 # its repository and commit as they build.
-guest_target="$(uname -m)-unknown-linux-musl"
+guest_target="$guest_arch-unknown-linux-musl"
 if [[ -z $build_only$prebuilt ]]; then
     # The harness's own tests, scripts/test.sh's guest part, which as another user than root says
     # it leaves out those that need root (TASK-307); and the VMM's extent device's tests, and its
     # vCPUs' exits', cladefs's, which no other suite reaches (TASK-79.102, TASK-187): its firecracker
-    # part, which CI runs too (TASK-220).
-    CLADEFS_TEST_PARTS="guest firecracker" "$root/scripts/test.sh"
+    # part, which CI runs too (TASK-220). On a Mac, the harness's host half's (Firecracker is
+    # Linux's).
+    test_parts="guest firecracker"
+    [[ $os == Linux ]] || test_parts=guest
+    CLADEFS_TEST_PARTS=$test_parts "$root/scripts/test.sh"
 fi
 if [[ -z $prebuilt ]]; then
-    (cd "$harness" && cargo build -q --locked --target "$guest_target" -p guest-agent)
+    # Cross-built on a Mac, with a musl cross toolchain (scripts/lib/musl.sh); natively on Linux.
+    guest_env=()
+    if [[ $os != Linux ]]; then
+        musl_setup "$guest_target"
+        guest_env=("${MUSL_ENV[@]}")
+    fi
+    (cd "$harness" && env ${guest_env[@]+"${guest_env[@]}"} cargo build -q --locked \
+        --target "$guest_target" -p guest-agent)
     export CLADEFS_GUEST_AGENT="$harness_target/$guest_target/debug/guest-agent"
 fi
 # cladefs: the artifacts, copied for runs to take as they are (CLADEFS_E2E_PREBUILT), and what they
@@ -430,7 +512,10 @@ daemon_file=$(grep -om1 '[a-z]*d-stats\.txt' "$root/scripts/guest_results.py" ||
 daemon_file=${daemon_file:-cladefsd-stats.txt}
 daemon_file=${daemon_file%-stats.txt}
 bucket_dir=
-if [[ -z ${CLADEFSD_BUCKET:-} ]]; then
+if [[ -z ${CLADEFSD_BUCKET:-} && $os == Darwin ]]; then
+    # On a Mac, which has no /dev/shm nor flock(1), on the run's volume, removed as the run exits.
+    bucket_dir=$(mktemp -d "$results_in/cladefs-e2e-bucket.XXXXXX")
+elif [[ -z ${CLADEFSD_BUCKET:-} ]]; then
     # In memory, owned: the next run removes it if this one is killed outright (e2e-bucket.sh).
     source "$(dirname "${BASH_SOURCE[0]}")/lib/e2e-bucket.sh"
     e2e_bucket /dev/shm
@@ -568,8 +653,10 @@ for (comm, call), count in sorted(seen.items()):
 fi
 # cladefs: the guest writes the DAX windows refused: the guest and the window disagreeing, which fails
 # the run (TASK-44.12). Not a kernel worker's, the VM processes' logs saying whose (TASK-150.16).
-mapfile -t firecracker_logs < <(find "$results" -name firecracker.log)
-if ! "$root/scripts/dax-refusals.py" "$results/$daemon_file.log" "${firecracker_logs[@]}" \
+firecracker_logs=()
+while IFS= read -r log; do firecracker_logs+=("$log"); done < <(find "$results" -name firecracker.log)
+if ! "$root/scripts/dax-refusals.py" "$results/$daemon_file.log" \
+    ${firecracker_logs[@]+"${firecracker_logs[@]}"} \
     > "$results/unexplained-refusals.txt"; then
     echo "the DAX window refused a guest's writes: see $results/unexplained-refusals.txt" >&2
     status=1

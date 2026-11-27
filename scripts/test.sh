@@ -12,7 +12,8 @@
 # on an arm64 Mac, libmachine's and machined's on Hypervisor.framework (the part hvf).
 # Arguments are passed to the suite's and the simulation's `cargo nextest run`. CLADEFS_TEST_PARTS
 # names the parts to run, separated by spaces (default: all of clippy, workspace, sim, madsim,
-# shuttle, scripts, go, and guest, firecracker and libmachine on Linux, hvf on an arm64 Mac). The part unit, in no default, runs the
+# shuttle, scripts, go, and guest, firecracker and libmachine on Linux, hvf and guest on an arm64
+# Mac). The part unit, in no default, runs the
 # workspace's unit tests alone, about a minute: the workspace part's tests but the slow ones the
 # nextest profile unit leaves out (.config/nextest.toml).
 #
@@ -28,7 +29,7 @@ export LIBC_FATAL_STDERR_=1
 
 parts="clippy workspace sim madsim shuttle scripts go"
 [[ $(uname) != Linux ]] || parts+=" guest firecracker libmachine"
-[[ $(uname -sm) != "Darwin arm64" ]] || parts+=" hvf"
+[[ $(uname -sm) != "Darwin arm64" ]] || parts+=" hvf guest"
 parts=${CLADEFS_TEST_PARTS:-$parts}
 part() { # name: whether CLADEFS_TEST_PARTS has it
     [[ " $parts " == *" $1 "* ]]
@@ -199,23 +200,26 @@ if part go; then
         go -C "$root/go" test ./...
     fi
 fi
-# The guest tests' own tests, the host's half and the guest's, which build on Linux alone: their
-# harness's (guest/tests/test_cases/src/vm.rs, script_vm.rs, the runner's) and the guest agent's.
-# Those that mount a filesystem of their own on a loop device, with mkfs.ext4 and mkfs.xfs, need
-# root, which nothing unprivileged stands in for (script_run's Loop): ignored, saying so, they
-# run as root alone, as CI runs this part, and a run as another user says it leaves them out
-# (TASK-307).
+# The guest tests' own tests, the host's half and the guest's: their harness's
+# (guest/tests/test_cases/src/vm.rs, script_vm.rs, the runner's) and the guest agent's, the
+# guest's half Linux's code, on Linux alone; the host's on an arm64 Mac too, which runs the guests
+# on libmachine (board 14336). Those that mount a filesystem of their own on a loop device, with
+# mkfs.ext4 and mkfs.xfs, need root, which nothing unprivileged stands in for (script_run's Loop):
+# ignored, saying so, they run as root alone, as CI runs this part, and a run as another user says
+# it leaves them out (TASK-307).
 if part guest; then
     as_root=()
     if (( EUID == 0 )); then
         as_root=(--run-ignored all)
-    else
+    elif [[ $(uname) == Linux ]]; then
         echo "scripts/test.sh: the guest part's tests that loop-mount a filesystem need root, and are left out: run it as root to include them" >&2
     fi
     harness=(cargo nextest run --locked --manifest-path "$root/guest/tests/Cargo.toml"
         ${as_root[@]+"${as_root[@]}"})
     "${harness[@]}" -p test_cases --features host
-    "${harness[@]}" -p test_cases --features guest
+    if [[ $(uname) == Linux ]]; then
+        "${harness[@]}" -p test_cases --features guest
+    fi
     "${harness[@]}" -p runner
 fi
 # libmachine's and machined's tests (crates/libmachine, doc-30; crates/machined), with what the

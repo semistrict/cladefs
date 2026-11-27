@@ -153,7 +153,8 @@ class Ci(unittest.TestCase):
         self.assertIn("            target\n", job())
         self.assertIn("'vendor/firecracker.lock'", job())
         e2e = (ROOT / "scripts" / "test-e2e.sh").read_text()
-        self.assertIn('CLADEFS_TEST_PARTS="guest firecracker" "$root/scripts/test.sh"', e2e)
+        self.assertIn('test_parts="guest firecracker"', e2e)
+        self.assertIn('CLADEFS_TEST_PARTS=$test_parts "$root/scripts/test.sh"', e2e)
 
     def test_guest_sim_runs_whole_when_what_it_tests_changed_and_nightly(self):
         """The user's decision (2026-11-08): guest/sim's jobs, keeping their names, run whole in CI
@@ -223,11 +224,13 @@ class Ci(unittest.TestCase):
         macOS runner, a part a job, every failure: what cladefs compiles for macOS alone (the
         slabs' arenas' files, local_cell's syncs, bucket_cell's cache, cladefs's storage I/O) ran on
         laptops alone. Board 2912: and the madsim part, the daemon's simulation building on macOS
-        too."""
+        too. Board 14336: and the guest part, the guest tests' harness's host half and runner,
+        which boot their guests on libmachine there, its target cached."""
         text = CI.read_text()
         macos = re.search(r"^  macos:\n(.*?)^  \S", text, re.MULTILINE | re.DOTALL).group(1)
         self.assertIn("runs-on: macos-15", macos)
-        self.assertIn("parts: [workspace, shuttle, madsim]", macos)
+        self.assertIn("parts: [workspace, shuttle, madsim, guest]", macos)
+        self.assertIn("            target\n            guest/tests/target\n", macos)
         self.assertIn("CLADEFS_TEST_PARTS: ${{ matrix.parts }}", macos)
         self.assertIn("run: scripts/test.sh --no-fail-fast", macos)
         self.assertIn("submodules: true", macos)
