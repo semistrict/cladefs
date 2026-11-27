@@ -159,6 +159,13 @@ impl TestFxfsGuestChecks {
     }
 }
 
+/// cladefs: the guest's log, lossily: a kernel line the console interleaves may split a character
+/// of the guest's lines, a µ of a check's times, which then is no UTF-8 (board 14500).
+fn guest_log(test_setup: &TestSetup) -> std::io::Result<String> {
+    let log = std::fs::read(test_setup.tmp_dir.join("log.txt"))?;
+    Ok(String::from_utf8_lossy(&log).into_owned())
+}
+
 impl Test for TestFxfsGuestChecks {
     fn should_run(&self) -> ShouldRun {
         cladefs_guest_should_run()
@@ -184,7 +191,7 @@ impl Test for TestFxfsGuestChecks {
     /// cladefs: names the check the guest was in, after the last its log has the time of.
     fn timed_out(self: Box<Self>, test_setup: TestSetup) -> Option<String> {
         let (checks, scale) = self.run().ok()?;
-        let log = std::fs::read_to_string(test_setup.tmp_dir.join("log.txt")).ok()?;
+        let log = guest_log(&test_setup).ok()?;
         let last = log.lines().rev().find_map(|line| {
             let (_, rest) = line.split_once("PASS: ").or_else(|| line.split_once("FAIL: "))?;
             rest.split_whitespace().next()
@@ -256,7 +263,7 @@ impl Test for TestFxfsGuestChecks {
         }
         // cladefs: the checks made to fail failed alone, as made to, and the rest passed after
         // them (TASK-160.30).
-        let log = std::fs::read_to_string(test_setup.tmp_dir.join("log.txt")).unwrap();
+        let log = guest_log(&test_setup).unwrap();
         if let Err(failed) = Self::failed_as_made_to(&checks, &without_kernel_lines(&log), scale) {
             return TestOutcome::Fail(format!("seed {seed}: {failed}"));
         }
