@@ -295,6 +295,17 @@ reaching what those can't reach, or reach only by luck: a pure function's edge c
 malformed inputs, an interleaving. A unit test restating its code (a map's insert and remove, a
 getter, a constant) is never written; one found is deleted, saying so in a `Weakens-tests:` line.
 
+## One simulator: the madsim world
+
+The user's rule (2026-11-27, board 14493), FoundationDB's way: cladefs has one simulator, the madsim
+world (`crates/cladefs/tests/madsim.rs`, doc-24), which runs real cladefsd daemons under one seed.
+`local_cell::sim` (`crates/local_cell/src/sim`) is frozen: no new feature, step, profile or check
+goes into it. A new feature's simulation goes into the madsim world. `local_cell::sim`'s step families
+move there one by one as workloads in its swarm, each family's rule searches moving with it, and are
+deleted from `local_cell::sim` once the madsim world catches their rules (boards 14565-14571).
+A rare interleaving comes from a BUGGIFY site in production code (`bucket_cell::buggify`), never from
+a harness faking it; seeds cost compute, run in parallel on hotbed, not a cheaper simulator.
+
 ## A daemon's state lives on Host/Daemon, not in statics (or say why)
 
 madsim runs every simulated host in one process, on one thread (doc-24): a mutable `static`, a `thread_local!`'s among them, is shared by all of them, and a host's state kept in one leaks to the others and outlives the host's kill (board 5450's part cache; board 7451's replicator, whose tasks ran on the process's bucket runtime after their host was lost). `scripts/rust-rules.py`'s `process-wide-static` rule finds each static in the crates the simulation runs: keep per-host state on an explicit `Host`/`Daemon` context instead (`bucket_cell::Host`, `local_cell::Host`, `cladefs::Host`, `cladefsd::Daemon`; board 10774, board 10962), or say over it why it is the process's (a count of the whole process's, a fact of the hardware, a pool of spare buffers, outside the simulation).
