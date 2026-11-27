@@ -213,7 +213,9 @@ async fn registry_versioned(
 /// at once agree on the one that landed first; one that stopped short of the registry is finished.
 #[cfg(feature = "full")]
 pub async fn format(bucket: &impl Bucket, details: &Details) -> Result<Identity, Error> {
-    let _ = crate::gates::ensure_formatted(bucket).await?;
+    // Its gates made, or found to be ones this build reads: what they say is the ratchet's to
+    // read, not this formatting's.
+    crate::gates::ensure_formatted(bucket).await?;
     let identity = match get(bucket).await? {
         Some(found) => found,
         None => {
