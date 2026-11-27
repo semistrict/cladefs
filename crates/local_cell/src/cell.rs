@@ -3629,8 +3629,21 @@ impl<D: Dir> LocalCell<D> {
                 self.recycle_or_remove_log(segment);
             }
             leave(&*self.dir, self.cache.as_deref(), leaving);
-            Ok(())
-        })
+            Ok::<_, Error>(())
+        })?;
+        // cladefs: the logs that went let go of at once, as no flush may follow (board 14305).
+        self.let_logs_go(&mut *self.flushing.lock().await);
+        Ok(())
+    }
+
+    /// cladefs: lets go of the logs `logs` appends to of segments whose logs went (`Segments::raw`,
+    /// a spare's or removed), and their replica logs: kept until the next flush before, which an
+    /// idle cell never makes, the last spare it renamed held open for good (board 14305). Its
+    /// caller holds the flush's lock, which is taken before the cell's state lock.
+    fn let_logs_go(&self, logs: &mut Logs<D::File>) {
+        let state = self.lock();
+        logs.by_segment.retain(|segment, _| state.segments.has_log(*segment));
+        logs.replica.retain(|segment, _| state.segments.has_log(*segment));
     }
 
     /// cladefs: makes the commits ordered so far durable, in order, as few syncs as they need
@@ -3709,6 +3722,7 @@ impl<D: Dir> LocalCell<D> {
             };
             let raw = self.state()?.segments.raw(durable);
             self.remove_raw(raw);
+            self.let_logs_go(logs);
             return Ok(());
         }
         // cladefs: its durability deferred, all of it made durable first, before anything of the
@@ -3756,6 +3770,7 @@ impl<D: Dir> LocalCell<D> {
         let started = Instant::now();
         let raw = self.state()?.segments.raw(durable);
         self.remove_raw(raw);
+        self.let_logs_go(logs);
         timed.phases.took(flush::RAW, started);
         Ok(())
     }

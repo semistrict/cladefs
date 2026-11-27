@@ -260,6 +260,12 @@ pub(crate) struct Syncs<F> {
     /// opening on demand so committing many filled segments never holds unbounded raw FDs;
     /// board 12887).
     cached_paths: Vec<(String, std::sync::Weak<F>)>,
+    /// cladefs: the cached files a flush holding its commits' runs left unsynced, carried to the
+    /// next flush that syncs data ([`Syncs::carry`]): held weakly, so that a closed segment's raw
+    /// file, which its segment lets go of once framed, its runs held in the records synced, closes
+    /// as it is removed, rather than at that next flush, which an idle cell never makes: it held
+    /// its last raw file open, removed, for good (board 14305).
+    carried: Vec<std::sync::Weak<F>>,
     dirs: BTreeSet<String>,
 }
 
@@ -270,6 +276,7 @@ impl<F> Default for Syncs<F> {
             paths: Vec::new(),
             cached: Vec::new(),
             cached_paths: Vec::new(),
+            carried: Vec::new(),
             dirs: BTreeSet::new(),
         }
     }
@@ -309,7 +316,8 @@ impl<F: File> Syncs<F> {
             && !(self.files.is_empty()
                 && self.paths.is_empty()
                 && self.cached.is_empty()
-                && self.cached_paths.is_empty()))
+                && self.cached_paths.is_empty()
+                && self.carried.iter().all(|carried| carried.strong_count() == 0)))
             || !self.dirs.is_empty()
     }
 
@@ -323,10 +331,14 @@ impl<F: File> Syncs<F> {
     /// segment's raw file, which its segment lets go of once framed, its framed file durable then,
     /// holding its data.
     pub fn carry(&mut self, (files, paths): (Vec<Arc<F>>, Vec<(String, std::sync::Weak<F>)>)) {
-        self.cached.retain(|carried| Arc::strong_count(carried) > 1);
+        self.carried.retain(|carried| carried.strong_count() > 0);
         for file in files {
-            if !self.cached.iter().any(|carried| Arc::ptr_eq(carried, &file)) {
-                self.cached.push(file);
+            if !self
+                .carried
+                .iter()
+                .any(|carried| std::ptr::eq(carried.as_ptr(), Arc::as_ptr(&file)))
+            {
+                self.carried.push(Arc::downgrade(&file));
             }
         }
         for (path, open) in paths {
@@ -338,7 +350,10 @@ impl<F: File> Syncs<F> {
 
     /// cladefs: the files it syncs keeping their pages cached, which it syncs no more.
     pub fn take_cached(&mut self) -> (Vec<Arc<F>>, Vec<(String, std::sync::Weak<F>)>) {
-        (std::mem::take(&mut self.cached), std::mem::take(&mut self.cached_paths))
+        let mut cached = std::mem::take(&mut self.cached);
+        cached
+            .extend(std::mem::take(&mut self.carried).iter().filter_map(std::sync::Weak::upgrade));
+        (cached, std::mem::take(&mut self.cached_paths))
     }
 
     /// Syncs what `other` does, too.
@@ -347,6 +362,7 @@ impl<F: File> Syncs<F> {
         self.paths.extend(other.paths);
         self.cached.extend(other.cached);
         self.cached_paths.extend(other.cached_paths);
+        self.carried.extend(other.carried);
         self.dirs.extend(other.dirs);
     }
 
@@ -368,8 +384,13 @@ impl<F: File> Syncs<F> {
         let mut seen_ptrs = HashSet::new();
         let mut seen_paths = HashSet::new();
         let mut targets: Vec<Target<'_, F>> = Vec::new();
-        for (file, cached) in
-            self.files.iter().map(|f| (f, false)).chain(self.cached.iter().map(|f| (f, true)))
+        // cladefs: those carried that a segment holds still: one let go of, framed, its runs in the
+        // records synced, needs no sync (as `carry` let it go before).
+        let carried: Vec<Arc<F>> =
+            self.carried.iter().filter_map(std::sync::Weak::upgrade).collect();
+        for (file, cached) in (self.files.iter().map(|f| (f, false)))
+            .chain(self.cached.iter().map(|f| (f, true)))
+            .chain(carried.iter().map(|f| (f, true)))
         {
             if seen_ptrs.insert(Arc::as_ptr(file)) {
                 targets.push(Target::Open(file, cached));
