@@ -292,11 +292,18 @@ u64 cladefs_rt_monotonic_ns(void)
 
 u64 cladefs_rt_realtime_ns(void)
 {
+	struct timespec64 now;
+
 	/*
-	 * cladefs: the coarse clock, an inode's own: a ctime the kernel sets after a time read from
-	 * a finer clock could be before it (xfstests generic/423).
+	 * cladefs: the time the kernel stamps an inode with (current_time()): the coarse clock, or
+	 * the multigrain floor if that is later, which a fine-grained ctime given another inode moves
+	 * on (FS_MGTIME). A finer clock put a time after a ctime the kernel set later; the coarse
+	 * clock alone fell behind a ctime set before: a symlink made after a file had an mtime a tick
+	 * before the file's (xfstests generic/423 both times, the second on an arm64 guest,
+	 * 2026-11-27).
 	 */
-	return ktime_get_coarse_real_ns();
+	ktime_get_coarse_real_ts64_mg(&now);
+	return timespec64_to_ns(&now);
 }
 
 void cladefs_rt_random_bytes(void *buf, size_t len)
