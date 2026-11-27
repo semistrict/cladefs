@@ -422,7 +422,7 @@ if [[ -z $build_only$prebuilt ]]; then
     [[ $os == Linux ]] || test_parts=guest
     # Without a case's replay knobs, which the harness's own tests of scripts read and fail on
     # (a_hang_is_shrunk, with CLADEFS_RANDOM_OPS_DROP set): a script's replay line runs as said.
-    env -u CLADEFS_SEED -u CLADEFS_RANDOM_OPS_DROP CLADEFS_TEST_PARTS=$test_parts "$root/scripts/test.sh"
+    env -u CLADEFS_SEED -u CLADEFS_RANDOM_OPS_DROP CLADEFS_TEST_PARTS="$test_parts" "$root/scripts/test.sh"
 fi
 if [[ -z $prebuilt ]]; then
     # Cross-built on a Mac, with a musl cross toolchain (scripts/lib/musl.sh); natively on Linux.
