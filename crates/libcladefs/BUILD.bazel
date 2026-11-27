@@ -50,6 +50,7 @@ cladefs_rust_library(
     crate_name = "libcladefs",
     target_compatible_with = _COMPAT,
     deps = [
+        "//crates/bucket_cell:bucket_cell_testing",
         "//crates/cladefs_core:cladefs_core_for_test",
         "//crates/cladefs_wire:cladefs_wire_for_test",
         "//crates/cladefsd:cladefsd_for_test",
