@@ -89,7 +89,7 @@ fn check_page(page: &[u8], magic: u64, index: usize) -> bool {
 #[host]
 mod host {
     use super::*;
-    use crate::common::{cladefs_guest_should_run, control, setup_rootfs, spawn_daemon};
+    use crate::common::{cladefs_guest_should_run, control, setup_rootfs, spawn_host_daemon};
     use crate::vm::{Firecracker, Vm};
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
     use anyhow::{Context, ensure};
@@ -139,10 +139,9 @@ mod host {
             let sockets = tempfile::Builder::new().prefix("cladefs-mig").tempdir()?;
             let src_sock = sockets.path().join("src.sock");
             let dst_sock = sockets.path().join("dst.sock");
-            // Both fixed, 1 GiB, not governed as production's (board 14529): two hosts on one
-            // machine, where each governed daemon would take the machine's free memory as its
-            // own; what this tests is the migration, at any size.
-            let _src_daemon = spawn_daemon(
+            // Both governed, as production's, each within its host's memory, two hosts on one
+            // machine: 2 GiB, the 1 GiB they were fixed at until board 14529, and the headroom.
+            let _src_daemon = spawn_host_daemon(
                 test_setup,
                 &src_sock,
                 "src",
@@ -152,9 +151,9 @@ mod host {
                     ("CLADEFSD_ROOTS", src_roots.as_os_str()),
                     ("CLADEFSD_UPLOAD_INTERVAL", OsStr::new("3600")),
                 ],
-                Some(1 << 30),
+                2 << 30,
             )?;
-            let _dst_daemon = spawn_daemon(
+            let _dst_daemon = spawn_host_daemon(
                 test_setup,
                 &dst_sock,
                 "dst",
@@ -163,7 +162,7 @@ mod host {
                     ("CLADEFSD_TOKEN", OsStr::new("1")),
                     ("CLADEFSD_ROOTS", dst_roots.as_os_str()),
                 ],
-                Some(1 << 30),
+                2 << 30,
             )?;
             let src_ctrl = control(&src_sock)?;
             let dst_ctrl = control(&dst_sock)?;

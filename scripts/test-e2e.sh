@@ -548,13 +548,34 @@ cladefsd_stop() {
 }
 # cladefs: its memory governed, as production's daemon's (no MEMORY_BYTES), unless
 # CLADEFSD_MEMORY fixes it (an A/B's fixed side): the run tests the mode that ships (board 14529).
-# On a host that can't run governed (no MGLRU, too little swap, no writable cgroup v2), the daemon
-# refuses to start, its doctor saying why (`cladefsd --doctor`), and so does the run, never quietly
-# testing another mode: `cladefsd --setup-host` provisions such a host. Its VMs' cgroups are taken
-# for delegated to it (CLADEFSD_VM_CGROUP_DELEGATED), as a test host's user holds no
-# CAP_DAC_OVERRIDE; exported, for the cases' own daemons too.
+# On Linux the host is first set up as a production host's start sets it up, `cladefsd
+# --setup-host` as root (MGLRU, zram swap): settings of the running kernel, which a hotbed
+# command's VM boots without. On a host that still can't run governed, the daemon refuses to
+# start, its doctor saying why, and so does the run, never quietly testing another mode. A daemon
+# from before --setup-host (an A/B's base, a pin's prebuilt) needs none of it.
+# And the run's cgroup's parent is given to the run's user, as systemd delegates one: the cases
+# put each VM process in a cgroup of its own beside the run's, as a production host does, and each
+# of several hosts' daemons in one of its host's memory (guest/tests' cgroups.rs). Its VMs'
+# cgroups so delegated to the daemon (CLADEFSD_VM_CGROUP_DELEGATED), it reclaims their memory
+# without CAP_DAC_OVERRIDE; exported, for the cases' own daemons too.
 export CLADEFSD_VM_CGROUP_DELEGATED="${CLADEFSD_VM_CGROUP_DELEGATED:-1}"
 cladefsd_memory=${CLADEFSD_MEMORY:-}
+if [[ $os == Linux ]]; then
+    as_root() { if (( EUID == 0 )); then "$@"; else sudo -n "$@"; fi; }
+    if grep -qa -- --setup-host "$cladefsd_bin"; then
+        as_root "$cladefsd_bin" --setup-host
+    fi
+    run_cgroup=$(sed -n 's/^0:://p' /proc/self/cgroup)
+    run_parent=/sys/fs/cgroup${run_cgroup%/*}
+    if (( EUID != 0 )); then
+        [[ $run_parent != /sys/fs/cgroup ]] || {
+            echo "the run's cgroup, $run_cgroup, is the root's child: no parent to delegate" >&2
+            exit 1
+        }
+        as_root chown "$(id -u):$(id -g)" "$run_parent" "$run_parent/cgroup.procs" \
+            "$run_parent/cgroup.subtree_control"
+    fi
+fi
 # The run's bucket, which the daemon keeps its cells in, named to the cases too: a case whose
 # daemon of its own forks a version the run's daemon made reads it there (bench-fork's cold and
 # predicted forks).

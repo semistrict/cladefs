@@ -274,10 +274,6 @@ jobs:
           source scripts/lib/musl.sh
           musl_setup x86_64-unknown-linux-musl
           env "${MUSL_ENV[@]}" cargo build --locked --target "$MUSL_TARGET" -p cladefs --bin cladefsd --bin cladefsctl
-      # The runner set up as a production host's ExecStartPre sets it up (MGLRU, zram swap), so
-      # that the daemon is governed, as production's (board 14529).
-      - name: The host's settings the memory governor needs
-        run: sudo target/x86_64-unknown-linux-musl/debug/cladefsd --setup-host
       - name: pjdfstest on the daemon's FUSE mounts of new cells, as root
         run: sudo --preserve-env env "PATH=$PATH" scripts/pjdfstest-fuse.py target/x86_64-unknown-linux-musl/debug
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

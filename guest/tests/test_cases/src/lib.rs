@@ -1036,6 +1036,9 @@ compile_error!("Cannot enable both guest and host in the same binary!");
 #[cfg(feature = "host")]
 mod common;
 
+#[cfg(all(feature = "host", target_os = "linux"))]
+pub mod cgroups;
+
 #[cfg(feature = "host")]
 mod faulty_s3;
 

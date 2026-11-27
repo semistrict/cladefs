@@ -121,10 +121,6 @@ jobs:
           tar -C "$WORK" -xf guest.tar
           rm guest.tar
           cat "$WORK/artifacts/artifacts.txt"
-      # The runner set up as a production host's ExecStartPre sets it up (MGLRU, zram swap), so
-      # that the daemons are governed, as production's (board 14529).
-      - name: The host's settings the memory governor needs
-        run: sudo "$WORK/artifacts/cladefsd" --setup-host
       # The host's memory, swap, I/O and CPU every minute, in this log, which outlives a runner
       # that runs out of them.
       - name: The guest suites, part ${{ env.SHARD }}

@@ -170,8 +170,9 @@ def mounted(bin_dir, dir):
                 # The disk the daemon owns, which its cells are kept on (board 14305).
                 "CLADEFSD_ROOTS": str(cells)})
     log = open(dir / "cladefsd.log", "w")
-    # Its memory governed, as production's (board 14529): the host set up as a production
-    # host is (`cladefsd --setup-host`, ci.yml), or the daemon refuses to start, saying why.
+    # Its memory governed, as production's (board 14529), the host set up first as a production
+    # host's start sets it up (MGLRU, zram swap), as root, as this runs.
+    subprocess.run([bin_dir / "cladefsd", "--setup-host"], check=True, stdout=log, stderr=log)
     process = subprocess.Popen([bin_dir / "cladefsd", str(dir / "vms.sock")],
                                env=env, stdout=log, stderr=subprocess.STDOUT)
     deadline = time.monotonic() + 60

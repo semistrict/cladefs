@@ -141,8 +141,9 @@ mod host {
     const ROOT_CAPACITY: u64 = 8 * GIB;
     /// A root's DAX window.
     const WINDOW: u64 = GIB;
-    /// Each daemon's memory.
-    const DAEMON_MEMORY: u64 = 2 * GIB;
+    /// Each host's memory, its daemon's to govern: the 2 GiB its daemon's cache was fixed at until
+    /// board 14529, and the governor's headroom, 1 GiB at least (`governor::headroom`).
+    const HOST_MEMORY: u64 = 3 * GIB;
     /// A sandbox's vCPUs and memory, in MiB: pandas reading a year of trips and marimo's server
     /// beside it.
     const VCPUS: u8 = 2;
@@ -257,11 +258,9 @@ RUN find / -xdev -name '*.pyc' -delete
         ) -> anyhow::Result<std::process::Child> {
             let env: Vec<(&str, &std::ffi::OsStr)> =
                 env.iter().map(|(var, value)| (*var, value.as_os_str())).collect();
-            // Fixed, not governed as production's (board 14529): several hosts on one machine,
-            // where each governed daemon would take the machine's free memory as its own, as no
-            // host's daemon shares its host. Governed in a cgroup of its own awaits hotbed issue
-            // 14 (cgroups delegated to a workspace's commands).
-            crate::common::spawn_daemon(test_setup, socket, name, &env, Some(DAEMON_MEMORY))
+            // Governed, as production's, within its host's memory, one of several hosts on one
+            // machine (board 14529).
+            crate::common::spawn_host_daemon(test_setup, socket, name, &env, HOST_MEMORY)
         }
 
         /// Restarts its daemon cold: its memory, and its part cache, a new one, empty.

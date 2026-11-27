@@ -915,6 +915,10 @@ fn spawn(
         // output would block.
         .stdout(std::fs::File::create(console)?);
     confine(&mut command, cpus, jail.map(|jail| jail.binds).unwrap_or_default())?;
+    // cladefs: in a cgroup of its own, as a production host runs each VM process, whose memory the
+    // extent daemon's governor reclaims; never the daemon's (board 14529, board 14533).
+    #[cfg(target_os = "linux")]
+    crate::cgroups::Cgroup::new("vm", None)?.enter_on_exec(&mut command);
     command.spawn().with_context(|| format!("executing {}", PathBuf::from(&firecracker).display()))
 }
 

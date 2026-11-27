@@ -70,8 +70,10 @@ mod host {
 
     /// The daemon's metrics reported, by their names less `cladefsd_`: besides them, any gauge
     /// of private pages.
-    const REPORTED: [&str; 11] = [
+    const REPORTED: [&str; 12] = [
         "memory_bytes",
+        // cladefs: what its governor reclaimed of its VMs' cgroups (board 14533).
+        "vm_reclaim_bytes_total",
         // cladefs: what a page-in finding no pages had to go on (board 5662).
         "memory_limit_bytes",
         "memory_capacity_bytes",

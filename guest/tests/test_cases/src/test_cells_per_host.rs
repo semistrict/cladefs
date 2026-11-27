@@ -707,14 +707,27 @@ mod host {
             let gauges = self.memory.gauges()?;
             let cache = *gauges.get("cladefsd_memory_bytes").context("no cladefsd_memory_bytes")?;
             let kvm = kvm_tables()?.saturating_sub(kvm_before);
-            breakdown(
+            let mut line = breakdown(
                 u64::from(self.settings.vm_mib) * MIB,
                 &guests,
                 &vmms,
                 kvm,
                 daemon_anon,
                 cache,
-            )
+            )?;
+            // cladefs: what of the daemon's pages is in swap (zram, `cladefsd --setup-host`'s), its
+            // extent cache's among them, outside its budget until it evicts them (board 14532);
+            // and what its governor reclaimed of the VMs' cgroups (board 14533).
+            let swapped = *daemon.get("Swap").context("the daemon: no Swap")?;
+            let reclaimed = *gauges
+                .get("cladefsd_vm_reclaim_bytes_total")
+                .context("no cladefsd_vm_reclaim_bytes_total")?;
+            line.push_str(&format!(
+                " daemon_swap_mib={:.1} vm_reclaim_mib={:.1}",
+                swapped as f64 / MIB as f64,
+                reclaimed as f64 / MIB as f64
+            ));
+            Ok(line)
         }
     }
 
@@ -964,6 +977,13 @@ mod host {
                 }
             };
             eprintln!("cells-per-host: held={} limit={limit}", ramp.held);
+            // cladefs: a host whose memory ran out has had its governor reclaim its VMs' cold
+            // memory first (`governor::reclaim_connected_vms`, board 14533), each VM in a cgroup
+            // of its own (`crate::cgroups`).
+            let reclaimed = *(host.memory.gauges()?)
+                .get("cladefsd_vm_reclaim_bytes_total")
+                .context("no cladefsd_vm_reclaim_bytes_total")?;
+            let out_of_memory = matches!(limit, Limit::Memory | Limit::Full);
             measured.higher("cells.held", "VMs", ramp.held as f64);
             if let Some((per_vm, mut boots, judged)) = last {
                 measured.lower("cells.per_vm", "MiB", per_vm as f64 / MIB as f64);
@@ -973,6 +993,10 @@ mod host {
                 }
             }
             self.stop(&mut cells, measured)?;
+            ensure!(
+                !out_of_memory || reclaimed > 0,
+                "the host's memory ran out ({limit}) and the governor reclaimed none of its VMs'"
+            );
             ensure!(
                 ramp.held >= settings.floor,
                 "held {} VMs, fewer than CLADEFS_CELLS_FLOOR's {}",

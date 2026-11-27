@@ -445,6 +445,43 @@ pub fn spawn_daemon(
     env: &[(&str, &std::ffi::OsStr)],
     memory: Option<u64>,
 ) -> anyhow::Result<std::process::Child> {
+    spawn(test_setup, socket, name, env, memory.map_or(Memory::Production, Memory::Fixed))
+}
+
+/// cladefs: as [`spawn_daemon`], a daemon standing for one host of several a case runs on one
+/// machine, governed as production's, within its host's memory, `host_memory` bytes: in a cgroup
+/// of its own of that `memory.max` ([`crate::cgroups`]), as a production host's daemon governed
+/// under its service's `MemoryMax` sizes itself to it (`governor::limit`), rather than take the
+/// machine's free memory as its own, as each of several would (board 14529). CLADEFSD_MEMORY, if
+/// set, fixes it as it fixes every daemon of a run (an A/B's fixed side). On macOS, which has no
+/// cgroups, its memory is the host's, fixed: no Mac host stands for a production one.
+pub fn spawn_host_daemon(
+    test_setup: &TestSetup,
+    socket: &Path,
+    name: &str,
+    env: &[(&str, &std::ffi::OsStr)],
+    host_memory: u64,
+) -> anyhow::Result<std::process::Child> {
+    spawn(test_setup, socket, name, env, Memory::Host(host_memory))
+}
+
+/// What a test's daemon's memory is ([`spawn_daemon`]).
+enum Memory {
+    /// As production's: governed, unless CLADEFSD_MEMORY fixes it.
+    Production,
+    /// Fixed, at so many bytes, whatever CLADEFSD_MEMORY says.
+    Fixed(u64),
+    /// Governed within a host's memory of so many bytes, unless CLADEFSD_MEMORY fixes it.
+    Host(u64),
+}
+
+fn spawn(
+    test_setup: &TestSetup,
+    socket: &Path,
+    name: &str,
+    env: &[(&str, &std::ffi::OsStr)],
+    memory: Memory,
+) -> anyhow::Result<std::process::Child> {
     use std::time::{Duration, Instant};
 
     let bin = std::env::var_os("CLADEFSD_BIN").context("CLADEFSD_BIN")?;
@@ -460,15 +497,28 @@ pub fn spawn_daemon(
     };
     let mut command = std::process::Command::new(bin);
     command.arg(socket).env("CLADEFSD_GRPC", socket.with_extension("control"));
-    let fixed: Option<std::ffi::OsString> =
-        memory.map(|memory| memory.to_string().into()).or_else(|| {
-            (env.iter().find(|(var, _)| *var == "CLADEFSD_MEMORY"))
-                .map(|(_, value)| value.to_os_string())
-                .or_else(|| std::env::var_os("CLADEFSD_MEMORY"))
-                .filter(|value| !value.is_empty())
-        });
-    if let Some(memory) = fixed {
-        command.arg(memory);
+    let fixed_by_run = || {
+        (env.iter().find(|(var, _)| *var == "CLADEFSD_MEMORY"))
+            .map(|(_, value)| value.to_os_string())
+            .or_else(|| std::env::var_os("CLADEFSD_MEMORY"))
+            .filter(|value| !value.is_empty())
+    };
+    match (memory, fixed_by_run()) {
+        (Memory::Fixed(bytes), _) => {
+            command.arg(bytes.to_string());
+        }
+        (Memory::Production | Memory::Host(_), Some(bytes)) => {
+            command.arg(bytes);
+        }
+        (Memory::Production, None) => {}
+        #[cfg(target_os = "linux")]
+        (Memory::Host(bytes), None) => {
+            crate::cgroups::Cgroup::new(name, Some(bytes))?.enter_on_exec(&mut command);
+        }
+        #[cfg(not(target_os = "linux"))]
+        (Memory::Host(bytes), None) => {
+            command.arg(bytes.to_string());
+        }
     }
     if !named("CLADEFSD_BUCKET") {
         let bucket = test_setup.tmp_dir.join(format!("{name}.bucket"));

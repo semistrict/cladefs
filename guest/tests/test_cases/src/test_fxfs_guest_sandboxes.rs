@@ -160,8 +160,9 @@ RUN apk add --no-cache postgresql postgresql-contrib git
         settings: fn(Role) -> Vec<(&'static str, String)>,
         /// Each role's vCPUs, a builder's as LangSmith's builders have, and its memory, in MiB.
         shape: fn(Role) -> (u8, u32),
-        /// Each daemon's memory: its extent cache's bound, and its windows' private pages'.
-        daemon_memory: u64,
+        /// Each host's memory, its daemon's to govern (board 14529): its extent cache, and its
+        /// windows' private pages, within it, less the governor's headroom, 1 GiB at least.
+        host_memory: u64,
         /// A builder's root's DAX window, and the window of a VM's own cell, when it has one:
         /// what a sandbox maps, not the host's memory, of which eight windows at once were
         /// refused (ENOMEM, fxfs-guest-shared-disk-dax). Each window's private pages, half its
@@ -246,7 +247,8 @@ RUN apk add --no-cache postgresql postgresql-contrib git
                 vms: 8,
                 settings: short,
                 shape: short_shape,
-                daemon_memory: 3 * GIB,
+                // The 3 GiB its daemons were fixed at until board 14529, and the headroom.
+                host_memory: 4 * GIB,
                 windows: (GIB, GIB / 2),
                 timeout_secs: 1200,
             }),
@@ -260,7 +262,8 @@ RUN apk add --no-cache postgresql postgresql-contrib git
                 shape: long_shape,
                 // Windows of the short mode's, 1 GiB and 512 MiB, were refused by daemons of 2 GiB
                 // whose caches eight guests' writes filled (ENOMEM, 2 a host).
-                daemon_memory: 2 * GIB,
+                // The 2 GiB its daemons were fixed at until board 14529, and the headroom.
+                host_memory: 3 * GIB,
                 windows: (GIB / 2, GIB / 4),
                 timeout_secs: 7200,
             }),
@@ -586,17 +589,14 @@ RUN apk add --no-cache postgresql postgresql-contrib git
                 // Each host's own placement.
                 let token = (at + 1).to_string();
                 let env = [("CLADEFSD_TOKEN", std::ffi::OsStr::new(&token))];
-                // Fixed, not governed as production's (board 14529): two hosts on one machine,
-                // each held to its budget (scripts/budgets.py), where each governed daemon would
-                // take the machine's free memory as its own, as no host's daemon shares its host.
-                // Governed in a cgroup of its own, its host's memory.max, awaits hotbed issue 14
-                // (cgroups delegated to a workspace's commands).
-                let daemon = crate::common::spawn_daemon(
+                // Governed, as production's, within its host's memory, one of two hosts on one
+                // machine (board 14529).
+                let daemon = crate::common::spawn_host_daemon(
                     test_setup,
                     &socket,
                     name,
                     &env,
-                    Some(mode.daemon_memory),
+                    mode.host_memory,
                 )?;
                 let imported = Instant::now();
                 let base = control(&socket)?
