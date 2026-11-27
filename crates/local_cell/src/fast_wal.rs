@@ -135,6 +135,12 @@ const RECORD_MAGIC: [u8; 4] = *b"CFWR";
 /// reuse with concurrent writer appends).
 const FENCE_MAGIC: [u8; 4] = *b"CFWF";
 
+/// How many times in a row a take's fence may be refused at a segment's end, nobody appending,
+/// before the take gives up on it as at its appends' limit ([`fence_and_recover`]): an object
+/// store's backoff between them (50 ms doubling to 5 s on `ObjectBucket`) outlasts any write in
+/// progress that S3 refuses a conflicting one for (409).
+const FENCE_REFUSALS: u32 = 8;
+
 /// Concurrent cold-bucket PUTs for large extents within one batch.
 const LARGE_PUTS_AT_ONCE: usize = 16;
 
@@ -1483,9 +1489,11 @@ pub async fn fence_and_recover<C: Bucket, F: Bucket>(
     let mut last_seen_epoch = writer.state().last_commit.map_or(0, epoch_of);
     let mut recovered_count = 0usize;
     let mut seg = 0u64;
-    // The segment and length at which a fence was last refused: refused again there, nobody
-    // appended meanwhile, so the store refuses it for good, the segment at its appends' limit.
-    let mut refused_at: Option<(u64, u64)> = None;
+    // The segment and length at which a fence was last refused, and how many times in a row: a
+    // refusal there with nobody appending meanwhile is a write in progress (S3's 409), which ends,
+    // or the segment at its appends' limit, which lasts; refused `FENCE_REFUSALS` times, backing off
+    // between, the take fails rather than try for ever (board 14433).
+    let mut refused: Option<(u64, u64, u32)> = None;
     if !rules().wal_activates_after_flush {
         writer.activate_fast_wal(target_fast_wal.clone()).await?;
     }
@@ -1592,15 +1600,24 @@ pub async fn fence_and_recover<C: Bucket, F: Bucket>(
                         .await?
                     {
                         Appended::Appended(_) => (seg_commits, true),
-                        Appended::Precondition if refused_at == Some((seg, rec_offset)) => {
-                            return Err(Failure::msg(format!(
-                                "fast WAL segment {key} refuses a fence at its end, {rec_offset}: \
-                                 its appends' limit reached, it can be fenced never"
-                            )));
-                        }
-                        // Old writer appended another batch or `Rolled`: re-read this segment.
+                        // Old writer appended another batch or `Rolled`, or a write of its is in
+                        // progress: re-read this segment.
                         Appended::Precondition => {
-                            refused_at = Some((seg, rec_offset));
+                            let times = match refused {
+                                Some((at, end, times)) if (at, end) == (seg, rec_offset) => {
+                                    times + 1
+                                }
+                                _ => 1,
+                            };
+                            if times >= FENCE_REFUSALS {
+                                return Err(Failure::msg(format!(
+                                    "fast WAL segment {key} refused a fence at its end, \
+                                     {rec_offset}, {times} times, nobody appending: its appends' \
+                                     limit reached, it can be fenced never"
+                                )));
+                            }
+                            refused = Some((seg, rec_offset, times));
+                            fast_bucket.pause(times).await;
                             continue;
                         }
                     }
@@ -1784,6 +1801,7 @@ mod tests {
     use bucket_cell::object_bucket::ObjectBucket;
     use bucket_cell::testing::SimBucket;
     use object_store::memory::InMemory;
+    use std::future::Future;
 
     /// The host runtime's sleep, as the uploader's clock is in production.
     fn tokio_clock() -> Clock {
@@ -2129,6 +2147,140 @@ mod tests {
         let deleting =
             bucket_cell::Rules { wal_sweep_tombstones: false, ..bucket_cell::Rules::ALL };
         assert!(told_after_sweep(deleting));
+    }
+
+    /// A bucket that refuses its first `refusals` fence records (`CFWF`) as S3 refuses a write
+    /// conflicting with one in progress (409, `Precondition`), the object unchanged.
+    struct Conflicting {
+        inner: Arc<ObjectBucket>,
+        refusals: AtomicU64,
+    }
+
+    impl Bucket for Conflicting {
+        fn get(
+            &self,
+            key: &str,
+        ) -> impl Future<Output = Result<bucket::Object, bucket::Error>> + Send {
+            self.inner.get(key)
+        }
+
+        fn get_range(
+            &self,
+            key: &str,
+            range: bucket::ByteRange,
+        ) -> impl Future<Output = Result<Vec<u8>, bucket::Error>> + Send {
+            self.inner.get_range(key, range)
+        }
+
+        fn head(
+            &self,
+            key: &str,
+        ) -> impl Future<Output = Result<bucket::Meta, bucket::Error>> + Send {
+            self.inner.head(key)
+        }
+
+        fn list(
+            &self,
+            prefix: &str,
+        ) -> impl Future<Output = Result<Vec<bucket::Meta>, bucket::Error>> + Send {
+            self.inner.list(prefix)
+        }
+
+        fn list_delimited(
+            &self,
+            prefix: &str,
+            page: bucket::Page<'_>,
+        ) -> impl Future<Output = Result<bucket::Listing, bucket::Error>> + Send {
+            self.inner.list_delimited(prefix, page)
+        }
+
+        fn put(
+            &self,
+            key: &str,
+            bytes: Bytes,
+            mode: bucket::PutMode,
+        ) -> impl Future<Output = Result<bucket::Version, bucket::Error>> + Send {
+            self.inner.put(key, bytes, mode)
+        }
+
+        async fn append(&self, key: &str, offset: u64, bytes: Bytes) -> Result<u64, bucket::Error> {
+            let refused = bytes.starts_with(&FENCE_MAGIC)
+                && self
+                    .refusals
+                    .try_update(Ordering::AcqRel, Ordering::Acquire, |left| left.checked_sub(1))
+                    .is_ok();
+            match refused {
+                true => Err(bucket::Error::Precondition),
+                false => self.inner.append(key, offset, bytes).await,
+            }
+        }
+
+        fn delete(&self, key: &str) -> impl Future<Output = Result<(), bucket::Error>> + Send {
+            self.inner.delete(key)
+        }
+
+        fn now(&self) -> u64 {
+            self.inner.now()
+        }
+    }
+
+    /// A take's fence refused at the segment's end, nobody appending, is a write in progress
+    /// that ends (S3's 409, which `ObjectBucket` answers `Precondition`): the take backs off and
+    /// fences once it ends; refused `FENCE_REFUSALS` times, the segment is at its appends' limit,
+    /// and the take fails rather than try for ever (verifying review of board 14433).
+    #[test]
+    fn takes_outlast_conflicting_writes_but_not_full_segments() {
+        fn take(refusals: u64) -> Result<usize, Failure> {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            rt.block_on(async {
+                let (cold, inner) = (memory_bucket(), memory_bucket());
+                let cell = layout::test_cell(13);
+                lifecycle::create(&*cold, cell, 1).await.unwrap();
+                let w1 = Arc::new(Writer::open(cold.clone(), cell, 10, 1).await.unwrap());
+                let active1 = ActiveWal { epoch: w1.epoch(), bucket: "memory:///fast".into() };
+                let fast_wal =
+                    |active| Some(FastWal { fsync: Fsync::FastWal, active: Some(active) });
+                w1.activate_fast_wal(fast_wal(active1.clone())).await.unwrap();
+                let sink = FastWalSink::new(
+                    "memory:///fast".into(),
+                    0,
+                    Arc::new(Event::new()),
+                    Arc::new(|| {}),
+                    None,
+                );
+                let mut writer = FastWalWriter::new(
+                    w1.clone(),
+                    inner.clone(),
+                    sink,
+                    DEFAULT_MAX_WRITER_APPENDS,
+                    DEFAULT_MAX_SEGMENT_BYTES,
+                    tokio_clock(),
+                );
+                writer.open = Some(OpenSegment::new(cell, w1.epoch(), 0, w1.keys()).unwrap());
+                let sequence = w1.chain().next_sequence();
+                let batch = WalRecord::Batch(vec![FastWalCommit {
+                    epoch: 1,
+                    tag: layout::tag(w1.epoch(), 1),
+                    inline_extents: vec![(ExtentId::new(cell.id, sequence), vec![7])],
+                    large_refs: Vec::new(),
+                    frees: Vec::new(),
+                    root: None,
+                    capacity: Some(1 << 20),
+                    next_sequence: sequence + 1,
+                    versions: Vec::new(),
+                }]);
+                assert!(writer.append_record(&batch, 1).await.unwrap());
+
+                let fast = Arc::new(Conflicting { inner, refusals: AtomicU64::new(refusals) });
+                let w2 = Arc::new(Writer::open(cold.clone(), cell, 20, 2).await.unwrap());
+                let active2 = ActiveWal { epoch: w2.epoch(), bucket: "memory:///fast".into() };
+                fence_and_recover(&w2, &cold, &fast, &active1, fast_wal(active2)).await
+            })
+        }
+
+        assert_eq!(take(2).unwrap(), 1);
+        let full = take(u64::from(FENCE_REFUSALS)).unwrap_err().to_string();
+        assert!(full.contains("it can be fenced never"), "{full}");
     }
 
     struct MapOpener(std::collections::HashMap<String, Arc<AnyBucket>>);
