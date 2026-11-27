@@ -151,6 +151,11 @@ struct virtio_extent {
 	u64 stats_answered;
 	/* cladefs: those who found it and have yet to put it, whom unbinding it waits for. */
 	atomic_t users;
+	/*
+	 * cladefs: its self-test runs, holding it alone: no one finds it meanwhile (board 14352).
+	 * Under devices_lock.
+	 */
+	bool testing;
 	struct list_head node;
 };
 
@@ -166,7 +171,7 @@ static struct virtio_extent *vext_find_bound(const char *tag)
 
 	mutex_lock(&devices_lock);
 	list_for_each_entry(vext, &devices, node) {
-		if (!strcmp(vext->config.tag, tag)) {
+		if (!strcmp(vext->config.tag, tag) && !vext->testing) {
 			atomic_inc(&vext->users);
 			found = vext;
 			break;
@@ -174,6 +179,31 @@ static struct virtio_extent *vext_find_bound(const char *tag)
 	}
 	mutex_unlock(&devices_lock);
 	return found;
+}
+
+/*
+ * cladefs: takes the device for its self-test alone, which writes extents and commits a root of
+ * its own: -EBUSY while anyone holds it, a mounted filesystem whose root it would replace among
+ * them (board 14352), or another self-test. No one finds it until vext_selftest_end().
+ */
+int vext_selftest_begin(struct virtio_extent *vext)
+{
+	int err = 0;
+
+	mutex_lock(&devices_lock);
+	if (vext->testing || atomic_read(&vext->users))
+		err = -EBUSY;
+	else
+		vext->testing = true;
+	mutex_unlock(&devices_lock);
+	return err;
+}
+
+void vext_selftest_end(struct virtio_extent *vext)
+{
+	mutex_lock(&devices_lock);
+	vext->testing = false;
+	mutex_unlock(&devices_lock);
 }
 
 /*

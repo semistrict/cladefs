@@ -2,7 +2,8 @@
 // Copyright 2026 The cladefs Authors.
 /*
  * The driver's self-test (selftest.h). It mints extents past the device's next sequence number,
- * so it can run on a store holding a filesystem, though it leaves its extents and root there.
+ * so it can run on a store holding a filesystem, though it leaves its extents and root there: never
+ * while one is mounted, whose root it would replace (board 14352).
  */
 
 #include <linux/atomic.h>
@@ -291,10 +292,14 @@ static ssize_t selftest_store(struct device *dev, struct device_attribute *attr,
 			      const char *buf, size_t count)
 {
 	struct vext_selftest *st = dev_get_drvdata(dev);
+	int err = vext_selftest_begin(st->vext);
 
+	if (err)
+		return err;
 	mutex_lock(&st->lock);
 	run(st);
 	mutex_unlock(&st->lock);
+	vext_selftest_end(st->vext);
 	return count;
 }
 

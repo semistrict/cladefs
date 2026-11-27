@@ -37,6 +37,17 @@ pub struct TestExtentGuestBadConfig {
     pub refusal: &'static str,
 }
 
+/// cladefs board 14352: the driver's self-test refuses, EBUSY, a device a mounted filesystem holds,
+/// whose root it would replace. The guest mounts its cell, writes a file and syncs it and its
+/// directory, writes the self-test's attribute (refused, the attribute still "not run"), and
+/// resets its VM at once, without syncing or unmounting, as a crash does. The host then checks and
+/// mounts the cell: the file the guest synced is there, whole. Before, the self-test ran, and the
+/// cell's root after the reset was the self-test's: its journal no longer replayed.
+pub struct TestExtentGuestSelftestMounted;
+
+/// What the guest of [`TestExtentGuestSelftestMounted`] writes and syncs before the self-test.
+const SYNCED: &[u8] = b"synced before the self-test was asked for\n";
+
 /// The version the driver is told it speaks: the device's, this build's, and one more.
 const OTHER_VERSION: (u32, u32) = (2, 3);
 
@@ -89,6 +100,67 @@ mod host {
             assert_eq!(info.next_sequence, 33);
             assert!(info.sequence_floor > 33, "the floor, {}, is past 33", info.sequence_floor);
             TestOutcome::Pass
+        }
+    }
+
+    impl Test for TestExtentGuestSelftestMounted {
+        fn should_run(&self) -> ShouldRun {
+            cladefs_guest_should_run()
+        }
+
+        fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
+            let (cell, _) =
+                crate::common::create_shared_cell(&test_setup.tmp_dir, "extents", 64 << 20)?;
+            let mut vm = Vm::new(2, 512)?;
+            vm.guest_kernel()?;
+            vm.cell_id("extents", cell, 64 << 20, 0)?;
+            vm.enter(&setup_rootfs(&test_setup)?, &test_setup.test_case)
+        }
+
+        fn check(self: Box<Self>, stdout: Vec<u8>, test_setup: TestSetup) -> TestOutcome {
+            use cladefs::{Filesystem, Storage};
+            use futures::executor::block_on;
+            let output = crate::vm::without_kernel_lines(&String::from_utf8(stdout).unwrap());
+            // EBUSY, 16 on every architecture Linux has.
+            if output != "\nSELFTEST Err(Some(16)) not run\n" {
+                return TestOutcome::Fail(format!("the guest said {output:?}"));
+            }
+            let shared = crate::common::shared_cell_path(&test_setup.tmp_dir, "extents")
+                .expect("shared cell path");
+            // A copy of the cell as the reset left it, once the daemon lets it go.
+            let path = test_setup.tmp_dir.join("extents-at-reset");
+            crate::common::copy_cell_dir(&shared, &path).unwrap();
+            let mounted = block_on(async {
+                let storage = Storage::open(&path).await;
+                let storage = storage.map_err(|err| format!("the cell does not open: {err:?}"))?;
+                let storage = storage.check().await;
+                let storage =
+                    storage.map_err(|err| format!("the cell fails its check: {err:?}"))?;
+                let fs = Filesystem::mount(storage).await;
+                let fs = fs.map_err(|err| format!("the cell does not mount: {err:?}"))?;
+                let found = fs.root().lookup(b"synced").await;
+                let (file, attr) =
+                    found.map_err(|err| format!("the synced file is not there: {err:?}"))?;
+                let mut contents = vec![0; attr.size as usize];
+                let mut read = 0;
+                while read < contents.len() {
+                    let n = file.read(read as u64, &mut contents[read..]).await;
+                    let n = n.map_err(|err| format!("the synced file does not read: {err:?}"))?;
+                    if n == 0 {
+                        return Err(format!("the synced file ends early, at {read}"));
+                    }
+                    read += n;
+                }
+                fs.close()
+                    .await
+                    .map_err(|err| format!("the filesystem does not close: {err:?}"))?;
+                Ok(contents)
+            });
+            match mounted {
+                Ok(contents) if contents == SYNCED => TestOutcome::Pass,
+                Ok(contents) => TestOutcome::Fail(format!("the synced file holds {contents:?}")),
+                Err(why) => TestOutcome::Fail(why),
+            }
         }
     }
 
@@ -162,6 +234,44 @@ mod guest {
             assert_eq!(fs::read_to_string(&selftest).unwrap(), "ok\n");
             let _ = ROOT;
             println!("OK");
+        }
+    }
+
+    impl Test for TestExtentGuestSelftestMounted {
+        fn in_guest(self: Box<Self>) {
+            use std::ffi::CString;
+            use std::io::Write as _;
+            const MNT: &str = "/mnt/fxfs";
+            let devices: Vec<_> = fs::read_dir(DRIVER)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|path| path.join("selftest").exists())
+                .collect();
+            assert_eq!(devices.len(), 1, "{devices:?}");
+            let selftest = devices[0].join("selftest");
+            fs::create_dir_all(MNT).unwrap();
+            let (source, target) = (CString::new("extents").unwrap(), CString::new(MNT).unwrap());
+            let fstype = CString::new("cladefs").unwrap();
+            // SAFETY: A plain system call, on strings that outlive it.
+            let ret = unsafe {
+                nix::libc::mount(
+                    source.as_ptr(),
+                    target.as_ptr(),
+                    fstype.as_ptr(),
+                    0,
+                    std::ptr::null(),
+                )
+            };
+            assert_eq!(ret, 0, "mount: {}", std::io::Error::last_os_error());
+            let mut file = fs::File::create(format!("{MNT}/synced")).unwrap();
+            file.write_all(SYNCED).unwrap();
+            file.sync_all().unwrap();
+            fs::File::open(MNT).unwrap().sync_all().unwrap();
+            // The self-test, asked for with the filesystem mounted.
+            let wrote = fs::write(&selftest, "1").map_err(|err| err.raw_os_error());
+            let result = fs::read_to_string(&selftest).unwrap();
+            crate::guest_init::say_out(&format!("SELFTEST {wrote:?} {}", result.trim()));
+            crate::guest_init::crash()
         }
     }
 

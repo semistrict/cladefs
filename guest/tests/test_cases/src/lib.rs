@@ -95,7 +95,10 @@ use test_fxfs_guest_snapshot::{
     TestFxfsGuestSnapshot, VOLUMES,
 };
 mod test_extent_guest;
-use test_extent_guest::{TestExtentGuest, TestExtentGuestBadConfig, TestExtentGuestOtherVersion};
+use test_extent_guest::{
+    TestExtentGuest, TestExtentGuestBadConfig, TestExtentGuestOtherVersion,
+    TestExtentGuestSelftestMounted,
+};
 mod test_runner_deadlock;
 use test_runner_deadlock::TestRunnerDeadlock;
 
@@ -868,6 +871,12 @@ pub fn test_cases() -> Vec<TestCase> {
             "extent-guest",
             &[Tag::E2e, Tag::Kernel, Tag::Nightly],
             Box::new(TestExtentGuest),
+        ),
+        // cladefs board 14352: the self-test refused while a filesystem is mounted.
+        TestCase::new(
+            "extent-guest-selftest-mounted",
+            &[Tag::E2e, Tag::Kernel, Tag::Nightly],
+            Box::new(TestExtentGuestSelftestMounted),
         ),
         TestCase::new(
             "extent-guest-other-version",
