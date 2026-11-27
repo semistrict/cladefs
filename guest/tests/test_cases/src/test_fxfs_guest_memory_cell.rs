@@ -5,10 +5,12 @@
 //! Direct `/snapshot/create` into a memory cell (TASK-456.4) and KVM dirty-page tracking on
 //! cell-backed guest memory (`MemBackendType::Cell`, board 11225):
 //!
-//! 1. Cold-booted 1 GiB VM writes a 4 MiB marker buffer (`buf_a`), freezes Fxfs, and calls
-//!    `PUT /snapshot/create` with `memory_cell: { path_on_host, cladefsd_socket }` (no local
-//!    memory file). Checks that `StatCell` stores far less than 1 GiB (resident non-zero pages
-//!    only, untouched anonymous pages skipped).
+//! 1. A freshly booted 1 GiB VM, its memory a new memory cell's window as every VM's is (board
+//!    14415), writes a 4 MiB marker buffer (`buf_a`), freezes Fxfs, and calls
+//!    `PUT /snapshot/create` with `memory_cell: {}` (no local memory file), as a restored VM's
+//!    snapshot does: its private pages written into its memory cell. Checks that `StatCell`
+//!    stores far less than 1 GiB (the pages the guest wrote, untouched ones holes), and that the
+//!    snapshot's version is of the memory cell the VM booted with.
 //! 2. Restores `child` from that version with `MemBackendType::Cell` and `track_dirty_pages: true`.
 //!    - Round 1: `child` allocates & writes a 4 MiB buffer (`buf_r1`) and mutates 16 shared pages of
 //!      `buf_a`. Host pauses `child` and takes a `Diff` snapshot (`KVM_GET_DIRTY_LOG` +
@@ -159,7 +161,8 @@ mod host {
                 std::env::var_os("CLADEFSD").context("CLADEFSD not set")?.into();
             let control = crate::common::control(&cladefsd)?;
 
-            // 1. Cold-booted 1 GiB VM snapshots straight into a memory cell (no memory file).
+            // 1. A freshly booted 1 GiB VM snapshots straight into its memory cell (no memory
+            // file), as a restored one does.
             let uds_boot = uds("boot");
             let listen_boot = listen(&uds_boot)?;
             let mut vm = Vm::new(2, RAM_MIB)?;
@@ -180,6 +183,14 @@ mod host {
             BufReader::new(&mut boot_stream).read_line(&mut line)?;
             ensure!(line.trim() == "frozen-boot", "boot guest said {line:?}");
 
+            // The cells as the VM runs: its memory cell, which its snapshot makes a version of,
+            // among them.
+            let cells_booted: BTreeSet<(u64, u64)> = control
+                .call(async |client| client.list_cells(ListCellsRequest {}).await)?
+                .stores
+                .into_iter()
+                .map(|c| (c.tenant, c.cell))
+                .collect();
             boot_fc.request("PATCH", "/vm", &serde_json::json!({ "state": "Paused" }))?;
             let snap1 = dir.join("snap1.state");
             let v1: MemoryCellSnapshot = boot_fc.request_json(
@@ -188,22 +199,23 @@ mod host {
                 &serde_json::json!({
                     "snapshot_type": "Full",
                     "snapshot_path": snap1,
-                    "memory_cell": {
-                        "path_on_host": "0/0",
-                        "cladefsd_socket": cladefsd,
-                    },
+                    "memory_cell": {},
                 }),
             )?;
             ensure!(v1.cell != 0 && v1.version != 0, "unexpected v1: {v1:?}");
+            ensure!(
+                cells_booted.contains(&(v1.tenant, v1.cell)),
+                "v1 {v1:?} is of no cell the booted VM had: {cells_booted:?}"
+            );
             boot_fc.kill()?;
 
             let boot_stat = control.call(async |client| {
                 client.stat_cell(StatCellRequest { tenant: v1.tenant, cell: v1.cell }).await
             })?;
-            eprintln!("cold-boot memory cell: used={} bytes (RAM={} MiB)", boot_stat.used, RAM_MIB);
+            eprintln!("booted memory cell: used={} bytes (RAM={} MiB)", boot_stat.used, RAM_MIB);
             ensure!(
                 boot_stat.used < 256 << 20,
-                "cold-boot memory cell stored {} bytes of a {RAM_MIB} MiB VM",
+                "the booted VM's memory cell stored {} bytes of a {RAM_MIB} MiB VM",
                 boot_stat.used
             );
             control.call(async |client| {

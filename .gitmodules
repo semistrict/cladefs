@@ -1,4 +1,4 @@
 [submodule "vendor/firecracker"]
 	path = vendor/firecracker
 	url = https://github.com/semistrict/firecracker.git
-	branch = cladefs-v1.18.0-r7
+	branch = cladefs-v1.18.0-r8

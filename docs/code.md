@@ -175,7 +175,7 @@ Each crate's `Cargo.toml` says in its first lines what it is. cladefs's own, bes
 
 ## `vendor/firecracker`: the VMM
 
-The VMM is a submodule: branch `cladefs-v1.18.0-r7` of
+The VMM is a submodule: branch `cladefs-v1.18.0-r8` of
 [semistrict/firecracker](https://github.com/semistrict/firecracker),
 Firecracker's v1.18.0 release plus cladefs's changes as one
 linear series, each release of it a branch `cladefs-v1.18.0-rN` (rebased from

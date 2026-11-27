@@ -5,8 +5,9 @@
 //! End-to-end live migration of a running Firecracker VM with a bucket-backed extent cell and a
 //! shared memory-cell base:
 //!
-//! 1. Cold-booted 1 GiB VM writes `/mnt/fxfs/stage` and a 4 MiB RAM buffer (`buf_a`), freezes
-//!    Fxfs, and snapshots straight into memory cell version `v1`.
+//! 1. A freshly booted 1 GiB VM, its memory a new memory cell's window on daemon A (board 14415),
+//!    writes `/mnt/fxfs/stage` and a 4 MiB RAM buffer (`buf_a`), freezes Fxfs, and snapshots
+//!    straight into that memory cell, version `v1`.
 //! 2. Restores `src` on daemon A with `MemBackendType::Cell` (`v1`, `track_dirty_pages: true`) and
 //!    bucket-backed cell `store-src`.
 //! 3. **No-freeze migration snapshot + abort-safe cell release/reopen:**
@@ -172,6 +173,7 @@ mod host {
             let listen_boot = listen(&uds_boot)?;
             let mut vm = Vm::new(2, RAM_MIB)?;
             vm.guest_kernel()?;
+            vm.memory_cell(Path::new("0/0"), &src_sock, false);
             vm.new_cell_served(
                 "extents",
                 CAPACITY,
@@ -188,8 +190,13 @@ mod host {
             BufReader::new(&mut boot_stream).read_line(&mut line)?;
             ensure!(line.trim() == "frozen-boot", "boot guest said {line:?}");
 
-            let boot_cells =
-                src_ctrl.call(async |c| c.list_cells(ListCellsRequest {}).await)?.stores;
+            // Its extent cell, beside its memory cell.
+            let boot_cells: Vec<_> = (src_ctrl
+                .call(async |c| c.list_cells(ListCellsRequest {}).await)?
+                .stores
+                .into_iter())
+            .filter(|c| c.stat.as_ref().is_some_and(|s| s.capacity == CAPACITY))
+            .collect();
             ensure!(boot_cells.len() == 1, "expected 1 boot cell, got {}", boot_cells.len());
             let store_boot = (boot_cells[0].tenant, boot_cells[0].cell);
 
@@ -201,10 +208,7 @@ mod host {
                 &serde_json::json!({
                     "snapshot_type": "Full",
                     "snapshot_path": snap1,
-                    "memory_cell": {
-                        "path_on_host": "0/0",
-                        "cladefsd_socket": src_sock,
-                    },
+                    "memory_cell": {},
                 }),
             )?;
             ensure!(v1.cell != 0 && v1.version != 0, "unexpected v1: {v1:?}");

@@ -113,7 +113,7 @@ case "$os/$(uname -m)" in
         source "$(dirname "${BASH_SOURCE[0]}")/lib/containers.sh"
         source "$(dirname "${BASH_SOURCE[0]}")/lib/e2e-macos.sh"
         for knob in CLADEFS_E2E_BUILD_ONLY CLADEFS_E2E_PREBUILT CLADEFS_E2E_HARNESS \
-            CLADEFS_FIRECRACKER_JAIL CLADEFS_GUEST_HUGE_PAGES CLADEFS_MAX_MAP_COUNT \
+            CLADEFS_FIRECRACKER_JAIL CLADEFS_MAX_MAP_COUNT \
             CLADEFSD_MEMORY_MAX; do
             [[ -z ${!knob:-} ]] || { echo "$knob is Linux's" >&2; exit 2; }
         done
@@ -345,15 +345,10 @@ if [[ -n ${CLADEFS_MAX_MAP_COUNT:-} ]]; then
     sysctl -q vm.max_map_count="$CLADEFS_MAX_MAP_COUNT"
     echo "vm.max_map_count: $(sysctl -n vm.max_map_count)"
 fi
-# CLADEFS_GUEST_HUGE_PAGES=2M backs each VM's memory with the host's 2 MiB huge pages, as many
-# reserved as CLADEFS_GUEST_HUGE_PAGES_MIB (default 16384) take (TASK-91.16): the hypervisor's
-# second-stage mappings of guest memory then 2 MiB each, what refilling the guest's TLB after a
-# flush walks the fewer.
-if [[ ${CLADEFS_GUEST_HUGE_PAGES:-} == 2M ]]; then
-    sysctl -q vm.nr_hugepages=$(( ${CLADEFS_GUEST_HUGE_PAGES_MIB:-16384} / 2 ))
-    echo "huge pages: $(sysctl -n vm.nr_hugepages) of 2 MiB reserved"
-elif [[ -n ${CLADEFS_GUEST_HUGE_PAGES:-} ]]; then
-    echo "CLADEFS_GUEST_HUGE_PAGES is 2M or unset" >&2; exit 2
+# CLADEFS_GUEST_HUGE_PAGES is gone: every VM's memory is a memory cell's window, of 4 KiB pages,
+# which Firecracker refuses huge pages for (board 14415, hotbed question 595).
+if [[ -n ${CLADEFS_GUEST_HUGE_PAGES:-} ]]; then
+    echo "CLADEFS_GUEST_HUGE_PAGES is gone: a VM's memory is a memory cell's window" >&2; exit 2
 fi
 # fxfs-guest-docker-dax's Docker, its static binaries (Apache-2.0), downloaded once, and BusyBox,
 # its containers' image, the host's static one (busybox-static); fxfs-guest-docker-build-dax's

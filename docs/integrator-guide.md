@@ -102,26 +102,36 @@ A VM's memory restored from a memory cell names the version in `memory_cell`'s `
 and `version`, as the disk's are named in the snapshot file, with `mem_backend.backend_path = "0/0"`
 (or `"<TENANT>/0"`).
 
-### Memory cells: snapshotting and restoring without local memory files
+### Memory cells: every VM's memory, snapshotted and restored without local memory files
 
-A VM's guest memory can live in a **memory cell** (`CELL_KIND_MEMORY`) instead of a local memory
-file, so every VM restored from the same snapshot on a host shares unmodified pages straight out of
-the extent daemon's cache (copy-on-write on first guest store).
+Every VM's guest memory is a **memory cell**'s (`CELL_KIND_MEMORY`) window, a freshly booted VM's
+as a restored VM's (board 14415): the extent daemon's pages, shared with every VM restored from the
+same snapshot on the host straight out of its cache, and a private copy of each page the guest
+writes. Its pages are 4 KiB: `machine-config`'s `huge_pages` other than `None` is refused.
+
+**Booting.** Name the new memory cell before `InstanceStart`, with `PUT /memory-cell` (or
+`memory-cell` in the configuration file); a boot without it is refused:
+
+```json
+{ "path_on_host": "0/0", "cladefsd_socket": "<tenant.sock>" }
+```
+
+`"0/0"` (or `"<TENANT>/0"`) is a new cell the daemon places, whose snapshots make versions; with
+`"ephemeral": true` it is a standalone host-local ephemeral memory cell instead, whose snapshots
+checkpoint it in place (below). The VM's memory cell is new and empty, and outlives the VM: call
+`DeleteCell` on it once the VM is gone and nothing restores from it.
 
 There are two ways to create a snapshot's memory cell version:
 
-1. **Directly from Firecracker (`PUT /snapshot/create`, preferred):** pass `memory_cell` in place of
-   `mem_file_path` — no local memory file is written:
-   - **Cold-booted (or File/Uffd-restored) VM:** pass
-     `"memory_cell": { "path_on_host": "0/0", "cladefsd_socket": "<tenant.sock>" }`. Firecracker
-     scans resident pages via `mincore` (skipping untouched anonymous RAM), writes non-zero pages,
-     commits, and makes a version.
-   - **VM already restored from a memory cell (`MemBackendType::Cell`):** pass `"memory_cell": {}`
-     (omit both fields). Firecracker writes only the window's private pages into the VM's forked
-     memory cell, commits, reclaims them back to the newly committed extents, and makes a version.
+1. **Directly from Firecracker (`PUT /snapshot/create`, preferred):** pass `"memory_cell": {}` in
+   place of `mem_file_path`, a booted VM as a restored one (`MemBackendType::Cell`): no local
+   memory file is written. Firecracker writes only the window's private pages into the VM's memory
+   cell, commits, reclaims them back to the newly committed extents, and makes a version.
    - On success, `PUT /snapshot/create` returns `200 OK` with JSON
      `{"tenant": <u64>, "cell": <u64>, "version": <u64>}`. Call `SyncCell(tenant, cell)` before
      restoring on another host.
+   - A VM restored from a `File` or `Uffd` memory backend has no memory cell: snapshot it to
+     `mem_file_path`, and import that.
 2. **Importing an existing Firecracker memory file (`ImportMemory` / `cladefsctl import-memory`):**
    call `ImportMemory(file, tenant, make_version=true)` over the control API (or
    `cladefsctl import-memory --version FILE`). Zero pages are discarded as holes; call
@@ -147,21 +157,18 @@ uploading anything to object storage:
 
 1. **Freeze, pause, and suspend (`PUT /snapshot/create`):**
    - Freeze the guest's Fxfs filesystem and pause the VM (`PATCH /vm` with `{"state": "Paused"}`).
-   - **First suspend (cold-booted anonymous RAM):** pass `"ephemeral": true` in `memory_cell`:
+   - **First suspend:** boot the VM with an ephemeral memory cell, `PUT /memory-cell`
+     `{ "path_on_host": "<dir>/mem-cell", "cladefsd_socket": "<tenant.sock>", "ephemeral": true }`:
+     a standalone host-local ephemeral memory cell (`CELL_KIND_MEMORY`, encrypted under the
+     tenant's KMS key, zero bucket uploads or references). Suspend it with `"memory_cell": {}`:
      ```json
      {
        "snapshot_type": "Full",
        "snapshot_path": "<dir>/vm.state",
-       "memory_cell": {
-         "path_on_host": "<dir>/mem-cell",
-         "cladefsd_socket": "<tenant.sock>",
-         "ephemeral": true
-       }
+       "memory_cell": {}
      }
      ```
-     Firecracker creates a standalone host-local ephemeral memory cell (`CELL_KIND_MEMORY`, encrypted
-     under the tenant's KMS key, zero bucket uploads or references), writes resident non-zero pages,
-     commits, and checkpoints it locally. For each ephemeral rootfs extent device, `cladefsd`
+     Firecracker writes the window's private pages into it, commits, and checkpoints it locally. For each ephemeral rootfs extent device, `cladefsd`
      quiesces and checkpoints the ephemeral cell in place instead of creating a bucket version,
      recording `(tenant, cell, committed)` in the snapshot state (`snapshot-extent-state` v3).
      `PUT /snapshot/create` returns `200 OK` with

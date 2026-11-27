@@ -284,7 +284,8 @@ if part firecracker; then
     # Where KVM is, as on the test host: the PCI transport's tests and the device managers'
     # persistence tests, which make VMs, the extent device's window a BAR of its device's over PCI
     # (TASK-267); with CLADEFS_FIRECRACKER_TESTS=all, the vmm crate's whole suite, its integration
-    # tests too, in their place. One at a time, as Firecracker runs them (--test-threads=1): they
+    # tests too, in their place (which boot with no memory cell, and fail, since board 14415: board
+    # 14513). One at a time, as Firecracker runs them (--test-threads=1): they
     # share host resources, such as the tap device the persistence tests open by one name,
     # `hostname`: root's to make, or, made persistent and owned by a user (ip tuntap add dev
     # hostname mode tap user USER), that user's to open. Where neither, they are left out, saying

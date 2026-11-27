@@ -384,10 +384,7 @@ mod host {
                 &serde_json::json!({
                     "snapshot_type": "Full",
                     "snapshot_path": snap1,
-                    "memory_cell": {
-                        "path_on_host": "0/0",
-                        "cladefsd_socket": cladefsd,
-                    },
+                    "memory_cell": {},
                 }),
             )?;
             ensure!(v1.cell != 0 && v1.version != 0, "unexpected v1: {v1:?}");

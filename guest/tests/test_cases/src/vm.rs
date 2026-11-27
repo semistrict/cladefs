@@ -102,20 +102,13 @@ fn balloon() -> anyhow::Result<bool> {
 }
 
 impl Vm {
-    /// A VM of `cpus` vCPUs and `ram_mib` MiB of memory.
+    /// A VM of `cpus` vCPUs and `ram_mib` MiB of memory: a new memory cell's window, `0/0` on the
+    /// extent daemon at CLADEFSD, if it is set ([`Vm::memory_cell`]).
     pub fn new(cpus: u8, ram_mib: u32) -> anyhow::Result<Self> {
-        // cladefs: CLADEFS_GUEST_HUGE_PAGES=2M backs its memory with the host's huge pages
-        // (scripts/test-e2e.sh, TASK-91.16).
-        let huge_pages = match std::env::var("CLADEFS_GUEST_HUGE_PAGES").as_deref() {
-            Ok("2M") => "2M",
-            Ok(other) => anyhow::bail!("CLADEFS_GUEST_HUGE_PAGES is 2M or unset, not {other:?}"),
-            Err(_) => "None",
-        };
         let mut config = serde_json::json!({
             "machine-config": {
                 "vcpu_count": cpus,
                 "mem_size_mib": ram_mib,
-                "huge_pages": huge_pages,
             },
             "drives": [],
             "pmem": [],
@@ -129,7 +122,7 @@ impl Vm {
                 "free_page_reporting": true,
             });
         }
-        Ok(Self {
+        let mut vm = Self {
             config,
             args: Vec::new(),
             disks: 0,
@@ -142,7 +135,27 @@ impl Vm {
             stops_with: None,
             kill_instead: None,
             loops: Vec::new(),
-        })
+        };
+        if let Some(cladefsd) = std::env::var_os("CLADEFSD") {
+            vm.memory_cell(Path::new("0/0"), Path::new(&cladefsd), false);
+        }
+        Ok(vm)
+    }
+
+    /// cladefs: makes the VM's memory a new memory cell's window, at `path` (`0/0`, a new cell of
+    /// the daemon's placing; or, `ephemeral`, a directory), on the extent daemon at `cladefsd`, as
+    /// every VM's memory is in place of anonymous memory (board 14415): the one a VM's snapshot
+    /// into a memory cell (`memory_cell: {}`) writes its private pages into. On Linux, where the
+    /// VMM is cladefs's Firecracker; on macOS, libmachine-firecracker boots on anonymous RAM still,
+    /// a fresh boot's memory cell board 13994's to do, and takes none.
+    pub fn memory_cell(&mut self, path: &Path, cladefsd: &Path, ephemeral: bool) {
+        if cfg!(target_os = "linux") {
+            self.config["memory-cell"] = serde_json::json!({
+                "path_on_host": path,
+                "cladefsd_socket": cladefsd,
+                "ephemeral": ephemeral,
+            });
+        }
     }
 
     /// Boots the kernel cladefs's scripts/build-guest-kernel.sh builds, which CLADEFS_GUEST_KERNEL
@@ -454,6 +467,11 @@ impl Vm {
         ensure!(
             self.config["boot-source"]["kernel_image_path"].is_string(),
             "Firecracker boots cladefs's guest kernel only"
+        );
+        ensure!(
+            cfg!(not(target_os = "linux")) || self.config["memory-cell"].is_object(),
+            "Firecracker boots a VM whose memory is a memory cell's window only: set CLADEFSD, or \
+             Vm::memory_cell"
         );
         let mut boot_args = match &self.fxfs_root {
             // Not a block device's: the kernel mounts it by its source, the device's tag.

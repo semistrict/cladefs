@@ -7,12 +7,13 @@
 //!
 //! 1. Fork an ephemeral Fxfs rootfs cell from a bucket version on a dedicated daemon with
 //!    `CLADEFSD_EPHEMERAL`. Record baseline bucket `uploaded_bytes`.
-//! 2. Cold-boot Firecracker VM #1 on the ephemeral rootfs cell. Guest mounts Fxfs, writes files
-//!    and a 4 MiB RAM marker buffer (`buf_a`), freezes Fxfs, and signals host.
-//! 3. Host pauses VM #1, calls `PUT /snapshot/create` with
-//!    `memory_cell: { path_on_host, cladefsd_socket, ephemeral: true }`, verifies the response has
-//!    `ephemeral: true` and `version: 0`, stops Firecracker #1 (freeing 100% of host RAM), evicts
-//!    the daemon's cache, and asserts zero bucket uploads occurred.
+//! 2. Boot Firecracker VM #1 on the ephemeral rootfs cell, its memory a new standalone ephemeral
+//!    memory cell's window (`memory-cell` with `ephemeral: true`, board 14415). Guest mounts
+//!    Fxfs, writes files and a 4 MiB RAM marker buffer (`buf_a`), freezes Fxfs, and signals host.
+//! 3. Host pauses VM #1, calls `PUT /snapshot/create` with `memory_cell: {}`, as a resumed VM's
+//!    re-suspend does, verifies the response has `ephemeral: true` and `version: 0`, stops
+//!    Firecracker #1 (freeing 100% of host RAM), evicts the daemon's cache, and asserts zero
+//!    bucket uploads occurred.
 //! 4. Host resumes Firecracker VM #2 from snapshot #1 with `MemBackendType::Cell` +
 //!    `memory_cell: { tenant, cell, cladefsd_socket, ephemeral: true }` + `cladefs_overrides`
 //!    pointing at the same ephemeral rootfs cell. Guest thaws Fxfs, verifies files and `buf_a`,
@@ -192,6 +193,7 @@ mod host {
             let listen_boot = listen(&uds_boot)?;
             let mut vm = Vm::new(2, RAM_MIB)?;
             vm.guest_kernel()?;
+            vm.memory_cell(Path::new("0/0"), &socket, true);
             vm.cell_id_served(
                 "extents",
                 eph_root_id,
@@ -218,11 +220,7 @@ mod host {
                 &serde_json::json!({
                     "snapshot_type": "Full",
                     "snapshot_path": snap1,
-                    "memory_cell": {
-                        "path_on_host": "0/0",
-                        "cladefsd_socket": socket,
-                        "ephemeral": true,
-                    },
+                    "memory_cell": {},
                 }),
             )?;
             ensure!(
