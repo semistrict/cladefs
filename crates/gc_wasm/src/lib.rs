@@ -13,6 +13,7 @@
 #![deny(clippy::undocumented_unsafe_blocks)]
 
 use base32_id::Short;
+use bucket_cell::gc_metrics::{Merge as _, SweepReport};
 use bucket_cell::layout::{self, CellId};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -50,6 +51,10 @@ pub struct CollectResult {
     /// (`"swept"`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub left: Option<&'static str>,
+    /// Per-cell GC metrics snapshot (formats, histograms, per-tenant accounting), mergeable
+    /// across fan-out workers with [`merge_reports`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<SweepReport>,
 }
 
 /// One object a dry run would delete.
@@ -140,6 +145,18 @@ pub fn parse_holder(text: &str) -> Result<u64, String> {
 pub fn is_foreign_bucket(own_number: Option<u16>, cell: CellId) -> bool {
     let Some(own) = own_number else { return false };
     layout::routed_to(&cell.prefix()).is_some_and(|of| of != own)
+}
+
+/// Folds a JSON array of per-cell or partial [`SweepReport`] values into a single merged JSON
+/// [`SweepReport`] (for fan-out/fan-in Cloudflare Workers sweeps).
+pub fn merge_reports(reports_json: &str) -> Result<String, String> {
+    let parts: Vec<SweepReport> = serde_json::from_str(reports_json)
+        .map_err(|err| format!("invalid reports JSON array: {err}"))?;
+    let mut merged = SweepReport::default();
+    for part in parts {
+        merged.merge(part);
+    }
+    serde_json::to_string(&merged).map_err(|err| format!("serializing merged report: {err}"))
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -460,8 +477,12 @@ mod wasm_api {
         };
         let bucket = JsBucket(bridge);
         let holding = Holding { lease: lease_ms as u64, since };
-        let collector =
-            Collector::new().holding(holding).shredded(shredded).stream_checkpoints(true);
+        let shared = Arc::new(bucket_cell::gc_metrics::Shared::<SweepReport>::default());
+        let collector = Collector::new()
+            .holding(holding)
+            .shredded(shredded)
+            .stream_checkpoints(true)
+            .observer(Some(shared.clone()));
         let result = match collector.collect_cell(&bucket, cell, holder).await {
             Ok(report) => CollectResult {
                 cell: cell.to_string(),
@@ -471,6 +492,7 @@ mod wasm_api {
                 skipped: report.skipped,
                 removed: report.removed,
                 left: None,
+                metrics: Some(shared.take()),
             },
             Err(Error::Left(left)) => CollectResult {
                 cell: cell.to_string(),
@@ -483,6 +505,13 @@ mod wasm_api {
             Err(err) => return Err(err_to_js(err)),
         };
         to_json(&result)
+    }
+
+    /// Merges a JSON array of [`SweepReport`] objects (from fan-out `collectCell` calls) into a
+    /// single aggregated JSON [`SweepReport`].
+    #[wasm_bindgen(js_name = "mergeMetrics")]
+    pub fn merge_metrics(reports_json: &str) -> Result<String, JsValue> {
+        merge_reports(reports_json).map_err(err_to_js)
     }
 
     /// Runs a read-only dry-run GC pass over one cell, returning JSON [`DryRunResult`].
@@ -551,5 +580,62 @@ mod wasm_api {
             None => (false, None, None),
         };
         to_json(&LiveCellResult { cell: cell.to_string(), live, origin_parent, origin_at })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bucket_cell::gc_metrics::{CellSample, Metric as _, ObjectSample};
+
+    #[test]
+    fn merge_reports_combines_fan_out_cell_metrics() {
+        let mut r1 = SweepReport::default();
+        let kept1 = [ObjectSample { kind: "segment", size: 4096, modified: 1 }];
+        r1.observe(&CellSample {
+            cell: CellId { tenant: 2, id: 1 },
+            foreign_copy: false,
+            skipped: false,
+            removed: false,
+            now: 10,
+            head_format: Some(layout::FORMAT.current),
+            lease_format: Some(layout::FORMAT.current),
+            live: Some(true),
+            versions: Some(1),
+            is_fork: Some(false),
+            replicated: Some(false),
+            references: 0,
+            kept: &kept1,
+            deleted: &[],
+        });
+
+        let mut r2 = SweepReport::default();
+        let kept2 = [ObjectSample { kind: "segment", size: 8192, modified: 2 }];
+        r2.observe(&CellSample {
+            cell: CellId { tenant: 2, id: 2 },
+            foreign_copy: false,
+            skipped: true,
+            removed: false,
+            now: 10,
+            head_format: None,
+            lease_format: Some(layout::FORMAT.current),
+            live: None,
+            versions: None,
+            is_fork: None,
+            replicated: None,
+            references: 0,
+            kept: &kept2,
+            deleted: &[],
+        });
+
+        let input = serde_json::to_string(&[r1, r2]).unwrap();
+        let merged_json = merge_reports(&input).unwrap();
+        let merged: SweepReport = serde_json::from_str(&merged_json).unwrap();
+        assert_eq!(merged.cells.total, 2);
+        assert_eq!(merged.cells.live, 1);
+        assert_eq!(merged.cells.skipped, 1);
+        assert_eq!(merged.stored.objects, 2);
+        assert_eq!(merged.stored.bytes, 12288);
+        assert_eq!(merged.tenants.len(), 1);
     }
 }

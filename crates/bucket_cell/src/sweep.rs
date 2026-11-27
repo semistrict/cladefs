@@ -37,6 +37,7 @@
 use crate::bucket::{Bucket, ByteRange, Error as BucketError, Listing, Meta, Object, Page};
 use crate::bucket::{PutMode, Refused, Version};
 use crate::collector::{Budget, Collector, Holding, Report};
+use crate::gc_metrics::Observer;
 use crate::layout::CellId;
 use crate::object_bucket::Request;
 use crate::{Error, Left};
@@ -76,7 +77,7 @@ pub struct Sweep {
 
 /// cladefs: what bounds a sweep besides its passes at once (boards 8529, 8513): nothing, by
 /// default.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct Limits {
     /// The most objects its passes delete together, and the most bytes of them, as listed
     /// ([`Budget`]): once a pass would go past either, it deletes nothing, nor does any pass after
@@ -96,6 +97,22 @@ pub struct Limits {
     /// cladefs: tenants known to be shredded (populated by `cladefs-gc` from the root bucket's
     /// `events` object).
     pub shredded: Option<Arc<BTreeSet<u64>>>,
+    /// Optional streaming GC metrics observer notified once per completed cell pass.
+    pub observer: Option<Arc<dyn Observer>>,
+}
+
+impl std::fmt::Debug for Limits {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Limits")
+            .field("deleted_objects", &self.deleted_objects)
+            .field("deleted_bytes", &self.deleted_bytes)
+            .field("requests_per_second", &self.requests_per_second)
+            .field("refused_in_a_row", &self.refused_in_a_row)
+            .field("stop", &self.stop)
+            .field("shredded", &self.shredded)
+            .field("observer", &self.observer.as_ref().map(|_| ".."))
+            .finish()
+    }
 }
 
 /// cladefs: what asks a process's sweeps to stop (board 8513), as SIGTERM and SIGINT have
@@ -477,9 +494,10 @@ impl Sweep {
             let (sweep, bucket) = (self.clone(), bucket.clone());
             let copies = copies.clone();
             let shredded = shredded.clone();
+            let observer = bounds.limits.observer.clone();
             let (budget, pacer) = (bounds.budget.clone(), bounds.pacer.clone());
             let pass = async move {
-                let bounded = (budget, pacer);
+                let bounded = (budget, pacer, observer);
                 sweep.pass(&bucket, copies, shredded, cell, since, bounded).await
             };
             match self.spawned {
@@ -534,7 +552,11 @@ impl Sweep {
         shredded: Arc<BTreeSet<u64>>,
         cell: CellId,
         since: u64,
-        (budget, pacer): (Option<Arc<Budget>>, Option<Arc<Pacer>>),
+        (budget, pacer, observer): (
+            Option<Arc<Budget>>,
+            Option<Arc<Pacer>>,
+            Option<Arc<dyn Observer>>,
+        ),
     ) -> Ran {
         let counted = Counted::new(bucket.clone(), pacer.clone());
         // cladefs: a cell of another bucket here is a copy of its versions (TASK-633.8).
@@ -542,7 +564,7 @@ impl Sweep {
             && crate::layout::routed_to(&cell.prefix()).is_some_and(|of| of != number)
         {
             let started = Instant::now();
-            let collector = Collector::new().budget(budget).shredded(shredded);
+            let collector = Collector::new().budget(budget).shredded(shredded).observer(observer);
             // Its requests of its own bucket, counted and paced as those of this one.
             let own = Counted::new(own, pacer);
             let outcome = match self.mode {
@@ -556,7 +578,8 @@ impl Sweep {
             return Ran { cell, outcome, requests, took: started.elapsed() };
         }
         let holding = Holding { lease: self.lease, since: Some(since) };
-        let collector = Collector::new().holding(holding).budget(budget).shredded(shredded);
+        let collector =
+            Collector::new().holding(holding).budget(budget).shredded(shredded).observer(observer);
         let holder = bucket.random_u64();
         let started = Instant::now();
         let outcome = match self.mode {

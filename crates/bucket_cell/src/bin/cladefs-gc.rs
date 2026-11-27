@@ -123,6 +123,7 @@
 use base32_id::Short;
 use bucket_cell::bucket::{Bucket, Meta};
 use bucket_cell::collector::{Collector, DryRun, Report};
+use bucket_cell::gc_metrics::{self, Shared, SweepReport};
 use bucket_cell::layout;
 use bucket_cell::layout::CellId;
 use bucket_cell::layout::Head;
@@ -139,7 +140,7 @@ use std::time::{Duration, SystemTime};
 
 fn usage() -> String {
     "usage: cladefs-gc URL [--cell TENANT/CELL] [--every SECONDS] \
-     [--at-once PASSES] [--lease SECONDS] [--metrics FILE] \
+     [--at-once PASSES] [--lease SECONDS] [--metrics FILE] [--report FILE] \
      [--max-delete-objects N] [--max-delete-bytes N] [--max-requests-per-second N] \
      [--max-refused-passes N] | \
      cladefs-gc URL [--cell TENANT/CELL] --dry-run | \
@@ -184,8 +185,11 @@ struct Run {
     at_once: usize,
     /// How long each holds its cell, in milliseconds.
     lease: u64,
-    /// Where it writes its metrics, if anywhere.
+    /// Where it writes its Prometheus metrics, if anywhere.
     metrics: Option<PathBuf>,
+    /// Where it writes its structured JSON sweep report (formats, histograms, per-tenant billing),
+    /// if anywhere (`-` for stdout).
+    report: Option<PathBuf>,
     /// cladefs: the most objects, and bytes, its passes delete together, the most requests a
     /// second they make, and the passes in a row the bucket refuses after which it starts no
     /// more (board 8529, `bucket_cell::sweep::Limits`).
@@ -201,6 +205,7 @@ impl Default for Run {
             at_once: 16,
             lease: 600_000,
             metrics: None,
+            report: None,
             max_deleted_objects: None,
             max_deleted_bytes: None,
             requests_per_second: None,
@@ -294,6 +299,7 @@ fn parse_collect(flags: &[&str]) -> Result<Command, String> {
             "--cell" if cell.is_none() => cell = Some(value()?.parse().map_err(|_| usage())?),
             "--at-once" => run.at_once = count(value()?)?,
             "--metrics" if run.metrics.is_none() => run.metrics = Some(value()?.into()),
+            "--report" if run.report.is_none() => run.report = Some(value()?.into()),
             "--every" => every = Some(seconds(value()?)?),
             "--lease" => run.lease = millis(seconds(value()?)?),
             "--max-delete-objects" => run.max_deleted_objects = Some(count(value()?)?),
@@ -560,6 +566,11 @@ async fn collect(
     let mut sweeps = 0;
     loop {
         let shredded = shredded_tenants(bucket).await?;
+        let collect_aggregates = run.metrics.is_some() || run.report.is_some();
+        let shared_report = collect_aggregates.then(|| Arc::new(Shared::<SweepReport>::default()));
+        let observer = shared_report
+            .as_ref()
+            .map(|shared| Arc::clone(shared) as Arc<dyn gc_metrics::Observer>);
         let limits = Limits {
             deleted_objects: run.max_deleted_objects,
             deleted_bytes: run.max_deleted_bytes,
@@ -567,6 +578,7 @@ async fn collect(
             refused_in_a_row: Some(run.refused_in_a_row),
             stop: Some(stop.clone()),
             shredded: Some(shredded),
+            observer,
         };
         let mut passes = Histogram::default();
         let observe = |ran: &Ran| {
@@ -582,9 +594,32 @@ async fn collect(
         if let Some(stopped) = &swept.stopped {
             eprintln!("cladefs-gc: the sweep stopped: {stopped}");
         }
+        let mut aggregate = shared_report.map(|shared| shared.take()).unwrap_or_default();
+        if collect_aggregates {
+            match bucket_cell::gates::get(&*own).await {
+                Ok(Some(gates)) => {
+                    aggregate.formats.bucket_gates = Some(gates.into());
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    log::warn!("cladefs-gc: reading bucket format gates for report: {err}");
+                }
+            }
+        }
         if let Some(file) = &run.metrics {
-            let written = metrics(sweeps, &swept, &passes, peak_resident(), SystemTime::now());
+            let written =
+                metrics(sweeps, &swept, &passes, &aggregate, peak_resident(), SystemTime::now());
             write_atomically(file, &written).map_err(|err| format!("{}: {err}", file.display()))?;
+        }
+        if let Some(file) = &run.report {
+            let json = serde_json::to_string_pretty(&aggregate)
+                .map_err(|err| format!("serializing sweep report: {err}"))?;
+            if file.as_os_str() == "-" {
+                println!("{json}");
+            } else {
+                write_atomically(file, &format!("{json}\n"))
+                    .map_err(|err| format!("{}: {err}", file.display()))?;
+            }
         }
         let ended = ended(&swept);
         let Some(every) = every else { return ended };
@@ -939,7 +974,14 @@ impl Histogram {
 /// - `cladefs_gc_pass_seconds`: a histogram of how long its passes took, those it ran;
 ///   `cladefs_gc_slowest_pass_seconds{cell}`: its slowest passes, by their cells, TENANT/CELL.
 /// - `cladefs_gc_peak_resident_bytes`: the most memory the process held so far.
-fn metrics(sweeps: u64, swept: &Swept, passes: &Histogram, peak: u64, now: SystemTime) -> String {
+fn metrics(
+    sweeps: u64,
+    swept: &Swept,
+    passes: &Histogram,
+    aggregate: &SweepReport,
+    peak: u64,
+    now: SystemTime,
+) -> String {
     let mut text = String::new();
     let mut family = |name: &str, kind: &str, help: &str, samples: &[(String, String)]| {
         text += &format!("# HELP {name} {help}\n# TYPE {name} {kind}\n");
@@ -1070,6 +1112,7 @@ fn metrics(sweeps: u64, swept: &Swept, passes: &Histogram, peak: u64, now: Syste
         "The most memory the process held so far.",
         &one(peak.to_string()),
     );
+    text += &aggregate.to_prometheus();
     text
 }
 
@@ -1305,6 +1348,8 @@ struct TomlGc {
     #[serde(default)]
     metrics_file: Option<PathBuf>,
     #[serde(default)]
+    report_file: Option<PathBuf>,
+    #[serde(default)]
     max_delete_objects: Option<u64>,
     #[serde(default)]
     max_delete_bytes: Option<TomlByteSize>,
@@ -1401,6 +1446,12 @@ fn load_toml_args(raw: Vec<String>) -> Result<Vec<String>, String> {
         {
             effective.push("--metrics".into());
             effective.push(metrics.to_string_lossy().into_owned());
+        }
+        if let Some(report) = &cfg.gc.report_file
+            && !has_flag("--report")
+        {
+            effective.push("--report".into());
+            effective.push(report.to_string_lossy().into_owned());
         }
         if let Some(max_obj) = cfg.gc.max_delete_objects
             && !has_flag("--max-delete-objects")
@@ -1660,7 +1711,7 @@ mod tests {
             passes.observe(&Ran { cell, outcome, requests: Requests::default(), took });
         }
         let now = SystemTime::UNIX_EPOCH + Duration::from_millis(1_700_000_000_250);
-        let text = metrics(2, &swept, &passes, 64 << 20, now);
+        let text = metrics(2, &swept, &passes, &SweepReport::default(), 64 << 20, now);
         let expected = "\
 # HELP cladefs_gc_sweeps_total Sweeps the process ran.
 # TYPE cladefs_gc_sweeps_total counter
@@ -1874,7 +1925,14 @@ cladefs_gc_peak_resident_bytes 67108864
             (odd, cells([0, 2, 3, 0, 0]), stopped("capped"), 4),
         ];
         for (swept, cells, stopped, capped) in cases {
-            let text = metrics(1, &swept, &Histogram::default(), 0, SystemTime::UNIX_EPOCH);
+            let text = metrics(
+                1,
+                &swept,
+                &Histogram::default(),
+                &SweepReport::default(),
+                0,
+                SystemTime::UNIX_EPOCH,
+            );
             let capped = format!("cladefs_gc_sweep_capped_passes {capped}");
             for line in cells.iter().chain(&stopped).chain([&capped]) {
                 assert!(text.lines().any(|had| had == line), "{line} in {text}");
@@ -1923,6 +1981,7 @@ every_secs = 60
 at_once = 4
 lease_secs = 30
 metrics_file = "/tmp/gc.prom"
+report_file = "/tmp/gc-report.json"
 max_delete_objects = 100
 max_delete_bytes = "1GiB"
 max_requests_per_second = 50.0
@@ -1938,6 +1997,7 @@ max_refused_passes = 3
             Command::Collect { every, mode, run, .. } => {
                 assert_eq!(every, Some(Duration::from_secs(60)));
                 assert_eq!(mode, Mode::Delete);
+                assert_eq!(run.report, Some(PathBuf::from("/tmp/gc-report.json")));
                 assert_eq!(run.max_deleted_objects, Some(100));
                 assert_eq!(run.max_deleted_bytes, Some(1 << 30));
             }

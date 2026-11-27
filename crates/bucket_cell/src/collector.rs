@@ -91,6 +91,7 @@
 //! touching neither the bucket nor its readers' path.
 
 use crate::bucket::{self, Bucket, Meta};
+use crate::gc_metrics::{CellSample, ObjectSample, Observer};
 use crate::layout::Head;
 use crate::layout::{self, CellId, Kind, Location, Origin};
 use crate::passed::{self, CollectorLease, LeaseTaking, Listed, Passed, Usage};
@@ -273,6 +274,8 @@ pub struct Collector {
     /// materializing the full `imbl::OrdMap<ExtentId, Location>`, bounding peak RAM to a few MiB
     /// per cell (default on `wasm32` for Cloudflare Workers' 128 MiB isolate limit).
     stream_checkpoints: bool,
+    /// Optional streaming metrics observer notified once per completed cell pass (zero extra I/O).
+    observer: Option<Arc<dyn Observer>>,
 }
 
 impl Default for Collector {
@@ -282,6 +285,7 @@ impl Default for Collector {
             budget: None,
             shredded: Arc::new(BTreeSet::new()),
             stream_checkpoints: cfg!(target_arch = "wasm32"),
+            observer: None,
         }
     }
 }
@@ -321,6 +325,12 @@ impl Collector {
     /// decoding full `State` maps into memory.
     pub fn stream_checkpoints(self, stream_checkpoints: bool) -> Self {
         Self { stream_checkpoints, ..self }
+    }
+
+    /// Attaches an [`Observer`] notified once per completed cell pass with [`CellSample`] metadata
+    /// gathered from the pass's existing listings and reads (zero extra bucket requests).
+    pub fn observer(self, observer: Option<Arc<dyn Observer>>) -> Self {
+        Self { observer, ..self }
     }
 
     /// cladefs: whether a pass may delete `objects` objects of `bytes` bytes, as its budget says,
@@ -561,6 +571,7 @@ impl Collector {
             bucket::delete_all(own, stale_pins).await?;
         }
         if !whole {
+            self.observe_copy(own, cell, &listed, false, &[]);
             return Ok(report);
         }
         bucket::delete_all(bucket, &holds).await?;
@@ -571,10 +582,15 @@ impl Collector {
         bucket::delete_all(own, &marks.into_iter().collect::<Vec<_>>()).await?;
         // What it deleted of the copy, not the marks, its own, which a pass over a child here may
         // have written as this one ran.
+        let mut deleted_metas = Vec::new();
         for metas in [markers, copied] {
             report.deleted += metas.len();
             report.deleted_bytes += metas.iter().map(|meta| meta.size).sum::<u64>();
+            if self.observer.is_some() {
+                deleted_metas.extend(metas);
+            }
         }
+        self.observe_copy(own, cell, &listed, true, &deleted_metas);
         Ok(report)
     }
 
@@ -660,7 +676,9 @@ impl Collector {
             return Ok(Looked::Changed(listed, epoch, EphemeralCheck::Retired(decommissioned)));
         }
         let skipped = Report { skipped: 1, ..Report::default() };
-        Ok(Looked::Unchanged(self.trim_evidence(bucket, cell, &listed, skipped).await?))
+        Ok(Looked::Unchanged(
+            self.trim_evidence(bucket, cell, Some(lease.format), &listed, skipped).await?,
+        ))
     }
 
     /// cladefs: checks whether `objects` holds any ephemeral reference under `cell` that should
@@ -770,7 +788,14 @@ impl Collector {
                         None => {
                             let skipped = Report { skipped: 1, ..Report::default() };
                             return Ok((
-                                self.trim_evidence(bucket, cell, listed, skipped).await?,
+                                self.trim_evidence(
+                                    bucket,
+                                    cell,
+                                    Some(layout::FORMAT.current),
+                                    listed,
+                                    skipped,
+                                )
+                                .await?,
                                 None,
                             ));
                         }
@@ -855,8 +880,26 @@ impl Collector {
             report.removed += removal.remove(bucket).await?;
             report.deleted += usize::from(removal.head.is_some());
             report.deleted_bytes += removal.head.map_or(0, |meta| meta.size);
+            self.observe_pass(
+                bucket,
+                cell,
+                Some(layout::FORMAT.current),
+                &pass,
+                &doomed,
+                &retired_ephemeral,
+                Some(&removal),
+            );
             return Ok((report, None));
         }
+        self.observe_pass(
+            bucket,
+            cell,
+            Some(layout::FORMAT.current),
+            &pass,
+            &doomed,
+            &retired_ephemeral,
+            None,
+        );
         // What the cell takes now: as listed, less what went.
         let mut usage = pass.recording.usage.clone();
         doomed.iter().for_each(|meta| usage.remove(&meta.key, meta.size));
@@ -969,7 +1012,9 @@ impl Collector {
         else {
             return Ok(DryRun { fenced: true, ..DryRun::default() });
         };
-        let doomed = pass.doomed(bucket, &self.shredded)?.into_iter().cloned().collect();
+        let doomed_refs = pass.doomed(bucket, &self.shredded)?;
+        self.observe_pass(bucket, cell, None, &pass, &doomed_refs, &[], None);
+        let doomed = doomed_refs.into_iter().cloned().collect();
         let mut retired: Vec<String> = pass.retired().into_iter().map(|(key, _)| key).collect();
         retired.extend(pass.recording.stale.iter().cloned());
         retired.extend(
@@ -1233,24 +1278,168 @@ impl Collector {
         &self,
         bucket: &impl Bucket,
         cell: CellId,
+        lease_format: Option<u32>,
         listed: &Listed,
         report: Report,
     ) -> Result<Report, Error> {
         let evidence = layout::evidence_of_cell(cell);
-        let listed = bucket::under(&listed.objects, &evidence);
-        let doomed = crate::evidence::doomed(cell, &listed, None, &self.shredded, bucket.now());
+        let under = bucket::under(&listed.objects, &evidence);
+        let doomed = crate::evidence::doomed(cell, &under, None, &self.shredded, bucket.now());
         let deleted_bytes = doomed.iter().map(|meta| meta.size).sum::<u64>();
         if !self.may_delete(doomed.len(), deleted_bytes) {
+            self.observe_skipped(bucket, cell, lease_format, listed, &[]);
             return Ok(report);
         }
         let keys: Vec<&str> = doomed.iter().map(|meta| meta.key.as_str()).collect();
         bucket::delete_all(bucket, &keys).await?;
+        self.observe_skipped(bucket, cell, lease_format, listed, &doomed);
         Ok(Report {
             deleted: report.deleted + keys.len(),
             deleted_bytes: report.deleted_bytes + deleted_bytes,
             ..report
         })
     }
+
+    fn observe_skipped(
+        &self,
+        bucket: &impl Bucket,
+        cell: CellId,
+        lease_format: Option<u32>,
+        listed: &Listed,
+        trimmed: &[&Meta],
+    ) {
+        let Some(observer) = &self.observer else { return };
+        let deleted_keys: BTreeSet<&str> = trimmed.iter().map(|m| m.key.as_str()).collect();
+        let kept: Vec<ObjectSample> = listed
+            .objects
+            .values()
+            .filter(|m| !deleted_keys.contains(m.key.as_str()))
+            .map(object_sample)
+            .collect();
+        let deleted: Vec<ObjectSample> = trimmed.iter().copied().map(object_sample).collect();
+        observer.observe(&CellSample {
+            cell,
+            foreign_copy: false,
+            skipped: true,
+            removed: false,
+            now: bucket.now(),
+            head_format: None,
+            lease_format,
+            live: None,
+            versions: None,
+            is_fork: None,
+            replicated: None,
+            references: listed.references as u64,
+            kept: &kept,
+            deleted: &deleted,
+        });
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn observe_pass(
+        &self,
+        bucket: &impl Bucket,
+        cell: CellId,
+        lease_format: Option<u32>,
+        pass: &Pass,
+        doomed: &[&Meta],
+        retired_ephemeral: &[(&str, String)],
+        removal: Option<&Removal<'_>>,
+    ) {
+        let Some(observer) = &self.observer else { return };
+        let mut deleted_keys: BTreeSet<&str> = doomed.iter().map(|m| m.key.as_str()).collect();
+        for &(ref_key, _) in retired_ephemeral {
+            deleted_keys.insert(ref_key);
+        }
+        if let Some(rem) = removal {
+            if let Some(head) = rem.head {
+                deleted_keys.insert(head.key.as_str());
+            }
+            if let Some(lease) = rem.lease {
+                deleted_keys.insert(lease.key.as_str());
+            }
+        }
+        let kept: Vec<ObjectSample> = if removal.is_some() {
+            Vec::new()
+        } else {
+            pass.objects
+                .values()
+                .filter(|m| !deleted_keys.contains(m.key.as_str()))
+                .map(object_sample)
+                .collect()
+        };
+        let mut deleted: Vec<ObjectSample> = doomed.iter().copied().map(object_sample).collect();
+        for &(ref_key, _) in retired_ephemeral {
+            if let Some(meta) = pass.objects.get(ref_key) {
+                deleted.push(object_sample(meta));
+            }
+        }
+        if let Some(rem) = removal
+            && let Some(head) = rem.head
+        {
+            deleted.push(object_sample(head));
+        }
+        let head = pass.record.as_ref();
+        observer.observe(&CellSample {
+            cell,
+            foreign_copy: false,
+            skipped: false,
+            removed: removal.is_some(),
+            now: bucket.now(),
+            head_format: head.map(|h| h.format),
+            lease_format,
+            live: head.map(|h| !h.deleted()),
+            versions: head.map(|h| h.versions.len() as u64),
+            is_fork: head.map(|h| h.origin().is_some()),
+            replicated: head.map(|h| h.replication.is_some()),
+            references: pass.recording.references as u64,
+            kept: &kept,
+            deleted: &deleted,
+        });
+    }
+
+    #[cfg(feature = "full")]
+    fn observe_copy(
+        &self,
+        bucket: &impl Bucket,
+        cell: CellId,
+        listed: &[Meta],
+        removed: bool,
+        deleted_metas: &[&Meta],
+    ) {
+        let Some(observer) = &self.observer else { return };
+        let deleted_keys: BTreeSet<&str> = deleted_metas.iter().map(|m| m.key.as_str()).collect();
+        let kept: Vec<ObjectSample> = if removed {
+            Vec::new()
+        } else {
+            listed
+                .iter()
+                .filter(|m| !deleted_keys.contains(m.key.as_str()))
+                .map(object_sample)
+                .collect()
+        };
+        let deleted: Vec<ObjectSample> = deleted_metas.iter().copied().map(object_sample).collect();
+        observer.observe(&CellSample {
+            cell,
+            foreign_copy: true,
+            skipped: false,
+            removed,
+            now: bucket.now(),
+            head_format: None,
+            lease_format: None,
+            live: None,
+            versions: None,
+            is_fork: None,
+            replicated: None,
+            references: 0,
+            kept: &kept,
+            deleted: &deleted,
+        });
+    }
+}
+
+fn object_sample(meta: &Meta) -> ObjectSample {
+    ObjectSample { kind: layout::kind(&meta.key).name(), size: meta.size, modified: meta.modified }
 }
 
 /// cladefs: whether a pass writes to the bucket what giving up on forks needs: a dry run writes

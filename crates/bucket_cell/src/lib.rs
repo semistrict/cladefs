@@ -77,6 +77,7 @@ pub mod faults;
 #[cfg(feature = "full")]
 pub mod fetch;
 pub mod gates;
+pub mod gc_metrics;
 #[cfg(all(test, feature = "full"))]
 mod golden;
 pub mod head;

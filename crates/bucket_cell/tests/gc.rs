@@ -593,15 +593,70 @@ fn rotates_master_keys_rewrapping_every_tenants_kek() {
 fn without_a_bucket_prints_its_usage() {
     let out = gc(&[]);
     let usage = "usage: cladefs-gc URL [--cell TENANT/CELL] [--every SECONDS] [--at-once PASSES] \
-                 [--lease SECONDS] [--metrics FILE] [--max-delete-objects N] [--max-delete-bytes N] \
-                 [--max-requests-per-second N] [--max-refused-passes N] | cladefs-gc URL [--cell \
-                 TENANT/CELL] --dry-run | cladefs-gc URL --cells [--cell TENANT/CELL] [--held FILE] \
-                 | cladefs-gc URL --delete-cell TENANT/CELL [--force-missing] | cladefs-gc URL \
-                 --delete-tenant TENANT | cladefs-gc URL --usage [--tenant TENANT] | cladefs-gc \
-                 URL --rotate-master-key (every cell, or the one --cell names; SECONDS from a \
-                 millisecond to a year; --dry-run writes nothing)";
+                 [--lease SECONDS] [--metrics FILE] [--report FILE] [--max-delete-objects N] \
+                 [--max-delete-bytes N] [--max-requests-per-second N] [--max-refused-passes N] | \
+                 cladefs-gc URL [--cell TENANT/CELL] --dry-run | cladefs-gc URL --cells [--cell \
+                 TENANT/CELL] [--held FILE] | cladefs-gc URL --delete-cell TENANT/CELL \
+                 [--force-missing] | cladefs-gc URL --delete-tenant TENANT | cladefs-gc URL \
+                 --usage [--tenant TENANT] | cladefs-gc URL --rotate-master-key (every cell, or \
+                 the one --cell names; SECONDS from a millisecond to a year; --dry-run writes \
+                 nothing)";
     assert_eq!(String::from_utf8_lossy(&out.stderr), format!("Error: {usage:?}\n"));
     assert_eq!(out.status.code(), Some(1));
+}
+
+#[test]
+fn sweeps_write_json_report_and_extended_prometheus_metrics() {
+    use bucket_cell::gc_metrics::SweepReport;
+    use bucket_cell::object_bucket::ObjectBucket;
+    use bucket_cell::{identity, lifecycle};
+
+    let dir = tempfile::tempdir().unwrap();
+    let url = file_bucket(&dir);
+    let bucket = ObjectBucket::from_url(&url).unwrap();
+    futures::executor::block_on(async {
+        let _ = identity::format(&bucket, &identity::Details::default()).await.unwrap();
+        lifecycle::create(&bucket, test_cell(1), 0).await.unwrap();
+        lifecycle::create(&bucket, bucket_cell::layout::CellId { tenant: 2, id: 1 }, 0)
+            .await
+            .unwrap();
+    });
+
+    let out_dir = tempfile::tempdir().unwrap();
+    let prom_file = out_dir.path().join("gc.prom");
+    let report_file = out_dir.path().join("gc.json");
+    let out = gc(&[
+        &url,
+        "--metrics",
+        prom_file.to_str().unwrap(),
+        "--report",
+        report_file.to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+
+    let report: SweepReport =
+        serde_json::from_str(&std::fs::read_to_string(&report_file).unwrap()).unwrap();
+    assert_eq!(report.cells.total, 2);
+    assert_eq!(report.cells.live, 2);
+    assert_eq!(report.tenants.len(), 2);
+    assert_eq!(
+        report.formats.bucket_gates,
+        Some(bucket_cell::gc_metrics::BucketGates {
+            storage: formats::gates::CURRENT_STORAGE,
+            fxfs: formats::gates::CURRENT_FXFS,
+        })
+    );
+    assert_eq!(report.formats.head_versions.get(&bucket_cell::layout::FORMAT.current), Some(&2));
+    assert!(report.stored.bytes > 0);
+    assert!(report.object_sizes.stats.count > 0);
+
+    let prom = std::fs::read_to_string(&prom_file).unwrap();
+    assert!(prom.contains("cladefs_gc_bucket_gate_version{knob=\"storage\"} 1"), "{prom}");
+    assert!(prom.contains("cladefs_gc_tenants_observed 2"), "{prom}");
+    assert!(prom.contains("cladefs_gc_format_cells{scope=\"head\",version=\"35\"} 2"), "{prom}");
+    assert!(prom.contains("cladefs_gc_object_size_bytes_count "), "{prom}");
+    assert!(prom.contains("cladefs_gc_cell_size_bytes_count 2"), "{prom}");
+    assert!(!prom.contains("tenant="), "high-cardinality tenant label leaked into prom: {prom}");
 }
 
 /// The cells' objects of the bucket at `url`, the collector's leases aside, which a pass writes
