@@ -211,6 +211,9 @@ struct State {
     private: BTreeMap<u64, u32>,
     /// Let go of ([`HvfSecondStage::release`]): nothing is mapped any more.
     released: bool,
+    /// How many unmaps it made: what tells a fault whose unit went after the daemon named it
+    /// from one the daemon named nothing at ([`HvfSecondStage::fault`]).
+    unmaps: u64,
 }
 
 /// The window's private memory: an anonymous mapping as large as the window, of which only the
@@ -313,6 +316,7 @@ impl HvfSecondStage {
                 units: BTreeMap::new(),
                 private: BTreeMap::new(),
                 released: false,
+                unmaps: 0,
             }),
             faults: OnceLock::new(),
             copies: Default::default(),
@@ -373,7 +377,12 @@ impl HvfSecondStage {
         }
         let at = offset - offset % self.unit;
         let faults = self.faults.get().ok_or(Errno::ENOTCONN)?;
-        let mut named = false;
+        // The unmaps made as the daemon was last asked to name the unit. The guest's next change
+        // may take a unit away after the daemon named it, before its fault's reply comes back,
+        // as the window then lets go of it too (a MAP of a unit beside it, board 14436): asked
+        // again, the daemon names it anew, as KVM's fault again does on Linux. Gone with no
+        // unmap since, the daemon named nothing there.
+        let mut asked = None;
         loop {
             {
                 let mut state = self.state.lock().unwrap();
@@ -390,14 +399,13 @@ impl HvfSecondStage {
                         self.count_copies(1, start);
                         return Ok(());
                     }
-                    (None, _) if named => return Err(Errno::ENOENT),
-                    (None, _) => {}
+                    (None, _) if asked == Some(state.unmaps) => return Err(Errno::ENOENT),
+                    (None, _) => asked = Some(state.unmaps),
                 }
             }
             if let Err(err) = futures::executor::block_on(faults.fault_page(at)) {
                 return Err(if faults.lost() { Errno::ENOTCONN } else { err });
             }
-            named = true;
         }
     }
 
@@ -514,7 +522,11 @@ impl HvfSecondStage {
     /// Ends the private units at `ended`, which the guest maps no more, the stage's lock held
     /// (`state`): each host page left with none given back to the host.
     fn end_private(&self, state: &mut State, ended: &[u64]) {
-        let (memory, _) = self.private.get().expect("private units of a window that copies");
+        // A window that doesn't copy has none to end, as its unmaps say.
+        let Some((memory, _)) = self.private.get() else {
+            assert!(ended.is_empty(), "private units of a window that doesn't copy");
+            return;
+        };
         for &at in ended {
             let page = host_page_of(at);
             let held = state.private.get_mut(&page).expect("a private unit's host page counted");
@@ -744,6 +756,7 @@ impl SecondStage for HvfSecondStage {
             state.units.remove(at);
         }
         self.end_private(&mut state, &ended);
+        state.unmaps += 1;
     }
 }
 
@@ -841,6 +854,79 @@ mod tests {
         // A host's unmap keeps every private unit, the page's included.
         stage.unmap(host_page, unit, Private::Keep);
         assert_eq!((stage.installed(), stage.private_pages()), (private, private));
+    }
+
+    /// Faults whose daemon maps the unit asked for, and, for its first `racing` faults, has the
+    /// guest's next change take it away again before the fault's reply, as a MAP beside it does.
+    struct Racing {
+        stage: OnceLock<std::sync::Weak<HvfSecondStage>>,
+        racing: u64,
+        asked: AtomicU64,
+    }
+
+    impl Faults for Racing {
+        fn size(&self) -> u64 {
+            1 << 20
+        }
+
+        fn fault_page(&self, offset: u64) -> futures::future::BoxFuture<'_, Result<(), Errno>> {
+            let stage = self.stage.get().unwrap().upgrade().unwrap();
+            stage.map(offset, at(0), map_unit());
+            if self.asked.fetch_add(1, Ordering::Relaxed) < self.racing {
+                stage.unmap(offset, map_unit(), Private::End);
+            }
+            Box::pin(std::future::ready(Ok(())))
+        }
+
+        fn probe(&self, offset: u64) -> futures::future::BoxFuture<'_, Result<(), Errno>> {
+            self.fault_page(offset)
+        }
+    }
+
+    /// A fault whose unit the guest's next change took away after the daemon named it asks the
+    /// daemon again, rather than refusing the access (board 14436: a check's VM stopped on a load
+    /// so); a unit the daemon says it named, gone with no unmap since, refuses it.
+    #[test]
+    fn a_fault_raced_by_an_unmap_asks_again() {
+        for racing in [0, 1, 3] {
+            let (stage, _guest) = stage();
+            let faults = Arc::new(Racing { stage: OnceLock::new(), racing, asked: 0.into() });
+            faults.stage.set(Arc::downgrade(&stage)).unwrap();
+            let _serving = stage.serve(faults.clone()).unwrap();
+            assert_eq!(stage.fault(0, Access::Read), Ok(()), "{racing} raced");
+            assert_eq!(faults.asked.load(Ordering::Relaxed), racing + 1);
+        }
+        let (stage, _guest) = stage();
+        let _serving =
+            stage.serve(Arc::new(Refusing { refusal: Errno::EIO, lost: false })).unwrap();
+        assert_eq!(stage.fault(0, Access::Read), Err(Errno::EIO));
+    }
+
+    /// Faults whose daemon answers each, mapping nothing.
+    struct Silent;
+
+    impl Faults for Silent {
+        fn size(&self) -> u64 {
+            1 << 20
+        }
+
+        fn fault_page(&self, _: u64) -> futures::future::BoxFuture<'_, Result<(), Errno>> {
+            Box::pin(std::future::ready(Ok(())))
+        }
+
+        fn probe(&self, _: u64) -> futures::future::BoxFuture<'_, Result<(), Errno>> {
+            Box::pin(std::future::ready(Ok(())))
+        }
+    }
+
+    /// A daemon that answers a fault mapping nothing there, nothing unmapped since it was asked,
+    /// has the access refused, once asked again: no fault waits for good.
+    #[test]
+    fn a_fault_the_daemon_maps_nothing_at_is_refused() {
+        let (stage, _guest) = stage();
+        let _serving = stage.serve(Arc::new(Silent)).unwrap();
+        assert_eq!(stage.fault(0, Access::Read), Err(Errno::ENOENT));
+        assert_eq!(stage.fault(0, Access::Write), Err(Errno::ENOENT));
     }
 
     /// Faults whose daemon names nothing, refusing each with `refusal`, gone if `lost`.
