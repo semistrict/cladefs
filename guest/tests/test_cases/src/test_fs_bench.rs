@@ -32,6 +32,8 @@
 // extent daemon's memory (CLADEFSD_MEMORY, as test-e2e.sh gives it), IOPS and latencies once the
 // caches settle (TASK-350.2); the sync group, also only when named, writes 4 KiB and then syncs,
 // syncfs's or freezes and thaws the filesystem, CLADEFS_BENCH_SYNCS times each (50) (TASK-350.5).
+// cladefs: the memory group, also only when named, says how long the guest took to boot, and times
+// its first and second touch of 1 GiB of anonymous memory (board 14415).
 // CLADEFS_BENCH_FILES sets how many files the metadata workloads make (2000), and
 // CLADEFS_BENCH_PGBENCH_SECS how long pgbench's transactions run (20), and
 // CLADEFS_BENCH_PGBENCH_SCALE the scale of its database (10, about 160 MiB). With
@@ -1077,6 +1079,54 @@ mod guest {
             println!("OBSERVED {workload}-bytes {size}");
             fs::remove_file(&file).unwrap();
         }
+    }
+
+    /// cladefs: the anonymous memory the memory group touches, half the VM's.
+    const TOUCHED: usize = 1 << 30;
+
+    /// The guest's time since its kernel began, `CLOCK_BOOTTIME`'s.
+    fn since_boot() -> std::time::Duration {
+        let mut now = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+        // SAFETY: a plain system call writing the timespec it is given.
+        assert_eq!(unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut now) }, 0);
+        std::time::Duration::new(now.tv_sec as u64, now.tv_nsec as u32)
+    }
+
+    /// cladefs: guest memory as the guest uses it (board 14415): how long it took to boot, to the
+    /// case's start (`booted`, the first iteration's alone); then its first touch of `TOUCHED`
+    /// bytes of anonymous memory, a store to each page, and its second, each in MiB/s. A page
+    /// touched first is one the host gives the guest then, each a fault of the VMM's memory; the
+    /// guest frees them all at the end, which free page reporting gives back to the host, so that
+    /// each iteration's first touch is one of the host's too.
+    fn memory_workloads(booted: Option<std::time::Duration>) {
+        if let Some(booted) = booted {
+            result("boot", "ms", false, booted.as_secs_f64() * 1e3);
+        }
+        // SAFETY: new anonymous memory, which this function owns.
+        let memory = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                TOUCHED,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(memory, libc::MAP_FAILED, "mmap: {}", std::io::Error::last_os_error());
+        let memory = memory.cast::<u8>();
+        let touch = |byte: u8| {
+            let start = Instant::now();
+            for at in (0..TOUCHED).step_by(4096) {
+                // SAFETY: within the mapping.
+                unsafe { memory.add(at).write_volatile(byte) };
+            }
+            TOUCHED as f64 / MIB / start.elapsed().as_secs_f64()
+        };
+        result("first-touch", "MiB/s", true, touch(1));
+        result("touch-again", "MiB/s", true, touch(2));
+        // SAFETY: the mapping, which nothing uses any more.
+        assert_eq!(unsafe { libc::munmap(memory.cast(), TOUCHED) }, 0);
     }
 
     /// cladefs: how many times the sync workloads write and sync: CLADEFS_BENCH_SYNCS, or 50.
@@ -2261,6 +2311,7 @@ mod guest {
 
     impl Test for TestFsBench {
         fn in_guest(self: Box<Self>) {
+            let booted = since_boot();
             start_watchdog();
             let default_hook = std::panic::take_hook();
             std::panic::set_hook(Box::new(move |info| {
@@ -2329,6 +2380,10 @@ mod guest {
                 }
                 if groups.split(',').any(|g| g == "sync") {
                     sync_workloads();
+                }
+                // cladefs: and guest memory's (board 14415).
+                if groups.split(',').any(|g| g == "memory") {
+                    memory_workloads((i == 0).then_some(booted));
                 }
                 // pgbench runs only when named, which keeps a run of every other group short.
                 if groups.split(',').any(|g| g == "pgbench")
