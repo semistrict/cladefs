@@ -5,7 +5,7 @@
 
 # The nightly (TASK-441): main's head measured against the commit the night before measured, in
 # interleaved rounds of the same night, as one hotbed run --bench measurement in a hotbed workspace
-# on CLADEFS_TEST_HOST's node (scripts/lib/host.sh, board 6058), and what moved filed as tasks on
+# on the node hotbed picks (scripts/lib/host.sh, board 6058), and what moved filed as tasks on
 # Hotbed's board, pushed to main. A cron entry runs it at 02:00 (scripts/nightly-install.sh),
 # from the nightly's own clone of cladefs (CLADEFS_NIGHTLY_REPO, default ~/src/cladefs-nightly),
 # which it alone uses: first it takes origin's main there (scripts/nightly.py sync: what an earlier

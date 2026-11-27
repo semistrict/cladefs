@@ -131,8 +131,8 @@ CLADEFS_TEST_HOST=<node> scripts/contamination-check.sh check-1   # four minutes
 `scripts/test-guest-kernel.sh` builds the guest kernel with Fxfs in it and runs
 the guest tests on it, on this host (Linux with KVM).
 
-`scripts/test-host.sh` runs them too, in a hotbed workspace on a test host (`CLADEFS_TEST_HOST`
-names the node): this checkout synced there, the run a hotbed command, the results copied back and
+`scripts/test-host.sh` runs them too, in a hotbed workspace on a test host (hotbed picks it, of
+the architecture the run needs): this checkout synced there, the run a hotbed command, the results copied back and
 the run's directory removed (`scripts/lib/host.sh`).
 
 The protocols whose bugs are rare interleavings have TLA+ specs, which TLC
@@ -184,8 +184,8 @@ night pushes it first.
   host drifted) measured nothing: its row says why, and its `nightly.md` lists each round and why
   it was left out. The next night measures the same commits again, or main's newer head against
   the same base. Three such nights in a row file a task (`[nightly:no-result]`).
-- Each night runs in a hotbed session of its own, on `CLADEFS_TEST_HOST`'s node, which the cron
-  entry sets, and builds both sides in its workspace (board 6058).
+- Each night runs in a hotbed session of its own, on the node hotbed picks, and builds both sides
+  in its workspace (board 6058).
   A single metric's NO RESULT means one of its rounds and that round's rerun were both left out.
 - The log: `~/.local/state/cladefs/nightly/nightly.log` on the test host, a line a step; cron's output in
   `cron.log` beside it.

@@ -17,11 +17,13 @@ there, and every file git doesn't ignore copied over. It runs COMMAND with --env
 TMPDIR of its own, and CLADEFS_SELF_CGROUP naming a file that says its cgroup, in hotbed's
 measurement slice with --bench, in its commands' slice without, as /proc/self/cgroup does
 (scripts/lib/measurement.sh); a node of $FAKE_HOTBED/arch (default x86_64), which uname -m says
-there, refusing --arch of another. It says on standard error, as hotbed does, where it runs.
+there, refusing --arch of another. As hotbed does, it refuses --node, which it no longer takes
+(board 14457), and a --detach without --mem, the memory hotbed reserves for it, the refusal JSON on
+standard output with --json. It says on standard error, as hotbed does, where it runs.
 Attached, it runs to its end, its status the command's; with --detach it runs on in a process
 group of its own, its output to commands/ID/log and its status to commands/ID/status, and prints
 the envelope naming it. Each call is a line of $FAKE_HOTBED/calls: its subcommand and flags, and
-COMMAND's first word.
+COMMAND's first word: the switches, sorted, then --arch's and --mem's values.
 """
 
 import json
@@ -85,7 +87,7 @@ def run(argv):
     i = 0
     while i < len(flags):
         flag = flags[i]
-        if flag in ("--no-sync", "--detach", "--json", "--bench"):
+        if flag in ("--no-sync", "--detach", "--json", "--bench", "--keep-idle"):
             switches.add(flag)
             i += 1
         elif flag == "--env":
@@ -95,13 +97,19 @@ def run(argv):
             options[flag] = flags[i + 1]
             i += 2
     with open(STATE / "calls", "a") as calls:
-        said = sorted(switches - {"--json"}) + [f"{k} {v}" for k, v in options.items()
-                                                if k in ("--node", "--arch")]
+        said = sorted(switches - {"--json"}) + [f"{k} {options[k]}" for k in ("--arch", "--mem")
+                                                if k in options]
         calls.write(" ".join(["run", *said, command[0]]) + "\n")
     if not (STATE / "session").exists() and not os.environ.get("HOTBED_SESSION"):
         sys.exit("error: no session: hotbed session start")
-    if options.get("--node", NODE) != NODE:
-        sys.exit(f"error: no node {options['--node']}")
+    if "--node" in options:
+        sys.exit("error: unknown flag --node")
+    if "--detach" in switches and "--mem" not in options:
+        refusal = {"code": "INVALID_ARGS", "message": "a detached run needs --mem"}
+        if "--json" in switches:
+            print(json.dumps({"version": "1", "ok": False, "command": "run", "error": refusal}))
+            sys.exit(1)
+        sys.exit(f"error: {refusal['message']}")
     wanted = {"amd64": "x86_64", "arm64": "aarch64"}.get(options.get("--arch", ""), ARCH)
     if wanted != ARCH:
         sys.exit(f"error: no node of architecture {options['--arch']}")

@@ -112,7 +112,8 @@ class HostCommand(unittest.TestCase):
 
     def test_this_machines_own_setup_stays_here(self):
         here = {name: "/laptop/" + name for name in KEPT}
-        here["CLADEFS_TEST_HOST"] = "node1"
+        # Unset, as hotbed places the run: a node's name, which it no longer takes, is refused.
+        del here["CLADEFS_TEST_HOST"]
         here["CLADEFS_HOTBED_WORK"] = "/work"
         here["CLADEFS_HOTBED_REPO"] = "cladefs"
         # Knobs for the workspace: where its cells keep their cells, and its daemons what they
@@ -376,8 +377,11 @@ class RunNames(unittest.TestCase):
 
     def test_a_node_and_a_run_number_are_named_as_they_may_be(self):
         fleet = Fleet()
-        self.assertEqual(fleet.drive("true", environment={"CLADEFS_TEST_HOST": "a host"}),
-                         (2, "", "CLADEFS_TEST_HOST names a hotbed node, or local: a host\n"))
+        # A node's name, which hotbed no longer takes (board 14457), refused rather than ignored.
+        for named in ["node1", "a host"]:
+            self.assertEqual(
+                fleet.drive("true", environment={"CLADEFS_TEST_HOST": named}),
+                (2, "", f"CLADEFS_TEST_HOST is unset (hotbed places the run) or local, not {named}\n"))
         self.assertEqual(
             fleet.drive("true", environment={"CLADEFS_TEST_HOST_RUN": "R1"}),
             (2, "", "CLADEFS_TEST_HOST_RUN names a run in lower-case letters and digits, such as r1040\n"))
@@ -399,16 +403,15 @@ class Runs(unittest.TestCase):
         # A session started for the run, and ended with it; the checkout synced once, first.
         self.assertEqual(
             fleet.calls(),
-            ["session current", "session start", "run bash", "run --detach --no-sync --node node1 bash",
-             "run --no-sync --node node1 bash", "run --no-sync --node node1 bash",
-             "run --no-sync --node node1 bash", "session end"])
+            ["session current", "session start", "run bash", "run --detach --no-sync --mem 8G bash",
+             "run --no-sync bash", "run --no-sync bash", "run --no-sync bash", "session end"])
 
-    def test_a_run_keeps_to_the_session_and_node_it_has(self):
+    def test_a_run_keeps_to_the_session_it_has(self):
         fleet = Fleet()
         (fleet.directory / "session").write_text("mine\n")
-        status, out, errors = fleet.drive(RAN, environment={"CLADEFS_TEST_HOST": "node1"})
+        status, out, errors = fleet.drive(RAN)
         self.assertEqual((status, out), (0, "status 0\n"), errors)
-        self.assertEqual(fleet.calls()[:2], ["session current", "run --node node1 bash"])
+        self.assertEqual(fleet.calls()[:2], ["session current", "run bash"])
         self.assertNotIn("session end", fleet.calls())
         self.assertEqual((fleet.directory / "session").read_text(), "mine\n")
 
@@ -442,11 +445,6 @@ class Runs(unittest.TestCase):
         status, out, errors = fleet.drive(need + RAN)
         self.assertEqual((status, out), (2, ""))
         self.assertEqual(errors, "error: no node of architecture amd64\n")
-        # On the node named, refused there before anything is made.
-        status, out, errors = fleet.drive(need + RAN, environment={"CLADEFS_TEST_HOST": "node1"})
-        self.assertEqual((status, out), (2, ""))
-        self.assertIn("a driver: its guests boot an x86-64 kernel: this test host is aarch64, the "
-                      "run needs x86_64\n", errors)
         self.assertEqual((fleet.runs(), fleet.worktrees()), ([], []))
         # A run that needs none runs there; one that needs the node's own runs too.
         self.assertEqual(fleet.drive(RAN)[:2], (0, "status 0\n"))
@@ -456,12 +454,9 @@ class Runs(unittest.TestCase):
     def test_test_host_runs_the_workspaces_tests_alone_on_an_arm64_node(self):
         fleet = Fleet(arch="aarch64")
         results = fleet.directory / "results"
-        status, _, errors = fleet.run_driver("test-host.sh", str(results),
-                                             environment={"CLADEFS_TEST_HOST": "node1"})
+        status, _, errors = fleet.run_driver("test-host.sh", str(results))
         self.assertEqual(status, 2)
-        self.assertIn("test-host.sh: the guest tests boot an x86-64 guest kernel "
-                      "(CLADEFS_GUEST_TESTS=0 runs the workspace's tests alone): this test host "
-                      "is aarch64, the run needs x86_64", errors)
+        self.assertIn("error: no node of architecture amd64", errors)
         self.assertEqual(fleet.runs(), [])
         status, _, errors = fleet.run_driver("test-host.sh", str(results),
                                              environment={"CLADEFS_GUEST_TESTS": "0"})
@@ -512,8 +507,9 @@ class Runs(unittest.TestCase):
         alone under hotbed run --bench, building nothing; any other run's one command of work, of
         no phase."""
         for bench, said, jobs in [
-            ("0", ["run --detach --no-sync --node node1 bash"], ["test-linux-host.sh all work"]),
-            ("1", ["run --detach --no-sync --node node1 bash", "run --bench --detach --no-sync --node node1 bash"],
+            ("0", ["run --detach --no-sync --mem 8G bash"], ["test-linux-host.sh all work"]),
+            ("1", ["run --detach --no-sync --mem 8G bash",
+                   "run --bench --detach --keep-idle --no-sync --mem 12G bash"],
              ["test-linux-host.sh build work", "test-linux-host.sh measure bench"]),
         ]:
             with self.subTest(bench=bench):

@@ -455,8 +455,6 @@ class Install(unittest.TestCase):
         environment = {**host1.environment, "CLADEFS_NIGHTLY_CRONTAB": str(bin_ / "crontab"),
                        "CLADEFS_NIGHTLY_REPO": str(host1.dir / "installed")}
         environment.pop("HOTBED_CONTROLLER", None)
-        node = subprocess.run(["hostname", "-s"], capture_output=True, text=True,
-                              check=True).stdout.strip()
         for _ in range(2):
             done = subprocess.run(["/bin/bash", str(SCRIPTS / "nightly-install.sh"),
                                    str(host1.origin)], capture_output=True, text=True,
@@ -466,7 +464,7 @@ class Install(unittest.TestCase):
         self.assertEqual(crontab.read_text().splitlines(), [
             "5 * * * * other job",
             f"0 2 * * * PATH={bin_}:/usr/local/bin:/usr/bin:/bin "
-            f"CLADEFS_TEST_HOST={node} HOTBED_CONTROLLER= "
+            "HOTBED_CONTROLLER= "
             f"{host1.dir / 'installed'}/scripts/nightly-host.sh >> {state}/cron.log 2>&1 "
             "# cladefs nightly (scripts/nightly-install.sh)"])
         self.assertEqual(host1.git(host1.dir / "installed", "config", "user.name"), "cladefs nightly")

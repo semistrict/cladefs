@@ -14,9 +14,9 @@
 # ORIGIN is what the clone fetches from: by default the origin of ~/src/fxdax, the clone the host
 # runs use. The clone is CLADEFS_NIGHTLY_REPO (~/src/cladefs-nightly), made if missing; it is the
 # nightly's alone, which it resets to origin's main each night. It fails, saying what is missing,
-# if the nightly could not run: hotbed (which runs its builds, its measurement in a workspace on
-# CLADEFS_TEST_HOST's node, and files tasks on the board), flock, hostname, or a fetch from ORIGIN
-# without a prompt (cron has no agent or terminal).
+# if the nightly could not run: hotbed (which runs its builds, its measurement in a workspace on the
+# node it picks of the architecture the A/B needs, board 14457, and files tasks on the board), flock,
+# hostname, or a fetch from ORIGIN without a prompt (cron has no agent or terminal).
 # CLADEFS_NIGHTLY_CRONTAB names crontab(1) (for the tests).
 set -euo pipefail
 clone=${CLADEFS_NIGHTLY_REPO:-$HOME/src/cladefs-nightly}
@@ -28,7 +28,6 @@ missing=()
 for tool in hotbed flock hostname; do
     command -v "$tool" > /dev/null || missing+=("$tool")
 done
-node=${CLADEFS_TEST_HOST:-$(hostname -s)}
 if ! GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="ssh -o BatchMode=yes" \
     git ls-remote -q "$origin" HEAD > /dev/null; then
     missing+=("a fetch from $origin without a prompt")
@@ -54,6 +53,6 @@ done
 path+=/usr/local/bin:/usr/bin:/bin
 state=$HOME/.local/state/cladefs/nightly
 mkdir -p "$state"
-line="0 2 * * * PATH=$path CLADEFS_TEST_HOST=$node HOTBED_CONTROLLER=${HOTBED_CONTROLLER:-} $clone/scripts/nightly-host.sh >> $state/cron.log 2>&1 $mark"
+line="0 2 * * * PATH=$path HOTBED_CONTROLLER=${HOTBED_CONTROLLER:-} $clone/scripts/nightly-host.sh >> $state/cron.log 2>&1 $mark"
 { "$crontab" -l 2> /dev/null | { grep -vF -- "$mark" || true; }; echo "$line"; } | "$crontab" -
 echo "Installed: $line"

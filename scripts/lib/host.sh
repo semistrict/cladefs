@@ -12,10 +12,11 @@
 # A run happens in the caller's hotbed session (the one bound to this checkout, or HOTBED_SESSION;
 # one started for the run, and ended with it, if there is none), in its workspace, a fork of
 # main's built base that hotbed syncs this checkout into, uncommitted changes too: everything of a
-# run is the workspace's, nothing the host's (board 7780). CLADEFS_TEST_HOST names the hotbed node
-# it runs on (unset: the one hotbed picks, of the architecture a driver needs, host_need_arch), or
-# `local`, this machine itself, the checkout here, reached without hotbed: as a run inside a hotbed
-# command does, such as the nightly's.
+# run is the workspace's, nothing the host's (board 7780). hotbed picks its node, of the
+# architecture a driver needs (host_need_arch); CLADEFS_TEST_HOST is unset, or `local`, this machine
+# itself, the checkout here, reached without hotbed: as a run inside a hotbed command does, such as
+# the nightly's. It named a hotbed node once, which hotbed no longer takes (board 14457): a node's
+# name is refused, rather than ignored.
 #
 # A run is a directory in the workspace's checkout, target/host-runs/RUN, RUN the run's name
 # (host_name): its results, its work directory and its trees (scripts/lib/host-workspace.sh, which
@@ -47,8 +48,8 @@
 # status of its every step itself.
 
 host=${CLADEFS_TEST_HOST:-}
-[[ $host =~ ^[A-Za-z0-9._-]*$ ]] ||
-    { echo "CLADEFS_TEST_HOST names a hotbed node, or local: $host" >&2; exit 2; }
+[[ -z $host || $host == local ]] ||
+    { echo "CLADEFS_TEST_HOST is unset (hotbed places the run) or local, not $host" >&2; exit 2; }
 # The workspace's checkout of cladefs: hotbed's /work/REPO (CLADEFS_HOTBED_WORK names another
 # /work, for the tests).
 host_workspace=${CLADEFS_HOTBED_WORK:-/work}/${CLADEFS_HOTBED_REPO:-cladefs}
@@ -73,10 +74,9 @@ host_state=''
 # A function the driver names, which host_actions' resume runs as the driver's run would once the
 # results are back, with the run's status, and whose status is the resume's.
 host_after=''
-# The node the run is on, once host_start placed it (CLADEFS_TEST_HOST's, if set); the session it
-# is in, and whether this driver started it; the job's hotbed command.
-host_node='' host_session=${HOTBED_SESSION:-} host_session_ours=0 host_command_id=''
-if [[ $host != local ]]; then host_node=$host; fi
+# The node the run is on, once host_start placed it, which its records name; the session it is in,
+# and whether this driver started it; the job's hotbed command.
+host_node='' host_session=${HOTBED_SESSION:-} host_session_ours=0 host_command_id=
 
 # host_name RUN names the run RUN: its directory in the workspace is host_dir.
 host_name() {
@@ -148,12 +148,12 @@ print(data["id"])
 }
 
 # host_placement sets placement, the caller's, to the arguments of hotbed run that place a command
-# of the run: its node, once known; else the architecture the driver needs (host_need_arch).
+# of the run: the architecture the driver needs (host_need_arch), if any. hotbed takes no node
+# (`--node` is gone, board 14457): the run's first command syncs this checkout, which places its
+# workspace; every later one syncs nothing and stays in that workspace.
 host_placement() {
     placement=()
-    if [[ -n $host_node ]]; then
-        placement=(--node "$host_node")
-    elif [[ $host_arch == x86_64 ]]; then
+    if [[ $host_arch == x86_64 ]]; then
         placement=(--arch amd64)
     elif [[ $host_arch == aarch64 ]]; then
         placement=(--arch arm64)
@@ -382,15 +382,28 @@ host_launch() {
         return "$status"
     fi
     host_placement
-    if (( host_bench )); then flags+=(--bench); fi
+    # cladefs: a measurement holds its guests' and daemon's memory with little CPU, which hotbed
+    # would stop as idle (`--keep-idle`); and reserves its peak, CLADEFS_TEST_HOST_PEAK, where work,
+    # its builds, reserves CLADEFS_TEST_HOST_BUILD_PEAK (default 8G): hotbed also stops a command
+    # holding much more than its CPU use warrants.
+    local peak=${CLADEFS_TEST_HOST_BUILD_PEAK:-8G}
+    if (( host_bench )); then
+        flags+=(--bench --keep-idle)
+        peak=${CLADEFS_TEST_HOST_PEAK:-12G}
+    fi
     if [[ -n ${CLADEFS_TEST_HOST_MEM:-} ]]; then flags+=(--mem-high "$CLADEFS_TEST_HOST_MEM"); fi
     for assignment in ${host_environment[@]+"${host_environment[@]}"}; do
         flags+=(--env "$assignment")
     done
+    # cladefs: hotbed reserves a detached command's peak memory on its node, which it needs said
+    # (above); and its refusal, JSON on stdout, is said here, not swallowed with it.
     said=$(host_hotbed run --no-sync --detach --json ${placement[@]+"${placement[@]}"} --kind test \
-        --hard-limit "${CLADEFS_TEST_HOST_LIMIT:-$limit}" ${flags[@]+"${flags[@]}"} -- \
-        "${host_argv[@]}") ||
-        return
+        --mem "$peak" --hard-limit "${CLADEFS_TEST_HOST_LIMIT:-$limit}" \
+        ${flags[@]+"${flags[@]}"} -- "${host_argv[@]}") || {
+        status=$?
+        echo "hotbed refused the run's job: $said" >&2
+        return "$status"
+    }
     host_command_id=$(python3 -c 'import json, sys; print(json.load(sys.stdin)["data"]["id"])' \
         <<< "$said") || return
     host_state=launched
