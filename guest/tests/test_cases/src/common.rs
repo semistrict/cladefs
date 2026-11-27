@@ -649,15 +649,42 @@ pub fn load_cell_id(dir: &Path, name: &str) -> anyhow::Result<cladefs::CellId> {
 }
 
 /// Locates the canonical on-disk path for a cell previously persisted via [`save_cell_id`] on the
-/// run's shared `CLADEFSD` daemon.
+/// run's shared `CLADEFSD` daemon, once the daemon has closed it ([`wait_closed`]): for a check to
+/// read it, its VM process gone.
 pub fn shared_cell_path(dir: &Path, name: &str) -> anyhow::Result<PathBuf> {
-    Ok(cell_disk_path(&shared_disk_root()?, load_cell_id(dir, name)?))
+    let cell = load_cell_id(dir, name)?;
+    let cladefsd = PathBuf::from(std::env::var_os("CLADEFSD").context("CLADEFSD not set")?);
+    wait_closed(&cladefsd, cell)?;
+    Ok(cell_disk_path(&shared_disk_root()?, cell))
 }
 
-/// Copies the extent store at `from` to `to`, as [`copy_dir`] does, once no process has it open:
-/// its directory taken, as a process opening it takes it, which the extent daemon serving it holds
-/// until its last user, an upload too, lets it go. Copied while the daemon held it, an upload's
-/// marker's `.new` file was renamed away between listing it and copying it (TASK-129).
+/// cladefs: waits for the daemon at `cladefsd` to have closed `cell`, which a VM process had open,
+/// as StatCell says: a cell its VM process let go of closes on the daemon's time, its commits,
+/// returned to the guest once ordered, made durable as it closes, which takes seconds on a slow
+/// disk. A daemon owns its cells' directories, which nothing else locks (board 14305): what reads
+/// one behind its back waits so, or reads it as it was before its last commits (board 14456).
+/// StatCell of a cell no VM process has open opens it, waiting for its close, and closes it again.
+fn wait_closed(cladefsd: &Path, cell: cladefs::CellId) -> anyhow::Result<()> {
+    use cladefs::cladefsd::control::proto::StatCellRequest;
+    use std::time::{Duration, Instant};
+    let control = control(cladefsd)?;
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let stat = control.call(async |client| {
+            client.stat_cell(StatCellRequest { tenant: cell.tenant, cell: cell.id }).await
+        })?;
+        if !stat.open {
+            return Ok(());
+        }
+        anyhow::ensure!(Instant::now() < deadline, "the daemon still has cell {cell} open");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Copies the extent store at `from` to `to`, as [`copy_dir`] does, its directory taken in this
+/// process: once no other process has it open, which the caller waits for ([`shared_cell_path`]).
+/// Copied while the daemon held it, an upload's marker's `.new` file was renamed away between
+/// listing it and copying it (TASK-129).
 pub fn copy_cell_dir(from: &Path, to: &Path) -> anyhow::Result<()> {
     use local_cell::Dir;
     let dir =
