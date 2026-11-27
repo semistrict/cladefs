@@ -53,7 +53,7 @@ use crate::object_store::journal::super_block::{
     JournalSpan, Root, SuperBlockHeader, SuperBlockManager,
 };
 use crate::object_store::journal::writer::JournalWriter;
-use crate::object_store::object_manager::ObjectManager;
+use crate::object_store::object_manager::{ObjectManager, reserved_space_from_journal_usage};
 use crate::object_store::transaction::{
     AllocatorMutation, Mutation, MutationV66, ObjectMutationIterator, ObjectStoreMutation, Options,
     TRANSACTION_MAX_JOURNAL_USAGE, Transaction, lock_keys,
@@ -1874,6 +1874,10 @@ impl Journal {
         let checkpoint_after;
         {
             let _guard = self.writer_mutex.lock();
+            // cladefs: what flushing the objects it dirties first takes, reserved before it is
+            // applied, under the lock that keeps the objects dirty as they are until then (board
+            // 14243).
+            let flush_charge = self.objects.reserve_flush_charge(transaction);
             checkpoint_before = {
                 let mut inner = self.inner.lock();
                 // cladefs: re-check span room under `writer_mutex` so a concurrent
@@ -1895,7 +1899,8 @@ impl Journal {
             // kernel to panic, as upstream does. Nothing can go on: the filesystem is left as this
             // left it, so the journal stops. What was written of this transaction has no Commit
             // record, which replay discards it for.
-            let applied = self.objects.apply_transaction(transaction, &checkpoint_before);
+            let applied =
+                self.objects.apply_transaction(transaction, &checkpoint_before, flush_charge);
             let maybe_mutation = applied.inspect_err(|error| {
                 let reason = anyhow!(FxfsError::Inconsistent).context(format!("{error:#}"));
                 self.inner.lock().terminate(Some(reason.context("Failed to apply a transaction")));
@@ -2194,13 +2199,22 @@ impl Journal {
 
     /// Whether the journal, holding `journal_bytes` not yet flushed to layer files, should compact:
     /// once half of `reclaim_size`, sooner if the metadata reservation runs low, or when `Root`
-    /// has accumulated `COMPACT_SPAN_THRESHOLD` spans across remounts (board 6923).
+    /// has accumulated `COMPACT_SPAN_THRESHOLD` spans across remounts (board 6923). cladefs: or
+    /// once flushing the objects it holds updates of takes as much, whatever they hold, as
+    /// compacting half of `reclaim_size` (but at least `RESERVED_SPACE`), which hundreds of
+    /// stores, each dirtied by a few hundred bytes of it, do long before it fills (board 14243).
+    /// The low reservation is what is left over flushing them and compacting the largest store.
     fn should_compact(&self, inner: &Inner, journal_bytes: u64) -> bool {
+        let flush_charges = self.objects.flush_charges();
+        // What compacting half of `reclaim_size` reserves, which some tests make all of a u64.
+        let half_reclaimed =
+            reserved_space_from_journal_usage(1).saturating_mul(inner.reclaim_size / 2);
         journal_bytes > inner.reclaim_size / 2
             || self.handle.get().is_some_and(|h| h.span_count() >= COMPACT_SPAN_THRESHOLD)
+            || flush_charges > half_reclaimed.max(RESERVED_SPACE)
             || (journal_bytes >= MIN_COMPACTION_BYTES
                 && self.objects.metadata_reservation().amount()
-                    <= self.objects.max_store_reservation() + METADATA_LOW_MARGIN)
+                    <= self.objects.max_store_reservation() + flush_charges + METADATA_LOW_MARGIN)
     }
 
     fn should_force_major_compaction(&self) -> ForceMajor {
@@ -2214,8 +2228,14 @@ impl Journal {
         // compact when reclaim_size / 2 <= J <= reclaim_size, and will block most operations once
         // J > reclaim_size, so any given compaction should have no more than reclaim_size bytes.
         let reclaim_size = self.inner.lock().reclaim_size;
-        // metadata_reservation = required_reservation - borrowed
-        let metadata_reservation = self.objects.metadata_reservation().amount();
+        // metadata_reservation = required_reservation - borrowed. cladefs: but for what it holds for
+        // flushing the objects the journal holds updates of, whatever they hold (board 14243),
+        // which this compaction takes as it flushes them, and is no room for a major one.
+        let metadata_reservation = self
+            .objects
+            .metadata_reservation()
+            .amount()
+            .saturating_sub(self.objects.flush_charges());
         // max_store_reservation is the greatest amount reserved by any object store.  This
         // corresponds to the minimum amount which is needed to perform a major compaction of that
         // store (and therefore the minimum amount needed to do a major compaction overall, since

@@ -215,7 +215,7 @@ impl DirtyReservation {
 mod tests {
     use super::{DirtyReservation, SPARE};
     use crate::errors::FxfsError;
-    use crate::filesystem::{FxFilesystem, FxFilesystemBuilder, OpenFxFilesystem};
+    use crate::filesystem::{FxFilesystem, FxFilesystemBuilder, OpenFxFilesystem, SyncOptions};
     use crate::fsck::fsck;
     use crate::object_handle::ObjectHandle;
     use crate::object_store::transaction::{Options, lock_keys};
@@ -295,6 +295,43 @@ mod tests {
     #[fuchsia_async::run_singlethreaded(test)]
     async fn test_dirty_data_reserved_is_written_a_block_at_a_time_however_full() {
         fill_and_write_back(1).await;
+    }
+
+    /// cladefs: the first reserved writeback to a store a compaction left clean is written, the
+    /// filesystem full: what flushing the store it dirties again takes (board 14243), which the
+    /// allocator has no room for, it borrows, as its reservation was all it had to hold.
+    #[fuchsia_async::run_singlethreaded(test)]
+    async fn test_dirty_data_reserved_is_written_to_a_clean_store_however_full() {
+        let fs = filesystem().await;
+        let dirty = DirtyReservation::new(&fs.root_store());
+        let file = create_file(&fs).await;
+        let ino = file.object_id();
+        fs.journal().pause_compactions().await;
+        fs.journal().force_compact().await.expect("force_compact failed");
+        fs.sync(SyncOptions { flush_device: true, ..Default::default() })
+            .await
+            .expect("sync failed");
+        fs.allocator().freed().await.expect("freed failed");
+        assert!(!fs.object_manager().needs_flush(fs.root_store().store_object_id()));
+        dirty.reserve(ino, BLOCK).expect("reserve failed");
+        let full = fs.allocator().reserve_with(None, |limit| limit);
+        let data = vec![7u8; BLOCK as usize];
+        let taken = dirty.take(ino, BLOCK);
+        file.write_many_reserved(&[(0, &data[..])], &taken.reservation)
+            .await
+            .expect("write_many failed");
+        dirty.written(taken);
+        drop(full);
+        let objects = fs.object_manager();
+        assert_eq!(
+            objects.metadata_reservation().amount() + objects.borrowed_metadata_space(),
+            objects.required_reservation()
+        );
+        fs.journal().resume_compactions();
+        let contents = file.contents(usize::MAX).await.expect("contents failed");
+        assert!(contents[..data.len()] == data[..], "the block written back");
+        fsck(fs.clone()).await.expect("fsck failed");
+        fs.close().await.expect("close failed");
     }
 
     /// What files' dirty data reserves, its blocks, their share of metadata space and a spare

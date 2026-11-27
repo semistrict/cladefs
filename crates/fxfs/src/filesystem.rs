@@ -351,17 +351,17 @@ impl FxFilesystemBuilder {
             bail!("Cannot initialize a filesystem as read-only");
         }
 
-        let objects = Arc::new(ObjectManager::new(self.on_new_store));
+        let device_block_size =
+            BlockSize::new(device.block_size()).expect("Device block size is not a power of 2");
+        let block_size = std::cmp::max(device_block_size, MIN_BLOCK_SIZE);
+        assert!(block_size <= MAX_BLOCK_SIZE, "Max supported block size is 64KiB");
+
+        let objects = Arc::new(ObjectManager::new(block_size, self.on_new_store));
         let journal = Arc::new(Journal::new(
             objects.clone(),
             self.journal_options,
             self.options.hooks.clone(),
         ));
-
-        let device_block_size =
-            BlockSize::new(device.block_size()).expect("Device block size is not a power of 2");
-        let block_size = std::cmp::max(device_block_size, MIN_BLOCK_SIZE);
-        assert!(block_size <= MAX_BLOCK_SIZE, "Max supported block size is 64KiB");
 
         let mut fsck_after_every_transaction = None;
         let mut filesystem_options = self.options;

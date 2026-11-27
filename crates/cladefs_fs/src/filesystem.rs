@@ -970,26 +970,21 @@ impl Filesystem {
         })
     }
 
-    /// Creates an additional empty volume named `name` on this Fxfs filesystem (board 13920), and
-    /// compacts the journal, so that the filesystem's trees hold the new volume whole.
+    /// Creates an additional empty volume named `name` on this Fxfs filesystem (board 13920).
     ///
-    /// Without the compaction, creating many volumes runs the filesystem out of room: a store's
-    /// creation takes a few hundred bytes of the journal, and Fxfs keeps room for flushing what the
-    /// journal holds at four times its size (`reserved_space_from_journal_usage`), but the first
-    /// flush of a new store writes it a layer file and rewrites its info, some 10 KiB. Compacted
-    /// at once, the store is flushed alone while that room is there; 256 left to the next
-    /// compaction needed more than its metadata reservation held, and failed with ENOSPC on a
-    /// 128 MiB cell (board 14222). The unmount of each new volume the deleted `Image` did hid this:
-    /// its sync padded the journal to a block per volume, which raised the reservation enough.
+    /// Nothing compacts it: Fxfs's metadata reservation holds what flushing each store the journal
+    /// holds updates of takes, whatever little it holds (board 14243), so hundreds of volumes
+    /// created one after another fit a small cell (board 14222), as fast as they are created
+    /// (hotbed question 587).
     pub async fn create_volume(&self, name: &str) -> Result<(), Error> {
         let name = name.to_owned();
         self.inner
             .run(|fxfs| async move {
-                let filesystem = fxfs.filesystem();
+                let filesystem = fxfs.filesystem().clone();
                 let created = async {
-                    let root = root_volume(filesystem.clone()).await?;
+                    let root = root_volume(filesystem).await?;
                     root.new_volume(&name, NewChildStoreOptions::default()).await?;
-                    filesystem.journal().force_compact().await
+                    Ok::<_, anyhow::Error>(())
                 };
                 Ok(created.await)
             })

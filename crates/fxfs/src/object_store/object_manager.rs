@@ -17,10 +17,11 @@ use crate::object_store::{LockKey, ObjectDescriptor, ObjectStore};
 use crate::serialized_types::{LATEST_VERSION, Version};
 use anyhow::{Context, Error, anyhow, bail, ensure};
 use fuchsia_sync::RwLock;
-use rustc_hash::FxHashMap as HashMap;
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::collections::hash_map::Entry;
 use std::num::Saturating;
 use std::sync::{Arc, OnceLock};
+use storage_units::BlockSize;
 
 // Data written to the journal eventually needs to be flushed somewhere (typically into layer
 // files).  Here we conservatively assume that could take up to four times as much space as it does
@@ -34,6 +35,20 @@ use std::sync::{Arc, OnceLock};
 pub const fn reserved_space_from_journal_usage(journal_usage: u64) -> u64 {
     journal_usage * 4
 }
+
+/// cladefs: what flushing an object the journal holds updates of takes of the metadata reservation,
+/// in the filesystem's blocks, however little the journal holds of it (board 14243). A store's
+/// flush writes a new layer file of at least three blocks (a header, a block of items and the
+/// layer's info: `MINIMUM_LAYER_FILE_BLOCKS` and one), which a new store's first flush takes of
+/// the reservation whole (measured: 12 KiB each); a later one gets most of it back as its old
+/// layers go. The flush journals some 380 bytes of records of its own (the new layer, its extents,
+/// its graveyard entries, the store's info rewritten), which the flushes of the root store and the
+/// allocator then write into their layers: the fourth block. Four times what an object takes of
+/// the journal (`reserved_space_from_journal_usage`) pays for what its flush writes in proportion
+/// to that, not this: 300 volumes created, a few hundred bytes of the journal apiece, compacted
+/// at once, needed nearly three times what the reservation held, and failed with ENOSPC on a mostly empty
+/// filesystem. Upstream reserves nothing for it: its stores are few. (hotbed question 585)
+const FLUSH_COST_BLOCKS: u64 = 4;
 
 /// ObjectManager is a global loading cache for object stores and other special objects.
 pub struct ObjectManager {
@@ -99,11 +114,45 @@ struct Inner {
 
     // Extra temporary space that might be tied up in the journal that hasn't yet been deallocated.
     reserved_space: u64,
+
+    // cladefs: what flushing each object in `journal_checkpoints` costs, whatever it holds
+    // (`FLUSH_COST_BLOCKS`).
+    flush_cost: u64,
 }
 
 impl Inner {
     fn earliest_journal_offset(&self) -> Option<u64> {
         self.journal_checkpoints.values().map(|c| c.earliest().file_offset).min()
+    }
+
+    /// cladefs: what the metadata reservation holds for flushing the objects the journal holds
+    /// updates of, whatever they are (`FLUSH_COST_BLOCKS`).
+    fn flush_charges(&self) -> u64 {
+        self.flush_cost * self.journal_checkpoints.len() as u64
+    }
+
+    /// cladefs: whether applying `mutation` to `object_id` leaves the journal holding an update of
+    /// it, which it must flush: a checkpoint in `journal_checkpoints`.
+    fn dirties(&self, object_id: u64, mutation: &Mutation) -> bool {
+        !matches!(mutation, Mutation::BeginFlush | Mutation::EndFlush | Mutation::DeleteVolume)
+            && object_id != self.root_parent_store_object_id
+    }
+
+    /// cladefs: what flushing the objects `mutations` dirty first (`dirties`), that the journal
+    /// holds no update of yet, adds to the metadata reservation.
+    fn flush_charge<'a, 'b: 'a>(
+        &self,
+        mutations: impl IntoIterator<Item = &'a TxnMutation<'b>>,
+    ) -> u64 {
+        let dirtied: HashSet<u64> = mutations
+            .into_iter()
+            .filter(|m| {
+                self.dirties(m.object_id, &m.mutation)
+                    && !self.journal_checkpoints.contains_key(&m.object_id)
+            })
+            .map(|m| m.object_id)
+            .collect();
+        self.flush_cost * dirtied.len() as u64
     }
 
     // Returns the required size of the metadata reservation assuming that no space has been
@@ -122,6 +171,9 @@ impl Inner {
 
         // Extra reserved space
             + self.reserved_space
+
+        // cladefs: and flushing each object, whatever it holds.
+            + self.flush_charges()
     }
 
     fn journaling_object(&self, object_id: u64) -> Option<Arc<dyn JournalingObject>> {
@@ -134,7 +186,12 @@ impl Inner {
 }
 
 impl ObjectManager {
-    pub fn new(on_new_store: Option<Box<dyn Fn(&ObjectStore) + Send + Sync>>) -> ObjectManager {
+    /// cladefs: for a filesystem of `block_size` blocks, which flushing an object costs
+    /// (`FLUSH_COST_BLOCKS`).
+    pub fn new(
+        block_size: BlockSize,
+        on_new_store: Option<Box<dyn Fn(&ObjectStore) + Send + Sync>>,
+    ) -> ObjectManager {
         ObjectManager {
             inner: RwLock::new(Inner {
                 stores: HashMap::default(),
@@ -149,6 +206,7 @@ impl ObjectManager {
                 borrowed_metadata_space: 0,
                 borrowed_as_replayed: 0,
                 reserved_space: journal::RESERVED_SPACE,
+                flush_cost: block_size * FLUSH_COST_BLOCKS,
             }),
             metadata_reservation: OnceLock::new(),
             volume_directory: OnceLock::new(),
@@ -414,7 +472,7 @@ impl ObjectManager {
                     return Ok(());
                 }
                 _ => {
-                    if object_id != inner.root_parent_store_object_id {
+                    if inner.dirties(object_id, &mutation) {
                         inner
                             .journal_checkpoints
                             .entry(object_id)
@@ -583,17 +641,38 @@ impl ObjectManager {
         Ok(())
     }
 
+    /// cladefs: reserves with the allocator what flushing the objects `transaction` dirties first
+    /// adds to the metadata reservation (`FLUSH_COST_BLOCKS`), before it is written and applied,
+    /// with nothing else committing meanwhile (the journal's writer lock); what it has no room for,
+    /// the transaction borrows (`apply_transaction`), whatever its reservation (board 14243). It
+    /// never fails one: a writeback of dirty data its reservation pays for is written however
+    /// full the filesystem, as the guest drops what fails with ENOSPC, and refused, the first
+    /// writeback to a store a compaction left clean failed (hotbed review 171).
+    pub fn reserve_flush_charge(&self, transaction: &Transaction<'_>) -> FlushCharge {
+        let amount = self.inner.read().flush_charge(transaction.mutations());
+        let reserved = (amount > 0).then(|| self.allocator().reserve(None, amount)).flatten();
+        FlushCharge { amount, reserved }
+    }
+
     /// Called by the journaling system to apply a transaction.  `checkpoint` indicates the location
     /// in the journal file for this transaction.  Returns an optional mutation to be written to be
-    /// included with the transaction.
+    /// included with the transaction. cladefs: `flush_charge` is what `reserve_flush_charge`
+    /// reserved for it, which goes into the metadata reservation as its objects' charges do into
+    /// what that requires.
     pub fn apply_transaction(
         &self,
         transaction: &mut Transaction<'_>,
         checkpoint: &JournalCheckpoint,
+        flush_charge: FlushCharge,
     ) -> Result<Option<Mutation>, Error> {
         // Record old values so we can see what changes as a result of this transaction.
         let old_amount = self.metadata_reservation().amount();
         let old_required = self.inner.read().required_reservation();
+        debug_assert_eq!(
+            self.inner.read().flush_charge(transaction.mutations()),
+            flush_charge.amount,
+            "the transaction's flush charge changed after it was reserved"
+        );
 
         debug!(checkpoint = checkpoint.file_offset; "BEGIN TXN");
         let mutations = transaction.take_mutations();
@@ -603,6 +682,15 @@ impl ObjectManager {
             self.apply_mutation(object_id, mutation, &context, associated_object)?;
         }
         debug!("END TXN");
+
+        // cladefs: what the transaction's new objects to flush require, the allocator reserved: a
+        // transaction that may borrow borrows the rest, below, as the requirement grew by it.
+        let FlushCharge { amount: charge, reserved } = flush_charge;
+        let paid = reserved.map_or(0, |reserved| {
+            let amount = reserved.amount();
+            reserved.move_to(self.metadata_reservation(), amount);
+            amount
+        });
 
         let borrowing = matches!(
             transaction.metadata_reservation,
@@ -638,10 +726,27 @@ impl ObjectManager {
             })
         } else {
             // This transaction should have had no impact on the metadata reservation or the amount
-            // we need to reserve.
-            debug_assert_eq!(self.metadata_reservation().amount(), old_amount);
-            debug_assert_eq!(self.inner.read().required_reservation(), old_required);
-            None
+            // we need to reserve. cladefs: but for flushing the objects it dirtied first, which it
+            // paid as far as the allocator had room (`reserve_flush_charge`).
+            debug_assert_eq!(self.metadata_reservation().amount(), old_amount + paid);
+            debug_assert_eq!(self.inner.read().required_reservation(), old_required + charge);
+            (paid < charge).then(|| {
+                // cladefs: the rest it borrows, which compacting repays, recorded as a borrowing
+                // transaction's is, for replay to borrow it too: its own reservation pays for its
+                // journal usage (`did_commit_transaction`), all of what it holds.
+                let mut inner = self.inner.write();
+                inner.borrowed_metadata_space += charge - paid;
+                let paid = match &transaction.metadata_reservation {
+                    MetadataReservation::Reservation(reservation) => reservation.amount(),
+                    MetadataReservation::Hold(hold_amount) => *hold_amount,
+                    _ => 0,
+                };
+                Mutation::UpdateBorrowed {
+                    borrowed: inner.borrowed_metadata_space,
+                    from: inner.last_end_offset,
+                    paid,
+                }
+            })
         })
     }
 
@@ -838,28 +943,38 @@ impl ObjectManager {
             // We don't need metadata reservations in read-only mode.
             return Ok(());
         }
-        let inner = self.inner.read();
+        let mut inner = self.inner.write();
         let required = inner.required_reservation();
         ensure!(required >= inner.borrowed_metadata_space, FxfsError::Inconsistent);
         let allocator = inner.allocator.as_ref().cloned().unwrap();
-        self.metadata_reservation
-            .set(
-                allocator
-                    .clone()
-                    .reserve(None, inner.required_reservation() - inner.borrowed_metadata_space)
-                    .with_context(|| {
+        let wanted = required - inner.borrowed_metadata_space;
+        // cladefs: what the objects the journal holds updates of take to flush (board 14243) is
+        // borrowed if the filesystem has no room for it: a journal an earlier build wrote, which
+        // charged nothing for it, may have filled it. Refused, its mount would fail where that
+        // build's didn't; borrowed, compacting it is no worse off than that build's (hotbed
+        // question 586).
+        let reservation = match allocator.clone().reserve(None, wanted) {
+            Some(reservation) => reservation,
+            None => {
+                let charges = inner.flush_charges().min(wanted);
+                let reservation =
+                    allocator.clone().reserve(None, wanted - charges).with_context(|| {
                         format!(
-                            "Failed to reserve {} - {} = {} bytes, free={}, \
-                             owner_bytes={}",
-                            inner.required_reservation(),
+                            "Failed to reserve {} - {} = {} bytes ({charges} of them borrowable), \
+                             free={}, owner_bytes={}",
+                            required,
                             inner.borrowed_metadata_space,
-                            inner.required_reservation() - inner.borrowed_metadata_space,
+                            wanted,
                             Saturating(allocator.get_disk_bytes()) - allocator.get_used_bytes(),
                             allocator.owner_bytes_debug(),
                         )
-                    })?,
-            )
-            .unwrap();
+                    })?;
+                warn!(charges; "No room to reserve flushing the dirty objects: borrowed");
+                inner.borrowed_metadata_space += charges;
+                reservation
+            }
+        };
+        self.metadata_reservation.set(reservation).unwrap();
         Ok(())
     }
 
@@ -882,6 +997,12 @@ impl ObjectManager {
     /// Returns the maximum reservation held by any object (the amount budgeted for compaction).
     pub fn max_store_reservation(&self) -> u64 {
         self.inner.read().reservations.values().max().cloned().unwrap_or(0)
+    }
+
+    /// cladefs: what the metadata reservation requires for flushing the objects the journal holds
+    /// updates of, whatever they hold (`FLUSH_COST_BLOCKS`, board 14243).
+    pub fn flush_charges(&self) -> u64 {
+        self.inner.read().flush_charges()
     }
 
     pub fn set_reserved_space(&self, amount: u64) {
@@ -936,6 +1057,14 @@ impl ObjectManager {
     }
 }
 
+/// cladefs: what flushing the objects a transaction dirties first adds to the metadata reservation
+/// (`FLUSH_COST_BLOCKS`), and what of that the allocator reserved before the transaction applied
+/// (`ObjectManager::reserve_flush_charge`): the rest it borrows (board 14243).
+pub struct FlushCharge {
+    amount: u64,
+    reserved: Option<Reservation>,
+}
+
 /// ReservationUpdate is an associated object that sets the amount reserved for an object
 /// (overwriting any previous amount). Updates must be applied as part of a transaction before
 /// did_commit_transaction runs because it will reconcile the accounting for reserved metadata
@@ -957,13 +1086,119 @@ impl AssociatedObject for ReservationUpdate {
 #[cfg(test)]
 mod tests {
     use super::ObjectManager;
+    use crate::filesystem::{FxFilesystem, FxFilesystemBuilder};
+    use crate::fsck::fsck;
+    use crate::object_store::directory::Directory;
+    use crate::object_store::transaction::{Options, lock_keys};
+    use crate::object_store::volume::root_volume;
+    use crate::object_store::{LockKey, NewChildStoreOptions, ObjectStore};
+    use std::sync::Arc;
+    use storage_device::DeviceHolder;
+    use storage_device::fake_device::FakeDevice;
+
+    /// As many volumes as the guest's snapshot tests format on a cell, and more.
+    const STORES: usize = 300;
+
+    /// The invariant of the metadata reservation: what it holds and what was borrowed of it is what
+    /// it requires.
+    fn assert_balanced(fs: &FxFilesystem, when: &str) {
+        let objects = fs.object_manager();
+        let (amount, borrowed) =
+            (objects.metadata_reservation().amount(), objects.borrowed_metadata_space());
+        assert_eq!(
+            amount + borrowed,
+            objects.required_reservation(),
+            "{when}: reservation {amount} + borrowed {borrowed}"
+        );
+    }
+
+    /// Creates the file `name` in `store`'s root directory: a few hundred bytes of the journal.
+    async fn create_file(store: &Arc<ObjectStore>, name: &str) {
+        let dir =
+            Directory::open(store, store.root_directory_object_id()).await.expect("open failed");
+        let mut transaction = store
+            .new_transaction(
+                lock_keys![LockKey::object(store.store_object_id(), dir.object_id())],
+                Options::default(),
+            )
+            .await
+            .expect("new_transaction failed");
+        dir.create_child_file(&mut transaction, name).await.expect("create_child_file failed");
+        transaction.commit().await.expect("commit failed");
+    }
+
+    /// cladefs: hundreds of stores, each dirtied by a few hundred bytes of the journal, compact all
+    /// at once without running the metadata reservation out of room, though a store's flush writes
+    /// a layer file of three blocks however little it holds (board 14243): new volumes, a file
+    /// created in each, and another, replayed by a mount. Compactions wait meanwhile, so that one
+    /// compaction flushes them all.
+    #[fuchsia_async::run_singlethreaded(test)]
+    async fn test_hundreds_of_lightly_dirtied_stores_compact() {
+        let device = DeviceHolder::new(FakeDevice::new(32768, 4096));
+        let fs = FxFilesystemBuilder::new().format(true).open(device).await.expect("open failed");
+        fs.journal().pause_compactions().await;
+        let volumes = root_volume(fs.clone()).await.expect("root_volume failed");
+        let mut stores = Vec::new();
+        for volume in 0..STORES {
+            let store = volumes
+                .new_volume(&format!("v{volume}"), NewChildStoreOptions::default())
+                .await
+                .expect("new_volume failed");
+            stores.push(store);
+        }
+        assert_balanced(&fs, "new volumes");
+        fs.journal().force_compact().await.expect("compacting new volumes");
+        assert_balanced(&fs, "new volumes compacted");
+
+        for store in &stores {
+            create_file(store, "file").await;
+        }
+        assert_balanced(&fs, "a file in each");
+        fs.journal().force_compact().await.expect("compacting a file in each");
+        assert_balanced(&fs, "a file in each compacted");
+
+        for store in &stores {
+            create_file(store, "another").await;
+        }
+        drop((stores, volumes));
+        fs.close().await.expect("close failed");
+        let device = fs.take_device().await;
+        device.reopen(false);
+        let fs = FxFilesystemBuilder::new().open(device).await.expect("open failed");
+        assert_balanced(&fs, "another file in each, replayed");
+        fs.journal().force_compact().await.expect("compacting another file in each, replayed");
+        assert_balanced(&fs, "another file in each, replayed and compacted");
+        fsck(fs.clone()).await.expect("fsck failed");
+        fs.close().await.expect("close failed");
+    }
+
+    /// cladefs: the journal compacts on its own before the stores it dirtied cost more to flush
+    /// than it keeps room for compacting (board 14243): hundreds of new volumes, each a few hundred
+    /// bytes of the journal, well under what compacts it.
+    #[fuchsia_async::run_singlethreaded(test)]
+    async fn test_many_dirty_stores_compact_the_journal() {
+        let device = DeviceHolder::new(FakeDevice::new(32768, 4096));
+        let fs = FxFilesystemBuilder::new().format(true).open(device).await.expect("open failed");
+        let compactions =
+            || fs.journal().stats().compactions.load(std::sync::atomic::Ordering::Relaxed);
+        let before = compactions();
+        let volumes = root_volume(fs.clone()).await.expect("root_volume failed");
+        for volume in 0..STORES {
+            volumes
+                .new_volume(&format!("v{volume}"), NewChildStoreOptions::default())
+                .await
+                .expect("new_volume failed");
+        }
+        assert!(compactions() > before, "{} compactions", compactions() - before);
+        fs.close().await.expect("close failed");
+    }
 
     /// cladefs: `cached_layer_chunks` and `evict_layer_chunks` must not block while
     /// `ObjectManager::inner` is write-locked (as `add_store` holds it while inserting into
     /// `stores`; TASK-292, TASK-596, hotbed review 109).
     #[test]
     fn test_layer_chunk_shrinker_under_inner_write_lock() {
-        let manager = ObjectManager::new(None);
+        let manager = ObjectManager::new(storage_units::BlockSize::SIZE_4KIB, None);
         let _write_guard = manager.inner.write();
         assert_eq!(manager.cached_layer_chunks(), 0);
         assert_eq!(manager.evict_layer_chunks(16), 0);
