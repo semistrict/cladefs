@@ -122,6 +122,11 @@ case "$os/$(uname -m)" in
         # The runner's sockets' directory, as short as a socket's path needs (SUN_LEN), not
         # macOS's own, under /var/folders.
         export TMPDIR=/tmp
+        # The daemons' disks keep 8 GiB free, not max(5%, 4 GiB): a developer's Mac's disk is
+        # its working disk, often nearly full, and 5% of it most of what is left, which refused
+        # cells (ENOSPC) to the cases making many or large ones. Exported: the daemons cases
+        # start themselves take it too.
+        export CLADEFSD_DISK_HEADROOM=${CLADEFSD_DISK_HEADROOM:-$((8 << 30))}
         results_in=$(e2e_macos_volume) guest_arch=aarch64
         ;;
     *) echo "cladefs's guests run on Linux and arm64 macOS only: use scripts/test-host.sh" >&2; exit 2 ;;
