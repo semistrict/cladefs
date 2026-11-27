@@ -1509,7 +1509,7 @@ async fn hand_overs_to_wedged_targets_end_within_their_bound() {
     use cladefs::Errno;
     use cladefs::cladefsd::control::errno;
     use cladefs::cladefsd::control::proto::{
-        AbortMigrationRequest, HandOverCellRequest, MigrateCellRequest,
+        AbortEphemeralMigrationRequest, HandOverEphemeralCellRequest, MigrateEphemeralCellRequest,
     };
     const PIECE_BOUND: Duration = Duration::from_secs(30);
     const BLOCKS: u64 = 4;
@@ -1572,15 +1572,16 @@ async fn hand_overs_to_wedged_targets_end_within_their_bound() {
 
     fail::cfg("migration::file_unanswered", "return").unwrap();
     let migrate = move || {
-        let request = MigrateCellRequest { tenant: 0, cell: child, peer: peer(2).to_string() };
-        async move { connect(1).await.migrate_cell(request).await.map(drop) }
+        let request =
+            MigrateEphemeralCellRequest { tenant: 0, cell: child, peer: peer(2).to_string() };
+        async move { connect(1).await.migrate_ephemeral_cell(request).await.map(drop) }
     };
     manager.spawn(migrate()).await.unwrap().unwrap();
     // The rounds' first request of the kept segment sent, and unanswered.
     madsim::time::sleep(Duration::from_secs(2)).await;
     let hand_over = move || {
-        let request = HandOverCellRequest { tenant: 0, cell: child, ..Default::default() };
-        async move { connect(1).await.hand_over_cell(request).await.map(drop) }
+        let request = HandOverEphemeralCellRequest { tenant: 0, cell: child };
+        async move { connect(1).await.hand_over_ephemeral_cell(request).await.map(drop) }
     };
     let timed = manager.spawn(async move {
         let started = madsim::time::Instant::now();
@@ -1597,8 +1598,13 @@ async fn hand_overs_to_wedged_targets_end_within_their_bound() {
     assert_eq!(opened, Err(Errno::EBUSY));
 
     let aborted = manager.spawn(async move {
-        let request = AbortMigrationRequest { tenant: 0, cell: child };
-        connect(1).await.abort_migration(request).await.map(drop).map_err(|status| errno(&status))
+        let request = AbortEphemeralMigrationRequest { tenant: 0, cell: child };
+        connect(1)
+            .await
+            .abort_ephemeral_migration(request)
+            .await
+            .map(drop)
+            .map_err(|status| errno(&status))
     });
     assert_eq!(aborted.await.unwrap(), Err(Some(Errno::EAGAIN)), "the cell served here again");
     let read_all = |host: usize| {
@@ -1642,7 +1648,7 @@ async fn hand_overs_to_wedged_targets_end_within_their_bound() {
 /// anything.
 async fn ephemeral_attrition(disk: bool, aborts: bool) -> Result<(), String> {
     use cladefs::cladefsd::control::proto::{
-        AbortMigrationRequest, HandOverCellRequest, MigrateCellRequest,
+        AbortEphemeralMigrationRequest, HandOverEphemeralCellRequest, MigrateEphemeralCellRequest,
     };
     use madsim::rand::Rng as _;
     const ROUNDS: u64 = 6;
@@ -1690,14 +1696,14 @@ async fn ephemeral_attrition(disk: bool, aborts: bool) -> Result<(), String> {
         let target = (host + 1) % 3;
         let source = host as u8 + 1;
         let migrating = manager.spawn(async move {
-            let request = MigrateCellRequest {
+            let request = MigrateEphemeralCellRequest {
                 tenant: 0,
                 cell: child,
                 peer: peer(source % 3 + 1).to_string(),
             };
             calling(source, || {
                 let request = request.clone();
-                async move { connect(source).await.migrate_cell(request).await }
+                async move { connect(source).await.migrate_ephemeral_cell(request).await }
             })
             .await
         });
@@ -1720,9 +1726,9 @@ async fn ephemeral_attrition(disk: bool, aborts: bool) -> Result<(), String> {
                 let tried = match tried {
                     false => None,
                     true => {
-                        let request =
-                            HandOverCellRequest { tenant: 0, cell: child, ..Default::default() };
-                        let answered = connect(source).await.hand_over_cell(request).await;
+                        let request = HandOverEphemeralCellRequest { tenant: 0, cell: child };
+                        let answered =
+                            connect(source).await.hand_over_ephemeral_cell(request).await;
                         Some(
                             answered
                                 .map(drop)
@@ -1731,8 +1737,8 @@ async fn ephemeral_attrition(disk: bool, aborts: bool) -> Result<(), String> {
                     }
                 };
                 let aborted = calling(source, || {
-                    let request = AbortMigrationRequest { tenant: 0, cell: child };
-                    async move { connect(source).await.abort_migration(request).await }
+                    let request = AbortEphemeralMigrationRequest { tenant: 0, cell: child };
+                    async move { connect(source).await.abort_ephemeral_migration(request).await }
                 })
                 .await;
                 (tried, aborted.map(drop))
@@ -1761,8 +1767,8 @@ async fn ephemeral_attrition(disk: bool, aborts: bool) -> Result<(), String> {
         }
         let handing = manager.spawn(async move {
             calling(source, || {
-                let request = HandOverCellRequest { tenant: 0, cell: child, ..Default::default() };
-                async move { connect(source).await.hand_over_cell(request).await }
+                let request = HandOverEphemeralCellRequest { tenant: 0, cell: child };
+                async move { connect(source).await.hand_over_ephemeral_cell(request).await }
             })
             .await
         });
@@ -1790,16 +1796,19 @@ async fn ephemeral_attrition(disk: bool, aborts: bool) -> Result<(), String> {
     // the seed's here, so that the rounds above draw as they did.
     let (target, source) = ((host + 1) % 3, host as u8 + 1);
     let migrated = manager.spawn(async move {
-        let request =
-            MigrateCellRequest { tenant: 0, cell: child, peer: peer(source % 3 + 1).to_string() };
+        let request = MigrateEphemeralCellRequest {
+            tenant: 0,
+            cell: child,
+            peer: peer(source % 3 + 1).to_string(),
+        };
         calling(source, || {
             let request = request.clone();
-            async move { connect(source).await.migrate_cell(request).await }
+            async move { connect(source).await.migrate_ephemeral_cell(request).await }
         })
         .await?;
         calling(source, || {
-            let request = HandOverCellRequest { tenant: 0, cell: child, ..Default::default() };
-            async move { connect(source).await.hand_over_cell(request).await }
+            let request = HandOverEphemeralCellRequest { tenant: 0, cell: child };
+            async move { connect(source).await.hand_over_ephemeral_cell(request).await }
         })
         .await
     });

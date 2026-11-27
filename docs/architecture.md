@@ -176,11 +176,12 @@ its footprint counts their blocks allocated. It has no uploader: its commits are
 reference in its parent's bucket, naming the host's incarnation, keeps the version while it lives.
 The host's `CLADEFSD_EPHEMERAL` directory holds that incarnation and a journal, by which a daemon
 starting retires the references of cells it holds no more, and `DecommissionHost` retires those of
-a host gone for good. `MigrateCell`, `HandOverCell`, `WaitHandOver`, and `AbortMigration` move an
-ephemeral cell live to another host over the daemons' peer network (`cladefsd::migration`): its
-kept segments are copied while its guest runs, the rest once its VM process is gone or its cell is
-released, the source giving the cell up before the target takes it over, as `specs/ephemeral`
-models; `AbortMigration` ends a migration before that. (Bucket-backed cells do not use peer
+a host gone for good. `MigrateEphemeralCell`, `HandOverEphemeralCell`, `WaitEphemeralHandOver`,
+and `AbortEphemeralMigration` move an ephemeral cell live to another host over the daemons' peer
+network (`cladefsd::migration`): its kept segments are copied while its guest runs, the rest once
+its VM process is gone or its cell is released, the source giving the cell up before the target
+takes it over, as `specs/ephemeral` models; `AbortEphemeralMigration` ends a migration before that.
+(Bucket-backed cells do not use peer
 hand-over; they move between hosts through the bucket via `SyncCell`, `CreateCell` + `PlaceCell`,
 `PUT /snapshot/load`, and `DropCell`.) A target takes a migration only of a source of its own
 formats

@@ -11,9 +11,10 @@
 #![cfg(target_os = "linux")]
 
 use cladefs::cladefsd::control::proto::{
-    AbortMigrationRequest, CreateCellRequest, DeleteCellRequest, DropCellRequest, ForkCellRequest,
-    HandOverCellRequest, MakeVersionRequest, MigrateCellRequest, PlaceCellRequest, StatCellRequest,
-    SyncCellRequest, WaitHandOverRequest, WaitHandOverResponse,
+    AbortEphemeralMigrationRequest, CreateCellRequest, DeleteCellRequest, DropCellRequest,
+    ForkCellRequest, HandOverEphemeralCellRequest, MakeVersionRequest, MigrateEphemeralCellRequest,
+    PlaceCellRequest, StatCellRequest, SyncCellRequest, WaitEphemeralHandOverRequest,
+    WaitEphemeralHandOverResponse,
 };
 use cladefs::testing::Control;
 use cladefs::{CellClient, CellId, ExtentId, VolatileSlice, VolatileSliceMut};
@@ -117,31 +118,34 @@ fn daemon_logging(
 
 impl Daemon {
     fn migrate(&self, cell: CellId, peer: &str) -> Result<u64, cladefs::Error> {
-        let request =
-            MigrateCellRequest { tenant: cell.tenant, cell: cell.id, peer: peer.to_owned() };
+        let request = MigrateEphemeralCellRequest {
+            tenant: cell.tenant,
+            cell: cell.id,
+            peer: peer.to_owned(),
+        };
         self.control
-            .call(async |client| client.migrate_cell(request).await)
+            .call(async |client| client.migrate_ephemeral_cell(request).await)
             .map(|response| response.migration)
     }
 
     fn hand_over(&self, cell: CellId) -> Result<(), cladefs::Error> {
-        let request =
-            HandOverCellRequest { tenant: cell.tenant, cell: cell.id, ..Default::default() };
-        self.control.call(async |client| client.hand_over_cell(request).await).map(drop)
+        let request = HandOverEphemeralCellRequest { tenant: cell.tenant, cell: cell.id };
+        self.control.call(async |client| client.hand_over_ephemeral_cell(request).await).map(drop)
     }
 
     fn abort_migration(&self, cell: CellId) -> Result<(), cladefs::Error> {
-        let request = AbortMigrationRequest { tenant: cell.tenant, cell: cell.id };
-        self.control.call(async |client| client.abort_migration(request).await).map(drop)
+        let request = AbortEphemeralMigrationRequest { tenant: cell.tenant, cell: cell.id };
+        self.control.call(async |client| client.abort_ephemeral_migration(request).await).map(drop)
     }
 
     fn wait_hand_over(
         &self,
         cell: CellId,
         migration: u64,
-    ) -> Result<WaitHandOverResponse, cladefs::Error> {
-        let request = WaitHandOverRequest { tenant: cell.tenant, cell: cell.id, migration };
-        self.control.call(async |client| client.wait_hand_over(request).await)
+    ) -> Result<WaitEphemeralHandOverResponse, cladefs::Error> {
+        let request =
+            WaitEphemeralHandOverRequest { tenant: cell.tenant, cell: cell.id, migration };
+        self.control.call(async |client| client.wait_ephemeral_hand_over(request).await)
     }
 
     /// Kills its process, as a crash does.
@@ -947,28 +951,13 @@ fn bucket_backed_cells_refuse_peer_migration_and_move_via_bucket() {
             assert!(msg.contains(expected), "{rpc} error missing {expected:?}: {msg}");
         }
     };
-    assert_bucket_refusal(source.migrate(cell, &target_at).unwrap_err(), "MigrateCell");
-    assert_bucket_refusal(source.abort_migration(cell).unwrap_err(), "AbortMigration");
-    assert_bucket_refusal(target.wait_hand_over(cell, 0).unwrap_err(), "WaitHandOver");
+    assert_bucket_refusal(source.migrate(cell, &target_at).unwrap_err(), "MigrateEphemeralCell");
+    assert_bucket_refusal(source.abort_migration(cell).unwrap_err(), "AbortEphemeralMigration");
+    assert_bucket_refusal(target.wait_hand_over(cell, 0).unwrap_err(), "WaitEphemeralHandOver");
 
-    // HandOverCell with a deprecated fencing token is refused with EINVAL.
-    let with_token = source
-        .control
-        .call(async |c| {
-            #[allow(deprecated)]
-            let req = HandOverCellRequest { tenant: cell.tenant, cell: cell.id, token: Some(2) };
-            c.hand_over_cell(req).await
-        })
-        .unwrap_err();
-    assert_eq!(
-        with_token.errno(),
-        Some(cladefs::Errno::EINVAL),
-        "HandOverCell token: {with_token}"
-    );
-
-    // Close client on source, verify HandOverCell also refuses with ENOTSUP.
+    // Close client on source, verify HandOverEphemeralCell also refuses with ENOTSUP.
     drop(client);
-    assert_bucket_refusal(source.hand_over(cell).unwrap_err(), "HandOverCell");
+    assert_bucket_refusal(source.hand_over(cell).unwrap_err(), "HandOverEphemeralCell");
 
     // Move through the bucket: SyncCell -> CreateCell + PlaceCell(2) -> open on target -> DropCell.
     source
@@ -1087,7 +1076,7 @@ fn wait_hand_over_wakes_on_accept_and_failure_and_returns_immediately_when_ready
     let waiter = std::thread::spawn(move || {
         let ctrl = Control::connect(&sock_clone).unwrap();
         ctrl.call(async |c| {
-            c.wait_hand_over(WaitHandOverRequest {
+            c.wait_ephemeral_hand_over(WaitEphemeralHandOverRequest {
                 tenant: cell1.tenant,
                 cell: cell1.id,
                 migration: 0,
@@ -1139,7 +1128,7 @@ fn wait_hand_over_wakes_on_accept_and_failure_and_returns_immediately_when_ready
     let abort_waiter = std::thread::spawn(move || {
         let ctrl = Control::connect(&sock_clone).unwrap();
         ctrl.call(async |c| {
-            c.wait_hand_over(WaitHandOverRequest {
+            c.wait_ephemeral_hand_over(WaitEphemeralHandOverRequest {
                 tenant: cell2.tenant,
                 cell: cell2.id,
                 migration: mig2,

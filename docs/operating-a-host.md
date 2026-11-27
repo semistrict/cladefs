@@ -33,7 +33,7 @@ placement = "read_write"     # read_write | drain | read_only
 `cladefsd` owns the on-disk layout under each disk root (`<path>/cells/<TENANT>/<CELL>`,
 `<path>/part-cache/`, `<path>/replicas/`) and chooses which disk holds each new cell based on
 placement mode, health state, and remaining spare capacity. Callers never pass host filesystem paths
-to control RPCs (`CreateCell`, `ForkCell`, `ImportImage`, `Grant`, `MigrateCell`, etc.) — every cell
+to control RPCs (`CreateCell`, `ForkCell`, `ImportImage`, `Grant`, `MigrateEphemeralCell`, etc.) — every cell
 is addressed by `(tenant, cell)` alone.
 
 Legacy `CLADEFSD_*` environment variables remain supported for compatibility and override TOML
@@ -507,10 +507,10 @@ it (board 8585). TENANT is in base 32; `--tenant` names one, its absence every t
 | `cells [--json]` | `ListCells` | The cells VM processes have open, each's `path` and what `StatCell` says of it |
 | `counters [--json]` | `GetCounters` | The daemon's counters since it started, its bucket's under `object_storage` |
 | `set-peers [ADDRESS...]` | `SetPeers` | The hosts sharing its bucket, each `HOST:PORT`; none without any |
-| `migrate TENANT/CELL PEER` | `MigrateCell` | Begins the live migration of the ephemeral cell to the daemon at peer address PEER; prints `migration ID` |
-| `hand-over TENANT/CELL` | `HandOverCell` | Hands the ephemeral cell over to its migration's target |
-| `wait-hand-over [--migration ID] TENANT/CELL` | `WaitHandOver` | Waits on the target daemon for an incoming ephemeral hand-over |
-| `abort-migration TENANT/CELL` | `AbortMigration` | Ends the ephemeral cell's migration, the cell free to migrate again |
+| `migrate-ephemeral TENANT/CELL PEER` | `MigrateEphemeralCell` | Begins the live migration of the ephemeral cell to the daemon at peer address PEER; prints `migration ID` |
+| `hand-over-ephemeral TENANT/CELL` | `HandOverEphemeralCell` | Hands the ephemeral cell over to its migration's target |
+| `wait-ephemeral-hand-over [--migration ID] TENANT/CELL` | `WaitEphemeralHandOver` | Waits on the target daemon for an incoming ephemeral hand-over |
+| `abort-ephemeral-migration TENANT/CELL` | `AbortEphemeralMigration` | Ends the ephemeral cell's migration, the cell free to migrate again |
 | `memory-limit [--tenant TENANT] BYTES\|none` | `SetMemoryLimit` | Limits the memory extents' pages are held in, or lifts the limit |
 | `memory-weight TENANT WEIGHT` | `SetMemoryWeight` | Weighs a tenant's memory against the others' |
 | `in-flight [--tenant TENANT] BYTES\|default` | `SetTenantInFlight` | The bytes in flight a tenant's connections share, or the default |

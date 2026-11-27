@@ -320,7 +320,7 @@ func (CellKind) EnumDescriptor() ([]byte, []int) {
 
 // A live migration of an ephemeral cell to begin. The target daemon chooses its own managed JBOD
 // disk.
-type MigrateCellRequest struct {
+type MigrateEphemeralCellRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The peer address of the daemon it goes to.
 	Peer string `protobuf:"bytes,2,opt,name=peer,proto3" json:"peer,omitempty"`
@@ -332,20 +332,20 @@ type MigrateCellRequest struct {
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *MigrateCellRequest) Reset() {
-	*x = MigrateCellRequest{}
+func (x *MigrateEphemeralCellRequest) Reset() {
+	*x = MigrateEphemeralCellRequest{}
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *MigrateCellRequest) String() string {
+func (x *MigrateEphemeralCellRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*MigrateCellRequest) ProtoMessage() {}
+func (*MigrateEphemeralCellRequest) ProtoMessage() {}
 
-func (x *MigrateCellRequest) ProtoReflect() protoreflect.Message {
+func (x *MigrateEphemeralCellRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -357,34 +357,34 @@ func (x *MigrateCellRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use MigrateCellRequest.ProtoReflect.Descriptor instead.
-func (*MigrateCellRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use MigrateEphemeralCellRequest.ProtoReflect.Descriptor instead.
+func (*MigrateEphemeralCellRequest) Descriptor() ([]byte, []int) {
 	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{0}
 }
 
-func (x *MigrateCellRequest) GetPeer() string {
+func (x *MigrateEphemeralCellRequest) GetPeer() string {
 	if x != nil {
 		return x.Peer
 	}
 	return ""
 }
 
-func (x *MigrateCellRequest) GetTenant() uint64 {
+func (x *MigrateEphemeralCellRequest) GetTenant() uint64 {
 	if x != nil {
 		return x.Tenant
 	}
 	return 0
 }
 
-func (x *MigrateCellRequest) GetCell() uint64 {
+func (x *MigrateEphemeralCellRequest) GetCell() uint64 {
 	if x != nil {
 		return x.Cell
 	}
 	return 0
 }
 
-// A migration begun.
-type MigrateCellResponse struct {
+// An ephemeral migration begun.
+type MigrateEphemeralCellResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Its ID.
 	Migration     uint64 `protobuf:"varint,1,opt,name=migration,proto3" json:"migration,omitempty"`
@@ -392,20 +392,20 @@ type MigrateCellResponse struct {
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *MigrateCellResponse) Reset() {
-	*x = MigrateCellResponse{}
+func (x *MigrateEphemeralCellResponse) Reset() {
+	*x = MigrateEphemeralCellResponse{}
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *MigrateCellResponse) String() string {
+func (x *MigrateEphemeralCellResponse) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*MigrateCellResponse) ProtoMessage() {}
+func (*MigrateEphemeralCellResponse) ProtoMessage() {}
 
-func (x *MigrateCellResponse) ProtoReflect() protoreflect.Message {
+func (x *MigrateEphemeralCellResponse) ProtoReflect() protoreflect.Message {
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -417,26 +417,21 @@ func (x *MigrateCellResponse) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use MigrateCellResponse.ProtoReflect.Descriptor instead.
-func (*MigrateCellResponse) Descriptor() ([]byte, []int) {
+// Deprecated: Use MigrateEphemeralCellResponse.ProtoReflect.Descriptor instead.
+func (*MigrateEphemeralCellResponse) Descriptor() ([]byte, []int) {
 	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{1}
 }
 
-func (x *MigrateCellResponse) GetMigration() uint64 {
+func (x *MigrateEphemeralCellResponse) GetMigration() uint64 {
 	if x != nil {
 		return x.Migration
 	}
 	return 0
 }
 
-// A migration's hand-over.
-type HandOverCellRequest struct {
+// An ephemeral migration's hand-over.
+type HandOverEphemeralCellRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Deprecated: HandOverCell serves ephemeral cells only and takes no fencing token. Setting this
-	// field is refused (INVALID_ARGUMENT, EINVAL).
-	//
-	// Deprecated: Marked as deprecated in cladefs/cladefsd/v1/cladefsd.proto.
-	Token *uint64 `protobuf:"varint,2,opt,name=token,proto3,oneof" json:"token,omitempty"`
 	// The cell's tenant.
 	Tenant uint64 `protobuf:"varint,3,opt,name=tenant,proto3" json:"tenant,omitempty"`
 	// The cell's ID.
@@ -445,20 +440,20 @@ type HandOverCellRequest struct {
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *HandOverCellRequest) Reset() {
-	*x = HandOverCellRequest{}
+func (x *HandOverEphemeralCellRequest) Reset() {
+	*x = HandOverEphemeralCellRequest{}
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *HandOverCellRequest) String() string {
+func (x *HandOverEphemeralCellRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*HandOverCellRequest) ProtoMessage() {}
+func (*HandOverEphemeralCellRequest) ProtoMessage() {}
 
-func (x *HandOverCellRequest) ProtoReflect() protoreflect.Message {
+func (x *HandOverEphemeralCellRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -470,54 +465,46 @@ func (x *HandOverCellRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use HandOverCellRequest.ProtoReflect.Descriptor instead.
-func (*HandOverCellRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use HandOverEphemeralCellRequest.ProtoReflect.Descriptor instead.
+func (*HandOverEphemeralCellRequest) Descriptor() ([]byte, []int) {
 	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{2}
 }
 
-// Deprecated: Marked as deprecated in cladefs/cladefsd/v1/cladefsd.proto.
-func (x *HandOverCellRequest) GetToken() uint64 {
-	if x != nil && x.Token != nil {
-		return *x.Token
-	}
-	return 0
-}
-
-func (x *HandOverCellRequest) GetTenant() uint64 {
+func (x *HandOverEphemeralCellRequest) GetTenant() uint64 {
 	if x != nil {
 		return x.Tenant
 	}
 	return 0
 }
 
-func (x *HandOverCellRequest) GetCell() uint64 {
+func (x *HandOverEphemeralCellRequest) GetCell() uint64 {
 	if x != nil {
 		return x.Cell
 	}
 	return 0
 }
 
-// A migration handed over.
-type HandOverCellResponse struct {
+// An ephemeral migration handed over.
+type HandOverEphemeralCellResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *HandOverCellResponse) Reset() {
-	*x = HandOverCellResponse{}
+func (x *HandOverEphemeralCellResponse) Reset() {
+	*x = HandOverEphemeralCellResponse{}
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *HandOverCellResponse) String() string {
+func (x *HandOverEphemeralCellResponse) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*HandOverCellResponse) ProtoMessage() {}
+func (*HandOverEphemeralCellResponse) ProtoMessage() {}
 
-func (x *HandOverCellResponse) ProtoReflect() protoreflect.Message {
+func (x *HandOverEphemeralCellResponse) ProtoReflect() protoreflect.Message {
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -529,13 +516,13 @@ func (x *HandOverCellResponse) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use HandOverCellResponse.ProtoReflect.Descriptor instead.
-func (*HandOverCellResponse) Descriptor() ([]byte, []int) {
+// Deprecated: Use HandOverEphemeralCellResponse.ProtoReflect.Descriptor instead.
+func (*HandOverEphemeralCellResponse) Descriptor() ([]byte, []int) {
 	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{3}
 }
 
-// A migration to end.
-type AbortMigrationRequest struct {
+// An ephemeral migration to end.
+type AbortEphemeralMigrationRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The cell's tenant.
 	Tenant uint64 `protobuf:"varint,2,opt,name=tenant,proto3" json:"tenant,omitempty"`
@@ -545,20 +532,20 @@ type AbortMigrationRequest struct {
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *AbortMigrationRequest) Reset() {
-	*x = AbortMigrationRequest{}
+func (x *AbortEphemeralMigrationRequest) Reset() {
+	*x = AbortEphemeralMigrationRequest{}
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *AbortMigrationRequest) String() string {
+func (x *AbortEphemeralMigrationRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*AbortMigrationRequest) ProtoMessage() {}
+func (*AbortEphemeralMigrationRequest) ProtoMessage() {}
 
-func (x *AbortMigrationRequest) ProtoReflect() protoreflect.Message {
+func (x *AbortEphemeralMigrationRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -570,46 +557,46 @@ func (x *AbortMigrationRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use AbortMigrationRequest.ProtoReflect.Descriptor instead.
-func (*AbortMigrationRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use AbortEphemeralMigrationRequest.ProtoReflect.Descriptor instead.
+func (*AbortEphemeralMigrationRequest) Descriptor() ([]byte, []int) {
 	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{4}
 }
 
-func (x *AbortMigrationRequest) GetTenant() uint64 {
+func (x *AbortEphemeralMigrationRequest) GetTenant() uint64 {
 	if x != nil {
 		return x.Tenant
 	}
 	return 0
 }
 
-func (x *AbortMigrationRequest) GetCell() uint64 {
+func (x *AbortEphemeralMigrationRequest) GetCell() uint64 {
 	if x != nil {
 		return x.Cell
 	}
 	return 0
 }
 
-// A migration ended.
-type AbortMigrationResponse struct {
+// An ephemeral migration ended.
+type AbortEphemeralMigrationResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *AbortMigrationResponse) Reset() {
-	*x = AbortMigrationResponse{}
+func (x *AbortEphemeralMigrationResponse) Reset() {
+	*x = AbortEphemeralMigrationResponse{}
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *AbortMigrationResponse) String() string {
+func (x *AbortEphemeralMigrationResponse) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*AbortMigrationResponse) ProtoMessage() {}
+func (*AbortEphemeralMigrationResponse) ProtoMessage() {}
 
-func (x *AbortMigrationResponse) ProtoReflect() protoreflect.Message {
+func (x *AbortEphemeralMigrationResponse) ProtoReflect() protoreflect.Message {
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -621,8 +608,8 @@ func (x *AbortMigrationResponse) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use AbortMigrationResponse.ProtoReflect.Descriptor instead.
-func (*AbortMigrationResponse) Descriptor() ([]byte, []int) {
+// Deprecated: Use AbortEphemeralMigrationResponse.ProtoReflect.Descriptor instead.
+func (*AbortEphemeralMigrationResponse) Descriptor() ([]byte, []int) {
 	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{5}
 }
 
@@ -1063,35 +1050,36 @@ func (*SetDiskGovernanceResponse) Descriptor() ([]byte, []int) {
 	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{10}
 }
 
-// Waits for an incoming migration hand-over of `(tenant, cell)` on this target daemon.
-type WaitHandOverRequest struct {
+// Waits for an incoming ephemeral migration hand-over of `(tenant, cell)` on this target daemon.
+type WaitEphemeralHandOverRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The migrating cell's tenant ID.
 	Tenant uint64 `protobuf:"varint,1,opt,name=tenant,proto3" json:"tenant,omitempty"`
 	// The migrating cell's ID.
 	Cell uint64 `protobuf:"varint,2,opt,name=cell,proto3" json:"cell,omitempty"`
-	// Optional migration ID (from MigrateCellResponse.migration). When 0, waits for any incoming
-	// migration of `(tenant, cell)` (or returns immediately if the cell is already present locally
-	// with no active migration). When non-zero, waits specifically for that migration of the cell.
+	// Optional migration ID (from MigrateEphemeralCellResponse.migration). When 0, waits for any
+	// incoming migration of `(tenant, cell)` (or returns immediately if the cell is already present
+	// locally with no active migration). When non-zero, waits specifically for that migration of the
+	// cell.
 	Migration     uint64 `protobuf:"varint,3,opt,name=migration,proto3" json:"migration,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *WaitHandOverRequest) Reset() {
-	*x = WaitHandOverRequest{}
+func (x *WaitEphemeralHandOverRequest) Reset() {
+	*x = WaitEphemeralHandOverRequest{}
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *WaitHandOverRequest) String() string {
+func (x *WaitEphemeralHandOverRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*WaitHandOverRequest) ProtoMessage() {}
+func (*WaitEphemeralHandOverRequest) ProtoMessage() {}
 
-func (x *WaitHandOverRequest) ProtoReflect() protoreflect.Message {
+func (x *WaitEphemeralHandOverRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -1103,34 +1091,34 @@ func (x *WaitHandOverRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use WaitHandOverRequest.ProtoReflect.Descriptor instead.
-func (*WaitHandOverRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use WaitEphemeralHandOverRequest.ProtoReflect.Descriptor instead.
+func (*WaitEphemeralHandOverRequest) Descriptor() ([]byte, []int) {
 	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{11}
 }
 
-func (x *WaitHandOverRequest) GetTenant() uint64 {
+func (x *WaitEphemeralHandOverRequest) GetTenant() uint64 {
 	if x != nil {
 		return x.Tenant
 	}
 	return 0
 }
 
-func (x *WaitHandOverRequest) GetCell() uint64 {
+func (x *WaitEphemeralHandOverRequest) GetCell() uint64 {
 	if x != nil {
 		return x.Cell
 	}
 	return 0
 }
 
-func (x *WaitHandOverRequest) GetMigration() uint64 {
+func (x *WaitEphemeralHandOverRequest) GetMigration() uint64 {
 	if x != nil {
 		return x.Migration
 	}
 	return 0
 }
 
-// An incoming migration hand-over accepted on this target daemon.
-type WaitHandOverResponse struct {
+// An incoming ephemeral migration hand-over accepted on this target daemon.
+type WaitEphemeralHandOverResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The migration ID that completed, or 0 if the cell was already present before this daemon
 	// observed a migration for it.
@@ -1143,20 +1131,20 @@ type WaitHandOverResponse struct {
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *WaitHandOverResponse) Reset() {
-	*x = WaitHandOverResponse{}
+func (x *WaitEphemeralHandOverResponse) Reset() {
+	*x = WaitEphemeralHandOverResponse{}
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *WaitHandOverResponse) String() string {
+func (x *WaitEphemeralHandOverResponse) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*WaitHandOverResponse) ProtoMessage() {}
+func (*WaitEphemeralHandOverResponse) ProtoMessage() {}
 
-func (x *WaitHandOverResponse) ProtoReflect() protoreflect.Message {
+func (x *WaitEphemeralHandOverResponse) ProtoReflect() protoreflect.Message {
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -1168,26 +1156,26 @@ func (x *WaitHandOverResponse) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use WaitHandOverResponse.ProtoReflect.Descriptor instead.
-func (*WaitHandOverResponse) Descriptor() ([]byte, []int) {
+// Deprecated: Use WaitEphemeralHandOverResponse.ProtoReflect.Descriptor instead.
+func (*WaitEphemeralHandOverResponse) Descriptor() ([]byte, []int) {
 	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{12}
 }
 
-func (x *WaitHandOverResponse) GetMigration() uint64 {
+func (x *WaitEphemeralHandOverResponse) GetMigration() uint64 {
 	if x != nil {
 		return x.Migration
 	}
 	return 0
 }
 
-func (x *WaitHandOverResponse) GetTenant() uint64 {
+func (x *WaitEphemeralHandOverResponse) GetTenant() uint64 {
 	if x != nil {
 		return x.Tenant
 	}
 	return 0
 }
 
-func (x *WaitHandOverResponse) GetCell() uint64 {
+func (x *WaitEphemeralHandOverResponse) GetCell() uint64 {
 	if x != nil {
 		return x.Cell
 	}
@@ -5979,23 +5967,21 @@ var File_cladefs_cladefsd_v1_cladefsd_proto protoreflect.FileDescriptor
 
 const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\n" +
-	"\"cladefs/cladefsd/v1/cladefsd.proto\x12\x13cladefs.cladefsd.v1\"`\n" +
-	"\x12MigrateCellRequest\x12\x12\n" +
+	"\"cladefs/cladefsd/v1/cladefsd.proto\x12\x13cladefs.cladefsd.v1\"i\n" +
+	"\x1bMigrateEphemeralCellRequest\x12\x12\n" +
 	"\x04peer\x18\x02 \x01(\tR\x04peer\x12\x16\n" +
 	"\x06tenant\x18\x04 \x01(\x04R\x06tenant\x12\x12\n" +
-	"\x04cell\x18\x05 \x01(\x04R\x04cellJ\x04\b\x01\x10\x02J\x04\b\x03\x10\x04\"3\n" +
-	"\x13MigrateCellResponse\x12\x1c\n" +
-	"\tmigration\x18\x01 \x01(\x04R\tmigration\"p\n" +
-	"\x13HandOverCellRequest\x12\x1d\n" +
-	"\x05token\x18\x02 \x01(\x04B\x02\x18\x01H\x00R\x05token\x88\x01\x01\x12\x16\n" +
+	"\x04cell\x18\x05 \x01(\x04R\x04cellJ\x04\b\x01\x10\x02J\x04\b\x03\x10\x04\"<\n" +
+	"\x1cMigrateEphemeralCellResponse\x12\x1c\n" +
+	"\tmigration\x18\x01 \x01(\x04R\tmigration\"V\n" +
+	"\x1cHandOverEphemeralCellRequest\x12\x16\n" +
 	"\x06tenant\x18\x03 \x01(\x04R\x06tenant\x12\x12\n" +
-	"\x04cell\x18\x04 \x01(\x04R\x04cellB\b\n" +
-	"\x06_tokenJ\x04\b\x01\x10\x02\"\x16\n" +
-	"\x14HandOverCellResponse\"I\n" +
-	"\x15AbortMigrationRequest\x12\x16\n" +
+	"\x04cell\x18\x04 \x01(\x04R\x04cellJ\x04\b\x01\x10\x02J\x04\b\x02\x10\x03\"\x1f\n" +
+	"\x1dHandOverEphemeralCellResponse\"R\n" +
+	"\x1eAbortEphemeralMigrationRequest\x12\x16\n" +
 	"\x06tenant\x18\x02 \x01(\x04R\x06tenant\x12\x12\n" +
-	"\x04cell\x18\x03 \x01(\x04R\x04cellJ\x04\b\x01\x10\x02\"\x18\n" +
-	"\x16AbortMigrationResponse\"\x12\n" +
+	"\x04cell\x18\x03 \x01(\x04R\x04cellJ\x04\b\x01\x10\x02\"!\n" +
+	"\x1fAbortEphemeralMigrationResponse\"\x12\n" +
 	"\x10ListDisksRequest\"H\n" +
 	"\x11ListDisksResponse\x123\n" +
 	"\x05disks\x18\x01 \x03(\v2\x1d.cladefs.cladefsd.v1.DiskInfoR\x05disks\"\xe5\x04\n" +
@@ -6043,12 +6029,12 @@ const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\x13_dirty_budget_bytesB\f\n" +
 	"\n" +
 	"_placement\"\x1b\n" +
-	"\x19SetDiskGovernanceResponse\"_\n" +
-	"\x13WaitHandOverRequest\x12\x16\n" +
+	"\x19SetDiskGovernanceResponse\"h\n" +
+	"\x1cWaitEphemeralHandOverRequest\x12\x16\n" +
 	"\x06tenant\x18\x01 \x01(\x04R\x06tenant\x12\x12\n" +
 	"\x04cell\x18\x02 \x01(\x04R\x04cell\x12\x1c\n" +
-	"\tmigration\x18\x03 \x01(\x04R\tmigration\"`\n" +
-	"\x14WaitHandOverResponse\x12\x1c\n" +
+	"\tmigration\x18\x03 \x01(\x04R\tmigration\"i\n" +
+	"\x1dWaitEphemeralHandOverResponse\x12\x1c\n" +
 	"\tmigration\x18\x01 \x01(\x04R\tmigration\x12\x16\n" +
 	"\x06tenant\x18\x02 \x01(\x04R\x06tenant\x12\x12\n" +
 	"\x04cell\x18\x03 \x01(\x04R\x04cell\"O\n" +
@@ -6421,7 +6407,7 @@ const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\bCellKind\x12\x12\n" +
 	"\x0eCELL_KIND_FXFS\x10\x00\x12\x14\n" +
 	"\x10CELL_KIND_SQLITE\x10\x01\x12\x14\n" +
-	"\x10CELL_KIND_MEMORY\x10\x022\xd1\x1f\n" +
+	"\x10CELL_KIND_MEMORY\x10\x022\xbe \n" +
 	"\bCladefsd\x12]\n" +
 	"\n" +
 	"CreateCell\x12&.cladefs.cladefsd.v1.CreateCellRequest\x1a'.cladefs.cladefsd.v1.CreateCellResponse\x12`\n" +
@@ -6462,13 +6448,13 @@ const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\vShredTenant\x12'.cladefs.cladefsd.v1.ShredTenantRequest\x1a(.cladefs.cladefsd.v1.ShredTenantResponse\x12Z\n" +
 	"\tReloadKms\x12%.cladefs.cladefsd.v1.ReloadKmsRequest\x1a&.cladefs.cladefsd.v1.ReloadKmsResponse\x12o\n" +
 	"\x10DecommissionHost\x12,.cladefs.cladefsd.v1.DecommissionHostRequest\x1a-.cladefs.cladefsd.v1.DecommissionHostResponse\x12u\n" +
-	"\x12ListEphemeralHosts\x12..cladefs.cladefsd.v1.ListEphemeralHostsRequest\x1a/.cladefs.cladefsd.v1.ListEphemeralHostsResponse\x12`\n" +
-	"\vMigrateCell\x12'.cladefs.cladefsd.v1.MigrateCellRequest\x1a(.cladefs.cladefsd.v1.MigrateCellResponse\x12c\n" +
-	"\fHandOverCell\x12(.cladefs.cladefsd.v1.HandOverCellRequest\x1a).cladefs.cladefsd.v1.HandOverCellResponse\x12i\n" +
-	"\x0eAbortMigration\x12*.cladefs.cladefsd.v1.AbortMigrationRequest\x1a+.cladefs.cladefsd.v1.AbortMigrationResponse\x12Z\n" +
+	"\x12ListEphemeralHosts\x12..cladefs.cladefsd.v1.ListEphemeralHostsRequest\x1a/.cladefs.cladefsd.v1.ListEphemeralHostsResponse\x12{\n" +
+	"\x14MigrateEphemeralCell\x120.cladefs.cladefsd.v1.MigrateEphemeralCellRequest\x1a1.cladefs.cladefsd.v1.MigrateEphemeralCellResponse\x12~\n" +
+	"\x15HandOverEphemeralCell\x121.cladefs.cladefsd.v1.HandOverEphemeralCellRequest\x1a2.cladefs.cladefsd.v1.HandOverEphemeralCellResponse\x12\x84\x01\n" +
+	"\x17AbortEphemeralMigration\x123.cladefs.cladefsd.v1.AbortEphemeralMigrationRequest\x1a4.cladefs.cladefsd.v1.AbortEphemeralMigrationResponse\x12Z\n" +
 	"\tListDisks\x12%.cladefs.cladefsd.v1.ListDisksRequest\x1a&.cladefs.cladefsd.v1.ListDisksResponse\x12r\n" +
-	"\x11SetDiskGovernance\x12-.cladefs.cladefsd.v1.SetDiskGovernanceRequest\x1a..cladefs.cladefsd.v1.SetDiskGovernanceResponse\x12c\n" +
-	"\fWaitHandOver\x12(.cladefs.cladefsd.v1.WaitHandOverRequest\x1a).cladefs.cladefsd.v1.WaitHandOverResponseB9Z7github.com/semistrict/cladefs/go/cladefsd/v1;cladefsdv1b\x06proto3"
+	"\x11SetDiskGovernance\x12-.cladefs.cladefsd.v1.SetDiskGovernanceRequest\x1a..cladefs.cladefsd.v1.SetDiskGovernanceResponse\x12~\n" +
+	"\x15WaitEphemeralHandOver\x121.cladefs.cladefsd.v1.WaitEphemeralHandOverRequest\x1a2.cladefs.cladefsd.v1.WaitEphemeralHandOverResponseB9Z7github.com/semistrict/cladefs/go/cladefsd/v1;cladefsdv1b\x06proto3"
 
 var (
 	file_cladefs_cladefsd_v1_cladefsd_proto_rawDescOnce sync.Once
@@ -6485,112 +6471,112 @@ func file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP() []byte {
 var file_cladefs_cladefsd_v1_cladefsd_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
 var file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes = make([]protoimpl.MessageInfo, 102)
 var file_cladefs_cladefsd_v1_cladefsd_proto_goTypes = []any{
-	(DiskPlacementMode)(0),             // 0: cladefs.cladefsd.v1.DiskPlacementMode
-	(DiskHealthMode)(0),                // 1: cladefs.cladefsd.v1.DiskHealthMode
-	(FsyncLevel)(0),                    // 2: cladefs.cladefsd.v1.FsyncLevel
-	(CellKind)(0),                      // 3: cladefs.cladefsd.v1.CellKind
-	(*MigrateCellRequest)(nil),         // 4: cladefs.cladefsd.v1.MigrateCellRequest
-	(*MigrateCellResponse)(nil),        // 5: cladefs.cladefsd.v1.MigrateCellResponse
-	(*HandOverCellRequest)(nil),        // 6: cladefs.cladefsd.v1.HandOverCellRequest
-	(*HandOverCellResponse)(nil),       // 7: cladefs.cladefsd.v1.HandOverCellResponse
-	(*AbortMigrationRequest)(nil),      // 8: cladefs.cladefsd.v1.AbortMigrationRequest
-	(*AbortMigrationResponse)(nil),     // 9: cladefs.cladefsd.v1.AbortMigrationResponse
-	(*ListDisksRequest)(nil),           // 10: cladefs.cladefsd.v1.ListDisksRequest
-	(*ListDisksResponse)(nil),          // 11: cladefs.cladefsd.v1.ListDisksResponse
-	(*DiskInfo)(nil),                   // 12: cladefs.cladefsd.v1.DiskInfo
-	(*SetDiskGovernanceRequest)(nil),   // 13: cladefs.cladefsd.v1.SetDiskGovernanceRequest
-	(*SetDiskGovernanceResponse)(nil),  // 14: cladefs.cladefsd.v1.SetDiskGovernanceResponse
-	(*WaitHandOverRequest)(nil),        // 15: cladefs.cladefsd.v1.WaitHandOverRequest
-	(*WaitHandOverResponse)(nil),       // 16: cladefs.cladefsd.v1.WaitHandOverResponse
-	(*DecommissionHostRequest)(nil),    // 17: cladefs.cladefsd.v1.DecommissionHostRequest
-	(*DecommissionHostResponse)(nil),   // 18: cladefs.cladefsd.v1.DecommissionHostResponse
-	(*ListEphemeralHostsRequest)(nil),  // 19: cladefs.cladefsd.v1.ListEphemeralHostsRequest
-	(*ListEphemeralHostsResponse)(nil), // 20: cladefs.cladefsd.v1.ListEphemeralHostsResponse
-	(*EphemeralHost)(nil),              // 21: cladefs.cladefsd.v1.EphemeralHost
-	(*CreateCellRequest)(nil),          // 22: cladefs.cladefsd.v1.CreateCellRequest
-	(*CreateCellResponse)(nil),         // 23: cladefs.cladefsd.v1.CreateCellResponse
-	(*ImportImageRequest)(nil),         // 24: cladefs.cladefsd.v1.ImportImageRequest
-	(*ImportImageResponse)(nil),        // 25: cladefs.cladefsd.v1.ImportImageResponse
-	(*ImportMemoryRequest)(nil),        // 26: cladefs.cladefsd.v1.ImportMemoryRequest
-	(*ImportMemoryResponse)(nil),       // 27: cladefs.cladefsd.v1.ImportMemoryResponse
-	(*ForkCellRequest)(nil),            // 28: cladefs.cladefsd.v1.ForkCellRequest
-	(*ForkCellResponse)(nil),           // 29: cladefs.cladefsd.v1.ForkCellResponse
-	(*DeleteCellRequest)(nil),          // 30: cladefs.cladefsd.v1.DeleteCellRequest
-	(*DeleteCellResponse)(nil),         // 31: cladefs.cladefsd.v1.DeleteCellResponse
-	(*DropCellRequest)(nil),            // 32: cladefs.cladefsd.v1.DropCellRequest
-	(*DropCellResponse)(nil),           // 33: cladefs.cladefsd.v1.DropCellResponse
-	(*ResizeCellRequest)(nil),          // 34: cladefs.cladefsd.v1.ResizeCellRequest
-	(*ResizeCellResponse)(nil),         // 35: cladefs.cladefsd.v1.ResizeCellResponse
-	(*PlaceCellRequest)(nil),           // 36: cladefs.cladefsd.v1.PlaceCellRequest
-	(*PlaceCellResponse)(nil),          // 37: cladefs.cladefsd.v1.PlaceCellResponse
-	(*MakeVersionRequest)(nil),         // 38: cladefs.cladefsd.v1.MakeVersionRequest
-	(*MakeVersionResponse)(nil),        // 39: cladefs.cladefsd.v1.MakeVersionResponse
-	(*ListVersionsRequest)(nil),        // 40: cladefs.cladefsd.v1.ListVersionsRequest
-	(*Version)(nil),                    // 41: cladefs.cladefsd.v1.Version
-	(*ListVersionsResponse)(nil),       // 42: cladefs.cladefsd.v1.ListVersionsResponse
-	(*DropVersionsRequest)(nil),        // 43: cladefs.cladefsd.v1.DropVersionsRequest
-	(*DropVersionsResponse)(nil),       // 44: cladefs.cladefsd.v1.DropVersionsResponse
-	(*ShareVersionRequest)(nil),        // 45: cladefs.cladefsd.v1.ShareVersionRequest
-	(*ShareVersionResponse)(nil),       // 46: cladefs.cladefsd.v1.ShareVersionResponse
-	(*MakePublicRequest)(nil),          // 47: cladefs.cladefsd.v1.MakePublicRequest
-	(*MakePublicResponse)(nil),         // 48: cladefs.cladefsd.v1.MakePublicResponse
-	(*AttachBaseRequest)(nil),          // 49: cladefs.cladefsd.v1.AttachBaseRequest
-	(*AttachBaseResponse)(nil),         // 50: cladefs.cladefsd.v1.AttachBaseResponse
-	(*SyncCellRequest)(nil),            // 51: cladefs.cladefsd.v1.SyncCellRequest
-	(*SyncCellResponse)(nil),           // 52: cladefs.cladefsd.v1.SyncCellResponse
-	(*StatCellRequest)(nil),            // 53: cladefs.cladefsd.v1.StatCellRequest
-	(*StatCellResponse)(nil),           // 54: cladefs.cladefsd.v1.StatCellResponse
-	(*ListCellsRequest)(nil),           // 55: cladefs.cladefsd.v1.ListCellsRequest
-	(*ListCellsResponse)(nil),          // 56: cladefs.cladefsd.v1.ListCellsResponse
-	(*ListedCell)(nil),                 // 57: cladefs.cladefsd.v1.ListedCell
-	(*GetCountersRequest)(nil),         // 58: cladefs.cladefsd.v1.GetCountersRequest
-	(*GetCountersResponse)(nil),        // 59: cladefs.cladefsd.v1.GetCountersResponse
-	(*GetStatsRequest)(nil),            // 60: cladefs.cladefsd.v1.GetStatsRequest
-	(*GetStatsResponse)(nil),           // 61: cladefs.cladefsd.v1.GetStatsResponse
-	(*VmStats)(nil),                    // 62: cladefs.cladefsd.v1.VmStats
-	(*GuestStats)(nil),                 // 63: cladefs.cladefsd.v1.GuestStats
-	(*Histogram)(nil),                  // 64: cladefs.cladefsd.v1.Histogram
-	(*ObjectStorageStats)(nil),         // 65: cladefs.cladefsd.v1.ObjectStorageStats
-	(*GrantRequest)(nil),               // 66: cladefs.cladefsd.v1.GrantRequest
-	(*GrantResponse)(nil),              // 67: cladefs.cladefsd.v1.GrantResponse
-	(*RevokeRequest)(nil),              // 68: cladefs.cladefsd.v1.RevokeRequest
-	(*RevokeResponse)(nil),             // 69: cladefs.cladefsd.v1.RevokeResponse
-	(*SetMemoryLimitRequest)(nil),      // 70: cladefs.cladefsd.v1.SetMemoryLimitRequest
-	(*SetMemoryLimitResponse)(nil),     // 71: cladefs.cladefsd.v1.SetMemoryLimitResponse
-	(*SetMemoryWeightRequest)(nil),     // 72: cladefs.cladefsd.v1.SetMemoryWeightRequest
-	(*SetMemoryWeightResponse)(nil),    // 73: cladefs.cladefsd.v1.SetMemoryWeightResponse
-	(*SetTenantInFlightRequest)(nil),   // 74: cladefs.cladefsd.v1.SetTenantInFlightRequest
-	(*SetTenantInFlightResponse)(nil),  // 75: cladefs.cladefsd.v1.SetTenantInFlightResponse
-	(*ShrinkMemoryRequest)(nil),        // 76: cladefs.cladefsd.v1.ShrinkMemoryRequest
-	(*ShrinkMemoryResponse)(nil),       // 77: cladefs.cladefsd.v1.ShrinkMemoryResponse
-	(*SetDiskLimitRequest)(nil),        // 78: cladefs.cladefsd.v1.SetDiskLimitRequest
-	(*SetDiskLimitResponse)(nil),       // 79: cladefs.cladefsd.v1.SetDiskLimitResponse
-	(*SetDiskWeightRequest)(nil),       // 80: cladefs.cladefsd.v1.SetDiskWeightRequest
-	(*SetDiskWeightResponse)(nil),      // 81: cladefs.cladefsd.v1.SetDiskWeightResponse
-	(*SetPeersRequest)(nil),            // 82: cladefs.cladefsd.v1.SetPeersRequest
-	(*SetPeersResponse)(nil),           // 83: cladefs.cladefsd.v1.SetPeersResponse
-	(*GetTenantDiskRequest)(nil),       // 84: cladefs.cladefsd.v1.GetTenantDiskRequest
-	(*GetTenantDiskResponse)(nil),      // 85: cladefs.cladefsd.v1.GetTenantDiskResponse
-	(*ShredCellRequest)(nil),           // 86: cladefs.cladefsd.v1.ShredCellRequest
-	(*ShredCellResponse)(nil),          // 87: cladefs.cladefsd.v1.ShredCellResponse
-	(*ForgetTenantKeysRequest)(nil),    // 88: cladefs.cladefsd.v1.ForgetTenantKeysRequest
-	(*ForgetTenantKeysResponse)(nil),   // 89: cladefs.cladefsd.v1.ForgetTenantKeysResponse
-	(*ShredTenantRequest)(nil),         // 90: cladefs.cladefsd.v1.ShredTenantRequest
-	(*ShredTenantResponse)(nil),        // 91: cladefs.cladefsd.v1.ShredTenantResponse
-	(*ReloadKmsRequest)(nil),           // 92: cladefs.cladefsd.v1.ReloadKmsRequest
-	(*ReloadKmsResponse)(nil),          // 93: cladefs.cladefsd.v1.ReloadKmsResponse
-	(*MasterKeysReloaded)(nil),         // 94: cladefs.cladefsd.v1.MasterKeysReloaded
-	(*Forgotten)(nil),                  // 95: cladefs.cladefsd.v1.Forgotten
-	nil,                                // 96: cladefs.cladefsd.v1.GetStatsResponse.CountersEntry
-	nil,                                // 97: cladefs.cladefsd.v1.GetStatsResponse.GaugesEntry
-	nil,                                // 98: cladefs.cladefsd.v1.VmStats.CountersEntry
-	nil,                                // 99: cladefs.cladefsd.v1.VmStats.GaugesEntry
-	nil,                                // 100: cladefs.cladefsd.v1.VmStats.WindowEntry
-	nil,                                // 101: cladefs.cladefsd.v1.GuestStats.CountersEntry
-	nil,                                // 102: cladefs.cladefsd.v1.GuestStats.HistogramsEntry
-	nil,                                // 103: cladefs.cladefsd.v1.ObjectStorageStats.RequestsEntry
-	nil,                                // 104: cladefs.cladefsd.v1.ObjectStorageStats.UploadedBytesEntry
-	nil,                                // 105: cladefs.cladefsd.v1.ObjectStorageStats.FailuresEntry
+	(DiskPlacementMode)(0),                  // 0: cladefs.cladefsd.v1.DiskPlacementMode
+	(DiskHealthMode)(0),                     // 1: cladefs.cladefsd.v1.DiskHealthMode
+	(FsyncLevel)(0),                         // 2: cladefs.cladefsd.v1.FsyncLevel
+	(CellKind)(0),                           // 3: cladefs.cladefsd.v1.CellKind
+	(*MigrateEphemeralCellRequest)(nil),     // 4: cladefs.cladefsd.v1.MigrateEphemeralCellRequest
+	(*MigrateEphemeralCellResponse)(nil),    // 5: cladefs.cladefsd.v1.MigrateEphemeralCellResponse
+	(*HandOverEphemeralCellRequest)(nil),    // 6: cladefs.cladefsd.v1.HandOverEphemeralCellRequest
+	(*HandOverEphemeralCellResponse)(nil),   // 7: cladefs.cladefsd.v1.HandOverEphemeralCellResponse
+	(*AbortEphemeralMigrationRequest)(nil),  // 8: cladefs.cladefsd.v1.AbortEphemeralMigrationRequest
+	(*AbortEphemeralMigrationResponse)(nil), // 9: cladefs.cladefsd.v1.AbortEphemeralMigrationResponse
+	(*ListDisksRequest)(nil),                // 10: cladefs.cladefsd.v1.ListDisksRequest
+	(*ListDisksResponse)(nil),               // 11: cladefs.cladefsd.v1.ListDisksResponse
+	(*DiskInfo)(nil),                        // 12: cladefs.cladefsd.v1.DiskInfo
+	(*SetDiskGovernanceRequest)(nil),        // 13: cladefs.cladefsd.v1.SetDiskGovernanceRequest
+	(*SetDiskGovernanceResponse)(nil),       // 14: cladefs.cladefsd.v1.SetDiskGovernanceResponse
+	(*WaitEphemeralHandOverRequest)(nil),    // 15: cladefs.cladefsd.v1.WaitEphemeralHandOverRequest
+	(*WaitEphemeralHandOverResponse)(nil),   // 16: cladefs.cladefsd.v1.WaitEphemeralHandOverResponse
+	(*DecommissionHostRequest)(nil),         // 17: cladefs.cladefsd.v1.DecommissionHostRequest
+	(*DecommissionHostResponse)(nil),        // 18: cladefs.cladefsd.v1.DecommissionHostResponse
+	(*ListEphemeralHostsRequest)(nil),       // 19: cladefs.cladefsd.v1.ListEphemeralHostsRequest
+	(*ListEphemeralHostsResponse)(nil),      // 20: cladefs.cladefsd.v1.ListEphemeralHostsResponse
+	(*EphemeralHost)(nil),                   // 21: cladefs.cladefsd.v1.EphemeralHost
+	(*CreateCellRequest)(nil),               // 22: cladefs.cladefsd.v1.CreateCellRequest
+	(*CreateCellResponse)(nil),              // 23: cladefs.cladefsd.v1.CreateCellResponse
+	(*ImportImageRequest)(nil),              // 24: cladefs.cladefsd.v1.ImportImageRequest
+	(*ImportImageResponse)(nil),             // 25: cladefs.cladefsd.v1.ImportImageResponse
+	(*ImportMemoryRequest)(nil),             // 26: cladefs.cladefsd.v1.ImportMemoryRequest
+	(*ImportMemoryResponse)(nil),            // 27: cladefs.cladefsd.v1.ImportMemoryResponse
+	(*ForkCellRequest)(nil),                 // 28: cladefs.cladefsd.v1.ForkCellRequest
+	(*ForkCellResponse)(nil),                // 29: cladefs.cladefsd.v1.ForkCellResponse
+	(*DeleteCellRequest)(nil),               // 30: cladefs.cladefsd.v1.DeleteCellRequest
+	(*DeleteCellResponse)(nil),              // 31: cladefs.cladefsd.v1.DeleteCellResponse
+	(*DropCellRequest)(nil),                 // 32: cladefs.cladefsd.v1.DropCellRequest
+	(*DropCellResponse)(nil),                // 33: cladefs.cladefsd.v1.DropCellResponse
+	(*ResizeCellRequest)(nil),               // 34: cladefs.cladefsd.v1.ResizeCellRequest
+	(*ResizeCellResponse)(nil),              // 35: cladefs.cladefsd.v1.ResizeCellResponse
+	(*PlaceCellRequest)(nil),                // 36: cladefs.cladefsd.v1.PlaceCellRequest
+	(*PlaceCellResponse)(nil),               // 37: cladefs.cladefsd.v1.PlaceCellResponse
+	(*MakeVersionRequest)(nil),              // 38: cladefs.cladefsd.v1.MakeVersionRequest
+	(*MakeVersionResponse)(nil),             // 39: cladefs.cladefsd.v1.MakeVersionResponse
+	(*ListVersionsRequest)(nil),             // 40: cladefs.cladefsd.v1.ListVersionsRequest
+	(*Version)(nil),                         // 41: cladefs.cladefsd.v1.Version
+	(*ListVersionsResponse)(nil),            // 42: cladefs.cladefsd.v1.ListVersionsResponse
+	(*DropVersionsRequest)(nil),             // 43: cladefs.cladefsd.v1.DropVersionsRequest
+	(*DropVersionsResponse)(nil),            // 44: cladefs.cladefsd.v1.DropVersionsResponse
+	(*ShareVersionRequest)(nil),             // 45: cladefs.cladefsd.v1.ShareVersionRequest
+	(*ShareVersionResponse)(nil),            // 46: cladefs.cladefsd.v1.ShareVersionResponse
+	(*MakePublicRequest)(nil),               // 47: cladefs.cladefsd.v1.MakePublicRequest
+	(*MakePublicResponse)(nil),              // 48: cladefs.cladefsd.v1.MakePublicResponse
+	(*AttachBaseRequest)(nil),               // 49: cladefs.cladefsd.v1.AttachBaseRequest
+	(*AttachBaseResponse)(nil),              // 50: cladefs.cladefsd.v1.AttachBaseResponse
+	(*SyncCellRequest)(nil),                 // 51: cladefs.cladefsd.v1.SyncCellRequest
+	(*SyncCellResponse)(nil),                // 52: cladefs.cladefsd.v1.SyncCellResponse
+	(*StatCellRequest)(nil),                 // 53: cladefs.cladefsd.v1.StatCellRequest
+	(*StatCellResponse)(nil),                // 54: cladefs.cladefsd.v1.StatCellResponse
+	(*ListCellsRequest)(nil),                // 55: cladefs.cladefsd.v1.ListCellsRequest
+	(*ListCellsResponse)(nil),               // 56: cladefs.cladefsd.v1.ListCellsResponse
+	(*ListedCell)(nil),                      // 57: cladefs.cladefsd.v1.ListedCell
+	(*GetCountersRequest)(nil),              // 58: cladefs.cladefsd.v1.GetCountersRequest
+	(*GetCountersResponse)(nil),             // 59: cladefs.cladefsd.v1.GetCountersResponse
+	(*GetStatsRequest)(nil),                 // 60: cladefs.cladefsd.v1.GetStatsRequest
+	(*GetStatsResponse)(nil),                // 61: cladefs.cladefsd.v1.GetStatsResponse
+	(*VmStats)(nil),                         // 62: cladefs.cladefsd.v1.VmStats
+	(*GuestStats)(nil),                      // 63: cladefs.cladefsd.v1.GuestStats
+	(*Histogram)(nil),                       // 64: cladefs.cladefsd.v1.Histogram
+	(*ObjectStorageStats)(nil),              // 65: cladefs.cladefsd.v1.ObjectStorageStats
+	(*GrantRequest)(nil),                    // 66: cladefs.cladefsd.v1.GrantRequest
+	(*GrantResponse)(nil),                   // 67: cladefs.cladefsd.v1.GrantResponse
+	(*RevokeRequest)(nil),                   // 68: cladefs.cladefsd.v1.RevokeRequest
+	(*RevokeResponse)(nil),                  // 69: cladefs.cladefsd.v1.RevokeResponse
+	(*SetMemoryLimitRequest)(nil),           // 70: cladefs.cladefsd.v1.SetMemoryLimitRequest
+	(*SetMemoryLimitResponse)(nil),          // 71: cladefs.cladefsd.v1.SetMemoryLimitResponse
+	(*SetMemoryWeightRequest)(nil),          // 72: cladefs.cladefsd.v1.SetMemoryWeightRequest
+	(*SetMemoryWeightResponse)(nil),         // 73: cladefs.cladefsd.v1.SetMemoryWeightResponse
+	(*SetTenantInFlightRequest)(nil),        // 74: cladefs.cladefsd.v1.SetTenantInFlightRequest
+	(*SetTenantInFlightResponse)(nil),       // 75: cladefs.cladefsd.v1.SetTenantInFlightResponse
+	(*ShrinkMemoryRequest)(nil),             // 76: cladefs.cladefsd.v1.ShrinkMemoryRequest
+	(*ShrinkMemoryResponse)(nil),            // 77: cladefs.cladefsd.v1.ShrinkMemoryResponse
+	(*SetDiskLimitRequest)(nil),             // 78: cladefs.cladefsd.v1.SetDiskLimitRequest
+	(*SetDiskLimitResponse)(nil),            // 79: cladefs.cladefsd.v1.SetDiskLimitResponse
+	(*SetDiskWeightRequest)(nil),            // 80: cladefs.cladefsd.v1.SetDiskWeightRequest
+	(*SetDiskWeightResponse)(nil),           // 81: cladefs.cladefsd.v1.SetDiskWeightResponse
+	(*SetPeersRequest)(nil),                 // 82: cladefs.cladefsd.v1.SetPeersRequest
+	(*SetPeersResponse)(nil),                // 83: cladefs.cladefsd.v1.SetPeersResponse
+	(*GetTenantDiskRequest)(nil),            // 84: cladefs.cladefsd.v1.GetTenantDiskRequest
+	(*GetTenantDiskResponse)(nil),           // 85: cladefs.cladefsd.v1.GetTenantDiskResponse
+	(*ShredCellRequest)(nil),                // 86: cladefs.cladefsd.v1.ShredCellRequest
+	(*ShredCellResponse)(nil),               // 87: cladefs.cladefsd.v1.ShredCellResponse
+	(*ForgetTenantKeysRequest)(nil),         // 88: cladefs.cladefsd.v1.ForgetTenantKeysRequest
+	(*ForgetTenantKeysResponse)(nil),        // 89: cladefs.cladefsd.v1.ForgetTenantKeysResponse
+	(*ShredTenantRequest)(nil),              // 90: cladefs.cladefsd.v1.ShredTenantRequest
+	(*ShredTenantResponse)(nil),             // 91: cladefs.cladefsd.v1.ShredTenantResponse
+	(*ReloadKmsRequest)(nil),                // 92: cladefs.cladefsd.v1.ReloadKmsRequest
+	(*ReloadKmsResponse)(nil),               // 93: cladefs.cladefsd.v1.ReloadKmsResponse
+	(*MasterKeysReloaded)(nil),              // 94: cladefs.cladefsd.v1.MasterKeysReloaded
+	(*Forgotten)(nil),                       // 95: cladefs.cladefsd.v1.Forgotten
+	nil,                                     // 96: cladefs.cladefsd.v1.GetStatsResponse.CountersEntry
+	nil,                                     // 97: cladefs.cladefsd.v1.GetStatsResponse.GaugesEntry
+	nil,                                     // 98: cladefs.cladefsd.v1.VmStats.CountersEntry
+	nil,                                     // 99: cladefs.cladefsd.v1.VmStats.GaugesEntry
+	nil,                                     // 100: cladefs.cladefsd.v1.VmStats.WindowEntry
+	nil,                                     // 101: cladefs.cladefsd.v1.GuestStats.CountersEntry
+	nil,                                     // 102: cladefs.cladefsd.v1.GuestStats.HistogramsEntry
+	nil,                                     // 103: cladefs.cladefsd.v1.ObjectStorageStats.RequestsEntry
+	nil,                                     // 104: cladefs.cladefsd.v1.ObjectStorageStats.UploadedBytesEntry
+	nil,                                     // 105: cladefs.cladefsd.v1.ObjectStorageStats.FailuresEntry
 }
 var file_cladefs_cladefsd_v1_cladefsd_proto_depIdxs = []int32{
 	12,  // 0: cladefs.cladefsd.v1.ListDisksResponse.disks:type_name -> cladefs.cladefsd.v1.DiskInfo
@@ -6657,12 +6643,12 @@ var file_cladefs_cladefsd_v1_cladefsd_proto_depIdxs = []int32{
 	92,  // 61: cladefs.cladefsd.v1.Cladefsd.ReloadKms:input_type -> cladefs.cladefsd.v1.ReloadKmsRequest
 	17,  // 62: cladefs.cladefsd.v1.Cladefsd.DecommissionHost:input_type -> cladefs.cladefsd.v1.DecommissionHostRequest
 	19,  // 63: cladefs.cladefsd.v1.Cladefsd.ListEphemeralHosts:input_type -> cladefs.cladefsd.v1.ListEphemeralHostsRequest
-	4,   // 64: cladefs.cladefsd.v1.Cladefsd.MigrateCell:input_type -> cladefs.cladefsd.v1.MigrateCellRequest
-	6,   // 65: cladefs.cladefsd.v1.Cladefsd.HandOverCell:input_type -> cladefs.cladefsd.v1.HandOverCellRequest
-	8,   // 66: cladefs.cladefsd.v1.Cladefsd.AbortMigration:input_type -> cladefs.cladefsd.v1.AbortMigrationRequest
+	4,   // 64: cladefs.cladefsd.v1.Cladefsd.MigrateEphemeralCell:input_type -> cladefs.cladefsd.v1.MigrateEphemeralCellRequest
+	6,   // 65: cladefs.cladefsd.v1.Cladefsd.HandOverEphemeralCell:input_type -> cladefs.cladefsd.v1.HandOverEphemeralCellRequest
+	8,   // 66: cladefs.cladefsd.v1.Cladefsd.AbortEphemeralMigration:input_type -> cladefs.cladefsd.v1.AbortEphemeralMigrationRequest
 	10,  // 67: cladefs.cladefsd.v1.Cladefsd.ListDisks:input_type -> cladefs.cladefsd.v1.ListDisksRequest
 	13,  // 68: cladefs.cladefsd.v1.Cladefsd.SetDiskGovernance:input_type -> cladefs.cladefsd.v1.SetDiskGovernanceRequest
-	15,  // 69: cladefs.cladefsd.v1.Cladefsd.WaitHandOver:input_type -> cladefs.cladefsd.v1.WaitHandOverRequest
+	15,  // 69: cladefs.cladefsd.v1.Cladefsd.WaitEphemeralHandOver:input_type -> cladefs.cladefsd.v1.WaitEphemeralHandOverRequest
 	23,  // 70: cladefs.cladefsd.v1.Cladefsd.CreateCell:output_type -> cladefs.cladefsd.v1.CreateCellResponse
 	25,  // 71: cladefs.cladefsd.v1.Cladefsd.ImportImage:output_type -> cladefs.cladefsd.v1.ImportImageResponse
 	27,  // 72: cladefs.cladefsd.v1.Cladefsd.ImportMemory:output_type -> cladefs.cladefsd.v1.ImportMemoryResponse
@@ -6698,12 +6684,12 @@ var file_cladefs_cladefsd_v1_cladefsd_proto_depIdxs = []int32{
 	93,  // 102: cladefs.cladefsd.v1.Cladefsd.ReloadKms:output_type -> cladefs.cladefsd.v1.ReloadKmsResponse
 	18,  // 103: cladefs.cladefsd.v1.Cladefsd.DecommissionHost:output_type -> cladefs.cladefsd.v1.DecommissionHostResponse
 	20,  // 104: cladefs.cladefsd.v1.Cladefsd.ListEphemeralHosts:output_type -> cladefs.cladefsd.v1.ListEphemeralHostsResponse
-	5,   // 105: cladefs.cladefsd.v1.Cladefsd.MigrateCell:output_type -> cladefs.cladefsd.v1.MigrateCellResponse
-	7,   // 106: cladefs.cladefsd.v1.Cladefsd.HandOverCell:output_type -> cladefs.cladefsd.v1.HandOverCellResponse
-	9,   // 107: cladefs.cladefsd.v1.Cladefsd.AbortMigration:output_type -> cladefs.cladefsd.v1.AbortMigrationResponse
+	5,   // 105: cladefs.cladefsd.v1.Cladefsd.MigrateEphemeralCell:output_type -> cladefs.cladefsd.v1.MigrateEphemeralCellResponse
+	7,   // 106: cladefs.cladefsd.v1.Cladefsd.HandOverEphemeralCell:output_type -> cladefs.cladefsd.v1.HandOverEphemeralCellResponse
+	9,   // 107: cladefs.cladefsd.v1.Cladefsd.AbortEphemeralMigration:output_type -> cladefs.cladefsd.v1.AbortEphemeralMigrationResponse
 	11,  // 108: cladefs.cladefsd.v1.Cladefsd.ListDisks:output_type -> cladefs.cladefsd.v1.ListDisksResponse
 	14,  // 109: cladefs.cladefsd.v1.Cladefsd.SetDiskGovernance:output_type -> cladefs.cladefsd.v1.SetDiskGovernanceResponse
-	16,  // 110: cladefs.cladefsd.v1.Cladefsd.WaitHandOver:output_type -> cladefs.cladefsd.v1.WaitHandOverResponse
+	16,  // 110: cladefs.cladefsd.v1.Cladefsd.WaitEphemeralHandOver:output_type -> cladefs.cladefsd.v1.WaitEphemeralHandOverResponse
 	70,  // [70:111] is the sub-list for method output_type
 	29,  // [29:70] is the sub-list for method input_type
 	29,  // [29:29] is the sub-list for extension type_name
@@ -6716,7 +6702,6 @@ func file_cladefs_cladefsd_v1_cladefsd_proto_init() {
 	if File_cladefs_cladefsd_v1_cladefsd_proto != nil {
 		return
 	}
-	file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[2].OneofWrappers = []any{}
 	file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[9].OneofWrappers = []any{}
 	file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[18].OneofWrappers = []any{}
 	file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[24].OneofWrappers = []any{}

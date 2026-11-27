@@ -36,7 +36,7 @@ follows from that.
 Callers never choose host directories or paths. Every control RPC (`CreateCell`, `ForkCell`,
 `ImportImage`, `ImportMemory`, `StatCell`, `SyncCell`, `ResizeCell`, `DeleteCell`, `DropCell`,
 `PlaceCell`, `MakePublic`, `MakeVersion`, `ListVersions`, `DropVersions`, `ShareVersion`,
-`AttachBase`, `MigrateCell`, `HandOverCell`, `AbortMigration`) addresses cells by `(tenant, cell)`
+`AttachBase`, `MigrateEphemeralCell`, `HandOverEphemeralCell`, `AbortEphemeralMigration`) addresses cells by `(tenant, cell)`
 alone. On the VM socket (`OPEN`), Firecracker passes `"TENANT/CELL"` (in Crockford base 32) to open
 an existing cell, or `"TENANT/0"` / `"0/0"` to let the daemon create or fork a new cell on the best
 managed disk. On a granted tenant's socket, `"0/0"` is a new cell of that tenant's, and any other
@@ -206,7 +206,8 @@ uploading anything to object storage:
 Bucket-backed cells move between hosts sharing a bucket through the bucket itself (or through the
 fast WAL, where each commit already is once acknowledged) using the existing control RPCs
 (`SyncCell`, `CreateCell`, `PlaceCell`, `DropCell`) — no peer mTLS hand-over is needed. Peer live
-migration (`MigrateCell`, `HandOverCell`, `WaitHandOver`, `AbortMigration`) serves **ephemeral
+migration (`MigrateEphemeralCell`, `HandOverEphemeralCell`, `WaitEphemeralHandOver`,
+`AbortEphemeralMigration`) serves **ephemeral
 cells only** and refuses bucket-backed cells with `FAILED_PRECONDITION` (`ENOTSUP`).
 
 1. **Pause, migration snapshot, and release the cell on the source VM:**

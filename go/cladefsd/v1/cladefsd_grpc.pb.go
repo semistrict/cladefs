@@ -94,47 +94,47 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Cladefsd_CreateCell_FullMethodName         = "/cladefs.cladefsd.v1.Cladefsd/CreateCell"
-	Cladefsd_ImportImage_FullMethodName        = "/cladefs.cladefsd.v1.Cladefsd/ImportImage"
-	Cladefsd_ImportMemory_FullMethodName       = "/cladefs.cladefsd.v1.Cladefsd/ImportMemory"
-	Cladefsd_ForkCell_FullMethodName           = "/cladefs.cladefsd.v1.Cladefsd/ForkCell"
-	Cladefsd_DeleteCell_FullMethodName         = "/cladefs.cladefsd.v1.Cladefsd/DeleteCell"
-	Cladefsd_DropCell_FullMethodName           = "/cladefs.cladefsd.v1.Cladefsd/DropCell"
-	Cladefsd_ResizeCell_FullMethodName         = "/cladefs.cladefsd.v1.Cladefsd/ResizeCell"
-	Cladefsd_PlaceCell_FullMethodName          = "/cladefs.cladefsd.v1.Cladefsd/PlaceCell"
-	Cladefsd_MakePublic_FullMethodName         = "/cladefs.cladefsd.v1.Cladefsd/MakePublic"
-	Cladefsd_MakeVersion_FullMethodName        = "/cladefs.cladefsd.v1.Cladefsd/MakeVersion"
-	Cladefsd_ListVersions_FullMethodName       = "/cladefs.cladefsd.v1.Cladefsd/ListVersions"
-	Cladefsd_DropVersions_FullMethodName       = "/cladefs.cladefsd.v1.Cladefsd/DropVersions"
-	Cladefsd_ShareVersion_FullMethodName       = "/cladefs.cladefsd.v1.Cladefsd/ShareVersion"
-	Cladefsd_AttachBase_FullMethodName         = "/cladefs.cladefsd.v1.Cladefsd/AttachBase"
-	Cladefsd_SyncCell_FullMethodName           = "/cladefs.cladefsd.v1.Cladefsd/SyncCell"
-	Cladefsd_StatCell_FullMethodName           = "/cladefs.cladefsd.v1.Cladefsd/StatCell"
-	Cladefsd_ListCells_FullMethodName          = "/cladefs.cladefsd.v1.Cladefsd/ListCells"
-	Cladefsd_GetCounters_FullMethodName        = "/cladefs.cladefsd.v1.Cladefsd/GetCounters"
-	Cladefsd_GetStats_FullMethodName           = "/cladefs.cladefsd.v1.Cladefsd/GetStats"
-	Cladefsd_Grant_FullMethodName              = "/cladefs.cladefsd.v1.Cladefsd/Grant"
-	Cladefsd_Revoke_FullMethodName             = "/cladefs.cladefsd.v1.Cladefsd/Revoke"
-	Cladefsd_SetMemoryLimit_FullMethodName     = "/cladefs.cladefsd.v1.Cladefsd/SetMemoryLimit"
-	Cladefsd_SetMemoryWeight_FullMethodName    = "/cladefs.cladefsd.v1.Cladefsd/SetMemoryWeight"
-	Cladefsd_SetTenantInFlight_FullMethodName  = "/cladefs.cladefsd.v1.Cladefsd/SetTenantInFlight"
-	Cladefsd_ShrinkMemory_FullMethodName       = "/cladefs.cladefsd.v1.Cladefsd/ShrinkMemory"
-	Cladefsd_SetDiskLimit_FullMethodName       = "/cladefs.cladefsd.v1.Cladefsd/SetDiskLimit"
-	Cladefsd_SetDiskWeight_FullMethodName      = "/cladefs.cladefsd.v1.Cladefsd/SetDiskWeight"
-	Cladefsd_GetTenantDisk_FullMethodName      = "/cladefs.cladefsd.v1.Cladefsd/GetTenantDisk"
-	Cladefsd_SetPeers_FullMethodName           = "/cladefs.cladefsd.v1.Cladefsd/SetPeers"
-	Cladefsd_ShredCell_FullMethodName          = "/cladefs.cladefsd.v1.Cladefsd/ShredCell"
-	Cladefsd_ForgetTenantKeys_FullMethodName   = "/cladefs.cladefsd.v1.Cladefsd/ForgetTenantKeys"
-	Cladefsd_ShredTenant_FullMethodName        = "/cladefs.cladefsd.v1.Cladefsd/ShredTenant"
-	Cladefsd_ReloadKms_FullMethodName          = "/cladefs.cladefsd.v1.Cladefsd/ReloadKms"
-	Cladefsd_DecommissionHost_FullMethodName   = "/cladefs.cladefsd.v1.Cladefsd/DecommissionHost"
-	Cladefsd_ListEphemeralHosts_FullMethodName = "/cladefs.cladefsd.v1.Cladefsd/ListEphemeralHosts"
-	Cladefsd_MigrateCell_FullMethodName        = "/cladefs.cladefsd.v1.Cladefsd/MigrateCell"
-	Cladefsd_HandOverCell_FullMethodName       = "/cladefs.cladefsd.v1.Cladefsd/HandOverCell"
-	Cladefsd_AbortMigration_FullMethodName     = "/cladefs.cladefsd.v1.Cladefsd/AbortMigration"
-	Cladefsd_ListDisks_FullMethodName          = "/cladefs.cladefsd.v1.Cladefsd/ListDisks"
-	Cladefsd_SetDiskGovernance_FullMethodName  = "/cladefs.cladefsd.v1.Cladefsd/SetDiskGovernance"
-	Cladefsd_WaitHandOver_FullMethodName       = "/cladefs.cladefsd.v1.Cladefsd/WaitHandOver"
+	Cladefsd_CreateCell_FullMethodName              = "/cladefs.cladefsd.v1.Cladefsd/CreateCell"
+	Cladefsd_ImportImage_FullMethodName             = "/cladefs.cladefsd.v1.Cladefsd/ImportImage"
+	Cladefsd_ImportMemory_FullMethodName            = "/cladefs.cladefsd.v1.Cladefsd/ImportMemory"
+	Cladefsd_ForkCell_FullMethodName                = "/cladefs.cladefsd.v1.Cladefsd/ForkCell"
+	Cladefsd_DeleteCell_FullMethodName              = "/cladefs.cladefsd.v1.Cladefsd/DeleteCell"
+	Cladefsd_DropCell_FullMethodName                = "/cladefs.cladefsd.v1.Cladefsd/DropCell"
+	Cladefsd_ResizeCell_FullMethodName              = "/cladefs.cladefsd.v1.Cladefsd/ResizeCell"
+	Cladefsd_PlaceCell_FullMethodName               = "/cladefs.cladefsd.v1.Cladefsd/PlaceCell"
+	Cladefsd_MakePublic_FullMethodName              = "/cladefs.cladefsd.v1.Cladefsd/MakePublic"
+	Cladefsd_MakeVersion_FullMethodName             = "/cladefs.cladefsd.v1.Cladefsd/MakeVersion"
+	Cladefsd_ListVersions_FullMethodName            = "/cladefs.cladefsd.v1.Cladefsd/ListVersions"
+	Cladefsd_DropVersions_FullMethodName            = "/cladefs.cladefsd.v1.Cladefsd/DropVersions"
+	Cladefsd_ShareVersion_FullMethodName            = "/cladefs.cladefsd.v1.Cladefsd/ShareVersion"
+	Cladefsd_AttachBase_FullMethodName              = "/cladefs.cladefsd.v1.Cladefsd/AttachBase"
+	Cladefsd_SyncCell_FullMethodName                = "/cladefs.cladefsd.v1.Cladefsd/SyncCell"
+	Cladefsd_StatCell_FullMethodName                = "/cladefs.cladefsd.v1.Cladefsd/StatCell"
+	Cladefsd_ListCells_FullMethodName               = "/cladefs.cladefsd.v1.Cladefsd/ListCells"
+	Cladefsd_GetCounters_FullMethodName             = "/cladefs.cladefsd.v1.Cladefsd/GetCounters"
+	Cladefsd_GetStats_FullMethodName                = "/cladefs.cladefsd.v1.Cladefsd/GetStats"
+	Cladefsd_Grant_FullMethodName                   = "/cladefs.cladefsd.v1.Cladefsd/Grant"
+	Cladefsd_Revoke_FullMethodName                  = "/cladefs.cladefsd.v1.Cladefsd/Revoke"
+	Cladefsd_SetMemoryLimit_FullMethodName          = "/cladefs.cladefsd.v1.Cladefsd/SetMemoryLimit"
+	Cladefsd_SetMemoryWeight_FullMethodName         = "/cladefs.cladefsd.v1.Cladefsd/SetMemoryWeight"
+	Cladefsd_SetTenantInFlight_FullMethodName       = "/cladefs.cladefsd.v1.Cladefsd/SetTenantInFlight"
+	Cladefsd_ShrinkMemory_FullMethodName            = "/cladefs.cladefsd.v1.Cladefsd/ShrinkMemory"
+	Cladefsd_SetDiskLimit_FullMethodName            = "/cladefs.cladefsd.v1.Cladefsd/SetDiskLimit"
+	Cladefsd_SetDiskWeight_FullMethodName           = "/cladefs.cladefsd.v1.Cladefsd/SetDiskWeight"
+	Cladefsd_GetTenantDisk_FullMethodName           = "/cladefs.cladefsd.v1.Cladefsd/GetTenantDisk"
+	Cladefsd_SetPeers_FullMethodName                = "/cladefs.cladefsd.v1.Cladefsd/SetPeers"
+	Cladefsd_ShredCell_FullMethodName               = "/cladefs.cladefsd.v1.Cladefsd/ShredCell"
+	Cladefsd_ForgetTenantKeys_FullMethodName        = "/cladefs.cladefsd.v1.Cladefsd/ForgetTenantKeys"
+	Cladefsd_ShredTenant_FullMethodName             = "/cladefs.cladefsd.v1.Cladefsd/ShredTenant"
+	Cladefsd_ReloadKms_FullMethodName               = "/cladefs.cladefsd.v1.Cladefsd/ReloadKms"
+	Cladefsd_DecommissionHost_FullMethodName        = "/cladefs.cladefsd.v1.Cladefsd/DecommissionHost"
+	Cladefsd_ListEphemeralHosts_FullMethodName      = "/cladefs.cladefsd.v1.Cladefsd/ListEphemeralHosts"
+	Cladefsd_MigrateEphemeralCell_FullMethodName    = "/cladefs.cladefsd.v1.Cladefsd/MigrateEphemeralCell"
+	Cladefsd_HandOverEphemeralCell_FullMethodName   = "/cladefs.cladefsd.v1.Cladefsd/HandOverEphemeralCell"
+	Cladefsd_AbortEphemeralMigration_FullMethodName = "/cladefs.cladefsd.v1.Cladefsd/AbortEphemeralMigration"
+	Cladefsd_ListDisks_FullMethodName               = "/cladefs.cladefsd.v1.Cladefsd/ListDisks"
+	Cladefsd_SetDiskGovernance_FullMethodName       = "/cladefs.cladefsd.v1.Cladefsd/SetDiskGovernance"
+	Cladefsd_WaitEphemeralHandOver_FullMethodName   = "/cladefs.cladefsd.v1.Cladefsd/WaitEphemeralHandOver"
 )
 
 // CladefsdClient is the client API for Cladefsd service.
@@ -336,22 +336,22 @@ type CladefsdClient interface {
 	ListEphemeralHosts(ctx context.Context, in *ListEphemeralHostsRequest, opts ...grpc.CallOption) (*ListEphemeralHostsResponse, error)
 	// Begins the live migration of an ephemeral cell to the daemon whose peer address is `peer`
 	// (backlog doc-25, TASK-698.4): that daemon refers to the cell's origin first, then takes its
-	// kept segments as they come while its guest runs. Returns the migration's ID. HandOverCell ends
-	// it, or AbortMigration. EBUSY while another migration of the cell is under way. Serves ephemeral
-	// cells only; bucket-backed cells are refused (FAILED_PRECONDITION, ENOTSUP) and move through the
-	// bucket instead (SyncCell on source, CreateCell + PlaceCell on target, PUT /snapshot/load, then
-	// DropCell on source).
-	MigrateCell(ctx context.Context, in *MigrateCellRequest, opts ...grpc.CallOption) (*MigrateCellResponse, error)
+	// kept segments as they come while its guest runs. Returns the migration's ID.
+	// HandOverEphemeralCell ends it, or AbortEphemeralMigration. EBUSY while another migration of
+	// the cell is under way. Serves ephemeral cells only; bucket-backed cells are refused
+	// (FAILED_PRECONDITION, ENOTSUP) and move through the bucket instead (SyncCell on source,
+	// CreateCell + PlaceCell on target, PUT /snapshot/load, then DropCell on source).
+	MigrateEphemeralCell(ctx context.Context, in *MigrateEphemeralCellRequest, opts ...grpc.CallOption) (*MigrateEphemeralCellResponse, error)
 	// Hands an ephemeral cell over to the daemon its migration names, once nothing has it open
 	// (EBUSY otherwise: its guest paused, its VM process gone or cell released). Accepted, the cell
 	// directory here goes and its reference is retired; refused, it serves the cell again (EAGAIN).
 	// Asked again after a failure or a restart, it asks the other again, which answers as it did.
 	// Serves ephemeral cells only; bucket-backed cells are refused (FAILED_PRECONDITION, ENOTSUP) and
 	// move through the bucket instead.
-	HandOverCell(ctx context.Context, in *HandOverCellRequest, opts ...grpc.CallOption) (*HandOverCellResponse, error)
+	HandOverEphemeralCell(ctx context.Context, in *HandOverEphemeralCellRequest, opts ...grpc.CallOption) (*HandOverEphemeralCellResponse, error)
 	// Ends the live migration of an ephemeral cell (board 8577). Serves ephemeral cells only;
 	// bucket-backed cells are refused (FAILED_PRECONDITION, ENOTSUP).
-	AbortMigration(ctx context.Context, in *AbortMigrationRequest, opts ...grpc.CallOption) (*AbortMigrationResponse, error)
+	AbortEphemeralMigration(ctx context.Context, in *AbortEphemeralMigrationRequest, opts ...grpc.CallOption) (*AbortEphemeralMigrationResponse, error)
 	// Lists all managed host disks and their live per-disk governance state (caps, headroom,
 	// allowance, usage, spare, pressure, health, placement; hotbed question 547).
 	ListDisks(ctx context.Context, in *ListDisksRequest, opts ...grpc.CallOption) (*ListDisksResponse, error)
@@ -365,7 +365,7 @@ type CladefsdClient interface {
 	// terminal outcome. Respects caller cancellation and deadlines, and returns UNAVAILABLE if the
 	// daemon begins draining. Serves ephemeral cells only; bucket-backed cells are refused
 	// (FAILED_PRECONDITION, ENOTSUP).
-	WaitHandOver(ctx context.Context, in *WaitHandOverRequest, opts ...grpc.CallOption) (*WaitHandOverResponse, error)
+	WaitEphemeralHandOver(ctx context.Context, in *WaitEphemeralHandOverRequest, opts ...grpc.CallOption) (*WaitEphemeralHandOverResponse, error)
 }
 
 type cladefsdClient struct {
@@ -726,30 +726,30 @@ func (c *cladefsdClient) ListEphemeralHosts(ctx context.Context, in *ListEphemer
 	return out, nil
 }
 
-func (c *cladefsdClient) MigrateCell(ctx context.Context, in *MigrateCellRequest, opts ...grpc.CallOption) (*MigrateCellResponse, error) {
+func (c *cladefsdClient) MigrateEphemeralCell(ctx context.Context, in *MigrateEphemeralCellRequest, opts ...grpc.CallOption) (*MigrateEphemeralCellResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(MigrateCellResponse)
-	err := c.cc.Invoke(ctx, Cladefsd_MigrateCell_FullMethodName, in, out, cOpts...)
+	out := new(MigrateEphemeralCellResponse)
+	err := c.cc.Invoke(ctx, Cladefsd_MigrateEphemeralCell_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *cladefsdClient) HandOverCell(ctx context.Context, in *HandOverCellRequest, opts ...grpc.CallOption) (*HandOverCellResponse, error) {
+func (c *cladefsdClient) HandOverEphemeralCell(ctx context.Context, in *HandOverEphemeralCellRequest, opts ...grpc.CallOption) (*HandOverEphemeralCellResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(HandOverCellResponse)
-	err := c.cc.Invoke(ctx, Cladefsd_HandOverCell_FullMethodName, in, out, cOpts...)
+	out := new(HandOverEphemeralCellResponse)
+	err := c.cc.Invoke(ctx, Cladefsd_HandOverEphemeralCell_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *cladefsdClient) AbortMigration(ctx context.Context, in *AbortMigrationRequest, opts ...grpc.CallOption) (*AbortMigrationResponse, error) {
+func (c *cladefsdClient) AbortEphemeralMigration(ctx context.Context, in *AbortEphemeralMigrationRequest, opts ...grpc.CallOption) (*AbortEphemeralMigrationResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(AbortMigrationResponse)
-	err := c.cc.Invoke(ctx, Cladefsd_AbortMigration_FullMethodName, in, out, cOpts...)
+	out := new(AbortEphemeralMigrationResponse)
+	err := c.cc.Invoke(ctx, Cladefsd_AbortEphemeralMigration_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -776,10 +776,10 @@ func (c *cladefsdClient) SetDiskGovernance(ctx context.Context, in *SetDiskGover
 	return out, nil
 }
 
-func (c *cladefsdClient) WaitHandOver(ctx context.Context, in *WaitHandOverRequest, opts ...grpc.CallOption) (*WaitHandOverResponse, error) {
+func (c *cladefsdClient) WaitEphemeralHandOver(ctx context.Context, in *WaitEphemeralHandOverRequest, opts ...grpc.CallOption) (*WaitEphemeralHandOverResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(WaitHandOverResponse)
-	err := c.cc.Invoke(ctx, Cladefsd_WaitHandOver_FullMethodName, in, out, cOpts...)
+	out := new(WaitEphemeralHandOverResponse)
+	err := c.cc.Invoke(ctx, Cladefsd_WaitEphemeralHandOver_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -985,22 +985,22 @@ type CladefsdServer interface {
 	ListEphemeralHosts(context.Context, *ListEphemeralHostsRequest) (*ListEphemeralHostsResponse, error)
 	// Begins the live migration of an ephemeral cell to the daemon whose peer address is `peer`
 	// (backlog doc-25, TASK-698.4): that daemon refers to the cell's origin first, then takes its
-	// kept segments as they come while its guest runs. Returns the migration's ID. HandOverCell ends
-	// it, or AbortMigration. EBUSY while another migration of the cell is under way. Serves ephemeral
-	// cells only; bucket-backed cells are refused (FAILED_PRECONDITION, ENOTSUP) and move through the
-	// bucket instead (SyncCell on source, CreateCell + PlaceCell on target, PUT /snapshot/load, then
-	// DropCell on source).
-	MigrateCell(context.Context, *MigrateCellRequest) (*MigrateCellResponse, error)
+	// kept segments as they come while its guest runs. Returns the migration's ID.
+	// HandOverEphemeralCell ends it, or AbortEphemeralMigration. EBUSY while another migration of
+	// the cell is under way. Serves ephemeral cells only; bucket-backed cells are refused
+	// (FAILED_PRECONDITION, ENOTSUP) and move through the bucket instead (SyncCell on source,
+	// CreateCell + PlaceCell on target, PUT /snapshot/load, then DropCell on source).
+	MigrateEphemeralCell(context.Context, *MigrateEphemeralCellRequest) (*MigrateEphemeralCellResponse, error)
 	// Hands an ephemeral cell over to the daemon its migration names, once nothing has it open
 	// (EBUSY otherwise: its guest paused, its VM process gone or cell released). Accepted, the cell
 	// directory here goes and its reference is retired; refused, it serves the cell again (EAGAIN).
 	// Asked again after a failure or a restart, it asks the other again, which answers as it did.
 	// Serves ephemeral cells only; bucket-backed cells are refused (FAILED_PRECONDITION, ENOTSUP) and
 	// move through the bucket instead.
-	HandOverCell(context.Context, *HandOverCellRequest) (*HandOverCellResponse, error)
+	HandOverEphemeralCell(context.Context, *HandOverEphemeralCellRequest) (*HandOverEphemeralCellResponse, error)
 	// Ends the live migration of an ephemeral cell (board 8577). Serves ephemeral cells only;
 	// bucket-backed cells are refused (FAILED_PRECONDITION, ENOTSUP).
-	AbortMigration(context.Context, *AbortMigrationRequest) (*AbortMigrationResponse, error)
+	AbortEphemeralMigration(context.Context, *AbortEphemeralMigrationRequest) (*AbortEphemeralMigrationResponse, error)
 	// Lists all managed host disks and their live per-disk governance state (caps, headroom,
 	// allowance, usage, spare, pressure, health, placement; hotbed question 547).
 	ListDisks(context.Context, *ListDisksRequest) (*ListDisksResponse, error)
@@ -1014,7 +1014,7 @@ type CladefsdServer interface {
 	// terminal outcome. Respects caller cancellation and deadlines, and returns UNAVAILABLE if the
 	// daemon begins draining. Serves ephemeral cells only; bucket-backed cells are refused
 	// (FAILED_PRECONDITION, ENOTSUP).
-	WaitHandOver(context.Context, *WaitHandOverRequest) (*WaitHandOverResponse, error)
+	WaitEphemeralHandOver(context.Context, *WaitEphemeralHandOverRequest) (*WaitEphemeralHandOverResponse, error)
 	mustEmbedUnimplementedCladefsdServer()
 }
 
@@ -1130,14 +1130,14 @@ func (UnimplementedCladefsdServer) DecommissionHost(context.Context, *Decommissi
 func (UnimplementedCladefsdServer) ListEphemeralHosts(context.Context, *ListEphemeralHostsRequest) (*ListEphemeralHostsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListEphemeralHosts not implemented")
 }
-func (UnimplementedCladefsdServer) MigrateCell(context.Context, *MigrateCellRequest) (*MigrateCellResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method MigrateCell not implemented")
+func (UnimplementedCladefsdServer) MigrateEphemeralCell(context.Context, *MigrateEphemeralCellRequest) (*MigrateEphemeralCellResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method MigrateEphemeralCell not implemented")
 }
-func (UnimplementedCladefsdServer) HandOverCell(context.Context, *HandOverCellRequest) (*HandOverCellResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method HandOverCell not implemented")
+func (UnimplementedCladefsdServer) HandOverEphemeralCell(context.Context, *HandOverEphemeralCellRequest) (*HandOverEphemeralCellResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method HandOverEphemeralCell not implemented")
 }
-func (UnimplementedCladefsdServer) AbortMigration(context.Context, *AbortMigrationRequest) (*AbortMigrationResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method AbortMigration not implemented")
+func (UnimplementedCladefsdServer) AbortEphemeralMigration(context.Context, *AbortEphemeralMigrationRequest) (*AbortEphemeralMigrationResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AbortEphemeralMigration not implemented")
 }
 func (UnimplementedCladefsdServer) ListDisks(context.Context, *ListDisksRequest) (*ListDisksResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListDisks not implemented")
@@ -1145,8 +1145,8 @@ func (UnimplementedCladefsdServer) ListDisks(context.Context, *ListDisksRequest)
 func (UnimplementedCladefsdServer) SetDiskGovernance(context.Context, *SetDiskGovernanceRequest) (*SetDiskGovernanceResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SetDiskGovernance not implemented")
 }
-func (UnimplementedCladefsdServer) WaitHandOver(context.Context, *WaitHandOverRequest) (*WaitHandOverResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method WaitHandOver not implemented")
+func (UnimplementedCladefsdServer) WaitEphemeralHandOver(context.Context, *WaitEphemeralHandOverRequest) (*WaitEphemeralHandOverResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method WaitEphemeralHandOver not implemented")
 }
 func (UnimplementedCladefsdServer) mustEmbedUnimplementedCladefsdServer() {}
 func (UnimplementedCladefsdServer) testEmbeddedByValue()                  {}
@@ -1799,56 +1799,56 @@ func _Cladefsd_ListEphemeralHosts_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Cladefsd_MigrateCell_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(MigrateCellRequest)
+func _Cladefsd_MigrateEphemeralCell_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MigrateEphemeralCellRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(CladefsdServer).MigrateCell(ctx, in)
+		return srv.(CladefsdServer).MigrateEphemeralCell(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Cladefsd_MigrateCell_FullMethodName,
+		FullMethod: Cladefsd_MigrateEphemeralCell_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(CladefsdServer).MigrateCell(ctx, req.(*MigrateCellRequest))
+		return srv.(CladefsdServer).MigrateEphemeralCell(ctx, req.(*MigrateEphemeralCellRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Cladefsd_HandOverCell_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(HandOverCellRequest)
+func _Cladefsd_HandOverEphemeralCell_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(HandOverEphemeralCellRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(CladefsdServer).HandOverCell(ctx, in)
+		return srv.(CladefsdServer).HandOverEphemeralCell(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Cladefsd_HandOverCell_FullMethodName,
+		FullMethod: Cladefsd_HandOverEphemeralCell_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(CladefsdServer).HandOverCell(ctx, req.(*HandOverCellRequest))
+		return srv.(CladefsdServer).HandOverEphemeralCell(ctx, req.(*HandOverEphemeralCellRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Cladefsd_AbortMigration_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(AbortMigrationRequest)
+func _Cladefsd_AbortEphemeralMigration_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AbortEphemeralMigrationRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(CladefsdServer).AbortMigration(ctx, in)
+		return srv.(CladefsdServer).AbortEphemeralMigration(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Cladefsd_AbortMigration_FullMethodName,
+		FullMethod: Cladefsd_AbortEphemeralMigration_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(CladefsdServer).AbortMigration(ctx, req.(*AbortMigrationRequest))
+		return srv.(CladefsdServer).AbortEphemeralMigration(ctx, req.(*AbortEphemeralMigrationRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1889,20 +1889,20 @@ func _Cladefsd_SetDiskGovernance_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Cladefsd_WaitHandOver_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(WaitHandOverRequest)
+func _Cladefsd_WaitEphemeralHandOver_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(WaitEphemeralHandOverRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(CladefsdServer).WaitHandOver(ctx, in)
+		return srv.(CladefsdServer).WaitEphemeralHandOver(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Cladefsd_WaitHandOver_FullMethodName,
+		FullMethod: Cladefsd_WaitEphemeralHandOver_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(CladefsdServer).WaitHandOver(ctx, req.(*WaitHandOverRequest))
+		return srv.(CladefsdServer).WaitEphemeralHandOver(ctx, req.(*WaitEphemeralHandOverRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -2055,16 +2055,16 @@ var Cladefsd_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Cladefsd_ListEphemeralHosts_Handler,
 		},
 		{
-			MethodName: "MigrateCell",
-			Handler:    _Cladefsd_MigrateCell_Handler,
+			MethodName: "MigrateEphemeralCell",
+			Handler:    _Cladefsd_MigrateEphemeralCell_Handler,
 		},
 		{
-			MethodName: "HandOverCell",
-			Handler:    _Cladefsd_HandOverCell_Handler,
+			MethodName: "HandOverEphemeralCell",
+			Handler:    _Cladefsd_HandOverEphemeralCell_Handler,
 		},
 		{
-			MethodName: "AbortMigration",
-			Handler:    _Cladefsd_AbortMigration_Handler,
+			MethodName: "AbortEphemeralMigration",
+			Handler:    _Cladefsd_AbortEphemeralMigration_Handler,
 		},
 		{
 			MethodName: "ListDisks",
@@ -2075,8 +2075,8 @@ var Cladefsd_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Cladefsd_SetDiskGovernance_Handler,
 		},
 		{
-			MethodName: "WaitHandOver",
-			Handler:    _Cladefsd_WaitHandOver_Handler,
+			MethodName: "WaitEphemeralHandOver",
+			Handler:    _Cladefsd_WaitEphemeralHandOver_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

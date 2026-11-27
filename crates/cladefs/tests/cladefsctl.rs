@@ -861,8 +861,9 @@ fn memory_and_disks_through_the_daemon() {
     drop(vm);
 }
 
-/// board 8585: `set-peers`, `migrate` and `hand-over` reach the daemon's calls, which say what they
-/// refuse: no peers, a cell no migration's, a migration of none; board 8577: `abort-migration` too.
+/// board 8585: `set-peers`, `migrate-ephemeral` and `hand-over-ephemeral` reach the daemon's calls,
+/// which say what they refuse: no peers, a cell no migration's, a migration of none; board 8577:
+/// `abort-ephemeral-migration` too.
 #[test]
 fn peers_and_migrations_through_the_daemon() {
     let dir = tempfile::tempdir().unwrap();
@@ -887,13 +888,13 @@ fn peers_and_migrations_through_the_daemon() {
     assert!(refused.contains("EINVAL"), "{refused}");
 
     let cell = run(&["create", "16777216"]).unwrap().trim().to_owned();
-    let refused = run(&["migrate", &cell, "127.0.0.1:1"]).unwrap_err();
+    let refused = run(&["migrate-ephemeral", &cell, "127.0.0.1:1"]).unwrap_err();
     assert!(refused.contains(&format!("migrating cell {cell}")), "{refused}");
     assert!(refused.contains("ENOTSUP"), "{refused}");
-    let refused = run(&["hand-over", &cell]).unwrap_err();
+    let refused = run(&["hand-over-ephemeral", &cell]).unwrap_err();
     assert!(refused.contains(&format!("handing cell {cell} over")), "{refused}");
     assert!(refused.contains("ENOTSUP"), "{refused}");
-    let refused = run(&["abort-migration", &cell]).unwrap_err();
+    let refused = run(&["abort-ephemeral-migration", &cell]).unwrap_err();
     let aborting = format!("aborting the migration of cell {cell}");
     assert!(refused.contains(&aborting), "{refused}");
     // Peer migration RPCs serve ephemeral cells only (board 14467): bucket-backed cells are
@@ -1023,9 +1024,10 @@ fn calls_of_the_daemon_need_it() {
         &["set-disk", "disk-0", "--placement", "drain"],
         &["counters", "--json"],
         &["set-peers", "a:1"],
-        &["migrate", "0/1", "a:1"],
-        &["hand-over", "0/1"],
-        &["abort-migration", "0/1"],
+        &["migrate-ephemeral", "0/1", "a:1"],
+        &["hand-over-ephemeral", "0/1"],
+        &["wait-ephemeral-hand-over", "0/1"],
+        &["abort-ephemeral-migration", "0/1"],
         &["memory-limit", "none"],
         &["memory-weight", "a", "1"],
         &["in-flight", "default"],

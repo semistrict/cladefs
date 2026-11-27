@@ -35,10 +35,10 @@
 //! cladefsctl set-disk ID [--cap BYTES|none] [--cache-cap BYTES|none] [--headroom SPEC|none]
 //!     [--dirty-budget BYTES|none] [--placement read_write|drain|read_only]
 //! cladefsctl set-peers [--bucket URL] [ADDRESS...]
-//! cladefsctl migrate TENANT/CELL PEER
-//! cladefsctl hand-over TENANT/CELL
-//! cladefsctl wait-hand-over [--migration ID] TENANT/CELL
-//! cladefsctl abort-migration TENANT/CELL
+//! cladefsctl migrate-ephemeral TENANT/CELL PEER
+//! cladefsctl hand-over-ephemeral TENANT/CELL
+//! cladefsctl wait-ephemeral-hand-over [--migration ID] TENANT/CELL
+//! cladefsctl abort-ephemeral-migration TENANT/CELL
 //! cladefsctl memory-limit [--tenant TENANT] BYTES|none
 //! cladefsctl memory-weight TENANT WEIGHT
 //! cladefsctl in-flight [--tenant TENANT] BYTES|default
@@ -176,12 +176,13 @@
 //! (`SetDiskGovernance`). `set-peers` has the hosts sharing the daemon's bucket be those at the
 //! ADDRESSes, each `HOST:PORT`, none without any (`SetPeers`); with `--bucket URL`, with or without
 //! the daemon, it publishes them to the bucket at URL instead, for every daemon on it to take, and
-//! prints `generation N`, the peer list's new generation. `migrate` begins the live migration of
-//! the ephemeral cell TENANT/CELL to the daemon whose peer address is PEER, and prints
-//! `migration ID` (`MigrateCell`); `hand-over` hands the ephemeral cell over to its migration's
-//! target (`HandOverCell`); `wait-hand-over` waits on the target daemon until an incoming ephemeral
-//! hand-over of TENANT/CELL is accepted or fails (`WaitHandOver`); `abort-migration` ends its
-//! migration, the cell then free to migrate again (`AbortMigration`). Bucket-backed cells move
+//! prints `generation N`, the peer list's new generation. `migrate-ephemeral` begins the live
+//! migration of the ephemeral cell TENANT/CELL to the daemon whose peer address is PEER, and prints
+//! `migration ID` (`MigrateEphemeralCell`); `hand-over-ephemeral` hands the ephemeral cell over to
+//! its migration's target (`HandOverEphemeralCell`); `wait-ephemeral-hand-over` waits on the target
+//! daemon until an incoming ephemeral hand-over of TENANT/CELL is accepted or fails
+//! (`WaitEphemeralHandOver`); `abort-ephemeral-migration` ends its migration, the cell then free to
+//! migrate again (`AbortEphemeralMigration`). Bucket-backed cells move
 //! through the bucket instead (`sync`, `take`/`place`, `drop`). `memory-limit` limits the memory the daemon holds extents' pages in
 //! to BYTES, or lifts the limit with `none` (`SetMemoryLimit`); `memory-weight` weighs a tenant's
 //! memory against the others' (`SetMemoryWeight`); `in-flight` sets the bytes in flight a tenant's
@@ -515,10 +516,10 @@ mod cli {
          [--headroom SPEC|none] [--dirty-budget BYTES|none] \
          [--placement read_write|drain|read_only] | \
          cladefsctl set-peers [--bucket URL] [ADDRESS...] | \
-         cladefsctl migrate TENANT/CELL PEER | \
-         cladefsctl hand-over TENANT/CELL | \
-         cladefsctl wait-hand-over [--migration ID] TENANT/CELL | \
-         cladefsctl abort-migration TENANT/CELL | \
+         cladefsctl migrate-ephemeral TENANT/CELL PEER | \
+         cladefsctl hand-over-ephemeral TENANT/CELL | \
+         cladefsctl wait-ephemeral-hand-over [--migration ID] TENANT/CELL | \
+         cladefsctl abort-ephemeral-migration TENANT/CELL | \
          cladefsctl memory-limit [--tenant TENANT] BYTES|none | \
          cladefsctl memory-weight TENANT WEIGHT | \
          cladefsctl in-flight [--tenant TENANT] BYTES|default | \
@@ -1095,18 +1096,22 @@ mod cli {
                     bucket: None,
                     addresses: addresses.iter().map(|&address| address.into()).collect(),
                 },
-                ["migrate", cell, peer] => {
+                ["migrate-ephemeral", cell, peer] => {
                     Self::Migrate { cell: parse_cell(cell)?, peer: peer.to_owned() }
                 }
-                ["hand-over", cell] => Self::HandOver { cell: parse_cell(cell)? },
-                ["wait-hand-over", cell] => {
+                ["hand-over-ephemeral", cell] => Self::HandOver { cell: parse_cell(cell)? },
+                ["wait-ephemeral-hand-over", cell] => {
                     Self::WaitHandOver { cell: parse_cell(cell)?, migration: 0 }
                 }
-                ["wait-hand-over", "--migration", migration, cell] => Self::WaitHandOver {
-                    cell: parse_cell(cell)?,
-                    migration: number("MIGRATION", migration)?,
-                },
-                ["abort-migration", cell] => Self::AbortMigration { cell: parse_cell(cell)? },
+                ["wait-ephemeral-hand-over", "--migration", migration, cell] => {
+                    Self::WaitHandOver {
+                        cell: parse_cell(cell)?,
+                        migration: number("MIGRATION", migration)?,
+                    }
+                }
+                ["abort-ephemeral-migration", cell] => {
+                    Self::AbortMigration { cell: parse_cell(cell)? }
+                }
                 ["memory-limit", ref rest @ ..] => {
                     let (tenant, bytes) = of_tenant(rest)?;
                     Self::MemoryLimit { tenant, bytes: bytes_or(bytes, "none")? }
@@ -1498,33 +1503,38 @@ mod cli {
                 Self::SetPeers { bucket: Some(_), .. } => unreachable!("served above"),
                 Self::Migrate { cell, peer } => {
                     let what = format!("migrating cell {cell} to {peer}");
-                    let request = MigrateCellRequest { peer, tenant: cell.tenant, cell: cell.id };
-                    println!("migration {}", call!(what, migrate_cell, request).migration);
+                    let request =
+                        MigrateEphemeralCellRequest { peer, tenant: cell.tenant, cell: cell.id };
+                    println!(
+                        "migration {}",
+                        call!(what, migrate_ephemeral_cell, request).migration
+                    );
                 }
                 Self::HandOver { cell } => {
-                    let request = HandOverCellRequest {
-                        tenant: cell.tenant,
-                        cell: cell.id,
-                        ..Default::default()
-                    };
-                    call!(format!("handing cell {cell} over"), hand_over_cell, request);
+                    let request =
+                        HandOverEphemeralCellRequest { tenant: cell.tenant, cell: cell.id };
+                    call!(format!("handing cell {cell} over"), hand_over_ephemeral_cell, request);
                 }
                 Self::WaitHandOver { cell, migration } => {
-                    let request =
-                        WaitHandOverRequest { tenant: cell.tenant, cell: cell.id, migration };
+                    let request = WaitEphemeralHandOverRequest {
+                        tenant: cell.tenant,
+                        cell: cell.id,
+                        migration,
+                    };
                     let ready = call!(
                         format!("waiting for a hand-over of cell {cell}"),
-                        wait_hand_over,
+                        wait_ephemeral_hand_over,
                         request
                     );
                     println!("migration {}", ready.migration);
                     println!("{}", cladefs::CellId { tenant: ready.tenant, id: ready.cell });
                 }
                 Self::AbortMigration { cell } => {
-                    let request = AbortMigrationRequest { tenant: cell.tenant, cell: cell.id };
+                    let request =
+                        AbortEphemeralMigrationRequest { tenant: cell.tenant, cell: cell.id };
                     call!(
                         format!("aborting the migration of cell {cell}"),
-                        abort_migration,
+                        abort_ephemeral_migration,
                         request
                     );
                 }

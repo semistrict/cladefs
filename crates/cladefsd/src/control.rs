@@ -1045,44 +1045,34 @@ impl Cladefsd for Control {
         Ok(Response::new(ForkCellResponse { tenant: forked.tenant, cell: forked.id }))
     }
 
-    async fn migrate_cell(
+    async fn migrate_ephemeral_cell(
         &self,
-        request: Request<MigrateCellRequest>,
-    ) -> Result<Response<MigrateCellResponse>, Status> {
-        let MigrateCellRequest { peer, tenant, cell } = request.into_inner();
+        request: Request<MigrateEphemeralCellRequest>,
+    ) -> Result<Response<MigrateEphemeralCellResponse>, Status> {
+        let MigrateEphemeralCellRequest { peer, tenant, cell } = request.into_inner();
         let (_, cell_dir) = self.resolve_cell(tenant, cell).await?;
         let migration = crate::migration::migrate_on(&self.daemon, cell_dir, peer).await?;
-        Ok(Response::new(MigrateCellResponse { migration }))
+        Ok(Response::new(MigrateEphemeralCellResponse { migration }))
     }
 
-    async fn hand_over_cell(
+    async fn hand_over_ephemeral_cell(
         &self,
-        request: Request<HandOverCellRequest>,
-    ) -> Result<Response<HandOverCellResponse>, Status> {
-        #[allow(deprecated)]
-        let HandOverCellRequest { token, tenant, cell } = request.into_inner();
-        if token.is_some() {
-            return Err(saying(
-                Errno::EINVAL,
-                "HandOverCell serves ephemeral cells only and takes no fencing token; move \
-                 bucket-backed cells through the bucket: SyncCell on source, CreateCell + \
-                 PlaceCell on target, PUT /snapshot/load, then DropCell on source"
-                    .to_owned(),
-            ));
-        }
+        request: Request<HandOverEphemeralCellRequest>,
+    ) -> Result<Response<HandOverEphemeralCellResponse>, Status> {
+        let HandOverEphemeralCellRequest { tenant, cell } = request.into_inner();
         let (id, cell_dir) = self.resolve_migrating_cell(tenant, cell).await?;
         crate::migration::hand_over_on(&self.daemon, cell_dir).await?;
         if let Some(pool) = self.daemon.disk_pool() {
             pool.forget_cell(id);
         }
-        Ok(Response::new(HandOverCellResponse {}))
+        Ok(Response::new(HandOverEphemeralCellResponse {}))
     }
 
-    async fn abort_migration(
+    async fn abort_ephemeral_migration(
         &self,
-        request: Request<AbortMigrationRequest>,
-    ) -> Result<Response<AbortMigrationResponse>, Status> {
-        let AbortMigrationRequest { tenant, cell } = request.into_inner();
+        request: Request<AbortEphemeralMigrationRequest>,
+    ) -> Result<Response<AbortEphemeralMigrationResponse>, Status> {
+        let AbortEphemeralMigrationRequest { tenant, cell } = request.into_inner();
         let (id, cell_dir) = self.resolve_migrating_cell(tenant, cell).await?;
         let done = crate::migration::abort_on(&self.daemon, cell_dir).await;
         if let Err(ref err) = done
@@ -1091,17 +1081,17 @@ impl Cladefsd for Control {
         {
             pool.forget_cell(id);
         }
-        done.map(|()| Response::new(AbortMigrationResponse {}))
+        done.map(|()| Response::new(AbortEphemeralMigrationResponse {}))
     }
 
-    async fn wait_hand_over(
+    async fn wait_ephemeral_hand_over(
         &self,
-        request: Request<WaitHandOverRequest>,
-    ) -> Result<Response<WaitHandOverResponse>, Status> {
-        let WaitHandOverRequest { tenant, cell, migration } = request.into_inner();
+        request: Request<WaitEphemeralHandOverRequest>,
+    ) -> Result<Response<WaitEphemeralHandOverResponse>, Status> {
+        let WaitEphemeralHandOverRequest { tenant, cell, migration } = request.into_inner();
         let id = cell_id(tenant, cell)?;
         let waited = super::migration::wait_hand_over_on(&self.daemon, id, migration).await?;
-        Ok(Response::new(WaitHandOverResponse {
+        Ok(Response::new(WaitEphemeralHandOverResponse {
             migration: waited.migration,
             tenant: waited.cell.tenant,
             cell: waited.cell.id,

@@ -275,22 +275,22 @@ service Cladefsd {
   rpc ListEphemeralHosts(ListEphemeralHostsRequest) returns (ListEphemeralHostsResponse);
   // Begins the live migration of an ephemeral cell to the daemon whose peer address is `peer`
   // (backlog doc-25, TASK-698.4): that daemon refers to the cell's origin first, then takes its
-  // kept segments as they come while its guest runs. Returns the migration's ID. HandOverCell ends
-  // it, or AbortMigration. EBUSY while another migration of the cell is under way. Serves ephemeral
-  // cells only; bucket-backed cells are refused (FAILED_PRECONDITION, ENOTSUP) and move through the
-  // bucket instead (SyncCell on source, CreateCell + PlaceCell on target, PUT /snapshot/load, then
-  // DropCell on source).
-  rpc MigrateCell(MigrateCellRequest) returns (MigrateCellResponse);
+  // kept segments as they come while its guest runs. Returns the migration's ID.
+  // HandOverEphemeralCell ends it, or AbortEphemeralMigration. EBUSY while another migration of
+  // the cell is under way. Serves ephemeral cells only; bucket-backed cells are refused
+  // (FAILED_PRECONDITION, ENOTSUP) and move through the bucket instead (SyncCell on source,
+  // CreateCell + PlaceCell on target, PUT /snapshot/load, then DropCell on source).
+  rpc MigrateEphemeralCell(MigrateEphemeralCellRequest) returns (MigrateEphemeralCellResponse);
   // Hands an ephemeral cell over to the daemon its migration names, once nothing has it open
   // (EBUSY otherwise: its guest paused, its VM process gone or cell released). Accepted, the cell
   // directory here goes and its reference is retired; refused, it serves the cell again (EAGAIN).
   // Asked again after a failure or a restart, it asks the other again, which answers as it did.
   // Serves ephemeral cells only; bucket-backed cells are refused (FAILED_PRECONDITION, ENOTSUP) and
   // move through the bucket instead.
-  rpc HandOverCell(HandOverCellRequest) returns (HandOverCellResponse);
+  rpc HandOverEphemeralCell(HandOverEphemeralCellRequest) returns (HandOverEphemeralCellResponse);
   // Ends the live migration of an ephemeral cell (board 8577). Serves ephemeral cells only;
   // bucket-backed cells are refused (FAILED_PRECONDITION, ENOTSUP).
-  rpc AbortMigration(AbortMigrationRequest) returns (AbortMigrationResponse);
+  rpc AbortEphemeralMigration(AbortEphemeralMigrationRequest) returns (AbortEphemeralMigrationResponse);
   // Lists all managed host disks and their live per-disk governance state (caps, headroom,
   // allowance, usage, spare, pressure, health, placement; hotbed question 547).
   rpc ListDisks(ListDisksRequest) returns (ListDisksResponse);
@@ -304,12 +304,12 @@ service Cladefsd {
   // terminal outcome. Respects caller cancellation and deadlines, and returns UNAVAILABLE if the
   // daemon begins draining. Serves ephemeral cells only; bucket-backed cells are refused
   // (FAILED_PRECONDITION, ENOTSUP).
-  rpc WaitHandOver(WaitHandOverRequest) returns (WaitHandOverResponse);
+  rpc WaitEphemeralHandOver(WaitEphemeralHandOverRequest) returns (WaitEphemeralHandOverResponse);
 }
 
 // A live migration of an ephemeral cell to begin. The target daemon chooses its own managed JBOD
 // disk.
-message MigrateCellRequest {
+message MigrateEphemeralCellRequest {
   reserved 1, 3;
   // The peer address of the daemon it goes to.
   string peer = 2;
@@ -319,29 +319,26 @@ message MigrateCellRequest {
   uint64 cell = 5;
 }
 
-// A migration begun.
-message MigrateCellResponse {
+// An ephemeral migration begun.
+message MigrateEphemeralCellResponse {
   // Its ID.
   uint64 migration = 1;
 }
 
-// A migration's hand-over.
-message HandOverCellRequest {
-  reserved 1;
-  // Deprecated: HandOverCell serves ephemeral cells only and takes no fencing token. Setting this
-  // field is refused (INVALID_ARGUMENT, EINVAL).
-  optional uint64 token = 2 [deprecated = true];
+// An ephemeral migration's hand-over.
+message HandOverEphemeralCellRequest {
+  reserved 1, 2;
   // The cell's tenant.
   uint64 tenant = 3;
   // The cell's ID.
   uint64 cell = 4;
 }
 
-// A migration handed over.
-message HandOverCellResponse {}
+// An ephemeral migration handed over.
+message HandOverEphemeralCellResponse {}
 
-// A migration to end.
-message AbortMigrationRequest {
+// An ephemeral migration to end.
+message AbortEphemeralMigrationRequest {
   reserved 1;
   // The cell's tenant.
   uint64 tenant = 2;
@@ -349,8 +346,8 @@ message AbortMigrationRequest {
   uint64 cell = 3;
 }
 
-// A migration ended.
-message AbortMigrationResponse {}
+// An ephemeral migration ended.
+message AbortEphemeralMigrationResponse {}
 
 // Administrative placement/write policy for a managed disk.
 enum DiskPlacementMode {
@@ -448,20 +445,21 @@ message SetDiskGovernanceRequest {
 // Per-disk governance updated.
 message SetDiskGovernanceResponse {}
 
-// Waits for an incoming migration hand-over of `(tenant, cell)` on this target daemon.
-message WaitHandOverRequest {
+// Waits for an incoming ephemeral migration hand-over of `(tenant, cell)` on this target daemon.
+message WaitEphemeralHandOverRequest {
   // The migrating cell's tenant ID.
   uint64 tenant = 1;
   // The migrating cell's ID.
   uint64 cell = 2;
-  // Optional migration ID (from MigrateCellResponse.migration). When 0, waits for any incoming
-  // migration of `(tenant, cell)` (or returns immediately if the cell is already present locally
-  // with no active migration). When non-zero, waits specifically for that migration of the cell.
+  // Optional migration ID (from MigrateEphemeralCellResponse.migration). When 0, waits for any
+  // incoming migration of `(tenant, cell)` (or returns immediately if the cell is already present
+  // locally with no active migration). When non-zero, waits specifically for that migration of the
+  // cell.
   uint64 migration = 3;
 }
 
-// An incoming migration hand-over accepted on this target daemon.
-message WaitHandOverResponse {
+// An incoming ephemeral migration hand-over accepted on this target daemon.
+message WaitEphemeralHandOverResponse {
   // The migration ID that completed, or 0 if the cell was already present before this daemon
   // observed a migration for it.
   uint64 migration = 1;

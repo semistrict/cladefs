@@ -584,7 +584,7 @@ pub(super) async fn migrate_on(
     })
     .await
     .map_err(|errno| match errno {
-        Errno::ENOTSUP => bucket_backed_refusal("MigrateCell"),
+        Errno::ENOTSUP => bucket_backed_refusal("MigrateEphemeralCell"),
         other => control_errno(other),
     })?;
     let migration = rand::random::<u64>() | 1;
@@ -966,7 +966,7 @@ pub(super) async fn hand_over_on(daemon: &Arc<Daemon>, path: PathBuf) -> Result<
         .await
         .map_err(control_errno)?;
     if is_bucket_backed {
-        return Err(bucket_backed_refusal("HandOverCell"));
+        return Err(bucket_backed_refusal("HandOverEphemeralCell"));
     }
     let host = ephemeral_host::host_on(&daemon.host).map_err(control_errno)?;
     // Handed over before, and asked again: what is left of letting it go (board 5730).
@@ -1218,7 +1218,7 @@ pub(super) async fn wait_hand_over_on(
     migration: u64,
 ) -> Result<HandedOver, Status> {
     let host = ephemeral_host::host_on(&daemon.host).map_err(|errno| match errno {
-        Errno::ENOTSUP => bucket_backed_refusal("WaitHandOver"),
+        Errno::ENOTSUP => bucket_backed_refusal("WaitEphemeralHandOver"),
         other => control_errno(other),
     })?;
     let mut gen_rx = daemon.migrations.incoming_gen.subscribe();
@@ -1287,7 +1287,7 @@ pub(super) async fn wait_hand_over_on(
                     && found == cell
                 {
                     if !ephemeral {
-                        return Err(bucket_backed_refusal("WaitHandOver"));
+                        return Err(bucket_backed_refusal("WaitEphemeralHandOver"));
                     }
                     let still_idle =
                         !daemon.migrations.incoming.lock().unwrap().active.contains_key(&cell);
@@ -1310,7 +1310,7 @@ pub(super) async fn wait_hand_over_on(
                         Ok(Ok(Some(_)))
                     )
                 {
-                    return Err(bucket_backed_refusal("WaitHandOver"));
+                    return Err(bucket_backed_refusal("WaitEphemeralHandOver"));
                 }
             }
         }
@@ -1320,7 +1320,7 @@ pub(super) async fn wait_hand_over_on(
         tokio::select! {
             biased;
             () = cladefs_core::caller::gone() => {
-                return Err(Status::cancelled("caller cancelled WaitHandOver"));
+                return Err(Status::cancelled("caller cancelled WaitEphemeralHandOver"));
             }
             changed = serving.changed() => {
                 if changed.is_err() || !*serving.borrow() {
@@ -1363,7 +1363,7 @@ pub(super) async fn abort_on(daemon: &Arc<Daemon>, path: PathBuf) -> Result<(), 
         .await
         .map_err(control_errno)?;
     if is_bucket_backed {
-        return Err(bucket_backed_refusal("AbortMigration"));
+        return Err(bucket_backed_refusal("AbortEphemeralMigration"));
     }
     let host = ephemeral_host::host_on(&daemon.host).map_err(control_errno)?;
     // Nothing of it under way, given up or handed over: nothing to end, its guest running or not.
