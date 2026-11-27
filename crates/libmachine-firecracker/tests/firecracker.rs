@@ -260,7 +260,10 @@ fn snapshots_load_in_new_processes() {
     let diff = serde_json::json!({
         "snapshot_type": "Diff", "snapshot_path": snapshot, "mem_file_path": memory,
     });
-    assert_eq!(request(&api, "PUT", "/snapshot/create", &diff).0, 400);
+    // A cold-booted microVM's memory tracks no writes: Diff snapshots are a memory cell's.
+    let (code, body) = request(&api, "PUT", "/snapshot/create", &diff);
+    assert_eq!(code, 400, "{body}");
+    assert!(body.contains("restored from a memory cell"), "{body}");
     let (code, body) = request(&api, "PUT", "/snapshot/create", &create);
     assert_eq!(code, 204, "{body}");
     assert_eq!(std::fs::metadata(&memory).unwrap().len(), 256 << 20);
@@ -295,9 +298,10 @@ fn snapshots_load_in_new_processes() {
         "snapshot_path": snapshot,
         "mem_backend": { "backend_type": "Cell", "backend_path": "0/0" },
     });
+    // A Cell backend names its memory cell and daemon (`memory_cell`), as Firecracker's.
     let (code, body) = request(&api, "PUT", "/snapshot/load", &cell);
     assert_eq!(code, 400, "{body}");
-    assert!(body.contains("memory cells"), "{body}");
+    assert!(body.contains("needs memory_cell"), "{body}");
     let load = serde_json::json!({
         "snapshot_path": snapshot,
         "mem_backend": { "backend_type": "File", "backend_path": memory },

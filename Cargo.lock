@@ -2870,9 +2870,11 @@ dependencies = [
 name = "libmachine-firecracker"
 version = "0.1.0"
 dependencies = [
+ "cladefs",
  "libmachine",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "tempfile",
 ]
 

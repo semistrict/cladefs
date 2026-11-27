@@ -12,9 +12,11 @@ use std::sync::{Arc, Mutex, mpsc};
 use libmachine::vsock_unix::{GuestPorts, Server};
 use libmachine::{
     Disk, Error, ExitReason, ExtentCache, ExtentCell, ExtentDaemon, ExtentStore, LinuxBoot,
-    Machine, MachineConfig, Snapshot, SnapshotOptions, StopHandle,
+    Machine, MachineConfig, Snapshot, SnapshotOptions, SnapshotRam, StopHandle,
 };
 use serde_json::{Value, json};
+
+use crate::memory::CellMemory;
 
 /// Firecracker's exit code once its extent daemon goes (`FcExitCode::CladefsdLost`).
 const CLADEFSD_LOST: i32 = 158;
@@ -102,26 +104,51 @@ enum Action {
     Load(Load),
     /// `PATCH /balloon`: the balloon's target.
     Balloon { amount_mib: u64 },
+    /// cladefs's `PATCH /cladefs/extents`: the extent store devices' cells let go of
+    /// (`Released`), for a live migration's hand-over, or taken back (`Open`), the migration
+    /// aborted.
+    Extents { released: bool },
 }
 
-/// A full snapshot: its state at `snapshot`, the guest's memory at `memory`, as Firecracker's
-/// memory file holds it (libmachine's RAM file of its own).
+/// A snapshot: its state at `snapshot`, the guest's memory where `memory` says.
 struct Create {
     snapshot: PathBuf,
-    memory: PathBuf,
+    memory: MemoryTo,
     /// cladefs's `for_migration`: the extent store devices' cells handed over whole.
     for_migration: bool,
+}
+
+/// Where a snapshot's memory goes.
+enum MemoryTo {
+    /// All of it, as Firecracker's memory file holds it (libmachine's RAM file of its own).
+    File(PathBuf),
+    /// What the guest wrote since the last snapshot, a memory cell's window's, at its offsets in
+    /// a sparse file of the memory's size, as Firecracker's `Diff` snapshot writes it.
+    Diff(PathBuf),
+    /// cladefs's `memory_cell` (TASK-456.4): into a memory cell, its window's own if the microVM
+    /// was restored from one, else a new one at `path_on_host` of the daemon at
+    /// `cladefsd_socket`.
+    Cell { path_on_host: Option<PathBuf>, cladefsd_socket: Option<PathBuf>, ephemeral: bool },
 }
 
 /// A snapshot to load, as `PUT /snapshot/load` says.
 struct Load {
     snapshot: PathBuf,
-    memory: PathBuf,
+    memory: MemoryFrom,
     resume: bool,
     /// Where the vsock is served: the snapshot's, unless overridden.
     vsock: Option<PathBuf>,
     /// cladefs's `cladefs_overrides`: the cell each extent store device opens.
     overrides: Vec<Override>,
+}
+
+/// Where a loaded snapshot's memory is.
+enum MemoryFrom {
+    /// A memory file, mapped privately.
+    File(PathBuf),
+    /// cladefs's `Cell` memory backend (TASK-456.3): a memory cell, at the backend's path, the
+    /// guest's RAM its window.
+    Cell(crate::memory::LoadCell),
 }
 
 /// An extent store device's cell in the loaded machine, and its daemon's socket.
@@ -131,11 +158,15 @@ struct Override {
     cladefsd_socket: Option<String>,
 }
 
-/// A request of the API's, and where its answer goes: an error a 400's fault message.
+/// A request of the API's, and where its answer goes: a body, a 200's, or none, a 204; an error
+/// a 400's fault message.
 struct Request {
     action: Action,
-    reply: mpsc::Sender<Result<(), String>>,
+    reply: mpsc::Sender<Answer>,
 }
+
+/// What a request is answered.
+type Answer = Result<Option<Value>, String>;
 
 /// What stops the machine's run, for a request to be served: the running machine's.
 #[derive(Clone, Default)]
@@ -164,12 +195,18 @@ struct Kept {
     cladefsd_socket: Option<String>,
 }
 
-/// The VMM's microVM: its machine, and what serves it.
+/// The VMM's microVM: its machine, and what serves it. The machine goes first, its VM with it,
+/// then its memory's cell, if any, whose window lets go of the RAM.
 struct Vmm {
     machine: Machine,
     kept: Kept,
     _vsock: Option<Server>,
     paused: bool,
+    /// Its memory as a memory cell's window, if it was restored from one.
+    memory: Option<CellMemory>,
+    /// Whether its extent store devices' cells are let go of: it stays paused until they are
+    /// taken back.
+    released: bool,
 }
 
 fn run(args: &Args, log: &Log) -> Result<i32, String> {
@@ -207,15 +244,20 @@ impl Vmm {
         let machine =
             Machine::boot_linux(plan.config, &plan.boot).map_err(|e| format!("booting: {e}"))?;
         let kept = Kept { vsock: plan.vsock, cladefsd_socket: plan.cladefsd_socket };
-        Self::serving(machine, kept, false)
+        Self::serving(machine, kept, false, None)
     }
 
     /// The microVM around `machine`: its console on standard output (a file, as the tests give
-    /// it), its vsock served, paused if `paused`.
-    fn serving(mut machine: Machine, kept: Kept, paused: bool) -> Result<Self, String> {
+    /// it), its vsock served, paused if `paused`, its memory `memory`'s window if given.
+    fn serving(
+        mut machine: Machine,
+        kept: Kept,
+        paused: bool,
+        memory: Option<CellMemory>,
+    ) -> Result<Self, String> {
         machine.set_console(std::io::stdout());
         let vsock = kept.vsock.as_deref().map(|path| serve_vsock(&machine, path)).transpose()?;
-        Ok(Self { machine, kept, _vsock: vsock, paused })
+        Ok(Self { machine, kept, _vsock: vsock, paused, memory, released: false })
     }
 
     /// Waits for the API's `PUT /snapshot/load`, refusing every other request meanwhile, and
@@ -230,7 +272,7 @@ impl Vmm {
             match Self::load(load) {
                 Ok(vmm) => {
                     // Its requester's answer: the API thread waits for it.
-                    let _ = request.reply.send(Ok(()));
+                    let _ = request.reply.send(Ok(None));
                     return Ok(vmm);
                 }
                 Err(e) => {
@@ -243,8 +285,11 @@ impl Vmm {
     /// The microVM `load`'s snapshot holds, its extent store devices on the cells and daemon it
     /// says, its vsock at its own path or the snapshot's.
     fn load(load: Load) -> Result<Self, String> {
-        let snapshot = Snapshot::open_split(&load.snapshot, &load.memory)
-            .map_err(|e| format!("opening the snapshot: {e}"))?;
+        let snapshot = match &load.memory {
+            MemoryFrom::File(memory) => Snapshot::open_split(&load.snapshot, memory),
+            MemoryFrom::Cell(_) => Snapshot::open_without_ram(&load.snapshot),
+        }
+        .map_err(|e| format!("opening the snapshot: {e}"))?;
         let mut kept: Kept = serde_json::from_slice(snapshot.caller_data()).map_err(|e| {
             format!("{} is no snapshot of libmachine-firecracker's: {e}", load.snapshot.display())
         })?;
@@ -272,9 +317,19 @@ impl Vmm {
         if let Some(vsock) = load.vsock {
             kept.vsock = Some(vsock);
         }
-        let machine = Machine::restore(&snapshot, config)
-            .map_err(|e| format!("loading the snapshot: {e}"))?;
-        Self::serving(machine, kept, !load.resume)
+        let (machine, memory) = match load.memory {
+            MemoryFrom::File(_) => (Machine::restore(&snapshot, config), None),
+            MemoryFrom::Cell(cell) => {
+                let memory = CellMemory::open(&cell, config.mem_size)?;
+                let machine = Machine::restore_onto(&snapshot, config, memory.ram().clone());
+                (machine, Some(memory))
+            }
+        };
+        let machine = machine.map_err(|e| format!("loading the snapshot: {e}"))?;
+        if let Some(memory) = &memory {
+            memory.take_given_back();
+        }
+        Self::serving(machine, kept, !load.resume, memory)
     }
 
     /// Runs the microVM, serving the API's requests between its runs, until it ends: 0 once
@@ -314,25 +369,39 @@ impl Vmm {
         }
     }
 
-    fn handle(&mut self, action: Action) -> Result<(), String> {
+    fn handle(&mut self, action: Action) -> Answer {
         match action {
+            Action::Vm { paused: false } if self.released => {
+                Err("the extent store devices' cells are released: open them first (PATCH \
+                 /cladefs/extents)"
+                    .into())
+            }
             Action::Vm { paused } => {
                 self.paused = paused;
-                Ok(())
+                Ok(None)
+            }
+            Action::Extents { .. } if !self.paused => {
+                Err("the microVM must be paused to release or open its cells".into())
+            }
+            Action::Extents { released: true } => {
+                self.machine
+                    .release_extent_cells()
+                    .map_err(|e| format!("releasing the extent store devices' cells: {e}"))?;
+                self.released = true;
+                Ok(None)
+            }
+            Action::Extents { released: false } => {
+                self.machine
+                    .reopen_extent_cells()
+                    .map_err(|e| format!("opening the extent store devices' cells: {e}"))?;
+                self.released = false;
+                Ok(None)
             }
             Action::Create(create) => {
                 if !self.paused {
                     return Err("the microVM must be paused to snapshot it".into());
                 }
-                let kept = serde_json::to_vec(&self.kept).map_err(|e| e.to_string())?;
-                let options = SnapshotOptions {
-                    ram: Some(&create.memory),
-                    for_migration: create.for_migration,
-                    caller_data: &kept,
-                };
-                self.machine
-                    .snapshot_with(&create.snapshot, &options)
-                    .map_err(|e| format!("creating the snapshot: {e}"))
+                self.create(create)
             }
             Action::Load(_) => {
                 Err("a microVM runs already: load a snapshot in a new process".into())
@@ -340,9 +409,82 @@ impl Vmm {
             Action::Balloon { amount_mib } => {
                 let balloon = self.machine.balloon().ok_or("the microVM has no balloon")?;
                 balloon.set_target(amount_mib << 20);
-                Ok(())
+                Ok(None)
             }
         }
+    }
+
+    /// Takes the snapshot `create` asks for of the paused microVM: its state, then its memory
+    /// where it says. A memory cell's answered as Firecracker answers it, with the cell and its
+    /// version.
+    fn create(&mut self, create: Create) -> Answer {
+        // What the memory asks is checked before anything is written.
+        match (&create.memory, &self.memory) {
+            (MemoryTo::Diff(_), None) => {
+                return Err(format!(
+                    "Diff snapshots are of a microVM restored from a memory cell: \
+                     {MEMORY_CELL_ONLY}"
+                ));
+            }
+            (MemoryTo::Cell { path_on_host: None, cladefsd_socket: None, .. }, Some(_)) => {}
+            (MemoryTo::Cell { .. }, Some(_)) => {
+                return Err("a microVM restored from a memory cell snapshots into its own forked \
+                            cell: omit path_on_host and cladefsd_socket"
+                    .into());
+            }
+            (MemoryTo::Cell { path_on_host: Some(_), cladefsd_socket: Some(_), .. }, None) => {}
+            (MemoryTo::Cell { .. }, None) => {
+                return Err("snapshotting a microVM not restored from a memory cell into one \
+                            takes both path_on_host and cladefsd_socket"
+                    .into());
+            }
+            (MemoryTo::File(_) | MemoryTo::Diff(_), _) => {}
+        }
+        let ram = match &create.memory {
+            MemoryTo::File(path) => SnapshotRam::File(path),
+            MemoryTo::Diff(_) | MemoryTo::Cell { .. } => SnapshotRam::Kept,
+        };
+        let kept = serde_json::to_vec(&self.kept).map_err(|e| e.to_string())?;
+        let options =
+            SnapshotOptions { ram, for_migration: create.for_migration, caller_data: &kept };
+        let memory = &mut self.memory;
+        // The memory as of the state's moment, the devices held meanwhile: none writes it.
+        let made = self.machine.snapshot_with_ram(&create.snapshot, &options, |base, size| {
+            // SAFETY (each below): The microVM is paused and its devices held; `base` is its RAM,
+            // `size` bytes, its memory cell's window if it has one.
+            match (&create.memory, memory) {
+                // The next diff is of what the guest writes from now.
+                (MemoryTo::File(_), Some(memory)) => {
+                    unsafe { memory.snapshotted(base) }.map(|()| None)
+                }
+                (MemoryTo::File(_), None) => Ok(None),
+                (MemoryTo::Diff(path), Some(memory)) => {
+                    unsafe { memory.write_diff(base, path) }.map(|()| None)
+                }
+                (MemoryTo::Cell { ephemeral, .. }, Some(memory)) => {
+                    unsafe { memory.snapshot(base, *ephemeral) }.map(Some)
+                }
+                (
+                    MemoryTo::Cell {
+                        path_on_host: Some(path),
+                        cladefsd_socket: Some(socket),
+                        ephemeral,
+                    },
+                    None,
+                ) => unsafe {
+                    crate::memory::snapshot_into_new(socket, path, base, size, *ephemeral)
+                }
+                .map(Some),
+                (MemoryTo::Diff(_) | MemoryTo::Cell { .. }, _) => unreachable!("checked above"),
+            }
+        });
+        let made = made.map_err(|e| format!("creating the snapshot: {e}"))?;
+        // As Firecracker's: the vsock's connections reset, its host ends closed at once, the
+        // guest told as it runs again (a transport reset), as a restore of the snapshot is.
+        if let Some(vsock) = self.machine.vsock() {
+            vsock.reset_connections();
+        }
+        Ok(made)
     }
 }
 
@@ -524,7 +666,16 @@ fn answer(
     });
     let mut stream = stream;
     match outcome {
-        Ok(()) => write!(stream, "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n"),
+        Ok(None) => write!(stream, "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n"),
+        Ok(Some(body)) => {
+            let body = body.to_string();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n\
+                 {body}",
+                body.len()
+            )
+        }
         Err(why) => {
             log.say(&format!("refused {method} {path}: {why}"));
             let body = json!({ "fault_message": why }).to_string();
@@ -552,29 +703,45 @@ fn action(method: &str, path: &str, body: &[u8]) -> Result<Action, String> {
             other => Err(format!("no VM state {other:?}")),
         },
         ("PUT", "/snapshot/create") => {
-            if body.get("memory_cell").is_some() {
-                return Err(MEMORY_CELLS.into());
-            }
-            match body["snapshot_type"].as_str().unwrap_or("Full") {
-                "Full" => {}
-                "Diff" => return Err(format!("Diff snapshots aren't supported: {MEMORY_CELLS}")),
+            let diff = match body["snapshot_type"].as_str().unwrap_or("Full") {
+                "Full" => false,
+                "Diff" => true,
                 other => return Err(format!("no snapshot type {other:?}")),
-            }
+            };
+            let memory = match (&body["memory_cell"], &body["mem_file_path"]) {
+                (Value::Null, Value::String(path)) if diff => MemoryTo::Diff(path.into()),
+                (Value::Null, Value::String(path)) => MemoryTo::File(path.into()),
+                (Value::Object(_), Value::Null) if diff => {
+                    return Err("a Diff snapshot goes to mem_file_path, not a memory cell".into());
+                }
+                (cell @ Value::Object(_), Value::Null) => {
+                    let path = |key| cell[key].as_str().map(PathBuf::from);
+                    MemoryTo::Cell {
+                        path_on_host: path("path_on_host"),
+                        cladefsd_socket: path("cladefsd_socket"),
+                        ephemeral: cell["ephemeral"].as_bool().unwrap_or(false),
+                    }
+                }
+                (Value::Null, Value::Null) => {
+                    return Err("a snapshot names mem_file_path or memory_cell".into());
+                }
+                _ => return Err("mem_file_path and memory_cell exclude each other".into()),
+            };
             Ok(Action::Create(Create {
                 snapshot: string(&body, "snapshot_path")?.into(),
-                memory: string(&body, "mem_file_path")?.into(),
+                memory,
                 for_migration: body["for_migration"].as_bool().unwrap_or(false),
             }))
         }
         ("PUT", "/snapshot/load") => {
-            if body.get("memory_cell").is_some() {
-                return Err(MEMORY_CELLS.into());
-            }
             let memory = match (&body["mem_backend"], &body["mem_file_path"]) {
-                (Value::Null, Value::String(path)) => path.clone(),
+                (Value::Null, Value::String(path)) => MemoryFrom::File(path.into()),
                 (backend, _) => match backend["backend_type"].as_str() {
-                    Some("File") => string(backend, "backend_path")?,
-                    Some("Cell") => return Err(MEMORY_CELLS.into()),
+                    Some("File") => MemoryFrom::File(string(backend, "backend_path")?.into()),
+                    Some("Cell") => MemoryFrom::Cell(crate::memory::LoadCell::parse(
+                        &string(backend, "backend_path")?,
+                        &body["memory_cell"],
+                    )?),
                     other => return Err(format!("no memory backend {other:?}")),
                 },
             };
@@ -590,18 +757,22 @@ fn action(method: &str, path: &str, body: &[u8]) -> Result<Action, String> {
                 .collect::<Result<_, String>>()?;
             Ok(Action::Load(Load {
                 snapshot: string(&body, "snapshot_path")?.into(),
-                memory: memory.into(),
+                memory,
                 resume: body["resume_vm"].as_bool().unwrap_or(false),
                 vsock: body["vsock_override"]["uds_path"].as_str().map(PathBuf::from),
                 overrides,
             }))
         }
         ("PATCH", "/balloon") => Ok(Action::Balloon { amount_mib: number(&body, "amount_mib")? }),
+        ("PATCH", "/cladefs/extents") => match body["state"].as_str() {
+            Some("Released") => Ok(Action::Extents { released: true }),
+            Some("Open") => Ok(Action::Extents { released: false }),
+            other => Err(format!("no extent store devices' state {other:?}")),
+        },
         _ => Err(format!("{method} {path} isn't supported by libmachine-firecracker")),
     }
 }
 
-/// Why what needs memory cells is refused: macOS machines keep anonymous RAM until a macOS design
-/// of them is chosen (board 13994, the user's choice of 2026-11-26).
-const MEMORY_CELLS: &str =
-    "memory cells aren't supported on macOS yet (board 13994): snapshot to a memory file";
+/// What only a microVM restored from a memory cell has: its window's private pages, which are
+/// what its guest wrote, are what a diff snapshot holds.
+const MEMORY_CELL_ONLY: &str = "a cold-booted microVM's memory tracks no writes on macOS";

@@ -36,12 +36,19 @@
 //!   snapshot's microVM, from a `File` memory backend (or `mem_file_path`), with cladefs's
 //!   `cladefs_overrides` (each extent store device's cell and daemon) and `vsock_override`,
 //!   resumed if `resume_vm`, else paused;
-//! - `PATCH /balloon`, the balloon's target.
+//! - `PATCH /balloon`, the balloon's target;
+//! - cladefs's memory cells (board 13994, `memory`): `PUT /snapshot/create` with `memory_cell`
+//!   (into a new cell of a cold-booted microVM's resident pages, or the restored microVM's own,
+//!   ephemeral or not, answered 200 with the cell and its version as Firecracker answers), `Diff`
+//!   snapshots of a microVM restored from one (what its guest wrote since the last snapshot),
+//!   and `PUT /snapshot/load` from a `Cell` memory backend (`memory_cell`, its `diff_files`
+//!   applied), the guest's RAM the cell's window;
+//! - cladefs's `PATCH /cladefs/extents`, the extent store devices' cells `Released` for a live
+//!   migration's hand-over or `Open` again, the microVM paused, and never resumed released.
 //!
 //! What it doesn't do it refuses, saying so on standard error: network interfaces and pmem root
-//! devices as it starts (pmem data devices it maps into the guest, as Firecracker does); Diff snapshots and memory cells (macOS machines keep anonymous RAM
-//! until a macOS design of memory cells is chosen, board 13994), `PATCH /cladefs/extents` and every
-//! other request of the API's.
+//! devices as it starts (pmem data devices it maps into the guest, as Firecracker does); `Diff`
+//! snapshots of a cold-booted microVM, and every other request of the API's.
 //!
 //! The guest's serial console goes to standard output. It exits as Firecracker does: 0 once the
 //! guest resets or powers off (the tests' guest agent reboots it as a case ends), 158 once its
@@ -50,6 +57,8 @@
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 mod hvf;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+mod memory;
 
 fn main() {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
