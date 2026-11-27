@@ -101,16 +101,19 @@ pub fn daemon_stats(path: &Path) -> anyhow::Result<std::collections::BTreeMap<St
 /// daemon from before it counted its own writes and memory among them (TASK-330.4).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ProcessCosts {
-    /// What its kernel wrote to disks for it (/proc/PID/io's `write_bytes`).
+    /// What its kernel wrote to disks for it (/proc/PID/io's `write_bytes`; macOS's
+    /// `ri_diskio_byteswritten`).
     pub disk_written: u64,
-    /// The most memory it held at once (/proc/PID/status's `VmHWM`).
+    /// The most memory it held at once (/proc/PID/status's `VmHWM`; macOS's
+    /// `ri_lifetime_max_phys_footprint`).
     pub peak_rss: u64,
-    /// Its CPU time, its user and system time, in seconds (/proc/PID/stat's).
+    /// Its CPU time, its user and system time, in seconds (/proc/PID/stat's; macOS's).
     pub cpu_secs: f64,
 }
 
 impl ProcessCosts {
     /// The process `pid`'s, as it runs.
+    #[cfg(target_os = "linux")]
     pub fn of(pid: u32) -> anyhow::Result<Self> {
         let read = |file: &str| {
             let path = format!("/proc/{pid}/{file}");
@@ -119,8 +122,28 @@ impl ProcessCosts {
         Self::parse(&read("io")?, &read("status")?, &read("stat")?, clock_ticks())
     }
 
+    /// The process `pid`'s, as it runs: what macOS's kernel counts of it ([`usage`]).
+    #[cfg(target_os = "macos")]
+    #[allow(deprecated, reason = "libc's mach_timebase_info, which mach2 has too: the same call")]
+    pub fn of(pid: u32) -> anyhow::Result<Self> {
+        use nix::libc;
+        let usage = usage(pid)?;
+        // Its times are in Mach's absolute time units, of the timebase's fraction of a nanosecond.
+        let mut timebase = libc::mach_timebase_info { numer: 0, denom: 0 };
+        // SAFETY: Writes the timebase into `timebase`.
+        let read = unsafe { libc::mach_timebase_info(&mut timebase) };
+        anyhow::ensure!(read == 0, "the Mach timebase: {read}");
+        let ticks = (usage.ri_user_time + usage.ri_system_time) as f64;
+        Ok(Self {
+            disk_written: usage.ri_diskio_byteswritten,
+            peak_rss: usage.ri_lifetime_max_phys_footprint,
+            cpu_secs: ticks * f64::from(timebase.numer) / f64::from(timebase.denom) / 1e9,
+        })
+    }
+
     /// From a process's /proc files, `io`, `status` and `stat`, and its kernel's clock ticks a
     /// second, `ticks`.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code, reason = "Linux's, and its test's"))]
     fn parse(io: &str, status: &str, stat: &str, ticks: f64) -> anyhow::Result<Self> {
         let field = |text: &str, name: &str| -> anyhow::Result<u64> {
             let line = text.lines().find_map(|line| line.strip_prefix(name)?.strip_prefix(':'));
@@ -142,9 +165,45 @@ impl ProcessCosts {
     }
 }
 
+/// cladefs: what macOS's kernel counts of process `pid` (`proc_pid_rusage`): its memory, resident
+/// and its footprint, its disk's writes and its CPU time.
+#[cfg(target_os = "macos")]
+pub fn usage(pid: u32) -> anyhow::Result<nix::libc::rusage_info_v4> {
+    use nix::libc;
+    // SAFETY: Plain data, which the call writes.
+    let mut usage: libc::rusage_info_v4 = unsafe { std::mem::zeroed() };
+    // SAFETY: Writes the process's counts into `usage`, of the flavour's size.
+    let read = unsafe {
+        libc::proc_pid_rusage(pid as libc::c_int, libc::RUSAGE_INFO_V4, (&raw mut usage).cast())
+    };
+    anyhow::ensure!(read == 0, "process {pid}'s usage: {}", std::io::Error::last_os_error());
+    Ok(usage)
+}
+
+#[cfg(target_os = "linux")]
 fn clock_ticks() -> f64 {
     // SAFETY: sysconf reads a constant of the system's.
     (unsafe { nix::libc::sysconf(nix::libc::_SC_CLK_TCK) }) as f64
+}
+
+/// cladefs: a version of a new memory cell of the default tenant's, on the extent daemon at
+/// `socket`, holding the memory file `memory` of a VM's snapshot, imported (TASK-456.2): what VMs
+/// restore their memory from, sharing its pages.
+#[cfg(target_os = "linux")]
+pub fn memory_version(socket: &Path, memory: &Path) -> anyhow::Result<cladefs::CellVersion> {
+    let size = fs::metadata(memory)?.len();
+    let cell = cladefs::memory_cell::MemoryCell::create_cell(socket, 0, size)?;
+    cell.import(memory)?;
+    let version = cell.make_version()?;
+    cell.close()?;
+    Ok(version)
+}
+
+/// As Linux's, where cladefs's memory cells are not yet: `cladefs_wire::memory_cell` is Linux's
+/// (board 14343).
+#[cfg(not(target_os = "linux"))]
+pub fn memory_version(_socket: &Path, _memory: &Path) -> anyhow::Result<cladefs::CellVersion> {
+    anyhow::bail!("memory cells are Linux's yet: cladefs_wire::memory_cell (board 14343)")
 }
 
 /// cladefs: the memory limit nearest this process in its cgroups (memory.max, its own cgroup's or
@@ -180,7 +239,15 @@ fn unreclaimable(max: &str, stat: &str) -> Option<(u64, u64)> {
     Some((max, field("anon") + field("shmem")))
 }
 
+/// cladefs: the memory process `pid` holds now (macOS's resident size, [`usage`]), 0 if it says
+/// none, as Linux's.
+#[cfg(target_os = "macos")]
+pub fn resident(pid: u32) -> u64 {
+    usage(pid).map_or(0, |usage| usage.ri_resident_size)
+}
+
 /// cladefs: the memory process `pid` holds now (/proc/PID/status's `VmRSS`), 0 if it says none.
+#[cfg(target_os = "linux")]
 pub fn resident(pid: u32) -> u64 {
     let status = fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default();
     let kib = status.lines().find_map(|line| line.strip_prefix("VmRSS:"));
@@ -302,28 +369,54 @@ pub enum Window {
 /// (TASK-92.8), and its VM process keeps changes for those pages alone (TASK-227).
 pub fn dax_window(window: Window) -> anyhow::Result<u64> {
     let given = std::env::var("CLADEFS_DAX_WINDOW_MIB").ok();
-    let meminfo = std::fs::read_to_string("/proc/meminfo")?;
-    window_bytes(window, given.as_deref(), &meminfo)
+    window_bytes(window, given.as_deref(), host_memory()?)
 }
 
 /// cladefs: [`dax_window`]'s bytes, of `window`, `given` CLADEFS_DAX_WINDOW_MIB's, and the host's
-/// /proc/meminfo, `meminfo`: a large window's `given`'s, or the host's MemTotal, rounded down to a
+/// memory, `memory` bytes: a large window's `given`'s, or the host's memory, rounded down to a
 /// window's 2 MiB, at most [`MAX_DAX_WINDOW`].
-fn window_bytes(window: Window, given: Option<&str>, meminfo: &str) -> anyhow::Result<u64> {
+fn window_bytes(window: Window, given: Option<&str>, memory: u64) -> anyhow::Result<u64> {
     const ALIGNMENT: u64 = 2 << 20;
     match window {
         Window::Small(bytes) => Ok(bytes),
         Window::Large if let Some(mib) = given.filter(|mib| !mib.is_empty()) => {
             Ok(mib.parse::<u64>().context("CLADEFS_DAX_WINDOW_MIB")? << 20)
         }
-        Window::Large => {
-            let line = (meminfo.lines().find(|line| line.starts_with("MemTotal:")))
-                .context("/proc/meminfo has no MemTotal")?;
-            let kib: u64 =
-                (line.split_whitespace().nth(1)).context("MemTotal has no value")?.parse()?;
-            Ok(((kib << 10) / ALIGNMENT * ALIGNMENT).min(MAX_DAX_WINDOW))
-        }
+        Window::Large => Ok((memory / ALIGNMENT * ALIGNMENT).min(MAX_DAX_WINDOW)),
     }
+}
+
+/// cladefs: the bytes of the host's memory: /proc/meminfo's MemTotal on Linux, `hw.memsize` on
+/// macOS.
+pub fn host_memory() -> anyhow::Result<u64> {
+    #[cfg(target_os = "linux")]
+    return mem_total(&fs::read_to_string("/proc/meminfo")?);
+    #[cfg(target_os = "macos")]
+    {
+        let mut memory: u64 = 0;
+        let mut len = std::mem::size_of::<u64>();
+        // SAFETY: Reads a u64-sized sysctl into `memory`, of `len` bytes.
+        let read = unsafe {
+            nix::libc::sysctlbyname(
+                c"hw.memsize".as_ptr(),
+                (&raw mut memory).cast(),
+                &mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        anyhow::ensure!(read == 0, "hw.memsize: {}", std::io::Error::last_os_error());
+        Ok(memory)
+    }
+}
+
+/// cladefs: the bytes of memory /proc/meminfo's text, `meminfo`, says the host has, its MemTotal.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code, reason = "Linux's, and its test's"))]
+fn mem_total(meminfo: &str) -> anyhow::Result<u64> {
+    let line = (meminfo.lines().find(|line| line.starts_with("MemTotal:")))
+        .context("/proc/meminfo has no MemTotal")?;
+    let kib: u64 = (line.split_whitespace().nth(1)).context("MemTotal has no value")?.parse()?;
+    Ok(kib << 10)
 }
 
 /// An extent daemon of the test's own, CLADEFSD_BIN, serving at `socket`, and its control API
@@ -637,17 +730,17 @@ mod tests {
     /// fxfs-guest-checks-dax-small's window_filled failed in 64 GiB (GCE r886).
     #[test]
     fn windows_are_as_large_as_the_hosts_memory() {
-        let host = |kib: u64| format!("MemTotal:       {kib} kB\nMemFree:  1 kB\n");
+        let host = |kib: u64| mem_total(&format!("MemTotal:       {kib} kB\nMemFree:  1 kB\n"));
         let (gib, mib) = (1 << 30, 1 << 20);
-        let large = |kib| window_bytes(Window::Large, None, &host(kib)).unwrap();
+        let large = |kib| window_bytes(Window::Large, None, host(kib).unwrap()).unwrap();
         assert_eq!(large(32_853_144), 31 * gib + 338 * mib);
         assert_eq!(large(256 << 20), MAX_DAX_WINDOW);
         let small = Window::Small(64 * mib);
-        assert_eq!(window_bytes(small, None, &host(1 << 25)).unwrap(), 64 * mib);
-        assert_eq!(window_bytes(small, Some("8192"), &host(1 << 25)).unwrap(), 64 * mib);
-        assert_eq!(window_bytes(Window::Large, Some("1024"), &host(1 << 25)).unwrap(), gib);
-        assert_eq!(window_bytes(Window::Large, Some(""), &host(4 << 20)).unwrap(), 4 * gib);
-        assert!(window_bytes(Window::Large, None, "MemFree: 1 kB\n").is_err());
+        assert_eq!(window_bytes(small, None, 32 * gib).unwrap(), 64 * mib);
+        assert_eq!(window_bytes(small, Some("8192"), 32 * gib).unwrap(), 64 * mib);
+        assert_eq!(window_bytes(Window::Large, Some("1024"), 32 * gib).unwrap(), gib);
+        assert_eq!(window_bytes(Window::Large, Some(""), 4 * gib).unwrap(), 4 * gib);
+        assert!(mem_total("MemFree: 1 kB\n").is_err());
     }
 
     /// TASK-165.12: a test's daemon keeps its stats beside its log, where the run's summary reads

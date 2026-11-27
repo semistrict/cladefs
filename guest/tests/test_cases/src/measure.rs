@@ -106,6 +106,38 @@ mod host {
 
         /// Says the host's memory now, on standard error: of VM `vm` (0 before the first), at
         /// `phase`, its VM process `vmm` if it runs, and what its guest said of itself, `guest`.
+        /// cladefs: on macOS, what it counts, which has no proportional shares nor KVM: the
+        /// host's memory used (`host_used`), and the VM process's and the daemon's resident memory
+        /// and footprint (`vmm_rss`, `vmm_footprint`, `cladefsd_footprint`, board 14336).
+        #[cfg(target_os = "macos")]
+        pub fn say(
+            &self,
+            vm: usize,
+            phase: &str,
+            vmm: Option<u32>,
+            guest: &str,
+        ) -> anyhow::Result<()> {
+            let mut line = format!("memory: vm={vm} phase={phase} host_used={}", host_used()?);
+            if let Some(pid) = vmm {
+                let vmm = crate::common::usage(pid).context("the VM process's memory")?;
+                write!(line, " vmm_rss={}", vmm.ri_resident_size)?;
+                write!(line, " vmm_footprint={}", vmm.ri_phys_footprint)?;
+            }
+            let daemon = crate::common::usage(self.daemon).context("the daemon's memory")?;
+            write!(line, " cladefsd_footprint={}", daemon.ri_phys_footprint)?;
+            for (name, value) in self.gauges()? {
+                write!(line, " {name}={value}")?;
+            }
+            if !guest.is_empty() {
+                write!(line, " {guest}")?;
+            }
+            eprintln!("{line}");
+            Ok(())
+        }
+
+        /// Says the host's memory now, on standard error: of VM `vm` (0 before the first), at
+        /// `phase`, its VM process `vmm` if it runs, and what its guest said of itself, `guest`.
+        #[cfg(target_os = "linux")]
         pub fn say(
             &self,
             vm: usize,
@@ -154,7 +186,37 @@ mod host {
         }
     }
 
+    /// cladefs: the host's memory not available, as Linux's MemAvailable has it: macOS's memory
+    /// less its free, inactive, speculative and purgeable pages (`host_statistics64`'s), which it
+    /// takes back without paging out.
+    #[cfg(target_os = "macos")]
+    #[allow(deprecated, reason = "libc's mach calls, which mach2 has too: the same calls")]
+    fn host_used() -> anyhow::Result<u64> {
+        use nix::libc;
+        // SAFETY: Plain data, which the call writes.
+        let mut stats: libc::vm_statistics64 = unsafe { std::mem::zeroed() };
+        let mut count = libc::HOST_VM_INFO64_COUNT;
+        // SAFETY: Writes the host's counts into `stats`, of `count` words.
+        let read = unsafe {
+            libc::host_statistics64(
+                libc::mach_host_self(),
+                libc::HOST_VM_INFO64,
+                (&raw mut stats).cast(),
+                &mut count,
+            )
+        };
+        anyhow::ensure!(read == libc::KERN_SUCCESS, "the host's memory statistics: {read}");
+        // SAFETY: A constant of the kernel's, set before main.
+        let page = unsafe { libc::vm_page_size } as u64;
+        let available = u64::from(stats.free_count)
+            + u64::from(stats.inactive_count)
+            + u64::from(stats.speculative_count)
+            + u64::from(stats.purgeable_count);
+        Ok(crate::common::host_memory()?.saturating_sub(available * page))
+    }
+
     /// The host's memory not available: MemTotal less MemAvailable.
+    #[cfg(target_os = "linux")]
     fn host_used() -> anyhow::Result<u64> {
         let memory = meminfo(&std::fs::read_to_string("/proc/meminfo")?);
         let (total, available) = (memory.get("MemTotal"), memory.get("MemAvailable"));

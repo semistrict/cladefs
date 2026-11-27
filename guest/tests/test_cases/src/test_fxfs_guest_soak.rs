@@ -213,12 +213,7 @@ mod host {
     impl Daemon {
         /// Its peak resident memory so far, in bytes.
         fn peak(&self) -> anyhow::Result<u64> {
-            let status = std::fs::read_to_string(format!("/proc/{}/status", self.child.id()))?;
-            let line = (status.lines())
-                .find_map(|line| line.strip_prefix("VmHWM:"))
-                .context("no VmHWM in the daemon's status")?;
-            let kib: u64 = line.trim().trim_end_matches("kB").trim().parse()?;
-            Ok(kib << 10)
+            Ok(crate::common::ProcessCosts::of(self.child.id())?.peak_rss)
         }
 
         /// Kills it, as its host's crash would.

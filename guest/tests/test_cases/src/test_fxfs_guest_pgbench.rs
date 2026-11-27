@@ -749,6 +749,11 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
     }
 
     impl Test for TestFxfsGuestPgbench {
+        fn linux_only(&self) -> Option<&'static str> {
+            matches!(self.storage, Storage::Ext4LoopWriteback | Storage::Ext4LoopUnsafe)
+                .then_some(crate::LINUX_ONLY_LOOP)
+        }
+
         fn should_run(&self) -> ShouldRun {
             cladefs_guest_should_run()
         }

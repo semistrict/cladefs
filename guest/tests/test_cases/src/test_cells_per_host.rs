@@ -140,7 +140,6 @@ mod host {
     use cladefs::cladefsd::control::proto::{ForkCellRequest, ImportImageRequest};
     use cladefs::cladefsd::governor;
     use cladefs::import::testing::oci_layout;
-    use cladefs::memory_cell::MemoryCell;
     use cladefs::testing::control_path;
     use std::collections::BTreeMap;
     use std::ffi::OsStr;
@@ -659,11 +658,7 @@ mod host {
             firecracker.kill()?;
             drop(stream);
             std::fs::remove_file(Vm::api_socket(&name))?;
-            let size = std::fs::metadata(&memory)?.len();
-            let cell = MemoryCell::create_cell(&self.socket, 0, size)?;
-            cell.import(&memory)?;
-            let version = cell.make_version()?;
-            cell.close()?;
+            let version = crate::common::memory_version(&self.socket, &memory)?;
             std::fs::remove_file(&memory)?;
             eprintln!("cells-per-host: made the zygote in {:.1?}", made.elapsed());
             Ok(Zygote { snapshot, memory: version })
@@ -1015,6 +1010,10 @@ mod host {
     }
 
     impl Test for TestCellsPerHost {
+        fn linux_only(&self) -> Option<&'static str> {
+            Some(crate::LINUX_ONLY_HOST_MEASURES)
+        }
+
         fn should_run(&self) -> ShouldRun {
             if std::env::var_os("CLADEFSD_BIN").is_none() {
                 return ShouldRun::No("CLADEFSD_BIN does not name the extent daemon");

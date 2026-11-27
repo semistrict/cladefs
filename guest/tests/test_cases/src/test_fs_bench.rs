@@ -471,8 +471,9 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
             role(test_setup, "base", &base, Path::new(""), None)?;
             for i in 0..iterations().unwrap_or(1) {
                 let fork = images.join(format!("fork-{i}.img"));
-                let status =
-                    Command::new("cp").arg("--sparse=always").arg(&base).arg(&fork).status()?;
+                // Its holes kept: GNU cp's, or macOS's clone of it, which shares its blocks.
+                let sparse = if cfg!(target_os = "macos") { "-c" } else { "--sparse=always" };
+                let status = Command::new("cp").arg(sparse).arg(&base).arg(&fork).status()?;
                 anyhow::ensure!(status.success(), "copying the base's image: {status}");
                 role(test_setup, "fork", &fork, Path::new(""), None)?;
                 std::fs::remove_file(&fork)?;
@@ -609,6 +610,11 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
     }
 
     impl Test for TestFsBench {
+        fn linux_only(&self) -> Option<&'static str> {
+            matches!(self.backend, Backend::Ext4Loop | Backend::Ext4LoopUnsafe)
+                .then_some(crate::LINUX_ONLY_LOOP)
+        }
+
         fn should_run(&self) -> ShouldRun {
             if iterations().is_none() {
                 return ShouldRun::No("CLADEFS_BENCH_ITERATIONS not set");

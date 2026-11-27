@@ -230,7 +230,6 @@ mod host {
         GetStatsRequest, GrantRequest, ListCellsRequest, ListVersionsRequest, ResizeCellRequest,
         ShrinkMemoryRequest, StatCellRequest,
     };
-    use cladefs::memory_cell::MemoryCell;
     use cladefs::{Filesystem, Storage};
     use futures::executor::block_on;
     use std::io::{BufRead, BufReader, Write};
@@ -494,13 +493,9 @@ mod host {
             // The snapshot's memory as a memory cell's version, its file imported into it.
             let mut memory_version = None;
             if self.memory == Memory::Cell {
-                let size = std::fs::metadata(&memory)?.len();
-                let memory_cell = MemoryCell::create_cell(&cladefsd, 0, size)?;
                 let start = std::time::Instant::now();
-                memory_cell.import(&memory)?;
+                memory_version = Some(crate::common::memory_version(&cladefsd, &memory)?);
                 eprintln!("memory: imported in {:?}", start.elapsed());
-                memory_version = Some(memory_cell.make_version()?);
-                memory_cell.close()?;
                 // The import left the memory's pages in the daemon's memory: evicted, so that the
                 // restores page in what they read, the first of them at least.
                 crate::common::control(&cladefsd)?

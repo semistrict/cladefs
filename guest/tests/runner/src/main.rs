@@ -241,8 +241,13 @@ fn run_single_test(
     );
 
     // Check if test should run
-    if let ShouldRun::No(reason) = test_case.should_run() {
-        eprintln!("SKIP ({})", reason);
+    let skipped = match test_case.should_run() {
+        ShouldRun::Yes => None,
+        ShouldRun::No(reason) => Some((reason, "")),
+        ShouldRun::LinuxOnly(reason) => Some((reason, "Linux-only: ")),
+    };
+    if let Some((reason, kind)) = skipped {
+        eprintln!("SKIP ({kind}{reason})");
         return Ok(TestResult {
             name: test_case.name.to_string(),
             outcome: TestOutcome::Skip(reason),
@@ -318,13 +323,18 @@ fn run_single_test(
             command
         }
     };
+    // cladefs: in a process group of its own, which its VMs' processes and daemons are in too: ended
+    // whole as the case ends (`CaseGroup`).
+    use std::os::unix::process::CommandExt as _;
     let child = command
         .env(test_cases::TEST_DEADLINE, &killed_at)
         .stdin(Stdio::piped())
         .stdout(stdout_file)
         .stderr(log_file)
+        .process_group(0)
         .spawn()
         .context("Failed to start subprocess for test")?;
+    let _group = CaseGroup::new(child.id());
 
     let mut child = child;
     let began = std::time::Instant::now();
@@ -472,28 +482,72 @@ fn run_single_test(
     })
 }
 
+/// cladefs: the process group of the case running, its first process's ID, killed (SIGKILL) as the
+/// case ends, and as the runner is interrupted, terminated or hung up on: whatever of the case
+/// outlives it, its VMs' processes, which macOS has no parent-death signal to end (vm.rs's
+/// `confine`), and its daemons, goes. 0 for none.
+static CASE_GROUP: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+/// cladefs: the case's process group, from its making until dropped, which kills it.
+struct CaseGroup(i32);
+
+impl CaseGroup {
+    fn new(leader: u32) -> Self {
+        use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal, sigaction};
+        let group = i32::try_from(leader).expect("a process ID");
+        CASE_GROUP.store(group, std::sync::atomic::Ordering::SeqCst);
+        let ends =
+            SigAction::new(SigHandler::Handler(end_case), SaFlags::SA_RESETHAND, SigSet::empty());
+        for signal in [Signal::SIGINT, Signal::SIGTERM, Signal::SIGHUP] {
+            // SAFETY: end_case is async-signal-safe: an atomic's load, kill and raise.
+            if let Err(err) = unsafe { sigaction(signal, &ends) } {
+                eprintln!("WARNING: the case outlives the runner's {signal}: {err}");
+            }
+        }
+        Self(group)
+    }
+}
+
+impl Drop for CaseGroup {
+    fn drop(&mut self) {
+        CASE_GROUP.store(0, std::sync::atomic::Ordering::SeqCst);
+        // Gone already, its processes all ended, is what a case that cleaned up leaves: ESRCH.
+        match nix::sys::signal::killpg(
+            nix::unistd::Pid::from_raw(self.0),
+            nix::sys::signal::SIGKILL,
+        ) {
+            Ok(()) | Err(nix::errno::Errno::ESRCH) => {}
+            Err(err) => eprintln!("WARNING: ending the case's process group {}: {err}", self.0),
+        }
+    }
+}
+
+/// cladefs: ends the case running, its process group, then the runner as `signal` would have.
+extern "C" fn end_case(signal: nix::libc::c_int) {
+    let group = CASE_GROUP.load(std::sync::atomic::Ordering::SeqCst);
+    // SAFETY: kill and raise are async-signal-safe; SA_RESETHAND restored the default action.
+    unsafe {
+        if group > 0 {
+            nix::libc::kill(-group, nix::libc::SIGKILL);
+        }
+        nix::libc::raise(signal);
+    }
+}
+
 /// cladefs: saves, before a test that hung is killed, the stacks of every thread of its processes,
 /// `pid`'s and its descendants', and those it registered for cleanup, to `stacks-<pid>.txt` in its
 /// directory `dir`: what waits for what, which a timeout alone kept nothing of (TASK-44.13). With
-/// elfutils' eu-stack; without it, a note says so.
+/// elfutils' eu-stack (macOS's sample); without it, a note says so.
 fn save_stacks(dir: &Path, pid: u32) {
-    let mut pids = vec![pid];
-    let mut at = 0;
-    while at < pids.len() {
-        let tasks = fs::read_dir(format!("/proc/{}/task", pids[at])).into_iter().flatten();
-        for task in tasks.flatten() {
-            let children = fs::read_to_string(task.path().join("children")).unwrap_or_default();
-            pids.extend(children.split_whitespace().filter_map(|child| child.parse::<u32>().ok()));
-        }
-        at += 1;
-    }
+    let mut pids = case_processes(pid);
     let cleanup = fs::read_to_string(dir.join("cleanup.pids")).unwrap_or_default();
     pids.extend(cleanup.lines().filter_map(|line| line.trim().parse::<u32>().ok()));
     pids.sort_unstable();
     pids.dedup();
+    let (tool, args) = stacks_tool();
     for pid in pids {
         let comm = fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
-        match Command::new("eu-stack").args(["-p", &pid.to_string()]).output() {
+        match Command::new(tool).args(args(pid)).output() {
             Ok(output) => {
                 let mut saved = format!("{pid} {}\n", comm.trim()).into_bytes();
                 saved.extend(output.stdout);
@@ -504,12 +558,52 @@ fn save_stacks(dir: &Path, pid: u32) {
                 }
             }
             Err(err) => {
-                eprintln!("no stacks of the hung test's processes: eu-stack: {err}");
+                eprintln!("no stacks of the hung test's processes: {tool}: {err}");
                 return;
             }
         }
     }
     eprintln!("the hung test's stacks: {}/stacks-*.txt", dir.display());
+}
+
+/// cladefs: the processes of the case whose first is `pid`: it and its descendants, as /proc's
+/// tasks' children say.
+#[cfg(target_os = "linux")]
+fn case_processes(pid: u32) -> Vec<u32> {
+    let mut pids = vec![pid];
+    let mut at = 0;
+    while at < pids.len() {
+        let tasks = fs::read_dir(format!("/proc/{}/task", pids[at])).into_iter().flatten();
+        for task in tasks.flatten() {
+            let children = fs::read_to_string(task.path().join("children")).unwrap_or_default();
+            pids.extend(children.split_whitespace().filter_map(|child| child.parse::<u32>().ok()));
+        }
+        at += 1;
+    }
+    pids
+}
+
+/// cladefs: the processes of the case whose first is `pid`: its process group's (`CaseGroup`), as
+/// pgrep says, with no /proc to walk.
+#[cfg(not(target_os = "linux"))]
+fn case_processes(pid: u32) -> Vec<u32> {
+    let listed = Command::new("pgrep").args(["-g", &pid.to_string()]).output();
+    let listed = listed.map(|output| String::from_utf8_lossy(&output.stdout).into_owned());
+    let listed = listed.unwrap_or_else(|err| {
+        eprintln!("the hung test's processes: pgrep: {err}");
+        String::new()
+    });
+    std::iter::once(pid).chain(listed.lines().filter_map(|line| line.trim().parse().ok())).collect()
+}
+
+/// cladefs: the tool that prints a process's threads' stacks, and its arguments for a process: elfutils'
+/// eu-stack on Linux, macOS's sample.
+fn stacks_tool() -> (&'static str, fn(u32) -> Vec<String>) {
+    if cfg!(target_os = "macos") {
+        ("sample", |pid| vec![pid.to_string(), "1".to_owned()])
+    } else {
+        ("eu-stack", |pid| vec!["-p".to_owned(), pid.to_string()])
+    }
 }
 
 /// cladefs: fails with what the kernels of a test's VMs complained of on their consoles, the files

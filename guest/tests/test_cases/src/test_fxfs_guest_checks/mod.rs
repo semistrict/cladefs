@@ -407,7 +407,9 @@ mod tests {
     fn ends_say_how() {
         assert_eq!(Ended::Exited(101).to_string(), "exited with 101");
         let signalled = Ended::Signalled(nix::libc::SIGBUS).to_string();
-        assert_eq!(signalled, format!("killed by signal {} (Bus error)", nix::libc::SIGBUS));
+        // strsignal's name, the libc's: the guest's musl, or the host's (macOS's adds its number).
+        let name = if cfg!(target_os = "macos") { "Bus error: 10" } else { "Bus error" };
+        assert_eq!(signalled, format!("killed by signal {} ({name})", nix::libc::SIGBUS));
         assert_eq!(Ended::Overran.to_string(), "still running after its budget: killed");
     }
 

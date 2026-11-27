@@ -674,7 +674,7 @@ impl Firecracker {
     /// once the VM exits without making it, as one whose guest panics, resetting it, does, which
     /// Firecracker exits from well (TASK-79.59). Its guest's console, which says why, goes to this
     /// process's output then. It waits for the one or the other, the listener's connection or the
-    /// VM process's exit, which its pidfd says.
+    /// VM process's exit, which [`exit_watch`] says.
     pub fn accept(
         &mut self,
         listener: &std::os::unix::net::UnixListener,
@@ -691,20 +691,20 @@ impl Firecracker {
         within: Option<std::time::Duration>,
     ) -> anyhow::Result<std::os::unix::net::UnixStream> {
         use nix::libc;
-        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+        use std::os::fd::AsRawFd;
         let deadline = within.map(|within| std::time::Instant::now() + within);
-        // SAFETY: Opens a pidfd of the VM's process, this one's child, which it hasn't waited for.
-        let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, self.child.id(), 0) };
-        ensure!(pidfd >= 0, "the VM process's pidfd: {}", std::io::Error::last_os_error());
-        // SAFETY: Just opened, and owned here.
-        let pidfd = unsafe { OwnedFd::from_raw_fd(pidfd as libc::c_int) };
+        // None if it exited already: told of at once, but for a connection its guest made first.
+        let exit = exit_watch(self.child.id())?;
         let ready = |fd: libc::c_int| libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
-        let mut polled = [ready(listener.as_raw_fd()), ready(pidfd.as_raw_fd())];
+        // poll() leaves a negative descriptor out.
+        let exit_fd = exit.as_ref().map_or(-1, |fd| fd.as_raw_fd());
+        let mut polled = [ready(listener.as_raw_fd()), ready(exit_fd)];
         loop {
             // The time left, rounded up, so as not to spin on a last part of a millisecond; none
             // once the deadline passed, the connection taken still if its guest made it by then, as
             // a VM's started long before its turn to be accepted came (board 7084).
             let (timeout, passed) = match deadline {
+                _ if exit.is_none() => (0, false),
                 None => (-1, false),
                 Some(deadline) => {
                     let left = deadline.saturating_duration_since(std::time::Instant::now());
@@ -719,7 +719,7 @@ impl Firecracker {
                 ensure!(err.kind() == std::io::ErrorKind::Interrupted, "polling: {err}");
                 continue;
             }
-            if ready == 0 {
+            if ready == 0 && exit.is_some() {
                 ensure!(
                     !passed,
                     "the guest didn't connect within {:?}: see {}",
@@ -732,7 +732,7 @@ impl Firecracker {
             if polled[0].revents != 0 {
                 return Ok(listener.accept()?.0);
             }
-            if polled[1].revents != 0 {
+            if exit.is_none() || polled[1].revents != 0 {
                 let status = self.child.wait()?;
                 split_console(std::fs::File::open(&self.console)?)?;
                 anyhow::bail!(
@@ -753,6 +753,50 @@ impl Firecracker {
         self.child.kill()?;
         self.child.wait()?;
         Ok(self.console)
+    }
+}
+
+/// cladefs: a descriptor that polls readable once the process `pid` exits, a child of this one not
+/// yet waited for: its pidfd on Linux; on macOS, a kqueue watching it (EVFILT_PROC's NOTE_EXIT),
+/// which poll() takes as a pidfd. None if it exited already, which macOS says of a child exited but
+/// not waited for, a zombie, which it doesn't watch.
+fn exit_watch(pid: u32) -> anyhow::Result<Option<std::os::fd::OwnedFd>> {
+    use nix::libc;
+    use std::os::fd::{FromRawFd, OwnedFd};
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: Opens a pidfd of the process, this one's child, which it hasn't waited for.
+        let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+        ensure!(pidfd >= 0, "the VM process's pidfd: {}", std::io::Error::last_os_error());
+        // SAFETY: Just opened, and owned here.
+        Ok(Some(unsafe { OwnedFd::from_raw_fd(pidfd as libc::c_int) }))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::fd::AsRawFd;
+        // SAFETY: A plain system call.
+        let kqueue = unsafe { libc::kqueue() };
+        ensure!(kqueue >= 0, "a kqueue: {}", std::io::Error::last_os_error());
+        // SAFETY: Just made, and owned here.
+        let kqueue = unsafe { OwnedFd::from_raw_fd(kqueue) };
+        let watch = libc::kevent {
+            ident: pid as libc::uintptr_t,
+            filter: libc::EVFILT_PROC,
+            flags: libc::EV_ADD,
+            fflags: libc::NOTE_EXIT,
+            data: 0,
+            udata: std::ptr::null_mut(),
+        };
+        // SAFETY: Registers the one change, which outlives the call, and asks for no events back.
+        let added = unsafe {
+            libc::kevent(kqueue.as_raw_fd(), &watch, 1, std::ptr::null_mut(), 0, std::ptr::null())
+        };
+        if added < 0 {
+            let err = std::io::Error::last_os_error();
+            ensure!(err.raw_os_error() == Some(libc::ESRCH), "watching the VM process: {err}");
+            return Ok(None);
+        }
+        Ok(Some(kqueue))
     }
 }
 
@@ -830,8 +874,6 @@ fn spawn(
     cpus: &[usize],
     written: &[PathBuf],
 ) -> anyhow::Result<std::process::Child> {
-    use std::os::unix::process::CommandExt;
-
     let firecracker =
         std::env::var_os("CLADEFS_FIRECRACKER").context("CLADEFS_FIRECRACKER not set")?;
     let mut jail = Jail::from_env()?;
@@ -854,7 +896,21 @@ fn spawn(
         // A file, not a pipe: Firecracker drops what its serial port says when its standard
         // output would block.
         .stdout(std::fs::File::create(console)?);
-    // Its threads, all made after it starts, run where it does.
+    confine(&mut command, cpus, jail.map(|jail| jail.binds).unwrap_or_default())?;
+    command.spawn().with_context(|| format!("executing {}", PathBuf::from(&firecracker).display()))
+}
+
+/// Has the VMM `command` starts go when this process does, as when the runner times the test out
+/// (PR_SET_PDEATHSIG; but for a jailed one, which the jailer's change of user makes forget it); its
+/// threads, all made after it starts, run on the host's CPUs `cpus`, or any if none; and binds the
+/// jail's directories, `binds` ([`Jail`]).
+#[cfg(target_os = "linux")]
+fn confine(
+    command: &mut std::process::Command,
+    cpus: &[usize],
+    binds: Vec<(CString, CString)>,
+) -> anyhow::Result<()> {
+    use std::os::unix::process::CommandExt;
     // SAFETY: a cpu_set_t is plain data, which CPU_ZERO and CPU_SET only write to.
     let mut set: nix::libc::cpu_set_t = unsafe { std::mem::zeroed() };
     for &cpu in cpus {
@@ -863,9 +919,6 @@ fn spawn(
         unsafe { nix::libc::CPU_SET(cpu, &mut set) };
     }
     let pinned = !cpus.is_empty();
-    let binds = jail.map(|jail| jail.binds).unwrap_or_default();
-    // Firecracker goes when this process does, as when the runner times the test out (but for a
-    // jailed one, which the jailer's change of user makes forget it).
     // SAFETY: prctl, sched_setaffinity, unshare and mount are async-signal-safe, and the binds'
     // paths were made before.
     unsafe {
@@ -882,7 +935,21 @@ fn spawn(
             Ok(())
         })
     };
-    command.spawn().with_context(|| format!("executing {}", PathBuf::from(&firecracker).display()))
+    Ok(())
+}
+
+/// As Linux's [`confine`], where macOS can: it has no parent-death signal, the runner ending the
+/// case's process group, its VMMs among them, when the case ends (`runner`'s `run_single_test`);
+/// nor CPU affinity, nor the jailer's mount namespaces.
+#[cfg(not(target_os = "linux"))]
+fn confine(
+    _command: &mut std::process::Command,
+    cpus: &[usize],
+    binds: Vec<(CString, CString)>,
+) -> anyhow::Result<()> {
+    ensure!(cpus.is_empty(), "only Linux pins a VMM to host CPUs (sched_setaffinity)");
+    ensure!(binds.is_empty(), "only Linux jails a VMM");
+    Ok(())
 }
 
 /// cladefs: a jail for Firecracker, as production runs it (TASK-50.1, TASK-50.4): Firecracker's
@@ -904,6 +971,7 @@ struct Jail {
 impl Jail {
     fn from_env() -> anyhow::Result<Option<Self>> {
         let Some(jailer) = std::env::var_os("CLADEFS_FIRECRACKER_JAILER") else { return Ok(None) };
+        ensure!(cfg!(target_os = "linux"), "Firecracker's jailer is Linux's");
         let id = |name: &str| -> anyhow::Result<u32> {
             let value = std::env::var(name).with_context(|| format!("{name} not set"))?;
             value.parse().with_context(|| format!("{name} is not a number"))
@@ -968,6 +1036,7 @@ impl Jail {
     }
 
     /// In a mount namespace of the child's own, binds `binds`' directories into the jail.
+    #[cfg(target_os = "linux")]
     fn mount(binds: &[(CString, CString)]) -> std::io::Result<()> {
         use nix::libc::{CLONE_NEWNS, MS_BIND, MS_PRIVATE, MS_REC, mount, unshare};
         let check = |ret: i32| if ret < 0 { Err(std::io::Error::last_os_error()) } else { Ok(()) };
@@ -1222,6 +1291,15 @@ mod tests {
         let mut gone = firecracker(dir.path(), &["true"]);
         let refused = gone.accept(&listener).map(drop).map_err(|err| err.to_string());
         let console = dir.path().join("true.console.txt");
+        let said = format!(
+            "the VM exited exit status: 0 before its guest connected: see {}",
+            console.display()
+        );
+        assert_eq!(refused, Err(said));
+        // One that exits as it is waited on, not before: its exit is what wakes the wait.
+        let mut exiting = firecracker(dir.path(), &["sleep", "0.5"]);
+        let refused = exiting.accept(&listener).map(drop).map_err(|err| err.to_string());
+        let console = dir.path().join("sleep.console.txt");
         let said = format!(
             "the VM exited exit status: 0 before its guest connected: see {}",
             console.display()

@@ -65,8 +65,6 @@ mod host {
         }
 
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
-            let host_os = if cfg!(target_os = "macos") { "Darwin" } else { "Linux" };
-            let host_os_env = CString::new(format!("PJDFSTEST_HOST_OS={host_os}"))?;
             // CLADEFS_PJDFSTEST_TESTS names pjdfstest's directories of tests to run, separated by
             // commas (such as `open,chmod`), for a quick run: all of them otherwise.
             let only = std::env::var("CLADEFS_PJDFSTEST_TESTS").unwrap_or_default();
@@ -76,7 +74,6 @@ mod host {
             let window =
                 if self.dax { crate::common::dax_window(crate::common::Window::Large)? } else { 0 };
             vm.new_cell("extents", 1 << 30, window)?;
-            vm.env(&host_os_env);
             vm.env(&only_env);
             vm.enter(&setup_rootfs(&test_setup)?, &test_setup.test_case)
         }

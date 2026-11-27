@@ -8,6 +8,7 @@
 //! and pipes `podman export` directly into `tar -x` to populate the destination directory.
 //! The image tag is derived from the hash of the Containerfile content (`cladefs-test-<hash>`),
 //! so podman's layer cache makes rebuilds fast when the Containerfile hasn't changed.
+//! cladefs: or Docker's, where podman doesn't run, as on macOS ([`engine`]).
 //!
 //! cladefs: and the files its build takes from the host ([`Download`]), each fetched once into the
 //! host's cache, checked by its sha256, and given to the build in a context directory of its own
@@ -157,24 +158,63 @@ fn image_tag(image: &Image) -> anyhow::Result<String> {
     Ok(format!("cladefs-test-{}", &sha256(described.as_bytes())?[..16]))
 }
 
-fn podman_available() -> bool {
-    Command::new("podman")
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+/// cladefs: the container engine images are built with: CLADEFS_CONTAINER_ENGINE if set, else
+/// podman or docker, whichever answers, podman's first, as the test hosts build with it; one
+/// installed but not running, as a podman whose machine is stopped on macOS, passed over
+/// (scripts/lib/containers.sh, TASK-149.20).
+fn engine() -> anyhow::Result<String> {
+    if let Some(engine) = std::env::var("CLADEFS_CONTAINER_ENGINE").ok().filter(|e| !e.is_empty()) {
+        return Ok(engine);
+    }
+    let answers = |engine: &str| {
+        let mut info = Command::new(engine);
+        info.arg("info").stdout(Stdio::null()).stderr(Stdio::null());
+        info.status().is_ok_and(|status| status.success())
+    };
+    let found = ["podman", "docker"].into_iter().find(|engine| answers(engine));
+    Ok(found
+        .context("neither podman nor docker runs here: start one, or set CLADEFS_CONTAINER_ENGINE")?
+        .to_owned())
+}
+
+/// cladefs: fails unless `dir` is on a case-sensitive filesystem, as a Linux root's names need: on
+/// macOS's case-insensitive APFS, Fedora's `terminfo/E/Eterm` and `terminfo/e/eterm` are one file,
+/// the root extracted there not the image's (scripts/test-e2e.sh's results are on a case-sensitive
+/// volume there).
+#[cfg(target_os = "macos")]
+fn case_sensitive(dir: &Path) -> anyhow::Result<()> {
+    use std::os::unix::ffi::OsStrExt as _;
+    let path = std::ffi::CString::new(dir.as_os_str().as_bytes())?;
+    // SAFETY: Reads a property of the path's filesystem, the path a C string that outlives it.
+    let sensitive = unsafe { nix::libc::pathconf(path.as_ptr(), nix::libc::_PC_CASE_SENSITIVE) };
+    anyhow::ensure!(
+        sensitive >= 0,
+        "whether {} is case-sensitive: {}",
+        dir.display(),
+        std::io::Error::last_os_error()
+    );
+    anyhow::ensure!(
+        sensitive == 1,
+        "{} is on a case-insensitive filesystem, where a Linux root's names collide: extract it \
+         on a case-sensitive one",
+        dir.display()
+    );
+    Ok(())
+}
+
+/// As macOS's: Linux's filesystems are case-sensitive.
+#[cfg(not(target_os = "macos"))]
+fn case_sensitive(_dir: &Path) -> anyhow::Result<()> {
+    Ok(())
 }
 
 /// Builds a podman image from `image`, creates a container, and extracts
 /// its filesystem directly into `dest` (no intermediate tarball).
 ///
-/// Returns an error if podman is unavailable or the build/export fails.
+/// Returns an error if no container engine runs ([`engine`]) or the build/export fails.
 pub fn prepare_rootfs(image: &Image, dest: &Path) -> anyhow::Result<()> {
-    if !podman_available() {
-        bail!("podman not available");
-    }
+    let engine = engine()?;
+    let engine = engine.as_str();
 
     let tag = image_tag(image)?;
     let containerfile = image.containerfile;
@@ -196,39 +236,39 @@ pub fn prepare_rootfs(image: &Image, dest: &Path) -> anyhow::Result<()> {
     }
 
     // Build image (podman layer cache makes this fast when unchanged)
-    let mut build = Command::new("podman")
+    let mut build = Command::new(engine)
         .args(["build", "-t", &tag, "-f", "-"])
         .arg(context.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .context("spawning podman build")?;
+        .with_context(|| format!("spawning {engine} build"))?;
 
     build
         .stdin
         .take()
         .unwrap()
         .write_all(containerfile.as_bytes())
-        .context("writing containerfile to podman stdin")?;
+        .with_context(|| format!("writing containerfile to {engine} stdin"))?;
 
-    let output = build.wait_with_output().context("waiting for podman build")?;
+    let output = build.wait_with_output().with_context(|| format!("waiting for {engine} build"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("podman build failed: {stderr}");
+        bail!("{engine} build failed: {stderr}");
     }
 
     // Create a container from the image
-    let create_out = Command::new("podman")
+    let create_out = Command::new(engine)
         .args(["create", &tag])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .context("podman create")?;
+        .with_context(|| format!("{engine} create"))?;
 
     if !create_out.status.success() {
         let stderr = String::from_utf8_lossy(&create_out.stderr);
-        bail!("podman create failed: {stderr}");
+        bail!("{engine} create failed: {stderr}");
     }
 
     let ctr_id =
@@ -236,13 +276,14 @@ pub fn prepare_rootfs(image: &Image, dest: &Path) -> anyhow::Result<()> {
 
     // Pipe podman export directly into tar extract
     fs::create_dir_all(dest).context("creating rootfs destination directory")?;
+    case_sensitive(dest)?;
 
-    let mut export = Command::new("podman")
+    let mut export = Command::new(engine)
         .args(["export", &ctr_id])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .context("podman export")?;
+        .with_context(|| format!("{engine} export"))?;
 
     let export_stdout = export.stdout.take().unwrap();
 
@@ -251,15 +292,27 @@ pub fn prepare_rootfs(image: &Image, dest: &Path) -> anyhow::Result<()> {
         .arg(dest)
         .stdin(export_stdout)
         .status()
-        .context("tar extract from podman export")?;
+        .with_context(|| format!("tar extract from {engine} export"))?;
 
-    let export_out = export.wait_with_output().context("waiting for podman export")?;
+    let export_out =
+        export.wait_with_output().with_context(|| format!("waiting for {engine} export"))?;
 
     if !export_out.status.success() {
-        bail!("podman export failed");
+        bail!("{engine} export failed");
     }
     if !tar_status.success() {
         bail!("tar extraction failed");
+    }
+    // cladefs: on macOS, every file readable by its owner, this process's user, and every directory
+    // searchable: what `mkfs.ext4 -d` copies into the root's image must be, a root's mode-0 files
+    // (Fedora's /etc/shadow) among them, which on Linux the case reads as its user namespace's root
+    // (the runner's `buildah unshare`), whom no mode stops (board 14336).
+    if cfg!(target_os = "macos") {
+        let status = Command::new("chmod").args(["-R", "u+rX"]).arg(dest).status();
+        let status = status.with_context(|| format!("chmod {}", dest.display()))?;
+        if !status.success() {
+            bail!("making {} readable failed: {status}", dest.display());
+        }
     }
 
     Ok(())

@@ -166,14 +166,24 @@ pub enum TestOutcome {
 pub enum ShouldRun {
     Yes,
     No(&'static str),
+    /// cladefs: not on this host, which isn't Linux, as the case needs what only Linux has
+    /// ([`Test::linux_only`]).
+    LinuxOnly(&'static str),
 }
 
-impl ShouldRun {
-    /// Returns Yes unless on macOS, in which case returns No with the given reason.
-    pub fn yes_unless_macos(reason: &'static str) -> Self {
-        if cfg!(target_os = "macos") { ShouldRun::No(reason) } else { ShouldRun::Yes }
-    }
-}
+// cladefs: what the cases that run on Linux alone need of their host that only Linux has
+// ([`Test::linux_only`], board 14336). Each is something macOS has no counterpart of for the case,
+// not a feature its VMM, or cladefs on macOS, lacks yet: those cases run there, and fail, until it
+// has it.
+
+/// A loop device, the Linux host's block device over an image file, as production's local disk
+/// images are: what the case measures or checks (TASK-350.1).
+pub const LINUX_ONLY_LOOP: &str = "a loop device over an image, as production's local disks are";
+/// What a Linux host, the production host, says of itself and its VM processes in /proc, which the
+/// case measures: their proportional shares of memory (smaps_rollup), KVM's page tables, its
+/// disks' I/O and pressure (PSI).
+pub const LINUX_ONLY_HOST_MEASURES: &str =
+    "measures a Linux host's /proc: PSS (smaps_rollup), KVM's page tables, disk I/O and PSI";
 
 /// cladefs: declares [`Tag`], each tag's variant and name, its doc its help (`runner list --help`).
 macro_rules! tags {
@@ -1128,10 +1138,16 @@ pub trait Test {
         ShouldRun::Yes
     }
 
+    /// cladefs: what of its host the case needs that only Linux has, one of the `LINUX_ONLY_*`
+    /// reasons, if any: elsewhere it doesn't run, and says so, whatever its environment.
+    fn linux_only(&self) -> Option<&'static str> {
+        None
+    }
+
     /// Return the image (its Containerfile, cladefs: and what its build takes from the host) if
     /// this test needs a custom rootfs image.
-    /// The runner will build the image via podman and extract it before launching the VM.
-    /// If podman is unavailable, the test is skipped.
+    /// The runner will build the image via podman (cladefs: or docker, `rootfs::engine`) and
+    /// extract it before launching the VM. If neither runs, the test is skipped.
     fn rootfs_image(&self) -> Option<rootfs::Image> {
         None
     }
@@ -1176,7 +1192,10 @@ impl TestCase {
     /// Check if this test should run on this platform.
     #[host]
     pub fn should_run(&self) -> ShouldRun {
-        self.test.should_run()
+        match self.test.linux_only() {
+            Some(why) if !cfg!(target_os = "linux") => ShouldRun::LinuxOnly(why),
+            _ => self.test.should_run(),
+        }
     }
 
     #[host]
@@ -1242,6 +1261,32 @@ mod tests {
             assert!(!tag.about().is_empty() && !tag.about().starts_with(' '), "{tag:?}");
         }
         assert_eq!(Tag::named("nope"), None);
+    }
+
+    /// cladefs: the cases that run on Linux alone, each saying why, and no others: one joins them
+    /// here, as what it needs of Linux, or runs on macOS too (board 14336).
+    #[cfg(feature = "host")]
+    #[test]
+    fn linux_only_cases_say_why() {
+        let linux_only: Vec<(&str, &str)> = (test_cases().iter())
+            .filter_map(|case| Some((case.name, case.test.linux_only()?)))
+            .collect();
+        let (looped, measured) = (LINUX_ONLY_LOOP, LINUX_ONLY_HOST_MEASURES);
+        assert_eq!(
+            linux_only,
+            [
+                ("fxfs-guest-shared-disk", measured),
+                ("fxfs-guest-shared-disk-dax", measured),
+                ("pgbench-ext4-loop-writeback", looped),
+                ("pgbench-ext4-loop-unsafe", looped),
+                ("cells-per-host", measured),
+                ("cells-per-host-dax", measured),
+                ("cells-per-host-dax-zygote", measured),
+                ("ext4-loop-persists", looped),
+                ("bench-fs-ext4-loop", looped),
+                ("bench-fs-ext4-loop-unsafe", looped),
+            ]
+        );
     }
 
     fn names_of(cases: Vec<TestCase>) -> Vec<&'static str> {

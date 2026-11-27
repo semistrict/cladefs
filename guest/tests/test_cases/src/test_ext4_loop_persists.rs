@@ -87,6 +87,10 @@ RUN apk add --no-cache e2fsprogs
     }
 
     impl Test for TestExt4LoopPersists {
+        fn linux_only(&self) -> Option<&'static str> {
+            Some(crate::LINUX_ONLY_LOOP)
+        }
+
         fn should_run(&self) -> ShouldRun {
             if std::env::var_os("CLADEFS_GUEST_KERNEL").is_none() {
                 return ShouldRun::No("CLADEFS_GUEST_KERNEL does not name a guest kernel");

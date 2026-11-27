@@ -100,7 +100,8 @@ mod host {
     fn disk_stat(dir: &Path) -> Option<(u64, u64)> {
         use std::os::unix::fs::MetadataExt as _;
         let dev = std::fs::metadata(dir).ok()?.dev();
-        let (major, minor) = (nix::libc::major(dev), nix::libc::minor(dev));
+        // dev_t is 32 bits on macOS, whose disks have no /sys stat.
+        let (major, minor) = (nix::libc::major(dev as _), nix::libc::minor(dev as _));
         let stat = std::fs::read_to_string(format!("/sys/dev/block/{major}:{minor}/stat")).ok()?;
         let fields: Vec<u64> = stat.split_whitespace().filter_map(|f| f.parse().ok()).collect();
         Some((*fields.get(6)?, *fields.get(9)?))
@@ -301,6 +302,10 @@ mod host {
     }
 
     impl Test for TestFxfsGuestSharedDisk {
+        fn linux_only(&self) -> Option<&'static str> {
+            Some(crate::LINUX_ONLY_HOST_MEASURES)
+        }
+
         fn should_run(&self) -> ShouldRun {
             if std::env::var_os("CLADEFSD_BIN").is_none() {
                 return ShouldRun::No("CLADEFSD_BIN does not name the extent daemon");
