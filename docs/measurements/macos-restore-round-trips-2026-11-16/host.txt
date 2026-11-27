@@ -1,7 +1,0 @@
-macOS 27.0.1, arm64
-Apple M5 Pro
-cpus 15
-rustc 1.99.1 (58cf8f9c3 2026-10-13)
-build: debug (cargo nextest's test profile); other agents' builds and TLC runs shared the host
-before: main at 80e84f8b9 (TASK-455 landed, bucket format 13)
-after: TASK-449's commit on branch t449 (this note's)

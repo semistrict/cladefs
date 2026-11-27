@@ -1,2 +1,0 @@
-INFO cladefsd: cladefsd: draining, on SIGTERM, within 60s
-INFO cladefsd: cladefsd: drained in 121.8µs: every store closed

@@ -1,4 +1,0 @@
-run run-20261123T234504Z-b522856f
-host ubu1
-session generous-werewolf
-directory /work/cladefs/target/host-runs/run-20261123T234504Z-b522856f

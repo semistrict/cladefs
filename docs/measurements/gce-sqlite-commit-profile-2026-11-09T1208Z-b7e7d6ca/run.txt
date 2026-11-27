@@ -1,3 +1,0 @@
-run run-20261109T120802Z-b7e7d6ca
-host fxdax-keep-c3-standard-8-us-east4-a-1
-zone us-east4-a

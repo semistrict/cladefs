@@ -1,2 +1,0 @@
-r2 left out: head-r2 contaminated: others wrote 10.2 MB/s to its disk over the round, bound 10 (zd0 6.5, rpool/hotbed/ws/2alsvm2p 1.7, rpool/hotbed/ws/lx5ysq7g 1.6)
-r3 left out: base-r3 contaminated: others wrote 21.2 MB/s to its disk over the round, bound 10 (rpool/hotbed/ws/nfhvbft4 15.3, zd0 4.0, rpool/hotbed/ws/aihhiixv 0.8); others wrote 65.1 MB/s to its disk in the minute 240 s in, bound 50

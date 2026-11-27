@@ -1,2 +1,0 @@
-error: could not infer hotbed repo from checkout /home/ramon/src/cladefs-nightly
-  pass -r REPO, set HOTBED_REPO, or check registered repos with `hotbed repo ls`

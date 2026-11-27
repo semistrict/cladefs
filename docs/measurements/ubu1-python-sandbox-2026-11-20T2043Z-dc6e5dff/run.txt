@@ -1,3 +1,0 @@
-run run-20261120T204357Z-dc6e5dff
-host ubu1
-directory /mnt/fxdax-scratch/fxdax-host/run-20261120T204357Z-dc6e5dff

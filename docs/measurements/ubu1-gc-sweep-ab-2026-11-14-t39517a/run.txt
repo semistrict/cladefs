@@ -1,3 +1,0 @@
-run run-t39517a-20261114T153803Z-64a9cfec
-host ubu1
-directory /mnt/fxdax-scratch/fxdax-host/run-t39517a-20261114T153803Z-64a9cfec

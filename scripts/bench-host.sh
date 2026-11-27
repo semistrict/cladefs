@@ -5,10 +5,10 @@
 
 # Benchmark cladefs against ext4 on virtio-blk (scripts/bench.sh) on the test host, an x86-64 Linux
 # machine of one's own with KVM, over ssh (CLADEFS_TEST_HOST; scripts/lib/host.sh),
-# as a measurement, alone there and on CPUs of its own (hotbed run --bench), and keep the results in the
-# repo: the measurements, the test host, the source measured, the comparison of the filesystems
-# (comparison.md) and what the run was for (note.md); and bring
-# docs/measurements/fs-bench-history.md up to date (scripts/bench-history.py).
+# as a measurement, alone there and on CPUs of its own (hotbed run --bench), and keep the results
+# here: the measurements, the test host, the source measured, the comparison of the filesystems
+# (comparison.md) and what the run was for (note.md). Of them the repo tracks the .md alone
+# (.gitignore).
 #
 #   scripts/bench-host.sh [RESULTS]
 #   scripts/bench-host.sh resume RUN RESULTS | cancel RUN
@@ -44,8 +44,7 @@ limit=6h
 # its note says.
 host_bench=${CLADEFS_TEST_HOST_BENCH:-1}
 
-# finish STATUS writes what the run was for, brings the history up to date, and says how the run
-# went: STATUS, unless the history failed.
+# finish STATUS writes what the run was for, and says how the run went: STATUS.
 finish() {
     local status=$1
     {
@@ -55,7 +54,6 @@ finish() {
             "Workloads: ${CLADEFS_BENCH_GROUPS:-all}.${CLADEFS_BENCH_PERF:+ perf: $CLADEFS_BENCH_PERF.}" \
             "${CLADEFS_BENCH_GUEST_PERF:+Guest kernel profiled.}"
     } > "$results/note.md"
-    "$repo/scripts/bench-history.py" >&2 || status=$?
     if [[ -f $results/comparison.md ]]; then cat "$results/comparison.md" >&2; fi
     echo "Results: $results" >&2
     return "$status"

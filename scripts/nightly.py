@@ -481,7 +481,11 @@ def publish(root, results, state):
     results = Path(results)
     record = json.loads((results / NIGHT).read_text())
     measurements = Path("docs") / "measurements"
-    git(root, "add", "-f", "--", str(measurements / results.name), str(measurements / HISTORY))
+    # Of the night's directory, its report and its record alone: the rounds' raw output stays here,
+    # on the nightly host, untracked (.gitignore).
+    night = measurements / results.name
+    git(root, "add", "--", str(night / "nightly.md"), str(night / NIGHT),
+        str(measurements / HISTORY))
     summary = record["outcome"]
     if record["moved"] or record["broken"]:
         summary = ", ".join([f"{row['case']} {row['name']} {row['change']}"

@@ -1,2 +1,0 @@
-revision 15ba7bd2e722646bad64e67fbcf6b81cbd7e7e96
-firecracker 35d9ba276aa564516e90c4a3a5947c816607e0c2

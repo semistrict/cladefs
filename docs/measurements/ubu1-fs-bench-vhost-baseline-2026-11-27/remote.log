@@ -1,5 +1,0 @@
-hotbed: warning: mzwucdrs on cladefs-vm-534ee1e9, not up to date: base cladefs-vm-27b85090 failed at step build (its log is command f-cladefs-vm-27b85090-02cf9a)
-hotbed: m6jqnnho queued: waiting for its workspace: command rinzyuj6 runs in its VM
-hotbed: the controller at https://hotbed.semistrict.com is out of reach (unavailable: http2: timeout awaiting response headers); waiting up to 3m0s for it to come back
-hotbed: INTERNAL: m6jqnnho was cancelled: its client went away
-keeping run-r14378b-20261127T154045Z-d52abb55's command, rinzyuj6, failed: resume can't find it

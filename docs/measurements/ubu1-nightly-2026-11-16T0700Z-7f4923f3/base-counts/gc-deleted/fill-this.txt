@@ -1,2 +1,0 @@
-shape 1 100 4 16 --deleted
-cells 100 objects 818 bytes 374583 largest-objects 21 largest-bytes 12896

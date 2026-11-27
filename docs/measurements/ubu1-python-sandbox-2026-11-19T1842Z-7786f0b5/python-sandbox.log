@@ -1,7 +1,0 @@
-pysandbox: host-a imported the base in 6.7 s, versioned and synced it in 0.5 s
-pysandbox: sandbox-a1 on host-a: fork=333ms vm_started=352ms boot=255ms serving=3354ms answered=7158ms compiled=1640 | bucket_gets=7/0/0 bucket_mib=0/0/0 peer_asked=0/0/0 peer_given=0/0/0 peer_served=0/0/0 fetched_mib=0/0/0
-pysandbox: sandbox-b1 on host-b: fork=752ms vm_started=763ms boot=995ms serving=7190ms answered=13422ms compiled=1640 | bucket_gets=0/176/170 bucket_mib=0/51/52 peer_asked=0/288/0 peer_given=0/288/0 peer_served=134/0/154 fetched_mib=0/0/0
-pysandbox: sandbox-c1 on host-c: fork=734ms vm_started=1149ms boot=459ms serving=5389ms answered=10246ms compiled=1640 | bucket_gets=0/0/14 bucket_mib=0/0/0 peer_asked=0/0/271 peer_given=0/0/271 peer_served=131/140/0 fetched_mib=0/0/0
-pysandbox: sandbox-a2 on host-a: fork=305ms vm_started=316ms boot=225ms serving=2870ms answered=6024ms compiled=1640 | bucket_gets=6/0/0 bucket_mib=0/0/0 peer_asked=0/0/0 peer_given=0/0/0 peer_served=0/0/0 fetched_mib=0/0/0
-pysandbox: sandbox-b2 on host-b: fork=299ms vm_started=311ms boot=237ms serving=2885ms answered=6050ms compiled=1640 | bucket_gets=0/6/0 bucket_mib=0/0/0 peer_asked=0/0/0 peer_given=0/0/0 peer_served=0/0/0 fetched_mib=0/0/0
-pysandbox: sandbox-c2 on host-c: fork=293ms vm_started=304ms boot=238ms serving=2845ms answered=5984ms compiled=1640 | bucket_gets=0/0/6 bucket_mib=0/0/0 peer_asked=0/0/0 peer_given=0/0/0 peer_served=0/0/0 fetched_mib=0/0/0

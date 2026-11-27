@@ -714,7 +714,7 @@ class Drivers(unittest.TestCase):
         self.assertEqual(errors.splitlines()[-1], f"Results: {results}")
         self.assertEqual(fleet.runs(), [])
 
-    def test_a_bench_is_a_measurement_kept_in_the_history(self):
+    def test_a_bench_is_a_measurement_with_its_note(self):
         fleet = Fleet()
         results = fleet.origin / "docs" / "measurements" / "node1-fs-bench-x"
         status, _, errors = fleet.run_driver("bench-host.sh", str(results),
@@ -723,8 +723,8 @@ class Drivers(unittest.TestCase):
         self.assertEqual((results / "ran.txt").read_text().splitlines()[0], "bench-linux-host.sh 3")
         self.assertTrue(any("--bench" in call for call in fleet.calls()))
         self.assertEqual((results / "note.md").read_text().splitlines()[0], "a note")
-        history = (fleet.origin / "docs" / "measurements" / "fs-bench-history.md").read_text()
-        self.assertIn("[x](node1-fs-bench-x/)", history)
+        # The history page is rewritten by hand, where every run it lists is (bench-history.py).
+        self.assertFalse((fleet.origin / "docs" / "measurements" / "fs-bench-history.md").exists())
 
     def test_an_ab_builds_each_sides_commit(self):
         fleet = Fleet()

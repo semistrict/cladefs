@@ -1,2 +1,0 @@
-shape 20 100 95 950
-cells 2000 objects 212855 bytes 150919682 largest-objects 961 largest-bytes 724637

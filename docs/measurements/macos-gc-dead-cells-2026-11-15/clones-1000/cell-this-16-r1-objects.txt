@@ -1,8 +1,0 @@
-   1 (the cell)
-   1 branches
-   1 checkpoints
-   1 gc
-   1 heads
-   1 refs
-1000 retired
-  16 segments

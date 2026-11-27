@@ -194,6 +194,30 @@ source; its note says what it was for. Medians of the iterations.
             [True, True],
         )
 
+    def test_the_script_keeps_a_page_listing_runs_that_are_not_here(self):
+        """Runs' raw output is untracked: a checkout without a run the page lists leaves the page
+        as it is, rather than write one without that run."""
+        root = Path(tempfile.mkdtemp())
+        measurements = root / "docs" / "measurements"
+        measurements.mkdir(parents=True)
+        run(measurements, "2026-10-17T1609Z", {"ext4-virtio-blk": 1000.0})
+        run(measurements, "2026-10-18T1609Z", {"ext4-virtio-blk": 1100.0})
+        module = script.load("bench-history")
+        module.ROOT, module.MEASUREMENTS = root, measurements
+        module.OUTPUT = measurements / "fs-bench-history.md"
+        module.main()
+        both = module.OUTPUT.read_text()
+        for file in (measurements / "gce-fs-bench-2026-10-17T1609Z").iterdir():
+            file.unlink()
+        with self.assertRaises(SystemExit) as refused:
+            module.main()
+        self.assertEqual(
+            str(refused.exception),
+            "docs/measurements/fs-bench-history.md lists 1 run(s) whose output is not here "
+            "(gce-fs-bench-2026-10-17T1609Z, ...): not rewritten",
+        )
+        self.assertEqual(module.OUTPUT.read_text(), both)
+
     def test_a_hosts_runs_beside_the_gce_hosts_and_no_ab(self):
         """The runs of a host of one's own (scripts/bench-host.sh), named for it, beside the GCE
         hosts' of before; an A/B's (scripts/bench-ab-host.sh) is none, its report its own."""

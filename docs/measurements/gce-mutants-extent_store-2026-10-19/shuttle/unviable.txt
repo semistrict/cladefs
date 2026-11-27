@@ -1,1 +1,0 @@
-crates/extent_store/src/sync.rs:68:5: replace rules -> Rules with Default::default()
