@@ -217,8 +217,8 @@ bucket format family (bucket layout, bucket events, format gates, cell directori
 replica directories, ephemeral hosts, extent frames, fast WAL, block devices, Fxfs, all KMS
 backends, and Firecracker snapshot extent state) is pinned by its golden corpus under
 `formats/<family>/`, while upgrade gating is collapsed to **two linear monotonic ratchet numbers**
-stored in each bucket's `formats` object (`storage` for the host binary release train via
-`formats::PROFILES`, and `fxfs` for guest Linux kernels).
+stored in each bucket's `formats` object (`storage` for the host binary release train, and `fxfs`
+for guest Linux kernels).
 
 - **Do not discourage new storage versions when they are the best design — just ask the user for
   confirmation.** If bumping a storage version is the cleanest way to solve a problem, recommend it
@@ -234,13 +234,14 @@ stored in each bucket's `formats` object (`storage` for the host binary release 
 - **New versions are not written until ungated by the home bucket's ratchet.** Each bucket stores
   its `formats` object (`formats::Gates`: `storage` + `fxfs`) at format time (`format-bucket`
   initializes both to this build's current versions; `add-bucket` copies the root bucket's gates).
-  Host writers consult `formats::Ratchet` (`storage` -> `formats::StorageProfile`) and only branch
-  where a format actually differs between `V` and `V+1`. During partial/rolling upgrades and
-  potential rollbacks, new builds read `oldest..=current` while continuing to write the gated
-  profile until an operator explicitly ratchets forward (`cladefsctl ratchet`), so mixed old/new
-  nodes interoperate and rollbacks stay safe. When adding a new `storage` profile `N+1` (or `fxfs`
-  version), keep the `N` encoder working and fail hard (`ENOTSUP` / format-gated error) if a caller
-  explicitly requests an `N+1`-only feature before the bucket is ratcheted.
+  Host writers consult `formats::Ratchet` (`ratchet.storage() >= N`) only where a format actually
+  differs between `N-1` and `N`; existing per-format header numbers stay private to each format's
+  decoder. During partial/rolling upgrades and potential rollbacks, new builds read
+  `oldest..=current` while continuing to write the gated version until an operator explicitly
+  ratchets forward (`cladefsctl ratchet`), so mixed old/new nodes interoperate and rollbacks stay
+  safe. When adding a new `storage` version `N+1` (or `fxfs` version), keep the `N` encoder working
+  and fail hard (`ENOTSUP` / format-gated error) if a caller explicitly requests an `N+1`-only
+  feature before the bucket is ratcheted.
 - **The corpus is append-only.** An approved new version adds its cases (`CLADEFS_FORMATS_WRITE=1`
   on the family's corpus test writes the missing ones) and never edits, deletes or moves an old
   case, nor raises `oldest`. `scripts/format-freeze.py` refuses corpus edits, deletions, and raised

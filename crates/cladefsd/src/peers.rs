@@ -138,13 +138,15 @@ pub(crate) fn current_formats_on(daemon: &Daemon) -> proto::Formats {
 }
 
 fn formats_for_ratchet(ratchet: &formats::Ratchet) -> proto::Formats {
-    let profile = ratchet.profile();
+    // Branch on `ratchet.storage()` here whenever a future `storage >= 2` bump introduces a new
+    // write version for any replicated family.
+    let _storage = ratchet.storage();
     let mut versions = proto::Formats {
-        cell_directory: profile.cell_directory,
-        cell_records: profile.cell_records,
-        replica_directory: profile.replica_directory,
-        extent_frame: profile.extent_frame,
-        bucket_layout: profile.bucket_layout,
+        cell_directory: local_cell::FORMAT.current,
+        cell_records: cladefs_core::cell_dir::FORMAT.current,
+        replica_directory: local_cell::replica::FORMAT.current,
+        extent_frame: extent_frame::FORMAT.current,
+        bucket_layout: bucket_cell::layout::FORMAT.current,
         cell_directory_oldest: local_cell::FORMAT.oldest,
         cell_records_oldest: cladefs_core::cell_dir::FORMAT.oldest,
         replica_directory_oldest: local_cell::replica::FORMAT.oldest,
@@ -158,20 +160,6 @@ fn formats_for_ratchet(ratchet: &formats::Ratchet) -> proto::Formats {
     }
     versions
 }
-
-// Compile-time check that the latest `formats::StorageProfile` matches every host crate's
-// `FORMAT.current`, so a format bump cannot land without adding a new `storage` profile (doc-28).
-const _: () = {
-    let latest = formats::gates::PROFILES[formats::gates::PROFILES.len() - 1];
-    assert!(latest.bucket_events == bucket_cell::events::FORMAT.current);
-    assert!(latest.bucket_layout == bucket_cell::layout::FORMAT.current);
-    assert!(latest.cell_directory == local_cell::FORMAT.current);
-    assert!(latest.cell_records == cladefs_core::cell_dir::FORMAT.current);
-    assert!(latest.ephemeral_host == cladefs_core::ephemeral_host::FORMAT.current);
-    assert!(latest.extent_frame == extent_frame::FORMAT.current);
-    assert!(latest.fast_wal == local_cell::fast_wal::FORMAT.current);
-    assert!(latest.replica_directory == local_cell::replica::FORMAT.current);
-};
 
 /// cladefs: a test failpoint (`peers::formats=return(N)`) overriding this host's cell directory
 /// version for both sending and receiving, simulating a peer of another build.

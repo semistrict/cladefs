@@ -8,8 +8,10 @@
 //! collapses cluster-wide write gating to **two linear monotonic numbers** stored at bucket
 //! format time:
 //!
-//! - **`storage`** (`1..=CURRENT_STORAGE`): maps via [`PROFILES`] to the exact per-format write
-//!   versions for the host release train (`cladefsd`, `cladefs-gc`, `cladefsctl`, VMM).
+//! - **`storage`** (`1..=CURRENT_STORAGE`): single linear version for the host release train
+//!   (`cladefsd`, `cladefs-gc`, `cladefsctl`, VMM). Writers branch directly on
+//!   `ratchet.storage() >= N` only where a format actually changes between `N-1` and `N`;
+//!   existing per-format header numbers stay private to each format's decoder.
 //! - **`fxfs`** (`OLDEST_FXFS..=CURRENT_FXFS`): the guest Linux kernel's Fxfs on-disk format
 //!   version, kept separate so a slow guest-kernel rollout never blocks ratcheting a host-only
 //!   storage change.
@@ -42,9 +44,9 @@ pub const MAX_BYTES: usize = 4 << 10;
 /// Oldest host `storage` profile version supported by this build.
 pub const OLDEST_STORAGE: u32 = 1;
 
-/// Newest host `storage` profile version supported by this build.
-/// Bump by 1 and append a new [`StorageProfile`] to [`PROFILES`] whenever any host-side storage
-/// format version increases.
+/// Newest host `storage` version supported by this build.
+/// Bump by 1 whenever any host-side storage format change ships, and gate the new writer path on
+/// `ratchet.storage() >= N`.
 pub const CURRENT_STORAGE: u32 = 1;
 
 /// Oldest guest `fxfs` version supported by this build (`fxfs::EARLIEST_SUPPORTED_VERSION`).
@@ -53,71 +55,10 @@ pub const OLDEST_FXFS: u32 = 66;
 /// Newest guest `fxfs` version supported by this build (`fxfs::LATEST_VERSION`).
 pub const CURRENT_FXFS: u32 = 66;
 
-/// Per-format write versions selected by a single linear `storage` profile number.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct StorageProfile {
-    pub storage: u32,
-    pub block_device: u32,
-    pub bucket_events: u32,
-    pub bucket_layout: u32,
-    pub cell_directory: u32,
-    pub cell_records: u32,
-    pub ephemeral_host: u32,
-    pub extent_frame: u32,
-    pub fast_wal: u32,
-    pub replica_directory: u32,
-    pub snapshot_extent_state: u32,
-}
-
-/// Linear host storage-version profiles (`storage = 1` is today's baseline).
-/// Only append a new profile (`storage = 2`, ...) when a future host storage format bump ships.
-pub const PROFILES: &[StorageProfile] = &[StorageProfile {
-    storage: 1,
-    block_device: 2,
-    bucket_events: 1,
-    bucket_layout: 35,
-    cell_directory: 19,
-    cell_records: 1,
-    ephemeral_host: 2,
-    extent_frame: 3,
-    fast_wal: 1,
-    replica_directory: 4,
-    snapshot_extent_state: 3,
-}];
-
 const _: () = {
-    assert!(!PROFILES.is_empty());
     assert!(OLDEST_STORAGE <= CURRENT_STORAGE);
-    assert!(PROFILES.len() == (CURRENT_STORAGE - OLDEST_STORAGE + 1) as usize);
-    let mut i = 0;
-    while i < PROFILES.len() {
-        assert!(PROFILES[i].storage == OLDEST_STORAGE + i as u32);
-        if i > 0 {
-            let prev = &PROFILES[i - 1];
-            let cur = &PROFILES[i];
-            assert!(cur.block_device >= prev.block_device);
-            assert!(cur.bucket_events >= prev.bucket_events);
-            assert!(cur.bucket_layout >= prev.bucket_layout);
-            assert!(cur.cell_directory >= prev.cell_directory);
-            assert!(cur.cell_records >= prev.cell_records);
-            assert!(cur.ephemeral_host >= prev.ephemeral_host);
-            assert!(cur.extent_frame >= prev.extent_frame);
-            assert!(cur.fast_wal >= prev.fast_wal);
-            assert!(cur.replica_directory >= prev.replica_directory);
-            assert!(cur.snapshot_extent_state >= prev.snapshot_extent_state);
-        }
-        i += 1;
-    }
     assert!(OLDEST_FXFS <= CURRENT_FXFS);
 };
-
-/// Returns the [`StorageProfile`] for `storage`, if supported by this build.
-pub const fn profile_for(storage: u32) -> Option<&'static StorageProfile> {
-    if storage < OLDEST_STORAGE || storage > CURRENT_STORAGE {
-        return None;
-    }
-    Some(&PROFILES[(storage - OLDEST_STORAGE) as usize])
-}
 
 /// Errors decoding, validating, or advancing a bucket's format gates.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -175,17 +116,13 @@ impl Gates {
 
     /// Validates that both `storage` and `fxfs` fall within this build's supported ranges.
     pub fn validate(&self) -> Result<(), GateError> {
-        let _ = self.profile()?;
+        if !(OLDEST_STORAGE..=CURRENT_STORAGE).contains(&self.storage) {
+            return Err(incompatible("storage", self.storage, OLDEST_STORAGE, CURRENT_STORAGE));
+        }
         if !(OLDEST_FXFS..=CURRENT_FXFS).contains(&self.fxfs) {
             return Err(incompatible("fxfs", self.fxfs, OLDEST_FXFS, CURRENT_FXFS));
         }
         Ok(())
-    }
-
-    /// Returns the [`StorageProfile`] selected by `self.storage`, or an error if unsupported.
-    pub fn profile(&self) -> Result<&'static StorageProfile, GateError> {
-        profile_for(self.storage)
-            .ok_or_else(|| incompatible("storage", self.storage, OLDEST_STORAGE, CURRENT_STORAGE))
     }
 
     /// Monotonically advances `storage` and/or `fxfs`. Returns `(next, changed)`.
@@ -348,12 +285,6 @@ impl Ratchet {
         self.fxfs.load(Ordering::Acquire)
     }
 
-    /// Active [`StorageProfile`] for this host's current `storage` gate.
-    #[inline]
-    pub fn profile(&self) -> &'static StorageProfile {
-        profile_for(self.storage()).expect("ratchet storage version is validated on load/advance")
-    }
-
     /// Validates `gates` and installs them on boot (replacing initial defaults, allowing lower
     /// gated versions when joining an older bucket).
     pub fn load(&self, gates: Gates) -> Result<(), GateError> {
@@ -433,7 +364,7 @@ mod tests {
     fn gates_validate_ratchet_and_refuse_downgrades_or_future_versions() {
         let current = Gates::current();
         current.validate().unwrap();
-        assert_eq!(current.profile().unwrap().storage, CURRENT_STORAGE);
+        assert_eq!(current.storage, CURRENT_STORAGE);
         assert_eq!(Gates::decode(&current.encode()).unwrap(), current);
 
         // Idempotent ratchet reports unchanged.

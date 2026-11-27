@@ -156,11 +156,11 @@ storage 1
 fxfs 66
 ```
 
-- **`storage`** (`1..=CURRENT_STORAGE`): maps via `formats::PROFILES` (`StorageProfile`) to the
-  exact per-format versions for the host binary release train (`cladefsd`, `cladefs-gc`,
-  `cladefsctl`, VMM). Keeping this a single linear number eliminates the combinatorial matrix of
-  independent per-format knobs (`storage = 1` is today's baseline; add `storage = 2` when the next
-  host storage format bump ships).
+- **`storage`** (`1..=CURRENT_STORAGE`): single linear monotonic version for the host binary release
+  train (`cladefsd`, `cladefs-gc`, `cladefsctl`, VMM). Writers branch directly on
+  `ratchet.storage() >= N` only where a format actually changes between `N-1` and `N`; existing
+  per-format header numbers stay private to each format's decoder (`storage = 1` is today's
+  baseline; bump to `storage = 2` when the next host storage format change ships).
 - **`fxfs`** (`OLDEST_FXFS..=CURRENT_FXFS`): the guest Linux kernel's Fxfs version, kept separate
   so a slower guest-kernel rollout never blocks ratcheting a host-only storage bump.
 - **Format time:** `cladefsctl format-bucket` (and automatic `identity::format`) creates `formats`
@@ -171,11 +171,11 @@ fxfs 66
 - **Boot & live polling:** `cladefsd` loads and validates `formats` from its home bucket at boot
   (refusing to start if either knob is outside this build's supported range) and polls it via
   `If-None-Match` alongside `events` so ratchets take effect live without restarts.
-- **Writers & peers:** host writers branch on `ratchet.storage()` / `ratchet.profile()` only where
-  a format actually differs between `storage = N` and `N+1` (failing hard with `ENOTSUP` /
-  `Error::FormatGated` if a caller explicitly asks for an `N+1`-only feature while gated at `N`).
-  Peer RPCs (`cladefsd::peers`) advertise the active `StorageProfile`'s write versions so upgraded
-  hosts gated at `N` replicate cleanly with older peers on `N`.
+- **Writers & peers:** host writers branch directly on `ratchet.storage() >= N` only where a format
+  actually differs between `N-1` and `N` (failing hard with `ENOTSUP` / `Error::FormatGated` if a
+  caller explicitly asks for an `N`-only feature while gated below `N`). Peer RPCs
+  (`cladefsd::peers`) advertise the active gated write versions so upgraded hosts gated at `N-1`
+  replicate cleanly with older peers on `N-1`.
 - **Advancing the ratchet:** once all nodes run the new build and rollback is no longer needed, an
   operator runs `cladefsctl ratchet URL` (or `--storage N` / `--fxfs N`), which conditionally
   updates `formats` via CAS (strictly monotonic: never lowers a version) and spreads it to every

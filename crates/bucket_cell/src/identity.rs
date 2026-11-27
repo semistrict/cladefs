@@ -213,12 +213,12 @@ async fn registry_versioned(
 /// at once agree on the one that landed first; one that stopped short of the registry is finished.
 #[cfg(feature = "full")]
 pub async fn format(bucket: &impl Bucket, details: &Details) -> Result<Identity, Error> {
-    let gates = crate::gates::ensure_formatted(bucket).await?;
-    let layout_version = gates.profile()?.bucket_layout;
+    let _ = crate::gates::ensure_formatted(bucket).await?;
     let identity = match get(bucket).await? {
         Some(found) => found,
         None => {
-            let made = Identity { format: layout_version, number: ROOT, id: bucket.random_u64() };
+            let made =
+                Identity { format: layout::FORMAT.current, number: ROOT, id: bucket.random_u64() };
             match bucket::create(bucket, layout::IDENTITY, layout::encode(&made)).await? {
                 Created::Created(_) => made,
                 // Another formatting's, or addition's, first.
@@ -228,7 +228,8 @@ pub async fn format(bucket: &impl Bucket, details: &Details) -> Result<Identity,
     };
     if identity.number == ROOT && registry_versioned(bucket).await?.is_none() {
         let entry = Entry { number: ROOT, id: identity.id, details: details.clone() };
-        let registry = Registry { format: layout_version, version: 1, buckets: vec![entry] };
+        let registry =
+            Registry { format: layout::FORMAT.current, version: 1, buckets: vec![entry] };
         // Another formatting's, first, if it exists: of the same identity.
         bucket::create(bucket, layout::BUCKETS, layout::encode(&registry)).await?;
     }
@@ -285,7 +286,6 @@ pub async fn add(
         return Err(Error::NotRoot(ours.number));
     }
     let root_gates = crate::gates::ensure_formatted(root).await?;
-    let layout_version = root_gates.profile()?.bucket_layout;
     let found = get(new).await?;
     let (entry, registry) = loop {
         let (registry, version) = registry_versioned(root)
@@ -306,7 +306,7 @@ pub async fn add(
         let number = registry.next()?;
         let entry = Entry { number, id: root.random_u64(), details: details.clone() };
         let mut changed = registry.clone();
-        changed.format = layout_version;
+        changed.format = layout::FORMAT.current;
         changed.version += 1;
         for root_entry in changed.buckets.iter_mut().filter(|entry| entry.number == ROOT) {
             root_entry.details = std::mem::take(&mut root_entry.details).or(root_details);
@@ -321,7 +321,7 @@ pub async fn add(
     };
     copy_tombstones(root, new, entry.number).await?;
     crate::gates::spread(root_gates, new).await?;
-    let identity = Identity { format: layout_version, number: entry.number, id: entry.id };
+    let identity = Identity { format: layout::FORMAT.current, number: entry.number, id: entry.id };
     match bucket::create(new, layout::IDENTITY, layout::encode(&identity)).await? {
         Created::Created(_) => Ok((identity, registry)),
         Created::Exists(object) => match decode::<Identity>(&object.bytes)? {
@@ -359,7 +359,7 @@ pub async fn record_master_key(
             Some(_) => {}
         }
         let mut changed = registry.clone();
-        changed.format = root.ratchet().profile().bucket_layout;
+        changed.format = layout::FORMAT.current;
         changed.version += 1;
         for entry in changed.buckets.iter_mut().filter(|entry| entry.number == number) {
             entry.details.master_key_id = Some(master_key_id.to_owned());

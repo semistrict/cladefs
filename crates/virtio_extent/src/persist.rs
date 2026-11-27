@@ -38,11 +38,6 @@ use crate::config::{CacheType, Config};
 /// and host-local quiesced ephemeral cell checkpoints (`CellSnapshot::LocalEphemeral`).
 pub const FORMAT: formats::Format = formats::Format::new("snapshot extent state", 2, 3);
 
-const _: () = {
-    let latest = formats::gates::PROFILES[formats::gates::PROFILES.len() - 1];
-    assert!(latest.snapshot_extent_state == FORMAT.current);
-};
-
 /// Maximum encoded device state accepted from a snapshot (64 MiB): bounds allocations from hostile
 /// or corrupted snapshot bytes before bincode allocates `Vec<MappingStateV2>` (AGENTS.md, Trust
 /// boundaries).

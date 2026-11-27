@@ -51,11 +51,6 @@ const ROOT_MAGIC: &[u8; 8] = b"CLADEBLK";
 /// lists saying their version.
 pub(crate) const FORMAT: formats::Format = formats::Format::new("block device", 2, 2);
 
-const _: () = {
-    let latest = formats::gates::PROFILES[formats::gates::PROFILES.len() - 1];
-    assert!(latest.block_device == FORMAT.current);
-};
-
 /// The bytes before an extent's owners: their version, and how many follow.
 const OWNERS_HEADER: usize = 8;
 

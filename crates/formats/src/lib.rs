@@ -18,16 +18,16 @@
 //! rises, `current` never falls, and no case of the corpus changes.
 //!
 //! Upgrade ratchets ([`gates::Gates`], [`gates::Ratchet`]) are kept separate from golden-corpus
-//! pinning: each bucket stores just two linear monotonic versions — `storage` (mapping to a
-//! well-defined [`StorageProfile`] for all host binaries) and `fxfs` (for guest Linux kernels) —
-//! so partial upgrades and rollbacks remain safe without a combinatorial gate matrix.
+//! pinning: each bucket stores just two linear monotonic versions — `storage` (for all host
+//! binaries) and `fxfs` (for guest Linux kernels) — so partial upgrades and rollbacks remain safe
+//! without per-format gate knobs.
 
 use std::ops::RangeInclusive;
 
 pub mod gates;
 pub mod golden;
 
-pub use gates::{GateError, Gates, Ratchet, StorageProfile};
+pub use gates::{GateError, Gates, Ratchet};
 
 /// A family of formats, and the versions of it this build reads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
