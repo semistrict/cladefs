@@ -63,9 +63,9 @@ pub use cladefs::extent_requests::{
 pub use requests::{Guest, Requests, Served};
 #[cfg(target_os = "linux")]
 pub use window::dax_window_at;
-#[cfg(not(target_os = "linux"))]
-pub use window::window_fault;
 pub use window::{DaxWindowError, PrefaultGuestMemory, WindowVm};
+#[cfg(not(target_os = "linux"))]
+pub use window::{is_window, window_fault};
 pub use workers::{Popped, QueueInterrupt, RequestQueue, WorkerQueue, Workers};
 
 /// An error of the VMM's, which the device passes on.

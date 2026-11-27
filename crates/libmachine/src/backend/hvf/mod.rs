@@ -418,6 +418,7 @@ impl Vm {
                 boot: None,
                 pending_read: None,
                 data: [0; 8],
+                window_failures: cladefs::AccessFailures::default(),
                 _mem: mem.clone(),
             })
             .collect();
@@ -725,6 +726,9 @@ pub(crate) struct Vcpu {
     pending_read: Option<PendingRead>,
     /// The bytes of the last MMIO exit's access.
     data: [u8; 8],
+    /// cladefs: its accesses to a DAX window refused, retried a while before the machine stops
+    /// for them, as KVM's VMMs retry a `KVM_RUN` that fails with `EFAULT` (`virtio_extent::vcpu`).
+    window_failures: cladefs::AccessFailures,
     _mem: GuestMemoryMmap,
 }
 
@@ -830,6 +834,9 @@ impl Vcpu {
         // SAFETY: the framework keeps the exit information at `exit` for the vCPU's life, and
         // writes it only in hv_vcpu_run, on this thread.
         let exit = unsafe { *exit };
+        if !Self::window_abort(&exit) {
+            self.window_failures.ran(Instant::now);
+        }
         match exit.reason {
             HV_EXIT_REASON_CANCELED => Ok(Exit::Interrupted),
             HV_EXIT_REASON_EXCEPTION => self.exception(id, &exit.exception),
@@ -960,12 +967,28 @@ impl Vcpu {
                             e.physical_address,
                             if write { "write" } else { "read" }
                         );
-                        // ENOTCONN: the window's daemon, or its cell, went; anything else is the
-                        // guest's access refused (`HvfSecondStage::fault`).
-                        Err(match errno {
-                            cladefs::Errno::ENOTCONN => Error::ExtentDaemonLost(why),
-                            _ => Error::AccessRefused(why),
-                        })
+                        // ENOTCONN: the window's daemon, or its cell, went. Anything else is the
+                        // guest's access refused (`HvfSecondStage::fault`), retried a while first,
+                        // as KVM's VMMs retry it (`cladefs::AccessFailures`, virtio_extent::vcpu),
+                        // before the machine stops saying where the guest was (board 14531).
+                        if errno == cladefs::Errno::ENOTCONN {
+                            return Err(Error::ExtentDaemonLost(why));
+                        }
+                        match self.window_failures.failed(Instant::now()) {
+                            cladefs::Failure::Retry { .. } => {
+                                Ok(Exit::Handled(ExitKind::AccessRetried))
+                            }
+                            // Where the guest was, for its kernel's symbols to say what it did.
+                            cladefs::Failure::GiveUp(run) => Err(Error::AccessRefused(format!(
+                                "{why}, {} times in {:?}, at virtual address {:#x}, the guest's pc \
+                                 {:#x}, lr {:#x}",
+                                run.failures,
+                                run.last - run.first,
+                                e.virtual_address,
+                                get_reg(id, HV_REG_PC)?,
+                                get_reg(id, HV_REG_X0 + 30)?
+                            ))),
+                        }
                     }
                     None if class == EC_DATA_ABORT_LOWER => {
                         self.data_abort(id, syndrome, e.physical_address)
@@ -1033,6 +1056,17 @@ impl Vcpu {
                 e.physical_address
             )))),
         }
+    }
+
+    /// cladefs: whether `exit` is an abort on a DAX window, which [`Self::exception`] resolves,
+    /// retrying it while it is refused: a refused access's run of failures
+    /// ([`cladefs::AccessFailures`]) goes on through it; every other exit counts as the vCPU
+    /// running on.
+    fn window_abort(exit: &hv_vcpu_exit_t) -> bool {
+        let class = (exit.exception.syndrome >> 26) & 0x3f;
+        exit.reason == HV_EXIT_REASON_EXCEPTION
+            && matches!(class, EC_DATA_ABORT_LOWER | EC_INSTRUCTION_ABORT_LOWER)
+            && virtio_extent::is_window(exit.exception.physical_address)
     }
 
     /// A load or store to an address no memory backs: a device's register, or a queue's notify

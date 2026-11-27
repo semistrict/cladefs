@@ -330,6 +330,14 @@ impl cladefs::GuestMemory for GuestAt {
 static STAGES: Mutex<Vec<(u64, u64, std::sync::Weak<cladefs::HvfSecondStage>)>> =
     Mutex::new(Vec::new());
 
+/// cladefs: whether guest physical address `gpa` is in a DAX window of this process's, whose
+/// faults [`window_fault`] resolves.
+#[cfg(not(target_os = "linux"))]
+pub fn is_window(gpa: u64) -> bool {
+    let stages = STAGES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    stages.iter().any(|(start, len, _)| (*start..*start + *len).contains(&gpa))
+}
+
 /// cladefs: resolves the guest's fault at guest physical address `gpa`, for writing if `write`,
 /// if a DAX window of this process's is there, blocking the vCPU until it may retry its access
 /// (`HvfSecondStage::fault`): `None` if no window is, the access the VMM's own to emulate; the
