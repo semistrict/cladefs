@@ -1055,8 +1055,8 @@ mod tests {
             let (version, purge_delay, max_arena_kib) = unsafe {
                 (
                     libmimalloc_sys::mi_version(),
-                    libmimalloc_sys::mi_option_get(crate::MI_OPTION_PURGE_DELAY),
-                    libmimalloc_sys::mi_option_get(crate::MI_OPTION_ARENA_MAX_OBJECT_SIZE),
+                    libmimalloc_sys::mi_option_get(super::MI_OPTION_PURGE_DELAY),
+                    libmimalloc_sys::mi_option_get(super::MI_OPTION_ARENA_MAX_OBJECT_SIZE),
                 )
             };
             assert!(version >= 300, "expected mimalloc v3+, got {version}");
