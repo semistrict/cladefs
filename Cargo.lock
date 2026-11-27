@@ -2930,6 +2930,7 @@ name = "libmachine-firecracker"
 version = "0.1.0"
 dependencies = [
  "libmachine",
+ "serde",
  "serde_json",
  "tempfile",
 ]

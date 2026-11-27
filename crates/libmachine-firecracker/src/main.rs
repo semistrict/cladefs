@@ -22,9 +22,26 @@
 //!   guest's connections to every port passed to `<uds_path>_<port>`;
 //! - `balloon`, a virtio-balloon with free page reporting.
 //!
-//! What it doesn't do it refuses as it starts, saying so on standard error: `pmem` devices, network
-//! interfaces, and every request of the API but its socket answering (snapshots, pause and
-//! migration need libmachine's snapshots on Hypervisor.framework).
+//! Its API (`--api-sock`) serves what the guest tests ask of Firecracker's, with its status codes
+//! (204, or 400 and a fault message), the machine's run stopped for each request and resumed
+//! after it:
+//!
+//! - `PATCH /vm`, `Paused` or `Resumed`;
+//! - `PUT /snapshot/create`, a full snapshot of the paused microVM: its state at `snapshot_path`
+//!   (libmachine's snapshot, with what this VMM keeps of its devices' host sides: the vsock's
+//!   `uds_path`, the extent daemon's socket) and the guest's memory at `mem_file_path`, flat and
+//!   sparse as Firecracker's memory file (libmachine's RAM file of its own); cladefs's
+//!   `for_migration` as Firecracker's;
+//! - `PUT /snapshot/load`, in a process started with `--api-sock` and no configuration: the
+//!   snapshot's microVM, from a `File` memory backend (or `mem_file_path`), with cladefs's
+//!   `cladefs_overrides` (each extent store device's cell and daemon) and `vsock_override`,
+//!   resumed if `resume_vm`, else paused;
+//! - `PATCH /balloon`, the balloon's target.
+//!
+//! What it doesn't do it refuses, saying so on standard error: `pmem` devices and network
+//! interfaces as it starts; Diff snapshots and memory cells (macOS machines keep anonymous RAM
+//! until a macOS design of memory cells is chosen, board 13994), `PATCH /cladefs/extents` and every
+//! other request of the API's.
 //!
 //! The guest's serial console goes to standard output. It exits as Firecracker does: 0 once the
 //! guest resets or powers off (the tests' guest agent reboots it as a case ends), 158 once its
