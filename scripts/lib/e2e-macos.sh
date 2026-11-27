@@ -9,26 +9,41 @@
 # Bash 3.2, macOS's own, runs it. Needs scripts/lib/user-cache.sh and scripts/lib/containers.sh.
 
 # E2E_MACOS_VOLUME is the volume's name, and so its mount point's, /Volumes/NAME.
-E2E_MACOS_VOLUME=cladefs-e2e
+E2E_MACOS_VOLUME=cladefs-runs
 
 # e2e_macos_volume prints the mount point of a case-sensitive APFS volume for the run's results,
-# attaching it, made first if it isn't, a sparse disk image in the user's cache that grows as it is
-# written (hdiutil; no root): a Mac's own volumes are case-insensitive, where a Linux root's names
+# made first if there is none: a volume of its own in the Mac's boot container, sharing its free
+# space (diskutil; no root). A Mac's own volumes are case-insensitive, where a Linux root's names
 # collide (Fedora's terminfo/E/Eterm and terminfo/e/eterm), and the runner refuses to extract one
-# there (guest/tests rootfs.rs). It stays attached for the next run, as a cache directory does;
-# `hdiutil detach /Volumes/cladefs-e2e` lets it go, and removing the image frees its space.
+# there (guest/tests rootfs.rs). Not a disk image, as it was (hdiutil's sparse image, attached at
+# /Volumes/cladefs-e2e, which can go): each sync there took ~30 ms, not ~0.2 ms, which held the
+# daemons' commits ~250 ms before they were durable, failing the pgbench cases' check of doc-12's
+# median (50 ms; board 14462). It stays for the next run, as a cache directory does; `diskutil apfs
+# deleteVolume cladefs-runs` removes it and frees its space.
 e2e_macos_volume() {
-    local mount=/Volumes/$E2E_MACOS_VOLUME image
+    local mount=/Volumes/$E2E_MACOS_VOLUME boot
+    boot=$(e2e_macos_container /) || return
     if [[ ! -d $mount ]]; then
-        image=$(user_cache)/$E2E_MACOS_VOLUME.sparseimage || return
-        if [[ ! -f $image ]]; then
-            hdiutil create -quiet -size 1t -type SPARSE -fs 'Case-sensitive APFS' \
-                -volname "$E2E_MACOS_VOLUME" "$image" >&2 || return
+        if diskutil info "$E2E_MACOS_VOLUME" > /dev/null 2>&1; then
+            diskutil mount "$E2E_MACOS_VOLUME" >&2 || return
+        else
+            diskutil apfs addVolume "$boot" 'Case-sensitive APFS' "$E2E_MACOS_VOLUME" >&2 ||
+                return
         fi
-        hdiutil attach -quiet -nobrowse "$image" >&2 || return
+    fi
+    if [[ $(e2e_macos_container "$mount") != "$boot" ]]; then
+        echo "$mount isn't a volume of the boot container $boot (a disk image's syncs are" \
+            "~100 times slower): hdiutil detach $mount" >&2
+        return 1
     fi
     e2e_macos_case_sensitive "$mount" || return
     echo "$mount"
+}
+
+# e2e_macos_container PATH prints the APFS container of the volume PATH is on (disk3).
+e2e_macos_container() {
+    diskutil info -plist "$1" | plutil -extract APFSContainerReference raw - ||
+        { echo "$1 is on no APFS volume" >&2; return 1; }
 }
 
 # e2e_macos_case_sensitive DIR fails, saying so, unless DIR is on a case-sensitive filesystem.
