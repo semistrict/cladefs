@@ -53,47 +53,54 @@ export interface R2Bridge {
 }
 
 /**
- * cladefs: the most the Worker's monotonic clock may run fast of R2's, in millionths, as
+ * cladefs: the most the Worker's clock may run fast of R2's, in millionths, as
  * `bucket_cell::clock::DRIFT_PPM`.
  */
 export const DRIFT_PPM = 500;
 
 /**
+ * cladefs: the furthest the clock goes on past R2's latest date, by the Worker's own clock, in ms:
+ * `bucket_cell::clock::SKEW`, the most a bucket's clock may be off its backend's dates.
+ */
+export const SKEW_MS = 10_000;
+
+/**
  * cladefs: a bucket's clock as the collector reads it (`Bucket::now`): R2's, never the Worker's own,
  * as `crates/bucket_cell/src/clock.rs` has every host's (boards 8467, 8471, 14350). Collector leases
- * are measured by it, and the dates R2 gives objects (`R2Object.uploaded`) by R2's clock. The binding's
- * answers carry no `Date`, as native backends' do (`clock::Served`): the dates R2 gives what the
- * Worker writes stand in for them. It keeps their best lower bound: R2's time, as a write's answer
- * arrives, is at least the write's date, and since then it has gone on at least as fast as the
- * Worker's monotonic clock (`performance.now()`), less {@link DRIFT_PPM}. Never ahead of R2's, so a
- * lease it holds ends early, never late. 0 before any date: a lower bound still, which closes no
- * window; {@link probedBridge} writes before any pass reads it.
+ * are measured by it, and the dates R2 gives objects (`R2Object.uploaded`) by R2's clock. The
+ * binding's answers carry no `Date`, as native backends' do (`clock::Served`): the latest date R2
+ * gave what the Worker wrote stands in for them, R2's time at least as its answer arrived. From it
+ * the clock goes on by the Worker's clock, less {@link DRIFT_PPM}, but {@link SKEW_MS} at most:
+ * workerd's `performance.now()` is its `Date.now()`, which may step either way (hotbed review 184),
+ * so that the Worker's clock alone never puts the clock further ahead of R2's than a native host's
+ * may be. Past that, or the Worker's clock gone back, it stands still, behind R2's: a lease ends
+ * early, never late, until a write dates it again ({@link BucketClock.stale}, {@link probedBridge}).
+ * 0 before any date: a lower bound still, which closes no window.
  */
 export class BucketClock {
-	#best: { ms: number; at: number } | null = null;
+	#latest: { ms: number; at: number } | null = null;
 
-	/** A write R2 dated `dateMs`, answered at `at` by the monotonic clock: kept if it says more. */
+	/** A write R2 dated `dateMs`, answered at `at` by the Worker's clock: kept if it is later. */
 	heard(dateMs: number, at: number = performance.now()): void {
 		if (!Number.isFinite(dateMs) || dateMs < 0) return;
-		const heard = { ms: dateMs, at };
-		const best = this.#best;
-		// Both as of the later's arrival, after which each goes on alike.
-		const later = best === null ? at : Math.max(best.at, at);
-		if (best === null || dated(best, later) < dated(heard, later)) {
-			this.#best = heard;
+		if (this.#latest === null || dateMs >= this.#latest.ms) {
+			this.#latest = { ms: dateMs, at };
 		}
 	}
 
 	/** R2's time at `at`, at least: 0 before any date. */
 	now(at: number = performance.now()): number {
-		return this.#best === null ? 0 : Math.floor(dated(this.#best, at));
+		if (this.#latest === null) return 0;
+		const since = Math.min(Math.max(0, at - this.#latest.at), SKEW_MS);
+		return Math.floor(this.#latest.ms + since - (since * DRIFT_PPM) / 1_000_000);
 	}
-}
 
-/** R2's time at `then`, at least, as `date` says: its date, and the time since less the drift. */
-function dated(date: { ms: number; at: number }, then: number): number {
-	const since = Math.max(0, then - date.at);
-	return date.ms + since - (since * DRIFT_PPM) / 1_000_000;
+	/** Whether the clock stands still at `at`: no date, or the Worker's clock past its window. */
+	stale(at: number = performance.now()): boolean {
+		if (this.#latest === null) return true;
+		const since = at - this.#latest.at;
+		return since < 0 || since >= SKEW_MS;
+	}
 }
 
 function toMeta(obj: R2Object): R2Meta {
@@ -312,5 +319,19 @@ export async function probedBridge(bucket: R2Bucket): Promise<R2Bridge> {
 		);
 		probed.set(bucket, clock);
 	}
-	return createR2Bridge(bucket, await clock);
+	const probedClock = await clock;
+	// A pass takes its lease by the clock before it writes: dated afresh if it stands still.
+	if (probedClock.stale()) await date(bucket, probedClock);
+	return createR2Bridge(bucket, probedClock);
+}
+
+/** cladefs: dates `clock` afresh by a write of R2's, then removes what it wrote: two requests. */
+async function date(bucket: R2Bucket, clock: BucketClock): Promise<void> {
+	const nonce = crypto.getRandomValues(new Uint32Array(2));
+	const key = `probe/clock-${nonce[0].toString(16)}${nonce[1].toString(16)}`;
+	const written = await bucket.put(key, new Uint8Array(0));
+	// An unconditional write is stored or fails: none stored is the store wrong.
+	if (written === null) throw refused(`a write of ${key}`, written);
+	clock.heard(written.uploaded.getTime());
+	await bucket.delete(key);
 }

@@ -4,7 +4,14 @@
 
 import { env, SELF } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { BucketClock, createR2Bridge, DRIFT_PPM, probe, probedBridge } from "../src/r2-bridge.ts";
+import {
+	BucketClock,
+	createR2Bridge,
+	DRIFT_PPM,
+	probe,
+	probedBridge,
+	SKEW_MS,
+} from "../src/r2-bridge.ts";
 import worker, { type CellMessage, type CollectResult, type DryRunResult } from "../src/index.ts";
 
 const AUTH = { authorization: "Bearer test-gc-token" };
@@ -109,26 +116,44 @@ describe("the bucket's clock: R2's, never the Worker's (board 14350)", () => {
 		vi.useRealTimers();
 	});
 
-	it("keeps the best lower bound of the dates heard, going on less the drift", () => {
+	it("goes on from R2's latest date by the Worker's clock, less the drift, a window at most", () => {
 		const clock = new BucketClock();
 		expect(clock.now(0)).toBe(0);
+		expect(clock.stale(0)).toBe(true);
 		const date = 784_111_777_000;
 		clock.heard(date, 1_000);
 		expect(clock.now(1_000)).toBe(date);
-		expect(clock.now(1_001_000)).toBe(date + 1_000_000 - DRIFT_PPM);
-		// Behind what the best says as it arrives: nothing.
-		clock.heard(date + 1_000, 3_000);
-		expect(clock.now(3_000)).toBe(date + 1_999);
-		// Before it arrived, its date.
+		expect(clock.stale(1_000)).toBe(false);
+		expect(clock.now(2_000)).toBe(date + 999); // 1,000 ms less 0.5, floored
+		expect(clock.now(1_000 + SKEW_MS)).toBe(date + SKEW_MS - (SKEW_MS * DRIFT_PPM) / 1_000_000);
+		// Past its window, or the Worker's clock gone back: it stands still, stale.
+		expect(clock.now(1_000 + 3_600_000)).toBe(clock.now(1_000 + SKEW_MS));
+		expect(clock.stale(1_000 + SKEW_MS)).toBe(true);
 		expect(clock.now(0)).toBe(date);
+		expect(clock.stale(0)).toBe(true);
+		// An earlier date heard later: nothing.
+		clock.heard(date - 5_000, 3_000);
+		expect(clock.now(3_000)).toBe(date + 1_999);
 		// Dates that are none say nothing.
 		for (const nothing of [Number.NaN, -1, Number.POSITIVE_INFINITY]) {
 			clock.heard(nothing, 3_000);
 			expect(clock.now(3_000)).toBe(date + 1_999);
 		}
-		// Ahead: taken.
-		clock.heard(date + 60_000, 10_000);
-		expect(clock.now(10_000)).toBe(date + 60_000);
+	});
+
+	it("is never ahead of R2 by more than its window, the Worker's clock stepping back and forth", () => {
+		// Hotbed review 184's case: a date heard with the Worker's clock an hour behind, which then
+		// comes back.
+		const clock = new BucketClock();
+		const t = 784_111_777_000;
+		clock.heard(t + 1_000, t - 3_600_000);
+		// Before a date since: ahead by its window at most, R2's time being t + 2,000 then.
+		expect(clock.now(t + 2_000) - (t + 2_000)).toBeLessThanOrEqual(SKEW_MS);
+		expect(clock.stale(t + 2_000)).toBe(true);
+		clock.heard(t + 2_000, t + 2_000);
+		expect(clock.now(t + 2_000)).toBe(t + 2_000);
+		const later = t + 2_000 + 60_000;
+		expect(clock.now(later) - later).toBeLessThanOrEqual(0);
 	});
 
 	it("reads R2's dates with the Worker's clock an hour ahead", async () => {
