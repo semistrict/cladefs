@@ -730,16 +730,43 @@ impl std::fmt::Display for KmsKey {
 
 /// cladefs: the KMSes a host asks (TASK-633.6; backlog doc-23): the one wrapping the KEKs of the
 /// cells of each bucket, by the bucket's number ([`crate::objectid::bucket_of`]), and its name; or
-/// why it has none to be had, a refusal of each call for the bucket's cells, never a revocation.
+/// why it has none to be had ([`Unfound`]): a refusal of each call for the bucket's cells, or its
+/// failure as a bucket out of reach fails it, never a revocation.
 pub trait Kmses: Send + Sync + 'static {
-    fn of(&self, bucket: u16) -> BoxFuture<'_, Result<(KmsKey, kms::Shared), String>>;
+    fn of(&self, bucket: u16) -> BoxFuture<'_, Result<(KmsKey, kms::Shared), Unfound>>;
+}
+
+/// cladefs: why a bucket's KMS was not found ([`Kmses::of`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Unfound {
+    /// What names it, the registry of buckets, was out of reach as it was asked, which it is once
+    /// (board 5528), and which says nothing of the KMS: the call it was for fails as a bucket out
+    /// of reach fails it, to be made again, never as a refusal (board 14562: one read of the
+    /// registry failing once answered a fork `EACCES`).
+    Unreached(String),
+    /// The host has none it may use for the bucket, as this says: the call is refused.
+    Refused(String),
+}
+
+impl std::fmt::Display for Unfound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (Self::Unreached(why) | Self::Refused(why)) = self;
+        f.write_str(why)
+    }
+}
+
+impl From<String> for Unfound {
+    /// A refusal, as what finds a KMS says why it found none.
+    fn from(why: String) -> Self {
+        Self::Refused(why)
+    }
 }
 
 /// cladefs: one KMS for the cells of every bucket: a host's of one bucket, and tests'.
 pub struct OneKms(pub kms::Shared);
 
 impl Kmses for OneKms {
-    fn of(&self, _: u16) -> BoxFuture<'_, Result<(KmsKey, kms::Shared), String>> {
+    fn of(&self, _: u16) -> BoxFuture<'_, Result<(KmsKey, kms::Shared), Unfound>> {
         futures::future::ready(Ok((KmsKey("one".into()), self.0.clone()))).boxed()
     }
 }
@@ -951,8 +978,12 @@ impl CachingKms {
         if let Some(found) = self.resolved.lock().unwrap().get(&bucket) {
             return Ok(found.clone());
         }
-        let found = self.kmses.of(bucket).await.map_err(|why| {
-            Error::Kms(format!("tenant {}: the KMS of bucket {bucket}: {why}", cell.tenant))
+        let found = self.kmses.of(bucket).await.map_err(|unfound| {
+            let why = format!("tenant {}: the KMS of bucket {bucket}: {unfound}", cell.tenant);
+            match unfound {
+                Unfound::Unreached(_) => Error::Read(why),
+                Unfound::Refused(_) => Error::Kms(why),
+            }
         })?;
         Ok(self.resolved.lock().unwrap().entry(bucket).or_insert(found).clone())
     }
@@ -2480,7 +2511,7 @@ mod tests {
     struct TwoKmses(kms::Shared, kms::Shared);
 
     impl Kmses for TwoKmses {
-        fn of(&self, bucket: u16) -> BoxFuture<'_, Result<(KmsKey, kms::Shared), String>> {
+        fn of(&self, bucket: u16) -> BoxFuture<'_, Result<(KmsKey, kms::Shared), Unfound>> {
             let chosen = match bucket {
                 2 => (KmsKey("second".into()), self.1.clone()),
                 _ => (KmsKey("first".into()), self.0.clone()),
@@ -2580,9 +2611,11 @@ mod tests {
     struct SecondUnreachable(kms::Shared);
 
     impl Kmses for SecondUnreachable {
-        fn of(&self, bucket: u16) -> BoxFuture<'_, Result<(KmsKey, kms::Shared), String>> {
+        fn of(&self, bucket: u16) -> BoxFuture<'_, Result<(KmsKey, kms::Shared), Unfound>> {
             let chosen = match bucket {
-                2 => Err("its tenants' KEKs are kept under a master key this host has not".into()),
+                2 => Err(Unfound::Refused(
+                    "its tenants' KEKs are kept under a master key this host has not".into(),
+                )),
                 _ => Ok((KmsKey("first".into()), self.0.clone())),
             };
             futures::future::ready(chosen).boxed()

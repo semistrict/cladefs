@@ -188,6 +188,15 @@ pub async fn registry_once(bucket: &impl Bucket) -> Result<Option<Registry>, Err
     found.map(|object| decode(&object.bytes)).transpose()
 }
 
+/// cladefs: whether `err` is a read of a bucket's identity or its registry of buckets failing,
+/// asked once ([`get_once`], [`registry_once`]): its bucket out of reach, which says nothing of
+/// what it holds, and may answer if asked again. Any other is for good: a bucket no registry
+/// records, another at its URL, a URL or an option that opens none.
+pub(crate) fn unreached(err: &Error) -> bool {
+    let read = |key: &str| matches!(err, Error::Read(why) if why.starts_with(key));
+    read(layout::IDENTITY) || read(layout::BUCKETS)
+}
+
 /// The object at `key` in `bucket`, if any, asked for once.
 async fn once(bucket: &impl Bucket, key: &str) -> Result<Option<bucket::Object>, Error> {
     match bucket.get(key).await {

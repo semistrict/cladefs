@@ -38,7 +38,7 @@
 
 use crate::bucket::{self, Bucket, Created, Updated};
 use crate::identity::{self, NAMED};
-use crate::keys::{KmsKey, Kmses};
+use crate::keys::{KmsKey, Kmses, Unfound};
 use crate::layout;
 use crate::object_bucket::{ObjectBucket, RoutedBucket};
 use extent_keys::kms::bucket::{self as formats, KekObject, TenantKek};
@@ -1161,17 +1161,21 @@ impl ByBucket {
 
     /// The KMS of the bucket numbered `number`, another than the host's, chosen (see the type).
     /// Its bucket KMS too, if it is that.
-    async fn other(&self, number: u16) -> Result<Chosen, String> {
-        let entry = self.entry(number).await;
-        let entry = entry.map_err(|err| format!("its entry in the registry: {err}"))?;
+    async fn other(&self, number: u16) -> Result<Chosen, Unfound> {
+        let entry = self.entry(number).await.map_err(|err| {
+            let why = format!("its entry in the registry: {err}");
+            // A read of the registry failing, asked once: the bucket out of reach, which says
+            // nothing of its KMS (board 14562).
+            match identity::unreached(&err) {
+                true => Unfound::Unreached(why),
+                false => Unfound::Refused(why),
+            }
+        })?;
         let vars = self.vars.numbered(number);
         let recorded = entry.details.kms.as_deref();
         if let Some(url) = recorded.or_else(|| vars.get(KMS_VAR)) {
             let trust = recorded.map(|_| Trust::of(&vars)).transpose()?;
-            return self
-                .named(number, &vars, url, trust.as_ref())
-                .await
-                .map(|chosen| (chosen, None));
+            return Ok((self.named(number, &vars, url, trust.as_ref()).await?, None));
         }
         // The bucket is opened only when it keeps its tenants' KEKs (board 5528).
         let shared_keys = self.master_keys_for(&vars)?;
@@ -1179,17 +1183,23 @@ impl ByBucket {
         if let Some(id) = &entry.details.master_key_id
             && !keys.ids().iter().any(|held| held.to_string() == *id)
         {
-            return Err(format!(
+            let refused = format!(
                 "its tenants' KEKs are kept under master key {id}, which this host has \
                  not (it has {}): CLADEFSD_BUCKET_{number}_{MASTER_KEY_VAR}",
                 keys.named_ids()
-            ));
+            );
+            return Err(Unfound::Refused(refused));
         }
         let bucket = self.home.numbered(number).await.map_err(|err| {
-            format!(
+            let why = format!(
                 "{MASTER_KEY_VAR}: the bucket KMS keeps tenants' KEKs in the host's bucket: \
                  the bucket: {err}"
-            )
+            );
+            // Its identity's read failing, asked once, as its registry entry's.
+            match identity::unreached(&err) {
+                true => Unfound::Unreached(why),
+                false => Unfound::Refused(why),
+            }
         })?;
         let kms = Arc::new(BucketKms::with_shared_keys(bucket, shared_keys));
         kms.identify(entry.id);
@@ -1232,7 +1242,7 @@ impl ByBucket {
     }
 
     /// Coalesces cold opens of a bucket. Failed or cancelled lookups can be tried again.
-    async fn chosen(&self, number: u16) -> Result<Chosen, String> {
+    async fn chosen(&self, number: u16) -> Result<Chosen, Unfound> {
         let chosen = self.chosen.lock().unwrap().entry(number).or_default().clone();
         chosen.get_or_try_init(|| self.other(number)).await.cloned()
     }
@@ -1353,7 +1363,7 @@ impl Shredded {
 }
 
 impl Kmses for ByBucket {
-    fn of(&self, bucket: u16) -> BoxFuture<'_, Result<(KmsKey, kms::Shared), String>> {
+    fn of(&self, bucket: u16) -> BoxFuture<'_, Result<(KmsKey, kms::Shared), Unfound>> {
         Box::pin(async move {
             // An unformatted home bucket has no registry and takes bucket 1 (ROOT) once formatted,
             // so bucket-1 cells (e.g. a standalone image `.bucket` opened before the daemon creates
@@ -2192,6 +2202,7 @@ mod tests {
             )));
             let by_bucket = ByBucket::new(home, own, vars_of(&vars));
             let refused = by_bucket.of(2).await.map(drop).unwrap_err();
+            let Unfound::Refused(refused) = refused else { panic!("{refused:?}: no refusal") };
             assert!(refused.starts_with("the registry of buckets: \"local://"), "{refused}");
             assert!(refused.ends_with("only if CLADEFSD_KMS_LOCAL is 1"), "{refused}");
             assert!(!local.exists(), "local:// made its directory");
@@ -2201,8 +2212,10 @@ mod tests {
                 HostKms::Named(local_url, own),
                 by_bucket.vars.clone(),
             );
-            assert_eq!(by_bucket_with_own.of(2).await.map(drop).unwrap_err(), refused);
+            let with_own = by_bucket_with_own.of(2).await.map(drop).unwrap_err();
+            assert_eq!(with_own, Unfound::Refused(refused));
             let refused = by_bucket.of(3).await.map(drop).unwrap_err();
+            let Unfound::Refused(refused) = refused else { panic!("{refused:?}: no refusal") };
             assert!(
                 refused.ends_with(
                     "10.9.9.9:8200: a KMS URL the registry of buckets records reaches only the \

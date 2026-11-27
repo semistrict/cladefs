@@ -156,9 +156,7 @@ impl<B: Bucket> RoutedBucket<B> {
                 Err(crate::Error::Refused(refusal)) => return Err(refusal),
                 // Out of reach while reading identity or the registry: asked again, as every
                 // request of a bucket is.
-                Err(crate::Error::Read(why))
-                    if why.starts_with(layout::IDENTITY) || why.starts_with(layout::BUCKETS) =>
-                {
+                Err(err) if crate::identity::unreached(&err) => {
                     failures = failures.saturating_add(1);
                     self.pause(failures).await;
                 }
