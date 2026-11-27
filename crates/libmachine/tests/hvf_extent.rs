@@ -29,6 +29,13 @@ fn guest_dir() -> PathBuf {
     )
 }
 
+/// The embedded daemon's, its disk at `dir`: a 256 MiB budget, and 1 GiB of the disk kept free,
+/// not max(5%, 4 GiB), which a developer's nearly full Mac doesn't have (92 GiB of 1.8 TiB): its
+/// cells' opening failed with ENOSPC there.
+fn daemon_config(dir: &std::path::Path) -> ExtentDaemonConfig {
+    ExtentDaemonConfig::local(dir).memory(256 << 20).disk_headroom(1 << 30)
+}
+
 /// cladefs's arm64 kernel and the test initramfs, if both are there.
 fn guest() -> Option<(PathBuf, PathBuf)> {
     let kernel = std::env::var_os("CLADEFS_GUEST_KERNEL")
@@ -64,8 +71,7 @@ fn mount_and_check(dax_window_size: Option<u64>) -> Option<Seen> {
     // Its log on standard error, which a failed test shows.
     let _ = cladefs::cladefsd::logging::to_stderr();
     let dir = tempfile::tempdir().unwrap();
-    let daemon = ExtentDaemon::start(ExtentDaemonConfig::local(dir.path()).memory(256 << 20))
-        .expect("the embedded daemon");
+    let daemon = ExtentDaemon::start(daemon_config(dir.path())).expect("the embedded daemon");
     let store = ExtentStore {
         dax_window_size,
         ..ExtentStore::new("extents", ExtentCell::New { tenant: 1 }, 256 << 20)
@@ -200,10 +206,8 @@ fn boot_with_a_window() -> Option<(Arc<ExtentDaemon>, tempfile::TempDir, Running
     let (kernel, initrd) = guest()?;
     let _ = cladefs::cladefsd::logging::to_stderr();
     let dir = tempfile::tempdir().unwrap();
-    let daemon = Arc::new(
-        ExtentDaemon::start(ExtentDaemonConfig::local(dir.path()).memory(256 << 20))
-            .expect("the embedded daemon"),
-    );
+    let daemon =
+        Arc::new(ExtentDaemon::start(daemon_config(dir.path())).expect("the embedded daemon"));
     let store = ExtentStore {
         dax_window_size: Some(64 << 20),
         ..ExtentStore::new("extents", ExtentCell::New { tenant: 1 }, 256 << 20)
