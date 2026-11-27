@@ -715,42 +715,95 @@ impl Control {
         .map_err(status)?;
         Ok((id, path))
     }
+}
 
-    /// Picks a managed disk and allocates a fresh staging path inside `<disk>/cells/<TENANT>`.
-    async fn stage_for(
-        &self,
-        tenant: u64,
-    ) -> Result<(Arc<crate::disks::ManagedDisk>, PathBuf), Status> {
-        let pool = Arc::clone(self.disk_pool()?);
-        let disk = pool.pick_disk().map_err(status)?;
-        let disk_for_stage = Arc::clone(&disk);
-        let staging =
-            cells::blocking(move || crate::disks::DiskPool::staging_path(&disk_for_stage, tenant))
-                .await
-                .map_err(status)?;
-        Ok((disk, staging))
-    }
+/// The daemon's managed [`super::disks::DiskPool`], or `ENOTSUP` if unconfigured.
+fn disk_pool_of(daemon: &Daemon) -> Result<&Arc<crate::disks::DiskPool>, Status> {
+    daemon.disk_pool().ok_or_else(|| {
+        saying(
+            Errno::ENOTSUP,
+            "no managed disks configured (configure [[disks]] in TOML)".to_owned(),
+        )
+    })
+}
 
-    /// Atomically moves `staging` into `<disk>/cells/<TENANT>/<CELL>`, registering `made` in the
-    /// pool and migrating any per-cell upload interval entry.
-    async fn commit_staged(
-        &self,
-        disk: Arc<crate::disks::ManagedDisk>,
-        made: cladefs_core::CellId,
-        staging: PathBuf,
-    ) -> Result<PathBuf, Status> {
-        let pool = Arc::clone(self.disk_pool()?);
-        let staging_for_commit = staging.clone();
-        match cells::blocking(move || pool.commit_staged(&disk, made, &staging_for_commit)).await {
-            Ok(final_path) => {
-                cells::move_upload_interval(&self.daemon, &staging, &final_path);
-                Ok(final_path)
-            }
-            Err(err) => {
-                cleanup_staging(&self.daemon, staging).await;
-                Err(status(err))
-            }
+/// Picks a managed disk of `daemon`'s and allocates a fresh staging path inside
+/// `<disk>/cells/<TENANT>`.
+async fn stage_for(
+    daemon: &Daemon,
+    tenant: u64,
+) -> Result<(Arc<crate::disks::ManagedDisk>, PathBuf), Status> {
+    let pool = Arc::clone(disk_pool_of(daemon)?);
+    let disk = pool.pick_disk().map_err(status)?;
+    let disk_for_stage = Arc::clone(&disk);
+    let staging =
+        cells::blocking(move || crate::disks::DiskPool::staging_path(&disk_for_stage, tenant))
+            .await
+            .map_err(status)?;
+    Ok((disk, staging))
+}
+
+/// Atomically moves `staging` into `<disk>/cells/<TENANT>/<CELL>`, registering `made` in the
+/// pool and migrating any per-cell upload interval entry.
+async fn commit_staged(
+    daemon: &Daemon,
+    disk: Arc<crate::disks::ManagedDisk>,
+    made: cladefs_core::CellId,
+    staging: PathBuf,
+) -> Result<PathBuf, Status> {
+    let pool = Arc::clone(disk_pool_of(daemon)?);
+    let staging_for_commit = staging.clone();
+    match cells::blocking(move || pool.commit_staged(&disk, made, &staging_for_commit)).await {
+        Ok(final_path) => {
+            cells::move_upload_interval(daemon, &staging, &final_path);
+            Ok(final_path)
         }
+        Err(err) => {
+            cleanup_staging(daemon, staging).await;
+            Err(status(err))
+        }
+    }
+}
+
+/// Imports the container image at `image` (a `docker export` tarball, or an OCI image layout and
+/// its `reference`) into a new managed cell of `tenant`'s, of `capacity` bytes, on a disk of
+/// `daemon`'s: as `ImportImage` does, and `cladefsctl import`.
+async fn import_image(
+    daemon: &Arc<Daemon>,
+    tenant: u64,
+    capacity: u64,
+    image: PathBuf,
+    reference: Option<String>,
+) -> Result<cladefs_core::CellId, Status> {
+    room_for_a_cell(daemon)?;
+    let (disk, staging) = stage_for(daemon, tenant).await?;
+    let made =
+        match cells::import(daemon, staging.clone(), capacity, image, reference, tenant).await {
+            Ok(made) => made,
+            Err(err) => {
+                cleanup_staging(daemon, staging).await;
+                return Err(status(err));
+            }
+        };
+    commit_staged(daemon, disk, made, staging).await?;
+    Ok(made)
+}
+
+impl Daemon {
+    /// Imports the container image at `image` (a `docker export` tarball, or an OCI image layout
+    /// and its `reference`) into a new managed cell of `tenant`'s, of `capacity` bytes: what
+    /// `ImportImage` does, for a process embedding the daemon (libcladefs), which boots VMs on
+    /// forks of it.
+    pub async fn import_image(
+        self: &Arc<Self>,
+        tenant: u64,
+        capacity: u64,
+        image: PathBuf,
+        reference: Option<String>,
+    ) -> anyhow::Result<cladefs_core::CellId> {
+        import_image(self, tenant, capacity, image, reference)
+            .await
+            .map_err(|status| anyhow::anyhow!("importing an image: {}", status.message()))
     }
 }
 
@@ -860,7 +913,7 @@ impl Cladefsd for Control {
             pool.register_cell(made, final_path);
             return Ok(Response::new(CreateCellResponse { tenant: made.tenant, cell: made.id }));
         }
-        let (disk, staging) = self.stage_for(tenant).await?;
+        let (disk, staging) = stage_for(&self.daemon, tenant).await?;
         let made = match cells::create(
             &self.daemon,
             staging.clone(),
@@ -876,7 +929,7 @@ impl Cladefsd for Control {
                 return Err(status(err));
             }
         };
-        let _ = self.commit_staged(disk, made, staging).await?;
+        let _ = commit_staged(&self.daemon, disk, made, staging).await?;
         Ok(Response::new(CreateCellResponse { tenant: made.tenant, cell: made.id }))
     }
 
@@ -887,19 +940,7 @@ impl Cladefsd for Control {
         let ImportImageRequest { capacity, image, reference, tenant } = request.into_inner();
         let image = input_path(image)?;
         let reference = Some(reference).filter(|reference| !reference.is_empty());
-        room_for_a_cell(&self.daemon)?;
-        let (disk, staging) = self.stage_for(tenant).await?;
-        let made =
-            match cells::import(&self.daemon, staging.clone(), capacity, image, reference, tenant)
-                .await
-            {
-                Ok(made) => made,
-                Err(err) => {
-                    cleanup_staging(&self.daemon, staging).await;
-                    return Err(status(err));
-                }
-            };
-        let _ = self.commit_staged(disk, made, staging).await?;
+        let made = import_image(&self.daemon, tenant, capacity, image, reference).await?;
         Ok(Response::new(ImportImageResponse { tenant: made.tenant, cell: made.id }))
     }
 
@@ -913,7 +954,7 @@ impl Cladefsd for Control {
             return Err(status(Errno::EINVAL));
         }
         room_for_a_cell(&self.daemon)?;
-        let (disk, staging) = self.stage_for(tenant).await?;
+        let (disk, staging) = stage_for(&self.daemon, tenant).await?;
         let (made, version) = match cells::import_memory(
             &self.daemon,
             staging.clone(),
@@ -930,7 +971,7 @@ impl Cladefsd for Control {
                 return Err(status(err));
             }
         };
-        let final_path = self.commit_staged(disk, made, staging).await?;
+        let final_path = commit_staged(&self.daemon, disk, made, staging).await?;
         if let Some(ver) = version {
             let named = std::collections::BTreeSet::from([ver]);
             cladefs_core::host_cell::made_version_on(
@@ -997,7 +1038,7 @@ impl Cladefsd for Control {
             pool.register_cell(forked, final_path);
             return Ok(Response::new(ForkCellResponse { tenant: forked.tenant, cell: forked.id }));
         }
-        let (disk, staging) = self.stage_for(dest_tenant).await?;
+        let (disk, staging) = stage_for(&self.daemon, dest_tenant).await?;
         let forked = match version {
             0 => {
                 let (_, from_path) = self.resolve_cell(of.tenant, of.id).await?;
@@ -1015,7 +1056,7 @@ impl Cladefsd for Control {
                 return Err(status(err));
             }
         };
-        let _ = self.commit_staged(disk, forked, staging).await?;
+        let _ = commit_staged(&self.daemon, disk, forked, staging).await?;
         Ok(Response::new(ForkCellResponse { tenant: forked.tenant, cell: forked.id }))
     }
 

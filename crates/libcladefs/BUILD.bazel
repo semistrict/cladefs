@@ -34,6 +34,7 @@ cladefs_rust_library(
     aliases = _ALIASES,
     target_compatible_with = _COMPAT,
     deps = [
+        "//crates/bucket_cell",
         "//crates/cladefs_core",
         "//crates/cladefs_wire",
         "//crates/cladefsd",

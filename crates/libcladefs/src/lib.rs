@@ -117,6 +117,15 @@ impl Config {
         self
     }
 
+    /// The bytes each disk keeps free, which the daemon's cells never fill: max(5%, 4 GiB) of the
+    /// disk unless said, too much of a developer's nearly full disk.
+    pub fn disk_headroom(mut self, bytes: u64) -> Self {
+        self.0.disk.headroom = Some(cladefs_core::config::HeadroomSpec(
+            bucket_cell::host_disk::DiskHeadroom::Bytes(bytes),
+        ));
+        self
+    }
+
     /// The most bytes of parts the disks' part cache holds.
     pub fn cache_cap(mut self, bytes: u64) -> Self {
         self.0.disk.cache_cap = Some(cladefs_core::config::ByteSize(bytes));
@@ -245,6 +254,26 @@ impl Daemon {
         opened.map_err(|errno| {
             Error::new(anyhow::Error::new(errno).context(format!("opening cell {cell}")))
         })
+    }
+
+    /// Imports the container image at `image` into a new managed cell of `tenant`'s, of `capacity`
+    /// bytes, on a disk the daemon picks: a `docker export` tarball, or an OCI image layout
+    /// (`skopeo copy`, `docker save`) and the `reference` of the image in it, as `cladefsctl import`
+    /// does. Its root filesystem, which a VM boots from (`root=TAG rootfstype=cladefs`), or forks
+    /// of it do.
+    pub async fn import_image(
+        &self,
+        tenant: u64,
+        capacity: u64,
+        image: impl AsRef<Path>,
+        reference: Option<&str>,
+    ) -> Result<CellId, Error> {
+        let (daemon, image) = (Arc::clone(&self.daemon), image.as_ref().to_owned());
+        let reference = reference.map(str::to_owned);
+        self.daemon
+            .run(async move { daemon.import_image(tenant, capacity, image, reference).await })
+            .await
+            .map_err(Error::new)
     }
 
     /// The daemon's control API, the Cladefsd gRPC service, health and its FUSE mount's Mount, for

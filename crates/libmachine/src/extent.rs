@@ -86,6 +86,25 @@ impl ExtentDaemon {
         }
     }
 
+    /// Imports the container image at `image` into a new cell of `tenant`'s, of `capacity` bytes, on
+    /// the daemon this process runs ([`ExtentDaemon::start`]): a `docker export` tarball, or an OCI
+    /// image layout and the `reference` of the image in it. A machine boots from it with an extent
+    /// store device on it ([`ExtentCell::Existing`]) and `root=TAG rootfstype=cladefs rw` on its
+    /// kernel's command line.
+    pub fn import_image(
+        &self,
+        tenant: u64,
+        capacity: u64,
+        image: impl AsRef<std::path::Path>,
+        reference: Option<&str>,
+    ) -> crate::Result<CellId> {
+        let daemon = self.daemon().ok_or_else(|| {
+            crate::Error::InvalidConfig("only a daemon this process runs imports images".into())
+        })?;
+        futures::executor::block_on(daemon.import_image(tenant, capacity, image, reference))
+            .map_err(|err| crate::Error::ExtentStore(format!("importing an image: {err:#}")))
+    }
+
     /// A new connection to the daemon, for a device to open its cell over: the device's one seam
     /// to it.
     pub(crate) fn connect(&self) -> Result<cladefs::DaemonConnection, cladefs::Error> {

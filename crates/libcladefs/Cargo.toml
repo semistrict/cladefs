@@ -10,6 +10,7 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
+bucket_cell.workspace = true
 cladefs_core.workspace = true
 cladefs_wire.workspace = true
 cladefsd.workspace = true
