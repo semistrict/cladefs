@@ -505,16 +505,19 @@ class Runs(unittest.TestCase):
     def test_a_job_runs_as_work_and_a_measurement_alone_after_its_build_as_work(self):
         """TASK-368: a measurement's run is two commands, its build as work, then the measurement
         alone under hotbed run --bench, building nothing; any other run's one command of work, of
-        no phase."""
-        for bench, said, jobs in [
-            ("0", ["run --detach --no-sync --mem 8G bash"], ["test-linux-host.sh all work"]),
-            ("1", ["run --detach --no-sync --mem 8G bash",
-                   "run --bench --detach --keep-idle --no-sync --mem 12G bash"],
+        no phase, kept though it idles with CLADEFS_TEST_HOST_KEEP_IDLE=1 (board 14415)."""
+        for bench, keep_idle, said, jobs in [
+            ("0", "0", ["run --detach --no-sync --mem 8G bash"], ["test-linux-host.sh all work"]),
+            ("0", "1", ["run --detach --keep-idle --no-sync --mem 8G bash"],
+             ["test-linux-host.sh all work"]),
+            ("1", "0", ["run --detach --no-sync --mem 8G bash",
+                        "run --bench --detach --keep-idle --no-sync --mem 12G bash"],
              ["test-linux-host.sh build work", "test-linux-host.sh measure bench"]),
         ]:
-            with self.subTest(bench=bench):
+            with self.subTest(bench=bench, keep_idle=keep_idle):
                 fleet = Fleet()
-                status, out, errors = fleet.drive(RAN, environment={"CLADEFS_TEST_HOST_BENCH": bench})
+                status, out, errors = fleet.drive(RAN, environment={
+                    "CLADEFS_TEST_HOST_BENCH": bench, "CLADEFS_TEST_HOST_KEEP_IDLE": keep_idle})
                 self.assertEqual((status, out), (0, "status 0\n"), errors)
                 results = fleet.directory / "results"
                 self.assertEqual([call for call in fleet.calls() if "--detach" in call], said)
