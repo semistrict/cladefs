@@ -319,7 +319,7 @@ fn most_open_files(hard: libc::rlim_t) -> std::io::Result<libc::rlim_t> {
 /// VMs are few and whose processes macOS lets keep 10,240 files by default
 /// (`kern.maxfilesperproc`): 32, so that a daemon a process embeds (libcladefs) starts there
 /// without the machine's settings changed (board 13850).
-pub(crate) const FLOOR_CELLS: u64 = if cfg!(target_os = "macos") { 32 } else { 256 };
+pub const FLOOR_CELLS: u64 = if cfg!(target_os = "macos") { 32 } else { 256 };
 
 /// cladefs: what a daemon keeps open of its own, beside its cells' files, at most: its sockets and
 /// listeners, its log, its part cache's and its bucket's files and connections, its arenas' memfds.

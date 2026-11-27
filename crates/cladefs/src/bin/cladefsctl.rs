@@ -318,7 +318,6 @@ mod cli {
 
     /// cladefs: what `ephemeral-hosts` prints of `hosts`: a line each, `INCARNATION REFERENCES`, in
     /// base 32 and decimal, then `decommissioned` after one that was (board 8521).
-    #[cfg(target_os = "linux")]
     fn ephemeral_hosts_lines(hosts: &[cladefs::cladefsd::control::proto::EphemeralHost]) -> String {
         let line = |host: &cladefs::cladefsd::control::proto::EphemeralHost| {
             let decommissioned = if host.decommissioned { " decommissioned" } else { "" };
@@ -396,7 +395,6 @@ mod cli {
     }
 
     /// Prints `versions`, one a line: its ID, in hexadecimal, and whether it is uploaded and shared.
-    #[cfg(target_os = "linux")]
     fn print_versions(versions: &[cladefs::VersionInfo]) {
         for cladefs::VersionInfo { id, uploaded, shared } in versions {
             let uploaded = if *uploaded { "uploaded" } else { "local" };
@@ -422,7 +420,6 @@ mod cli {
     }
 
     /// Parses a headroom spec (`"10%"`, `"8GiB"`, `"1073741824"`, or `"none"`).
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     #[derive(Clone, Copy)]
     enum HeadroomArg {
         Clear,
@@ -550,7 +547,6 @@ mod cli {
 
     /// cladefs: what a daemon forgot of a tenant's or a cell's keys, one `name value` a line
     /// (TASK-411.7).
-    #[cfg(target_os = "linux")]
     fn forgotten_lines(forgotten: &cladefs::cladefsd::control::proto::Forgotten) -> String {
         let cladefs::cladefsd::control::proto::Forgotten { stores, rings, kept, extents, bytes } =
             forgotten;
@@ -562,7 +558,6 @@ mod cli {
 
     /// cladefs: what a reload of the daemon's KMS changed, one `name values` a line, tenants in base 32
     /// (board 8487).
-    #[cfg(target_os = "linux")]
     fn reloaded_lines(reloaded: &cladefs::cladefsd::control::proto::ReloadKmsResponse) -> String {
         let renamed = (reloaded.renamed.iter())
             .map(|&tenant| format!("renamed {}\n", base32_id::Short(tenant)));
@@ -577,8 +572,7 @@ mod cli {
     }
 
     /// What cladefsctl was asked to do. cladefs: what only the daemon does is read by `through`
-    /// alone, which is Linux's alone.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    /// alone.
     enum Command {
         /// cladefs: a new cell, its ID its bucket's to give (TASK-364, hotbed question 547).
         Create {
@@ -866,6 +860,18 @@ mod cli {
         }
     }
 
+    /// cladefs: the daemon's FUSE mount of cells is Linux's (`cladefsd::fuse_control`).
+    #[cfg(not(target_os = "linux"))]
+    impl Mount {
+        async fn through(
+            self,
+            _socket: &Path,
+            _timeout: Option<std::time::Duration>,
+        ) -> anyhow::Result<()> {
+            bail!("the daemon's FUSE mount of cells is Linux's")
+        }
+    }
+
     #[cfg(target_os = "linux")]
     impl Mount {
         /// Calls the Mount service of the daemon whose control socket is at `socket`, and prints what
@@ -915,7 +921,6 @@ mod cli {
         }
     }
 
-    #[cfg(target_os = "linux")]
     async fn connect_within<T>(
         timeout: Option<std::time::Duration>,
         socket: &Path,
@@ -926,7 +931,6 @@ mod cli {
         within(timeout, &what, call).await?.context(what)
     }
 
-    #[cfg(target_os = "linux")]
     async fn within<T>(
         timeout: Option<std::time::Duration>,
         what: &str,
@@ -944,7 +948,6 @@ mod cli {
     }
     }
 
-    #[cfg(target_os = "linux")]
     async fn rpc<T>(
         timeout: Option<std::time::Duration>,
         what: impl Into<String>,
@@ -958,12 +961,10 @@ mod cli {
             .into_inner())
     }
 
-    #[cfg(target_os = "linux")]
     fn name(path: &Path) -> Result<String, cladefs::Error> {
         path.to_str().map(str::to_owned).ok_or_else(|| cladefs::Errno::EINVAL.into())
     }
 
-    #[cfg(target_os = "linux")]
     fn whom(tenant: Option<u64>, none: &str) -> String {
         tenant.map_or_else(
             || none.to_owned(),
@@ -1218,7 +1219,6 @@ mod cli {
 
         /// Does it through the control API of the daemon whose control socket is at `socket`, within
         /// `timeout` if given (board 8585).
-        #[cfg(target_os = "linux")]
         async fn through(
             self,
             socket: &Path,
@@ -1705,15 +1705,6 @@ mod cli {
             Ok(())
         }
 
-        #[cfg(not(target_os = "linux"))]
-        fn through(
-            self,
-            _socket: &Path,
-            _timeout: Option<std::time::Duration>,
-        ) -> anyhow::Result<()> {
-            bail!("the extent daemon runs on Linux only")
-        }
-
         /// cladefs: whether it acts on buckets themselves, with or without the daemon (TASK-633.9).
         fn is_on_buckets(&self) -> bool {
             matches!(
@@ -1811,64 +1802,60 @@ mod cli {
                     _ => {}
                 }
             }
-            match self {
-                other => {
-                    let what = match other {
-                        Self::Stats { .. } => "stats are",
-                        Self::Grant { .. } | Self::Revoke { .. } => "tenants' grants are",
-                        Self::ShredCell { .. }
-                        | Self::ForgetTenantKeys { .. }
-                        | Self::ShredTenant { .. } => "shredding and forgetting keys are",
-                        Self::KmsReload => "reloading the KMS is",
-                        Self::DecommissionHost { .. } | Self::EphemeralHosts => {
-                            "decommissioning hosts, and listing them, are"
-                        }
-                        Self::Mount(_) => "its FUSE mount of cells is",
-                        Self::Cells { .. } => "the cells VM processes have open are",
-                        Self::Counters { .. } => "its counters are",
-                        Self::SetPeers { .. } => "its peers are",
-                        Self::Migrate { .. }
-                        | Self::HandOver { .. }
-                        | Self::WaitHandOver { .. }
-                        | Self::AbortMigration { .. } => "migrations are",
-                        Self::MemoryLimit { .. }
-                        | Self::MemoryWeight { .. }
-                        | Self::InFlight { .. }
-                        | Self::ShrinkMemory { .. } => "its memory is",
-                        Self::DiskLimit { .. }
-                        | Self::DiskWeight { .. }
-                        | Self::TenantDisk { .. }
-                        | Self::Disks { .. }
-                        | Self::SetDisk { .. } => "its disks are",
-                        Self::Create { .. }
-                        | Self::Take { .. }
-                        | Self::Place { .. }
-                        | Self::Sync { .. }
-                        | Self::Fork { .. }
-                        | Self::Version { .. }
-                        | Self::Versions { .. }
-                        | Self::DropVersions { .. }
-                        | Self::Share { .. }
-                        | Self::ForkVersion { .. }
-                        | Self::Delete { .. }
-                        | Self::Drop { .. }
-                        | Self::Resize { .. }
-                        | Self::Public { .. }
-                        | Self::PublicAttachOnly { .. }
-                        | Self::Attach { .. } => "live cell commands are",
-                        Self::Import { .. } | Self::ImportMemory { .. } => "its imports are",
-                        Self::Stat { .. } => "its cells' stats are",
-                        Self::FormatBucket { .. }
-                        | Self::AddBucket { .. }
-                        | Self::Buckets { .. }
-                        | Self::Formats { .. }
-                        | Self::Ratchet { .. } => unreachable!("handled above"),
-                    };
-                    bail!(
-                        "{what} the extent daemon's: name its control socket (CLADEFSD_GRPC), or pass --config"
-                    );
+            let what = match self {
+                Self::Stats { .. } => "stats are",
+                Self::Grant { .. } | Self::Revoke { .. } => "tenants' grants are",
+                Self::ShredCell { .. }
+                | Self::ForgetTenantKeys { .. }
+                | Self::ShredTenant { .. } => "shredding and forgetting keys are",
+                Self::KmsReload => "reloading the KMS is",
+                Self::DecommissionHost { .. } | Self::EphemeralHosts => {
+                    "decommissioning hosts, and listing them, are"
                 }
-            }
+                Self::Mount(_) => "its FUSE mount of cells is",
+                Self::Cells { .. } => "the cells VM processes have open are",
+                Self::Counters { .. } => "its counters are",
+                Self::SetPeers { .. } => "its peers are",
+                Self::Migrate { .. }
+                | Self::HandOver { .. }
+                | Self::WaitHandOver { .. }
+                | Self::AbortMigration { .. } => "migrations are",
+                Self::MemoryLimit { .. }
+                | Self::MemoryWeight { .. }
+                | Self::InFlight { .. }
+                | Self::ShrinkMemory { .. } => "its memory is",
+                Self::DiskLimit { .. }
+                | Self::DiskWeight { .. }
+                | Self::TenantDisk { .. }
+                | Self::Disks { .. }
+                | Self::SetDisk { .. } => "its disks are",
+                Self::Create { .. }
+                | Self::Take { .. }
+                | Self::Place { .. }
+                | Self::Sync { .. }
+                | Self::Fork { .. }
+                | Self::Version { .. }
+                | Self::Versions { .. }
+                | Self::DropVersions { .. }
+                | Self::Share { .. }
+                | Self::ForkVersion { .. }
+                | Self::Delete { .. }
+                | Self::Drop { .. }
+                | Self::Resize { .. }
+                | Self::Public { .. }
+                | Self::PublicAttachOnly { .. }
+                | Self::Attach { .. } => "live cell commands are",
+                Self::Import { .. } | Self::ImportMemory { .. } => "its imports are",
+                Self::Stat { .. } => "its cells' stats are",
+                Self::FormatBucket { .. }
+                | Self::AddBucket { .. }
+                | Self::Buckets { .. }
+                | Self::Formats { .. }
+                | Self::Ratchet { .. } => unreachable!("handled above"),
+            };
+            bail!(
+                "{what} the extent daemon's: name its control socket (CLADEFSD_GRPC), or pass --config"
+            );
         }
     }
 
@@ -1982,7 +1969,6 @@ mod cli {
 
     /// cladefs: `stats` as `stats --json` prints it (TASK-111.4): see the module docs. Maps' keys in
     /// order.
-    #[cfg(target_os = "linux")]
     fn stats_json(
         stats: &cladefs::cladefsd::control::proto::GetStatsResponse,
     ) -> serde_json::Value {
@@ -2033,7 +2019,6 @@ mod cli {
 
     /// cladefs: prints `value`, as one JSON object if `json`, otherwise as its lines ([`flattened`]):
     /// as `stats` and the API's other answers print (board 8585).
-    #[cfg(target_os = "linux")]
     fn print_value(value: &serde_json::Value, json: bool) -> anyhow::Result<()> {
         match json {
             true => println!("{}", serde_json::to_string_pretty(value)?),
@@ -2045,7 +2030,6 @@ mod cli {
     /// cladefs: what `StatCell` says of a cell, `stat`, every field by its name, as `cells` prints it
     /// (board 8585): its tenant and cell in base 32, its fsync level by name, `forced_after` null
     /// without one.
-    #[cfg(target_os = "linux")]
     fn stat_json(stat: &cladefs::cladefsd::control::proto::StatCellResponse) -> serde_json::Value {
         let cladefs::cladefsd::control::proto::StatCellResponse {
             tenant,
@@ -2117,7 +2101,6 @@ mod cli {
 
     /// cladefs: what `GetCounters` answers, `counters`, every field by its name, its bucket's under
     /// `object_storage`, as `counters` prints it (board 8585).
-    #[cfg(target_os = "linux")]
     fn counters_json(
         counters: &cladefs::cladefsd::control::proto::GetCountersResponse,
     ) -> serde_json::Value {
@@ -2180,7 +2163,6 @@ mod cli {
 
     /// cladefs: `value`, as lines of a path through it, its keys and indices joined by dots, and a
     /// value there that holds no other: what `stats` prints without `--json`.
-    #[cfg(target_os = "linux")]
     fn flattened(value: &serde_json::Value) -> String {
         use serde_json::Value;
         fn lines(at: &str, value: &Value, out: &mut String) {
@@ -2202,7 +2184,6 @@ mod cli {
     }
 
     /// Formats a `DiskInfo` for `cladefsctl disks [--json]`.
-    #[cfg(target_os = "linux")]
     fn disk_json(disk: &cladefs::cladefsd::control::proto::DiskInfo) -> serde_json::Value {
         use cladefs::cladefsd::control::proto::{DiskHealthMode, DiskPlacementMode};
         let health = match disk.state() {
@@ -2242,7 +2223,6 @@ mod cli {
         #[cfg(target_os = "linux")]
         cladefs::stacks::on_sigquit()?;
         // cladefs: warnings, as of reading what the collector marked (TASK-264).
-        #[cfg(target_os = "linux")]
         {
             use cladefs::cladefsd::logging;
             let warnings =
@@ -2305,13 +2285,10 @@ mod cli {
         let command = Command::parse(rest)?;
         match control_socket {
             Some(_) if command.is_on_buckets() => command.on_buckets(),
-            #[cfg(target_os = "linux")]
             Some(socket) => tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()?
                 .block_on(command.through(socket.as_ref(), timeout)),
-            #[cfg(not(target_os = "linux"))]
-            Some(socket) => command.through(socket.as_ref(), timeout),
             None => command.locally(),
         }
     }

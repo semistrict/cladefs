@@ -4,15 +4,13 @@
 
 //! Tests of cladefsctl, cladefs's tool for VMs' disks: offline commands (bucket administration,
 //! `import`, `import-memory`, read-only `stat`) without a daemon, and live-cell / control commands
-//! through an extent daemon's control API on Linux (TASK-43.5, board 11705, hotbed question 542).
+//! through an extent daemon's control API (TASK-43.5, board 11705, hotbed question 542).
 
-#[cfg(target_os = "linux")]
 use cladefs::{ExtentId, VolatileSliceMut};
 use cladefs::{OpenCell, VolatileSlice};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-#[cfg(target_os = "linux")]
 mod common;
 
 const BLOCK: usize = OpenCell::BLOCK_SIZE as usize;
@@ -44,7 +42,6 @@ impl Cladefsctl {
 
     /// cladefsctl acting through a daemon of its own, serving in `dir`, a host as tests have it
     /// ([`HOST`]), with `env` in its environment too.
-    #[cfg(target_os = "linux")]
     fn through_daemon(dir: &Path, env: &[(&str, &str)]) -> Self {
         Self { daemon: Some(daemon(dir, env, std::process::Stdio::inherit())), env: Vec::new() }
     }
@@ -69,9 +66,9 @@ impl Cladefsctl {
 }
 
 /// An extent daemon serving in `dir`, a host as tests have it ([`HOST`]), with `env` in its
-/// environment too, and its standard error `stderr`, once it serves its control API: the control
-/// socket, and the daemon, which goes with this.
-#[cfg(target_os = "linux")]
+/// environment too, and its standard error `stderr`, once it serves its control API and VM
+/// processes: the control socket, and the daemon, which goes with this. Each socket waited for: on
+/// macOS a test's VM found no `vms.sock` yet once the control socket served.
 fn daemon(dir: &Path, env: &[(&str, &str)], stderr: std::process::Stdio) -> (PathBuf, KillOnDrop) {
     use std::time::{Duration, Instant};
     let disk = dir.join("disk0");
@@ -86,9 +83,11 @@ fn daemon(dir: &Path, env: &[(&str, &str)], stderr: std::process::Stdio) -> (Pat
     let child = command.envs(HOST).envs(env.iter().copied()).spawn().unwrap();
     let child = KillOnDrop(child);
     let deadline = Instant::now() + Duration::from_secs(30);
-    while std::os::unix::net::UnixStream::connect(&control).is_err() {
-        assert!(Instant::now() < deadline, "the daemon never served");
-        std::thread::sleep(Duration::from_millis(20));
+    for socket in [&control, &dir.join("vms.sock")] {
+        while std::os::unix::net::UnixStream::connect(socket).is_err() {
+            assert!(Instant::now() < deadline, "the daemon never served at {}", socket.display());
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
     (control, child)
 }
@@ -104,7 +103,6 @@ impl Drop for KillOnDrop {
 
 /// TASK-154: `cladefsctl drop` deletes what `take` made, a copy of a cell this host holds nothing
 /// of, and a second finds nothing there.
-#[cfg(target_os = "linux")]
 #[test]
 fn copies_are_dropped_through_the_daemon() {
     let dir = tempfile::tempdir().unwrap();
@@ -121,7 +119,6 @@ fn copies_are_dropped_through_the_daemon() {
 
 /// TASK-395.7: `cladefsctl share` / `unshare` / `drop-versions` manage a cell's versions through
 /// the daemon.
-#[cfg(target_os = "linux")]
 #[test]
 fn versions_are_shared_and_unshared_through_the_daemon() {
     let dir = tempfile::tempdir().unwrap();
@@ -147,7 +144,6 @@ fn versions_are_shared_and_unshared_through_the_daemon() {
 /// TASK-39.4: `cladefsctl delete` deletes a cell whose fork lives: it in its bucket and its
 /// directory, the fork living on, a cell of its own, reading what it inherited in the bucket
 /// (TASK-165.7). Before, the cell directory stayed, holding what the fork shared of it.
-#[cfg(target_os = "linux")]
 #[test]
 fn cells_are_deleted_while_their_forks_live_through_the_daemon() {
     let dir = tempfile::tempdir().unwrap();
@@ -198,7 +194,6 @@ fn cells_are_deleted_while_their_forks_live_through_the_daemon() {
 /// bytes: of a new cell, none; of one written, its own, an extent written again or grown counted
 /// once; of its fork, all inherited; of the fork written and freed in, what it wrote and kept and
 /// what it kept of what it inherited; the cell forked from as before.
-#[cfg(target_os = "linux")]
 #[test]
 fn stat_counts_extents_through_the_daemon() {
     let dir = tempfile::tempdir().unwrap();
@@ -258,7 +253,6 @@ fn stat_counts_extents_through_the_daemon() {
 
 /// `cladefsctl stat` says what a cell holds, through the daemon, which owns its host's cells:
 /// offline once (board 11705), the daemon's alone since (board 14305).
-#[cfg(target_os = "linux")]
 #[test]
 fn stat_says_what_a_cell_holds() {
     let dir = tempfile::tempdir().unwrap();
@@ -282,7 +276,6 @@ fn stat_says_what_a_cell_holds() {
 }
 
 /// cladefsctl changes no cell another process has open: through the daemon, it refuses (`EBUSY`).
-#[cfg(target_os = "linux")]
 #[test]
 fn cells_open_elsewhere_are_left_alone_through_the_daemon() {
     let dir = tempfile::tempdir().unwrap();
@@ -354,7 +347,6 @@ fn buckets_are_added_in_turn_and_recorded_in_every_root() {
     assert_eq!(with_socket.run(&[Path::new("buckets"), Path::new(&root)]), Ok(expected));
     // A cell imported into `east`, through a daemon whose bucket it is, carries bucket 2 in its
     // ID's high bits.
-    #[cfg(target_os = "linux")]
     {
         let image = dir.path().join("layer.tar");
         std::fs::write(&image, layer(&[Entry::new("hello", Kind::File(b"hi\n"))]).unwrap())
@@ -371,7 +363,6 @@ fn buckets_are_added_in_turn_and_recorded_in_every_root() {
 /// `cladefsctl import` builds a base image into a cell of the daemon's, the daemon owning its
 /// host's cells (board 14305; offline, into a directory, before): its filesystem mounts and reads
 /// back cleanly, in the daemon's process.
-#[cfg(target_os = "linux")]
 #[test]
 fn images_imported_mount_and_read_back() {
     use cladefs::import::testing::{Entry, Kind, layer};
@@ -403,7 +394,6 @@ fn images_imported_mount_and_read_back() {
 
 /// Every command through the daemon: a cell imported, made a public base, grown, forked, synced
 /// to object storage, its fork dropped locally, taken back placed after it, and deleted.
-#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 async fn commands_through_the_daemon() {
     use cladefs::import::testing::{Entry, Kind, layer};
@@ -452,7 +442,6 @@ async fn commands_through_the_daemon() {
 /// and counters, and its VM process's, as its guest answered, with the guest's counters, histograms
 /// and build; without `--json`, the same as lines of a path and a value. Without the daemon,
 /// refused.
-#[cfg(target_os = "linux")]
 #[test]
 fn stats_are_of_one_moment_of_the_daemon_and_its_vms() {
     let dir = tempfile::tempdir().unwrap();
@@ -626,7 +615,6 @@ fn cladefsctl_writes_its_stacks_on_sigquit() {
 /// named, and prints its path: its VM processes open cells of that tenant alone. Granted again, it
 /// prints it again. `revoke` takes it away: its VM process connected keeps its cell, and no other
 /// connects; revoked again, there is no grant to revoke.
-#[cfg(target_os = "linux")]
 #[test]
 fn tenants_are_granted_and_revoked() {
     use cladefs::{CellClient, Errno};
@@ -670,7 +658,6 @@ fn grants_need_the_daemon() {
 /// TASK-48: SIGTERM stops the daemon: it exits, successfully. cladefs: board 8567: and so do SIGINT
 /// (Ctrl-C) and SIGHUP (its terminal closing), drained as SIGTERM drains it, where their default
 /// action killed it, every cell crashed.
-#[cfg(target_os = "linux")]
 #[test]
 fn the_daemon_stops_on_sigterm() {
     for signal in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
@@ -753,7 +740,6 @@ fn the_version_is_the_build_commit() {
 /// board 8585: `cells` lists the cells VM processes have open, each with what StatCell says of it,
 /// and `counters` the daemon's counters, its bucket's with them; as lines of a path and a value, or
 /// with `--json` as one JSON object.
-#[cfg(target_os = "linux")]
 #[test]
 fn cells_and_counters_through_the_daemon() {
     let dir = tempfile::tempdir().unwrap();
@@ -795,7 +781,6 @@ fn cells_and_counters_through_the_daemon() {
 
 /// hotbed question 547: `cladefsctl disks` and `cladefsctl set-disk` inspect and update per-disk
 /// caps and placement governance at runtime through the control API.
-#[cfg(target_os = "linux")]
 #[test]
 fn disks_and_set_disk_through_the_daemon() {
     let dir = tempfile::tempdir().unwrap();
@@ -824,7 +809,6 @@ fn disks_and_set_disk_through_the_daemon() {
 /// board 8585: the memory's and the disks' calls through cladefsctl, of a tenant granted and of
 /// every tenant: what each answers printed, nothing for those answering nothing, and a refusal
 /// said with its errno.
-#[cfg(target_os = "linux")]
 #[test]
 fn memory_and_disks_through_the_daemon() {
     let dir = tempfile::tempdir().unwrap();
@@ -880,7 +864,6 @@ fn memory_and_disks_through_the_daemon() {
 
 /// board 8585: `set-peers`, `migrate` and `hand-over` reach the daemon's calls, which say what they
 /// refuse: no peers, a cell no migration's, a migration of none; board 8577: `abort-migration` too.
-#[cfg(target_os = "linux")]
 #[test]
 fn peers_and_migrations_through_the_daemon() {
     let dir = tempfile::tempdir().unwrap();
@@ -920,7 +903,6 @@ fn peers_and_migrations_through_the_daemon() {
 /// board 8585: `--timeout`, or CLADEFSCTL_TIMEOUT, bounds a call the daemon holds, here a GetStats
 /// waiting for a guest that never answers: it fails in about the time given, `ETIMEDOUT`, saying
 /// the daemon may still complete it.
-#[cfg(target_os = "linux")]
 #[test]
 fn calls_end_at_their_timeouts() {
     use std::time::{Duration, Instant};
@@ -1061,7 +1043,6 @@ fn calls_of_the_daemon_need_it() {
 }
 
 /// TASK-45: the daemon refuses to start without the bucket and its placement token, saying why.
-#[cfg(target_os = "linux")]
 #[test]
 fn the_daemon_needs_a_bucket_and_a_token() {
     let dir = tempfile::tempdir().unwrap();
@@ -1087,7 +1068,6 @@ fn the_daemon_needs_a_bucket_and_a_token() {
 /// The standard error of a daemon that refused to start in `dir`, a host as tests have it
 /// ([`HOST`]), with `env`, and `limit` open files at most if given: it exits, failing, having bound
 /// no socket.
-#[cfg(target_os = "linux")]
 fn refused_to_start(dir: &Path, env: &[(&str, &str)], limit: Option<u64>) -> String {
     use std::os::unix::process::CommandExt as _;
     let mut command = Command::new(env!("CARGO_BIN_EXE_cladefsd"));
@@ -1126,7 +1106,6 @@ fn refused_to_start(dir: &Path, env: &[(&str, &str)], limit: Option<u64>) -> Str
 
 /// board 8595: a root of CLADEFSD_ROOTS that is no directory stops the daemon at its start, naming
 /// it: it was dropped, its paths refused to every VM while the daemon served.
-#[cfg(target_os = "linux")]
 #[test]
 fn the_daemon_refuses_roots_it_cannot_resolve() {
     let dir = tempfile::tempdir().unwrap();
@@ -1147,7 +1126,6 @@ fn the_daemon_refuses_roots_it_cannot_resolve() {
 /// and why, with no peers too: one on a filesystem that can't bypass the page cache (the
 /// `direct::bypass` failpoint), one another daemon holds locked, one under a file; each cell's
 /// opening failed EIO while it served.
-#[cfg(target_os = "linux")]
 #[test]
 fn the_daemon_refuses_a_part_cache_it_cannot_use() {
     let dir = tempfile::tempdir().unwrap();
@@ -1178,7 +1156,6 @@ fn the_daemon_refuses_a_part_cache_it_cannot_use() {
 /// board 14217: a limit of open files under the daemon's floor is a warning, its doctor's, naming
 /// RLIMIT_NOFILE, the floor and the cells it leaves room for, and the daemon starts and serves
 /// (the user, 2026-11-26). It refused to start before (board 8595).
-#[cfg(target_os = "linux")]
 #[test]
 fn the_daemon_warns_of_too_few_open_files() {
     use std::os::unix::process::CommandExt as _;
@@ -1212,17 +1189,18 @@ fn the_daemon_warns_of_too_few_open_files() {
     daemon.0.wait().unwrap();
     let mut stderr = String::new();
     std::io::Read::read_to_string(&mut daemon.0.stderr.take().unwrap(), &mut stderr).unwrap();
-    let cells = (limit - 1024) / 212;
+    // Its own 1024, and each cell's files.
+    let floor_cells = cladefs::cladefsd::FLOOR_CELLS;
+    let cells = (limit - 1024) / ((floor - 1024) / floor_cells);
     let warned = format!(
-        "cladefsd: doctor: open files: RLIMIT_NOFILE is {limit}, under the {floor} for 256 cells' \
-         files at their most: the daemon serves room for {cells}"
+        "cladefsd: doctor: open files: RLIMIT_NOFILE is {limit}, under the {floor} for \
+         {floor_cells} cells' files at their most: the daemon serves room for {cells}"
     );
     assert!(stderr.contains(&warned), "{stderr}");
 }
 
 /// board 14217: `cladefsd --doctor` says what the daemon's doctor finds of the host, a line a
 /// check, starting no daemon: with a memory size, as a daemon given one, no governor's check.
-#[cfg(target_os = "linux")]
 #[test]
 fn the_doctor_says_what_it_finds_of_the_host() {
     let output = Command::new(env!("CARGO_BIN_EXE_cladefsd"))
