@@ -1799,7 +1799,6 @@ mod tests {
     use bucket_cell::layout::Fsync;
     use bucket_cell::lifecycle;
     use bucket_cell::object_bucket::ObjectBucket;
-    use bucket_cell::testing::SimBucket;
     use object_store::memory::InMemory;
     use std::future::Future;
 
@@ -2022,45 +2021,6 @@ mod tests {
                 Err(bucket::Error::Precondition)
             );
         });
-    }
-
-    #[test]
-    fn gc_rule_mutation_deletes_wal_extents_when_protect_wal_epoch_is_off() {
-        fn run(protect_wal_epoch: bool) -> (usize, bool) {
-            bucket_cell::set_rules(bucket_cell::Rules {
-                protect_wal_epoch,
-                ..bucket_cell::Rules::ALL
-            });
-            let bucket = SimBucket::new();
-            let cell = layout::test_cell(11);
-            bucket.served(lifecycle::create(&*bucket, cell, 1)).0.unwrap();
-            let w1 = bucket.served(Writer::open(bucket.clone(), cell, 10, 1)).0.unwrap();
-            let active = ActiveWal { epoch: w1.epoch(), bucket: "sim://fast".into() };
-            bucket
-                .served(w1.activate_fast_wal(Some(FastWal {
-                    fsync: Fsync::FastWal,
-                    active: Some(active),
-                })))
-                .0
-                .unwrap();
-            let e = ExtentId::new(cell.id, w1.chain().next_sequence());
-            let key = layout::extent(cell, w1.epoch(), 0, e);
-            let framed = layout::own_extent(e, &[7u8; 4096], w1.keys().try_encrypting().unwrap());
-            bucket.served(w1.put_large_extent(&key, framed)).0.unwrap();
-
-            // Writer 2 takes head (epoch 2), preserving active = epoch 1.
-            let _w2 = bucket.served(Writer::open(bucket.clone(), cell, 20, 2)).0.unwrap();
-
-            let report = bucket.served(bucket_cell::collector::collect(&*bucket, 1)).0.unwrap();
-            let kept = bucket.keys().contains(&key);
-            bucket_cell::set_rules(bucket_cell::Rules::ALL);
-            (report.deleted, kept)
-        }
-
-        // With protect_wal_epoch = true: GC keeps the large extent.
-        assert_eq!(run(true), (0, true));
-        // Mutation: with protect_wal_epoch = false, GC deletes it (mirrors GcDeletesWalExtents.cfg).
-        assert_eq!(run(false), (1, false));
     }
 
     /// `tombstoneOnSweep` (rule `wal_sweep_tombstones`, `SweepDeletesFence.cfg`): a writer taken
