@@ -383,7 +383,7 @@ mod tests {
     #[test]
     fn crashes_fail_by_signal() {
         let ended = run_script("ulimit -c 0; kill -BUS $$", Duration::from_secs(10));
-        assert_eq!(ended, (Ok(Ended::Signalled(libc::SIGBUS)), false, true));
+        assert_eq!(ended, (Ok(Ended::Signalled(GUEST_SIGBUS)), false, true));
     }
 
     /// A check running on past its budget is told of, killed, and fails.

@@ -135,7 +135,7 @@ impl TestFxfsGuestChecks {
             let budget = check.budget.mul_f64(scale);
             match check.name {
                 "crashes" => {
-                    ended("crashes", Ended::Signalled(nix::libc::SIGBUS))?;
+                    ended("crashes", Ended::Signalled(GUEST_SIGBUS))?;
                     said("crashes: left cladefs.dax_fail_maps at 1000, set back to 0".to_owned())?;
                 }
                 "hangs" => {

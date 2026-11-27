@@ -70,10 +70,28 @@ pub(crate) enum Ended {
     Passed,
     /// With a status other than 0: 101 as it panicked, the panic's message before it in the log.
     Exited(i32),
-    /// By a signal: a crash, such as a SIGBUS.
+    /// By a signal, the guest's (Linux's) number: a crash, such as a SIGBUS ([`GUEST_SIGBUS`]).
     Signalled(i32),
     /// Running on past its budget: killed.
     Overran,
+}
+
+/// Linux's SIGBUS, the guest's, whatever the host's is (macOS's is 10): the guest names a check's
+/// signal by Linux's numbers, and the host reads its log by them.
+pub(crate) const GUEST_SIGBUS: i32 = 7;
+
+/// The name of Linux's signal `signal`, of those a check's process may die of: the guest's and
+/// the host's alike, which neither's libc gives (macOS numbers its signals otherwise).
+fn guest_signal_name(signal: i32) -> Option<&'static str> {
+    Some(match signal {
+        4 => "SIGILL",
+        6 => "SIGABRT",
+        GUEST_SIGBUS => "SIGBUS",
+        8 => "SIGFPE",
+        9 => "SIGKILL",
+        11 => "SIGSEGV",
+        _ => return None,
+    })
 }
 
 impl std::fmt::Display for Ended {
@@ -81,11 +99,10 @@ impl std::fmt::Display for Ended {
         match *self {
             Ended::Passed => write!(f, "passed"),
             Ended::Exited(status) => write!(f, "exited with {status}"),
-            Ended::Signalled(signal) => {
-                // SAFETY: strsignal's string, which this copies before anything calls it again.
-                let name = unsafe { std::ffi::CStr::from_ptr(nix::libc::strsignal(signal)) };
-                write!(f, "killed by signal {signal} ({})", name.to_string_lossy())
-            }
+            Ended::Signalled(signal) => match guest_signal_name(signal) {
+                Some(name) => write!(f, "killed by signal {signal} ({name})"),
+                None => write!(f, "killed by signal {signal}"),
+            },
             Ended::Overran => write!(f, "still running after its budget: killed"),
         }
     }
@@ -406,10 +423,9 @@ mod tests {
     #[test]
     fn ends_say_how() {
         assert_eq!(Ended::Exited(101).to_string(), "exited with 101");
-        let signalled = Ended::Signalled(nix::libc::SIGBUS).to_string();
-        // strsignal's name, the libc's: the guest's musl, or the host's (macOS's adds its number).
-        let name = if cfg!(target_os = "macos") { "Bus error: 10" } else { "Bus error" };
-        assert_eq!(signalled, format!("killed by signal {} ({name})", nix::libc::SIGBUS));
+        // Linux's numbers and names, the guest's, on any host.
+        assert_eq!(Ended::Signalled(GUEST_SIGBUS).to_string(), "killed by signal 7 (SIGBUS)");
+        assert_eq!(Ended::Signalled(64).to_string(), "killed by signal 64");
         assert_eq!(Ended::Overran.to_string(), "still running after its budget: killed");
     }
 
