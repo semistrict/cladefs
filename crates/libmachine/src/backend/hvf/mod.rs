@@ -965,11 +965,19 @@ impl Vcpu {
                 match virtio_extent::window_fault(e.physical_address, write) {
                     // The page mapped, the access is retried.
                     Some(Ok(())) => Ok(Exit::Handled(ExitKind::AccessRetried)),
-                    Some(Err(errno)) => Err(Error::ExtentStore(format!(
-                        "a guest access to its DAX window at {:#x} ({}) failed: {errno}",
-                        e.physical_address,
-                        if write { "write" } else { "read" }
-                    ))),
+                    Some(Err(errno)) => {
+                        let why = format!(
+                            "a guest access to its DAX window at {:#x} ({}) failed: {errno}",
+                            e.physical_address,
+                            if write { "write" } else { "read" }
+                        );
+                        // ENOTCONN: the window's daemon, or its cell, went; anything else is the
+                        // guest's access refused (`HvfSecondStage::fault`).
+                        Err(match errno {
+                            cladefs::Errno::ENOTCONN => Error::ExtentDaemonLost(why),
+                            _ => Error::AccessRefused(why),
+                        })
+                    }
                     None if class == EC_DATA_ABORT_LOWER => {
                         self.data_abort(id, syndrome, e.physical_address)
                     }

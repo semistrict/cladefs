@@ -451,7 +451,7 @@ impl MachineVcpu {
                     self.exits.count(ExitKind::AccessRetried);
                     match accesses.failed(fault) {
                         Ok(()) => continue,
-                        Err(why) => return Some(Err(Error::ExtentStore(why))),
+                        Err(why) => return Some(Err(Error::AccessRefused(why))),
                     }
                 }
                 exit => {

@@ -88,9 +88,10 @@ pub enum Error {
     #[error("snapshot: {0}")]
     Snapshot(String),
 
-    /// An extent store device stopped the machine for good: its extent daemon went, its guest's
-    /// accesses to its DAX window kept failing (past `private_max`, or refused), or it could not
-    /// be activated. Every run of the machine ends at once with it from then on.
+    /// An extent store device stopped the machine for good: it could not be activated, or failed
+    /// otherwise than by its daemon's going ([`Error::ExtentDaemonLost`]) or a guest's access
+    /// refused ([`Error::AccessRefused`]). Every run of the machine ends at once with it from then
+    /// on.
     #[error("extent store device: {0}")]
     ExtentStore(String),
 
@@ -100,6 +101,12 @@ pub enum Error {
     /// machine ends at once with it from then on.
     #[error("extent store device: {0}")]
     ExtentDaemonLost(String),
+
+    /// cladefs: a guest's access to an extent store device's DAX window was refused for good, and
+    /// the machine can't go on: a page nothing maps there, or a store past the window's
+    /// `private_max` (Firecracker's `AccessRefused`, TASK-70).
+    #[error("extent store device: {0}")]
+    AccessRefused(String),
 
     /// The guest is not idle, so it cannot be suspended now
     /// ([`Machine::suspend`](crate::Machine::suspend)): a vCPU is running

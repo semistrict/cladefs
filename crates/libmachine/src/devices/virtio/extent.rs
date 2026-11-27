@@ -22,10 +22,11 @@
 //!   the BAR itself (`hv_vm_map`) as cladefs's stage says, and the vCPUs hand it the guest's
 //!   aborts on the window (`virtio_extent::window_fault`, board 13069). The BAR never moves
 //!   (hotbed question 571).
-//! - **Stopping the machine:** as the extent daemon goes, or the device can't be activated, the
-//!   machine stops for good with `Error::ExtentStore` (`StopShared::fail`); the vCPUs stop it so
-//!   too when a guest's access to the window keeps failing (`virtio_extent::vcpu`; hotbed question
-//!   573).
+//! - **Stopping the machine:** as the extent daemon goes, the machine stops for good with
+//!   `Error::ExtentDaemonLost`, or, as the device can't be activated, `Error::ExtentStore`
+//!   (`StopShared::fail`); the vCPUs stop it with
+//!   `Error::AccessRefused` when a guest's access to the window is refused for good
+//!   (`virtio_extent::vcpu` on KVM, `HvfSecondStage::fault` on macOS; hotbed question 573).
 //! - **Snapshots** (board 13139), as doc-4 has them and Firecracker's adapter takes them: the
 //!   machine's snapshot pauses the device's workers, their queues back in the transport where
 //!   they left them (`VirtioDevice::pause_queues`), then has virtio_extent take the device's

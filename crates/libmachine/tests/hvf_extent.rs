@@ -344,3 +344,39 @@ fn a_migration_snapshot_maps_the_window_again() {
     let m = running.stop();
     eprintln!("{:?}", m.exit_counts());
 }
+
+/// A guest's access to its DAX window where nothing is mapped (cladefs.dax_stray, a guest keeping
+/// to no protocol) stops the machine at once with `Error::AccessRefused`, saying where: never a
+/// hang (board 14374), nor the daemon's going (`Error::ExtentStore`).
+#[test]
+fn a_stray_window_access_stops_the_machine() {
+    let Some((_daemon, _dir, mut running)) = boot_with_a_window() else {
+        return;
+    };
+    // Past the file and busybox the guest wrote, which its window maps from its start.
+    let offset = 60u64 << 20;
+    let agent = running.agent.clone();
+    // The guest answers nothing once its vCPU stops: the exec waits out its timeout, unwaited.
+    let _stray = std::thread::spawn(move || {
+        let mut cmd = Command::new("sh");
+        cmd.args([
+            "-c",
+            &format!("echo 'load {offset}' > /sys/module/cladefs/parameters/dax_stray"),
+        ]);
+        agent.exec(&cmd)
+    });
+    let runner = running.runner.take().unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !runner.is_finished() {
+        assert!(std::time::Instant::now() < deadline, "the machine runs on past a stray access");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let (exit, m) = runner.join().expect("the run thread");
+    let console = String::from_utf8_lossy(&m.serial_output()).into_owned();
+    match exit {
+        Err(libmachine::Error::AccessRefused(why)) => {
+            assert!(why.contains("(read) failed: ENOENT"), "{why}");
+        }
+        other => panic!("{other:?}; console:\n{console}"),
+    }
+}

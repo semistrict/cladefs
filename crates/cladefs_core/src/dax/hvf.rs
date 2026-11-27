@@ -363,8 +363,10 @@ impl HvfSecondStage {
     /// Resolves the guest's fault at `offset` in the window, for `access`, blocking its vCPU until
     /// the access may be retried: a page not mapped is named by the daemon, which maps it; a write
     /// to a page mapped makes it private, a writer's window's. `ENOENT` if the daemon names nothing
-    /// there, `EROFS` for a write to a window that doesn't copy, `ENOMEM` past its private units,
-    /// `ENOTCONN` before it serves faults: each a fault the guest can't go on from.
+    /// there, `EROFS` for a write to a window that doesn't copy, `ENOMEM` past its private units:
+    /// each the guest's access refused. `ENOTCONN` before it serves faults, once it is released,
+    /// or once what resolves its faults went ([`Faults::lost`]): nothing refused, the VM can't go
+    /// on without its daemon.
     pub fn fault(&self, offset: u64, access: Access) -> Result<(), Errno> {
         if offset >= self.size {
             return Err(Errno::EINVAL);
@@ -392,7 +394,9 @@ impl HvfSecondStage {
                     (None, _) => {}
                 }
             }
-            futures::executor::block_on(faults.fault_page(at))?;
+            if let Err(err) = futures::executor::block_on(faults.fault_page(at)) {
+                return Err(if faults.lost() { Errno::ENOTCONN } else { err });
+            }
             named = true;
         }
     }
@@ -798,6 +802,52 @@ mod tests {
                 format!("map ro {unit:#x} {:#x}", 2 * unit),
             ]
         );
+    }
+
+    /// Faults whose daemon names nothing, refusing each with `refusal`, gone if `lost`.
+    struct Refusing {
+        refusal: Errno,
+        lost: bool,
+    }
+
+    impl Faults for Refusing {
+        fn size(&self) -> u64 {
+            1 << 20
+        }
+
+        fn fault_page(&self, _: u64) -> futures::future::BoxFuture<'_, Result<(), Errno>> {
+            Box::pin(std::future::ready(Err(self.refusal)))
+        }
+
+        fn probe(&self, _: u64) -> futures::future::BoxFuture<'_, Result<(), Errno>> {
+            Box::pin(std::future::ready(Err(self.refusal)))
+        }
+
+        fn lost(&self) -> bool {
+            self.lost
+        }
+    }
+
+    /// A fault the daemon refuses is the guest's access refused, by its errno, which the VMM
+    /// stops the machine for (libmachine's `AccessRefused`); one failing as the daemon went is
+    /// `ENOTCONN`, as a stage released or not yet serving faults is: the daemon lost, nothing
+    /// refused (board 14374).
+    #[test]
+    fn faults_say_refused_apart_from_the_daemon_gone() {
+        for (refusal, lost, said) in [
+            (Errno::ENOENT, false, Errno::ENOENT),
+            (Errno::EIO, false, Errno::EIO),
+            (Errno::EIO, true, Errno::ENOTCONN),
+            (Errno::ENOENT, true, Errno::ENOTCONN),
+        ] {
+            let (stage, _guest) = stage();
+            assert_eq!(stage.fault(0, Access::Read), Err(Errno::ENOTCONN), "not serving yet");
+            let _serving = stage.serve(Arc::new(Refusing { refusal, lost })).unwrap();
+            assert_eq!(stage.fault(0, Access::Read), Err(said), "{refusal:?}, lost {lost}");
+            assert_eq!(stage.fault(0, Access::Write), Err(said), "{refusal:?}, lost {lost}");
+            stage.release();
+            assert_eq!(stage.fault(0, Access::Read), Err(Errno::ENOTCONN), "released");
+        }
     }
 
     /// A unit made private stays the guest's copy through a map over it and a host's unmap

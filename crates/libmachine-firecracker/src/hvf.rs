@@ -20,6 +20,9 @@ use crate::memory::CellMemory;
 
 /// Firecracker's exit code once its extent daemon goes (`FcExitCode::CladefsdLost`).
 const CLADEFSD_LOST: i32 = 158;
+/// Firecracker's exit code once a guest's access to a DAX window is refused for good
+/// (`FcExitCode::AccessRefused`): a page nothing maps there, or a store past `private_max`.
+const ACCESS_REFUSED: i32 = 159;
 
 /// What its command line says.
 #[derive(Debug, Default)]
@@ -371,7 +374,8 @@ impl Vmm {
     }
 
     /// Runs the microVM, serving the API's requests between its runs, until it ends: 0 once
-    /// its guest resets or powers off, 158 once its extent daemon goes.
+    /// its guest resets or powers off, 158 once its extent daemon goes, 159 once a guest's access
+    /// to a DAX window is refused for good.
     fn serve(
         mut self,
         rx: &mpsc::Receiver<Request>,
@@ -390,6 +394,10 @@ impl Vmm {
                         return Ok(CLADEFSD_LOST);
                     }
                     Err(e @ Error::ExtentDaemonLost(_)) => return Err(ending("running", e)),
+                    Err(Error::AccessRefused(why)) => {
+                        log.say(&format!("the extent store device stopped the machine: {why}"));
+                        return Ok(ACCESS_REFUSED);
+                    }
                     Ok(other) => return Err(format!("the machine stopped: {other:?}").into()),
                     Err(e) => return Err(format!("the machine failed: {e}").into()),
                 }

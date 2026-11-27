@@ -52,8 +52,8 @@
 //!
 //! The guest's serial console goes to standard output. It exits as Firecracker does: 0 once the
 //! guest resets or powers off (the tests' guest agent reboots it as a case ends), 158 once its
-//! extent daemon goes (Firecracker's `CladefsdLost`), 1 otherwise, saying why on standard error and
-//! in its log.
+//! extent daemon goes (Firecracker's `CladefsdLost`), 159 once a guest's access to a DAX window is
+//! refused for good (`AccessRefused`), 1 otherwise, saying why on standard error and in its log.
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 mod hvf;
