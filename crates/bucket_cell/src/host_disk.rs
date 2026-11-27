@@ -31,11 +31,16 @@ pub enum DiskHeadroom {
 
 impl DiskHeadroom {
     /// Computes the headroom in bytes for a capacity of `size` bytes, falling back to the
-    /// default (5% of `size`, at least 4 GiB, at most half of `size`) when `set` is `None`.
+    /// default when `set` is `None`: on Linux, a host's own disk, 5% of `size`, at least 4 GiB
+    /// (the user, 2026-11-18); on macOS, a developer's working disk, whose APFS volumes share one
+    /// container's space and often most of it, 8 GiB (the user, 2026-11-27: 5% of a 1.8 TiB disk
+    /// was 93 GiB, more than it had free, and the daemon refused every cell); half of `size` at
+    /// most.
     pub fn resolve(size: u64, set: Option<Self>) -> u64 {
         match set {
             Some(Self::Bytes(bytes)) => bytes,
             Some(Self::Percent(percent)) => ((u128::from(size) * u128::from(percent)) / 100) as u64,
+            None if cfg!(target_os = "macos") => (8u64 << 30).min(size / 2),
             None => (size / 20).max(4 << 30).min(size / 2),
         }
     }

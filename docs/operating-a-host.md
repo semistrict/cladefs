@@ -102,7 +102,8 @@ lower `MEMORY_BYTES` or the total limit instead.
 Governed as the memory is (backlog doc-22): every filesystem the daemon keeps
 cell directories or its part cache on is the daemon's but for a headroom
 (`CLADEFSD_DISK_HEADROOM`, bytes or `N%`; by default a twentieth of the
-filesystem, 4 GiB at least, half of it at most), and, if `CLADEFSD_DISK_BYTES`
+filesystem, 4 GiB at least, half of it at most; on macOS 8 GiB, a developer's
+working disk), and, if `CLADEFSD_DISK_BYTES`
 is set, no more than that on all of them together. A disk governor looks at
 each filesystem every 100 ms (`fstatvfs`), and at once when a write is refused:
 what the daemon may keep there, its allowance, is what it holds and what is

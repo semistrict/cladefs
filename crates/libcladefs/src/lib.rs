@@ -117,8 +117,8 @@ impl Config {
         self
     }
 
-    /// The bytes each disk keeps free, which the daemon's cells never fill: max(5%, 4 GiB) of the
-    /// disk unless said, too much of a developer's nearly full disk.
+    /// The bytes each disk keeps free, which the daemon's cells never fill: unless said, on macOS
+    /// 8 GiB, elsewhere max(5%, 4 GiB) of the disk (`DiskHeadroom::resolve`).
     pub fn disk_headroom(mut self, bytes: u64) -> Self {
         self.0.disk.headroom = Some(cladefs_core::config::HeadroomSpec(
             bucket_cell::host_disk::DiskHeadroom::Bytes(bytes),

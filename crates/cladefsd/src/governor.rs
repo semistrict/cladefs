@@ -1675,9 +1675,9 @@ pub fn disk_headroom_of(value: Option<&str>) -> Result<Option<DiskHeadroom>, Str
 }
 
 /// cladefs: what the disk governor leaves free of a filesystem of `size` bytes: `set`, or, unset, a
-/// twentieth of it, 4 GiB at least, half of it at most: room for others' writes between its looks,
-/// for what its cells' commits add unadmitted (TASK-539.15), and a neighbour's (user, 2026-11-18:
-/// 5%, 4 GiB at least).
+/// twentieth of it, 4 GiB at least (on macOS 8 GiB: `DiskHeadroom::resolve`), half of it at most:
+/// room for others' writes between its looks, for what its cells' commits add unadmitted
+/// (TASK-539.15), and a neighbour's (user, 2026-11-18: 5%, 4 GiB at least).
 pub fn disk_headroom(size: u64, set: Option<DiskHeadroom>) -> u64 {
     DiskHeadroom::resolve(size, set)
 }
@@ -1761,9 +1761,14 @@ mod tests {
                 Err(format!("CLADEFSD_DISK_HEADROOM is bytes or N%, not {wrong:?}"))
             );
         }
-        // A twentieth of a large disk; 4 GiB at least; half of a small one at most.
-        assert_eq!(disk_headroom(4000 * GIB, None), 200 * GIB);
-        assert_eq!(disk_headroom(40 * GIB, None), 4 * GIB);
+        // A twentieth of a large disk; 4 GiB at least; on macOS, 8 GiB; half of a small one at
+        // most.
+        let (large, middling) = match cfg!(target_os = "macos") {
+            true => (8 * GIB, 8 * GIB),
+            false => (200 * GIB, 4 * GIB),
+        };
+        assert_eq!(disk_headroom(4000 * GIB, None), large);
+        assert_eq!(disk_headroom(40 * GIB, None), middling);
         assert_eq!(disk_headroom(2 * GIB, None), GIB);
         assert_eq!(disk_headroom(4000 * GIB, Some(DiskHeadroom::Percent(2))), 80 * GIB);
         assert_eq!(disk_headroom(4000 * GIB, Some(DiskHeadroom::Bytes(GIB))), GIB);
