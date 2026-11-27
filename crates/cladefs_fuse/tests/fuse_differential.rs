@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Random sequences of file system calls made on a FUSE mount of a new cell (`cladefs::fuse`) and
+//! Random sequences of file system calls made on a FUSE mount of a new cell (`cladefs_fuse`) and
 //! on a directory of Linux's own tmpfs beside it, their results compared (TASK-149.37): Linux's
 //! filesystem the oracle of the host's `Node` layer, which plays Linux's VFS for Fxfs, of
 //! fxfs-posix under it, and of the FUSE server over it, as the guest's fsx differential holds the
@@ -31,8 +31,8 @@
 
 #![cfg(target_os = "linux")]
 
-use cladefs::fuse::{Mount, MountOptions};
-use cladefs::{FileType, Filesystem, Node, SetAttr, Storage};
+use cladefs_fs::{FileType, Filesystem, Node, SetAttr, Storage};
+use cladefs_fuse::{Mount, MountOptions};
 use futures::executor::block_on;
 use proptest::prelude::*;
 use proptest::strategy::Union;
@@ -1197,7 +1197,7 @@ async fn cell_tree(fs: &Filesystem) -> Tree {
     let mut found = BTreeMap::new();
     let root = fs.root().clone();
     let attr = root.getattr().await.unwrap();
-    let mut stack: Vec<(String, Node, cladefs::Attr)> = vec![(".".to_owned(), root, attr)];
+    let mut stack: Vec<(String, Node, cladefs_fs::Attr)> = vec![(".".to_owned(), root, attr)];
     while let Some((path, node, attr)) = stack.pop() {
         // The device numbers the kernel encodes in FUSE's 32 bits (new_encode_dev).
         let rdev = ((attr.rdev & 0xfff00) >> 8, (attr.rdev & 0xff) | ((attr.rdev >> 12) & 0xfff00));
@@ -1233,7 +1233,7 @@ async fn cell_tree(fs: &Filesystem) -> Tree {
             }
             Ok(xattrs)
         };
-        let xattrs = xattrs.await.map_err(|errno: cladefs::Errno| errno.raw());
+        let xattrs = xattrs.await.map_err(|errno: cladefs_core::Errno| errno.raw());
         found.insert(path, (attr.inode.0, stat, data, xattrs));
     }
     Tree::of(found)

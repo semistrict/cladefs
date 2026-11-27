@@ -120,7 +120,8 @@ pub(super) async fn serve_control_with(
 /// cladefs: the control API's services for `daemon`, the sockets of the tenants it grants in the
 /// directory `tenants`: Cladefsd, tonic's health service, its status reported as the daemon
 /// serves VM processes or stops, and the Mount service of the daemon's FUSE mount of cells, if it
-/// has one ([`crate::mount`], TASK-475.2), whose calls, without a mount, fail `UNIMPLEMENTED`.
+/// has one ([`crate::mount`], TASK-475.2), whose calls, without a mount, fail `UNIMPLEMENTED`:
+/// saying why, of a daemon that can mount none (built without `mount`, or not on Linux).
 /// Each call counted and refused as the daemon drains. What cladefsd serves on its control socket
 /// ([`serve_control_with`]), and an embedder on an endpoint of its own (libcladefs, board 13471).
 #[cfg(not(madsim))]
@@ -164,8 +165,8 @@ pub(crate) async fn routes(daemon: Arc<Daemon>, tenants: PathBuf) -> tonic::serv
             &daemon,
             CladefsdServer::new(control).max_encoding_message_size(MAX_MESSAGE_BYTES),
         )));
-    // cladefs: its FUSE mount's, if it mounts cells (TASK-475.2): Linux's.
-    #[cfg(target_os = "linux")]
+    // cladefs: its FUSE mount's, if it mounts cells (TASK-475.2); of a daemon that can mount none,
+    // one that refuses its calls, saying why (board 14536).
     let routes = match crate::mount::service_on(&daemon) {
         Some(mount) => routes.add_service(Served::new(Drained::new(&daemon, mount))),
         None => routes,

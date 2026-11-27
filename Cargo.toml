@@ -139,7 +139,10 @@ cladefs_proto = { path = "crates/cladefs_proto" }
 cladefs_core = { path = "crates/cladefs_core" }
 cladefs_wire = { path = "crates/cladefs_wire" }
 cladefs_fs = { path = "crates/cladefs_fs" }
-cladefsd = { path = "crates/cladefsd" }
+cladefs_fuse = { path = "crates/cladefs_fuse" }
+# cladefs: without its default features, its FUSE mount among them (`mount`, board 14536): each
+# dependant says whether its daemon mounts cells, as cladefs's does and libcladefs's does not.
+cladefsd = { path = "crates/cladefsd", default-features = false }
 vhost_user = { path = "crates/vhost_user" }
 libcladefs = { path = "crates/libcladefs" }
 

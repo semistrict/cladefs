@@ -16,8 +16,8 @@ use base32_id::Padded;
 use bucket_cell::cell::Kind;
 use cladefs_core::error::{Errno, Error};
 use cladefs_core::{CellId, CellOf};
-use cladefs_fs::fuse::server::Server;
 use cladefs_fs::{Filesystem, SetAttr, Storage};
+use cladefs_fuse::server::Server;
 use proto::mount_client::MountClient;
 use proto::*;
 use std::collections::BTreeMap;
@@ -84,10 +84,46 @@ impl CellSource {
     }
 }
 
+/// What the mount asks of the daemon's managed disks, placing the cells it attaches.
+impl crate::Daemon {
+    /// Checks whether the daemon's [`crate::disks::DiskPool`] (if configured) currently has a
+    /// writable disk that accepts new cells (`ENOSPC` if all disks are draining/read-only/full).
+    pub(crate) fn check_disk_placement(&self) -> Result<(), cladefs_core::Errno> {
+        if let Some(pool) = self.disk_pool.get() {
+            drop(pool.pick_disk()?);
+        }
+        Ok(())
+    }
+
+    /// Resolves `cell`'s existing path in [`crate::disks::DiskPool`], or picks an eligible
+    /// `ReadWrite` disk and prepares `<disk>/cells/<TENANT>/<CELL>`. Returns `Ok(None)` when no
+    /// managed disk pool is configured (a daemon booted of `CLADEFSD_MOUNT_STORES` alone).
+    pub(crate) fn resolve_or_pick_cell_path(
+        &self,
+        cell: cladefs_core::CellId,
+    ) -> Result<Option<PathBuf>, cladefs_core::Errno> {
+        let Some(pool) = self.disk_pool.get() else {
+            return Ok(None);
+        };
+        if let Some(existing) = pool.find_cell(cell) {
+            return Ok(Some(existing));
+        }
+        let disk = pool.pick_disk()?;
+        drop(crate::disks::DiskPool::ensure_tenant_dir(&disk, cell.tenant)?);
+        Ok(Some(crate::disks::DiskPool::cell_path(&disk, cell)))
+    }
+
+    /// Registers `cell` at `path` in this daemon's [`crate::disks::DiskPool`], if configured.
+    pub(crate) fn register_cell_path(&self, cell: cladefs_core::CellId, path: PathBuf) {
+        if let Some(pool) = self.disk_pool.get() {
+            pool.register_cell(cell, path);
+        }
+    }
+}
+
 /// The Mount service of `server`, a server of many cells, which attaches cells as `cells` says:
 /// what `daemon` serves on its control socket, beside its other services, if it mounts cells
 /// (`crate::mount`, TASK-475.2).
-#[cfg(not(madsim))]
 pub(crate) fn service_on(
     daemon: Arc<crate::Daemon>,
     server: &Arc<Server>,
@@ -211,7 +247,6 @@ async fn mount_ephemeral_cell(
     let keeping = crate::cells::mount_keeping(daemon).map_err(Error::from)?;
     let storage = Storage::open_on_keeping(&daemon.host, path, keeping).await?;
     let mut options = cladefs_fs::Options::new();
-    #[cfg(not(madsim))]
     options.runtime(daemon.runtime().handle().clone());
     options.mount(storage).await.map_err(|err| err.context(format!("mounting {}", path.display())))
 }
@@ -244,7 +279,6 @@ async fn mount_cell(
         Storage::take_on_keeping(&daemon.host, path, (of, capacity), url, token, keeping).await?;
     let mounting = async {
         let mut options = cladefs_fs::Options::new();
-        #[cfg(not(madsim))]
         options.runtime(daemon.runtime().handle().clone());
         if !new {
             return options.mount(storage).await;

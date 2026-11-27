@@ -16,7 +16,7 @@
 //! access, an inotify watch, `.Trash` and `.Trash-1000` looked up), and an unmount that comes
 //! during one of their calls fails, busy (TASK-705).
 
-#![cfg(target_os = "linux")]
+#![cfg(all(feature = "mount", target_os = "linux"))]
 
 use cladefs::cladefsd::control::proto::ForkCellRequest;
 use cladefs::fuse::MountOptions;

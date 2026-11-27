@@ -150,6 +150,17 @@ of the version's cell), and may drop once done (`DropCell`, which leaves the
 cell in the bucket); the proto says how (TASK-154). A version is immutable: any
 number of hosts fork one at once, and none writes it (TASK-158). A base forked
 on several hosts is made a version first (`ForkCell`'s `version`).
+
+Beside the control API, on its socket, the daemon serves its Mount service
+(`crates/cladefs/proto/cladefs/mount/v1/mount.proto`), which shows cells on the
+host through FUSE (`CLADEFSD_MOUNT`). The FUSE server and its mount through
+`/dev/fuse` are `crates/cladefs_fuse`, a crate apart from the host's Fxfs
+(`crates/cladefs_fs`), which the daemon links only when built with its `mount`
+feature: on unless a build says otherwise (board 14536). A daemon built without
+it, as a process embedding one builds it (`crates/libcladefs`), or one not on
+Linux, mounts no cells: asked to, it refuses to start, and its Mount calls fail
+`UNIMPLEMENTED`, each saying why.
+
 The daemon must be able to kill each VM process (it is the daemon's user's, or
 the daemon has `CAP_KILL`), and refuses a connection whose process it could
 not kill: one that stops acknowledging the daemon's changes to its window,

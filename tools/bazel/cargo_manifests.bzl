@@ -77,6 +77,10 @@ tracing-subscriber = "0.3.23"
 """
     elif crate_name in ("cladefs_core", "cladefs_fs", "cladefs_wire", "cladefsd"):
         text = text.replace('features = ["failpoints", "testing", "tests-kms"]', 'features = ["testing", "tests-kms"]')
+    elif crate_name == "cladefs_fuse":
+        # Its own failpoints too, its tests' dependency on itself turning them on.
+        text = text.replace('cladefs_fuse = { path = ".", features = ["failpoints"] }\n', "")
+        text = text.replace('features = ["failpoints", "testing", "tests-kms"]', 'features = ["testing", "tests-kms"]')
     elif crate_name == "cladefs":
         # Keep fail/failpoints out of the unified @crates//:fail target (controlled by //tools/bazel:fail_lib
         # so release/musl builds satisfy TASK-320's !fail::has_failpoints() assertion).

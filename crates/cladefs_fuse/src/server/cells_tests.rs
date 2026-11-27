@@ -7,7 +7,7 @@
 //! kernel forgets their nodes, or at once by force; driven by requests as the kernel sends them.
 
 use super::*;
-use crate::Storage;
+use cladefs_fs::Storage;
 use futures::executor::block_on;
 use std::sync::mpsc;
 

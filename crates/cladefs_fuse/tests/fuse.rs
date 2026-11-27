@@ -2,14 +2,15 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Tests of the FUSE server (`cladefs::fuse::Server`), driven as the kernel drives it: with
+//! Tests of the FUSE server (`cladefs_fuse::Server`), driven as the kernel drives it: with
 //! requests encoded as Linux's FUSE client encodes them, and their replies decoded.
 //!
 //! The client here encodes and decodes messages by hand, from Linux's `include/uapi/linux/fuse.h`,
 //! independently of the server's definitions.
 
-use cladefs::fuse::Server;
-use cladefs::{Filesystem, Storage, pages};
+use cladefs_core::pages;
+use cladefs_fs::{Filesystem, Storage};
+use cladefs_fuse::Server;
 use futures::executor::block_on;
 use std::sync::{Mutex, mpsc};
 
@@ -1030,13 +1031,13 @@ fn noise(len: usize) -> Vec<u8> {
 /// encrypted cell, its tenant's KEK in the host's KMS (the default tenant's, whose cells `Storage`
 /// makes): a file written through it reads back, before and after the cell is closed and served
 /// again; no file of the cell directory, nor of its bucket's, holds the file's data in the
-/// clear. Its kernel mount is `fuse_mount.rs`'s, Linux's.
+/// clear. Its kernel mount is `crates/cladefs/tests/fuse_mount.rs`'s, Linux's.
 #[test]
 fn an_encrypted_cell_served_reads_back_and_holds_nothing_in_the_clear() {
     let keys = tempfile::tempdir().unwrap();
     let kms = extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap();
     kms.create(0).unwrap();
-    cladefs::bucket::set_kms(std::sync::Arc::new(kms)).unwrap();
+    cladefs_core::bucket::set_kms(std::sync::Arc::new(kms)).unwrap();
     // Under the build's temporary directory, where direct I/O works.
     let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let path = dir.path().join("store");
@@ -1061,7 +1062,10 @@ fn an_encrypted_cell_served_reads_back_and_holds_nothing_in_the_clear() {
         assert!(client.read(file, 0, data.len() as u32).await == data, "reopened, read otherwise");
         drop(client.server.into_filesystem().close().await.unwrap());
     });
-    assert_eq!(cladefs::testing::files_holding(dir.path(), &[&data[..64]]), Vec::<String>::new());
+    assert_eq!(
+        cladefs_core::testing::files_holding(dir.path(), &[&data[..64]]),
+        Vec::<String>::new()
+    );
 }
 
 /// Regression for hotbed review 131: concurrent truncation during `FUSE_READ` (`read_prefixed`)

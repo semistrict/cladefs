@@ -63,7 +63,7 @@ class OutsideTheSeam(unittest.TestCase):
         source = "fn f() { tokio::task::spawn_blocking(work); }\n"
         self.assertEqual(self.matches(source, "crates/cladefsd/src/run.rs"), [])
         self.assertEqual(self.matches(source, "crates/cladefsd/src/tests.rs"), [])
-        self.assertEqual(self.matches(source, "crates/cladefs_fs/src/fuse/x.rs"), [])
+        self.assertEqual(self.matches(source, "crates/cladefs_fuse/src/x.rs"), [])
         self.assertEqual(self.matches("""\
             fn f() {}
             #[cfg(test)]
@@ -102,7 +102,7 @@ class OffHostFs(unittest.TestCase):
 
     def test_files_outside_the_simulation_tests_and_other_crates_pass(self):
         source = "fn f() { let _ = std::fs::read(\"x\"); }\n"
-        self.assertEqual(self.matches(source, "crates/cladefs/src/fuse/x.rs"), [])
+        self.assertEqual(self.matches(source, "crates/cladefs_fuse/src/x.rs"), [])
         self.assertEqual(self.matches(source, "crates/cladefs/src/cladefsd/tests.rs"), [])
         self.assertEqual(self.matches(source, "crates/virtio_extent/src/x.rs"), [])
         self.assertEqual(self.matches("""\

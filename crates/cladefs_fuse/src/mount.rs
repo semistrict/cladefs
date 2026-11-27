@@ -26,12 +26,12 @@
 //! A mount point a dead server left mounted, its connection aborted (`ENOTCONN`), as a daemon
 //! killed with its mount leaves it, is detached first, if it is a cladefs's (board 8537).
 
-use super::server::{MAX_WRITE, Notifier, Server};
-use crate::filesystem::Filesystem;
-use crate::node::Owner;
-use crate::storage::Storage;
+use crate::server::{MAX_WRITE, Notifier, Server};
 use anyhow::{Context as _, bail};
 use cladefs_core::error::Error;
+use cladefs_fs::filesystem::Filesystem;
+use cladefs_fs::node::Owner;
+use cladefs_fs::storage::Storage;
 use event_listener::{Event, Listener as _};
 use futures::FutureExt as _;
 use std::collections::{HashMap, VecDeque};
@@ -818,7 +818,7 @@ async fn tenant_failpoint_async(_: &str) {}
 /// fd that read it: `EIO` if its handling panicked (board 8539).
 async fn answer_async(device: &File, server: &Server, request: &[u8]) {
     // Unwind safe as far as the server needs: its tables are behind locks a panic poisons, and a
-    // panic through a cell's locks halts the cell (`crate::halt`).
+    // panic through a cell's locks halts the cell (`cladefs_core::halt`).
     let handled = AssertUnwindSafe(server.handle(request)).catch_unwind().await;
     let reply = match handled {
         Ok(Ok(Some(reply))) => reply,

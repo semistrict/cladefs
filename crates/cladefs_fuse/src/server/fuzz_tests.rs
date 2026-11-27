@@ -685,7 +685,7 @@ fn bytes(sent: &Sent, model: &Model, unique: u64) -> (Vec<u8>, u32, Expect) {
 }
 
 /// `attr`, a reply's `fuse_attr`, of the node `nodeid`: its inode number is the node's object ID.
-fn check_attr(model: &Model, nodeid: u64, attr: &super::super::abi::Attr) -> Result<(), String> {
+fn check_attr(model: &Model, nodeid: u64, attr: &crate::abi::Attr) -> Result<(), String> {
     if attr.ino != model.swap(nodeid) {
         return Err(format!(
             "node {nodeid}'s inode number is {}, not {}",
@@ -864,7 +864,7 @@ fn check_dirents(
             return Err(format!("a bad dirent {dirent:?} at offset {offset}"));
         }
         let dots = matches!(name, b"." | b"..");
-        if !dots && crate::filesystem::valid_name(name).is_err() {
+        if !dots && cladefs_fs::filesystem::valid_name(name).is_err() {
             return Err(format!("a name {name:?} no directory holds"));
         }
         if let Some(entry) = entry {
@@ -909,7 +909,7 @@ fn check_tables(server: &Server, model: &Model) -> Result<(), String> {
 /// DESTROY, and checks the cell.
 fn fuzz(sent: &[Sent]) -> Result<(), String> {
     block_on(async {
-        let fs = Filesystem::format(crate::Storage::memory(STORAGE_SIZE)).await.unwrap();
+        let fs = Filesystem::format(cladefs_fs::Storage::memory(STORAGE_SIZE)).await.unwrap();
         let server = Server::new(fs, Box::new(|_| Ok(())));
         let mut model = Model { root: server.root(), ..Model::default() };
         let mut history = Vec::new();

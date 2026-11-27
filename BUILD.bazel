@@ -51,6 +51,7 @@ filegroup(
         "//crates/cladefs:crate_files",
         "//crates/cladefs_core:crate_files",
         "//crates/cladefs_fs:crate_files",
+        "//crates/cladefs_fuse:crate_files",
         "//crates/cladefs_proto:crate_files",
         "//crates/cladefs_wire:crate_files",
         "//crates/cladefsd:crate_files",

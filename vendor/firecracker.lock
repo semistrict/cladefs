@@ -1095,6 +1095,7 @@ dependencies = [
  "bucket_cell",
  "cladefs_core",
  "cladefs_fs",
+ "cladefs_fuse",
  "cladefs_wire",
  "cladefsd",
  "extent_frame",
@@ -1165,7 +1166,6 @@ dependencies = [
  "cladefs_core",
  "event-listener",
  "extent_frame",
- "fail",
  "flate2",
  "fuchsia-async",
  "futures",
@@ -1176,13 +1176,27 @@ dependencies = [
  "local_cell",
  "log",
  "madsim-tokio",
- "rand 0.10.3",
  "serde",
  "serde_json",
  "sha2 0.11.1",
  "storage_device",
  "tar",
- "url",
+]
+
+[[package]]
+name = "cladefs_fuse"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cladefs_core",
+ "cladefs_fs",
+ "event-listener",
+ "fail",
+ "futures",
+ "libc",
+ "local_cell",
+ "log",
+ "madsim-tokio",
  "zerocopy",
 ]
 
@@ -1230,6 +1244,7 @@ dependencies = [
  "bucket_cell",
  "cladefs_core",
  "cladefs_fs",
+ "cladefs_fuse",
  "cladefs_proto",
  "cladefs_wire",
  "event-listener",

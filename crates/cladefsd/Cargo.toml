@@ -7,8 +7,14 @@ license.workspace = true
 publish = false
 
 [features]
+default = ["mount"]
+# The daemon's FUSE mount of cells and its Mount service (src/mount, src/fuse_control.rs,
+# `CLADEFSD_MOUNT`; board 14536): on unless a build says otherwise. Without it the daemon links
+# none of cladefs_fuse, and refuses a mount asked for, by `CLADEFSD_MOUNT` or a Mount call, saying
+# so. Linux's, outside the simulation: elsewhere it adds nothing.
+mount = ["dep:cladefs_fuse"]
 testing = ["cladefs_core/testing", "cladefs_fs/testing", "cladefs_wire/testing"]
-failpoints = ["fail/failpoints", "cladefs_core/failpoints", "cladefs_fs/failpoints", "cladefs_wire/failpoints"]
+failpoints = ["fail/failpoints", "cladefs_core/failpoints", "cladefs_fs/failpoints", "cladefs_fuse?/failpoints", "cladefs_wire/failpoints"]
 tests-kms = ["testing", "cladefs_core/tests-kms", "cladefs_fs/tests-kms", "cladefs_wire/tests-kms"]
 
 [dependencies]
@@ -52,6 +58,11 @@ tower = "0.5.3"
 url.workspace = true
 vhost_user.workspace = true
 zerocopy.workspace = true
+
+# The FUSE mount the `mount` feature serves (src/mount/fuse.rs): Linux's, outside the simulation,
+# as the code that uses it is, so that no other build has a dependency it leaves unused.
+[target.'cfg(all(target_os = "linux", not(madsim)))'.dependencies]
+cladefs_fuse = { workspace = true, optional = true }
 
 [target.'cfg(target_env = "musl")'.dependencies]
 libmimalloc-sys.workspace = true

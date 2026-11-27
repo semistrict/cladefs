@@ -1,4 +1,4 @@
-# Host-side Fxfs filesystem, image importer, and FUSE server for cladefs.
+# Host-side Fxfs filesystem and image importer for cladefs. Its FUSE mount is cladefs_fuse.
 [package]
 name = "cladefs_fs"
 version = "0.1.0"
@@ -8,7 +8,7 @@ publish = false
 
 [features]
 testing = ["cladefs_core/testing"]
-failpoints = ["fail/failpoints", "cladefs_core/failpoints"]
+failpoints = ["cladefs_core/failpoints"]
 tests-kms = ["testing", "cladefs_core/tests-kms"]
 
 [dependencies]
@@ -21,7 +21,6 @@ bucket_cell.workspace = true
 cladefs_core.workspace = true
 event-listener.workspace = true
 extent_frame.workspace = true
-fail = "0.5.1"
 flate2.workspace = true
 fuchsia-async.workspace = true
 futures.workspace = true
@@ -31,24 +30,23 @@ host_fs.workspace = true
 libc.workspace = true
 local_cell.workspace = true
 log.workspace = true
-rand.workspace = true
 serde.workspace = true
 serde_json = "1.0.154"
 sha2.workspace = true
 storage_device.workspace = true
 tar = { version = "0.4.46", default-features = false }
 tokio.workspace = true
-url.workspace = true
-zerocopy.workspace = true
 
 [dev-dependencies]
 bucket_cell = { workspace = true, features = ["testing"] }
 cladefs_core = { workspace = true, features = ["failpoints", "testing", "tests-kms"] }
 cladefs_fs = { path = ".", features = ["failpoints", "testing", "tests-kms"] }
 extent_keys = { workspace = true, features = ["testing"] }
+fail = "0.5.1"
 local_cell = { workspace = true, features = ["testing"] }
 object_store.workspace = true
 proptest.workspace = true
+rand.workspace = true
 tempfile.workspace = true
 
 [lints]

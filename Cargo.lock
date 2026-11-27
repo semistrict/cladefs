@@ -1030,6 +1030,7 @@ dependencies = [
  "cladefs",
  "cladefs_core",
  "cladefs_fs",
+ "cladefs_fuse",
  "cladefs_wire",
  "cladefsd",
  "extent_frame",
@@ -1163,7 +1164,29 @@ dependencies = [
  "storage_device",
  "tar",
  "tempfile",
- "url",
+]
+
+[[package]]
+name = "cladefs_fuse"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bucket_cell",
+ "cladefs_core",
+ "cladefs_fs",
+ "cladefs_fuse",
+ "event-listener",
+ "extent_keys",
+ "fail",
+ "futures",
+ "fxfs",
+ "libc",
+ "local_cell",
+ "log",
+ "madsim-tokio",
+ "proptest",
+ "storage_device",
+ "tempfile",
  "zerocopy",
 ]
 
@@ -1214,6 +1237,7 @@ dependencies = [
  "bucket_cell",
  "cladefs_core",
  "cladefs_fs",
+ "cladefs_fuse",
  "cladefs_proto",
  "cladefs_wire",
  "cladefsd",

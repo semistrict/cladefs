@@ -24,9 +24,11 @@ pub use cladefs_wire::memory_cell;
 
 pub use cladefsd;
 
-/// FUSE filesystem server and (on Linux) multi-cell mount control API.
+/// FUSE filesystem server and (on Linux) multi-cell mount control API: `cladefs_fuse`'s, of a
+/// build with the `mount` feature (board 14536).
+#[cfg(feature = "mount")]
 pub mod fuse {
-    pub use cladefs_fs::fuse::*;
+    pub use cladefs_fuse::*;
     #[cfg(all(target_os = "linux", not(madsim)))]
     pub use cladefsd::fuse_control as control;
 }

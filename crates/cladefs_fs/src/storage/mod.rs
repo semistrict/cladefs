@@ -434,7 +434,8 @@ impl Storage {
         Self { device: DeviceHolder::new(device), kind: Kind::Memory }
     }
 
-    #[cfg(test)]
+    /// Storage in memory on `device`, a test's own: this crate's, and `cladefs_fuse`'s.
+    #[cfg(any(test, feature = "testing"))]
     pub fn from_device(device: DeviceHolder) -> Self {
         Self { device, kind: Kind::Memory }
     }

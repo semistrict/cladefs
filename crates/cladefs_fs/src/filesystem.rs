@@ -37,7 +37,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::num::NonZeroU8;
 use std::pin::Pin;
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -45,8 +45,9 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 /// cladefs: counts entries emitted by `fxfs.readdir` across `Node::entries` and
-/// `Node::entries_page` for tests verifying bounded streaming `READDIR` (TASK-619, board 2634).
-#[cfg(test)]
+/// `Node::entries_page` for tests verifying bounded streaming `READDIR` (TASK-619, board 2634):
+/// `cladefs_fuse`'s among them, so `testing`'s too.
+#[cfg(any(test, feature = "testing"))]
 pub static READDIR_EMITS: AtomicU64 = AtomicU64::new(0);
 
 /// Where a bounded directory listing (`Node::entries_page`) begins (TASK-619, board 2634).
@@ -1513,7 +1514,7 @@ impl Node {
             .run(|fxfs| async move {
                 let mut entries = Vec::new();
                 let listed = fxfs.readdir(dir, ReaddirStart::Index(0), |name, ino, kind| {
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "testing"))]
                     READDIR_EMITS.fetch_add(1, Ordering::Relaxed);
                     let file_type = FileType::from_mode(kind).unwrap_or(FileType::File);
                     entries.push(DirEntry { inode: Inode(ino), file_type, name: name.into() });
@@ -1544,7 +1545,7 @@ impl Node {
                 let mut entries = Vec::with_capacity(limit.min(256));
                 let mut has_more = false;
                 let listed = fxfs.readdir(dir, start, |name, ino, kind| {
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "testing"))]
                     READDIR_EMITS.fetch_add(1, Ordering::Relaxed);
                     if entries.len() >= limit {
                         has_more = true;

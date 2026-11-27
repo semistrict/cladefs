@@ -2,9 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! FUSE: a [`Filesystem`](crate::Filesystem) mounted on the host, such as a cell's, an image's
+//! FUSE: a [`Filesystem`](cladefs_fs::Filesystem) mounted on the host, such as a cell's, an image's
 //! or a stopped VM's, as any filesystem is (TASK-222). The extent daemon's mount of cells mounts
-//! them so (`cladefsd::mount`).
+//! them so (`cladefsd::mount`). A crate of its own (board 14536), which `cladefs_fs` knows nothing
+//! of: a daemon built without its Mount service links none of it.
 //!
 //! - [`Server`] serves the FUSE protocol, a request's bytes in, its reply's out, whatever carries
 //!   them, on every host, as its tests drive it.
@@ -12,7 +13,8 @@
 //!   kernel's requests until it is unmounted. macOS has no FUSE of its own, nor an open-source one.
 //! - [`MountOptions::mount_cells`] mounts a directory of cells instead (TASK-302): one mount,
 //!   into which cells are attached by name, and detached, by [`Server::attach`] and
-//!   [`Server::detach`], or through [`control`], a gRPC API, which cladefsd serves (TASK-475.2).
+//!   [`Server::detach`], or through `cladefsd::fuse_control`, a gRPC API, which cladefsd serves
+//!   (TASK-475.2).
 //!
 //! The mount is its cell's only writer, as a cell directory is its process's alone, so the
 //! kernel may cache all it reads: names, their absence, attributes, pages, directories' entries,
@@ -20,9 +22,10 @@
 //! files' locks itself, which no other mount shares.
 //!
 //! - Nodes are the kernel's inodes: a node the kernel has looked up stays, as its handle
-//!   ([`Node`](crate::Node)) holds it, until the kernel forgets it, so that a file unlinked stays
-//!   while a process has it open. Node IDs are object IDs, but the root's, which is FUSE's root ID
-//!   (1), and that ID's, which is the root's: the two swap places. Inode numbers are object IDs.
+//!   ([`Node`](cladefs_fs::Node)) holds it, until the kernel forgets it, so that a file unlinked
+//!   stays while a process has it open. Node IDs are object IDs, but the root's, which is FUSE's
+//!   root ID (1), and that ID's, which is the root's: the two swap places. Inode numbers are object
+//!   IDs.
 //! - Files have no handles: `OPEN` and `FLUSH` are refused (`ENOSYS`), which the kernel then sends
 //!   no more, opening and closing files on its own. A directory's handle holds its entries as it
 //!   held them as it was opened, which its reads list in turn.
@@ -34,6 +37,12 @@
 //!
 //! The server descends from cladefs's virtio-fs server (TASK-17), which a guest's FUSE client used
 //! before guests ran Fxfs in their own kernels (fda9d7d2).
+
+#![deny(clippy::undocumented_unsafe_blocks)]
+
+#[cfg(test)]
+#[global_allocator]
+static ALLOCATOR: cladefs_core::heap::Bounded = cladefs_core::heap::Bounded;
 
 mod abi;
 #[cfg(all(target_os = "linux", not(madsim)))]

@@ -566,7 +566,7 @@ pub mod testing {
     }
 }
 
-/// Hook registered by `cladefs_fs::fuse::server` so forgetting/shredding cells also halts and
+/// Hook registered by `cladefs_fuse::server` so forgetting/shredding cells also halts and
 /// invalidates any FUSE-mounted slots in this process (outside the simulation: FUSE mounts do not
 /// run under madsim).
 static FORGET_CELLS_HOOK: std::sync::OnceLock<fn(&dyn Fn(crate::CellId) -> bool)> =

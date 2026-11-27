@@ -941,7 +941,7 @@ fn calls_end_at_their_timeouts() {
 }
 
 /// Mount calls use the same deadline options as the rest of the control API.
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "mount", target_os = "linux"))]
 #[test]
 fn mount_calls_end_at_their_timeouts() {
     use cladefs::fuse::control::proto::{

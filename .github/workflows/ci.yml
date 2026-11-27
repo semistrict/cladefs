@@ -192,7 +192,7 @@ jobs:
           fi
 
   # pjdfstest (BSD-2-Clause) on FUSE mounts of new stores, as root, in a directory of the mount
-  # and from its root: the host's Node layer, fxfs-posix under it and cladefs::fuse's server held to
+  # and from its root: the host's Node layer, fxfs-posix under it and cladefs_fuse's server held to
   # POSIX's permissions, owners, times and errnos, which the guest's pjdfstest case checks only in
   # the nightly (TASK-149.38). Failures but scripts/pjdfstest-fuse-known's fail it. A debug build, its
   # assertions and overflow checks on.

@@ -117,8 +117,8 @@ pub struct Daemon {
     pub(super) process: Mutex<process::State>,
     /// Pages dirtied writing the periodic stats file (`CLADEFSD_STATS`).
     pub(super) stats_written: AtomicU64,
-    /// FUSE mount state (Linux's, outside `madsim`).
-    #[cfg(all(target_os = "linux", not(madsim)))]
+    /// FUSE mount state: nothing, of a daemon that mounts no cells ([`crate::mount`]).
+    #[allow(dead_code, reason = "nothing to read of a daemon that mounts no cells")]
     pub(super) mount: crate::mount::State,
     /// Number of times `kept_or_open` opened a version/kept cell store (TASK-549, board 2494).
     #[cfg(test)]
@@ -172,7 +172,6 @@ impl Daemon {
             stats_reports: Mutex::new(Vec::new()),
             process: process::State::new(),
             stats_written: AtomicU64::new(0),
-            #[cfg(all(target_os = "linux", not(madsim)))]
             mount: crate::mount::State::default(),
             #[cfg(test)]
             kept_opens: AtomicU64::new(0),
@@ -288,46 +287,6 @@ impl Daemon {
     /// if configured and known (for white-box tests inspecting encryption at rest or footprint).
     pub fn cell_path(&self, cell: cladefs_core::CellId) -> Option<PathBuf> {
         self.disk_pool.get()?.find_cell(cell)
-    }
-
-    /// Checks whether the daemon's [`crate::disks::DiskPool`] (if configured) currently has a
-    /// writable disk that accepts new cells (`ENOSPC` if all disks are draining/read-only/full).
-    // cladefs: the FUSE mount's (`fuse_control`): Linux's.
-    #[cfg(all(target_os = "linux", not(madsim)))]
-    pub(crate) fn check_disk_placement(&self) -> Result<(), cladefs_core::Errno> {
-        if let Some(pool) = self.disk_pool.get() {
-            drop(pool.pick_disk()?);
-        }
-        Ok(())
-    }
-
-    /// Resolves `cell`'s existing path in [`crate::disks::DiskPool`], or picks an eligible
-    /// `ReadWrite` disk and prepares `<disk>/cells/<TENANT>/<CELL>`. Returns `Ok(None)` when no
-    /// managed disk pool is configured (a daemon booted of `CLADEFSD_MOUNT_STORES` alone).
-    // cladefs: the FUSE mount's (`fuse_control`): Linux's.
-    #[cfg(all(target_os = "linux", not(madsim)))]
-    pub(crate) fn resolve_or_pick_cell_path(
-        &self,
-        cell: cladefs_core::CellId,
-    ) -> Result<Option<PathBuf>, cladefs_core::Errno> {
-        let Some(pool) = self.disk_pool.get() else {
-            return Ok(None);
-        };
-        if let Some(existing) = pool.find_cell(cell) {
-            return Ok(Some(existing));
-        }
-        let disk = pool.pick_disk()?;
-        drop(crate::disks::DiskPool::ensure_tenant_dir(&disk, cell.tenant)?);
-        Ok(Some(crate::disks::DiskPool::cell_path(&disk, cell)))
-    }
-
-    /// Registers `cell` at `path` in this daemon's [`crate::disks::DiskPool`], if configured.
-    // cladefs: the FUSE mount's (`fuse_control`): Linux's.
-    #[cfg(all(target_os = "linux", not(madsim)))]
-    pub(crate) fn register_cell_path(&self, cell: cladefs_core::CellId, path: PathBuf) {
-        if let Some(pool) = self.disk_pool.get() {
-            pool.register_cell(cell, path);
-        }
     }
 
     /// Starts the disk governor for this daemon instance with `config`.

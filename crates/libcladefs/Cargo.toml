@@ -8,6 +8,12 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+# The daemon's FUSE mount of cells and its Mount service (cladefsd's `mount`, board 14536), which
+# cladefsd's binary has. Off unless an embedder asks: none mounts cells (machined, libmachine), and
+# a daemon without it links none of cladefs_fuse, refusing a `[mount]` configured, saying so.
+mount = ["cladefsd/mount"]
+
 [dependencies]
 anyhow.workspace = true
 bucket_cell.workspace = true

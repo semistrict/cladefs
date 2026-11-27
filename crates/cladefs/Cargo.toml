@@ -8,9 +8,15 @@ license.workspace = true
 publish = false
 
 [features]
+default = ["mount"]
+# The daemon's FUSE mount of cells and its Mount service (cladefsd's `mount`, board 14536), with
+# `fuse`, this crate's view of cladefs_fuse, and `cladefsctl mount`: on unless a build says
+# otherwise. Without it cladefsd and cladefsctl link none of cladefs_fuse and refuse a mount asked
+# for, saying so.
+mount = ["dep:cladefs_fuse", "cladefsd/mount", "libcladefs/mount"]
 testing = ["cladefs_core/testing", "cladefs_fs/testing", "cladefs_wire/testing", "cladefsd/testing", "extent_keys/testing"]
 shuttle = ["cladefs_core/shuttle"]
-failpoints = ["fail/failpoints", "cladefs_core/failpoints", "cladefs_fs/failpoints", "cladefs_wire/failpoints", "cladefsd/failpoints"]
+failpoints = ["fail/failpoints", "cladefs_core/failpoints", "cladefs_fs/failpoints", "cladefs_fuse?/failpoints", "cladefs_wire/failpoints", "cladefsd/failpoints"]
 loom = ["cladefs_core/loom"]
 tests-kms = ["testing", "cladefs_core/tests-kms", "cladefs_fs/tests-kms", "cladefs_wire/tests-kms", "cladefsd/tests-kms"]
 
@@ -20,6 +26,7 @@ base32_id.workspace = true
 bucket_cell.workspace = true
 cladefs_core.workspace = true
 cladefs_fs.workspace = true
+cladefs_fuse = { workspace = true, optional = true }
 cladefs_wire.workspace = true
 extent_frame.workspace = true
 extent_keys.workspace = true

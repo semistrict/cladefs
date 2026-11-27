@@ -33,11 +33,13 @@
 //! file open or a directory someone's current one, goes once it is let go of; those the kernel is
 //! given while the cell is detached are given for no time.
 
-use super::abi::*;
-use crate::filesystem::{EntriesStart, Filesystem, Node, valid_name};
-use crate::node::XattrMode;
-use crate::node::{Attr, DirEntry, FileType, Inode, Owner, RenameFlags, S_ISGID, SetAttr, SetTime};
+use crate::abi::*;
 use cladefs_core::error::{Errno, Error, Result};
+use cladefs_fs::filesystem::{EntriesStart, Filesystem, Node, valid_name};
+use cladefs_fs::node::XattrMode;
+use cladefs_fs::node::{
+    Attr, DirEntry, FileType, Inode, Owner, RenameFlags, S_ISGID, SetAttr, SetTime,
+};
 use event_listener::Event;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::future::Future;
@@ -104,9 +106,9 @@ struct ServerHandle {
 /// kernel page cache and dentries (TASK-562, board 2520, board 2704).
 static SERVERS: Mutex<Vec<Weak<ServerHandle>>> = Mutex::new(Vec::new());
 
-/// cladefs: halts every FUSE-mounted cell whose [`crate::CellId`] matches `scope`, and asks the
-/// kernel to drop all cached file pages (`off=0, len=0`), attributes, and dentries of those cells
-/// (TASK-562, board 2520, board 2704).
+/// cladefs: halts every FUSE-mounted cell whose [`cladefs_core::CellId`] matches `scope`, and asks
+/// the kernel to drop all cached file pages (`off=0, len=0`), attributes, and dentries of those
+/// cells (TASK-562, board 2520, board 2704).
 pub fn forget_cells(scope: &dyn Fn(cladefs_core::CellId) -> bool) {
     let servers: Vec<Arc<ServerHandle>> = {
         let mut live = SERVERS.lock().unwrap();
@@ -167,7 +169,7 @@ pub fn forget_cells(scope: &dyn Fn(cladefs_core::CellId) -> bool) {
     }
 }
 
-/// cladefs: the [`crate::CellId`]s of every currently mounted, non-halted FUSE cell in this
+/// cladefs: the [`cladefs_core::CellId`]s of every currently mounted, non-halted FUSE cell in this
 /// process, used by `cladefsd::events` to reconcile missed `CellShredded` events when the event
 /// tail was trimmed (board 11665).
 pub fn live_cells() -> Vec<cladefs_core::CellId> {
@@ -1554,7 +1556,7 @@ impl Server {
             Target::Cells(_) => Kstatfs {
                 bsize: CELLS_BLOCK_SIZE,
                 frsize: CELLS_BLOCK_SIZE,
-                namelen: crate::filesystem::NAME_MAX as u32,
+                namelen: cladefs_fs::filesystem::NAME_MAX as u32,
                 ..Default::default()
             },
             Target::Node(slot, _) => {
@@ -2179,11 +2181,11 @@ fn timespec(time: SystemTime) -> (u64, u32) {
 }
 
 /// The kernel's attributes of a node whose are `attr`, its inode number `inode`.
-fn fuse_attr(attr: &Attr, inode: u64) -> super::abi::Attr {
+fn fuse_attr(attr: &Attr, inode: u64) -> crate::abi::Attr {
     let (atime, atimensec) = timespec(attr.atime);
     let (mtime, mtimensec) = timespec(attr.mtime);
     let (ctime, ctimensec) = timespec(attr.ctime);
-    super::abi::Attr {
+    crate::abi::Attr {
         ino: inode,
         size: attr.size,
         blocks: attr.blocks,
@@ -2282,7 +2284,7 @@ mod tests {
     /// nodes share one.
     #[test]
     fn the_root_and_fuses_root_id_swap_places() {
-        let fs = block_on(Filesystem::format(crate::Storage::memory(8 << 20))).unwrap();
+        let fs = block_on(Filesystem::format(cladefs_fs::Storage::memory(8 << 20))).unwrap();
         let server = Server::new(fs, Box::new(|_| Ok(())));
         let root = server.root();
         assert_eq!((server.swap(root), server.swap(ROOT_ID)), (ROOT_ID, root));
@@ -2316,7 +2318,7 @@ mod tests {
             let root_vol = fxfs::object_store::volume::root_volume((*fxfs).clone()).await.unwrap();
             let store = root_vol
                 .new_volume(
-                    crate::filesystem::VOLUME_NAME,
+                    cladefs_fs::filesystem::VOLUME_NAME,
                     fxfs::object_store::NewChildStoreOptions::default(),
                 )
                 .await
@@ -2352,18 +2354,18 @@ mod tests {
         });
         drop(rt);
 
-        let fs = block_on(Filesystem::mount(crate::Storage::from_device(device))).unwrap();
+        let fs = block_on(Filesystem::mount(cladefs_fs::Storage::from_device(device))).unwrap();
         let server = Server::new(fs, Box::new(|_| Ok(())));
         let send = |unique: u64, opcode: u32, nodeid: u64, body: &[u8]| -> Vec<u8> {
             fuse_send(&server, unique, opcode, nodeid, body)
         };
 
         // 1. OPENDIR reads zero entries from Fxfs.
-        crate::filesystem::READDIR_EMITS.store(0, Ordering::Relaxed);
+        cladefs_fs::filesystem::READDIR_EMITS.store(0, Ordering::Relaxed);
         let open_payload = send(1, opcode::OPENDIR, ROOT_ID, &[]);
         let (open_out, _) = OpenOut::read_from_prefix(&open_payload).unwrap();
         assert_eq!(
-            crate::filesystem::READDIR_EMITS.load(Ordering::Relaxed),
+            cladefs_fs::filesystem::READDIR_EMITS.load(Ordering::Relaxed),
             0,
             "OPENDIR must not walk Fxfs directory entries"
         );
@@ -2372,7 +2374,7 @@ mod tests {
         let read_in = ReadIn { fh: open_out.fh, offset: 0, size: 4096, ..Default::default() };
         let readdir_payload = send(2, opcode::READDIR, ROOT_ID, read_in.as_bytes());
         assert!(!readdir_payload.is_empty());
-        let emits = crate::filesystem::READDIR_EMITS.load(Ordering::Relaxed);
+        let emits = cladefs_fs::filesystem::READDIR_EMITS.load(Ordering::Relaxed);
         let max_expected = (4096 / MIN_DIRENT_LEN + READDIR_READAHEAD + 1) as u64;
         assert!(
             emits > 0 && emits <= max_expected,
@@ -2386,7 +2388,7 @@ mod tests {
 
         // 3. Streaming across concurrent mutations lists every unchanged entry exactly once, and
         // rewinddir (offset 0) sees newly added entries.
-        let fs2 = block_on(Filesystem::format(crate::Storage::memory(16 << 20))).unwrap();
+        let fs2 = block_on(Filesystem::format(cladefs_fs::Storage::memory(16 << 20))).unwrap();
         let root2 = fs2.root().clone();
         for i in 0..80u32 {
             block_on(root2.create(
@@ -2491,7 +2493,7 @@ mod tests {
             out
         };
 
-        let fs = block_on(Filesystem::format(crate::Storage::memory(16 << 20))).unwrap();
+        let fs = block_on(Filesystem::format(cladefs_fs::Storage::memory(16 << 20))).unwrap();
         let root = fs.root().clone();
         for i in 0..80u32 {
             block_on(root.create(
@@ -2624,7 +2626,7 @@ mod tests {
             let root_vol = fxfs::object_store::volume::root_volume((*fxfs).clone()).await.unwrap();
             let store = root_vol
                 .new_volume(
-                    crate::filesystem::VOLUME_NAME,
+                    cladefs_fs::filesystem::VOLUME_NAME,
                     fxfs::object_store::NewChildStoreOptions::default(),
                 )
                 .await
@@ -2668,7 +2670,7 @@ mod tests {
         drop(rt);
 
         let server = Server::cells(Owner { uid: 0, gid: 0 }, Box::new(|_| Ok(())));
-        block_on(server.attach("c", Filesystem::mount(crate::Storage::from_device(device))))
+        block_on(server.attach("c", Filesystem::mount(cladefs_fs::Storage::from_device(device))))
             .unwrap();
 
         let send_raw = |unique: u64, opcode: u32, nodeid: u64, body: &[u8]| -> (i32, Vec<u8>) {

@@ -19,7 +19,7 @@ not (
     (package(local_cell) & test(/^sim::/))
     | (package(cladefs_core) & test(/^bucket::(fork_faults|restore_faults|write_budgets)::/))
     | (package(cladefs_fs) & test(/^storage::model_tests::/))
-    | (package(cladefs_fs) & test(/^fuse::server::fuzz_tests::/))
+    | (package(cladefs_fuse) & test(/^server::fuzz_tests::/))
     | (package(fxfs-posix) & (
         test(/^corrupt_tests::/)
         | test(=model_tests::a_cut_with_fsck_after_every_transaction_replays_as_far_as_its_barrier)
@@ -65,7 +65,7 @@ not (
     | (binary_id(cladefs::control) & (
         test(=shrinks_waiting_for_their_guests_hold_no_threads)
         | test(=tenants_encrypted_under_the_bucket_kms_and_shredded_through_the_control_api)))
-    | (binary_id(cladefs::fuse_differential)
+    | (binary_id(cladefs_fuse::fuse_differential)
         & test(=random_calls_on_a_mount_come_to_what_they_do_on_tmpfs))
     | (binary_id(cladefs::handover) & test(=cells_open_whole_in_another_process_once_their_vm_goes))
     | (package(extent_frame) & test(=tests::objects_of_raw_files_sectors_read_under_their_key_alone))

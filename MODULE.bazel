@@ -125,6 +125,7 @@ _MEMBER_MANIFESTS = [
     "//crates/cladefs:Cargo.toml",
     "//crates/cladefs_core:Cargo.toml",
     "//crates/cladefs_fs:Cargo.toml",
+    "//crates/cladefs_fuse:Cargo.toml",
     "//crates/cladefs_proto:Cargo.toml",
     "//crates/cladefs_wire:Cargo.toml",
     "//crates/cladefsd:Cargo.toml",

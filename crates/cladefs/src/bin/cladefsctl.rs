@@ -800,7 +800,7 @@ mod cli {
 
     /// What cladefsctl was asked to do with the daemon's FUSE mount of cells (`cladefsctl mount`,
     /// TASK-475.2): its Mount service's calls.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg_attr(not(all(feature = "mount", target_os = "linux")), allow(dead_code))]
     enum Mount {
         /// A cell attached, at `token`'s placement if given; or, `capacity` given, a new one of its
         /// tenant's, a new Fxfs cell of `capacity` bytes.
@@ -840,19 +840,25 @@ mod cli {
         }
     }
 
-    /// cladefs: the daemon's FUSE mount of cells is Linux's (`cladefsd::fuse_control`).
-    #[cfg(not(target_os = "linux"))]
+    /// cladefs: the daemon's FUSE mount of cells is Linux's (`cladefsd::fuse_control`), and of a
+    /// build with its `mount` feature (board 14536).
+    #[cfg(not(all(feature = "mount", target_os = "linux")))]
     impl Mount {
         async fn through(
             self,
             _socket: &Path,
             _timeout: Option<std::time::Duration>,
         ) -> anyhow::Result<()> {
+            if cfg!(target_os = "linux") {
+                bail!(
+                    "this cladefsctl is built without the daemon's FUSE mount (the `mount` feature)"
+                )
+            }
             bail!("the daemon's FUSE mount of cells is Linux's")
         }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(all(feature = "mount", target_os = "linux"))]
     impl Mount {
         /// Calls the Mount service of the daemon whose control socket is at `socket`, and prints what
         /// it answers: `attach` and `create`, the cell; `list`, each cell, `TENANT CELL`, `detaching`

@@ -171,7 +171,7 @@ impl Applied {
     fn live_and_cached_cells(daemon: &Daemon) -> BTreeSet<cladefs_core::CellId> {
         let mut cells = BTreeSet::new();
         cells.extend(cladefs_core::halt::live_cells_on(&daemon.host));
-        cells.extend(cladefs_fs::fuse::server::live_cells());
+        cells.extend(crate::mount::live_cells());
         cells.extend(daemon.host.bucket_state().keys().cells());
         cells.extend(daemon.host.cache().cached_cells());
         cells

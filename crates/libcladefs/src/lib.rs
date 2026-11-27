@@ -17,7 +17,10 @@
 //!   VM-process wire at all, for a cell no guest uses, as a SQLite database's (board 13909).
 //! - [`Daemon::control_service`] is the daemon's control API (the Cladefsd gRPC service, health,
 //!   and the Mount service of its FUSE mount, Linux's), for the process to serve on an endpoint of
-//!   its own.
+//!   its own. The daemon mounts cells only if built to, with this crate's `mount` feature, as
+//!   cladefsd's binary is (board 14536): without it, as an embedder has it unless it asks, the
+//!   daemon links no FUSE, refuses a `[mount]` configured, and its Mount service refuses every
+//!   call, each saying why.
 //! - [`Daemon::serve_vm_processes`] and [`Daemon::serve_vm_process`] serve VM processes over
 //!   cladefs's VM-process wire, as cladefsd does: helper processes the process starts, each
 //!   connecting with [`CellClient::connect`], or over a socket it was handed with
@@ -276,7 +279,8 @@ impl Daemon {
             .map_err(Error::new)
     }
 
-    /// The daemon's control API, the Cladefsd gRPC service, health and its FUSE mount's Mount, for
+    /// The daemon's control API, the Cladefsd gRPC service, health and its FUSE mount's Mount
+    /// (which refuses every call unless the daemon is built with `mount`), for
     /// the process to serve on an endpoint of its own
     /// (`tonic::transport::Server::builder().add_routes(..)`), as cladefsd serves its control
     /// socket. The sockets of the tenants it grants go in `daemon.tenants_dir`, or the first

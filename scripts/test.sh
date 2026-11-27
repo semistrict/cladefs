@@ -68,7 +68,7 @@ if part clippy; then
     # Fuchsia path dependencies under the workspace rule above.
     cladefs_crates=(
         -p base32_id -p block_device -p bucket_cell -p cladefs -p cladefs_core -p cladefs_fs
-        -p cladefs_proto -p cladefs_wire -p cladefsd -p cladefs-examples
+        -p cladefs_fuse -p cladefs_proto -p cladefs_wire -p cladefsd -p cladefs-examples
         -p extent_frame -p extent_keys -p formats -p fxfs-posix
         -p fxfs-sim-diff -p gc_wasm -p host_fs -p libcladefs -p local_cell -p node_local
         -p sqlite_cladefs -p vhost_user -p virtio_extent
@@ -81,6 +81,10 @@ if part clippy; then
         "${cladefs_crates[@]}" --tests --examples -- "${cladefs_lints[@]}"
     cargo clippy --locked --manifest-path "$root/Cargo.toml" --no-deps \
         "${cladefs_crates[@]}" --lib --bins -- "${cladefs_lints[@]}"
+    # The daemon without its FUSE mount of cells (the `mount` feature off, board 14536), as a
+    # process embedding it builds it (libcladefs), which no other build compiles.
+    cargo clippy --locked --manifest-path "$root/Cargo.toml" --no-deps \
+        -p cladefs -p cladefsd -p libcladefs --no-default-features --lib --bins -- "${cladefs_lints[@]}"
     cargo clippy --locked --manifest-path "$root/Cargo.toml" --no-deps \
         -p gc_wasm --target wasm32-unknown-unknown -- "${cladefs_lints[@]}"
     cargo clippy --locked --manifest-path "$root/Cargo.toml" --no-deps -p local_cell -p cladefs_core \
@@ -99,7 +103,7 @@ if part clippy; then
     # Linux, went unseen there behind a `cargo check` (board 5652).
     env RUSTFLAGS="$madsim_rustflags" CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$root/target}/madsim" \
         cargo clippy --locked --manifest-path "$root/Cargo.toml" --no-deps -p node_local -p host_fs \
-        -p bucket_cell -p local_cell -p cladefs_core -p cladefs_fs -p cladefs_wire -p cladefsd -p cladefs -p libcladefs --lib --test madsim -- "${cladefs_lints[@]}"
+        -p bucket_cell -p local_cell -p cladefs_core -p cladefs_fs -p cladefs_fuse -p cladefs_wire -p cladefsd -p cladefs -p libcladefs --lib --test madsim -- "${cladefs_lints[@]}"
 fi
 # The simulation of bucket_cell's protocol over local_cell's extent stores (TASK-88): its profiles'
 # soaks, and its rules' seed searches, each until a seed with the rule off finds what the rule
@@ -137,7 +141,7 @@ fi
 if part madsim; then
     madsim=(env RUSTFLAGS="$madsim_rustflags" CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$root/target}/madsim")
     "${madsim[@]}" cargo check --locked --manifest-path "$root/Cargo.toml" -p node_local \
-        -p host_fs -p bucket_cell -p local_cell -p cladefs_core -p cladefs_fs -p cladefs_wire -p cladefsd -p cladefs
+        -p host_fs -p bucket_cell -p local_cell -p cladefs_core -p cladefs_fs -p cladefs_fuse -p cladefs_wire -p cladefsd -p cladefs
     # Each test over CLADEFS_MADSIM_SEEDS seeds, 20 unless said, from MADSIM_TEST_SEED's, 1 unless
     # said, after the regression seeds, those that once failed (crates/cladefs/tests/madsim-seeds,
     # TASK-685.8): each seed a process of its own, as what a simulation's hosts held in memory,

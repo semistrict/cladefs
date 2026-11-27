@@ -104,7 +104,7 @@ pub(super) fn cell_dir_key(path: &Path) -> PathBuf {
 /// cladefs: holds the cell at `path` on `daemon` for the daemon's FUSE mount of cells, which
 /// attaches it (TASK-475.3): until what it returns is dropped, as the mount detaches it, a VM
 /// process opening it, or the control API working on it, fails with `EBUSY` at once.
-#[cfg(all(target_os = "linux", not(madsim)))]
+#[cfg(all(feature = "mount", target_os = "linux", not(madsim)))]
 pub(crate) async fn hold_mounted(daemon: &Arc<Daemon>, path: &Path) -> Result<MountHold, Errno> {
     let (hold, kept) = daemon.table.hold_mounted(&cell_dir_key(path), CLOSING_WAIT).await?;
     close_kept(daemon, kept).await;
@@ -112,7 +112,7 @@ pub(crate) async fn hold_mounted(daemon: &Arc<Daemon>, path: &Path) -> Result<Mo
 }
 
 /// cladefs: a cell the daemon's FUSE mount holds ([`hold_mounted`]), let go as it is dropped.
-#[cfg(all(target_os = "linux", not(madsim)))]
+#[cfg(all(feature = "mount", target_os = "linux", not(madsim)))]
 pub(crate) struct MountHold(#[allow(dead_code, reason = "held for its drop")] Hold);
 
 /// Holds the cell at `path` for `daemon`, which no connection opens meanwhile.

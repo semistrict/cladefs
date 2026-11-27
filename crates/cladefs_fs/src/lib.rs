@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Host-side Fxfs filesystem, image/tar importer, and FUSE server for cladefs.
+//! Host-side Fxfs filesystem and image/tar importer for cladefs. Its FUSE mount is `cladefs_fuse`.
 
 #![deny(clippy::undocumented_unsafe_blocks)]
 
@@ -11,7 +11,6 @@
 static ALLOCATOR: cladefs_core::heap::Bounded = cladefs_core::heap::Bounded;
 
 pub mod filesystem;
-pub mod fuse;
 pub mod import;
 pub mod node;
 #[cfg(test)]

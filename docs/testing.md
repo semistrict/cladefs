@@ -28,10 +28,10 @@ runs so every night on GitHub's runners, whose nested KVM boots the guests
 (`.github/workflows/nightly.yml`), Firecracker in its jailer under its seccomp filter: built once,
 then a matrix of jobs, each a part of the suite (`runner list --tag nightly --shard K/N`).
 
-FUSE mounts (`crates/cladefs/src/fuse`) have their server fuzzed with random and
-malformed requests (`fuse/server/fuzz_tests.rs`), and on Linux random file
+FUSE mounts (`crates/cladefs_fuse`) have their server fuzzed with random and
+malformed requests (`src/server/fuzz_tests.rs`), and on Linux random file
 system calls on a mount compared with the same on tmpfs, as the user and as
-root (`crates/cladefs/tests/fuse_differential.rs`, what may differ in its
+root (`crates/cladefs_fuse/tests/fuse_differential.rs`, what may differ in its
 `ALLOWED`). CI also runs pjdfstest on mounts, as root:
 
 ```sh

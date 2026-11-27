@@ -255,12 +255,12 @@ def outside_the_seam(path, text):
 # `Path` asks the file system itself.
 OFF_HOST_FS = re.compile(r"\bstd::fs\b|\bstd::os::unix::fs::(FileExt|MetadataExt|OpenOptionsExt)\b|"
                          r"\.(exists|canonicalize|try_exists)\(\)")
-OFF_HOST_FS_CRATES = ("crates/cladefs/src/", "crates/cladefs_core/src/", "crates/cladefs_fs/src/", "crates/cladefs_wire/src/", "crates/cladefsd/src/", "crates/local_cell/src/", "crates/bucket_cell/src/")
+OFF_HOST_FS_CRATES = ("crates/cladefs/src/", "crates/cladefs_core/src/", "crates/cladefs_fs/src/", "crates/cladefs_fuse/src/", "crates/cladefs_wire/src/", "crates/cladefsd/src/", "crates/local_cell/src/", "crates/bucket_cell/src/")
 # The files whose reading or writing of the host's file system is outside the simulation as a
 # whole (doc-24): FUSE, the VM sockets and a VM process's client, procfs, the image an import reads,
 # a file bucket, the tools; and those that are tests' alone.
 OFF_HOST_FS_FILES = (
-    "/fuse/", "/cladefsd/src/grants.rs", "/cladefsd/src/lib.rs", "/cladefsd/src/mount.rs",
+    "/cladefs_fuse/src/", "/cladefsd/src/grants.rs", "/cladefsd/src/lib.rs", "/cladefsd/src/mount/fuse.rs",
     "/cladefs_wire/src/client.rs", "/cladefsd/src/governor.rs", "/cladefsd/src/process.rs", "/cladefsd/src/fuse_control.rs", "/dax/uffd.rs",
     "/import.rs", "/import/", "/storage/", "/bucket_cell/src/local.rs", "/bucket_cell/src/faults.rs",
     "/src/bin/", "/testing.rs", "_faults.rs", "/bucket/lifecycle.rs", "/bucket/write_budgets.rs",

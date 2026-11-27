@@ -1,0 +1,112 @@
+# Copyright 2026 The cladefs Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@crates//:defs.bzl", "all_crate_deps")
+load("//tools/bazel:rust.bzl", "MADSIM_TOKIO_ALIAS", "cladefs_rust_library", "cladefs_rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["Cargo.toml"])
+
+filegroup(
+    name = "crate_files",
+    srcs = glob(["Cargo.toml", "src/**/*.rs", "tests/**/*.rs"], allow_empty = True),
+)
+
+_LIB_SRCS = glob(["src/**/*.rs"])
+
+# The host's FUSE mount (board 14536), a variant for each of cladefs_fs's, which it serves: what
+# depends on one of cladefs_fs's depends on its own here.
+_PROC_MACROS = all_crate_deps(proc_macro = True)
+
+cladefs_rust_library(
+    name = "cladefs_fuse",
+    srcs = _LIB_SRCS,
+    aliases = MADSIM_TOKIO_ALIAS,
+    proc_macro_deps = _PROC_MACROS,
+    deps = [
+        "//crates/cladefs_core",
+        "//crates/cladefs_fs",
+        "//crates/local_cell",
+    ] + all_crate_deps(normal = True),
+)
+
+cladefs_rust_library(
+    name = "cladefs_fuse_testing",
+    srcs = _LIB_SRCS,
+    aliases = MADSIM_TOKIO_ALIAS,
+    crate_name = "cladefs_fuse",
+    proc_macro_deps = _PROC_MACROS,
+    deps = [
+        "//crates/cladefs_core:cladefs_core_testing",
+        "//crates/cladefs_fs:cladefs_fs_testing",
+        "//crates/local_cell:local_cell_keys_testing",
+    ] + all_crate_deps(normal = True),
+)
+
+cladefs_rust_library(
+    name = "cladefs_fuse_tests_kms",
+    srcs = _LIB_SRCS,
+    aliases = MADSIM_TOKIO_ALIAS,
+    crate_name = "cladefs_fuse",
+    proc_macro_deps = _PROC_MACROS,
+    deps = [
+        "//crates/cladefs_core:cladefs_core_tests_kms",
+        "//crates/cladefs_fs:cladefs_fs_tests_kms",
+        "//crates/local_cell:local_cell_testing",
+    ] + all_crate_deps(normal = True),
+)
+
+_TEST_DEPS = [
+    "//crates/cladefs_core:cladefs_core_for_test",
+    "//crates/cladefs_fs:cladefs_fs_for_test",
+    "//crates/local_cell:local_cell_testing",
+]
+
+cladefs_rust_library(
+    name = "cladefs_fuse_for_test",
+    srcs = _LIB_SRCS,
+    aliases = MADSIM_TOKIO_ALIAS,
+    crate_features = ["failpoints"],
+    crate_name = "cladefs_fuse",
+    proc_macro_deps = _PROC_MACROS,
+    deps = _TEST_DEPS + all_crate_deps(normal = True),
+)
+
+_DEV_DEPS = [
+    "//crates/extent_keys:extent_keys_testing",
+    "//crates/fxfs",
+    "//crates/storage_device",
+]
+
+cladefs_rust_test(
+    name = "cladefs_fuse_test",
+    aliases = MADSIM_TOKIO_ALIAS,
+    crate = ":cladefs_fuse_for_test",
+    crate_features = ["failpoints"],
+    isolated = True,
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    timeout = "long",
+    deps = _DEV_DEPS + all_crate_deps(normal_dev = True),
+)
+
+# The server driven as the kernel drives it, on every host; and, on Linux, a mount held to tmpfs.
+_INTEGRATION_TESTS = {
+    "fuse": [],
+    "fuse_differential": ["@platforms//os:linux"],
+}
+
+[
+    cladefs_rust_test(
+        name = test_name + "_test",
+        srcs = ["tests/" + test_name + ".rs"],
+        aliases = MADSIM_TOKIO_ALIAS,
+        crate_root = "tests/" + test_name + ".rs",
+        proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+        target_compatible_with = compatible_with,
+        deps = [":cladefs_fuse_for_test"] + _TEST_DEPS + _DEV_DEPS +
+               all_crate_deps(normal = True, normal_dev = True),
+    )
+    for test_name, compatible_with in _INTEGRATION_TESTS.items()
+]

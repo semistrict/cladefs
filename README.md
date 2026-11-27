@@ -266,6 +266,7 @@ read [docs/integrator-guide.md](docs/integrator-guide.md).
 | Path | What |
 |---|---|
 | `crates/cladefs` | The extent daemon (`cladefsd`), `cladefsctl`, and the host's library. |
+| `crates/cladefs_fuse` | The host's FUSE mount of cells: the FUSE server and its mount through `/dev/fuse`, which `cladefsd`'s Mount service serves (the daemon's `mount` feature, on by default). |
 | `crates/local_cell`, `crates/bucket_cell` | An extent store on local disk, and cells in the bucket (including Fast WAL and `cladefs-gc`). |
 | `crates/virtio_extent` | The extent store device, transport-independent, for a VMM to host. |
 | `crates/sqlite_cladefs`, `crates/block_device` | SQLite over a block device kept on extents, and the block device itself (one a SQLite or VM memory-image cell). |

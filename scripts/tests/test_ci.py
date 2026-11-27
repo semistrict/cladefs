@@ -151,9 +151,11 @@ class Ci(unittest.TestCase):
         for required in [
             '--no-deps \\\n        "${cladefs_crates[@]}" --tests --examples -- "${cladefs_lints[@]}"',
             '--no-deps \\\n        "${cladefs_crates[@]}" --lib --bins -- "${cladefs_lints[@]}"',
+            # The daemon without its FUSE mount of cells, which no other build compiles (board 14536).
+            '--no-deps \\\n        -p cladefs -p cladefsd -p libcladefs --no-default-features --lib --bins -- "${cladefs_lints[@]}"',
             '--no-deps -p local_cell -p cladefs_core \\\n        --features shuttle --tests -- "${cladefs_lints[@]}"',
             '--no-deps -p cladefs_core -p virtio_extent \\\n        --features loom --tests -- "${cladefs_lints[@]}"',
-            '--no-deps -p node_local -p host_fs \\\n        -p bucket_cell -p local_cell -p cladefs_core -p cladefs_fs -p cladefs_wire -p cladefsd -p cladefs -p libcladefs --lib --test madsim -- "${cladefs_lints[@]}"',
+            '--no-deps -p node_local -p host_fs \\\n        -p bucket_cell -p local_cell -p cladefs_core -p cladefs_fs -p cladefs_fuse -p cladefs_wire -p cladefsd -p cladefs -p libcladefs --lib --test madsim -- "${cladefs_lints[@]}"',
         ]:
             self.assertIn(required, body)
 

@@ -99,10 +99,13 @@ board 10598).
   applies changesets (whiteouts, opaque directories), files keeping their
   owners, permissions, times and extended attributes. `cladefsctl import` makes
   a base cell of one, for VMs to boot forks of.
-- `fuse/` mounts a `Filesystem` on the host with FUSE (TASK-222): a server of
+- `crates/cladefs_fuse`, a crate of its own (board 14536), mounts a `Filesystem`
+  on the host with FUSE (TASK-222): a server of
   the protocol, a request's bytes in and its reply's out, on every host, and on
   Linux a mount through `/dev/fuse`, by mount(2) as root or `fusermount3`
-  otherwise. cladefsd, with `CLADEFSD_MOUNT`
+  otherwise. cladefsd, built with its `mount` feature (on unless a build says
+  otherwise; without it the daemon links none of the crate and refuses a mount
+  asked for, saying so) and with `CLADEFSD_MOUNT`
   naming a MOUNTPOINT and `CLADEFSD_MOUNT_STORES` a DIR, is one mount for any
   number of cells (TASK-302, TASK-475.2): its Mount service, on the daemon's
   control socket (`proto/cladefs/mount/v1/mount.proto`; `cladefsctl mount
