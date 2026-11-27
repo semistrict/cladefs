@@ -15,7 +15,9 @@
 # shuttle, scripts, go, and guest and firecracker on Linux, hvf and guest on an arm64
 # Mac). The part unit, in no default, runs the
 # workspace's unit tests alone, about a minute: the workspace part's tests but the slow ones the
-# nextest profile unit leaves out (.config/nextest.toml).
+# nextest profile unit leaves out (.config/nextest.toml). The part worker, in no default, as it
+# needs Node, pnpm and wasm-bindgen, builds the Cloudflare Worker collector as it is deployed and
+# runs its checks and tests (workers/cladefs-gc).
 #
 # Every cargo call is --locked: a lock file that is not as Cargo resolves its manifests fails the
 # part, rather than being rewritten under it (board 8601).
@@ -116,6 +118,16 @@ fi
 if part sim; then
     cargo nextest run --locked --manifest-path "$root/Cargo.toml" --cargo-profile sim \
         -p local_cell -E "$sim" "$@"
+fi
+# The Cloudflare Worker collector (workers/cladefs-gc, board 14524): gc_wasm built for wasm32 as
+# it is deployed (its scripts/wasm.sh, wasm-bindgen of Cargo.lock's version), then the Worker
+# installed by its lockfile, type-checked, linted and formatted (`check`), its tests run against
+# Miniflare's R2 and its wasm collector (`test`), and bundled (`build`). What runs the collector on
+# wasm: the clippy part lints gc_wasm for wasm32, and runs none of it.
+if part worker; then
+    "$root/workers/cladefs-gc/scripts/wasm.sh"
+    (cd "$root/workers/cladefs-gc" && pnpm install --frozen-lockfile && pnpm run check &&
+        pnpm test --run && pnpm run build)
 fi
 # The build under madsim, the daemon's deterministic simulation (doc-24, TASK-685.12): the crates
 # the simulation runs, built with `--cfg madsim`, its target a directory of its own, as every crate

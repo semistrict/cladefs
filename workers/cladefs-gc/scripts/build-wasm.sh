@@ -3,32 +3,32 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 #
-# Rebuilds `crates/gc_wasm` for `wasm32-unknown-unknown` via `hotbed` and copies the
-# `wasm-bindgen` output into `workers/cladefs-gc/src/wasm/` (optimized with `wasm-opt` if present).
+# Rebuilds `crates/gc_wasm` for `wasm32-unknown-unknown` via `hotbed` (scripts/wasm.sh, with
+# wasm-bindgen of Cargo.lock's version, fetched from its release if the workspace has none) and
+# copies the output into `workers/cladefs-gc/src/wasm/` (optimized with `wasm-opt` if present).
 
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 worker_dir="$(cd "$script_dir/.." && pwd)"
 repo_root="$(cd "$worker_dir/../.." && pwd)"
-wbg_version="0.2.129"
+wbg_version=$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/version = |"/, ""); print; exit }' \
+  "$repo_root/Cargo.lock")
 
 cd "$repo_root"
 hotbed run --kind build --wait 30m -- sh -c "set -euo pipefail
-rustup target add wasm32-unknown-unknown
-cargo build --locked -p gc_wasm --target wasm32-unknown-unknown --release
-if [ ! -x /tmp/wbg/wasm-bindgen ]; then
-  mkdir -p /tmp/wbg
+if [ ! -x /tmp/wbg-${wbg_version}/wasm-bindgen ]; then
+  mkdir -p /tmp/wbg-${wbg_version}
   arch=\$(uname -m)
   case \"\$arch\" in
     x86_64) target=x86_64-unknown-linux-musl ;;
     aarch64) target=aarch64-unknown-linux-gnu ;;
     *) echo \"unsupported arch: \$arch\" >&2; exit 1 ;;
   esac
-  curl -fsSL \"https://github.com/wasm-bindgen/wasm-bindgen/releases/download/${wbg_version}/wasm-bindgen-${wbg_version}-\${target}.tar.gz\" | tar -xz --strip-components=1 -C /tmp/wbg
+  curl -fsSL \"https://github.com/wasm-bindgen/wasm-bindgen/releases/download/${wbg_version}/wasm-bindgen-${wbg_version}-\${target}.tar.gz\" | tar -xz --strip-components=1 -C /tmp/wbg-${wbg_version}
 fi
-rm -rf target/gc_wasm_pkg && mkdir -p target/gc_wasm_pkg
-/tmp/wbg/wasm-bindgen --target web --out-dir target/gc_wasm_pkg target/wasm32-unknown-unknown/release/gc_wasm.wasm
+rm -rf target/gc_wasm_pkg
+PATH=/tmp/wbg-${wbg_version}:\$PATH workers/cladefs-gc/scripts/wasm.sh target/gc_wasm_pkg
 "
 
 mkdir -p "$worker_dir/src/wasm"

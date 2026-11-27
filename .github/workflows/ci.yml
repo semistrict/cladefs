@@ -69,8 +69,9 @@ jobs:
         # (TASK-219); the VMM's own that cladefs adds to, vendor/firecracker's workspace, which ran
         # on hosts of guests alone and broke unseen there (TASK-220); the build under madsim, the
         # daemon's simulation, a build of its own, which no other part made (TASK-685.12); the
-        # rest, minutes.
-        parts: [workspace, sim, madsim, shuttle, clippy scripts, guest, go, firecracker]
+        # rest, minutes; the Cloudflare Worker collector, its wasm build and its own checks and
+        # tests, which no other part runs (board 14524).
+        parts: [workspace, sim, madsim, shuttle, clippy scripts, guest, go, firecracker, worker]
         # What a part's tests run beyond what every part builds with: Coccinelle, whose rules the
         # scripts' tests check; xfsprogs, for the guest tests' own of reflinks; libclang, which the
         # VMM's userfaultfd-sys builds its bindings with (bindgen). Coccinelle and its
@@ -130,6 +131,29 @@ jobs:
         with:
           go-version: stable
           cache-dependency-path: go/go.sum
+      # The worker part's: wasm-bindgen at Cargo.lock's version (its CLI and crate share an ABI;
+      # workers/cladefs-gc/scripts/wasm.sh refuses another), pnpm as the Worker's package.json pins
+      # it, and Node.
+      - name: wasm-bindgen, at Cargo.lock's version
+        if: matrix.parts == 'worker'
+        id: wasm-bindgen
+        run: |
+          version=$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/version = |"/, ""); print; exit }' Cargo.lock)
+          echo "tool=wasm-bindgen@$version" >> "$GITHUB_OUTPUT"
+      - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2.90.8
+        if: matrix.parts == 'worker'
+        with:
+          tool: ${{ steps.wasm-bindgen.outputs.tool }}
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        if: matrix.parts == 'worker'
+        with:
+          package_json_file: workers/cladefs-gc/package.json
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: matrix.parts == 'worker'
+        with:
+          node-version: 26
+          cache: pnpm
+          cache-dependency-path: workers/cladefs-gc/pnpm-lock.yaml
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |

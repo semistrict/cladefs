@@ -64,7 +64,7 @@ class Ci(unittest.TestCase):
         installed = packages()
         self.assertEqual(sorted(installed), sorted(["workspace", "sim", "madsim", "shuttle",
                                                     "clippy scripts", "guest", "go",
-                                                    "firecracker"]))
+                                                    "firecracker", "worker"]))
         for package, users in OWN.items():
             self.assertEqual({part for part, has in installed.items() if package in has}, users,
                              package)
@@ -95,6 +95,27 @@ class Ci(unittest.TestCase):
         for part in parts():
             for name in part.split():
                 self.assertIn(f"if part {name}; then", script, part)
+
+    def test_the_worker_part_runs_what_the_worker_runs(self):
+        """Board 14524: the worker part builds gc_wasm for wasm32 as the Worker deploys it and runs
+        the Worker's checks, tests and build, installed by its lockfile; CI gives it wasm-bindgen at
+        Cargo.lock's version, and pnpm as the Worker's package.json pins it."""
+        script = TEST_SH.read_text()
+        body = re.search(r"^if part worker; then\n(.*?)^fi$", script,
+                         re.MULTILINE | re.DOTALL).group(1)
+        self.assertIn('"$root/workers/cladefs-gc/scripts/wasm.sh"', body)
+        for step in ["pnpm install --frozen-lockfile", "pnpm run check", "pnpm test --run",
+                     "pnpm run build"]:
+            self.assertIn(step, body)
+        wasm = (ROOT / "workers/cladefs-gc/scripts/wasm.sh").read_text()
+        self.assertIn("--target wasm32-unknown-unknown --release", wasm)
+        self.assertIn("cargo build --locked", wasm)
+        self.assertIn('[[ $have == "$want" ]]', wasm)
+        self.assertIn('echo "tool=wasm-bindgen@$version"', job())
+        self.assertIn("package_json_file: workers/cladefs-gc/package.json", job())
+        self.assertIn("cache-dependency-path: workers/cladefs-gc/pnpm-lock.yaml", job())
+        package = (ROOT / "workers/cladefs-gc/package.json").read_text()
+        self.assertRegex(package, r'"packageManager": "pnpm@\d+\.\d+\.\d+"')
 
     def test_clippy_checks_every_cladefs_crate_and_non_test_targets(self):
         """Board 8607: cladefs's own crates (not copied Fuchsia crates or generated Fuchsia tables)
