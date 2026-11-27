@@ -12,6 +12,10 @@
 //! Its device is the daemon's extent store ([`DaemonDevice`]): its reads of sealed extents are the
 //! daemon's cache's, which every cell and VM it serves shares.
 //!
+//! A freshly booted VM's memory is a new memory cell's window ([`MemoryCell::create`]), as a
+//! restored VM's is its memory cell's (board 14415): its image all holes, each page the guest
+//! writes made private, which its first snapshot writes, as a restored VM's are.
+//!
 //! **Restored** (TASK-456.3), a VM's memory is the cell's window ([`MemoryCell::window`]): the
 //! daemon's pages of its extents, shared with every VM restored from the same snapshot on the host,
 //! mapped read-only, a page the guest writes to made a private copy of its own, as a DAX window
@@ -83,6 +87,13 @@ pub fn capacity(size: u64) -> u64 {
     cladefs_core::memory::memory_capacity(size)
 }
 
+/// Whether opening a memory cell takes one holding a memory already, or refuses it.
+#[derive(Clone, Copy)]
+enum Held {
+    Taken,
+    Refused,
+}
+
 /// A VM's memory, a cell of its own. See the module docs.
 pub struct MemoryCell {
     client: Arc<CellClient>,
@@ -97,21 +108,21 @@ impl MemoryCell {
     /// memory of `size` bytes of zeros, if it doesn't exist: `EINVAL` for one of another size.
     pub fn open(socket: &Path, cell_dir: &Path, size: u64) -> Result<Self, Error> {
         let daemon = DaemonConnection::connect(socket)?;
-        Self::over(daemon.open_memory(cell_dir, capacity(size))?, size)
+        Self::over(daemon.open_memory(cell_dir, capacity(size))?, size, Held::Taken)
     }
 
     /// Opens an existing managed memory cell `cell` served by the daemon listening at `socket`
     /// (hotbed question 547).
     pub fn open_cell(socket: &Path, cell: cladefs_core::CellId, size: u64) -> Result<Self, Error> {
         let daemon = DaemonConnection::connect(socket)?;
-        Self::over(daemon.open_memory(&cell.to_string(), capacity(size))?, size)
+        Self::over(daemon.open_memory(&cell.to_string(), capacity(size))?, size, Held::Taken)
     }
 
     /// Creates and opens a new managed memory cell for `tenant` of `size` bytes on a disk chosen
     /// by the daemon listening at `socket` (hotbed question 547).
     pub fn create_cell(socket: &Path, tenant: u64, size: u64) -> Result<Self, Error> {
         let daemon = DaemonConnection::connect(socket)?;
-        Self::over(daemon.create_memory_cell(tenant, capacity(size))?, size)
+        Self::over(daemon.create_memory_cell(tenant, capacity(size))?, size, Held::Taken)
     }
 
     /// Forks a memory cell version `from` into a new managed memory cell for `tenant` of `size`
@@ -123,7 +134,7 @@ impl MemoryCell {
         size: u64,
     ) -> Result<Self, Error> {
         let daemon = DaemonConnection::connect(socket)?;
-        Self::over(daemon.open_forked_cell(tenant, from, capacity(size))?, size)
+        Self::over(daemon.open_forked_cell(tenant, from, capacity(size))?, size, Held::Taken)
     }
 
     /// The memory cell at `cell_dir`, forked from the version `from` of a memory cell if it doesn't
@@ -136,7 +147,7 @@ impl MemoryCell {
         size: u64,
     ) -> Result<Self, Error> {
         let daemon = DaemonConnection::connect(socket)?;
-        Self::over(daemon.open_forked(cell_dir, from, capacity(size))?, size)
+        Self::over(daemon.open_forked(cell_dir, from, capacity(size))?, size, Held::Taken)
     }
 
     /// Creates (or reopens) a standalone host-local ephemeral memory cell at `cell_dir` of `size`
@@ -144,7 +155,7 @@ impl MemoryCell {
     /// another size, kind, or non-ephemeral mode.
     pub fn open_ephemeral(socket: &Path, cell_dir: &Path, size: u64) -> Result<Self, Error> {
         let daemon = DaemonConnection::connect(socket)?;
-        Self::over(daemon.open_memory_ephemeral(cell_dir, capacity(size))?, size)
+        Self::over(daemon.open_memory_ephemeral(cell_dir, capacity(size))?, size, Held::Taken)
     }
 
     /// Reopens an existing host-local ephemeral memory cell at `cell_dir` in place (`ENOENT` if
@@ -157,23 +168,49 @@ impl MemoryCell {
         size: u64,
     ) -> Result<Self, Error> {
         let daemon = DaemonConnection::connect(socket)?;
-        Self::over(daemon.open_ephemeral_memory_existing(cell_dir, expected, capacity(size))?, size)
+        Self::over(
+            daemon.open_ephemeral_memory_existing(cell_dir, expected, capacity(size))?,
+            size,
+            Held::Taken,
+        )
     }
 
-    /// The memory cell `opened` is, of a memory of `size` bytes, made one of zeros if new.
-    fn over(opened: CellClient, size: u64) -> Result<Self, Error> {
+    /// A new memory cell at `cell_dir` (`0/0`, or `TENANT/0`: one the daemon places), which the
+    /// daemon listening at `socket` serves, a memory of `size` bytes of zeros: a freshly booted
+    /// VM's (board 14415). `EEXIST` for a cell that holds a memory already, which a fresh boot's
+    /// memory never is.
+    pub fn create(socket: &Path, cell_dir: &Path, size: u64) -> Result<Self, Error> {
+        let daemon = DaemonConnection::connect(socket)?;
+        Self::over(daemon.open_memory(cell_dir, capacity(size))?, size, Held::Refused)
+    }
+
+    /// A new standalone host-local ephemeral memory cell at `cell_dir`, as [`MemoryCell::create`]
+    /// makes one in a bucket: writing nothing to the bucket. `EEXIST` for a cell that holds a
+    /// memory already.
+    pub fn create_ephemeral(socket: &Path, cell_dir: &Path, size: u64) -> Result<Self, Error> {
+        let daemon = DaemonConnection::connect(socket)?;
+        Self::over(daemon.open_memory_ephemeral(cell_dir, capacity(size))?, size, Held::Refused)
+    }
+
+    /// The memory cell `opened` is, of a memory of `size` bytes, made one of zeros if new; one
+    /// holding a memory already refused if `held` says so.
+    fn over(opened: CellClient, size: u64, held: Held) -> Result<Self, Error> {
         let client = Arc::new(opened);
         let device = DeviceHolder::new(DaemonDevice::new(client.clone()).map_err(Error::new)?);
         let blocks = BlockDevice::open(device, Options::default()).map_err(Error::new)?;
-        match blocks.size().map_err(Error::new)? {
-            0 if size > 0 => {
+        match (blocks.size().map_err(Error::new)?, held) {
+            (0, _) if size > 0 => {
                 blocks.resize(size).map_err(Error::new)?;
                 blocks.flush().map_err(Error::new)?;
             }
-            held if held == size => {}
-            held => {
-                return Err(Error::new(cladefs_core::Errno::EINVAL)
-                    .context(format!("a memory of {held} bytes, not {size}")));
+            (holding, Held::Refused) => {
+                return Err(Error::new(Errno::EEXIST)
+                    .context(format!("a new memory's cell holds a memory of {holding} bytes")));
+            }
+            (holding, Held::Taken) if holding == size => {}
+            (holding, Held::Taken) => {
+                return Err(Error::new(Errno::EINVAL)
+                    .context(format!("a memory of {holding} bytes, not {size}")));
             }
         }
         Ok(Self { client, blocks, size, window: Mutex::new(None) })
