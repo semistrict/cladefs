@@ -87,10 +87,42 @@ pub(crate) fn main() -> i32 {
     let log = Log::open(args.log.as_deref());
     match run(&args, &log) {
         Ok(code) => code,
-        Err(e) => {
-            log.say(&e);
+        Err(Ending::DaemonLost(why)) => {
+            log.say(&why);
+            CLADEFSD_LOST
+        }
+        Err(Ending::Failed(why)) => {
+            log.say(&why);
             1
         }
+    }
+}
+
+/// Why the VMM ends short of its guest, which its log says: its extent daemon gone, which it
+/// exits [`CLADEFSD_LOST`] for, as Firecracker does, at boot too, its cell opening as the daemon
+/// went (TASK-232); or anything else, 1.
+enum Ending {
+    DaemonLost(String),
+    Failed(String),
+}
+
+impl From<String> for Ending {
+    fn from(why: String) -> Self {
+        Self::Failed(why)
+    }
+}
+
+impl From<&str> for Ending {
+    fn from(why: &str) -> Self {
+        Self::Failed(why.to_owned())
+    }
+}
+
+/// The ending of a machine's call that failed with `e`, doing `what`.
+fn ending(what: &str, e: Error) -> Ending {
+    match e {
+        Error::ExtentDaemonLost(_) => Ending::DaemonLost(format!("{what}: {e}")),
+        e => Ending::Failed(format!("{what}: {e}")),
     }
 }
 
@@ -209,7 +241,7 @@ struct Vmm {
     released: bool,
 }
 
-fn run(args: &Args, log: &Log) -> Result<i32, String> {
+fn run(args: &Args, log: &Log) -> Result<i32, Ending> {
     let (requests, rx) = mpsc::channel();
     let interrupt = Interrupt::default();
     if let Some(path) = &args.api {
@@ -236,15 +268,15 @@ fn serve_vsock(machine: &Machine, path: &Path) -> Result<Server, String> {
 
 impl Vmm {
     /// Boots the microVM the configuration file at `path` describes.
-    fn boot(path: &Path) -> Result<Self, String> {
+    fn boot(path: &Path) -> Result<Self, Ending> {
         let text = std::fs::read(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
         let config: Value =
             serde_json::from_slice(&text).map_err(|e| format!("{}: {e}", path.display()))?;
         let plan = plan(&config)?;
         let machine =
-            Machine::boot_linux(plan.config, &plan.boot).map_err(|e| format!("booting: {e}"))?;
+            Machine::boot_linux(plan.config, &plan.boot).map_err(|e| ending("booting", e))?;
         let kept = Kept { vsock: plan.vsock, cladefsd_socket: plan.cladefsd_socket };
-        Self::serving(machine, kept, false, None)
+        Ok(Self::serving(machine, kept, false, None)?)
     }
 
     /// The microVM around `machine`: its console on standard output (a file, as the tests give
@@ -261,8 +293,9 @@ impl Vmm {
     }
 
     /// Waits for the API's `PUT /snapshot/load`, refusing every other request meanwhile, and
-    /// loads the snapshot it names. A load that fails is refused, and the next awaited.
-    fn await_load(rx: &mpsc::Receiver<Request>) -> Result<Self, String> {
+    /// loads the snapshot it names. A load that fails is refused, and the next awaited; one that
+    /// failed as the extent daemon went ends the VMM, as Firecracker's does.
+    fn await_load(rx: &mpsc::Receiver<Request>) -> Result<Self, Ending> {
         loop {
             let request = rx.recv().map_err(|_| "the API went before a snapshot was loaded")?;
             let Action::Load(load) = request.action else {
@@ -275,8 +308,12 @@ impl Vmm {
                     let _ = request.reply.send(Ok(None));
                     return Ok(vmm);
                 }
-                Err(e) => {
-                    let _ = request.reply.send(Err(e));
+                Err(Ending::DaemonLost(why)) => {
+                    let _ = request.reply.send(Err(why.clone()));
+                    return Err(Ending::DaemonLost(why));
+                }
+                Err(Ending::Failed(why)) => {
+                    let _ = request.reply.send(Err(why));
                 }
             }
         }
@@ -284,7 +321,7 @@ impl Vmm {
 
     /// The microVM `load`'s snapshot holds, its extent store devices on the cells and daemon it
     /// says, its vsock at its own path or the snapshot's.
-    fn load(load: Load) -> Result<Self, String> {
+    fn load(load: Load) -> Result<Self, Ending> {
         let snapshot = match &load.memory {
             MemoryFrom::File(memory) => Snapshot::open_split(&load.snapshot, memory),
             MemoryFrom::Cell(_) => Snapshot::open_without_ram(&load.snapshot),
@@ -304,7 +341,8 @@ impl Vmm {
                     Some(set) if set != socket && config.extent_stores.len() > 1 => {
                         return Err(format!(
                             "extent devices on two daemons ({set}, {socket}) aren't supported"
-                        ));
+                        )
+                        .into());
                     }
                     _ => kept.cladefsd_socket = Some(socket.clone()),
                 }
@@ -325,11 +363,11 @@ impl Vmm {
                 (machine, Some(memory))
             }
         };
-        let machine = machine.map_err(|e| format!("loading the snapshot: {e}"))?;
+        let machine = machine.map_err(|e| ending("loading the snapshot", e))?;
         if let Some(memory) = &memory {
             memory.take_given_back();
         }
-        Self::serving(machine, kept, !load.resume, memory)
+        Ok(Self::serving(machine, kept, !load.resume, memory)?)
     }
 
     /// Runs the microVM, serving the API's requests between its runs, until it ends: 0 once
@@ -339,7 +377,7 @@ impl Vmm {
         rx: &mpsc::Receiver<Request>,
         interrupt: &Interrupt,
         log: &Log,
-    ) -> Result<i32, String> {
+    ) -> Result<i32, Ending> {
         interrupt.set(self.machine.stop_handle());
         loop {
             if !self.paused {
@@ -351,8 +389,9 @@ impl Vmm {
                         log.say(&format!("the extent store device stopped the machine: {why}"));
                         return Ok(CLADEFSD_LOST);
                     }
-                    Ok(other) => return Err(format!("the machine stopped: {other:?}")),
-                    Err(e) => return Err(format!("the machine failed: {e}")),
+                    Err(e @ Error::ExtentDaemonLost(_)) => return Err(ending("running", e)),
+                    Ok(other) => return Err(format!("the machine stopped: {other:?}").into()),
+                    Err(e) => return Err(format!("the machine failed: {e}").into()),
                 }
             }
             let request = match self.paused {

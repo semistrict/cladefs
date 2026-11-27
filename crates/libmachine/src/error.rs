@@ -94,6 +94,13 @@ pub enum Error {
     #[error("extent store device: {0}")]
     ExtentStore(String),
 
+    /// An extent store device's extent daemon went, and the guest's disk with it: the machine
+    /// stopped for good, or wasn't made, the daemon going as its cell opened (Firecracker's
+    /// `CladefsdLost`, which a VMM tells its host apart from other failures). Every run of the
+    /// machine ends at once with it from then on.
+    #[error("extent store device: {0}")]
+    ExtentDaemonLost(String),
+
     /// The guest is not idle, so it cannot be suspended now
     /// ([`Machine::suspend`](crate::Machine::suspend)): a vCPU is running
     /// or has an interrupt to take.

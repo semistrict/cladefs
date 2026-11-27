@@ -59,7 +59,7 @@ use crate::backend::MemorySlots;
 use crate::devices::pci::BarAllocator;
 use crate::error::{Error, Result};
 use crate::extent::{ExtentCache, ExtentDaemon, ExtentStore};
-use crate::stop::StopShared;
+use crate::stop::{Failure, StopShared};
 use crate::sys::EventFd;
 
 /// The device's type, as its PCI IDs say it (`pci_ids`).
@@ -76,10 +76,15 @@ impl Failing {
         Self(Arc::downgrade(stop))
     }
 
-    fn fail(&self, why: String) {
+    fn fail(&self, why: Failure) {
         if let Some(stop) = self.0.upgrade() {
             stop.fail(why);
         }
+    }
+
+    /// Why the machine was stopped for good, if it was.
+    fn failure(&self) -> Option<Error> {
+        self.0.upgrade().and_then(|stop| stop.failure())
     }
 }
 
@@ -155,7 +160,9 @@ impl ExtentDevice {
         })?;
         let on_lost: virtio_extent::OnLost = {
             let (id, failing) = (id.clone(), failing.clone());
-            Arc::new(move || failing.fail(format!("{id}: the extent daemon went")))
+            Arc::new(move || {
+                failing.fail(Failure::DaemonLost(format!("{id}: the extent daemon went")))
+            })
         };
         let device = match saved {
             None => virtio_extent::Device::connected(config, connection, queues, vm, on_lost),
@@ -173,7 +180,11 @@ impl ExtentDevice {
                 virtio_extent::Device::restore_connected(&state, connection, queues, vm, on_lost)
             }
         };
-        let mut device = device.map_err(|err| Error::ExtentStore(format!("{id}: {err}")))?;
+        // A daemon going as the cell opened stopped the machine first (`on_lost`): that is the
+        // failure, not the open's, as Firecracker's is (`CladefsdLost`, TASK-232).
+        let mut device = device.map_err(|err| {
+            failing.failure().unwrap_or_else(|| Error::ExtentStore(format!("{id}: {err}")))
+        })?;
         if let Some(prefault) = prefault {
             device.set_prefault(prefault);
         }
@@ -295,7 +306,7 @@ impl VirtioDevice for ExtentDevice {
             let why = format!("{}: activating it: {why}", self.device.config().id);
             // The guest's disk is gone: the machine stops, saying why, rather than run on
             // without it.
-            self.failing.fail(why.clone());
+            self.failing.fail(Failure::Other(why.clone()));
             Error::ExtentStore(why)
         })
     }
@@ -311,7 +322,7 @@ impl VirtioDevice for ExtentDevice {
         });
         if let Err(err) = reset {
             let id = &self.device.config().id;
-            self.failing.fail(format!("{id}: starting its reset: {err}"));
+            self.failing.fail(Failure::Other(format!("{id}: starting its reset: {err}")));
         }
     }
 

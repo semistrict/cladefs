@@ -33,7 +33,25 @@ pub(crate) struct StopShared {
     doorbell: Arc<Doorbell>,
     /// Why a device stopped the machine for good ([`StopShared::fail`]): every run from then on
     /// ends at once with it. Read before every entry into the guest, so without a lock.
-    failed: std::sync::OnceLock<String>,
+    failed: std::sync::OnceLock<Failure>,
+}
+
+/// Why a device stopped its machine for good.
+#[derive(Debug, Clone)]
+pub(crate) enum Failure {
+    /// Its extent daemon went ([`crate::Error::ExtentDaemonLost`]).
+    DaemonLost(String),
+    /// Anything else ([`crate::Error::ExtentStore`]).
+    Other(String),
+}
+
+impl From<Failure> for crate::Error {
+    fn from(failure: Failure) -> Self {
+        match failure {
+            Failure::DaemonLost(why) => Self::ExtentDaemonLost(why),
+            Failure::Other(why) => Self::ExtentStore(why),
+        }
+    }
 }
 
 impl StopHandle {
@@ -62,9 +80,9 @@ impl StopShared {
 
     /// Stops the machine for good, as a device that can't go on does (an extent store device
     /// whose extent daemon went, or whose guest's accesses cladefs refuses): the run ends with
-    /// [`Error::ExtentStore`](crate::Error::ExtentStore) saying `why`, as does every run after it.
-    /// The first reason given is the one told.
-    pub(crate) fn fail(&self, why: String) {
+    /// the error `why` says ([`Failure`]), as does every run after it. The first reason given is
+    /// the one told.
+    pub(crate) fn fail(&self, why: Failure) {
         // A reason given already is the one told: this one is dropped.
         let _ = self.failed.set(why);
         self.requested.store(true, Ordering::SeqCst);
@@ -74,7 +92,7 @@ impl StopShared {
 
     /// Why a device stopped the machine for good, if one did ([`StopShared::fail`]).
     pub(crate) fn failure(&self) -> Option<crate::Error> {
-        self.failed.get().cloned().map(crate::Error::ExtentStore)
+        self.failed.get().cloned().map(crate::Error::from)
     }
 
     /// Consumes a pending stop request.
