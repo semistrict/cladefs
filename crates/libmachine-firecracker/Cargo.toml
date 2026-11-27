@@ -12,6 +12,7 @@ publish = false
 [target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
 # cladefs's memory cells (`cladefs::memory_cell`), a restored microVM's memory (board 13994).
 cladefs = { path = "../cladefs" }
+libc.workspace = true
 libmachine.workspace = true
 serde.workspace = true
 serde_json = "1.0.154"

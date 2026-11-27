@@ -2871,6 +2871,7 @@ name = "libmachine-firecracker"
 version = "0.1.0"
 dependencies = [
  "cladefs",
+ "libc",
  "libmachine",
  "serde",
  "serde_json",

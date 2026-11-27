@@ -204,7 +204,9 @@ impl CellMemory {
         let dirty = unsafe { self.diffs.dirty(&self.cell, base) }?;
         let io = |e: std::io::Error| format!("writing the memory diff {}: {e}", path.display());
         let file = std::fs::File::create(path).map_err(io)?;
-        file.set_len(self.cell.size()).map_err(io)?;
+        let size = self.cell.size();
+        file.set_len(size).map_err(io)?;
+        let mut written = 0;
         for run in dirty {
             // SAFETY: Within the RAM, which the paused microVM doesn't change.
             let bytes = unsafe {
@@ -214,8 +216,33 @@ impl CellMemory {
                 )
             };
             file.write_all_at(bytes, run.start).map_err(io)?;
+            punch_hole(&file, written, run.start - written).map_err(io)?;
+            written = run.end;
         }
+        punch_hole(&file, written, size - written).map_err(io)?;
         file.sync_all().map_err(io)
+    }
+}
+
+/// Makes the `len` bytes at `offset` of `file` a hole (`F_PUNCHHOLE`): a diff's pages the guest
+/// didn't write. APFS gives a file grown past what was written no holes of its own on a volume of
+/// the boot container, its gaps allocated zeros (measured 2026-11-27): which a diff applied
+/// (`SEEK_DATA`, `MemoryCell::apply_diff_files`) would take for pages of zeros the guest wrote.
+fn punch_hole(file: &std::fs::File, offset: u64, len: u64) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd as _;
+    if len == 0 {
+        return Ok(());
+    }
+    let hole = libc::fpunchhole_t {
+        fp_flags: 0,
+        reserved: 0,
+        fp_offset: offset as libc::off_t,
+        fp_length: len as libc::off_t,
+    };
+    // SAFETY: A plain system call on an open descriptor, with a struct of its own.
+    match unsafe { libc::fcntl(file.as_raw_fd(), libc::F_PUNCHHOLE, &hole) } {
+        0 => Ok(()),
+        _ => Err(std::io::Error::last_os_error()),
     }
 }
 
