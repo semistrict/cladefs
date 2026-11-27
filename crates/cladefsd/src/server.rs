@@ -52,7 +52,7 @@ const FLUSH_EVERY: std::time::Duration = std::time::Duration::from_millis(50);
 pub(super) fn serve_on(daemon: &Arc<Daemon>, listener: UnixListener) {
     let _serving = crate::Serving::begin(daemon);
     let serving = Arc::clone(daemon);
-    let stop = match StopAccepting::new() {
+    let stop = match StopAccepting::once_made() {
         Ok(stop) => stop,
         Err(err) => return log::error!("cladefsd: serving a VM socket: {err}: serving none"),
     };
@@ -89,7 +89,7 @@ pub(super) fn serve_tenant_on(
 /// ([`serve_tenant_on`]).
 #[cfg(not(madsim))]
 pub fn serve_tenant(listener: UnixListener, tenant: Arc<Tenant>) {
-    match StopAccepting::new() {
+    match StopAccepting::once_made() {
         Ok(stop) => serve_tenant_on(&tenant.daemon.clone(), listener, tenant, stop),
         Err(err) => log::error!("cladefsd: serving a tenant's VM socket: {err}: serving none"),
     }
@@ -218,6 +218,25 @@ pub(crate) struct StopAccepting {
 }
 
 impl StopAccepting {
+    /// A stop, not said yet, for a listener about to be served: made once descriptors are to be
+    /// had, as its accepts are tried again until they are (TASK-79.35), the process having as many
+    /// open as it may; an error of another kind returned.
+    pub(crate) fn once_made() -> std::io::Result<Arc<Self>> {
+        let mut failing = false;
+        loop {
+            match Self::new() {
+                Err(err) if matches!(err.raw_os_error(), Some(libc::EMFILE | libc::ENFILE)) => {
+                    if !failing {
+                        log::error!("cladefsd: serving a VM socket: {err}: trying again");
+                        failing = true;
+                    }
+                    std::thread::sleep(ACCEPT_AGAIN);
+                }
+                made => return made,
+            }
+        }
+    }
+
     /// A stop, not said yet.
     pub(crate) fn new() -> std::io::Result<Arc<Self>> {
         use std::os::fd::FromRawFd;

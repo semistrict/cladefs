@@ -440,7 +440,7 @@ impl Daemon {
         listener: std::os::unix::net::UnixListener,
         tenant: Arc<server::Tenant>,
     ) {
-        match server::StopAccepting::new() {
+        match server::StopAccepting::once_made() {
             Ok(stop) => server::serve_tenant_on(self, listener, tenant, stop),
             Err(err) => log::error!("cladefsd: serving a tenant's VM socket: {err}: serving none"),
         }
