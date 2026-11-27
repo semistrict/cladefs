@@ -2485,6 +2485,7 @@ name = "libcladefs"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bucket_cell",
  "cladefs_core",
  "cladefs_wire",
  "cladefsd",
