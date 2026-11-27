@@ -14,7 +14,7 @@ appendable fast object store (bare metal, R2, local files).
 
 In cladefs today, every compute host's local disk is a rebuildable cache except for three things:
 the unuploaded tail of an `f = 0` cell (explicitly not promised across host loss, doc-12),
-ephemeral cells (intentionally host-local scratch, doc-25), and `CLADEFSD_REPLICAS` (doc-21).
+ephemeral cells (doc-25), and `CLADEFSD_REPLICAS` (doc-21).
 
 `CLADEFSD_REPLICAS` breaks the "compute hosts are cattle" property:
 
