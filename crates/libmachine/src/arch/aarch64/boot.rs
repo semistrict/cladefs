@@ -40,8 +40,8 @@ pub(crate) struct Loaded {
     pub(crate) fdt: u64,
 }
 
-/// A kernel or initramfs that cannot be booted: [`Error::Boot`], as x86_64's loader says it
-/// (an `InvalidConfig` here had machined call a bad kernel a bad configuration).
+/// A kernel or initramfs that cannot be booted: [`Error::Boot`] (an `InvalidConfig` here had
+/// machined call a bad kernel a bad configuration).
 fn boot_err(msg: String) -> Error {
     Error::Boot(msg)
 }

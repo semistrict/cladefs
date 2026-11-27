@@ -295,6 +295,17 @@ reaching what those can't reach, or reach only by luck: a pure function's edge c
 malformed inputs, an interleaving. A unit test restating its code (a map's insert and remove, a
 getter, a constant) is never written; one found is deleted, saying so in a `Weakens-tests:` line.
 
+## One simulator: the madsim world
+
+The user's rule (2026-11-27, board 14493), FoundationDB's way: cladefs has one simulator, the madsim
+world (`crates/cladefs/tests/madsim.rs`, doc-24), which runs real cladefsd daemons under one seed.
+`local_cell::sim` (`crates/local_cell/src/sim`) is frozen: no new feature, step, profile or check
+goes into it. A new feature's simulation goes into the madsim world. `local_cell::sim`'s step families
+move there one by one as workloads in its swarm, each family's rule searches moving with it, and are
+deleted from `local_cell::sim` once the madsim world catches their rules (boards 14565-14571).
+A rare interleaving comes from a BUGGIFY site in production code (`bucket_cell::buggify`), never from
+a harness faking it; seeds cost compute, run in parallel on hotbed, not a cheaper simulator.
+
 ## A daemon's state lives on Host/Daemon, not in statics (or say why)
 
 madsim runs every simulated host in one process, on one thread (doc-24): a mutable `static`, a `thread_local!`'s among them, is shared by all of them, and a host's state kept in one leaks to the others and outlives the host's kill (board 5450's part cache; board 7451's replicator, whose tasks ran on the process's bucket runtime after their host was lost). `scripts/rust-rules.py`'s `process-wide-static` rule finds each static in the crates the simulation runs: keep per-host state on an explicit `Host`/`Daemon` context instead (`bucket_cell::Host`, `local_cell::Host`, `cladefs::Host`, `cladefsd::Daemon`; board 10774, board 10962), or say over it why it is the process's (a count of the whole process's, a fact of the hardware, a pool of spare buffers, outside the simulation).
@@ -400,34 +411,35 @@ Each file is `dead-ends/<short-kebab-name>.md`, short, with these parts:
 **Reopen if:** what would have to change.
 ```
 
-## libmachine: the library VMM beside Firecracker
+## libmachine: the library VMM for the Mac beside Firecracker
 
-`crates/libmachine` (with `libmachine-agent` and `libmachine-py`) is a VMM linked into its
-caller's process, imported from semistrict/libmachine on 2026-11-26 (board 13054); doc-30 is its
-architecture, doc-31 the decisions it made before. Its goal is cladefs's guests in full on macOS
-(Hypervisor.framework, DAX included). Firecracker stays cladefs's production VMM; what the two
-share lives once, in crates of this workspace (`virtio_extent`, the guest kernel). Its tasks are
-`tag.libmachine=yes` on the board; those from its Backlog carry `libmachine=TASK-N`, never cited
-as `TASK-N` (cladefs's own numbers): cite them by board ID.
+`crates/libmachine` (with `libmachine-agent`, `libmachine-firecracker` and `machined`) is a VMM
+linked into its caller's process on Hypervisor.framework, imported from semistrict/libmachine on
+2026-11-26 (board 13054) and cut down on 2026-11-27 (the user, board 14519) to what the Mac path
+needs: cladefs's guests on an Apple Silicon Mac (`crates/libmachine-firecracker`, a
+Firecracker-compatible VMM on libmachine, which cladefs's guest tests run as `CLADEFS_FIRECRACKER`;
+DAX included), and hotbed's Mac worker's VMM (`crates/machined`, whose calls hotbed makes are
+CreateMachine, StartMachine, GetMachine, ListMachines, DeleteMachine and StreamConsole). The KVM and
+x86-64 backend, suspension, the `Sandbox` layer, the Python bindings and machined's other calls are
+gone: Firecracker is the production VMM on Linux, and what the two share lives once, in crates of
+this workspace (`virtio_extent`, the guest kernel). doc-30 is libmachine's architecture, doc-31 the
+decisions it made before. Its tasks are `tag.libmachine=yes` on the board; those from its Backlog
+carry `libmachine=TASK-N`, never cited as `TASK-N` (cladefs's own numbers): cite them by board ID.
 
-- **Formats are not frozen** (the user, 2026-11-26): libmachine's snapshot and suspension files
-  and its agent's wire protocol stay outside `formats/`. Each changes outright when the design is
-  better, with its version bumped; the new code refuses every other version by name, with no
-  migration, conversion or dual reader.
-- **Guest code in tests is assembly, never raw bytes:** Rust tests and examples use iced-x86's
-  `code_asm` (`crates/libmachine/tests/common`); Python tests use Keystone in NASM syntax
-  (`crates/libmachine-py/tests/guest.py`, which serializes Keystone calls: it is not thread-safe).
-- **Guests.** Its tests boot a small test guest (`crates/libmachine/scripts/build-test-guest.sh`:
-  an upstream longterm kernel and an initramfs with its agent) and cladefs's own kernel
-  (`scripts/guest-kernel.sh`); a test that needs KVM or a guest skips itself with a note, and
-  `scripts/test.sh`'s `libmachine` part, which provides both, fails on any such note.
-- **Python:** uv for everything (`uv sync`, `uv run pytest`, `uv build --wheel` in
-  `crates/libmachine-py`); `uv run` rebuilds the extension when Rust sources change.
-- **macOS (Hypervisor.framework):** `cargo nextest run -p libmachine` on the Mac (the exception
-  above). Every macOS executable is signed with the hypervisor entitlement as it links
-  (`scripts/macos-link.sh`); the arm64 guest (cladefs's kernel, the test initramfs) is Linux's to
-  build: `crates/libmachine/scripts/arm64-guest.sh` builds it on hotbed and fetches it into
-  `target/arm64-guest`. A process has one HVF VM, so the tests take turns.
+- **Formats are not frozen** (the user, 2026-11-26): libmachine's snapshot files and its agent's
+  wire protocol stay outside `formats/`. Each changes outright when the design is better, with its
+  version bumped; the new code refuses every other version by name, with no migration, conversion
+  or dual reader. machined's API is held to hotbed's by `go/compat.sh`.
+- **Guest code in tests is assembly, never raw bytes:** Rust tests and examples use dynasm
+  (`crates/libmachine/tests/common`).
+- **Guests.** Its tests boot cladefs's arm64 kernel and a small initramfs with libmachine's agent
+  (`crates/libmachine/scripts/arm64-guest.sh` builds both on hotbed and fetches them into
+  `target/arm64-guest`); a test that needs the guest skips itself with a note, and
+  `scripts/test.sh`'s `hvf` part fails on any such note.
+- **Tests run on this Mac** (the user's exception, 2026-11-26): `cargo nextest run -p libmachine`
+  and the crates' that need it, niced; every macOS executable is signed with the hypervisor
+  entitlement as it links (`scripts/macos-link.sh`). A process has one HVF VM, so the tests take
+  turns.
 - **Tenancy.** One libmachine process may run VMs for several tenants (doc-30, "Security and
   tenancy"), unlike Firecracker's one jailed VM per process: an accepted risk, its callers'
   choice.

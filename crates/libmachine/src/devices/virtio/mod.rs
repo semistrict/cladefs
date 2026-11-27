@@ -10,10 +10,6 @@ pub(crate) mod blk;
 pub(crate) mod extent;
 pub(crate) mod net;
 pub(crate) mod pci;
-#[cfg_attr(
-    not(all(target_os = "macos", target_arch = "aarch64")),
-    allow(dead_code, reason = "the arm64 board's: on Linux Firecracker serves pmem")
-)]
 pub(crate) mod pmem;
 pub(crate) mod queue;
 pub(crate) mod rng;
@@ -163,12 +159,6 @@ pub(crate) trait VirtioDevice: Send {
     fn wake_fd(&self) -> Option<&EventFd> {
         None
     }
-    /// Whether the host side holds something for the guest that it has not
-    /// yet put in a queue: a guest with that waiting is not idle, whatever
-    /// its vCPUs do ([`crate::suspend`]).
-    fn pending_for_guest(&self) -> bool {
-        false
-    }
     /// The host side signalled [`wake_fd`](Self::wake_fd): use the ready
     /// queues as for [`process_queue`](Self::process_queue).
     fn woken(&mut self, _queues: &mut [DeviceQueue], _mem: &GuestMemoryMmap) {}
@@ -206,20 +196,12 @@ pub(crate) trait VirtioDevice: Send {
     /// Lets go of what the device serves the guest from, its queues paused, the machine paused:
     /// an extent store device's cell, which a live migration hands over to another host. Nothing
     /// by default.
-    #[cfg_attr(
-        target_os = "linux",
-        allow(dead_code, reason = "KVM migrates no extent store device yet")
-    )]
     fn release_cell(&mut self) -> crate::error::Result<()> {
         Ok(())
     }
 
     /// Takes back what [`release_cell`](Self::release_cell) let go of: the migration aborted.
     /// Nothing by default.
-    #[cfg_attr(
-        target_os = "linux",
-        allow(dead_code, reason = "KVM migrates no extent store device yet")
-    )]
     fn reopen_cell(&mut self) -> crate::error::Result<()> {
         Ok(())
     }
@@ -230,25 +212,6 @@ pub(crate) trait VirtioDevice: Send {
     /// outside them must save it; by default a device refuses.
     fn save(&self) -> crate::error::Result<DeviceState> {
         Err(not_snapshottable(self.device_type(), "it does not save its state"))
-    }
-
-    /// The device's state for a suspension ([`crate::suspend`]), which
-    /// frees the machine and restores it later in this process: like
-    /// [`save`](Self::save), but the device stops acting for the guest and
-    /// hands what must outlive its machine (host connections) to whoever
-    /// will restore it, rather than carrying on. [`Error::Busy`] if it
-    /// would act for the guest by itself, as it then still does. By
-    /// default, what `save` gives.
-    ///
-    /// [`Error::Busy`]: crate::Error::Busy
-    fn hand_over(&mut self) -> crate::error::Result<DeviceState> {
-        self.save()
-    }
-
-    /// Undoes [`hand_over`](Self::hand_over), the suspension having failed:
-    /// the device carries on as before it. Nothing if it handed nothing.
-    fn take_back(&mut self) -> crate::error::Result<()> {
-        Ok(())
     }
 
     /// Puts back what [`save`](Self::save) gave, in a new machine restored

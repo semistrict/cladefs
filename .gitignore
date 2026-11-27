@@ -15,3 +15,9 @@ crates/libmachine-py/python/libmachine/*.so
 # Bazel convenience symlinks and optional local overrides.
 /bazel-*
 .bazelrc.local
+# Raw run output stays on the host that made it: of a run's results only the .md summaries are
+# tracked, and the nightly's record of each night (scripts/nightly.py).
+/docs/measurements/**
+!/docs/measurements/**/
+!/docs/measurements/**/*.md
+!/docs/measurements/**/night.json

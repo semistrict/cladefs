@@ -242,22 +242,6 @@ pub(crate) struct State {
     cursor: u64,
     /// The device thread has packets to send (or an event): signal it.
     pub(crate) wake: bool,
-    /// The device that serves this host end (see `VsockDevice`), if any:
-    /// None while it is detached, which leaves every connection as it is
-    /// for a device restored onto it.
-    pub(crate) device: Option<u64>,
-    /// The device a detach took off, which a reattach puts back.
-    pub(crate) detached_from: Option<u64>,
-    /// Random, which a snapshot saves: a device is restored onto the host
-    /// end its snapshot was taken from, or not at all.
-    pub(crate) host_id: u64,
-    /// How many times a device has changed what this host end and a guest
-    /// share: a guest's packet taken, a packet or event given, the driver
-    /// started or reset. A snapshot saves it, and a device is restored onto
-    /// this host end only if it has not moved since: otherwise the restored
-    /// guest would see none of what was exchanged after the snapshot, and
-    /// bytes would be lost or come twice.
-    pub(crate) exchanges: u64,
     /// Which restore of a snapshot this machine is: 0 for a machine that
     /// booted, a fresh random number for each restore. The agent client
     /// compares it with what the guest's agent last reseeded for.
@@ -325,10 +309,6 @@ impl State {
             next_port: EPHEMERAL_START,
             cursor: 0,
             wake: false,
-            device: None,
-            detached_from: None,
-            host_id: 0,
-            exchanges: 0,
             generation: 0,
         }
     }
@@ -425,7 +405,6 @@ impl State {
 
     /// The driver set DRIVER_OK: a guest that stopped is running again.
     pub(crate) fn activate(&mut self) {
-        self.exchanges += 1;
         self.driver_ready = true;
         self.stopped = false;
     }
@@ -433,7 +412,6 @@ impl State {
     /// The driver reset the device: every connection is gone with it. A
     /// guest that stopped is running again (booting).
     pub(crate) fn driver_reset(&mut self) {
-        self.exchanges += 1;
         self.driver_ready = false;
         self.stopped = false;
         self.event_pending = false;
@@ -467,7 +445,6 @@ impl State {
     /// never move past it (found reading this code while board 13131's
     /// reset storms starved connections).
     pub(crate) fn event_sent(&mut self, next_avail: u16) {
-        self.exchanges += 1;
         self.event_pending = false;
         self.event_target = Some(next_avail.wrapping_add(self.event_room));
     }
@@ -517,72 +494,9 @@ impl State {
         self.reset_all(io::ErrorKind::NotConnected);
     }
 
-    /// Whether device `id` serves this host end.
-    pub(crate) fn serves(&self, id: u64) -> bool {
-        self.device == Some(id)
-    }
-
-    /// Takes the device off the host end (`Vsock::detach`): it serves
-    /// nothing from now on, and every connection stays as it is.
-    pub(crate) fn detach(&mut self) {
-        if let Some(id) = self.device.take() {
-            self.detached_from = Some(id);
-        }
-    }
-
-    /// Puts back the device [`detach`](Self::detach) took off; false if
-    /// there is none to put back (none was detached, or a device has been
-    /// restored onto the host end since).
-    pub(crate) fn reattach(&mut self) -> bool {
-        if self.device.is_some() {
-            return false;
-        }
-        let Some(id) = self.detached_from.take() else {
-            return false;
-        };
-        self.device = Some(id);
-        // What the host did meanwhile waits for it.
-        self.wake = true;
-        true
-    }
-
-    /// Attaches device `id`, restored from a snapshot of this host end
-    /// whose identity was `host_id` and which had made `exchanges`: only
-    /// if the host end is detached, is the one the snapshot was taken
-    /// from, and no device has changed anything it shares with a guest
-    /// since. Why not, otherwise.
-    pub(crate) fn adopt(&mut self, id: u64, host_id: u64, exchanges: u64) -> Result<(), String> {
-        if self.gone {
-            return Err(
-                "its machine is gone: it was dropped without the host end being detached".into()
-            );
-        }
-        if self.device.is_some() {
-            return Err(
-                "it is still attached to a device: detach it before taking the snapshot".into()
-            );
-        }
-        if host_id != self.host_id {
-            return Err("the snapshot was taken of another host end".into());
-        }
-        if exchanges != self.exchanges {
-            return Err(format!(
-                "it has moved on since the snapshot: a device made {} exchanges with a guest \
-                 after it",
-                self.exchanges.wrapping_sub(exchanges)
-            ));
-        }
-        self.device = Some(id);
-        self.detached_from = None;
-        self.wake = true;
-        Ok(())
-    }
-
     /// A packet the guest sent on the tx queue. Packets not from the guest's
     /// CID to the host's are dropped.
     pub(crate) fn guest_packet(&mut self, hdr: &Header, payload: &[u8]) {
-        // Taken off the ring even if dropped.
-        self.exchanges += 1;
         if hdr.src_cid != self.guest_cid || hdr.dst_cid != HOST_CID || self.gone || self.stopped {
             return;
         }
@@ -697,7 +611,6 @@ impl State {
     /// data: resets first, then a packet from each connection in turn.
     pub(crate) fn next_packet(&mut self, max_payload: usize) -> Option<(Header, Vec<u8>)> {
         if let Some(hdr) = self.resets.pop_front() {
-            self.exchanges += 1;
             return Some((hdr, Vec::new()));
         }
         let max_payload = max_payload.min(MAX_PAYLOAD);
@@ -709,7 +622,6 @@ impl State {
             .find(|(_, c)| c.next_op(max_payload).is_some())
             .map(|(&id, _)| id)?;
         self.cursor = id;
-        self.exchanges += 1;
         let mut hdr = self.header(self.conns[&id].key, Op::Rw);
         let conn = self.conns.get_mut(&id).unwrap();
         let op = conn.next_op(max_payload).unwrap();

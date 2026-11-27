@@ -3,9 +3,7 @@
 // found in the LICENSE file.
 
 //! The snapshot state's encoding: little-endian numbers, byte strings as a
-//! `u32` length and the bytes, lists as a `u32` count and the items. KVM's
-//! structures go as their bytes (the kernel's UAPI layout, which a snapshot
-//! only ever meets on the backend that wrote it).
+//! `u32` length and the bytes, lists as a `u32` count and the items.
 //!
 //! The decoder checks every length against what is left, so a damaged state
 //! fails with an error instead of a huge allocation or a panic.

@@ -2,51 +2,27 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! machined's one seam over its machines' VMs: a running machine ([`Vm`]), made from a kernel or a
-//! snapshot, its guest's agent and vsock socket, stopped, snapshotted, suspended. Nothing else of
-//! machined touches a VM.
+//! machined's one seam over its machines' VMs: a running machine ([`Vm`]), its vsock socket,
+//! stopped. Nothing else of machined touches a VM.
 //!
 //! Each machine's VM runs in a helper process of its own (`crate::helper`, board 13460), which
 //! machined starts from the helper binary beside it and speaks to over the helper's standard
-//! input (`helper::wire`): machined keeps no VM, so it runs as many as the host takes (on macOS,
-//! where Hypervisor.framework gives a process one, too), and a helper that dies ends its machine,
-//! with what killed it said, while machined lives on. A helper is machined's: it ends with
-//! machined's end of its socket.
-//!
-//! The guest's agent and vsock are reached through the vsock socket the helper serves
-//! (Firecracker's protocol): the agent with `Agent::over_unix_socket`.
+//! input (`helper::wire`): machined keeps no VM, so it runs as many as the host takes
+//! (Hypervisor.framework gives a process one), and a helper that dies ends its machine, with what
+//! killed it said, while machined lives on. A helper is machined's: it ends with machined's end
+//! of its socket.
 
 use std::io::Write;
 use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::Arc;
 
-use libmachine::agent::Agent;
 use tokio::net::unix::OwnedWriteHalf;
 use tokio::sync::{oneshot, watch};
 use tonic::Status;
 
-use crate::helper::wire::{self, Event, How, Request, event, request};
-
-/// An answer of the helper's: a balloon's state, answering a Balloon request.
-type Answered = Result<Option<crate::proto::BalloonStatus>, Status>;
-
-/// The largest file read from a guest through its agent: what a guest sends is untrusted.
-pub(crate) const MAX_FILE: usize = 64 << 20;
-
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-/// What a machine starts from.
-pub(crate) enum Source {
-    /// Its spec's kernel, booted from scratch.
-    Boot,
-    /// A snapshot's file, restored.
-    #[cfg(target_os = "linux")]
-    Snapshot(PathBuf),
-}
+use crate::helper::wire::{self, Event, How, event};
 
 /// How a machine ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,18 +42,14 @@ pub(crate) struct Vm {
     /// Its helper's process ID.
     pid: u32,
     vsock_socket: PathBuf,
-    agent: Agent,
     shared: Arc<Shared>,
     ended: watch::Receiver<Option<Ended>>,
-    suspended: watch::Receiver<bool>,
 }
 
 /// What a [`Vm`] and the task reading its helper share.
 struct Shared {
     /// machined's end of the helper's socket; None once the helper is gone.
     to: tokio::sync::Mutex<Option<OwnedWriteHalf>>,
-    /// The answers awaited, oldest first: the helper answers in the order it was asked.
-    answers: Mutex<std::collections::VecDeque<oneshot::Sender<Answered>>>,
 }
 
 /// The helper binary of this machined: `machined-vm`, beside machined's own.
@@ -86,15 +58,14 @@ pub(crate) fn default_helper() -> std::io::Result<PathBuf> {
 }
 
 impl Vm {
-    /// Starts `helper` and has it make the machine of `spec` (its paths in `images`) from
-    /// `source`, serving its vsock at `vsock_socket`, its console written to `console`: once the
-    /// machine runs, or why it didn't (BOOT_FAILED's detail).
+    /// Starts `helper` and has it make the machine of `spec` (its paths in `images`), serving its
+    /// vsock at `vsock_socket`, its console written to `console`: once the machine runs, or why
+    /// it didn't (BOOT_FAILED's detail).
     pub(crate) async fn start(
         helper: &Path,
         spec: crate::proto::MachineSpec,
         images: &Path,
         cladefs_socket: &Path,
-        source: Source,
         vsock_socket: PathBuf,
         console: impl Write + Send + 'static,
     ) -> Result<Self, Status> {
@@ -115,21 +86,14 @@ impl Vm {
         let (mut from, to) = tokio::net::UnixStream::from_std(ours)
             .map_err(|e| Status::internal(format!("a helper's socket: {e}")))?
             .into_split();
-        let snapshot = match source {
-            Source::Boot => String::new(),
-            #[cfg(target_os = "linux")]
-            Source::Snapshot(path) => path.to_string_lossy().into_owned(),
-        };
         let start = wire::Start {
             protocol: wire::PROTOCOL,
             spec: Some(spec),
             images: images.to_string_lossy().into_owned(),
-            snapshot,
             vsock_socket: vsock_socket.to_string_lossy().into_owned(),
             cladefs_socket: cladefs_socket.to_string_lossy().into_owned(),
         };
-        let shared =
-            Arc::new(Shared { to: tokio::sync::Mutex::new(Some(to)), answers: Mutex::default() });
+        let shared = Arc::new(Shared { to: tokio::sync::Mutex::new(Some(to)) });
         let sent = async {
             let mut to = shared.to.lock().await;
             wire::write(to.as_mut().expect("just made"), &start).await
@@ -137,10 +101,9 @@ impl Vm {
         sent.await.map_err(|e| Status::internal(format!("starting the helper: {e}")))?;
         let (started_tx, started) = oneshot::channel();
         let (ended_tx, ended) = watch::channel(None);
-        let (suspended_tx, suspended) = watch::channel(false);
         let reading = shared.clone();
         tokio::spawn(async move {
-            let how = read_events(&mut from, &reading, started_tx, console, &suspended_tx).await;
+            let how = read_events(&mut from, started_tx, console).await;
             // A helper that said nothing of its end: its exit says why.
             let how = match how {
                 Some(how) => how,
@@ -153,16 +116,14 @@ impl Vm {
                 }
             };
             reading.to.lock().await.take();
-            lock(&reading.answers).clear();
-            suspended_tx.send_replace(false);
             // Its process gone too, before anyone hears its machine ended.
             if let Err(e) = child.wait().await {
                 log::warn!("machined: waiting for a helper: {e}");
             }
             ended_tx.send_replace(Some(how));
         });
-        let generation = match started.await {
-            Ok(Ok(generation)) => generation,
+        match started.await {
+            Ok(Ok(())) => {}
             Ok(Err(status)) => return Err(status),
             Err(_) => {
                 let mut ended = ended.clone();
@@ -173,8 +134,7 @@ impl Vm {
                 }));
             }
         };
-        let agent = Agent::over_unix_socket(&vsock_socket, generation).max_file_size(MAX_FILE);
-        Ok(Self { pid, vsock_socket, agent, shared, ended, suspended })
+        Ok(Self { pid, vsock_socket, shared, ended })
     }
 
     /// Its helper's process ID.
@@ -187,20 +147,10 @@ impl Vm {
         &self.vsock_socket
     }
 
-    /// libmachine's agent in the guest (blocking calls).
-    pub(crate) fn agent(&self) -> Agent {
-        self.agent.clone()
-    }
-
-    /// Whether the guest is suspended, and its changes.
-    pub(crate) fn suspended(&self) -> watch::Receiver<bool> {
-        self.suspended.clone()
-    }
-
     /// Stops the machine (its helper then frees it and ends): [`wait`](Self::wait) says when.
     pub(crate) fn stop(&self) {
         let shared = self.shared.clone();
-        tokio::spawn(async move { send(&shared, request::Kind::Stop(wire::Empty {})).await });
+        tokio::spawn(async move { send_stop(&shared).await });
     }
 
     /// Waits until the machine has ended and its helper is gone; says how.
@@ -208,48 +158,6 @@ impl Vm {
         let mut ended = self.ended.clone();
         let how = ended.wait_for(Option::is_some).await.ok().and_then(|h| h.clone());
         how.unwrap_or_else(|| Ended::Failed("its helper's reader went".into()))
-    }
-
-    /// Writes a snapshot of the machine to `path`: the guest is paused for it, and runs on.
-    #[cfg(target_os = "linux")]
-    pub(crate) async fn snapshot(&self, path: PathBuf) -> Result<(), Status> {
-        self.ask(request::Kind::Snapshot(path.to_string_lossy().into_owned())).await.map(drop)
-    }
-
-    /// Suspends the guest once it is idle into a file in `dir`.
-    #[cfg(target_os = "linux")]
-    pub(crate) async fn suspend(&self, dir: PathBuf) -> Result<(), Status> {
-        self.ask(request::Kind::Suspend(dir.to_string_lossy().into_owned())).await.map(drop)
-    }
-
-    /// Wakes a suspended guest; returns once it runs again.
-    #[cfg(target_os = "linux")]
-    pub(crate) async fn resume(&self) -> Result<(), Status> {
-        self.ask(request::Kind::Resume(wire::Empty {})).await.map(drop)
-    }
-
-    /// Sets the balloon's target to `target` bytes, if given: how the balloon stands.
-    pub(crate) async fn balloon(
-        &self,
-        target: Option<u64>,
-    ) -> Result<crate::proto::BalloonStatus, Status> {
-        let asked = self.ask(request::Kind::Balloon(wire::BalloonTarget { bytes: target })).await?;
-        asked.ok_or_else(|| Status::internal("the helper answered a balloon request with none"))
-    }
-
-    /// Asks the helper `kind`, and waits for its answer: its awaited answer queued, under the
-    /// socket's lock, in the order the requests go.
-    async fn ask(&self, kind: request::Kind) -> Answered {
-        let (reply, answer) = oneshot::channel();
-        {
-            let mut to = self.shared.to.lock().await;
-            let Some(to) = to.as_mut() else { return Err(gone()) };
-            lock(&self.shared.answers).push_back(reply);
-            if let Err(e) = wire::write(to, &Request { kind: Some(kind) }).await {
-                return Err(Status::unavailable(format!("the machine's helper: {e}")));
-            }
-        }
-        answer.await.unwrap_or_else(|_| Err(gone()))
     }
 }
 
@@ -259,14 +167,10 @@ impl Drop for Vm {
     }
 }
 
-fn gone() -> Status {
-    Status::failed_precondition("the machine ended")
-}
-
-/// Sends `kind` to the helper, if it is still there.
-async fn send(shared: &Shared, kind: request::Kind) {
+/// Tells the helper to stop the machine, if it is still there.
+async fn send_stop(shared: &Shared) {
     if let Some(to) = shared.to.lock().await.as_mut()
-        && let Err(e) = wire::write(to, &Request { kind: Some(kind) }).await
+        && let Err(e) = wire::write(to, &wire::Empty {}).await
     {
         log::debug!("machined: a helper's socket: {e}");
     }
@@ -276,10 +180,8 @@ async fn send(shared: &Shared, kind: request::Kind) {
 /// without saying.
 async fn read_events(
     from: &mut tokio::net::unix::OwnedReadHalf,
-    shared: &Shared,
-    started: oneshot::Sender<Result<u64, Status>>,
+    started: oneshot::Sender<Result<(), Status>>,
     mut console: impl Write,
-    suspended: &watch::Sender<bool>,
 ) -> Option<Ended> {
     let mut started = Some(started);
     loop {
@@ -293,24 +195,15 @@ async fn read_events(
             }
         };
         match event {
-            event::Kind::Started(generation) => {
+            event::Kind::Started(_) => {
                 if let Some(started) = started.take() {
                     // The starter may have gone; the machine runs, and is stopped as its Vm goes.
-                    let _ = started.send(Ok(generation));
+                    let _ = started.send(Ok(()));
                 }
             }
             event::Kind::Console(data) => {
                 // The console keeps what it can: a write never fails.
                 let _ = console.write_all(&data);
-            }
-            event::Kind::Suspended(now) => {
-                suspended.send_replace(now);
-            }
-            event::Kind::Answer(answer) => {
-                if let Some(reply) = lock(&shared.answers).pop_front() {
-                    // The asker may have gone.
-                    let _ = reply.send(answer.result());
-                }
             }
             event::Kind::Ended(ended) => {
                 let how = match How::try_from(ended.how) {

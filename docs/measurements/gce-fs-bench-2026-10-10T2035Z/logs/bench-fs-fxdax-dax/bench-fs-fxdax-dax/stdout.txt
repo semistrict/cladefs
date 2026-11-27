@@ -1,1 +1,0 @@
-OBSERVED mtime-ahead-of-guest-ms 172.064

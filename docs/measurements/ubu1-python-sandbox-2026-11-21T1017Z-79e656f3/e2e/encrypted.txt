@@ -1,1 +1,0 @@
-encrypted: 0 stores, 9 cells, 165 objects, 0 files (369 MiB) read: 0 in the clear

@@ -5,7 +5,7 @@
 //! virtio-vsock (virtio 1.2, section 5.10): stream sockets between the guest
 //! and the host, whose end is in this process ([`Vsock`]).
 //!
-//! Every PC machine has one, guest CID 3. The host side lives in-process,
+//! Every board machine has one, guest CID 3. The host side lives in-process,
 //! so CIDs are per machine: every machine's guest is 3 and its host is 2,
 //! with no host kernel module (vhost-vsock), no system-wide CID to
 //! allocate and no Unix socket files to name, secure and clean up (the
@@ -18,16 +18,12 @@
 //! section 5.10.3: without VIRTIO_VSOCK_F_STREAM or SEQPACKET negotiated,
 //! stream is implied).
 
-// They boot the PC's test guest.
-#[cfg(all(test, target_os = "linux"))]
-mod guest_tests;
 mod host;
 pub(crate) mod packet;
 mod state;
 
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::sys::{EFD_NONBLOCK, EventFd};
 use virtio_queue::DescriptorChain;
@@ -55,49 +51,21 @@ const EVENT: usize = 2;
 const QUEUE_SIZES: [u16; 3] = [256, 256, 64];
 /// VIRTIO_VSOCK_EVENT_TRANSPORT_RESET, the only event.
 const EVENT_TRANSPORT_RESET: u32 = 0;
-/// The version of the state it saves: the rx buffers it holds, the host
-/// port its next connect takes (from version 2), and its host end's
-/// identity and exchange count (from version 3).
-const STATE_VERSION: u32 = 3;
+/// The version of the state it saves: the rx buffers it holds and the host
+/// port its next connect takes.
+const STATE_VERSION: u32 = 4;
 
-/// Device identities, unique in the process: which device serves a host
-/// end (`State::device`).
-static NEXT_DEVICE: AtomicU64 = AtomicU64::new(1);
-
-/// The device, owned by its transport on the device thread. It serves its
-/// host end only while attached to it (`State::serves`): a device whose
-/// host end was detached ([`Vsock::detach`]), or one built for a host end
-/// that a restore has not attached it to yet, touches neither the host end
-/// nor the guest's queues.
+/// The device, owned by its transport on the device thread.
 pub(crate) struct VsockDevice {
     shared: Arc<Shared>,
-    id: u64,
     /// The eventfd the device thread waits on.
     wake: EventFd,
-    /// For a device built onto an existing host end ([`adopt`]), the host
-    /// end's side of `wake`, which it hands over once attached.
-    ///
-    /// [`adopt`]: VsockDevice::adopt
-    host_wake: Option<EventFd>,
     /// Receive buffers taken off the queue that no packet owed fits: room
     /// for a header and no data, while only data is owed. Each waits for a
     /// packet without data; data goes in the buffers after it.
     held: VecDeque<WritableBuffer>,
     /// The driver has started the device (and not reset it since).
     active: bool,
-}
-
-/// A wake eventfd: the host end's side, and the device thread's.
-fn wake_fds() -> Result<(EventFd, EventFd)> {
-    let wake = EventFd::new(EFD_NONBLOCK).map_err(|source| Error::Hypervisor {
-        op: "create the vsock device's wake eventfd",
-        source,
-    })?;
-    let ours = wake.try_clone().map_err(|source| Error::Hypervisor {
-        op: "duplicate the vsock device's wake eventfd",
-        source,
-    })?;
-    Ok((wake, ours))
 }
 
 /// A random number other than 0.
@@ -116,42 +84,24 @@ impl VsockDevice {
     /// The device, and the host's handle to it: a new host end, which the
     /// device serves.
     pub(crate) fn new(guest_cid: u64) -> Result<(Self, Vsock)> {
-        let (wake, ours) = wake_fds()?;
+        let wake = EventFd::new(EFD_NONBLOCK).map_err(|source| Error::Hypervisor {
+            op: "create the vsock device's wake eventfd",
+            source,
+        })?;
+        let ours = wake.try_clone().map_err(|source| Error::Hypervisor {
+            op: "duplicate the vsock device's wake eventfd",
+            source,
+        })?;
         let shared = Arc::new(Shared::new(guest_cid, wake));
-        let id = NEXT_DEVICE.fetch_add(1, Ordering::Relaxed);
-        {
-            let mut s = shared.lock();
-            s.device = Some(id);
-            s.host_id = nonzero_random();
-        }
         let vsock = Vsock::new(shared.clone());
-        let device =
-            Self { shared, id, wake: ours, host_wake: None, held: VecDeque::new(), active: false };
+        let device = Self { shared, wake: ours, held: VecDeque::new(), active: false };
         Ok((device, vsock))
-    }
-
-    /// A device for `vsock`, an existing host end, which its restore
-    /// attaches it to (see [`restore`](VirtioDevice::restore)); until then
-    /// it serves nothing.
-    pub(crate) fn adopt(vsock: &Vsock) -> Result<Self> {
-        let (wake, ours) = wake_fds()?;
-        Ok(Self {
-            shared: vsock.shared().clone(),
-            id: NEXT_DEVICE.fetch_add(1, Ordering::Relaxed),
-            wake: ours,
-            host_wake: Some(wake),
-            held: VecDeque::new(),
-            active: false,
-        })
     }
 
     /// Uses the ready queues for whatever is owed to the guest, then wakes
     /// the host's waiters.
     fn serve(&mut self, queues: &mut [DeviceQueue], mem: &GuestMemoryMmap, tx: bool) {
         let mut state = self.shared.lock();
-        if !state.serves(self.id) {
-            return;
-        }
         // First whether the guest has taken a reset, so that its new
         // connections are not refused on a stale view.
         if queues[EVENT].ready() {
@@ -347,59 +297,36 @@ impl VirtioDevice for VsockDevice {
     fn activate(&mut self, _features: u64) {
         self.held.clear();
         self.active = true;
-        let mut s = self.shared.lock();
-        if s.serves(self.id) {
-            s.activate();
-            drop(s);
-            self.shared.notify();
-        }
+        self.shared.lock().activate();
+        self.shared.notify();
     }
 
     fn reset(&mut self) {
         self.held.clear();
         self.active = false;
-        let mut s = self.shared.lock();
-        if s.serves(self.id) {
-            s.driver_reset();
-            drop(s);
-            self.shared.notify();
-        }
+        self.shared.lock().driver_reset();
+        self.shared.notify();
     }
 
-    /// The rx buffers it holds (the queues are the transport's), the host
-    /// port its next connect takes, and its host end's identity and
-    /// exchange count, which a restore onto that host end checks. The
-    /// connections are the host end's, which keeps them.
+    /// The rx buffers it holds (the queues are the transport's), and the host
+    /// port its next connect takes. The connections are the host end's, which
+    /// no restored machine has.
     fn save(&self) -> Result<DeviceState> {
         let mut e = Encoder::default();
         e.count(self.held.len());
         for buffer in &self.held {
             buffer.save(&mut e);
         }
-        let s = self.shared.lock();
-        e.u32(s.next_port());
-        e.u64(s.host_id);
-        e.u64(s.exchanges);
-        drop(s);
+        e.u32(self.shared.lock().next_port());
         Ok(DeviceState { version: STATE_VERSION, data: e.finish() })
     }
 
-    /// A restored device takes back the buffers it held.
-    ///
-    /// On a new host end ([`new`](VsockDevice::new)) it starts with a
+    /// A restored device takes back the buffers it held, and starts with a
     /// transport reset (virtio 1.2, section 5.10.6.7: what a device sends
-    /// after a migration), so that the guest drops the connections it had
-    /// at the snapshot, whose other ends are not in this machine. It gets a
-    /// new random generation, so that the agent client has the guest's
-    /// agent reseed its RNG before anything else.
-    ///
-    /// On an existing host end ([`adopt`](VsockDevice::adopt)), the one the
-    /// snapshot was taken of, it attaches to it and carries on: the guest's
-    /// side of every connection is in its RAM, the host's in the host end,
-    /// both as they were at the snapshot, so nothing is reset and the
-    /// generation stays. Refused unless the host end was detached and no
-    /// device has exchanged anything with a guest through it since the
-    /// snapshot (`State::adopt`), and then nothing changes.
+    /// after a migration), so that the guest drops the connections it had at
+    /// the snapshot, whose other ends are not in this machine. It gets a new
+    /// random generation, so that the agent client has the guest's agent
+    /// reseed its RNG before anything else.
     fn restore(&mut self, state: &DeviceState) -> Result<()> {
         if state.version != STATE_VERSION {
             return Err(other_version(VIRTIO_ID_VSOCK, state.version, STATE_VERSION));
@@ -409,28 +336,8 @@ impl VirtioDevice for VsockDevice {
         let held =
             (0..n).map(|_| WritableBuffer::restore(&mut d)).collect::<Result<VecDeque<_>>>()?;
         let next_port = d.u32()?;
-        let host_id = d.u64()?;
-        let exchanges = d.u64()?;
         d.end()?;
         let mut s = self.shared.lock();
-        if self.host_wake.is_some() {
-            s.adopt(self.id, host_id, exchanges).map_err(|why| {
-                Error::Snapshot(format!(
-                    "the vsock cannot be restored onto the host end given: {why}"
-                ))
-            })?;
-            // Its own port counter, which host connects since the snapshot
-            // moved on, stays.
-            self.shared.set_wake(self.host_wake.take().unwrap());
-            if self.active {
-                s.activate();
-            }
-            self.held = held;
-            drop(s);
-            self.shared.notify();
-            let _ = self.wake.write(1);
-            return Ok(());
-        }
         if !s.set_next_port(next_port) {
             return Err(Error::Snapshot(format!(
                 "the vsock's next host port {next_port:#x} is not an ephemeral port"
@@ -453,29 +360,16 @@ impl VirtioDevice for VsockDevice {
         Some(&self.wake)
     }
 
-    fn pending_for_guest(&self) -> bool {
-        let s = self.shared.lock();
-        s.serves(self.id) && s.has_packet()
-    }
-
     fn woken(&mut self, queues: &mut [DeviceQueue], mem: &GuestMemoryMmap) {
         self.serve(queues, mem, false);
     }
 }
 
-/// The machine is gone, and with it the host end, unless it was detached
-/// from this device (to be restored onto: no reattach can bring this
-/// device back now) or never attached to it.
+/// The machine is gone, and with it the host end.
 impl Drop for VsockDevice {
     fn drop(&mut self) {
-        let mut s = self.shared.lock();
-        if s.serves(self.id) {
-            s.machine_gone();
-            drop(s);
-            self.shared.notify();
-        } else if s.detached_from == Some(self.id) {
-            s.detached_from = None;
-        }
+        self.shared.lock().machine_gone();
+        self.shared.notify();
     }
 }
 
@@ -849,185 +743,9 @@ mod tests {
         let mut e = Encoder::default();
         e.count(0);
         e.u32(7);
-        e.u64(0);
-        e.u64(0);
         let bad = DeviceState { version: STATE_VERSION, data: e.finish() };
         let (mut other, _) = VsockDevice::new(GUEST_CID).unwrap();
         assert!(matches!(other.restore(&bad), Err(Error::Snapshot(_))));
-    }
-
-    /// A connection the guest made to a host listener, accepted, with the
-    /// driver's rx buffers posted and the response taken: the host's end.
-    fn accepted(
-        dev: &mut VsockDevice,
-        vsock: &Vsock,
-        d: &mut Driver,
-    ) -> (VsockListener, VsockStream) {
-        let listener = vsock.listen(7000).unwrap();
-        d.send(from_guest(Op::Request, 4000, 7000), &[], false);
-        notify(dev, d, TX);
-        let s = listener.accept(Some(Duration::from_secs(1))).unwrap();
-        d.post_rx(1, 4096, false);
-        notify(dev, d, RX);
-        assert_eq!(d.received()[0].0.op, Op::Response);
-        (listener, s)
-    }
-
-    /// The payloads of the data packets the guest received since last
-    /// asked, and the host's last `fwd_cnt` among them.
-    fn data_received(d: &mut Driver) -> (Vec<u8>, Option<u32>) {
-        let mut data = Vec::new();
-        let mut fwd_cnt = None;
-        for (h, p) in d.received() {
-            assert!(matches!(h.op, Op::Rw | Op::CreditUpdate), "{h:?}");
-            data.extend(p);
-            fwd_cnt = Some(h.fwd_cnt);
-        }
-        (data, fwd_cnt)
-    }
-
-    /// board 13211: the host end detached before the snapshot and kept past
-    /// the machine's drop, a device restored onto it carries on: no
-    /// transport reset event, no stream reset, the generation kept, the
-    /// held buffer back, and every byte in flight either way (unread by the
-    /// host, queued for the guest before and after the snapshot) arrives
-    /// once, with the host's credit where it was.
-    #[test]
-    fn a_device_restored_onto_its_host_end_carries_on() {
-        let (mut dev, vsock, mut d) = device();
-        for _ in 0..8 {
-            d.post(EVENT, &[(vec![0; 4], true)]);
-        }
-        notify(&mut dev, &mut d, EVENT);
-        let (_listener, s) = accepted(&mut dev, &vsock, &mut d);
-        (&s).write_all(b"to-guest-1 ").unwrap();
-        d.post_rx(1, 4096, false);
-        woken(&mut dev, &mut d);
-        assert_eq!(data_received(&mut d).0, b"to-guest-1 ");
-        // Unread by the host; queued for the guest, with only a buffer too
-        // small for it, which the device holds.
-        d.send(from_guest(Op::Rw, 4000, 7000), b"to-host-1 ", false);
-        notify(&mut dev, &mut d, TX);
-        (&s).write_all(b"to-guest-2 ").unwrap();
-        d.post(RX, &[(vec![0; HEADER_LEN], true)]);
-        woken(&mut dev, &mut d);
-        assert_eq!(dev.held.len(), 1);
-        assert!(d.received().is_empty());
-
-        vsock.detach();
-        let state = dev.save().unwrap();
-        // The machine goes, the host end stays, its connection too; the host
-        // reads and writes meanwhile, as if the guest were only paused.
-        drop(dev);
-        let mut got = [0; 10];
-        (&s).read_exact(&mut got).unwrap();
-        assert_eq!(&got, b"to-host-1 ");
-        (&s).write_all(b"to-guest-3").unwrap();
-
-        // The new machine's device, on the same guest memory and queues
-        // (as the snapshot has them: nothing moved since).
-        let mut restored = VsockDevice::adopt(&vsock).unwrap();
-        restored.activate(0);
-        restored.restore(&state).unwrap();
-        assert_eq!(restored.held.len(), 1, "the held buffer is back");
-        assert_eq!(vsock.generation(), 0, "the same machine, not a clone");
-        woken(&mut restored, &mut d);
-        assert!(d.used(EVENT).is_empty(), "no transport reset event");
-        d.post_rx(2, 4096, false);
-        notify(&mut restored, &mut d, RX);
-        let (data, fwd_cnt) = data_received(&mut d);
-        assert_eq!(data, b"to-guest-2 to-guest-3", "each byte once");
-        assert_eq!(fwd_cnt, Some(10), "what the host read meanwhile");
-        d.send(from_guest(Op::Rw, 4000, 7000), b"to-host-2", false);
-        notify(&mut restored, &mut d, TX);
-        let mut got = [0; 9];
-        (&s).read_exact(&mut got).unwrap();
-        assert_eq!(&got, b"to-host-2");
-        // The host's writes wake the restored device, through its own
-        // eventfd, which it gave the host end.
-        (&s).write_all(b"to-guest-4").unwrap();
-        d.post_rx(1, 4096, false);
-        woken(&mut restored, &mut d);
-        assert_eq!(data_received(&mut d).0, b"to-guest-4");
-        // Its machine's drop now ends them.
-        drop(restored);
-        assert_eq!((&s).write(b"x").unwrap_err().kind(), io::ErrorKind::NotConnected);
-    }
-
-    /// A restore onto a host end is refused, with the host end unchanged,
-    /// unless it is the one the snapshot was taken of, detached, and no
-    /// device has exchanged anything with a guest through it since; and a
-    /// detach undone puts the same device back where it stopped.
-    #[test]
-    fn a_restore_onto_a_host_end_that_moved_on_is_refused() {
-        let refused = |vsock: &Vsock, state: &DeviceState, why: &str| {
-            let mut dev = VsockDevice::adopt(vsock).unwrap();
-            dev.activate(0);
-            match dev.restore(state) {
-                Err(Error::Snapshot(m)) => assert!(m.contains(why), "{m}"),
-                other => panic!("{other:?}, not refused for {why}"),
-            }
-        };
-        let (mut dev, vsock, mut d) = device();
-        let (_listener, s) = accepted(&mut dev, &vsock, &mut d);
-        let state = dev.save().unwrap();
-        // Still attached.
-        refused(&vsock, &state, "still attached");
-        // Detached after the device went on: a guest packet taken.
-        d.send(from_guest(Op::Rw, 4000, 7000), b"later", false);
-        notify(&mut dev, &mut d, TX);
-        vsock.detach();
-        refused(&vsock, &state, "moved on");
-        // Another host end.
-        let (other, other_vsock, mut d2) = device();
-        let other_state = other.save().unwrap();
-        other_vsock.detach();
-        refused(&other_vsock, &state, "another host end");
-        // Another version of the state.
-        let old = DeviceState { version: 2, data: other_state.data.clone() };
-        refused(&other_vsock, &old, "version");
-        // The refusals changed nothing: the device comes back as it was,
-        // the connection with it.
-        let mut got = [0; 5];
-        (&s).read_exact(&mut got).unwrap();
-        assert_eq!(&got, b"later");
-        (&s).write_all(b"queued while detached").unwrap();
-        d.post_rx(2, 4096, false);
-        woken(&mut dev, &mut d);
-        assert!(d.received().is_empty(), "a detached device serves nothing");
-        assert!(!dev.pending_for_guest());
-        assert!(vsock.reattach());
-        assert!(!vsock.reattach(), "once");
-        woken(&mut dev, &mut d);
-        let (data, _) = data_received(&mut d);
-        assert_eq!(data, b"queued while detached");
-        // Dropped without a detach: gone, and nothing restores onto it.
-        drop(dev);
-        refused(&vsock, &state, "gone");
-        // A device that was never attached leaves its host end alone when
-        // it drops.
-        drop(VsockDevice::adopt(&other_vsock).unwrap());
-        assert!(other_vsock.reattach());
-        drop(other);
-        let _ = d2.received();
-    }
-
-    /// A machine dropped after its host end was detached leaves the host
-    /// end's connections and listeners waiting for a device, not gone.
-    #[test]
-    fn a_detached_host_end_outlives_its_machine() {
-        let (mut dev, vsock, mut d) = device();
-        let (listener, s) = accepted(&mut dev, &vsock, &mut d);
-        vsock.detach();
-        drop(dev);
-        (&s).write_all(b"waits").unwrap();
-        s.set_read_timeout(Some(Duration::from_millis(20))).unwrap();
-        assert_eq!((&s).read(&mut [0; 1]).unwrap_err().kind(), io::ErrorKind::TimedOut);
-        let e = listener.accept(Some(Duration::from_millis(20))).unwrap_err();
-        assert_eq!(e.kind(), io::ErrorKind::TimedOut);
-        let e = vsock.connect(AGENT_PORT, Duration::from_millis(20)).unwrap_err();
-        assert_eq!(e.kind(), io::ErrorKind::TimedOut, "{e}");
-        assert!(!vsock.reattach(), "the device went with its machine");
     }
 
     #[test]
@@ -1272,56 +990,5 @@ mod tests {
         vsock.guest_stopped();
         let e = vsock.connect(AGENT_PORT, Duration::from_secs(1)).unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::NotConnected);
-    }
-
-    /// A suspended machine's watcher wakes it only for host activity the
-    /// guest has something to take from: a write past the guest's credit,
-    /// once the credit request has gone, owes it nothing and leaves it
-    /// suspended (as the device would have put nothing in its queue); a
-    /// connect owes it a request and wakes it.
-    #[test]
-    #[cfg(target_os = "linux")]
-    fn the_watcher_wakes_only_for_what_the_guest_is_owed() {
-        use crate::suspend::{Doorbell, Watcher, Woken};
-        let (device, vsock) = VsockDevice::new(GUEST_CID).unwrap();
-        vsock.shared().lock().activate();
-        let v = vsock.clone();
-        let connecting = std::thread::spawn(move || v.connect(AGENT_PORT, Duration::from_secs(10)));
-        // The guest answers with no room for anything.
-        let host_port = loop {
-            let mut s = vsock.shared().lock();
-            if let Some((hdr, _)) = s.next_packet(4096) {
-                assert_eq!(hdr.op, Op::Request);
-                let mut answer = from_guest(Op::Response, AGENT_PORT, hdr.src_port);
-                answer.buf_alloc = 0;
-                s.guest_packet(&answer, &[]);
-                break hdr.src_port;
-            }
-            drop(s);
-            std::thread::sleep(Duration::from_millis(1));
-        };
-        vsock.shared().notify();
-        let stream = connecting.join().unwrap().unwrap();
-        (&stream).write_all(b"x").unwrap();
-        let (hdr, _) = vsock.shared().lock().next_packet(4096).unwrap();
-        assert_eq!((hdr.op, hdr.src_port), (Op::CreditRequest, host_port));
-        assert!(!vsock.owes_guest());
-
-        vsock.detach();
-        let bell = Arc::new(Doorbell::default());
-        bell.arm();
-        let _watcher = Watcher::spawn(bell.clone(), Some(vsock.clone()), &[]).unwrap();
-        (&stream).write_all(b"y").unwrap();
-        assert!(!vsock.owes_guest());
-        assert_eq!(
-            bell.wait(|| false, Some(Duration::from_millis(100))),
-            Woken::TimedOut,
-            "a write the guest cannot take yet woke it"
-        );
-        let v = vsock.clone();
-        let _connect =
-            std::thread::spawn(move || v.connect(AGENT_PORT, Duration::from_millis(200)));
-        assert_eq!(bell.wait(|| false, Some(Duration::from_secs(10))), Woken::Device);
-        drop(device);
     }
 }

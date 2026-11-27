@@ -3,23 +3,18 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# Builds the guest the integration tests boot, for this host's architecture:
-# on x86-64, an upstream longterm kernel configured by guest/test-kernel.config,
-# as both a bzImage and an ELF vmlinux (PVH entry); on both, an initramfs
-# holding guest/init.c, libmachine's guest agent (crates/libmachine-agent,
-# static for musl) at /sbin/libmachine-agent, and a static busybox with all its
-# applets in /bin for the commands the agent's tests run. /etc/resolv.conf
-# links to /proc/net/pnp, where the kernel writes the DNS server of its ip=
-# setting. An arm64 guest's kernel is cladefs's (scripts/build-guest-kernel.sh
-# arm64): the test kernel's configuration is a PC's.
+# Builds the test initramfs the integration tests boot: guest/init.c, libmachine's guest agent
+# (crates/libmachine-agent, static for musl) at /sbin/libmachine-agent, and a static busybox with
+# all its applets in /bin for the commands the tests run. /etc/resolv.conf links to /proc/net/pnp,
+# where the kernel writes the DNS server of its ip= setting. The guest's kernel is cladefs's
+# (scripts/build-guest-kernel.sh arm64), which crates/libmachine/scripts/arm64-guest.sh builds
+# with this.
 #
 #   crates/libmachine/scripts/build-test-guest.sh
 #
-# Output in the workspace's target/guest (override with LIBMACHINE_GUEST_DIR):
-# bzImage and vmlinux (x86-64), initramfs.cpio. Needs make, a C compiler,
-# musl-gcc, flex, bison, bc, zstd, and libelf/openssl headers, as any kernel
-# build does; cargo with the host's musl target; a static busybox (BUSYBOX, or
-# busybox on the PATH, e.g. Debian's busybox-static).
+# Output in the workspace's target/guest (override with LIBMACHINE_GUEST_DIR): initramfs.cpio. Needs
+# make, a C compiler, musl-gcc, cargo with the host's musl target, and a static busybox (BUSYBOX,
+# or busybox on the PATH, e.g. Debian's busybox-static). An arm64 Linux host's.
 set -euo pipefail
 
 crate=$(cd "$(dirname "$0")/.." && pwd)
@@ -30,6 +25,10 @@ sha256=81764a545072d160748beff4d9de2e7d95aa9f16e8261110288f067a2cc61d71
 tarball=linux-$version.tar.xz
 src=$out/linux-$version
 
+arch=$(uname -m)
+[[ $arch == aarch64 ]] || { echo "the test guest is arm64's: this host is $arch" >&2; exit 2; }
+
+# The kernel's source gives the initramfs its gen_init_cpio, and nothing more.
 mkdir -p "$out"
 if [[ ! -d $src ]]; then
     if [[ ! -f $out/$tarball ]]; then
@@ -39,35 +38,6 @@ if [[ ! -d $src ]]; then
     fi
     echo "$sha256  $out/$tarball" | sha256sum -c --quiet
     tar -C "$out" -xf "$out/$tarball"
-fi
-
-arch=$(uname -m)
-case $arch in
-    x86_64) karch=x86 ;;
-    aarch64) karch=arm64 ;;
-    *) echo "no test guest for $arch" >&2; exit 2 ;;
-esac
-
-# The x86-64 test kernel: tinyconfig, then the fragment, then a check that
-# every option stuck. On arm64 the tree only gives the initramfs its
-# gen_init_cpio.
-if [[ $arch == x86_64 ]]; then
-    make -C "$src" -s ARCH="$karch" tinyconfig
-    "$src/scripts/kconfig/merge_config.sh" -m -O "$src" "$src/.config" "$crate/guest/test-kernel.config" >/dev/null
-    make -C "$src" -s olddefconfig
-    missing=0
-    while IFS= read -r line; do
-        [[ $line =~ ^CONFIG_ ]] || continue
-        if ! grep -qx "$line" "$src/.config"; then
-            echo "kernel config: $line did not survive the merge" >&2
-            missing=1
-        fi
-    done < "$crate/guest/test-kernel.config"
-    (( missing == 0 ))
-
-    make -C "$src" -s -j"$(nproc)" bzImage vmlinux
-    cp "$src/arch/x86/boot/bzImage" "$out/bzImage"
-    cp "$src/vmlinux" "$out/vmlinux"
 fi
 
 # The initramfs: a static init, the agent and busybox, packed by the
@@ -105,4 +75,3 @@ LIST
 "$out/gen_init_cpio" "$out/initramfs.list" > "$out/initramfs.cpio"
 
 ls -l "$out/initramfs.cpio"
-[[ $arch != x86_64 ]] || ls -l "$out/bzImage" "$out/vmlinux"

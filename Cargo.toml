@@ -143,30 +143,17 @@ cladefsd = { path = "crates/cladefsd" }
 libcladefs = { path = "crates/libcladefs" }
 
 # libmachine, the library VMM (crates/libmachine, board 13054), and its guest agent: on the
-# rust-vmm crates (Apache-2.0 OR BSD-3-Clause), KVM's on Linux.
+# rust-vmm crates (Apache-2.0 OR BSD-3-Clause).
 libmachine = { path = "crates/libmachine" }
 libmachine-agent = { path = "crates/libmachine-agent" }
-acpi_tables = "0.2.1"
-kvm-bindings = { version = "0.14.2", features = ["fam-wrappers", "serde"] }
-kvm-ioctls = "0.25.1"
-linux-loader = { version = "0.14.0", features = ["bzimage", "elf"] }
 virtio-queue = "0.18.0"
 vm-memory = { version = "0.18.0", features = ["backend-mmap"] }
 vm-superio = "0.8.2"
-vmm-sys-util = "0.15.0"
 # libmachine's arm64 device tree (Apache-2.0 OR BSD-3-Clause).
 vm-fdt = "0.3.0"
-# libmachine's Python bindings (crates/libmachine-py; MIT OR Apache-2.0).
-pyo3 = "0.30.1"
-# The network stack libmachine's guests reach the host through (0BSD): 0.12.0, the release the
-# patch below is on.
+# The network stack libmachine's guests reach the host through (0BSD).
 smoltcp = { version = "0.12.0", default-features = false, features = ["std", "medium-ethernet", "proto-ipv4", "socket-tcp", "socket-udp"] }
 socket2 = "0.6.5"
-
-# smoltcp 0.12.0 with a TCP socket's state exported and imported, for libmachine's snapshots of
-# networked machines (vendor/smoltcp/README.libmachine.md lists every change).
-[patch.crates-io]
-smoltcp = { path = "vendor/smoltcp" }
 
 # cladefs: what a release cladefsd is built with, each choice made, not Cargo's default (board
 # 8597). docs/operating-a-host.md says how a host's daemon is built.

@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! The console: rust-vmm's 16550 UART model, COM1 on a PC with its interrupt delivered through
-//! a KVM irqfd, MMIO on the arm64 board with its interrupt an SPI of the GIC.
+//! The console: rust-vmm's 16550 UART model, MMIO on the arm64 board with its interrupt an SPI of
+//! the GIC.
 
 use vm_superio::Trigger;
 use vm_superio::serial::NoEvents;
@@ -12,11 +12,7 @@ use vm_superio::serial::NoEvents;
 pub(crate) enum IrqLine {
     /// Nowhere: the bare platform has no interrupt controller.
     None,
-    /// An eventfd registered as an irqfd for the UART's GSI.
-    #[cfg(target_os = "linux")]
-    EventFd(crate::sys::EventFd),
     /// An SPI of the VM's GIC, raised as an edge.
-    #[cfg(target_os = "macos")]
     Spi(std::sync::Arc<crate::backend::hvf::Shared>, u32),
 }
 
@@ -26,9 +22,6 @@ impl Trigger for IrqLine {
     fn trigger(&self) -> std::io::Result<()> {
         match self {
             IrqLine::None => Ok(()),
-            #[cfg(target_os = "linux")]
-            IrqLine::EventFd(evt) => evt.write(1),
-            #[cfg(target_os = "macos")]
             IrqLine::Spi(vm, intid) => crate::backend::hvf::raise_spi(vm, *intid),
         }
     }
@@ -99,7 +92,7 @@ impl std::io::Write for Output {
 
 /// The machine's [`Output`], which the UART writes to: the machine keeps
 /// it, so that the captured output and the console carry on across the
-/// UARTs a suspension's restores make ([`crate::suspend`]).
+/// UARTs a restore makes.
 pub(crate) type SharedOutput = std::sync::Arc<std::sync::Mutex<Output>>;
 
 /// What the UART writes through: the shared output, locked per write

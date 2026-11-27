@@ -3,10 +3,10 @@
 // found in the LICENSE file.
 
 // machined's API (board 13467): what a host's VM manager asks of machined, the server that runs
-// many machines, each a Linux guest, in one process with libmachine (crates/libmachine, doc-30).
-// It is to embed cladefs's extent daemon, shared by them all, and serve that daemon's own API
+// many machines, each a Linux guest on Hypervisor.framework, with libmachine (crates/libmachine,
+// doc-30). It embeds cladefs's extent daemon, shared by them all, and serves that daemon's own API
 // (cladefs.cladefsd.v1.Cladefsd) on the same endpoint, through which the caller makes the cells
-// machines' roots are on (board 13471): until then a call of it fails with UNIMPLEMENTED.
+// machines' roots are on (board 13471).
 //
 // It is served over a Unix socket, its user's alone (mode 0600, whatever the umask), whose callers
 // are checked by their peer credentials too (machined's own user or root); and, if asked, over TCP
@@ -15,42 +15,34 @@
 //
 // Machines are named by their caller, and outlive the caller's connection: a VM manager that
 // restarts lists what runs (ListMachines), and takes up or stops what it finds. They do not
-// outlive machined: its machines are its process's (on macOS, each in a helper process of its
-// own, board 13460).
+// outlive machined: each runs in a helper process of its own that machined starts (board 13460).
 //
 // A machine's life:
 //
-//   CreateMachine -> CREATED -StartMachine-> STARTING -> RUNNING -(guest stops, StopMachine)->
-//   STOPPED -StartMachine-> STARTING ...  and DeleteMachine at any time with `force`, or while
-//   CREATED or STOPPED without.
+//   CreateMachine -> CREATED -StartMachine-> STARTING -> RUNNING -(guest stops)-> STOPPED
+//   -StartMachine-> STARTING ...  and DeleteMachine at any time with `force`, or while CREATED or
+//   STOPPED without. A start boots the machine's kernel again, from scratch.
 //
-// A RUNNING machine may be SUSPENDED (SuspendMachine, ResumeMachine) and snapshotted
-// (SnapshotMachine), where its platform can: KVM today. Elsewhere those calls fail with
-// UNIMPLEMENTED, saying so. A start boots the machine's kernel again, from scratch.
-//
-// Exec, ReadFile, WriteFile and StopMachine's `sync_filesystems` reach the guest through
-// libmachine's agent (crates/libmachine-agent), which a guest runs as `libmachine_action=agent` on
-// the test initramfs's command line, or of its own init's choosing. A guest without it fails them
-// with DEADLINE_EXCEEDED once its agent hasn't answered in 30 s. Each machine has at most 64 such
-// calls under way (an Exec until its command ends): past that they fail with RESOURCE_EXHAUSTED.
-// A file's read or write waits at most 60 s for any one answer of the guest's.
-//
-// A guest with an agent of its own (a VM manager's) reaches it through the machine's vsock socket
+// A guest's agent (a VM manager's) reaches the host through the machine's vsock socket
 // (Machine.vsock_socket), which speaks Firecracker's vsock protocol: connect, send
 // "CONNECT <port>\n", read "OK <port>\n", then the stream is the guest's port's; and a guest's
 // connection to a port the spec lists in `vsock_listen_ports` is passed to the Unix socket
 // "<vsock_socket>_<port>", if one listens there.
 //
-// Errors are gRPC statuses: NOT_FOUND for a machine or snapshot not there, ALREADY_EXISTS for a
-// name taken, INVALID_ARGUMENT for a request that means nothing (a name or path out of bounds, a
-// size not a multiple of 4096), FAILED_PRECONDITION for a call the machine's state refuses (a
-// start of a running machine, an exec in a stopped one), RESOURCE_EXHAUSTED for a limit reached
-// (on macOS before board 13460, a second machine running), UNIMPLEMENTED for what this platform or
-// build can't do yet, saying which board task brings it, and INTERNAL for the hypervisor's errors.
+// Errors are gRPC statuses: NOT_FOUND for a machine not there, ALREADY_EXISTS for a name taken,
+// INVALID_ARGUMENT for a request that means nothing (a name or path out of bounds, a size not a
+// multiple of 4096), FAILED_PRECONDITION for a call the machine's state refuses (a start of a
+// running machine), RESOURCE_EXHAUSTED for a limit reached, UNIMPLEMENTED for what this platform
+// or build can't do yet, saying which board task brings it, and INTERNAL for the hypervisor's
+// errors.
 //
-// Compatibility: v1 only grows. Calls and fields are added; none is removed, renamed, renumbered
-// or given another meaning or type. A field a server doesn't know of is zero, empty or false, which
-// each says it means. A call an older machined lacks fails with UNIMPLEMENTED.
+// Compatibility: v1 only grows, but for what the user dropped on 2026-11-27 (board 14519): the
+// calls of machines' stops, watches, execs, file transfers, snapshots, suspensions and balloon
+// targets, which hotbed, the one VM manager, never called (it calls CreateMachine, StartMachine,
+// GetMachine, ListMachines, DeleteMachine and StreamConsole). Calls and fields are added; none
+// else is removed, renamed, renumbered or given another meaning or type. A field a server doesn't
+// know of is zero, empty or false, which each says it means. A call an older machined lacks fails
+// with UNIMPLEMENTED.
 
 // Code generated by protoc-gen-go-grpc. DO NOT EDIT.
 // versions:
@@ -73,23 +65,12 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Machined_CreateMachine_FullMethodName   = "/machined.v1.Machined/CreateMachine"
-	Machined_StartMachine_FullMethodName    = "/machined.v1.Machined/StartMachine"
-	Machined_StopMachine_FullMethodName     = "/machined.v1.Machined/StopMachine"
-	Machined_DeleteMachine_FullMethodName   = "/machined.v1.Machined/DeleteMachine"
-	Machined_GetMachine_FullMethodName      = "/machined.v1.Machined/GetMachine"
-	Machined_ListMachines_FullMethodName    = "/machined.v1.Machined/ListMachines"
-	Machined_WatchMachine_FullMethodName    = "/machined.v1.Machined/WatchMachine"
-	Machined_StreamConsole_FullMethodName   = "/machined.v1.Machined/StreamConsole"
-	Machined_Exec_FullMethodName            = "/machined.v1.Machined/Exec"
-	Machined_ReadFile_FullMethodName        = "/machined.v1.Machined/ReadFile"
-	Machined_WriteFile_FullMethodName       = "/machined.v1.Machined/WriteFile"
-	Machined_SnapshotMachine_FullMethodName = "/machined.v1.Machined/SnapshotMachine"
-	Machined_RestoreMachine_FullMethodName  = "/machined.v1.Machined/RestoreMachine"
-	Machined_DeleteSnapshot_FullMethodName  = "/machined.v1.Machined/DeleteSnapshot"
-	Machined_SuspendMachine_FullMethodName  = "/machined.v1.Machined/SuspendMachine"
-	Machined_ResumeMachine_FullMethodName   = "/machined.v1.Machined/ResumeMachine"
-	Machined_Balloon_FullMethodName         = "/machined.v1.Machined/Balloon"
+	Machined_CreateMachine_FullMethodName = "/machined.v1.Machined/CreateMachine"
+	Machined_StartMachine_FullMethodName  = "/machined.v1.Machined/StartMachine"
+	Machined_DeleteMachine_FullMethodName = "/machined.v1.Machined/DeleteMachine"
+	Machined_GetMachine_FullMethodName    = "/machined.v1.Machined/GetMachine"
+	Machined_ListMachines_FullMethodName  = "/machined.v1.Machined/ListMachines"
+	Machined_StreamConsole_FullMethodName = "/machined.v1.Machined/StreamConsole"
 )
 
 // MachinedClient is the client API for Machined service.
@@ -101,50 +82,17 @@ type MachinedClient interface {
 	// Makes a machine from a spec, CREATED: nothing runs until StartMachine.
 	CreateMachine(ctx context.Context, in *CreateMachineRequest, opts ...grpc.CallOption) (*CreateMachineResponse, error)
 	// Boots a CREATED or STOPPED machine; returns once it is RUNNING (its kernel loaded and its
-	// vCPUs running), not once its guest is up: WatchMachine and the console say more.
+	// vCPUs running), not once its guest is up: GetMachine and the console say more.
 	StartMachine(ctx context.Context, in *StartMachineRequest, opts ...grpc.CallOption) (*StartMachineResponse, error)
-	// Stops a running or suspended machine, its guest's filesystems synced first if asked, and
-	// frees it: STOPPED, its exit STOPPED. A machine already STOPPED or CREATED is left as it is.
-	StopMachine(ctx context.Context, in *StopMachineRequest, opts ...grpc.CallOption) (*StopMachineResponse, error)
 	// Deletes a machine: one CREATED or STOPPED, or, with `force`, one in any state, stopped first.
 	DeleteMachine(ctx context.Context, in *DeleteMachineRequest, opts ...grpc.CallOption) (*DeleteMachineResponse, error)
 	// A machine: its spec, state and how it last ended.
 	GetMachine(ctx context.Context, in *GetMachineRequest, opts ...grpc.CallOption) (*GetMachineResponse, error)
 	// Every machine, by name.
 	ListMachines(ctx context.Context, in *ListMachinesRequest, opts ...grpc.CallOption) (*ListMachinesResponse, error)
-	// A machine's status now, then each time it changes, until the machine is deleted (the stream
-	// ends) or the caller goes.
-	WatchMachine(ctx context.Context, in *WatchMachineRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[WatchMachineResponse], error)
 	// What a machine's guest wrote to its console (its UART), from an offset, and, if asked, what
 	// it writes after, as it does. machined keeps the last 1 MiB of it, across starts.
 	StreamConsole(ctx context.Context, in *StreamConsoleRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[StreamConsoleResponse], error)
-	// Runs a command in a running machine's guest through its agent: the first request starts it,
-	// the next feed its stdin and signal it; the answers are its pid, its output as it comes, and
-	// how it ended, the last. A caller gone before the command ended kills it.
-	Exec(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[ExecRequest, ExecResponse], error)
-	// A file of a running machine's guest, through its agent, in chunks. At most 64 MiB:
-	// RESOURCE_EXHAUSTED past it.
-	ReadFile(ctx context.Context, in *ReadFileRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ReadFileResponse], error)
-	// Makes a file of a running machine's guest hold what the requests carry, whole or not at all,
-	// through its agent: the first request names it, each carries a chunk. At most 64 MiB.
-	WriteFile(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[WriteFileRequest, WriteFileResponse], error)
-	// Writes a snapshot of a running machine to machined's snapshots, by a name of the caller's;
-	// the machine is paused for it, and runs on. KVM only. A machine with a network can't be.
-	SnapshotMachine(ctx context.Context, in *SnapshotMachineRequest, opts ...grpc.CallOption) (*SnapshotMachineResponse, error)
-	// Makes a new machine from a snapshot, and starts it: RUNNING, its guest where the snapshot
-	// left it, its RNG reseeded and its clock moved on. KVM only.
-	RestoreMachine(ctx context.Context, in *RestoreMachineRequest, opts ...grpc.CallOption) (*RestoreMachineResponse, error)
-	// Deletes a snapshot. Machines restored from it live on.
-	DeleteSnapshot(ctx context.Context, in *DeleteSnapshotRequest, opts ...grpc.CallOption) (*DeleteSnapshotResponse, error)
-	// Suspends a running machine whose guest is idle: its RAM goes to a file, its threads stop,
-	// and it wakes by itself when a device has something for it, or on ResumeMachine. KVM only.
-	// FAILED_PRECONDITION if the guest stays busy for 2 s.
-	SuspendMachine(ctx context.Context, in *SuspendMachineRequest, opts ...grpc.CallOption) (*SuspendMachineResponse, error)
-	// Wakes a suspended machine; returns once it runs (at once if it wasn't suspended).
-	ResumeMachine(ctx context.Context, in *ResumeMachineRequest, opts ...grpc.CallOption) (*ResumeMachineResponse, error)
-	// A running machine's balloon (its spec's `balloon`): its target set, if the request gives
-	// one, and how it stands. FAILED_PRECONDITION if the machine doesn't run, or has none.
-	Balloon(ctx context.Context, in *BalloonRequest, opts ...grpc.CallOption) (*BalloonResponse, error)
 }
 
 type machinedClient struct {
@@ -169,16 +117,6 @@ func (c *machinedClient) StartMachine(ctx context.Context, in *StartMachineReque
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(StartMachineResponse)
 	err := c.cc.Invoke(ctx, Machined_StartMachine_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *machinedClient) StopMachine(ctx context.Context, in *StopMachineRequest, opts ...grpc.CallOption) (*StopMachineResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(StopMachineResponse)
-	err := c.cc.Invoke(ctx, Machined_StopMachine_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -215,28 +153,9 @@ func (c *machinedClient) ListMachines(ctx context.Context, in *ListMachinesReque
 	return out, nil
 }
 
-func (c *machinedClient) WatchMachine(ctx context.Context, in *WatchMachineRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[WatchMachineResponse], error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Machined_ServiceDesc.Streams[0], Machined_WatchMachine_FullMethodName, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	x := &grpc.GenericClientStream[WatchMachineRequest, WatchMachineResponse]{ClientStream: stream}
-	if err := x.ClientStream.SendMsg(in); err != nil {
-		return nil, err
-	}
-	if err := x.ClientStream.CloseSend(); err != nil {
-		return nil, err
-	}
-	return x, nil
-}
-
-// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type Machined_WatchMachineClient = grpc.ServerStreamingClient[WatchMachineResponse]
-
 func (c *machinedClient) StreamConsole(ctx context.Context, in *StreamConsoleRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[StreamConsoleResponse], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Machined_ServiceDesc.Streams[1], Machined_StreamConsole_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Machined_ServiceDesc.Streams[0], Machined_StreamConsole_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -253,111 +172,6 @@ func (c *machinedClient) StreamConsole(ctx context.Context, in *StreamConsoleReq
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type Machined_StreamConsoleClient = grpc.ServerStreamingClient[StreamConsoleResponse]
 
-func (c *machinedClient) Exec(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[ExecRequest, ExecResponse], error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Machined_ServiceDesc.Streams[2], Machined_Exec_FullMethodName, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	x := &grpc.GenericClientStream[ExecRequest, ExecResponse]{ClientStream: stream}
-	return x, nil
-}
-
-// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type Machined_ExecClient = grpc.BidiStreamingClient[ExecRequest, ExecResponse]
-
-func (c *machinedClient) ReadFile(ctx context.Context, in *ReadFileRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ReadFileResponse], error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Machined_ServiceDesc.Streams[3], Machined_ReadFile_FullMethodName, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	x := &grpc.GenericClientStream[ReadFileRequest, ReadFileResponse]{ClientStream: stream}
-	if err := x.ClientStream.SendMsg(in); err != nil {
-		return nil, err
-	}
-	if err := x.ClientStream.CloseSend(); err != nil {
-		return nil, err
-	}
-	return x, nil
-}
-
-// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type Machined_ReadFileClient = grpc.ServerStreamingClient[ReadFileResponse]
-
-func (c *machinedClient) WriteFile(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[WriteFileRequest, WriteFileResponse], error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Machined_ServiceDesc.Streams[4], Machined_WriteFile_FullMethodName, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	x := &grpc.GenericClientStream[WriteFileRequest, WriteFileResponse]{ClientStream: stream}
-	return x, nil
-}
-
-// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type Machined_WriteFileClient = grpc.ClientStreamingClient[WriteFileRequest, WriteFileResponse]
-
-func (c *machinedClient) SnapshotMachine(ctx context.Context, in *SnapshotMachineRequest, opts ...grpc.CallOption) (*SnapshotMachineResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(SnapshotMachineResponse)
-	err := c.cc.Invoke(ctx, Machined_SnapshotMachine_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *machinedClient) RestoreMachine(ctx context.Context, in *RestoreMachineRequest, opts ...grpc.CallOption) (*RestoreMachineResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(RestoreMachineResponse)
-	err := c.cc.Invoke(ctx, Machined_RestoreMachine_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *machinedClient) DeleteSnapshot(ctx context.Context, in *DeleteSnapshotRequest, opts ...grpc.CallOption) (*DeleteSnapshotResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(DeleteSnapshotResponse)
-	err := c.cc.Invoke(ctx, Machined_DeleteSnapshot_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *machinedClient) SuspendMachine(ctx context.Context, in *SuspendMachineRequest, opts ...grpc.CallOption) (*SuspendMachineResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(SuspendMachineResponse)
-	err := c.cc.Invoke(ctx, Machined_SuspendMachine_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *machinedClient) ResumeMachine(ctx context.Context, in *ResumeMachineRequest, opts ...grpc.CallOption) (*ResumeMachineResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(ResumeMachineResponse)
-	err := c.cc.Invoke(ctx, Machined_ResumeMachine_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *machinedClient) Balloon(ctx context.Context, in *BalloonRequest, opts ...grpc.CallOption) (*BalloonResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(BalloonResponse)
-	err := c.cc.Invoke(ctx, Machined_Balloon_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
 // MachinedServer is the server API for Machined service.
 // All implementations must embed UnimplementedMachinedServer
 // for forward compatibility.
@@ -367,50 +181,17 @@ type MachinedServer interface {
 	// Makes a machine from a spec, CREATED: nothing runs until StartMachine.
 	CreateMachine(context.Context, *CreateMachineRequest) (*CreateMachineResponse, error)
 	// Boots a CREATED or STOPPED machine; returns once it is RUNNING (its kernel loaded and its
-	// vCPUs running), not once its guest is up: WatchMachine and the console say more.
+	// vCPUs running), not once its guest is up: GetMachine and the console say more.
 	StartMachine(context.Context, *StartMachineRequest) (*StartMachineResponse, error)
-	// Stops a running or suspended machine, its guest's filesystems synced first if asked, and
-	// frees it: STOPPED, its exit STOPPED. A machine already STOPPED or CREATED is left as it is.
-	StopMachine(context.Context, *StopMachineRequest) (*StopMachineResponse, error)
 	// Deletes a machine: one CREATED or STOPPED, or, with `force`, one in any state, stopped first.
 	DeleteMachine(context.Context, *DeleteMachineRequest) (*DeleteMachineResponse, error)
 	// A machine: its spec, state and how it last ended.
 	GetMachine(context.Context, *GetMachineRequest) (*GetMachineResponse, error)
 	// Every machine, by name.
 	ListMachines(context.Context, *ListMachinesRequest) (*ListMachinesResponse, error)
-	// A machine's status now, then each time it changes, until the machine is deleted (the stream
-	// ends) or the caller goes.
-	WatchMachine(*WatchMachineRequest, grpc.ServerStreamingServer[WatchMachineResponse]) error
 	// What a machine's guest wrote to its console (its UART), from an offset, and, if asked, what
 	// it writes after, as it does. machined keeps the last 1 MiB of it, across starts.
 	StreamConsole(*StreamConsoleRequest, grpc.ServerStreamingServer[StreamConsoleResponse]) error
-	// Runs a command in a running machine's guest through its agent: the first request starts it,
-	// the next feed its stdin and signal it; the answers are its pid, its output as it comes, and
-	// how it ended, the last. A caller gone before the command ended kills it.
-	Exec(grpc.BidiStreamingServer[ExecRequest, ExecResponse]) error
-	// A file of a running machine's guest, through its agent, in chunks. At most 64 MiB:
-	// RESOURCE_EXHAUSTED past it.
-	ReadFile(*ReadFileRequest, grpc.ServerStreamingServer[ReadFileResponse]) error
-	// Makes a file of a running machine's guest hold what the requests carry, whole or not at all,
-	// through its agent: the first request names it, each carries a chunk. At most 64 MiB.
-	WriteFile(grpc.ClientStreamingServer[WriteFileRequest, WriteFileResponse]) error
-	// Writes a snapshot of a running machine to machined's snapshots, by a name of the caller's;
-	// the machine is paused for it, and runs on. KVM only. A machine with a network can't be.
-	SnapshotMachine(context.Context, *SnapshotMachineRequest) (*SnapshotMachineResponse, error)
-	// Makes a new machine from a snapshot, and starts it: RUNNING, its guest where the snapshot
-	// left it, its RNG reseeded and its clock moved on. KVM only.
-	RestoreMachine(context.Context, *RestoreMachineRequest) (*RestoreMachineResponse, error)
-	// Deletes a snapshot. Machines restored from it live on.
-	DeleteSnapshot(context.Context, *DeleteSnapshotRequest) (*DeleteSnapshotResponse, error)
-	// Suspends a running machine whose guest is idle: its RAM goes to a file, its threads stop,
-	// and it wakes by itself when a device has something for it, or on ResumeMachine. KVM only.
-	// FAILED_PRECONDITION if the guest stays busy for 2 s.
-	SuspendMachine(context.Context, *SuspendMachineRequest) (*SuspendMachineResponse, error)
-	// Wakes a suspended machine; returns once it runs (at once if it wasn't suspended).
-	ResumeMachine(context.Context, *ResumeMachineRequest) (*ResumeMachineResponse, error)
-	// A running machine's balloon (its spec's `balloon`): its target set, if the request gives
-	// one, and how it stands. FAILED_PRECONDITION if the machine doesn't run, or has none.
-	Balloon(context.Context, *BalloonRequest) (*BalloonResponse, error)
 	mustEmbedUnimplementedMachinedServer()
 }
 
@@ -427,9 +208,6 @@ func (UnimplementedMachinedServer) CreateMachine(context.Context, *CreateMachine
 func (UnimplementedMachinedServer) StartMachine(context.Context, *StartMachineRequest) (*StartMachineResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method StartMachine not implemented")
 }
-func (UnimplementedMachinedServer) StopMachine(context.Context, *StopMachineRequest) (*StopMachineResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method StopMachine not implemented")
-}
 func (UnimplementedMachinedServer) DeleteMachine(context.Context, *DeleteMachineRequest) (*DeleteMachineResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeleteMachine not implemented")
 }
@@ -439,38 +217,8 @@ func (UnimplementedMachinedServer) GetMachine(context.Context, *GetMachineReques
 func (UnimplementedMachinedServer) ListMachines(context.Context, *ListMachinesRequest) (*ListMachinesResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListMachines not implemented")
 }
-func (UnimplementedMachinedServer) WatchMachine(*WatchMachineRequest, grpc.ServerStreamingServer[WatchMachineResponse]) error {
-	return status.Error(codes.Unimplemented, "method WatchMachine not implemented")
-}
 func (UnimplementedMachinedServer) StreamConsole(*StreamConsoleRequest, grpc.ServerStreamingServer[StreamConsoleResponse]) error {
 	return status.Error(codes.Unimplemented, "method StreamConsole not implemented")
-}
-func (UnimplementedMachinedServer) Exec(grpc.BidiStreamingServer[ExecRequest, ExecResponse]) error {
-	return status.Error(codes.Unimplemented, "method Exec not implemented")
-}
-func (UnimplementedMachinedServer) ReadFile(*ReadFileRequest, grpc.ServerStreamingServer[ReadFileResponse]) error {
-	return status.Error(codes.Unimplemented, "method ReadFile not implemented")
-}
-func (UnimplementedMachinedServer) WriteFile(grpc.ClientStreamingServer[WriteFileRequest, WriteFileResponse]) error {
-	return status.Error(codes.Unimplemented, "method WriteFile not implemented")
-}
-func (UnimplementedMachinedServer) SnapshotMachine(context.Context, *SnapshotMachineRequest) (*SnapshotMachineResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method SnapshotMachine not implemented")
-}
-func (UnimplementedMachinedServer) RestoreMachine(context.Context, *RestoreMachineRequest) (*RestoreMachineResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method RestoreMachine not implemented")
-}
-func (UnimplementedMachinedServer) DeleteSnapshot(context.Context, *DeleteSnapshotRequest) (*DeleteSnapshotResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method DeleteSnapshot not implemented")
-}
-func (UnimplementedMachinedServer) SuspendMachine(context.Context, *SuspendMachineRequest) (*SuspendMachineResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method SuspendMachine not implemented")
-}
-func (UnimplementedMachinedServer) ResumeMachine(context.Context, *ResumeMachineRequest) (*ResumeMachineResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method ResumeMachine not implemented")
-}
-func (UnimplementedMachinedServer) Balloon(context.Context, *BalloonRequest) (*BalloonResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method Balloon not implemented")
 }
 func (UnimplementedMachinedServer) mustEmbedUnimplementedMachinedServer() {}
 func (UnimplementedMachinedServer) testEmbeddedByValue()                  {}
@@ -529,24 +277,6 @@ func _Machined_StartMachine_Handler(srv interface{}, ctx context.Context, dec fu
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Machined_StopMachine_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(StopMachineRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(MachinedServer).StopMachine(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: Machined_StopMachine_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(MachinedServer).StopMachine(ctx, req.(*StopMachineRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
 func _Machined_DeleteMachine_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(DeleteMachineRequest)
 	if err := dec(in); err != nil {
@@ -601,17 +331,6 @@ func _Machined_ListMachines_Handler(srv interface{}, ctx context.Context, dec fu
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Machined_WatchMachine_Handler(srv interface{}, stream grpc.ServerStream) error {
-	m := new(WatchMachineRequest)
-	if err := stream.RecvMsg(m); err != nil {
-		return err
-	}
-	return srv.(MachinedServer).WatchMachine(m, &grpc.GenericServerStream[WatchMachineRequest, WatchMachineResponse]{ServerStream: stream})
-}
-
-// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type Machined_WatchMachineServer = grpc.ServerStreamingServer[WatchMachineResponse]
-
 func _Machined_StreamConsole_Handler(srv interface{}, stream grpc.ServerStream) error {
 	m := new(StreamConsoleRequest)
 	if err := stream.RecvMsg(m); err != nil {
@@ -622,139 +341,6 @@ func _Machined_StreamConsole_Handler(srv interface{}, stream grpc.ServerStream) 
 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type Machined_StreamConsoleServer = grpc.ServerStreamingServer[StreamConsoleResponse]
-
-func _Machined_Exec_Handler(srv interface{}, stream grpc.ServerStream) error {
-	return srv.(MachinedServer).Exec(&grpc.GenericServerStream[ExecRequest, ExecResponse]{ServerStream: stream})
-}
-
-// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type Machined_ExecServer = grpc.BidiStreamingServer[ExecRequest, ExecResponse]
-
-func _Machined_ReadFile_Handler(srv interface{}, stream grpc.ServerStream) error {
-	m := new(ReadFileRequest)
-	if err := stream.RecvMsg(m); err != nil {
-		return err
-	}
-	return srv.(MachinedServer).ReadFile(m, &grpc.GenericServerStream[ReadFileRequest, ReadFileResponse]{ServerStream: stream})
-}
-
-// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type Machined_ReadFileServer = grpc.ServerStreamingServer[ReadFileResponse]
-
-func _Machined_WriteFile_Handler(srv interface{}, stream grpc.ServerStream) error {
-	return srv.(MachinedServer).WriteFile(&grpc.GenericServerStream[WriteFileRequest, WriteFileResponse]{ServerStream: stream})
-}
-
-// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type Machined_WriteFileServer = grpc.ClientStreamingServer[WriteFileRequest, WriteFileResponse]
-
-func _Machined_SnapshotMachine_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(SnapshotMachineRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(MachinedServer).SnapshotMachine(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: Machined_SnapshotMachine_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(MachinedServer).SnapshotMachine(ctx, req.(*SnapshotMachineRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _Machined_RestoreMachine_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(RestoreMachineRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(MachinedServer).RestoreMachine(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: Machined_RestoreMachine_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(MachinedServer).RestoreMachine(ctx, req.(*RestoreMachineRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _Machined_DeleteSnapshot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(DeleteSnapshotRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(MachinedServer).DeleteSnapshot(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: Machined_DeleteSnapshot_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(MachinedServer).DeleteSnapshot(ctx, req.(*DeleteSnapshotRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _Machined_SuspendMachine_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(SuspendMachineRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(MachinedServer).SuspendMachine(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: Machined_SuspendMachine_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(MachinedServer).SuspendMachine(ctx, req.(*SuspendMachineRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _Machined_ResumeMachine_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(ResumeMachineRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(MachinedServer).ResumeMachine(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: Machined_ResumeMachine_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(MachinedServer).ResumeMachine(ctx, req.(*ResumeMachineRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _Machined_Balloon_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(BalloonRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(MachinedServer).Balloon(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: Machined_Balloon_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(MachinedServer).Balloon(ctx, req.(*BalloonRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
 
 // Machined_ServiceDesc is the grpc.ServiceDesc for Machined service.
 // It's only intended for direct use with grpc.RegisterService,
@@ -772,10 +358,6 @@ var Machined_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Machined_StartMachine_Handler,
 		},
 		{
-			MethodName: "StopMachine",
-			Handler:    _Machined_StopMachine_Handler,
-		},
-		{
 			MethodName: "DeleteMachine",
 			Handler:    _Machined_DeleteMachine_Handler,
 		},
@@ -787,57 +369,12 @@ var Machined_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "ListMachines",
 			Handler:    _Machined_ListMachines_Handler,
 		},
-		{
-			MethodName: "SnapshotMachine",
-			Handler:    _Machined_SnapshotMachine_Handler,
-		},
-		{
-			MethodName: "RestoreMachine",
-			Handler:    _Machined_RestoreMachine_Handler,
-		},
-		{
-			MethodName: "DeleteSnapshot",
-			Handler:    _Machined_DeleteSnapshot_Handler,
-		},
-		{
-			MethodName: "SuspendMachine",
-			Handler:    _Machined_SuspendMachine_Handler,
-		},
-		{
-			MethodName: "ResumeMachine",
-			Handler:    _Machined_ResumeMachine_Handler,
-		},
-		{
-			MethodName: "Balloon",
-			Handler:    _Machined_Balloon_Handler,
-		},
 	},
 	Streams: []grpc.StreamDesc{
-		{
-			StreamName:    "WatchMachine",
-			Handler:       _Machined_WatchMachine_Handler,
-			ServerStreams: true,
-		},
 		{
 			StreamName:    "StreamConsole",
 			Handler:       _Machined_StreamConsole_Handler,
 			ServerStreams: true,
-		},
-		{
-			StreamName:    "Exec",
-			Handler:       _Machined_Exec_Handler,
-			ServerStreams: true,
-			ClientStreams: true,
-		},
-		{
-			StreamName:    "ReadFile",
-			Handler:       _Machined_ReadFile_Handler,
-			ServerStreams: true,
-		},
-		{
-			StreamName:    "WriteFile",
-			Handler:       _Machined_WriteFile_Handler,
-			ClientStreams: true,
 		},
 	},
 	Metadata: "machined/v1/machined.proto",

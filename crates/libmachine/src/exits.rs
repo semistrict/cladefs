@@ -15,10 +15,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// How many vCPU exits of each kind a machine has taken since it was
 /// created, summed over its vCPUs ([`Machine::exit_counts`]).
 ///
-/// An exit here is a return from the hypervisor to libmachine (on KVM, from
-/// `KVM_RUN`): the exits a guest makes libmachine handle. Exits the
-/// hypervisor handles by itself (interrupts, local APIC accesses, `hlt` on a
-/// PC, MSRs, page faults) are not counted.
+/// An exit here is a return from the hypervisor to libmachine (from
+/// `hv_vcpu_run`): the exits a guest makes libmachine handle. Exits the
+/// hypervisor handles by itself (interrupts, GIC accesses, page faults) are
+/// not counted.
 ///
 /// Counts only grow. To count a phase, subtract the counts before it from
 /// those after it.
@@ -27,14 +27,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ExitCounts {
-    /// Accesses to the UART: port I/O to COM1 on a PC, MMIO on the arm64 board.
+    /// MMIO to the UART.
     pub serial: u64,
     /// MMIO to the arm64 board's real-time clock (a PL031).
     pub rtc: u64,
-    /// Port I/O to the ACPI registers (sleep control and status, reset).
-    pub acpi: u64,
-    /// Port I/O that no device claims.
-    pub unclaimed_io: u64,
     /// MMIO to PCI configuration space (ECAM), whether or not a function is
     /// there.
     pub pci_config: u64,
@@ -44,26 +40,21 @@ pub struct ExitCounts {
     pub pci_bar: u64,
     /// MMIO that no device claims.
     pub unclaimed_mmio: u64,
-    /// `hlt` (bare machines only: on a PC the vCPU waits in the hypervisor).
+    /// `hlt` (bare machines only: on the board the vCPU waits in the hypervisor).
     pub halt: u64,
     /// The hypervisor returned before or while running the guest because
     /// of a signal: a kick (the run ending, a stop request) or another.
     pub interrupted: u64,
-    /// A vCPU waiting for its startup IPI woke (INIT or startup IPI from the
-    /// guest): PC machines with several vCPUs, once or twice per AP a boot.
-    pub startup: u64,
     /// A hypercall (HVC) the guest made: PSCI, on the arm64 board.
     pub hypercall: u64,
-    /// A wait for an interrupt (WFI) that left the guest: the arm64 board on
-    /// Hypervisor.framework, whose vCPU thread then sleeps until one comes.
+    /// A wait for an interrupt (WFI) that left the guest: the vCPU thread then sleeps until one
+    /// comes.
     pub wait: u64,
     /// A system register access the hypervisor left to libmachine (arm64:
     /// debug and OS lock registers, read as zero).
     pub system_register: u64,
-    /// A guest access to an extent store device's DAX window that the vCPU retried: on KVM, one
-    /// KVM failed (`EFAULT`) as cladefs changed the window's memory (`virtio_extent::vcpu`); on
-    /// Hypervisor.framework, a fault on a page of the window, which cladefs mapped first
-    /// (`virtio_extent::window_fault`).
+    /// A guest access to an extent store device's DAX window that the vCPU retried: a fault on a
+    /// page of the window, which cladefs mapped first (`virtio_extent::window_fault`).
     pub access_retried: u64,
     /// Anything else: a triple fault, an entry failure, an internal error,
     /// an exit libmachine does not handle, an error from the hypervisor.
@@ -74,21 +65,18 @@ pub struct ExitCounts {
 const NAMES: [&str; KINDS] = [
     "serial",
     "rtc",
-    "acpi",
-    "unclaimed_io",
     "pci_config",
     "pci_bar",
     "unclaimed_mmio",
     "halt",
     "interrupted",
-    "startup",
     "hypercall",
     "wait",
     "system_register",
     "access_retried",
     "other",
 ];
-const KINDS: usize = 15;
+const KINDS: usize = 12;
 
 impl ExitCounts {
     /// Every kind's name (the field's) and count, in a fixed order.
@@ -106,14 +94,11 @@ impl ExitCounts {
         [
             self.serial,
             self.rtc,
-            self.acpi,
-            self.unclaimed_io,
             self.pci_config,
             self.pci_bar,
             self.unclaimed_mmio,
             self.halt,
             self.interrupted,
-            self.startup,
             self.hypercall,
             self.wait,
             self.system_register,
@@ -126,14 +111,11 @@ impl ExitCounts {
         let [
             serial,
             rtc,
-            acpi,
-            unclaimed_io,
             pci_config,
             pci_bar,
             unclaimed_mmio,
             halt,
             interrupted,
-            startup,
             hypercall,
             wait,
             system_register,
@@ -143,14 +125,11 @@ impl ExitCounts {
         Self {
             serial,
             rtc,
-            acpi,
-            unclaimed_io,
             pci_config,
             pci_bar,
             unclaimed_mmio,
             halt,
             interrupted,
-            startup,
             hypercall,
             wait,
             system_register,
@@ -208,22 +187,14 @@ impl std::fmt::Display for ExitCounts {
 #[repr(usize)]
 pub(crate) enum ExitKind {
     Serial,
-    #[cfg_attr(not(target_arch = "aarch64"), allow(dead_code, reason = "the arm64 board's"))]
     Rtc,
-    Acpi,
-    UnclaimedIo,
     PciConfig,
     PciBar,
     UnclaimedMmio,
     Halt,
     Interrupted,
-    Startup,
-    // Hypervisor.framework's exits: KVM handles these in the kernel.
-    #[cfg_attr(target_os = "linux", allow(dead_code, reason = "HVF's exits"))]
     Hypercall,
-    #[cfg_attr(target_os = "linux", allow(dead_code, reason = "HVF's exits"))]
     Wait,
-    #[cfg_attr(target_os = "linux", allow(dead_code, reason = "HVF's exits"))]
     SystemRegister,
     AccessRetried,
     Other,
@@ -255,14 +226,11 @@ mod tests {
     const ALL: [ExitKind; KINDS] = [
         ExitKind::Serial,
         ExitKind::Rtc,
-        ExitKind::Acpi,
-        ExitKind::UnclaimedIo,
         ExitKind::PciConfig,
         ExitKind::PciBar,
         ExitKind::UnclaimedMmio,
         ExitKind::Halt,
         ExitKind::Interrupted,
-        ExitKind::Startup,
         ExitKind::Hypercall,
         ExitKind::Wait,
         ExitKind::SystemRegister,
@@ -288,14 +256,11 @@ mod tests {
         let expected: Vec<(&str, u64)> = [
             ("serial", counts.serial),
             ("rtc", counts.rtc),
-            ("acpi", counts.acpi),
-            ("unclaimed_io", counts.unclaimed_io),
             ("pci_config", counts.pci_config),
             ("pci_bar", counts.pci_bar),
             ("unclaimed_mmio", counts.unclaimed_mmio),
             ("halt", counts.halt),
             ("interrupted", counts.interrupted),
-            ("startup", counts.startup),
             ("hypercall", counts.hypercall),
             ("wait", counts.wait),
             ("system_register", counts.system_register),

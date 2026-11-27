@@ -80,8 +80,7 @@ fn mincore(at: *mut u8) -> u8 {
 
 #[test]
 fn guest_ram_follows_its_host_mapping_once_mapped_anew() {
-    let (vm, vcpus) =
-        Vm::new(64 << 20, CpuModel::Host, Platform::Bare, 1, Ram::Anonymous).expect("the VM");
+    let (vm, vcpus) = Vm::new(64 << 20, Platform::Bare, 1, Ram::Anonymous).expect("the VM");
     let page = |i: u64| RAM_ADDR + (1 << 20) + i * crate::sys::page_size() as u64;
     let host = |i: u64| vm.guest_memory().get_host_address(GuestAddress(page(i))).unwrap();
     let mut ops =

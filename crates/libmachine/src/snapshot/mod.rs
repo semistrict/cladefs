@@ -12,13 +12,11 @@
 //! 0       header (64 bytes): magic "lmsnap\0\0", format version (u32),
 //!         0 (u32), the state's length (u64), the RAM's offset (u64; 0 for
 //!         RAM in a file of its own), the state's SHA-256 (32 bytes)
-//! 64      the state: what the machine is (CPU model and fingerprint, vCPU
-//!         count, RAM size, the memory layout, its balloon, disks and extent
-//!         store devices, the caller's data), then the backend's: on KVM its
-//!         VM state, every vCPU's, the UART's and every PCI function's with its
-//!         device's; on Hypervisor.framework the GIC's and the host's clock,
-//!         every vCPU's, the UART's, the RTC's and every PCI function's
-//!         (snapshot::codec)
+//! 64      the state: what the machine is (CPU fingerprint, vCPU count, RAM
+//!         size, the memory layout, its balloon, disks and extent store
+//!         devices, the caller's data), then the backend's: the GIC's and the
+//!         host's clock, every vCPU's, the UART's, the RTC's and every PCI
+//!         function's with its device's (snapshot::codec)
 //! RAM     each RAM region in address order, each at a multiple of 2 MiB,
 //!         pages of zeroes left as holes
 //! ```
@@ -30,13 +28,15 @@
 //! holds none, and a restore is given it (`Machine::restore_onto`).
 //!
 //! Version 3 added the devices and the caller's data to what the machine is,
-//! the RAM file of its own, and Hypervisor.framework's state.
+//! the RAM file of its own, and Hypervisor.framework's state. Version 4 left
+//! out the CPU model, which Hypervisor.framework has one of, and the vsock's
+//! host end's identity.
 //!
 //! Formats are never converted (AGENTS.md): a file of another version, or
 //! one whose state another version of libmachine wrote, is refused with an
 //! error that says so. So is one whose machine differs from the one a
-//! restore asks for: another CPU model (by the fingerprint, on this host),
-//! vCPU count, address map or TSC frequency.
+//! restore asks for: another CPU (by the fingerprint, on this host), vCPU
+//! count or address map.
 //!
 //! The file is written beside its path and renamed over it, read-only for
 //! its owner: machines restored from it map it, so it must not change while
@@ -57,7 +57,6 @@ use std::sync::Arc;
 use sha2::{Digest, Sha256};
 use vm_memory::{GuestAddress, GuestMemoryBackend, GuestMemoryMmap};
 
-use crate::cpu::CpuModel;
 use crate::error::{Error, Result};
 use crate::extent::{ExtentCache, ExtentCell, ExtentStore};
 use crate::machine::MachineConfig;
@@ -66,7 +65,7 @@ use codec::{Decoder, Encoder};
 
 /// The snapshot format this libmachine writes and reads; any other is
 /// refused.
-pub const FORMAT_VERSION: u32 = 3;
+pub const FORMAT_VERSION: u32 = 4;
 
 const MAGIC: [u8; 8] = *b"lmsnap\0\0";
 const HEADER_LEN: usize = 64;
@@ -79,7 +78,6 @@ const PAGE: usize = 4096;
 /// builds again before it puts the state back.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MachineHeader {
-    pub(crate) cpu_model: CpuModel,
     pub(crate) cpu_fingerprint: String,
     pub(crate) vcpus: u32,
     pub(crate) mem_size: u64,
@@ -101,8 +99,7 @@ fn kind_code(kind: RegionKind) -> u8 {
         RegionKind::Mmio32 => 1,
         RegionKind::Platform => 2,
         RegionKind::Mmio64 => 3,
-        RegionKind::DeviceMemory => 4,
-        RegionKind::Pmem => 5,
+        RegionKind::Pmem => 4,
     }
 }
 
@@ -112,15 +109,13 @@ fn kind_of(code: u8) -> Result<RegionKind> {
         1 => RegionKind::Mmio32,
         2 => RegionKind::Platform,
         3 => RegionKind::Mmio64,
-        4 => RegionKind::DeviceMemory,
-        5 => RegionKind::Pmem,
+        4 => RegionKind::Pmem,
         _ => return Err(Error::Snapshot(format!("unknown region kind {code}"))),
     })
 }
 
 impl MachineHeader {
     pub(crate) fn encode(&self, e: &mut Encoder) {
-        e.str(&self.cpu_model.to_string());
         e.str(&self.cpu_fingerprint);
         e.u32(self.vcpus);
         e.u64(self.mem_size);
@@ -146,10 +141,6 @@ impl MachineHeader {
     }
 
     pub(crate) fn decode(d: &mut Decoder<'_>) -> Result<Self> {
-        let model = d.str()?;
-        let cpu_model = model
-            .parse()
-            .map_err(|e: String| Error::Snapshot(format!("the snapshot's CPU model: {e}")))?;
         let cpu_fingerprint = d.str()?;
         let vcpus = d.u32()?;
         let mem_size = d.u64()?;
@@ -180,7 +171,6 @@ impl MachineHeader {
             .collect::<Result<_>>()?;
         let caller_data = d.bytes()?.to_vec();
         Ok(Self {
-            cpu_model,
             cpu_fingerprint,
             vcpus,
             mem_size,
@@ -389,7 +379,6 @@ impl std::fmt::Debug for Snapshot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Snapshot")
             .field("path", &self.path)
-            .field("cpu_model", &self.machine.cpu_model)
             .field("vcpus", &self.machine.vcpus)
             .field("mem_size", &self.machine.mem_size)
             .finish_non_exhaustive()
@@ -429,9 +418,6 @@ impl Snapshot {
                 io(e)
             }
         })?;
-        if header[..8] == crate::suspend::FILE_MAGIC {
-            return Err(suspended_file(path, &header));
-        }
         if header[..8] != MAGIC {
             return Err(not_a_snapshot(path, "it does not start as a snapshot does"));
         }
@@ -540,7 +526,6 @@ impl Snapshot {
     pub fn config(&self) -> MachineConfig {
         MachineConfig {
             mem_size: self.machine.mem_size as usize,
-            cpu_model: self.machine.cpu_model,
             vcpus: self.machine.vcpus,
             network: None,
             serial_capture_limit: MachineConfig::DEFAULT_SERIAL_CAPTURE_LIMIT,
@@ -588,10 +573,6 @@ impl Snapshot {
     }
 
     /// Its extent store devices' saved state, in their order.
-    #[cfg_attr(
-        not(all(target_os = "macos", target_arch = "aarch64")),
-        allow(dead_code, reason = "KVM restores no extent store device yet")
-    )]
     pub(crate) fn extent_states(&self) -> &[virtio_extent::persist::State] {
         &self.machine.extent_stores
     }
@@ -658,12 +639,12 @@ impl Snapshot {
     }
 
     /// Checks the fingerprint of the CPU a restored machine shows.
-    pub(crate) fn check_cpu(&self, model: CpuModel, fingerprint: &str) -> Result<()> {
+    pub(crate) fn check_cpu(&self, fingerprint: &str) -> Result<()> {
         if fingerprint != self.machine.cpu_fingerprint {
             return Err(Error::Snapshot(format!(
-                "the snapshot's guest saw CPU model {} with fingerprint {}; CPU model {model} \
-                 on this host gives {fingerprint}",
-                self.machine.cpu_model, self.machine.cpu_fingerprint
+                "the snapshot's guest saw a CPU with fingerprint {}; this host's gives \
+                 {fingerprint}",
+                self.machine.cpu_fingerprint
             )));
         }
         Ok(())
@@ -698,33 +679,9 @@ fn extent_store(state: &virtio_extent::persist::State) -> ExtentStore {
     }
 }
 
-/// The error for a suspended machine's file ([`crate::suspend`]), whose
-/// header says what it lacks.
-fn suspended_file(path: &Path, header: &[u8; HEADER_LEN]) -> Error {
-    let lacks = u32::from_le_bytes(header[12..16].try_into().unwrap());
-    let mut what = Vec::new();
-    if lacks & crate::suspend::LACKS_NETWORK != 0 {
-        what.push("the host sockets of its guest's network connections");
-    }
-    if lacks & crate::suspend::LACKS_VSOCK != 0 {
-        what.push("its vsock host end");
-    }
-    if what.is_empty() {
-        what.push("what its process holds");
-    }
-    Error::Snapshot(format!(
-        "{} is a suspended machine's file, not a snapshot: it lacks {}, which only the \
-         process that suspended the machine holds; it is no template, and no machine is \
-         restored from it",
-        path.display(),
-        what.join(" and ")
-    ))
-}
-
 fn not_a_snapshot(path: &Path, why: &str) -> Error {
     Error::Snapshot(format!("{} is not a usable snapshot: {why}", path.display()))
 }
 
-// Its tests restore KVM machines.
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
 mod tests;

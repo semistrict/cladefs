@@ -1,3 +1,0 @@
-run run-nightly-20261116T070003Z-2ad571cf
-host local
-directory /mnt/fxdax-scratch/fxdax-host/run-nightly-20261116T070003Z-2ad571cf

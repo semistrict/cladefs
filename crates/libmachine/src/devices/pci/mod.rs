@@ -32,7 +32,7 @@ pub(crate) struct MsiMessage {
 }
 
 /// What PCI functions need from the hypervisor: interrupt routes, irqfds,
-/// ioeventfds and memory slots. The KVM backend implements it; unit tests
+/// ioeventfds and memory slots. The HVF backend implements it; unit tests
 /// record the calls.
 pub(crate) trait PciHost {
     /// Routes `gsi` to the MSI `message`.

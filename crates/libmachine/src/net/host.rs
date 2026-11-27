@@ -13,15 +13,8 @@
 //! so a busy network never delays the other devices' queues, and nothing
 //! here depends on a vCPU running: the network keeps working while another
 //! thread is in `Machine::run`, or none is.
-//!
-//! The thread can be stopped and its stack saved ([`NetThread::save`]): the
-//! host sockets come out beside the state, and a thread started from the
-//! state ([`NetThread::spawn`] with a [`Restore`]) takes them back. It can
-//! also be stopped with its stack kept whole ([`NetThread::park`]), to run
-//! on as it was or be saved: a suspension looks at it first, and holds the
-//! host sockets of the saved stack meanwhile ([`HeldStreams`]).
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::ffi::CString;
 use std::io;
 use std::net::{Ipv4Addr, Shutdown, SocketAddrV4, TcpStream};
@@ -37,7 +30,7 @@ use socket2::{Domain, SockRef, Socket, Type};
 use super::Shared;
 use super::decide::{ConnectionRequest, Decider};
 use super::policy::Verdict;
-use super::stack::{HostNet, HostStream, LookupError, Options, Ready, Stack, StackState, WakeOn};
+use super::stack::{HostNet, HostStream, LookupError, Options, Ready, Stack};
 use crate::error::{Error, Result};
 
 /// The most frames waiting in each direction of the link; past it, the
@@ -211,13 +204,6 @@ impl HostNet for RealStreams {
         Ok(stream)
     }
 
-    fn adopt(&mut self, id: u64, stream: &TcpStream) -> io::Result<()> {
-        // Edge-triggered, as for a new connection: adding a socket that is
-        // already readable or writable reports it at once, so nothing that
-        // happened while the stack was saved is missed.
-        self.watch(id, stream)
-    }
-
     fn resolve(&mut self, id: u64, name: String) {
         let Some((tx, wake)) = &self.lookups else {
             return;
@@ -312,42 +298,16 @@ fn random_seed() -> u64 {
     u64::from_ne_bytes(seed)
 }
 
-/// A saved stack to start a network thread from, and the host streams
-/// handed back to it.
-pub(crate) struct Restore {
-    pub(crate) state: StackState,
-    pub(crate) streams: HashMap<u64, TcpStream>,
-}
-
 /// The running network thread; dropping it stops and joins the thread,
 /// closing every host connection.
 pub(crate) struct NetThread {
-    /// None once [parked](NetThread::park).
-    stop: Option<EventFd>,
-    handle: Option<JoinHandle<(Stack<RealStreams>, Wakes)>>,
-    link: Arc<Link>,
-    /// The stack's clock counts from here.
-    start: std::time::Instant,
-}
-
-/// A network thread stopped with its stack kept whole, host side and all
-/// (lookups and decider questions in flight still answer to it): to go on
-/// as it was ([`resume`](Parked::resume)) or to be saved.
-pub(crate) struct Parked {
-    stack: Stack<RealStreams>,
-    wakes: Wakes,
     stop: EventFd,
-    link: Arc<Link>,
-    start: std::time::Instant,
+    handle: Option<JoinHandle<()>>,
 }
 
 impl NetThread {
-    /// Starts the thread, with a new stack, or the one `restore` gives.
-    pub(crate) fn spawn(
-        link: Arc<Link>,
-        shared: Arc<Shared>,
-        restore: Option<Restore>,
-    ) -> Result<Self> {
+    /// Starts the thread, with a new stack.
+    pub(crate) fn spawn(link: Arc<Link>, shared: Arc<Shared>) -> Result<Self> {
         let epoll = Poller::new().map_err(io_err("create the network thread's poller"))?;
         let stop =
             EventFd::new(EFD_NONBLOCK).map_err(io_err("create the network's stop eventfd"))?;
@@ -375,220 +335,23 @@ impl NetThread {
         };
         let wakes = Wakes { lookups: rx, lookup_wake, decisions: decided_rx, decide_wake };
         let start = std::time::Instant::now();
-        let now = Instant::from_micros(0);
-        let stack = match restore {
-            None => Stack::new(shared, host, random_seed(), Options::default(), now),
-            // A new seed: a clone's new connections differ from its
-            // template's.
-            Some(r) => Stack::restore(
-                shared,
-                host,
-                random_seed(),
-                Options::default(),
-                now,
-                r.state,
-                r.streams,
-            )?,
-        };
-        Self::start(Parked { stack, wakes, stop, link, start })
-    }
-
-    /// Runs `parked`'s stack on a new thread.
-    fn start(parked: Parked) -> Result<Self> {
-        let Parked { stack, wakes, stop, link, start } = parked;
-        // Frames the stack holds for the guest, or answers it owes, go out
-        // at the thread's first round.
-        link.wake_stack();
-        let thread_link = link.clone();
+        let stack =
+            Stack::new(shared, host, random_seed(), Options::default(), Instant::from_micros(0));
         let handle = std::thread::Builder::new()
             .name("libmachine-net".into())
-            .spawn(move || {
-                let stack = run(&thread_link, stack, start, &wakes);
-                (stack, wakes)
-            })
+            .spawn(move || serve(&link, stack, start, &wakes))
             .map_err(io_err("start the network thread"))?;
-        Ok(Self { stop: Some(stop), handle: Some(handle), link, start })
-    }
-
-    /// Stops the thread, keeping its stack as it is.
-    pub(crate) fn park(mut self) -> Result<Parked> {
-        let stop = self.stop.take().expect("taken only here");
-        let _ = stop.write(1);
-        let handle = self.handle.take().expect("joined only here and on drop");
-        let (stack, wakes) = handle
-            .join()
-            .map_err(|_| crate::error::Error::Snapshot("the network thread panicked".into()))?;
-        Ok(Parked { stack, wakes, stop, link: self.link.clone(), start: self.start })
-    }
-
-    /// Stops the thread and saves its stack: the state, and the host
-    /// streams of its connections by ID.
-    pub(crate) fn save(self) -> Result<(StackState, HashMap<u64, TcpStream>)> {
-        Ok(self.park()?.save())
-    }
-}
-
-impl Parked {
-    pub(crate) fn stack_mut(&mut self) -> &mut Stack<RealStreams> {
-        &mut self.stack
-    }
-
-    /// Runs the stack on again, on a new thread, from where it stopped.
-    pub(crate) fn resume(self) -> Result<NetThread> {
-        // The request that stopped the thread before.
-        let _ = self.stop.read();
-        NetThread::start(self)
-    }
-
-    /// Saves the stack: its state, and the host streams of its connections
-    /// by ID. Its host side goes (its epoll, its decider thread).
-    pub(crate) fn save(self) -> (StackState, HashMap<u64, TcpStream>) {
-        let (state, streams, _host) = self.stack.save();
-        (state, streams)
+        Ok(Self { stop, handle: Some(handle) })
     }
 }
 
 impl Drop for NetThread {
     fn drop(&mut self) {
-        if let Some(stop) = &self.stop {
-            let _ = stop.write(1);
-        }
+        let _ = self.stop.write(1);
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
     }
-}
-
-/// The host streams of a suspended machine's guest connections, held while
-/// no network thread runs ([`crate::suspend`]), with what each must be
-/// watched for: what would make the stack act for the guest. Nothing reads
-/// or writes them here: a watcher gets their file descriptors, and only a
-/// restored stack gets the streams back ([`into_streams`]), refused if one
-/// lost bytes meanwhile ([`check_unread`]).
-///
-/// [`into_streams`]: HeldStreams::into_streams
-/// [`check_unread`]: HeldStreams::check_unread
-pub(crate) struct HeldStreams {
-    held: Vec<Held>,
-}
-
-struct Held {
-    id: u64,
-    stream: TcpStream,
-    wake_on: WakeOn,
-    /// The bytes waiting to be read when it was handed over (SIOCINQ),
-    /// if the kernel said.
-    unread: Option<u32>,
-}
-
-/// The place a network device puts its host streams in when it hands them
-/// over, for its machine to take ([`crate::Machine::suspend`]).
-pub(crate) type NetSlot = Arc<Mutex<Option<HeldStreams>>>;
-
-impl HeldStreams {
-    /// Holds `streams`, each to be watched as `watch` says (not at all if
-    /// it is not there).
-    pub(crate) fn new(streams: HashMap<u64, TcpStream>, watch: &[(u64, WakeOn)]) -> Self {
-        let mut held: Vec<Held> = streams
-            .into_iter()
-            .map(|(id, stream)| Held {
-                id,
-                wake_on: watch
-                    .iter()
-                    .find(|(w, _)| *w == id)
-                    .map_or_else(WakeOn::default, |&(_, w)| w),
-                unread: unread(&stream),
-                stream,
-            })
-            .collect();
-        held.sort_by_key(|h| h.id);
-        Self { held }
-    }
-
-    /// How many streams it holds.
-    #[cfg(test)]
-    pub(crate) fn len(&self) -> usize {
-        self.held.len()
-    }
-
-    /// The file descriptor of each stream to watch, and what for.
-    pub(crate) fn watched(&self) -> Vec<(std::os::fd::RawFd, WakeOn)> {
-        self.held
-            .iter()
-            .filter(|h| h.wake_on.data || h.wake_on.room)
-            .map(|h| (h.stream.as_raw_fd(), h.wake_on))
-            .collect()
-    }
-
-    /// Checks that no stream lost bytes it had waiting since it was handed
-    /// over: bytes only arrive while nothing reads, so fewer waiting means
-    /// something read them, and the restored guest would never see them.
-    /// A socket the peer reset is not checked (the kernel may drop what it
-    /// had waiting).
-    pub(crate) fn check_unread(&self) -> Result<()> {
-        for h in &self.held {
-            let (Some(then), Some(now)) = (h.unread, unread(&h.stream)) else {
-                continue;
-            };
-            if now < then && !reset(&h.stream) {
-                return Err(Error::Snapshot(format!(
-                    "the host socket of guest connection {} had {then} bytes waiting when the \
-                     machine was suspended and has {now} now: something read it, so the \
-                     restored guest would miss bytes; refused",
-                    h.id
-                )));
-            }
-        }
-        Ok(())
-    }
-
-    /// The streams, by connection ID, for a restored stack.
-    pub(crate) fn into_streams(self) -> HashMap<u64, TcpStream> {
-        self.held.into_iter().map(|h| (h.id, h.stream)).collect()
-    }
-
-    /// Stream `id`, for tests that tamper with it.
-    #[cfg(test)]
-    pub(crate) fn stream(&self, id: u64) -> Option<&TcpStream> {
-        self.held.iter().find(|h| h.id == id).map(|h| &h.stream)
-    }
-}
-
-/// The bytes waiting to be read on `stream` (SIOCINQ), without reading.
-fn unread(stream: &TcpStream) -> Option<u32> {
-    let mut n: libc::c_int = 0;
-    // SAFETY: FIONREAD writes one int, to `n`.
-    let rc = unsafe { libc::ioctl(stream.as_raw_fd(), libc::FIONREAD, &mut n) };
-    (rc == 0).then(|| u32::try_from(n).unwrap_or(0))
-}
-
-/// Whether the connection is closed in the kernel (reset, or closed both ways), from its TCP
-/// state (Linux's TCP_INFO, macOS's TCP_CONNECTION_INFO), which changes nothing (unlike
-/// SO_ERROR, which takes the error away from the stack that will need it).
-fn reset(stream: &TcpStream) -> bool {
-    #[cfg(target_os = "linux")]
-    type Info = libc::tcp_info;
-    #[cfg(target_os = "macos")]
-    type Info = libc::tcp_connection_info;
-    // Linux's TCP_CLOSE, macOS's TCPS_CLOSED.
-    #[cfg(target_os = "linux")]
-    let (option, closed) = (libc::TCP_INFO, 7u8);
-    #[cfg(target_os = "macos")]
-    let (option, closed) = (libc::TCP_CONNECTION_INFO, 0u8);
-    // SAFETY: an all-zero info is valid, and getsockopt fills at most `len` bytes of it.
-    let mut info: Info = unsafe { std::mem::zeroed() };
-    let mut len = std::mem::size_of::<Info>() as libc::socklen_t;
-    // SAFETY: as above, on an open socket.
-    let rc = unsafe {
-        libc::getsockopt(
-            stream.as_raw_fd(),
-            libc::IPPROTO_TCP,
-            option,
-            (&raw mut info).cast(),
-            &mut len,
-        )
-    };
-    rc == 0 && info.tcpi_state == closed
 }
 
 /// The answers that come back to the network thread from other threads.
@@ -599,21 +362,9 @@ struct Wakes {
     decide_wake: Arc<EventFd>,
 }
 
-/// Runs `stack` until told to stop, then hands it back, its clock at the
-/// time it stopped.
-fn run(
-    link: &Link,
-    mut stack: Stack<RealStreams>,
-    start: std::time::Instant,
-    wakes: &Wakes,
-) -> Stack<RealStreams> {
+/// Runs `stack` until told to stop; its clock counts from `start`.
+fn serve(link: &Link, mut stack: Stack<RealStreams>, start: std::time::Instant, wakes: &Wakes) {
     let now = || Instant::from_micros(start.elapsed().as_micros() as i64);
-    serve(link, &mut stack, &now, wakes);
-    stack.set_now(now());
-    stack
-}
-
-fn serve(link: &Link, stack: &mut Stack<RealStreams>, now: &dyn Fn() -> Instant, wakes: &Wakes) {
     let mut events: Vec<Polled> = Vec::with_capacity(64);
     loop {
         // While frames wait for room on the link, nothing can go out, and

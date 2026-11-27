@@ -174,11 +174,10 @@ class NightlyHost:
         return (self.state / "nightly.log").read_text()
 
     def jobs(self, record):
-        """What the host script's jobs said of the night `record`."""
-        listed = self.git(self.origin, "ls-tree", "-r", "--name-only", "main", "docs/measurements")
-        path = next(path for path in listed.splitlines()
-                    if path.endswith(f"-{record['head'][:8]}/jobs.txt"))
-        return self.git(self.origin, "show", f"main:{path}").splitlines()
+        """What the host script's jobs said of the night `record`: in the nightly's clone, where a
+        night's raw output stays, untracked."""
+        night = self.clone / "docs" / "measurements" / record_directory(self, record)
+        return (night / "jobs.txt").read_text().splitlines()
 
 
 class Nights(unittest.TestCase):
@@ -239,10 +238,12 @@ class Nights(unittest.TestCase):
                       "bench-fork-fxfs-guest-dax-warm' CLADEFS_BENCH_GROUPS='io,files,fsync,sync' "
                       "scripts/bench-ab-host.sh RESULTS && scripts/ab-rounds.py compare RESULTS "
                       "base head\n", task["text"])
-        # The commit holds the results and the history page; the task is on the board.
+        # The commit holds the night's report, its record and the history page, and none of the
+        # rounds' raw output; the task is on the board.
         changed = host1.git(host1.origin, "show", "--name-only", "--format=", "main").splitlines()
-        self.assertIn("docs/measurements/nightly-history.md", changed)
-        self.assertIn(f"docs/measurements/{record_directory(host1, record)}/night.json", changed)
+        night = f"docs/measurements/{record_directory(host1, record)}"
+        self.assertEqual(sorted(changed), sorted([
+            "docs/measurements/nightly-history.md", f"{night}/night.json", f"{night}/nightly.md"]))
         self.assertEqual(record["tasks"], [{"key": "fxfs-guest-dax fsync-append slower",
                                             "id": "board 900", "action": "filed"}])
 

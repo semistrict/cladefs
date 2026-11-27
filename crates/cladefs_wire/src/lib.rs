@@ -6,6 +6,7 @@
 
 #![deny(clippy::undocumented_unsafe_blocks)]
 
+mod backend;
 pub mod client;
 pub mod codec;
 pub mod device;

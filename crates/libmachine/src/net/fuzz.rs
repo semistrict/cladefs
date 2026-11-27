@@ -13,11 +13,7 @@
 //!
 //! Beside raw frames, the input drives guest connections that follow TCP
 //! ([`TcpGuest`]), so that data moves both ways; every byte that reaches
-//! either end is checked against what the other sent. And the input saves
-//! the stack and restores it at random points ([`OP_SAVE`]): with its host
-//! streams handed back, the restored stack must save to the same state and
-//! carry on with every byte intact; without (a clone), every open
-//! connection must be reset towards the guest.
+//! either end is checked against what the other sent.
 //!
 //! The cargo-fuzz targets in `crates/libmachine/fuzz` call
 //! [`guest_frames`] and [`dns_query`] (with the `fuzzing` feature); the
@@ -43,29 +39,23 @@ use super::hosts::Hosts;
 use super::policy::{EgressPolicy, HostPattern, Verdict};
 use super::stack::{
     GATEWAY_MAC, GUEST_MAC, HostNet, HostStream, LookupError, MAX_FRAME, Options, Ready, Stack,
-    StackState,
 };
 use super::{GATEWAY_ADDR, GUEST_ADDR, NetworkConfig, Shared};
-use crate::snapshot::codec::{Decoder, Encoder};
 
 /// A host whose connections and lookups the test or fuzzer completes.
 #[derive(Debug, Default)]
 pub(crate) struct FakeHost {
     /// Every connection asked for, in order.
     pub(crate) connects: Vec<SocketAddrV4>,
-    /// Lookups not yet answered: (id, name). A lookup asked again under
-    /// the same ID (after a restore) is listed once.
+    /// Lookups not yet answered: (id, name).
     pub(crate) lookups: Vec<(u64, String)>,
-    /// Every question for the decider, in order: (id, request), each ID
-    /// once.
+    /// Every question for the decider, in order: (id, request).
     pub(crate) decisions: Vec<(u64, ConnectionRequest)>,
     /// Connections fail.
     pub(crate) refuse: bool,
     /// What each connection's stream was written, by connection ID (the
     /// latest stream with that ID).
     pub(crate) written: HashMap<u64, Arc<Mutex<Vec<u8>>>>,
-    /// The streams handed back to a restored stack, by ID.
-    pub(crate) adopted: Vec<u64>,
     /// While set, every stream's writes would block: a host that does not
     /// read.
     pub(crate) stalled: Arc<AtomicBool>,
@@ -156,20 +146,11 @@ impl HostNet for FakeHost {
     }
 
     fn resolve(&mut self, id: u64, name: String) {
-        if !self.lookups.iter().any(|(i, _)| *i == id) {
-            self.lookups.push((id, name));
-        }
+        self.lookups.push((id, name));
     }
 
     fn decide(&mut self, id: u64, request: ConnectionRequest, _decider: Decider) {
-        if !self.decisions.iter().any(|(i, _)| *i == id) {
-            self.decisions.push((id, request));
-        }
-    }
-
-    fn adopt(&mut self, id: u64, _stream: &FakeStream) -> io::Result<()> {
-        self.adopted.push(id);
-        Ok(())
+        self.decisions.push((id, request));
     }
 }
 
@@ -544,15 +525,6 @@ impl TcpGuest {
         true
     }
 
-    /// Forgets which connection of the stack each one is: after a clone,
-    /// whose host streams are new, what reached the old ones is not
-    /// checked.
-    pub(crate) fn forget_ids(&mut self) {
-        for c in &mut self.conns {
-            c.id = None;
-        }
-    }
-
     /// Checks that each open connection's host stream got exactly the
     /// guest's bytes, in order, and that one both ends closed cleanly got
     /// all of them before it went; returns how many they got.
@@ -587,47 +559,6 @@ impl TcpGuest {
         }
         total
     }
-}
-
-/// Saves `stack` and restores it through the state's encoding, at `now`.
-/// With its streams handed back, the restored stack must save to the same
-/// state; without (`clone`), the open connections it held are returned,
-/// which the caller checks are reset.
-pub(crate) fn save_and_restore(
-    stack: Stack<FakeHost>,
-    shared: &Arc<Shared>,
-    options: Options,
-    now: Instant,
-    clone: bool,
-) -> (Stack<FakeHost>, Vec<u64>) {
-    let encode = |state: &StackState| {
-        let mut e = Encoder::default();
-        state.encode(&mut e);
-        e.finish()
-    };
-    let decode = |bytes: &[u8]| {
-        let mut d = Decoder::new(bytes);
-        let state = StackState::decode(&mut d).expect("a saved state decodes");
-        d.end().expect("nothing after the state");
-        state
-    };
-    let (state, streams, host) = stack.save();
-    let bytes = encode(&state);
-    let state = decode(&bytes);
-    if clone {
-        let open = state.open_ids();
-        let stack = Stack::restore(shared.clone(), host, 7, options, now, state, HashMap::new())
-            .expect("a clone restores");
-        return (stack, open);
-    }
-    let restored = Stack::restore(shared.clone(), host, 3, options, now, state, streams)
-        .expect("a saved stack restores");
-    restored.check_invariants();
-    let (again, streams, host) = restored.save();
-    assert!(encode(&again) == bytes, "a restored stack saves to the state it was restored from");
-    let stack = Stack::restore(shared.clone(), host, 5, options, now, again, streams)
-        .expect("a saved stack restores");
-    (stack, Vec::new())
 }
 
 /// Where the fuzzer's TCP guest connects: allowed by a name rule through a
@@ -680,8 +611,7 @@ const OP_LOOKUP: u8 = 4;
 const OP_DECIDE: u8 = 5;
 const OP_CONNECT: u8 = 6;
 const OP_SEGMENT: u8 = 7;
-pub(crate) const OP_SAVE: u8 = 8;
-const OPS: u8 = 9;
+const OPS: u8 = 8;
 
 /// Runs a fuzz input through a fresh stack. The input is records of an
 /// operation byte, a 16-bit length and that many bytes: a raw guest frame;
@@ -689,9 +619,8 @@ const OPS: u8 = 9;
 /// first byte; protocol by its second); a host connection becoming ready;
 /// time passing; a DNS lookup answered; the decider answering a question;
 /// a [`TcpGuest`] connection opened, or a segment on one (data, FIN, RST,
-/// a closed window, out of order); the stack saved and restored (with its
-/// host streams, or as a clone without). Checks the stack's invariants
-/// after each, and every byte that reached either end.
+/// a closed window, out of order). Checks the stack's invariants after
+/// each, and every byte that reached either end.
 pub fn guest_frames(data: &[u8]) {
     run(data);
 }
@@ -699,8 +628,6 @@ pub fn guest_frames(data: &[u8]) {
 /// What a run reached, for the tests that check the seeds do.
 #[derive(Debug, Default)]
 struct Reach {
-    saves: usize,
-    clones: usize,
     /// The most host data the guest's connections had received in order.
     to_guest: usize,
     /// The most guest data their host streams had been written.
@@ -804,28 +731,6 @@ fn run(data: &[u8]) -> Reach {
                 };
                 if let Some(frame) = segment {
                     stack.guest_frame(frame);
-                }
-            }
-            OP_SAVE => {
-                let clone = body.first().is_some_and(|b| b & 1 != 0);
-                let (restored, open) = save_and_restore(stack, &policy, options, now, clone);
-                stack = restored;
-                reach.saves += 1;
-                reach.clones += usize::from(clone);
-                stack.check_invariants();
-                if clone {
-                    guest.forget_ids();
-                    // Every open connection is reset towards the guest, its
-                    // RST out before it goes, however full the queue was.
-                    for _ in 0..4 {
-                        stack.poll(now);
-                        while let Some(frame) = stack.take_frame() {
-                            guest.take(&frame);
-                        }
-                    }
-                    let left: Vec<u64> =
-                        stack.open_ids().into_iter().filter(|id| open.contains(id)).collect();
-                    assert!(left.is_empty(), "a clone kept connections {left:?}");
                 }
             }
             _ => {}
@@ -940,9 +845,8 @@ pub fn seeds() -> Vec<Vec<u8>> {
         record(OP_TIME, &[0; 600]),
         record(OP_FRAME, &tcp(remote, 443, TcpControl::Syn, 0, None, b"")),
     ];
-    // A TCP guest's connections: data both ways, saved and restored in the
-    // middle of transfers, with data out of order, half-closed, waiting for
-    // the decider, then cloned.
+    // A TCP guest's connections: data both ways, with data out of order,
+    // half-closed, waiting for the decider.
     let segment = |conn: u8, bits: u8, len: u16| {
         let [lo, hi] = len.to_le_bytes();
         record(OP_SEGMENT, &[conn, bits, lo, hi])
@@ -953,9 +857,7 @@ pub fn seeds() -> Vec<Vec<u8>> {
         segment(0, 0, 1000),
         record(OP_HOST, &[3]),
         segment(0, 0, 1000),
-        record(OP_SAVE, &[0]),
         segment(0, 0x18, 100),
-        record(OP_SAVE, &[0]),
         segment(0, 0, 2000),
         record(OP_HOST, &[3]),
         segment(0, 0, 0),
@@ -963,16 +865,13 @@ pub fn seeds() -> Vec<Vec<u8>> {
         record(OP_HOST, &[3]),
         segment(1, 0, 500),
         segment(0, 1, 16),
-        record(OP_SAVE, &[0]),
         record(OP_HOST, &[3]),
         segment(0, 0, 0),
         segment(1, 0, 0),
         record(OP_CONNECT, &[2]),
-        record(OP_SAVE, &[0]),
         record(OP_DECIDE, &[2]),
         record(OP_HOST, &[3]),
         segment(1, 4, 0),
-        record(OP_SAVE, &[1]),
         segment(0, 0, 0),
         segment(1, 0, 10),
     ];
@@ -1078,14 +977,12 @@ mod tests {
         assert_eq!(stack.host().connects.len(), 1);
     }
 
-    /// The TCP guest's seed moves data both ways through saves and a
-    /// clone (so that the fuzzer starts from transfers, not only from
-    /// handshakes).
+    /// The TCP guest's seed moves data both ways (so that the fuzzer
+    /// starts from transfers, not only from handshakes).
     #[test]
-    fn the_guest_seed_moves_data_through_saves() {
+    fn the_guest_seed_moves_data() {
         let seeds = seeds();
         let reach = run(&seeds[4]);
-        assert!(reach.saves >= 5 && reach.clones == 1, "{reach:?}");
         assert!(reach.to_guest > 10_000, "{reach:?}");
         assert!(reach.to_host >= 4_000, "{reach:?}");
     }

@@ -3,11 +3,11 @@
 // found in the LICENSE file.
 
 //! The device thread: one per machine, it waits on every queue's
-//! notification event (the ioeventfds KVM signals when the guest writes a
-//! queue's notify address, or the HVF backend in its place) and has the
-//! device process the queue. A notification therefore never makes the vCPU
-//! thread process a queue, and the interrupt that answers it goes out
-//! through an irqfd (or the HVF backend's stand-in).
+//! notification event (which the HVF backend signals when the guest writes a
+//! queue's notify address) and has the device process the queue. A
+//! notification therefore never makes the vCPU thread process a queue, and
+//! the interrupt that answers it goes out through the HVF backend's irqfd
+//! thread.
 
 use std::os::fd::{AsRawFd, RawFd};
 use std::sync::{Arc, Mutex};

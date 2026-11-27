@@ -220,10 +220,7 @@ pub(crate) type KickTarget = Arc<CpuSlot>;
 pub(crate) struct VcpuThreadScope(Kicker);
 
 impl VcpuThreadScope {
-    /// # Safety
-    ///
-    /// None needed here; unsafe as KVM's is, whose target is a raw pointer.
-    pub(crate) unsafe fn enter(target: KickTarget) -> Result<Self> {
+    pub(crate) fn enter(target: KickTarget) -> Result<Self> {
         Ok(Self(Kicker(target)))
     }
 

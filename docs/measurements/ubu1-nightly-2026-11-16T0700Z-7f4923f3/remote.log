@@ -1,6 +1,0 @@
-fxjob: waiting for another measurement to finish
-fxjob: fxjob-run-nightly-20261116T070003Z-2ad571cf-1910846.scope waits (12.0G, 8 CPUs), after 1 waiting; 0 running reserve 0M of 22.0G, 0 of 16 CPUs (fxjob ps)
-fxjob: fxjob-run-nightly-20261116T070003Z-2ad571cf-1910846.scope starts, after 2 s waiting
-mkdir: No space left on device
-job: line 32: echo: write error: No space left on device
-/home/ramon/src/cladefs-nightly/scripts/lib/host.sh: line 336: return: : numeric argument required

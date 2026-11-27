@@ -31,6 +31,7 @@ pub mod dax;
 pub mod ephemeral_host;
 pub mod error;
 pub mod evidence;
+pub mod extent_requests;
 pub mod faults;
 pub mod halt;
 #[cfg(any(test, feature = "testing"))]

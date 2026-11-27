@@ -8,10 +8,7 @@
 //!   machined --images DIR --state DIR [--socket PATH] [--tcp ADDR --tls-cert PEM --tls-key PEM
 //!            --tls-client-ca PEM]
 
-#[cfg(any(
-    all(target_os = "linux", target_arch = "x86_64"),
-    all(target_os = "macos", target_arch = "aarch64")
-))]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 mod run {
     use std::net::SocketAddr;
     use std::path::PathBuf;
@@ -41,7 +38,7 @@ mod run {
         /// The directory machines' kernels and initramfses are named in.
         #[arg(long)]
         images: PathBuf,
-        /// machined's own directory (vsock sockets, snapshots, suspensions): on disk, short.
+        /// machined's own directory (its vsock sockets): short.
         #[arg(long)]
         state: PathBuf,
         /// The helper binary each machine's VM runs in: `machined-vm` beside machined unless
@@ -125,19 +122,13 @@ mod run {
     }
 }
 
-#[cfg(any(
-    all(target_os = "linux", target_arch = "x86_64"),
-    all(target_os = "macos", target_arch = "aarch64")
-))]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn main() -> std::io::Result<()> {
     run::main()
 }
 
-#[cfg(not(any(
-    all(target_os = "linux", target_arch = "x86_64"),
-    all(target_os = "macos", target_arch = "aarch64")
-)))]
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
 fn main() {
-    eprintln!("machined runs on x86-64 Linux (KVM) and arm64 macOS (Hypervisor.framework)");
+    eprintln!("machined runs on arm64 macOS (Hypervisor.framework)");
     std::process::exit(1);
 }

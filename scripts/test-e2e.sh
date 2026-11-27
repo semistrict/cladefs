@@ -572,8 +572,12 @@ if [[ -z $cladefsd_memory ]]; then
         cladefsd_memory=$((1 << 30))
     fi
 fi
+# The run's bucket, which the daemon keeps its cells in, named to the cases too: a case whose
+# daemon of its own forks a version the run's daemon made reads it there (bench-fork's cold and
+# predicted forks).
+export CLADEFS_E2E_BUCKET="${CLADEFSD_BUCKET:-file://$bucket_dir}"
 ${cladefsd_run[@]+"${cladefsd_run[@]}"} \
-env CLADEFSD_BUCKET="${CLADEFSD_BUCKET:-file://$bucket_dir}" \
+env CLADEFSD_BUCKET="$CLADEFS_E2E_BUCKET" \
     CLADEFSD_ROOTS="$disk_dir" \
     CLADEFSD_PART_CACHE="${CLADEFSD_PART_CACHE-$cache_dir}" \
     CLADEFSD_TOKEN="${CLADEFSD_TOKEN:-1}" \

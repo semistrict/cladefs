@@ -17,15 +17,10 @@
 """
 
 def _rewrite_root_manifest(text):
-    text = text.replace(
+    return text.replace(
         'tokio = { package = "madsim-tokio",',
         'madsim-tokio = {',
     )
-
-    # libmachine's crates (crates/libmachine*, crates/machined) are Cargo's alone, not mirrored
-    # here, and they alone use smoltcp: its patch's path (vendor/smoltcp) is not in this repo, and
-    # Cargo refuses a patch it finds no package at (board 13671).
-    return text.replace('smoltcp = { path = "vendor/smoltcp" }\n', "")
 
 def _rewrite_member_manifest(text, crate_name):
     text = text.replace("tokio.workspace = true", "madsim-tokio.workspace = true")

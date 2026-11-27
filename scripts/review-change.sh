@@ -126,5 +126,5 @@ if ((use_hotbed)); then
         hotbed review findings -s "$session" "$review_id" --model "$model" --subagent codex-exec --file "$out.findings.json" > /dev/null
     fi
     hotbed review finish -s "$session" "$review_id" --model "$model" --subagent codex-exec --summary "$summary" > /dev/null
-    echo "review-change.sh: hotbed review $review_id, $(hotbed review link "$review_id" --json | json_field data url)" >&2
+    echo "review-change.sh: hotbed review $review_id, $(hotbed review link "$review_id" --json | json_field data cockpitUrl)" >&2
 fi

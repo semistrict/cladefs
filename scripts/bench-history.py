@@ -12,12 +12,16 @@ in the order they started (`started`), then for each filesystem each workload's 
 run, and for each filesystem how many times slower than what it compares with
 (scripts/bench_results.py) it was, in the runs that measured both.
 
+Runs' raw output is not tracked (.gitignore, since 2026-11-27): it is on the host that made the
+run. The page is rewritten only where every run it lists is there to read.
+
 Usage: scripts/bench-history.py
 """
 
 import importlib.util
 import re
 import statistics
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -74,7 +78,16 @@ def medians(run, backend):
 
 
 def main():
-    OUTPUT.write_text(history(MEASUREMENTS))
+    page = history(MEASUREMENTS)
+    # Runs' raw output is not tracked (.gitignore): a checkout has only the runs made in it, and a
+    # page of those alone would drop every other run's row.
+    if OUTPUT.exists():
+        listed = lambda text: set(re.findall(r"^\| \[[^]]+\]\(([^)]+)/\)", text, re.M))
+        gone = sorted(listed(OUTPUT.read_text()) - listed(page))
+        if gone:
+            sys.exit(f"{OUTPUT.relative_to(ROOT)} lists {len(gone)} run(s) whose output is not "
+                     f"here ({gone[0]}, ...): not rewritten")
+    OUTPUT.write_text(page)
     print(f"Wrote {OUTPUT.relative_to(ROOT)}")
 
 

@@ -1,1 +1,0 @@
-crates/extent_remote/src/writer.rs:278:34: replace || with && in Writer<B>::close

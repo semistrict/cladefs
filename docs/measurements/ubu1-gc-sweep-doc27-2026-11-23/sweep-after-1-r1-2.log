@@ -1,2 +1,0 @@
-cladefs-gc: deleted 0 (0 bytes), retired 0 references, over 2000 cells (0 unchanged), 0 held by other passes, 0 swept by them since, 0 failed; requests: get 14000, list 2000, update 8000, list-delimited 2021
-cladefs-gc: took 32.899 s; slowest: e/1e 0.027 s, j/2v 0.026 s, e/2x 0.026 s, e/1j 0.026 s, h/q 0.026 s

@@ -1,2 +1,0 @@
-shape 1 10000 4 16 --clones 1024
-cells 10002 objects 90023 bytes 761153192 largest-objects 23 largest-bytes 677551

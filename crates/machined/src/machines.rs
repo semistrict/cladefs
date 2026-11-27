@@ -3,34 +3,27 @@
 // found in the LICENSE file.
 
 //! machined's machines, by name: each one's spec, its state, its console, and, while it runs, its
-//! [`Vm`] (in a helper process of its own) and vsock socket. A machine's lifecycle calls (start, stop, delete, snapshot, suspend,
-//! resume) take turns on it; reads (get, list, watch, console, exec) never wait for them.
+//! [`Vm`] (in a helper process of its own) and vsock socket. A machine's lifecycle calls (start,
+//! delete) take turns on it; reads (get, list, console) never wait for them.
 
 use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
 
-use libmachine::agent::Command;
-use tokio::sync::{Semaphore, watch};
+use tokio::sync::watch;
 use tonic::Status;
 
 use crate::checks;
 use crate::console::Console;
-use crate::guest::{self, Guest};
 use crate::proto::{self, MachineState};
-use crate::vmm::{Ended, Source, Vm};
+use crate::vmm::{Ended, Vm};
 
 /// The most machines machined holds, running or not.
 const MAX_MACHINES: usize = 4096;
 /// The longest path a Unix socket may have, its NUL past it: macOS's (Linux allows 107).
 const MAX_SOCKET_PATH: usize = 103;
-/// How long a call waits for libmachine's agent in a guest to answer.
-pub(crate) const AGENT_READY: Duration = Duration::from_secs(30);
-/// How long StopMachine's sync may take unless its request says.
-const SYNC_TIMEOUT: Duration = Duration::from_secs(180);
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -84,15 +77,9 @@ pub(crate) struct Entry {
 /// A machine while it runs.
 struct Running {
     vm: Vm,
-    /// Its places for calls to its guest under way ([`guest::MAX_CALLS`]).
-    calls: Arc<Semaphore>,
 }
 
 impl Entry {
-    pub(crate) fn status(&self) -> watch::Receiver<Current> {
-        self.status.subscribe()
-    }
-
     pub(crate) fn deleted(&self) -> watch::Receiver<bool> {
         self.deleted.subscribe()
     }
@@ -103,19 +90,6 @@ impl Entry {
 
     fn running(&self) -> Option<Arc<Running>> {
         lock(&self.running).clone()
-    }
-
-    /// The running machine, or FAILED_PRECONDITION.
-    fn require_running(&self) -> Result<Arc<Running>, Status> {
-        self.running().ok_or_else(|| {
-            Status::failed_precondition(format!("machine {:?} is not running", self.name))
-        })
-    }
-
-    /// Its guest, to call, while it runs.
-    pub(crate) fn guest(&self) -> Result<Guest, Status> {
-        let running = self.require_running()?;
-        Ok(Guest::new(running.vm.agent(), running.calls.clone()))
     }
 
     pub(crate) fn to_proto(&self) -> proto::Machine {
@@ -159,20 +133,6 @@ impl Entry {
         }
     }
 
-    /// While `running` is this machine's run and not stopping, its state follows whether its
-    /// guest is suspended.
-    fn follow_suspension(&self, running: &Arc<Running>, suspended: bool) {
-        self.while_current(running, |status| {
-            let state = if suspended { MachineState::Suspended } else { MachineState::Running };
-            let follows = matches!(status.state, MachineState::Running | MachineState::Suspended);
-            let changed = follows && status.state != state;
-            if changed {
-                status.state = state;
-            }
-            changed
-        });
-    }
-
     /// `running` is STOPPING, if it still runs.
     fn stopping(&self, running: &Arc<Running>) {
         self.while_current(running, |status| {
@@ -190,13 +150,6 @@ impl Entry {
     }
 }
 
-/// A snapshot machined holds: its file, and what its machine was.
-#[cfg(target_os = "linux")]
-struct Taken {
-    path: PathBuf,
-    spec: proto::MachineSpec,
-}
-
 /// Every machine.
 pub(crate) struct Machines {
     images: PathBuf,
@@ -205,13 +158,7 @@ pub(crate) struct Machines {
     /// Where the daemon serves helpers, as VM processes (its VM-process wire).
     cladefs_socket: PathBuf,
     vsock_dir: PathBuf,
-    #[cfg(target_os = "linux")]
-    snapshot_dir: PathBuf,
-    #[cfg(target_os = "linux")]
-    suspend_dir: PathBuf,
     entries: Mutex<BTreeMap<String, Arc<Entry>>>,
-    #[cfg(target_os = "linux")]
-    snapshots: Mutex<BTreeMap<String, Arc<Taken>>>,
     /// The next vsock socket's number.
     next_socket: AtomicU32,
 }
@@ -281,25 +228,12 @@ impl Machines {
         cladefs.serve_vm_processes(&cladefs_socket).map_err(|e| {
             io::Error::other(format!("serving helpers at {}: {e:#}", cladefs_socket.display()))
         })?;
-        #[cfg(target_os = "linux")]
-        let (snapshot_dir, suspend_dir) = (state.join("snapshots"), state.join("suspensions"));
-        #[cfg(target_os = "linux")]
-        {
-            fresh(&snapshot_dir)?;
-            fresh(&suspend_dir)?;
-        }
         Ok(Self {
             images: images.to_owned(),
             helper: helper.to_owned(),
             cladefs_socket,
             vsock_dir,
-            #[cfg(target_os = "linux")]
-            snapshot_dir,
-            #[cfg(target_os = "linux")]
-            suspend_dir,
             entries: Mutex::default(),
-            #[cfg(target_os = "linux")]
-            snapshots: Mutex::default(),
             next_socket: AtomicU32::new(1),
         })
     }
@@ -370,12 +304,12 @@ impl Machines {
                 state.as_str_name()
             )));
         }
-        self.boot(entry, Source::Boot).await
+        self.boot(entry).await
     }
 
-    /// Starts `entry` from `source` in a helper of its own, its turn held: RUNNING, or STOPPED
-    /// with a BOOT_FAILED exit.
-    async fn boot(&self, entry: &Arc<Entry>, source: Source) -> Result<(), Status> {
+    /// Starts `entry` in a helper of its own, its turn held: RUNNING, or STOPPED with a
+    /// BOOT_FAILED exit.
+    async fn boot(&self, entry: &Arc<Entry>) -> Result<(), Status> {
         entry.status.send_replace(Current::new(MachineState::Starting, None));
         let socket =
             self.vsock_dir.join(self.next_socket.fetch_add(1, Ordering::Relaxed).to_string());
@@ -385,7 +319,6 @@ impl Machines {
             entry.spec.clone(),
             &self.images,
             &self.cladefs_socket,
-            source,
             socket,
             console,
         )
@@ -400,62 +333,14 @@ impl Machines {
                 return Err(status);
             }
         };
-        let running = Arc::new(Running { vm, calls: Arc::new(Semaphore::new(guest::MAX_CALLS)) });
+        let running = Arc::new(Running { vm });
         *lock(&entry.running) = Some(running.clone());
         entry.status.send_replace(Current::new(MachineState::Running, None));
         let entry = entry.clone();
         tokio::spawn(async move {
-            let mut suspended = running.vm.suspended();
-            loop {
-                tokio::select! {
-                    ended = running.vm.wait() => {
-                        entry.finish(&running, ended);
-                        return;
-                    }
-                    changed = suspended.changed() => {
-                        // Its sender lives as long as the machine: gone, the wait above ends.
-                        if changed.is_ok() {
-                            let now = *suspended.borrow_and_update();
-                            entry.follow_suspension(&running, now);
-                        } else {
-                            let ended = running.vm.wait().await;
-                            entry.finish(&running, ended);
-                            return;
-                        }
-                    }
-                }
-            }
+            let ended = running.vm.wait().await;
+            entry.finish(&running, ended);
         });
-        Ok(())
-    }
-
-    /// Stops a running or suspended machine, syncing its guest's filesystems first if asked.
-    pub(crate) async fn stop(
-        &self,
-        entry: &Arc<Entry>,
-        sync: bool,
-        timeout: Option<Duration>,
-    ) -> Result<(), Status> {
-        let _turn = entry.turn().await?;
-        let Some(running) = entry.running() else {
-            return Ok(());
-        };
-        if sync {
-            let before = entry.status.borrow().state;
-            entry.stopping(&running);
-            let guest = Guest::new(running.vm.agent(), running.calls.clone());
-            if let Err(status) = sync_filesystems(&guest, timeout.unwrap_or(SYNC_TIMEOUT)).await {
-                entry.while_current(&running, |s| {
-                    let back = s.state == MachineState::Stopping;
-                    if back {
-                        s.state = before;
-                    }
-                    back
-                });
-                return Err(status);
-            }
-        }
-        entry.stop_running(&running).await;
         Ok(())
     }
 
@@ -489,178 +374,5 @@ impl Machines {
             entry.deleted.send_replace(true);
         });
         futures::future::join_all(closing).await;
-    }
-
-    /// Snapshots a running machine as `snapshot`, replacing one of that name.
-    #[cfg(target_os = "linux")]
-    pub(crate) async fn snapshot(
-        &self,
-        entry: &Arc<Entry>,
-        snapshot: String,
-    ) -> Result<(), Status> {
-        checks::name("snapshot", &snapshot)?;
-        on_a_cell(entry)?;
-        let _turn = entry.turn().await?;
-        let running = entry.require_running()?;
-        let path = self.snapshot_dir.join(format!("{snapshot}.snap"));
-        running.vm.snapshot(path.clone()).await?;
-        let taken = Taken { path, spec: entry.spec.clone() };
-        lock(&self.snapshots).insert(snapshot, Arc::new(taken));
-        Ok(())
-    }
-
-    /// Makes a machine from a snapshot, and starts it.
-    #[cfg(target_os = "linux")]
-    pub(crate) async fn restore(
-        &self,
-        snapshot: &str,
-        name: String,
-        labels: std::collections::HashMap<String, String>,
-        vsock_listen_ports: Vec<u32>,
-    ) -> Result<Arc<Entry>, Status> {
-        checks::name("snapshot", snapshot)?;
-        checks::name("machine", &name)?;
-        checks::labels(&labels)?;
-        checks::vsock_ports(&vsock_listen_ports)?;
-        let taken = lock(&self.snapshots)
-            .get(snapshot)
-            .cloned()
-            .ok_or_else(|| Status::not_found(format!("no snapshot {snapshot:?}")))?;
-        let spec = proto::MachineSpec { labels, vsock_listen_ports, ..taken.spec.clone() };
-        let entry = self.insert(&name, spec)?;
-        let booted = async {
-            let _turn = entry.turn().await?;
-            self.boot(&entry, Source::Snapshot(taken.path.clone())).await
-        };
-        if let Err(status) = booted.await {
-            // Made whole or not at all.
-            lock(&self.entries).remove(&name);
-            entry.deleted.send_replace(true);
-            return Err(status);
-        }
-        Ok(entry)
-    }
-
-    /// Deletes a snapshot.
-    #[cfg(target_os = "linux")]
-    pub(crate) fn delete_snapshot(&self, snapshot: &str) -> Result<(), Status> {
-        checks::name("snapshot", snapshot)?;
-        lock(&self.snapshots)
-            .remove(snapshot)
-            .ok_or_else(|| Status::not_found(format!("no snapshot {snapshot:?}")))?;
-        // Machines restored from it map it privately: they keep what they mapped.
-        let path = self.snapshot_dir.join(format!("{snapshot}.snap"));
-        std::fs::remove_file(&path)
-            .map_err(|e| Status::internal(format!("removing {}: {e}", path.display())))
-    }
-
-    /// A running machine's balloon: its target set to `target` bytes, if given, and how it stands.
-    pub(crate) async fn balloon(
-        &self,
-        entry: &Arc<Entry>,
-        target: Option<u64>,
-    ) -> Result<proto::BalloonStatus, Status> {
-        if !entry.spec.balloon {
-            return Err(Status::failed_precondition(format!(
-                "machine {:?} has no balloon: its spec asks for none",
-                entry.name
-            )));
-        }
-        entry.require_running()?.vm.balloon(target).await
-    }
-
-    /// Suspends a running machine.
-    #[cfg(target_os = "linux")]
-    pub(crate) async fn suspend(&self, entry: &Arc<Entry>) -> Result<(), Status> {
-        on_a_cell(entry)?;
-        let _turn = entry.turn().await?;
-        let running = entry.require_running()?;
-        running.vm.suspend(self.suspend_dir.clone()).await
-    }
-
-    /// Wakes a suspended machine.
-    #[cfg(target_os = "linux")]
-    pub(crate) async fn resume(&self, entry: &Arc<Entry>) -> Result<(), Status> {
-        let _turn = entry.turn().await?;
-        let running = entry.require_running()?;
-        running.vm.resume().await
-    }
-}
-
-/// A machine booting from a cell, as every machine does, isn't snapshotted or suspended yet:
-/// its snapshot is a version of its root's cell and of its memory's, a memory cell, which wait on
-/// board 13994 (libmachine snapshots no extent store device, board 13139).
-#[cfg(target_os = "linux")]
-fn on_a_cell(entry: &Entry) -> Result<(), Status> {
-    match entry.spec.root {
-        Some(_) => Err(Status::failed_precondition(format!(
-            "machine {:?} boots from a cell: machines on cells are not snapshotted or suspended \
-             yet, their root's and memory's versions waiting on board 13994",
-            entry.name
-        ))),
-        None => Ok(()),
-    }
-}
-
-/// Hypervisor.framework's machines can't be snapshotted or suspended yet.
-#[cfg(not(target_os = "linux"))]
-fn unsupported(what: &str) -> Status {
-    Status::unimplemented(format!(
-        "{what}: machines on Hypervisor.framework can't be snapshotted or suspended yet (board \
-         13399)"
-    ))
-}
-
-#[cfg(not(target_os = "linux"))]
-impl Machines {
-    pub(crate) async fn snapshot(&self, _: &Arc<Entry>, _: String) -> Result<(), Status> {
-        Err(unsupported("SnapshotMachine"))
-    }
-
-    pub(crate) async fn restore(
-        &self,
-        _: &str,
-        _: String,
-        _: std::collections::HashMap<String, String>,
-        _: Vec<u32>,
-    ) -> Result<Arc<Entry>, Status> {
-        Err(unsupported("RestoreMachine"))
-    }
-
-    pub(crate) fn delete_snapshot(&self, _: &str) -> Result<(), Status> {
-        Err(unsupported("DeleteSnapshot"))
-    }
-
-    pub(crate) async fn suspend(&self, _: &Arc<Entry>) -> Result<(), Status> {
-        Err(unsupported("SuspendMachine"))
-    }
-
-    pub(crate) async fn resume(&self, _: &Arc<Entry>) -> Result<(), Status> {
-        Err(unsupported("ResumeMachine"))
-    }
-}
-
-/// Runs `sync` in the guest through its agent, within `timeout`.
-async fn sync_filesystems(guest: &Guest, timeout: Duration) -> Result<(), Status> {
-    // Each wait of the agent bounded too, so that its thread ends with the call.
-    let synced = tokio::time::timeout(
-        timeout,
-        guest.call_waiting(timeout, move |agent| {
-            agent.wait_ready(AGENT_READY.min(timeout))?;
-            agent.exec(&Command::new("sync"))
-        }),
-    )
-    .await
-    .map_err(|_| {
-        Status::deadline_exceeded(format!("the guest's sync took more than {timeout:?}"))
-    })??;
-    if synced.status.success() {
-        Ok(())
-    } else {
-        Err(Status::failed_precondition(format!(
-            "the guest's sync failed ({:?}): {}",
-            synced.status,
-            String::from_utf8_lossy(&synced.stderr)
-        )))
     }
 }

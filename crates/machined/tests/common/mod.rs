@@ -8,17 +8,9 @@
 
 use std::path::{Path, PathBuf};
 
-/// Whether this host runs VMs (else a note): /dev/kvm, accessible, on Linux;
-/// Hypervisor.framework (`kern.hv_support`) on macOS, which GitHub's macOS runners, themselves
-/// VMs, lack (board 13847).
+/// Whether this host runs VMs (else a note): Hypervisor.framework (`kern.hv_support`), which
+/// GitHub's macOS runners, themselves VMs, lack (board 13847).
 pub fn hypervisor() -> bool {
-    if cfg!(target_os = "linux") {
-        if std::fs::OpenOptions::new().read(true).write(true).open("/dev/kvm").is_err() {
-            eprintln!("skipping: /dev/kvm is not accessible");
-            return false;
-        }
-        return true;
-    }
     let support = std::process::Command::new("sysctl").args(["-n", "kern.hv_support"]).output();
     if !support.is_ok_and(|out| out.status.success() && out.stdout.trim_ascii() == b"1") {
         eprintln!("skipping: this host has no Hypervisor.framework (kern.hv_support)");
@@ -32,28 +24,21 @@ pub fn guest() -> Option<(PathBuf, PathBuf)> {
     if !hypervisor() {
         return None;
     }
-    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let (default_dir, default_kernel) = if cfg!(target_os = "linux") {
-        (workspace.join("target/guest"), None)
-    } else {
-        let dir = workspace.join("target/arm64-guest");
-        let kernel = dir.join("Image");
-        (dir, Some(kernel))
-    };
-    let kernel = std::env::var_os("CLADEFS_GUEST_KERNEL").map(PathBuf::from).or(default_kernel);
-    let dir = std::env::var_os("LIBMACHINE_GUEST_DIR").map_or(default_dir, PathBuf::from);
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/arm64-guest");
+    let kernel =
+        std::env::var_os("CLADEFS_GUEST_KERNEL").map_or_else(|| dir.join("Image"), PathBuf::from);
+    let dir = std::env::var_os("LIBMACHINE_GUEST_DIR").map_or(dir, PathBuf::from);
     let initramfs = dir.join("initramfs.cpio");
-    match kernel {
-        Some(kernel) if kernel.is_file() && initramfs.is_file() => Some((kernel, initramfs)),
-        kernel => {
-            eprintln!(
-                "skipping: no guest kernel ({kernel:?}; CLADEFS_GUEST_KERNEL) or initramfs ({}): \
-                 scripts/guest-kernel.sh and crates/libmachine/scripts/build-test-guest.sh, or \
-                 on macOS crates/libmachine/scripts/arm64-guest.sh",
-                initramfs.display()
-            );
-            None
-        }
+    if kernel.is_file() && initramfs.is_file() {
+        Some((kernel, initramfs))
+    } else {
+        eprintln!(
+            "skipping: no guest kernel ({}; CLADEFS_GUEST_KERNEL) or initramfs ({}): \
+             crates/libmachine/scripts/arm64-guest.sh",
+            kernel.display(),
+            initramfs.display()
+        );
+        None
     }
 }
 
@@ -158,98 +143,19 @@ pub fn cpio_to_tar(cpio: &[u8], tar: &Path) {
     out.finish().unwrap();
 }
 
-/// A machined binary of this build, run as a process of its own: one cladefs daemon a process,
-/// so a test that needs machined twice, or a daemon's cells before its machined, runs one so.
-pub struct Process {
-    child: std::process::Child,
-    pub socket: PathBuf,
-}
-
-impl Process {
-    /// Starts `machined --images IMAGES --state STATE --socket <state's>/machined.sock ARGS` and
-    /// waits until it serves.
-    pub async fn start(images: &Path, state: &Path, args: &[&str]) -> Self {
-        let socket = state.with_file_name("machined-process.sock");
-        let child = std::process::Command::new(env!("CARGO_BIN_EXE_machined"))
-            .arg("--images")
-            .arg(images)
-            .arg("--state")
-            .arg(state)
-            .arg("--socket")
-            .arg(&socket)
-            .args(args)
-            .spawn()
-            .unwrap();
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(60);
-        while machined::client::channel_unix(&socket).await.is_err() {
-            assert!(
-                std::time::Instant::now() < until,
-                "machined did not serve at {}",
-                socket.display()
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-        Self { child, socket }
-    }
-
-    /// Stops it as SIGTERM does, and waits for it: its cells drained, what it made kept.
-    pub fn stop(mut self) {
-        // SAFETY: a plain system call, on the test's own child.
-        let pid = libc::pid_t::try_from(self.child.id()).unwrap();
-        assert_eq!(unsafe { libc::kill(pid, libc::SIGTERM) }, 0);
-        let status = self.child.wait().unwrap();
-        assert!(status.success(), "machined stopped with {status}");
-    }
-}
-
-impl Process {
-    /// Kills it, as a crash would, and waits for it: what its daemon committed is on its disk.
-    pub fn kill(mut self) {
-        self.child.kill().unwrap();
-        self.child.wait().unwrap();
-    }
-}
-
-impl Drop for Process {
-    /// A test that failed with it running leaves nothing running.
-    fn drop(&mut self) {
-        if self.child.try_wait().is_ok_and(|ended| ended.is_none()) {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
-        }
-    }
-}
-
-/// A version of `cell`, made now.
-pub async fn make_version(socket: &Path, cell: &machined::proto::Cell) -> u64 {
-    use cladefsd::control::proto::MakeVersionRequest;
-    let request = MakeVersionRequest { tenant: cell.tenant, cell: cell.cell, ..Default::default() };
-    cladefsd(socket).await.make_version(request).await.unwrap().into_inner().version
-}
-
-/// The memory process `pid` holds: its physical footprint on macOS (what Activity Monitor shows,
-/// which leaves out pages given back as reusable), its resident set on Linux.
+/// The memory process `pid` holds: its physical footprint (what Activity Monitor shows, which
+/// leaves out pages given back as reusable).
 pub fn footprint(pid: u32) -> u64 {
-    #[cfg(target_os = "macos")]
-    {
-        // SAFETY: zeroed is a valid rusage_info_v2, which proc_pid_rusage fills.
-        let mut info: libc::rusage_info_v2 = unsafe { std::mem::zeroed() };
-        // SAFETY: `info` is the flavor's struct.
-        let done = unsafe {
-            libc::proc_pid_rusage(
-                libc::c_int::try_from(pid).unwrap(),
-                libc::RUSAGE_INFO_V2,
-                (&raw mut info).cast(),
-            )
-        };
-        assert_eq!(done, 0, "proc_pid_rusage({pid}): {}", std::io::Error::last_os_error());
-        info.ri_phys_footprint
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
-        let line = status.lines().find(|l| l.starts_with("VmRSS:")).unwrap();
-        let kib: u64 = line.split_whitespace().nth(1).unwrap().parse().unwrap();
-        kib * 1024
-    }
+    // SAFETY: zeroed is a valid rusage_info_v2, which proc_pid_rusage fills.
+    let mut info: libc::rusage_info_v2 = unsafe { std::mem::zeroed() };
+    // SAFETY: `info` is the flavor's struct.
+    let done = unsafe {
+        libc::proc_pid_rusage(
+            libc::c_int::try_from(pid).unwrap(),
+            libc::RUSAGE_INFO_V2,
+            (&raw mut info).cast(),
+        )
+    };
+    assert_eq!(done, 0, "proc_pid_rusage({pid}): {}", std::io::Error::last_os_error());
+    info.ri_phys_footprint
 }

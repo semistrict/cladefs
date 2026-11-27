@@ -93,28 +93,20 @@
 use crate::bucket::{self, Bucket, Meta};
 use crate::gc_metrics::{CellSample, ObjectSample, Observer};
 use crate::layout::Head;
-use crate::layout::{self, CellId, Kind, Location, Origin};
+use crate::layout::{self, CellId, Kind, Origin};
 use crate::passed::{self, CollectorLease, LeaseTaking, Listed, Passed, Usage};
 use crate::record::Made;
-use crate::recovery::{self, Checkpoints, Layered, Layers, Recovered, State};
+use crate::recovery::{self, Checkpoints};
 use crate::{Error, lifecycle, rules};
 use futures::StreamExt as _;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
-use storage_device::ExtentId;
 
 /// How many cells a pass recovers at once, and how many origins' states.
 #[cfg(not(target_arch = "wasm32"))]
 const RECOVERIES_AT_ONCE: usize = 16;
 #[cfg(target_arch = "wasm32")]
 const RECOVERIES_AT_ONCE: usize = 1;
-
-/// How many of the checkpoints a pass read whole it keeps for the recoveries after: those of forks
-/// of a base, recovered one after another, which start from the base's.
-#[cfg(not(target_arch = "wasm32"))]
-const CHECKPOINTS_KEPT: usize = 4;
-#[cfg(target_arch = "wasm32")]
-const CHECKPOINTS_KEPT: usize = 0;
 
 /// cladefs: how a collector's passes hold their cells (TASK-395.5): the default holds none, its
 /// passes taking their cells whatever another holds, but a pass holding it for a time, as the
@@ -270,10 +262,6 @@ pub struct Collector {
     /// cladefs: tenants known to be shredded (from `events`), whose live cells are ended and whose
     /// read evidence and orphaned ephemeral references are reclaimed.
     shredded: Arc<BTreeSet<u64>>,
-    /// cladefs: read checkpoints by streaming their tails and 1 MiB parts on demand instead of
-    /// materializing the full `imbl::OrdMap<ExtentId, Location>`, bounding peak RAM to a few MiB
-    /// per cell (default on `wasm32` for Cloudflare Workers' 128 MiB isolate limit).
-    stream_checkpoints: bool,
     /// Optional streaming metrics observer notified once per completed cell pass (zero extra I/O).
     observer: Option<Arc<dyn Observer>>,
 }
@@ -284,7 +272,6 @@ impl Default for Collector {
             holding: Holding::default(),
             budget: None,
             shredded: Arc::new(BTreeSet::new()),
-            stream_checkpoints: cfg!(target_arch = "wasm32"),
             observer: None,
         }
     }
@@ -295,8 +282,6 @@ impl Default for Collector {
 struct Remembered {
     /// The heads read, each with the version it was read at, by key.
     heads: BTreeMap<String, (String, Head)>,
-    /// Whether this pass streams checkpoints rather than materializing full `State` maps.
-    stream_checkpoints: bool,
 }
 
 impl Collector {
@@ -319,12 +304,6 @@ impl Collector {
     /// reclaiming their read evidence (board 2940) and orphaned ephemeral references.
     pub fn shredded(self, shredded: Arc<BTreeSet<u64>>) -> Self {
         Self { shredded, ..self }
-    }
-
-    /// cladefs: one whose passes stream checkpoint tails and 1 MiB parts on demand instead of
-    /// decoding full `State` maps into memory.
-    pub fn stream_checkpoints(self, stream_checkpoints: bool) -> Self {
-        Self { stream_checkpoints, ..self }
     }
 
     /// Attaches an [`Observer`] notified once per completed cell pass with [`CellSample`] metadata
@@ -806,8 +785,7 @@ impl Collector {
                 }
             }
         };
-        let mut remembered =
-            Remembered { stream_checkpoints: self.stream_checkpoints, ..Remembered::default() };
+        let mut remembered = Remembered::default();
         let survey = remembered.survey(bucket, cell, taken.epoch, Writes::Some, listed, false);
         let Some(pass) = survey.await? else {
             return Ok((Report::default(), None));
@@ -1003,8 +981,7 @@ impl Collector {
     pub async fn dry_run_cell(&self, bucket: &impl Bucket, cell: CellId) -> Result<DryRun, Error> {
         let epoch = passed::epoch(bucket, cell).await?;
         let listed = first_listing(bucket, cell).await?;
-        let mut remembered =
-            Remembered { stream_checkpoints: self.stream_checkpoints, ..Remembered::default() };
+        let mut remembered = Remembered::default();
         let shredded_cell =
             cell.tenant != layout::DEFAULT_TENANT && self.shredded.contains(&cell.tenant);
         let Some(pass) =
@@ -1116,7 +1093,7 @@ impl Remembered {
         // What the listing of the cell holds serves the first listing of the records, and of each
         // cell's checkpoints, that the pass makes (TASK-395.16).
         let objects = listed.as_ref().map(|listed| &listed.objects);
-        let checkpoints = Checkpoints::new(bucket, CHECKPOINTS_KEPT).listed(objects);
+        let checkpoints = Checkpoints::new(bucket, 0).listed(objects);
         let mut record = self.record(bucket, cell, objects).await?;
         if shredded_cell
             && let Some(head) = &mut record
@@ -1135,16 +1112,9 @@ impl Remembered {
                     None => referenced(bucket, cell).await?,
                 };
                 let by = KeptBy::Referred;
-                keep_origins(
-                    bucket,
-                    &checkpoints,
-                    &mut live,
-                    &referenced,
-                    by,
-                    self.stream_checkpoints,
-                )
-                .await
-                .map(|()| referenced)
+                keep_origins(bucket, &checkpoints, &mut live, &referenced, by)
+                    .await
+                    .map(|()| referenced)
             }
             Err(error) => Err(error),
         };
@@ -1190,18 +1160,9 @@ impl Remembered {
         if rules().collector_abandons {
             abandon(bucket, cell, record, writes).await?;
         }
-        let origins = recover_live(
-            bucket,
-            checkpoints,
-            cell,
-            record.as_ref(),
-            live,
-            writes,
-            self.stream_checkpoints,
-        )
-        .await?;
-        keep_origins(bucket, checkpoints, live, &origins, KeptBy::Version, self.stream_checkpoints)
-            .await
+        let origins =
+            recover_live(bucket, checkpoints, cell, record.as_ref(), live, writes).await?;
+        keep_origins(bucket, checkpoints, live, &origins, KeptBy::Version).await
     }
 
     /// `cell`'s record, if it has one, read: as the pass's listing of the whole cell, `listed`,
@@ -1560,49 +1521,25 @@ enum KeptBy {
 }
 
 /// cladefs: keeps in `live` the states of the origins `origins` it keeps none of yet, each
-/// recovered once, however many forks name it, several at once ([`Live::keep_origin`]): the
-/// extents each names, and what recovering it read (doc-7, A pass over a cell, step 5). Those of
-/// other cells are read there. A cell's are recovered in one walk where they share a checkpoint,
-/// each footer read once for them all (`recovery::recover_ats`, TASK-476): a cell's versions are
-/// up to 256 states of one history. A walk finding one lost, each is recovered alone, to tell
-/// which.
+/// recovered once, however many forks name it, several at once: the objects holding the extents
+/// each names, and what recovering it read (doc-7, A pass over a cell, step 5). Those of other
+/// cells are read there. A cell's are recovered in one walk where they share a checkpoint, each
+/// footer read once for them all (`recovery::keys_at`, TASK-476): a cell's versions are up to 256
+/// states of one history. A walk finding one lost, each is recovered alone, to tell which.
 async fn keep_origins(
     bucket: &impl Bucket,
     checkpoints: &Checkpoints<'_, impl Bucket>,
     live: &mut Live,
     origins: &BTreeSet<(CellId, u64)>,
     by: KeptBy,
-    stream: bool,
 ) -> Result<(), Error> {
     let mut unkept: BTreeMap<CellId, BTreeSet<u64>> = BTreeMap::new();
     for &(parent, at) in origins.iter().filter(|&origin| live.origins.insert(*origin)) {
         unkept.entry(parent).or_default().insert(at);
     }
-    if stream {
-        let walks = futures::stream::iter(unkept)
-            .map(|(parent, ats)| async move {
-                let walked = recovery::recover_ats_keys(checkpoints, parent, &ats).await;
-                (parent, ats, walked)
-            })
-            .buffer_unordered(RECOVERIES_AT_ONCE)
-            .collect::<Vec<_>>()
-            .await;
-        for (parent, ats, walked) in walks {
-            match walked {
-                Ok((named, touched)) => live.keep_keys(named, touched),
-                Err(Error::Lost(_)) if by == KeptBy::Referred => {
-                    for at in ats {
-                        keep_referred(bucket, checkpoints, live, (parent, at), true).await?;
-                    }
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        return Ok(());
-    }
     let walks = futures::stream::iter(unkept)
         .map(|(parent, ats)| async move {
-            let walked = recovery::recover_ats(checkpoints, parent, &ats).await;
+            let walked = recovery::keys_at(checkpoints, parent, &ats).await;
             (parent, ats, walked)
         })
         .buffer_unordered(RECOVERIES_AT_ONCE)
@@ -1610,10 +1547,10 @@ async fn keep_origins(
         .await;
     for (parent, ats, walked) in walks {
         match walked {
-            Ok((walked, touched)) => live.keep_walked(walked, touched),
+            Ok((named, touched)) => live.keep(named, touched),
             Err(Error::Lost(_)) if by == KeptBy::Referred => {
                 for at in ats {
-                    keep_referred(bucket, checkpoints, live, (parent, at), false).await?;
+                    keep_referred(bucket, checkpoints, live, (parent, at)).await?;
                 }
             }
             Err(error) => return Err(error),
@@ -1630,30 +1567,10 @@ async fn keep_referred(
     checkpoints: &Checkpoints<'_, impl Bucket>,
     live: &mut Live,
     (parent, at): (CellId, u64),
-    stream: bool,
 ) -> Result<(), Error> {
-    if stream {
-        match recovery::recover_at_keys(checkpoints, parent, at).await {
-            Ok((named, touched)) => live.keep_keys(named, touched),
-            Err(Error::Lost(_)) => {
-                let Some(child) = needing(bucket, (parent, at)).await? else {
-                    live.unsettled = true;
-                    return Ok(());
-                };
-                match recovery::recover_at_keys(checkpoints, parent, at).await {
-                    Ok((named, touched)) => live.keep_keys(named, touched),
-                    Err(Error::Lost(lost)) => {
-                        return Err(Error::Lost(format!("{lost}, which {child} lives on")));
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
-            Err(error) => return Err(error),
-        }
-        return Ok(());
-    }
-    match recovery::recover_at(checkpoints, parent, at).await {
-        Ok((state, touched)) => live.keep_origin(&state, touched),
+    let ats = BTreeSet::from([at]);
+    match recovery::keys_at(checkpoints, parent, &ats).await {
+        Ok((named, touched)) => live.keep(named, touched),
         Err(Error::Lost(_)) => {
             let Some(child) = needing(bucket, (parent, at)).await? else {
                 // Decided by its children's records, in other cells.
@@ -1667,8 +1584,8 @@ async fn keep_referred(
             // takeover's dropped, the takeover's writer forking the child there since, after
             // the first read the head (TASK-462): references name an origin by its segment
             // number alone.
-            match recovery::recover_at(checkpoints, parent, at).await {
-                Ok((state, touched)) => live.keep_origin(&state, touched),
+            match recovery::keys_at(checkpoints, parent, &ats).await {
+                Ok((named, touched)) => live.keep(named, touched),
                 Err(Error::Lost(lost)) => {
                     return Err(Error::Lost(format!("{lost}, which {child} lives on")));
                 }
@@ -1700,12 +1617,12 @@ async fn needing(
     Ok(None)
 }
 
-/// Recovers `cell`, its head `record`, live, if `live` has it not yet, folding it into
-/// it ([`Layers`]). Returns the origins of its versions, whose states the pass keeps (rule
-/// `versions_kept`, TASK-476). A
-/// fork of a version still being made, its version deleted, whose recovery finds what it names
-/// lost, it gives up on, writing its record so if `writes` says so (TASK-395.4): what the pass read
-/// of it before, the version live, may be older than what recovering it read.
+/// Recovers `cell`, its head `record`, live, keys-only ([`recovery::recover_keys`]), folding it
+/// into `live`. Returns the origins of its versions, whose states the pass keeps (rule
+/// `versions_kept`, TASK-476). A fork of a version still being made, its version deleted, whose
+/// recovery finds what it names lost, it gives up on, writing its record so if `writes` says so
+/// (TASK-395.4): what the pass read of it before, the version live, may be older than what
+/// recovering it read.
 async fn recover_live(
     bucket: &impl Bucket,
     checkpoints: &Checkpoints<'_, impl Bucket>,
@@ -1713,34 +1630,12 @@ async fn recover_live(
     record: Option<&Head>,
     live: &mut Live,
     writes: Writes,
-    stream: bool,
 ) -> Result<BTreeSet<(CellId, u64)>, Error> {
     let mut origins = BTreeSet::new();
     let Some(record) = record.filter(|record| !record.deleted()) else { return Ok(origins) };
-    if stream {
-        let recovered = match recovery::recover_live_keys(checkpoints, cell, record.origin()).await
-        {
-            Ok(recovered) => recovered,
-            Err(Error::Lost(lost)) => match lost_is_ok(bucket, cell, record, writes).await? {
-                true => {
-                    live.unsettled = true;
-                    return Ok(origins);
-                }
-                false => return Err(Error::Lost(lost)),
-            },
-            Err(error) => return Err(error),
-        };
-        if rules().versions_kept
-            && let Some(head) = &recovered.head
-        {
-            origins.extend(head.versions.iter().map(|version| (cell, version.at)));
-        }
-        live.add_keys(cell, recovered);
-        return Ok(origins);
-    }
     // Recovered from its head, read after the listing: what its writer may name ([`behind`]), and
     // what it may yet name ([`Ended::ahead`]).
-    let recovered = match recovery::recover_layers(checkpoints, cell, record.origin()).await {
+    let recovered = match recovery::recover_keys(checkpoints, cell, record.origin()).await {
         Ok(recovered) => recovered,
         Err(Error::Lost(lost)) => match lost_is_ok(bucket, cell, record, writes).await? {
             // Decided by what it read again, a version's record in another cell among it.
@@ -1757,7 +1652,7 @@ async fn recover_live(
     {
         origins.extend(head.versions.iter().map(|version| (cell, version.at)));
     }
-    live.add(recovered);
+    live.add(cell, recovered);
     Ok(origins)
 }
 
@@ -1871,32 +1766,9 @@ impl Live {
             .map(|active| active.epoch)
     }
 
-    /// Folds in `recovered`, a live cell's: its own layer, and what it inherited but the extents
-    /// it holds no longer where it inherited them.
-    fn add(&mut self, recovered: Recovered<Layers>) {
-        let ended = Ended {
-            end: recovered.end(),
-            epoch: recovered.epoch(),
-            checkpoint: recovered.checkpoint(),
-            wal_epoch: Self::active_wal_epoch(recovered.head.as_ref()),
-        };
-        let Recovered { state, touched, .. } = recovered;
-        let State { cell, extents, .. } = state;
-        let Layered { inherited, own, shadowed } = extents;
-        self.touched.extend(touched);
-        for location in own.values() {
-            self.name(location);
-        }
-        for (extent, location) in inherited.iter().flat_map(|state| &state.extents) {
-            if !shadowed.contains(extent) {
-                self.name(location);
-            }
-        }
-        self.cells.entry(cell).or_default().push(ended);
-    }
-
-    /// Folds in `recovered`, a live cell recovered by streaming checkpoint tails and parts.
-    fn add_keys(&mut self, cell: CellId, recovered: recovery::RecoveredKeys) {
+    /// Folds in `recovered`, a live cell's: where its recovery ended, what it read, and the
+    /// objects its extents are in.
+    fn add(&mut self, cell: CellId, recovered: recovery::RecoveredKeys) {
         let ended = Ended {
             end: recovered.end(),
             epoch: recovered.epoch(),
@@ -1904,42 +1776,19 @@ impl Live {
             wal_epoch: Self::active_wal_epoch(recovered.head.as_ref()),
         };
         self.touched.extend(recovered.touched);
-        for key in recovered.named {
-            if !self.named.contains(&key) {
-                self.named.insert(key);
-            }
-        }
+        self.named.extend(recovered.named);
         self.cells.entry(cell).or_default().push(ended);
     }
 
-    /// Keeps `named` object keys and `touched` objects from streaming origin/version recovery.
-    fn keep_keys(&mut self, named: rustc_hash::FxHashSet<String>, touched: BTreeSet<String>) {
+    /// cladefs: keeps an origin's state, for the forks of it to other cells, which `touched` was
+    /// read to recover (TASK-395.4): the objects `named`, holding the extents it names, as a child
+    /// with no checkpoint of its own names them where it read them; and what recovering it read,
+    /// through which such a child recovers, unless the rule that it is kept is off, as a test
+    /// shows it needed. What its forks freed of it since is no matter: the collector is
+    /// conservative.
+    fn keep(&mut self, named: rustc_hash::FxHashSet<String>, touched: BTreeSet<String>) {
         self.keep_read(touched);
-        for key in named {
-            if !self.named.contains(&key) {
-                self.named.insert(key);
-            }
-        }
-    }
-
-    /// cladefs: keeps `state`, an origin's, whole, for the forks of it to other cells, which
-    /// `touched` was read to recover (TASK-395.4): the extents it names, as a child with no
-    /// checkpoint of its own names them where it read them; and what recovering it read, through
-    /// which such a child recovers, unless the rule that it is kept is off, as a test shows it
-    /// needed. What its forks freed of it since is no matter: the collector is conservative.
-    fn keep_origin(&mut self, state: &State, touched: BTreeSet<String>) {
-        self.keep_read(touched);
-        self.keep_places(&state.extents);
-    }
-
-    /// cladefs: keeps the origins' states `walked`, a cell's, as [`Live::keep_origin`] keeps
-    /// one: each whole, and the places at which those after each name what changed since.
-    fn keep_walked(&mut self, walked: recovery::Walked, touched: BTreeSet<String>) {
-        self.keep_read(touched);
-        for state in &walked.states {
-            self.keep_places(&state.extents);
-        }
-        self.keep_places(walked.changed.iter().map(|(extent, location)| (extent, location)));
+        self.named.extend(named);
     }
 
     /// cladefs: keeps `touched`, what recovering origins' states read, unless the rule that it
@@ -1947,20 +1796,6 @@ impl Live {
     fn keep_read(&mut self, touched: BTreeSet<String>) {
         if rules().origins_kept {
             self.touched.extend(touched);
-        }
-    }
-
-    /// cladefs: keeps the extents at `places`.
-    fn keep_places<'a>(&mut self, places: impl IntoIterator<Item = (&'a ExtentId, &'a Location)>) {
-        for (_, location) in places {
-            self.name(location);
-        }
-    }
-
-    /// Notes that an extent is at `location`: its object is needed.
-    fn name(&mut self, location: &Location) {
-        if !self.named.contains(&location.key) {
-            self.named.insert(location.key.clone());
         }
     }
 }
@@ -2244,6 +2079,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use storage_device::ExtentId;
 
     fn memory_bucket() -> Arc<ObjectBucket> {
         Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""))
@@ -2745,8 +2581,9 @@ mod tests {
         done: AtomicBool,
     }
 
-    impl Bucket for DeletedAt {
-        fn get(&self, key: &str) -> impl Future<Output = Result<Object, BucketError>> + Send {
+    impl DeletedAt {
+        /// Deletes the child, the first time `key` is read, whole or by a range of it.
+        fn reading(&self, key: &str) {
             if key == self.key && !self.done.swap(true, Ordering::Relaxed) {
                 // cladefs: as a deletion writes it.
                 let record = Head { epoch: Head::FINAL, ..Head::of(Made::Own, 0) };
@@ -2758,10 +2595,25 @@ mod tests {
                     .unwrap()
                     .unwrap();
             }
+        }
+    }
+
+    impl Bucket for DeletedAt {
+        fn get(&self, key: &str) -> impl Future<Output = Result<Object, BucketError>> + Send {
+            self.reading(key);
             self.bucket.get(key)
         }
 
-        crate::bucket::delegate_bucket_methods!(except_get bucket);
+        fn get_range(
+            &self,
+            key: &str,
+            range: ByteRange,
+        ) -> impl Future<Output = Result<Vec<u8>, BucketError>> + Send {
+            self.reading(key);
+            self.bucket.get_range(key, range)
+        }
+
+        crate::bucket::delegate_bucket_methods!(except_reads bucket);
     }
 
     /// A bucket that runs `meanwhile` once, as a pass first reads the head of `cell`: having
@@ -3273,8 +3125,8 @@ mod tests {
 
     /// TASK-476: a pass over a cell of many versions reads each segment's footer twice at most,
     /// once for the cell's state and once for all its versions' states, walked to at once
-    /// (`recovery::recover_ats`), not once a version; and each version's checkpoint at its key,
-    /// which none has. 16 versions cut after a commit each, no checkpoint: 33 segments, whose
+    /// (`recovery::keys_at`), not once a version; and each version's checkpoint at its key, by its
+    /// tail, a ranged GET, which none has. 16 versions cut after a commit each, no checkpoint: 33 segments, whose
     /// footers a pass recovering each version alone read 321 times, in 52 GETs besides
     /// (`versions-pass-bench` shows how that grew).
     #[test]
@@ -3283,7 +3135,7 @@ mod tests {
         assert_eq!(segments, 33);
         // cladefs: its three reads of the cell's head; the walk to its versions reads none again,
         // going by the one its recovery read (board 8543).
-        assert_eq!((ranged, gets), (2 * segments, 16 + 5));
+        assert_eq!((ranged, gets), (2 * segments + 16, 5));
     }
 
     /// A pass over a cell with `versions` versions, each cut after a commit of an
@@ -3327,7 +3179,7 @@ mod tests {
 
     /// TASK-476: of a cell's versions, walked to at once, a later one keeps what the cell
     /// sealed after the first and freed after it, as the first keeps what it names: what a walk
-    /// takes of the states after its first is what changed since (`recovery::Walked`).
+    /// names of the states after its first is what changed since (`recovery::walk_keys`).
     #[test]
     fn later_versions_keep_what_changed_since_the_first() {
         assert_eq!(block_on(read_the_second_version()), Ok(b"later".to_vec()));
@@ -3700,13 +3552,17 @@ mod tests {
                 .0;
             let (report, asked) = bucket.served(collect_cell(&*bucket, origin_cell, 7));
             report.unwrap();
-            // The origin's state, the checkpoint at it the first clone into another cell wrote.
-            let version = format!("get {}", layout::checkpoint(origin_cell, at, 1));
-            let read = asked.iter().filter(|asked| **asked == version).count();
+            // The origin's state, the checkpoint at it the first clone into another cell wrote:
+            // by its tail, never whole.
+            let checkpoint = layout::checkpoint(origin_cell, at, 1);
+            let whole = format!("get {checkpoint}");
+            assert!(!asked.contains(&whole), "{asked:#?}");
+            let tail = format!("get {checkpoint} last {}", crate::object::TAIL);
+            let read = asked.iter().filter(|asked| **asked == tail).count();
             (asked.len(), read)
         };
         let (one, read) = asked(1);
-        assert_eq!(read, 1, "the origin's checkpoint");
+        assert_eq!(read, 1, "the origin's checkpoint's tail");
         assert_eq!(asked(8), (one, read));
     }
 
@@ -3745,7 +3601,12 @@ mod tests {
             report.unwrap();
             let count = |request: String| asked.iter().filter(|asked| **asked == request).count();
             let listed = count(format!("list {}", layout::checkpoints(parent)));
-            let read = |&at: &u64| count(format!("get {}", layout::checkpoint(parent, at, 1)));
+            // By its tail, never whole.
+            let read = |&at: &u64| {
+                let checkpoint = layout::checkpoint(parent, at, 1);
+                assert_eq!(count(format!("get {checkpoint}")), 0, "{asked:#?}");
+                count(format!("get {checkpoint} last {}", crate::object::TAIL))
+            };
             let read: Vec<usize> = ats.iter().map(read).collect();
             (listed, read)
         };
@@ -3836,8 +3697,9 @@ mod tests {
                 .filter(|asked| !asked.split(' ').nth(1).unwrap().starts_with(&prefix))
                 .collect();
             assert_eq!(outside, Vec::<&String>::new(), "checkpointed {checkpointed}");
-            let version = format!("get {}", layout::checkpoint(parent, at, epoch));
-            assert!(asked.contains(&version), "{asked:#?}");
+            let checkpoint = layout::checkpoint(parent, at, epoch);
+            let tail = format!("get {checkpoint} last {}", crate::object::TAIL);
+            assert!(asked.contains(&tail), "{asked:#?}");
             let direct = Arc::new(Direct(bucket.clone()));
             assert_eq!(block_on(read_inherited(&direct, child, extent)), Ok(b"held".to_vec()));
         }
@@ -4374,21 +4236,11 @@ mod tests {
         });
     }
 
-    /// Clones every object in `src` into a fresh `Direct(SimBucket)` so streaming and full
-    /// collector passes can be compared side-by-side on identical initial bucket state.
-    async fn clone_bucket(src: &Direct) -> Direct {
-        let dst = Direct(SimBucket::new());
-        for meta in bucket::list(src, "").await.unwrap() {
-            let obj = bucket::get(src, &meta.key).await.unwrap().unwrap();
-            dst.put(&meta.key, obj.bytes.into(), PutMode::Overwrite).await.unwrap();
-        }
-        dst
-    }
-
-    /// cladefs: streaming checkpoint recovery takes the tail-only fast path (zero full checkpoint
-    /// GETs) when no tail segments shadowed checkpointed extents, and matches full recovery.
+    /// cladefs: a pass over a cell whose head names a checkpoint and nothing after it reads the
+    /// checkpoint's tail alone, never the checkpoint whole, and deletes what no state names: a
+    /// stray segment.
     #[test]
-    fn streaming_checkpoints_fast_path_reads_only_tail() {
+    fn passes_read_a_checkpoint_nothing_since_shadows_by_its_tail_alone() {
         block_on(async {
             let sim = SimBucket::new();
             let direct = Arc::new(Direct(sim.clone()));
@@ -4402,38 +4254,32 @@ mod tests {
             commit(&writer, Commit { tag: 1, extents, ..Commit::default() }).await;
             let cp_seg = writer.checkpoint().await.unwrap().unwrap();
             let cp_key = layout::checkpoint(cell, cp_seg, writer.epoch());
+            let live = writer.location(ExtentId::new(1, 1)).unwrap().key;
 
-            // Also add an unreferenced stray segment so both passes delete something.
-            let stray = layout::segment(cell, 999, 999);
+            // Of epoch 0, before any writer's (the writer's is 1): no head names it, ever.
+            assert_eq!(writer.epoch(), 1);
+            let stray = layout::segment(cell, 999, 0);
             let bytes =
                 layout::with_footer(b"", &(), crate::testing::encrypting(layout::test_cell(1)));
             direct.put(&stray, bytes.into(), PutMode::Overwrite).await.unwrap();
 
-            let full_bucket = clone_bucket(&direct).await;
-            let full_report = Collector::new()
-                .stream_checkpoints(false)
-                .collect_cell(&full_bucket, cell, 1)
-                .await
-                .unwrap();
-
-            let (stream_report, asked) = sim
-                .served(Collector::new().stream_checkpoints(true).collect_cell(&*direct, cell, 1));
-            let stream_report = stream_report.unwrap();
-
-            assert_eq!(stream_report, full_report);
-            assert_eq!(keys(&*direct).await, keys(&full_bucket).await);
+            let (report, asked) = sim.served(Collector::new().collect_cell(&*direct, cell, 1));
+            assert_eq!(report.unwrap().deleted, 1);
+            let left = keys(&*direct).await;
+            assert!(!left.contains(&stray), "{left:?}");
+            assert!(left.contains(&live) && left.contains(&cp_key), "{left:?}");
             assert!(
                 !asked.iter().any(|req| req == &format!("get {cp_key}")),
-                "fast path must not GET full checkpoint {cp_key}: {asked:?}"
+                "a pass GETs the checkpoint {cp_key} whole: {asked:?}"
             );
         });
     }
 
-    /// cladefs: streaming checkpoint recovery across a multi-part (>1 MiB) checkpoint where
-    /// 64 KiB table blocks straddle the 1 MiB `extent_frame::PART` boundary reclaims the exact
-    /// same segments freed in tail segments as full recovery.
+    /// cladefs: a pass over a cell whose checkpoint spans several 1 MiB parts
+    /// (`extent_frame::PART`), its 64 KiB table blocks straddling their seams, and whose segment
+    /// after it frees every extent of an older segment, deletes that segment and keeps the rest.
     #[test]
-    fn streaming_checkpoints_reclaim_freed_segments_across_multipart_checkpoint() {
+    fn passes_reclaim_what_segments_free_of_multipart_checkpoints() {
         block_on(async {
             let direct = Arc::new(Direct(SimBucket::new()));
             let cell = test_cell(1);
@@ -4470,34 +4316,19 @@ mod tests {
             // Tail segment frees every extent of segment 1 while leaving segment 2 alive.
             commit(&writer, Commit { tag: 3, frees: freed_extents, ..Commit::default() }).await;
 
-            let full_bucket = clone_bucket(&direct).await;
-            let stream_bucket = clone_bucket(&direct).await;
-
-            let full_report = Collector::new()
-                .stream_checkpoints(false)
-                .collect_cell(&full_bucket, cell, 1)
-                .await
-                .unwrap();
-            let stream_report = Collector::new()
-                .stream_checkpoints(true)
-                .collect_cell(&stream_bucket, cell, 1)
-                .await
-                .unwrap();
-
-            assert_eq!(stream_report, full_report);
-            assert_eq!(keys(&stream_bucket).await, keys(&full_bucket).await);
-            assert!(
-                !keys(&stream_bucket).await.contains(&freed_seg_key),
-                "freed segment should be reclaimed"
-            );
-            assert!(keys(&stream_bucket).await.contains(&kept_seg_key), "live segment must remain");
+            Collector::new().collect_cell(&*direct, cell, 1).await.unwrap();
+            let left = keys(&*direct).await;
+            assert!(!left.contains(&freed_seg_key), "freed segment should be reclaimed");
+            assert!(left.contains(&kept_seg_key), "live segment must remain");
+            assert!(left.contains(&cp_key), "the head's checkpoint must remain");
         });
     }
 
-    /// cladefs: streaming checkpoint recovery matches full recovery across multi-version cells
-    /// (`head.versions`) and cross-cell forks without checkpoints of their own.
+    /// cladefs: a pass over a cell of versions, one of them dropped with a fork of it into another
+    /// cell, which has no checkpoint of its own, keeps what each state still named needs: as a full
+    /// recovery of each, after the pass, finds every extent it names in an object still there.
     #[test]
-    fn streaming_checkpoints_match_full_on_versions_and_cross_cell_forks() {
+    fn passes_keep_what_versions_and_forks_of_dropped_versions_name() {
         block_on(async {
             let direct = Arc::new(Direct(SimBucket::new()));
             let parent = test_cell(1);
@@ -4535,27 +4366,84 @@ mod tests {
                 },
             )
             .await;
-            let _v2_at = crate::testing::versioned_by(&writer, Vec::new(), 0x20).await;
+            let v2_at = crate::testing::versioned_by(&writer, Vec::new(), 0x20).await;
             writer.checkpoint().await.unwrap();
             commit(&writer, Commit { tag: 3, frees: vec![ext_v2], ..Commit::default() }).await;
 
-            let full_bucket = clone_bucket(&direct).await;
-            let stream_bucket = clone_bucket(&direct).await;
-
-            let full_report =
-                Collector::new().stream_checkpoints(false).collect(&full_bucket, 1).await.unwrap();
-            let stream_report =
-                Collector::new().stream_checkpoints(true).collect(&stream_bucket, 1).await.unwrap();
-
-            assert_eq!(stream_report, full_report);
-            assert_eq!(keys(&stream_bucket).await, keys(&full_bucket).await);
+            Collector::new().collect(&*direct, 1).await.unwrap();
+            let left = keys(&*direct).await;
+            let forked = recovery::recover(&*direct, child, Some(origin)).await.unwrap().state;
+            let live = recovery::recover(&*direct, parent, None).await.unwrap().state;
+            let checkpoints = Checkpoints::new(&*direct, 0);
+            let (v2, _) = recovery::recover_at(&checkpoints, parent, v2_at).await.unwrap();
+            let named = [(&forked, ext_v1), (&forked, ext_live), (&live, ext_live), (&*v2, ext_v2)];
+            for (state, extent) in named {
+                let location = state.extents.get(&extent).expect("the state names it");
+                assert!(left.contains(&location.key), "{extent:?} at {location:?} gone: {left:?}");
+            }
         });
     }
 
-    /// cladefs: streaming checkpoint recovery verifies block CRCs when scanning shadowed extents
-    /// and rejects corrupt checkpoint data instead of silently trusting the footer.
+    /// cladefs: a pass over a cell of two versions after a checkpoint, an extent the checkpoint
+    /// names live at the first and freed before the second, the cell checkpointed past both, keeps
+    /// the extent's object for the first: one walk to both versions from the older checkpoint
+    /// subtracts what segments shadow up to the first version alone (hotbed review 184).
     #[test]
-    fn streaming_checkpoints_reject_corrupt_block_when_shadowed() {
+    fn passes_keep_what_a_version_names_that_a_later_one_freed() {
+        block_on(async {
+            let direct = Arc::new(Direct(SimBucket::new()));
+            let cell = test_cell(1);
+            lifecycle::create(&*direct, cell, 0).await.unwrap();
+            let writer = Writer::open(direct.clone(), cell, 10, 0).await.unwrap();
+            let held = ExtentId::new(1, writer.chain().next_sequence());
+            commit(
+                &writer,
+                Commit { tag: 1, extents: vec![(held, b"held".to_vec())], ..Commit::default() },
+            )
+            .await;
+            let object = writer.location(held).unwrap().key;
+            writer.checkpoint().await.unwrap();
+            let first = crate::testing::versioned_by(&writer, Vec::new(), 0x10).await;
+            commit(&writer, Commit { tag: 3, frees: vec![held], ..Commit::default() }).await;
+            crate::testing::versioned_by(&writer, Vec::new(), 0x20).await;
+            commit(&writer, Commit { tag: 5, ..Commit::default() }).await;
+            writer.checkpoint().await.unwrap();
+
+            Collector::new().collect_cell(&*direct, cell, 1).await.unwrap();
+            assert!(keys(&*direct).await.contains(&object), "the first version's extent went");
+            let checkpoints = Checkpoints::new(&*direct, 0);
+            let (state, _) = recovery::recover_at(&checkpoints, cell, first).await.unwrap();
+            let location = state.extents.get(&held).expect("the first version names it");
+            let read = crate::testing::read(&direct, held, location).await;
+            assert_eq!(read, Ok(b"held".to_vec()));
+        });
+    }
+
+    /// cladefs: a pass over a cell whose head names the cell itself as its origin, with no
+    /// checkpoint of its own, refuses it as corrupt, deleting nothing (board 14525): no writer
+    /// makes such a head, and recovering what it inherits would recurse without end.
+    #[test]
+    fn passes_refuse_heads_naming_their_own_cell_as_origin() {
+        block_on(async {
+            let direct = Direct(SimBucket::new());
+            let cell = test_cell(1);
+            let origin = Origin { parent: cell, at: 0, epoch: 0 };
+            crate::testing::make_head(&direct, cell, Head::of(Made::Clone(origin), 0)).await;
+            let stray = layout::segment(cell, 999, 999);
+            let bytes = layout::with_footer(b"", &(), crate::testing::encrypting(cell));
+            direct.put(&stray, bytes.into(), PutMode::Overwrite).await.unwrap();
+
+            let refused = Collector::new().collect_cell(&direct, cell, 1).await;
+            let said = format!("{cell}'s head names the cell itself as its origin");
+            assert_eq!(refused, Err(Error::Corrupt(said)));
+            assert!(keys(&direct).await.contains(&stray), "a refused pass deleted");
+        });
+    }
+
+    /// cladefs: a pass reading a checkpoint's parts, as a segment since frees an extent it names,
+    /// checks each block's CRC and refuses corrupt data rather than trusting the footer's keys.
+    #[test]
+    fn passes_refuse_corrupt_checkpoint_blocks() {
         block_on(async {
             let direct = Arc::new(Direct(SimBucket::new()));
             let cell = test_cell(1);
@@ -4581,11 +4469,7 @@ mod tests {
             bytes[0] ^= 0xff;
             direct.put(&cp_key, bytes.into(), PutMode::Overwrite).await.unwrap();
 
-            let err = Collector::new()
-                .stream_checkpoints(true)
-                .collect_cell(&*direct, cell, 1)
-                .await
-                .unwrap_err();
+            let err = Collector::new().collect_cell(&*direct, cell, 1).await.unwrap_err();
             assert!(matches!(err, Error::Corrupt(_)), "expected Corrupt, got {err:?}");
         });
     }

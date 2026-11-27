@@ -3,17 +3,11 @@
 // found in the LICENSE file.
 
 use crate::backend::{self, Platform};
-use crate::cpu::CpuModel;
-#[cfg(target_arch = "x86_64")]
-use crate::cpu::CpuidEntry;
 use crate::devices::bus::Bus;
 use crate::devices::serial::{self, IrqLine};
 use crate::error::{Error, Result};
 use crate::exits::{ExitCounters, ExitCounts, ExitKind};
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-use crate::net::host::{HeldStreams, NetSlot};
 use crate::stop::{StopHandle, StopShared};
-use crate::suspend::{Doorbell, Woken};
 use crate::vcpus::{RunControl, VcpuLoop, Vcpus};
 use std::ops::ControlFlow;
 use std::sync::Arc;
@@ -21,7 +15,7 @@ use std::time::{Duration, Instant};
 
 const PAGE_SIZE: usize = 4096;
 /// The kernel command line libmachine starts every board's with: the console on the UART, and a
-/// panic resets the machine (a sandbox never hangs on one).
+/// panic resets the machine.
 pub(crate) const BASE_CMDLINE: &str = "console=ttyS0 panic=-1";
 /// The UART's IIR bit that says no interrupt is pending (16550).
 const UART_NO_INTERRUPT: u8 = 1;
@@ -49,20 +43,17 @@ pub struct SnapshotOptions<'a> {
 /// Configuration for a new [`Machine`].
 #[derive(Debug, Clone)]
 pub struct MachineConfig {
-    /// Guest RAM in bytes. Must be a non-zero multiple of 4 KiB, and at most
-    /// 1 TiB - 1 GiB. Up to 3 GiB is mapped at guest physical address 0; the
-    /// rest from 4 GiB, past the 32-bit MMIO hole ([`Machine::memory_layout`]).
+    /// Guest RAM in bytes. Must be a non-zero multiple of 4 KiB, and at most the arm64 map's
+    /// RAM ([`Machine::memory_layout`]).
     pub mem_size: usize,
-    /// Which CPU features the guest sees.
-    pub cpu_model: CpuModel,
     /// How many vCPUs, from 1 to [`MAX_VCPUS`](MachineConfig::MAX_VCPUS).
     /// Each runs on a host thread of its own. A bare machine
     /// ([`Machine::new`]) has exactly one.
     pub vcpus: u32,
-    /// The guest's network (board machines, on KVM and Hypervisor.framework): a virtio-net card whose
-    /// other end is a userspace network stack in this process, its
-    /// connections made from the host where the policy allows
-    /// ([`crate::net`]). None, the default, gives no network card at all.
+    /// The guest's network (board machines): a virtio-net card whose other end is a userspace
+    /// network stack in this process, its connections made from the host where the policy allows
+    /// ([`crate::net`]). None, the default, gives no network card at all. A machine with one is
+    /// not snapshotted.
     pub network: Option<crate::net::NetworkConfig>,
     /// How many of the most recent bytes of serial output the machine keeps
     /// for [`Machine::serial_output`]; older output is dropped (a console
@@ -74,31 +65,26 @@ pub struct MachineConfig {
     pub extent_daemon: Option<Arc<crate::ExtentDaemon>>,
     /// The machine's extent store devices ([`Machine::boot_linux`]'s machines): a virtio-PCI
     /// device each, with a request queue per vCPU, its cell opened on
-    /// [`extent_daemon`](MachineConfig::extent_daemon) as the machine is made. A machine with any
-    /// is neither snapshotted nor suspended, nor restored (board 13139).
+    /// [`extent_daemon`](MachineConfig::extent_daemon) as the machine is made.
     pub extent_stores: Vec<crate::ExtentStore>,
     /// Gives the guest the CPU's virtualization extensions, EL2, so that it runs VMs of its own
-    /// with KVM (nested virtualization): its kernel boots at EL2. Hypervisor.framework's on hosts
-    /// that have it (Apple M3 and later, macOS 15 and later); refused elsewhere, KVM's included.
+    /// with KVM (nested virtualization): its kernel boots at EL2. Needs a host that has it (Apple
+    /// M3 and later, macOS 15 and later); no snapshot holds a machine with it yet.
     pub nested_virtualization: bool,
     /// Gives the guest a virtio-balloon ([`Machine::balloon`], [`crate::Balloon`]): its free pages
-    /// reported and given back to the host, and a target the host sets. A machine with one is
-    /// neither snapshotted nor suspended yet (board 13994).
+    /// reported and given back to the host, and a target the host sets.
     pub balloon: bool,
     /// The machine's disks (virtio-blk, [`crate::Disk`]): `/dev/vda` on, in their order, after
-    /// its extent store devices. A machine with any is neither snapshotted nor suspended.
+    /// its extent store devices.
     pub disks: Vec<crate::Disk>,
     /// The machine's persistent memory devices (virtio-pmem, [`crate::Pmem`]): `/dev/pmem0` on,
-    /// in their order, each its file mapped into the guest's memory. The arm64 board's (on Linux
-    /// Firecracker serves them); a machine with any is neither snapshotted nor suspended.
+    /// in their order, each its file mapped into the guest's memory. A machine with any is not
+    /// snapshotted.
     pub pmems: Vec<crate::Pmem>,
 }
 
 impl MachineConfig {
-    /// The most vCPUs a machine can have: the MADT describes them with
-    /// xAPIC entries, whose APIC IDs are a byte, 0xFF is the broadcast ID,
-    /// and the I/O APIC takes the ID after the last vCPU's. The host's KVM
-    /// may allow fewer.
+    /// The most vCPUs a machine can have. The host's Hypervisor.framework may allow fewer.
     pub const MAX_VCPUS: u32 = 254;
     /// The default [`serial_capture_limit`](MachineConfig::serial_capture_limit): 1 MiB.
     pub const DEFAULT_SERIAL_CAPTURE_LIMIT: usize = 1 << 20;
@@ -108,7 +94,6 @@ impl Default for MachineConfig {
     fn default() -> Self {
         Self {
             mem_size: 16 << 20,
-            cpu_model: CpuModel::default(),
             vcpus: 1,
             network: None,
             serial_capture_limit: Self::DEFAULT_SERIAL_CAPTURE_LIMIT,
@@ -125,7 +110,7 @@ impl Default for MachineConfig {
 /// A Linux kernel to boot with [`Machine::boot_linux`].
 #[derive(Debug, Clone)]
 pub struct LinuxBoot {
-    /// An ELF `vmlinux` with a PVH entry point (`CONFIG_PVH`), or a `bzImage`.
+    /// An arm64 `Image`.
     pub kernel: std::path::PathBuf,
     /// An initramfs (cpio archive, optionally compressed).
     pub initrd: Option<std::path::PathBuf>,
@@ -137,12 +122,12 @@ pub struct LinuxBoot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ExitReason {
-    /// The guest executed `hlt` (bare machines only: on a PC machine `hlt`
+    /// The guest executed `hlt` (bare machines only: on a board machine `hlt`
     /// waits for an interrupt).
     Halt,
-    /// The guest powered the machine off (ACPI soft-off).
+    /// The guest powered the machine off (PSCI SYSTEM_OFF).
     Poweroff,
-    /// The guest reset the machine (ACPI reset register), e.g. `reboot`, or a
+    /// The guest reset the machine (PSCI SYSTEM_RESET), e.g. `reboot`, or a
     /// kernel panic with `panic=-1`.
     Reset,
     /// A [`StopHandle`] stopped the run. The machine keeps its state; `run`
@@ -167,64 +152,29 @@ pub enum ExitReason {
     Other(String),
 }
 
-/// x86_64 general-purpose register state of a vCPU.
-#[cfg(target_arch = "x86_64")]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-#[allow(missing_docs)]
-pub struct Registers {
-    pub rax: u64,
-    pub rbx: u64,
-    pub rcx: u64,
-    pub rdx: u64,
-    pub rsi: u64,
-    pub rdi: u64,
-    pub rsp: u64,
-    pub rbp: u64,
-    pub r8: u64,
-    pub r9: u64,
-    pub r10: u64,
-    pub r11: u64,
-    pub r12: u64,
-    pub r13: u64,
-    pub r14: u64,
-    pub r15: u64,
-    pub rip: u64,
-    pub rflags: u64,
-}
-
 /// A virtual machine.
 ///
 /// Two kinds: [`Machine::new`] makes a bare machine (one vCPU, no interrupt
 /// controller, only a UART, every other access reported to the caller) for
-/// instruction-level tests; [`Machine::boot_linux`] makes a PC with
+/// instruction-level tests; [`Machine::boot_linux`] makes the arm64 board with
 /// [`MachineConfig::vcpus`] vCPUs that boots a Linux kernel and behaves like
-/// hardware (unclaimed ports and addresses read as all ones).
+/// hardware (unclaimed addresses read as all ones).
 ///
 /// Each vCPU runs on a host thread of its own, which lives as long as the
-/// machine (or until it is [suspended](Machine::suspend)) and waits while
-/// the machine is not running.
+/// machine and waits while the machine is not running.
 ///
-/// Each `Machine` owns its own hypervisor VM, so many can exist in one process.
+/// A process has one Hypervisor.framework VM: while a machine exists, making
+/// another fails.
 pub struct Machine {
-    /// The hypervisor VM and what runs it, or what stands for them while
-    /// the machine is suspended.
-    body: Body,
+    /// The hypervisor VM and what runs it.
+    live: Live,
     platform: Platform,
     mem_size: usize,
-    cpu_model: CpuModel,
     cpu_fingerprint: String,
     vcpu_count: u32,
-    #[cfg(target_arch = "x86_64")]
-    cpuid: Vec<CpuidEntry>,
-    // What follows outlives the VM: a suspension frees the VM and a wake
-    // makes another, onto these, so that every handle a caller holds (stop
-    // handle, vsock and agent, network, console, exit counts) carries on.
     stop: Arc<StopShared>,
     /// Each vCPU's exit counters, which its thread writes.
     exits: Vec<Arc<ExitCounters>>,
-    /// Armed while the machine is suspended; its devices, or its watcher,
-    /// ring it.
-    doorbell: Arc<Doorbell>,
     /// The UART's output: what [`serial_output`](Machine::serial_output)
     /// returns, and the console.
     serial: serial::SharedOutput,
@@ -239,42 +189,7 @@ pub struct Machine {
     /// How many extent store devices it has.
     extent_stores: usize,
     /// Whether its vCPUs have EL2 (nested virtualization), which no snapshot holds yet.
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     nested: bool,
-    /// Where the virtio-net device puts its host streams when suspended.
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    net_slot: NetSlot,
-    /// The file the guest's RAM is a private mapping of, if any: the
-    /// snapshot's it was restored from, or the machine's own once it has
-    /// been suspended (which also holds its state while it is).
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    ram_file: Option<crate::suspend::RamFile>,
-    /// The memory slots of the VM the last suspension freed, retired.
-    #[cfg(target_os = "linux")]
-    retired_slots: Option<crate::MemorySlots>,
-    /// The machine was woken from a suspension and has not run since: its
-    /// first run resends the interrupts that may have been on their way
-    /// ([`Live::resend_interrupts`]).
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    resend: bool,
-    /// The caller put devices of its own on the PCI bus
-    /// ([`boot_linux_with`](Machine::boot_linux_with)): no suspension could
-    /// make them again.
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    caller_devices: bool,
-}
-
-/// What a machine is made of now.
-enum Body {
-    /// Its hypervisor VM, vCPU threads and devices.
-    Live(Live),
-    /// Suspended: its state is in its file, and only what must outlive the
-    /// VM is held ([`crate::suspend`]).
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    Frozen(Frozen),
-    /// Its wake from a suspension failed, so it is gone: why.
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    Lost(String),
 }
 
 /// A machine's hypervisor VM and what runs it.
@@ -303,42 +218,29 @@ impl Live {
     ) -> Result<Self> {
         let vm = Arc::new(vm);
         let bus = Arc::new(bus);
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-        let windows = vm.maps_dax_windows().then(|| vm.memory_fault_info());
-        let mut runners = Vec::with_capacity(vcpus.len());
-        for (vcpu, exits) in vcpus.into_iter().zip(exits) {
-            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-            let index = runners.len() as u32;
-            runners.push(MachineVcpu {
+        let runners = vcpus
+            .into_iter()
+            .zip(exits)
+            .map(|(vcpu, exits)| MachineVcpu {
                 vcpu,
                 bus: bus.clone(),
                 vm: vm.clone(),
                 exits: exits.clone(),
-                #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-                accesses: windows.map(|memory_fault_info| {
-                    virtio_extent::vcpu::FailingAccesses::new(index, memory_fault_info)
-                }),
-            });
-        }
+            })
+            .collect();
         let vcpus = Vcpus::spawn(runners, stop.clone())?;
         // Each vCPU created on its thread in its order, as the framework hands out the GIC's
         // redistributors (`hvf::Vcpu::create`).
-        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         for i in 0..vcpus.len() {
             vcpus.on(i, Box::new(|v: &mut MachineVcpu| v.vcpu.create_now()))?;
         }
         Ok(Self { vcpus, vm, pci: None, bus })
     }
-}
 
-impl Live {
     /// Interrupts the guest again from every device that may have had an
     /// interrupt on its way when its state was saved, which went with the
-    /// VM that was to take it (KVM injects an irqfd's interrupt from a
-    /// workqueue when it cannot at once: always for the UART's I/O APIC
-    /// route, sometimes for an MSI): every active queue, and the UART if
-    /// it says an interrupt is pending. A spare one only makes the driver
-    /// look.
+    /// VM that was to take it: every active queue, and the UART if it says
+    /// an interrupt is pending. A spare one only makes the driver look.
     fn resend_interrupts(&self) {
         if let Some(pci) = &self.pci {
             pci.signal_all_queues();
@@ -351,28 +253,6 @@ impl Live {
     }
 }
 
-/// What a suspended machine holds besides its file.
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-struct Frozen {
-    /// Stops first, before the streams it watches close.
-    watcher: Option<crate::suspend::Watcher>,
-    /// The host streams of the guest's connections.
-    net: Option<HeldStreams>,
-    /// The vsock's host end, detached: marked gone if the machine is
-    /// dropped suspended. Taken when it wakes.
-    vsock: Option<crate::Vsock>,
-}
-
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-impl Drop for Frozen {
-    fn drop(&mut self) {
-        drop(self.watcher.take());
-        if let Some(vsock) = self.vsock.take() {
-            vsock.machine_gone();
-        }
-    }
-}
-
 /// What each vCPU thread runs: its vCPU, with exits dispatched to the bus
 /// and counted.
 struct MachineVcpu {
@@ -380,34 +260,11 @@ struct MachineVcpu {
     bus: Arc<Bus>,
     vm: Arc<backend::Vm>,
     exits: Arc<ExitCounters>,
-    /// Its accesses to an extent store device's DAX window failing as cladefs changes the
-    /// window's memory, which it retries, and gives up on as they keep failing: of a machine
-    /// with a window alone (`Vm::maps_dax_windows`). Without one, an access KVM fails is the
-    /// hypervisor's error.
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    accesses: Option<virtio_extent::vcpu::FailingAccesses>,
 }
 
 impl VcpuLoop for MachineVcpu {
     fn kick_target(&mut self) -> crate::backend::kick::KickTarget {
         self.vcpu.kick_target()
-    }
-
-    // cladefs: this thread's faults on a DAX window that copies on write are the guest's own
-    // accesses, a store a store, unlike KVM's asynchronous page fault worker's (doc-13); until it
-    // exits, whose ID the kernel then reuses.
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    fn thread_started(&mut self) {
-        if self.accesses.is_some() {
-            cladefs::guest_thread_started();
-        }
-    }
-
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    fn thread_ended(&mut self) {
-        if self.accesses.is_some() {
-            cladefs::guest_thread_ended();
-        }
     }
 
     fn run(&mut self, ctl: &RunControl<'_>) -> Option<Result<ExitReason>> {
@@ -425,7 +282,7 @@ impl MachineVcpu {
             // Kicks set immediate_exit after the condition they signal (a
             // stop request, the run ending), so clearing it before checking
             // those conditions never loses one; a kick landing after the
-            // check makes the next KVM_RUN return at once.
+            // check makes the next run return at once.
             self.vcpu.clear_immediate_exit();
             if let ControlFlow::Break(outcome) = ctl.check() {
                 return outcome;
@@ -437,30 +294,6 @@ impl MachineVcpu {
                     return Some(Err(e));
                 }
             };
-            // cladefs: an access KVM failed as cladefs changes a DAX window's memory is retried;
-            // one that keeps failing (refused for good: past the window's private_max) stops the
-            // machine, telling what it can of it (virtio_extent::vcpu).
-            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-            let exit = match exit {
-                backend::Exit::AccessFailed(fault) => {
-                    let Some(accesses) = &mut self.accesses else {
-                        self.exits.count(ExitKind::Other);
-                        let source = std::io::Error::from_raw_os_error(libc::EFAULT);
-                        return Some(Err(Error::Hypervisor { op: "run vCPU", source }));
-                    };
-                    self.exits.count(ExitKind::AccessRetried);
-                    match accesses.failed(fault) {
-                        Ok(()) => continue,
-                        Err(why) => return Some(Err(Error::AccessRefused(why))),
-                    }
-                }
-                exit => {
-                    if let Some(accesses) = &mut self.accesses {
-                        accesses.ran();
-                    }
-                    exit
-                }
-            };
             match self.bus.handle(exit, &self.vm, &self.exits) {
                 Ok(None) => {}
                 Ok(Some(reason)) => return Some(Ok(reason)),
@@ -470,113 +303,29 @@ impl MachineVcpu {
     }
 }
 
-/// The guest's network card for [`PcDevices::new`]: a new one, or that of
-/// a suspended machine being woken, with the host streams it held.
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-enum NetCard {
-    New(Arc<crate::net::Shared>, NetSlot),
-    Adopt(Arc<crate::net::Shared>, NetSlot, HeldStreams),
-}
-
-/// The devices of a PC besides the UART's model: the UART's interrupt, the
-/// PCI bus with virtio-rng, virtio-vsock, virtio-net if there is a network,
-/// and `extra`, in that order (so that every PC machine with the same
-/// devices has the same BARs and GSIs, which a restore relies on). The
-/// vsock's host end is new, or `vsock`, which the device's restore then
-/// attaches it to.
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-struct PcDevices {
-    uart_irq: vmm_sys_util::eventfd::EventFd,
-    vsock: crate::Vsock,
-    pci: Arc<crate::devices::Pci>,
-    /// What the devices ring when they have something for the guest.
-    doorbell: Arc<Doorbell>,
-}
-
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-impl PcDevices {
-    fn new(
-        vm: &backend::Vm,
-        network: Option<NetCard>,
-        extra: Vec<Box<dyn crate::devices::virtio::VirtioDevice>>,
-        vsock: Option<crate::Vsock>,
-        doorbell: Arc<Doorbell>,
-        bars: crate::devices::pci::BarAllocator,
-    ) -> Result<Self> {
-        use crate::arch::x86_64::layout;
-        use crate::devices::virtio::net::NetDevice;
-        use crate::devices::virtio::vsock::{GUEST_CID, VsockDevice};
-        use crate::devices::virtio::{VirtioDevice, rng::Rng};
-        use vmm_sys_util::eventfd::{EFD_NONBLOCK, EventFd};
-
-        let uart_irq = EventFd::new(EFD_NONBLOCK)
-            .map_err(|source| Error::Hypervisor { op: "create the UART's eventfd", source })?;
-        vm.register_irqfd(&uart_irq, layout::COM1_IRQ)?;
-        let (vsock_device, vsock) = match vsock {
-            Some(vsock) => (VsockDevice::adopt(&vsock)?, vsock),
-            None => VsockDevice::new(GUEST_CID)?,
-        };
-        let mut all: Vec<Box<dyn VirtioDevice>> = vec![Box::new(Rng), Box::new(vsock_device)];
-        match network {
-            Some(NetCard::New(shared, slot)) => all.push(Box::new(NetDevice::new(shared, slot)?)),
-            Some(NetCard::Adopt(shared, slot, streams)) => {
-                all.push(Box::new(NetDevice::adopt(shared, slot, streams)?));
-            }
-            None => {}
-        }
-        all.extend(extra);
-        let pci = Arc::new(crate::devices::Pci::new(all, vm.guest_memory(), vm, &doorbell, bars)?);
-        Ok(Self { uart_irq, vsock, pci, doorbell })
-    }
-}
-
-/// What a machine restored from saved state ([`Machine::rebuild`]) keeps
-/// of the one that saved it: a suspended machine's, or new ones for a
-/// clone.
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-struct Kept<'a> {
-    doorbell: Arc<Doorbell>,
-    stop: &'a Arc<StopShared>,
-    exits: &'a [Arc<ExitCounters>],
-    serial: serial::SharedOutput,
-    vsock: Option<crate::Vsock>,
-    network: Option<NetCard>,
-}
-
-/// Writes a fresh random VM generation ID (VMGENID) into guest memory.
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-fn write_generation_id(vm: &backend::Vm) -> Result<()> {
-    let mut id = [0u8; 16];
-    crate::sys::getrandom(&mut id);
-    vm.write_memory(crate::arch::x86_64::layout::VMGENID_ADDR, &id)
-}
-
-/// Refuses nested virtualization where libmachine gives none: on KVM, and to a bare machine.
+/// Refuses nested virtualization to a bare machine.
 fn no_nested(config: &MachineConfig, what: &str) -> Result<()> {
     if config.nested_virtualization {
         return Err(Error::InvalidConfig(format!(
-            "{what} has no nested virtualization, which machines on Hypervisor.framework alone \
-             get; nested_virtualization must be false"
+            "{what} has no nested virtualization, which board machines alone get; \
+             nested_virtualization must be false"
         )));
     }
     Ok(())
 }
 
 fn check_mem_size(mem_size: usize) -> Result<()> {
+    use crate::arch::aarch64::layout::{MAX_RAM, PCI_MMIO64_ADDR};
     if mem_size == 0 || !mem_size.is_multiple_of(PAGE_SIZE) {
         return Err(Error::InvalidConfig(format!(
             "mem_size must be a non-zero multiple of {PAGE_SIZE} bytes, got {mem_size}"
         )));
     }
-    #[cfg(target_arch = "x86_64")]
-    {
-        use crate::arch::x86_64::layout::{MAX_RAM, MMIO64_START};
-        if mem_size as u64 > MAX_RAM {
-            return Err(Error::InvalidConfig(format!(
-                "mem_size is {mem_size} bytes; RAM can be at most {MAX_RAM} bytes \
-                 (1 TiB - 1 GiB), or it would reach the 64-bit MMIO window at {MMIO64_START:#x}"
-            )));
-        }
+    if mem_size as u64 > MAX_RAM {
+        return Err(Error::InvalidConfig(format!(
+            "mem_size is {mem_size} bytes; RAM can be at most {MAX_RAM} bytes, or it would reach \
+             the 64-bit MMIO window at {PCI_MMIO64_ADDR:#x}"
+        )));
     }
     Ok(())
 }
@@ -627,7 +376,6 @@ fn disk_devices(
 
 /// The persistent memory devices of `config`'s ([`MachineConfig::pmems`]), a virtio-pmem device
 /// each, their memory mapped into `vm`'s guest one after another from the board's pmem region.
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn pmem_devices(
     config: &MachineConfig,
     vm: &backend::Vm,
@@ -660,12 +408,6 @@ fn balloon_device(
     if !config.balloon {
         return Ok(None);
     }
-    #[cfg(target_os = "linux")]
-    let free = {
-        let _ = vm;
-        crate::devices::virtio::balloon::madvise_ram()
-    };
-    #[cfg(target_os = "macos")]
     let free: crate::devices::virtio::balloon::FreeRam = {
         let shared = vm.shared().clone();
         Box::new(move |guest_addr, host, len| {
@@ -679,11 +421,18 @@ fn balloon_device(
     Ok(Some(balloon))
 }
 
+/// How `options` have the extent store devices' snapshots taken.
+fn snapshot_mode(options: &SnapshotOptions<'_>) -> virtio_extent::SnapshotMode {
+    match options.for_migration {
+        true => virtio_extent::SnapshotMode::Migration,
+        false => virtio_extent::SnapshotMode::Versioned,
+    }
+}
+
 /// The extent store devices of `config`'s ([`MachineConfig::extent_stores`]), with a request
 /// queue per vCPU, their DAX windows' BARs from `bars`, stopping the machine through `stop` as one
-/// can't go on: on Hypervisor.framework, the windows' pages mapped by libmachine (board 13069).
-/// Restored from a snapshot, each made from what it `saved` of itself, in order.
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+/// can't go on: the windows' pages are mapped by libmachine (board 13069). Restored from a
+/// snapshot, each made from what it `saved` of itself, in order.
 fn extent_devices(
     config: &MachineConfig,
     vm: &backend::Vm,
@@ -717,65 +466,7 @@ fn extent_devices(
         .collect()
 }
 
-/// The extent store devices of `config`'s ([`MachineConfig::extent_stores`]), on `vm`, with a
-/// request queue per vCPU, their DAX windows' BARs from `bars`, stopping the machine through
-/// `stop` as one can't go on.
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-fn extent_devices(
-    config: &MachineConfig,
-    vm: &backend::Vm,
-    bars: &mut crate::devices::pci::BarAllocator,
-    stop: &Arc<StopShared>,
-) -> Result<Vec<Box<dyn crate::devices::virtio::VirtioDevice>>> {
-    use crate::devices::virtio::extent::{ExtentDevice, ExtentVm, Failing};
-
-    let Some(daemon) = extent_daemon(config)? else {
-        return Ok(Vec::new());
-    };
-    // KVM's prefault of the windows' pages, on a vCPU of its own after the guest's, if any
-    // device has a window and KVM can.
-    let windows = config.extent_stores.iter().any(|store| store.dax_window_size.is_some());
-    if windows {
-        vm.map_dax_windows();
-    }
-    let prefault: Option<Arc<dyn virtio_extent::PrefaultGuestMemory>> = match windows {
-        true => vm
-            .prefault_vcpu(config.vcpus)?
-            .map(|vcpu| Arc::new(virtio_extent::kvm::KvmPrefault::new(vcpu)) as _),
-        false => None,
-    };
-    let queues = u16::try_from(config.vcpus).expect("check_vcpus bounds them");
-    config
-        .extent_stores
-        .iter()
-        .map(|store| {
-            let slots = vm.memory_slots();
-            let device = ExtentDevice::new(
-                store,
-                daemon,
-                queues,
-                bars,
-                |at| Arc::new(ExtentVm { slots: slots.clone(), at }),
-                prefault.clone(),
-                Failing::new(stop),
-                // KVM restores no extent store device yet.
-                None,
-            )?;
-            Ok(Box::new(device) as Box<dyn crate::devices::virtio::VirtioDevice>)
-        })
-        .collect()
-}
-
-/// How `options` have the extent store devices' snapshots taken.
-fn snapshot_mode(options: &SnapshotOptions<'_>) -> virtio_extent::SnapshotMode {
-    match options.for_migration {
-        true => virtio_extent::SnapshotMode::Migration,
-        false => virtio_extent::SnapshotMode::Versioned,
-    }
-}
-
-/// The host memory of the one region of RAM `mem` is, and its size: Hypervisor.framework's.
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+/// The host memory of the one region of RAM `mem` is, and its size.
 fn ram_host_of(mem: &vm_memory::GuestMemoryMmap) -> Result<(std::ptr::NonNull<u8>, usize)> {
     use vm_memory::{GuestMemoryBackend, GuestMemoryRegion};
     let region = mem.iter().next().ok_or_else(|| Error::MemoryMap("no RAM".into()))?;
@@ -784,16 +475,9 @@ fn ram_host_of(mem: &vm_memory::GuestMemoryMmap) -> Result<(std::ptr::NonNull<u8
     Ok((host, region.len() as usize))
 }
 
-/// The error for anything asked of a machine whose wake failed.
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-fn lost(why: &str) -> Error {
-    Error::GuestGone(format!("the machine is gone: {why}"))
-}
-
 impl Machine {
-    /// Creates a bare VM with zeroed RAM and one vCPU reset to 16-bit real
-    /// mode at address 0. `config.vcpus` must be 1: a bare machine has no
-    /// local APICs, so no way to start a second vCPU.
+    /// Creates a bare VM with zeroed RAM and one vCPU. `config.vcpus` must be 1: a bare machine
+    /// has no interrupt controller to start a second vCPU with.
     pub fn new(config: MachineConfig) -> Result<Self> {
         check_mem_size(config.mem_size)?;
         no_nested(&config, "a bare machine")?;
@@ -813,23 +497,15 @@ impl Machine {
                 config.vcpus
             )));
         }
-        let (vm, vcpus) = backend::Vm::new(
-            config.mem_size,
-            config.cpu_model,
-            Platform::Bare,
-            1,
-            backend::Ram::Anonymous,
-        )?;
+        let (vm, vcpus) =
+            backend::Vm::new(config.mem_size, Platform::Bare, 1, backend::Ram::Anonymous)?;
         let output = serial::output(config.serial_capture_limit);
         let bus = Bus::bare(serial::new(IrqLine::None, output.clone()));
-        let doorbell = Arc::<Doorbell>::default();
-        let stop = Arc::new(StopShared::with_doorbell(doorbell.clone()));
-        Self::assemble(vm, vcpus, bus, Platform::Bare, config.mem_size, stop, doorbell, output)
+        let stop = Arc::<StopShared>::default();
+        Self::assemble(vm, vcpus, bus, Platform::Bare, config.mem_size, stop, output)
     }
 
-    /// The machine from its parts, with its vCPU threads started, stopped through `stop`, whose
-    /// suspensions wait on `doorbell`.
-    #[allow(clippy::too_many_arguments)]
+    /// The machine from its parts, with its vCPU threads started, stopped through `stop`.
     fn assemble(
         vm: backend::Vm,
         vcpus: Vec<backend::Vcpu>,
@@ -837,197 +513,53 @@ impl Machine {
         platform: Platform,
         mem_size: usize,
         stop: Arc<StopShared>,
-        doorbell: Arc<Doorbell>,
         serial: serial::SharedOutput,
     ) -> Result<Self> {
         let exits: Vec<Arc<ExitCounters>> = vcpus.iter().map(|_| Arc::default()).collect();
         let live = Live::spawn(vm, vcpus, bus, &stop, &exits)?;
-        Ok(Self::from_live(live, platform, mem_size, stop, exits, doorbell, serial))
+        Ok(Self::from_live(live, platform, mem_size, stop, exits, serial))
     }
 
-    /// The machine around `live` and what outlives it.
+    /// The machine around `live`.
     fn from_live(
         live: Live,
         platform: Platform,
         mem_size: usize,
         stop: Arc<StopShared>,
         exits: Vec<Arc<ExitCounters>>,
-        doorbell: Arc<Doorbell>,
         serial: serial::SharedOutput,
     ) -> Self {
         Self {
             platform,
             mem_size,
-            cpu_model: live.vm.cpu_model(),
             cpu_fingerprint: live.vm.cpu_fingerprint().to_owned(),
             vcpu_count: live.vcpus.len() as u32,
-            #[cfg(target_arch = "x86_64")]
-            cpuid: live.vm.cpuid().to_vec(),
-            body: Body::Live(live),
+            live,
             stop,
             exits,
-            doorbell,
             serial,
             vsock: None,
             balloon: None,
             network: None,
             disks: Vec::new(),
             extent_stores: 0,
-            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
             nested: false,
-            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-            net_slot: NetSlot::default(),
-            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-            ram_file: None,
-            #[cfg(target_os = "linux")]
-            retired_slots: None,
-            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-            resend: false,
-            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-            caller_devices: false,
         }
-    }
-
-    /// The live parts, or why there are none.
-    fn live(&self) -> Result<&Live> {
-        match &self.body {
-            Body::Live(live) => Ok(live),
-            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-            Body::Frozen(_) => Err(Error::InvalidConfig(
-                "the machine is suspended: its vCPUs and devices are in its file until it runs \
-                 again"
-                    .into(),
-            )),
-            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-            Body::Lost(why) => Err(lost(why)),
-        }
-    }
-
-    /// The live parts, restoring them first if the machine is suspended
-    /// (it stays suspended until it runs: its devices ring the doorbell).
-    fn live_mut(&mut self) -> Result<&mut Live> {
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-        self.thaw()?;
-        match &mut self.body {
-            Body::Live(live) => Ok(live),
-            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-            _ => unreachable!("thawed"),
-        }
-    }
-
-    /// Creates a PC and loads `boot`'s kernel into it, ready to [`run`]:
-    /// `config.vcpus` vCPUs, in-kernel interrupt controllers and timer, ACPI
-    /// tables (CPUs, power off and reset), a 16550 UART on COM1 as the
-    /// console, and a PCI bus with a virtio entropy device (virtio-rng) and a
-    /// virtio-vsock device (guest CID 3, the host's end in this process:
-    /// [`vsock`](Machine::vsock)), and a virtio-net card if
-    /// [`MachineConfig::network`] asks for one, the guest's address then
-    /// configured on the kernel command line (`ip=`, before `boot`'s).
-    /// vCPU 0 starts at the kernel's entry point;
-    /// the others wait for the kernel to start them (INIT and startup IPIs).
-    ///
-    /// RAM past 3 GiB continues at 4 GiB, and the kernel finds it in the
-    /// e820 table (bzImage) or the PVH memory map.
-    ///
-    /// [`run`]: Machine::run
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    pub fn boot_linux(config: MachineConfig, boot: &LinuxBoot) -> Result<Self> {
-        Self::boot_linux_with(config, boot, Vec::new())
-    }
-
-    /// [`boot_linux`](Machine::boot_linux), with `devices` on the PCI bus
-    /// after the virtio-rng, the virtio-vsock and the virtio-net if any
-    /// (from device number 3, or 4 with a network). Such a machine cannot
-    /// be suspended: only the caller could make its devices again.
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    pub(crate) fn boot_linux_with(
-        config: MachineConfig,
-        boot: &LinuxBoot,
-        devices: Vec<Box<dyn crate::devices::virtio::VirtioDevice>>,
-    ) -> Result<Self> {
-        use crate::arch::x86_64::{acpi, boot as linux, layout};
-
-        check_mem_size(config.mem_size)?;
-        check_vcpus(config.vcpus)?;
-        no_nested(&config, "a machine on KVM")?;
-        let (vm, mut vcpus) = backend::Vm::new(
-            config.mem_size,
-            config.cpu_model,
-            Platform::Board,
-            config.vcpus,
-            backend::Ram::Anonymous,
-        )?;
-        for (addr, table) in acpi::tables(config.vcpus) {
-            vm.write_memory(addr, &table)?;
-        }
-        write_generation_id(&vm)?;
-        let network =
-            config.network.as_ref().map(|n| crate::net::Network::new(n.clone())).transpose()?;
-        // Ours first, so that the caller's can override it.
-        let cmdline = match network {
-            Some(_) => format!("{} {}", crate::net::kernel_ip_param(), boot.cmdline),
-            None => boot.cmdline.clone(),
-        };
-        let kernel = linux::Kernel {
-            kernel: &boot.kernel,
-            initrd: boot.initrd.as_deref(),
-            cmdline: &cmdline,
-        };
-        let cpu =
-            linux::load(vm.guest_memory(), config.mem_size as u64, &kernel, layout::ACPI_ADDR)?;
-        vcpus[0].set_boot_cpu(&cpu)?;
-
-        let caller_devices = !devices.is_empty();
-        let net_slot = NetSlot::default();
-        let card = network.as_ref().map(|n| NetCard::New(n.shared(), net_slot.clone()));
-        let doorbell = Arc::<Doorbell>::default();
-        let stop = Arc::new(StopShared::with_doorbell(doorbell.clone()));
-        // The extent store devices first, before the caller's: their DAX windows' BARs before
-        // any transport's.
-        let mut bars = crate::devices::pci::BarAllocator::new();
-        if !config.pmems.is_empty() {
-            return Err(Error::InvalidConfig(
-                "pmem devices are the arm64 board's (on Linux, Firecracker serves them); pmems \
-                 must be empty"
-                    .into(),
-            ));
-        }
-        let mut all = extent_devices(&config, &vm, &mut bars, &stop)?;
-        all.extend(disk_devices(&config)?);
-        let balloon = balloon_device(&config, &vm, &mut all)?;
-        all.extend(devices);
-        let pc = PcDevices::new(&vm, card, all, None, doorbell, bars)?;
-        let output = serial::output(config.serial_capture_limit);
-        let serial = serial::new(IrqLine::EventFd(pc.uart_irq), output.clone());
-        let bus = Bus::board(serial, pc.pci.clone());
-        let (mem_size, doorbell) = (config.mem_size, pc.doorbell);
-        let mut machine =
-            Self::assemble(vm, vcpus, bus, Platform::Board, mem_size, stop, doorbell, output)?;
-        if let Body::Live(live) = &mut machine.body {
-            live.pci = Some(pc.pci);
-        }
-        machine.vsock = Some(pc.vsock);
-        machine.balloon = balloon;
-        machine.network = network;
-        machine.net_slot = net_slot;
-        machine.caller_devices = caller_devices;
-        machine.disks = config.disks;
-        machine.extent_stores = config.extent_stores.len();
-        Ok(machine)
     }
 
     /// Creates the arm64 board and loads `boot`'s kernel (an arm64 `Image`) into it, ready to
     /// [`run`]: `config.vcpus` vCPUs on Hypervisor.framework, its GICv3 and timers, PSCI, a 16550
     /// as the console, and a PCI bus with a virtio entropy device (virtio-rng) and a virtio-vsock
-    /// device (guest CID 3, the host's end in this process: [`vsock`](Machine::vsock)); the
-    /// device tree describes them all. vCPU 0 starts at the kernel's entry point; the others wait
-    /// for the kernel to power them on (PSCI CPU_ON).
+    /// device (guest CID 3, the host's end in this process: [`vsock`](Machine::vsock)), and a
+    /// virtio-net card if [`MachineConfig::network`] asks for one, the guest's address then
+    /// configured on the kernel command line (`ip=`, before `boot`'s); the device tree describes
+    /// them all. vCPU 0 starts at the kernel's entry point; the others wait for the kernel to
+    /// power them on (PSCI CPU_ON).
     ///
     /// A process has one Hypervisor.framework VM: while this machine exists, making another
-    /// fails. No network yet (board 13063).
+    /// fails.
     ///
     /// [`run`]: Machine::run
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     pub fn boot_linux(config: MachineConfig, boot: &LinuxBoot) -> Result<Self> {
         use crate::arch::aarch64::{boot as linux, fdt, layout};
         use crate::devices::virtio::vsock::{GUEST_CID, VsockDevice};
@@ -1039,7 +571,6 @@ impl Machine {
             config.network.as_ref().map(|n| crate::net::Network::new(n.clone())).transpose()?;
         let (vm, mut vcpus) = backend::Vm::with_el2(
             config.mem_size,
-            config.cpu_model,
             Platform::Board,
             config.vcpus,
             backend::Ram::Anonymous,
@@ -1083,9 +614,9 @@ impl Machine {
         vm.write_memory(loaded.fdt, &tree)?;
         vcpus[0].set_boot_cpu(&linux::boot_cpu(&loaded))?;
 
-        let doorbell: Arc<Doorbell> = Arc::default();
-        let stop = Arc::new(StopShared::with_doorbell(doorbell.clone()));
-        // The extent store devices first, as on the PC.
+        let stop = Arc::<StopShared>::default();
+        // The extent store devices first, so that their DAX windows' BARs come before any
+        // transport's.
         let mut bars = crate::devices::pci::BarAllocator::new();
         let mut devices = extent_devices(&config, &vm, &mut bars, &stop, &[])?;
         devices.extend(disk_devices(&config)?);
@@ -1095,25 +626,15 @@ impl Machine {
         devices.extend([Box::new(Rng) as Box<dyn VirtioDevice>, Box::new(vsock_device)]);
         if let Some(network) = &network {
             use crate::devices::virtio::net::NetDevice;
-            let slot = crate::net::host::NetSlot::default();
-            devices.push(Box::new(NetDevice::new(network.shared(), slot)?));
+            devices.push(Box::new(NetDevice::new(network.shared())?));
         }
-        let pci =
-            Arc::new(crate::devices::Pci::new(devices, vm.guest_memory(), &vm, &doorbell, bars)?);
+        let pci = Arc::new(crate::devices::Pci::new(devices, vm.guest_memory(), &vm, bars)?);
         let output = serial::output(config.serial_capture_limit);
         let uart = IrqLine::Spi(vm.shared().clone(), layout::UART_SPI);
         let bus = Bus::board(serial::new(uart, output.clone()), pci.clone());
-        let mut machine = Self::assemble(
-            vm,
-            vcpus,
-            bus,
-            Platform::Board,
-            config.mem_size,
-            stop,
-            doorbell,
-            output,
-        )?;
-        machine.live_mut()?.pci = Some(pci);
+        let mut machine =
+            Self::assemble(vm, vcpus, bus, Platform::Board, config.mem_size, stop, output)?;
+        machine.live.pci = Some(pci);
         machine.balloon = balloon;
         machine.network = network;
         machine.vsock = Some(vsock);
@@ -1124,15 +645,14 @@ impl Machine {
     }
 
     /// [`snapshot`](Machine::snapshot), as `options` say: its RAM in a file of its own, for a
-    /// live migration, with the caller's data. On Hypervisor.framework: the arm64 board, its
-    /// balloon, disks (their files are the host's: a restore opens them again) and extent store
-    /// devices with it, not one with a network or nested virtualization.
+    /// live migration, with the caller's data. The arm64 board, its balloon, disks (their files
+    /// are the host's: a restore opens them again) and extent store devices with it, not one with
+    /// a network or nested virtualization.
     ///
     /// Each extent store device's snapshot is taken first (doc-4): unless `for_migration`, its
     /// guest's filesystem must be frozen (`fsfreeze`, which `VIRTIO_EXTENT_T_FREEZE` tells the
     /// device of), and its cell gets a version, which a snapshot failing after drops. The guest's
     /// virtual counter goes on from the snapshot's count in a restore.
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     pub fn snapshot_with(
         &mut self,
         path: impl AsRef<std::path::Path>,
@@ -1146,7 +666,6 @@ impl Machine {
     /// RAM the snapshot holds none of ([`SnapshotRam::Kept`](crate::SnapshotRam::Kept)), a memory
     /// cell's version or a diff, as of the state's moment. Its failure fails the snapshot, as one
     /// of the state's would: what the extent store devices took for it dropped.
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     pub fn snapshot_with_ram<T>(
         &mut self,
         path: impl AsRef<std::path::Path>,
@@ -1172,7 +691,7 @@ impl Machine {
                     .into(),
             ));
         }
-        let live = self.live()?;
+        let live = &self.live;
         let pci = live.pci.as_ref().expect("a board machine has a PCI bus");
         // The device thread waits until the state and RAM are written.
         let mut quiesced = pci.quiesce();
@@ -1193,6 +712,20 @@ impl Machine {
         taken
     }
 
+    /// Writes the machine's state to a snapshot file at `path`, between
+    /// runs (the `&mut` guarantees no [`Run`] is in progress: every vCPU is
+    /// stopped). [`Snapshot::open`](crate::Snapshot::open) then reads it,
+    /// and [`Machine::restore`] makes machines from it. The machine itself
+    /// is not changed and can run on. See [`snapshot_with`](Machine::snapshot_with)
+    /// for what it takes.
+    ///
+    /// Commands the guest agent runs at the time keep running in every
+    /// clone, orphaned (no clone's client knows them); take snapshots of an
+    /// idle guest.
+    pub fn snapshot(&mut self, path: impl AsRef<std::path::Path>) -> Result<()> {
+        self.snapshot_with(path, &SnapshotOptions::default())
+    }
+
     /// Has the machine's extent store devices let go of their cells, between runs: a live
     /// migration's hand-over of them to another host (cladefs's `HandOverCell`), the VM process
     /// and the guest's memory kept. Its devices serve the guest nothing until
@@ -1200,23 +733,20 @@ impl Machine {
     /// refused meanwhile. Refused while a device's DAX window holds private pages or its cell
     /// uncommitted open extents. Their daemon must listen at a socket
     /// ([`ExtentDaemon::at_socket`](crate::ExtentDaemon::at_socket)), where they are opened again.
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     pub fn release_extent_cells(&mut self) -> Result<()> {
-        let pci = self.live()?.pci.as_ref().expect("a board machine has a PCI bus");
+        let pci = self.live.pci.as_ref().expect("a board machine has a PCI bus");
         pci.quiesce().release_cells()
     }
 
     /// Takes back the cells [`release_extent_cells`](Machine::release_extent_cells) let go of,
     /// between runs: the migration aborted, the machine goes on.
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     pub fn reopen_extent_cells(&mut self) -> Result<()> {
-        let pci = self.live()?.pci.as_ref().expect("a board machine has a PCI bus");
+        let pci = self.live.pci.as_ref().expect("a board machine has a PCI bus");
         pci.quiesce().reopen_cells()
     }
 
     /// The GIC's state and the host's clock, every vCPU's (read on its own thread), the UART's
     /// and the RTC's, between runs.
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     fn encode_cpus(&self, live: &Live, e: &mut crate::snapshot::codec::Encoder) -> Result<()> {
         type Job = Box<dyn FnOnce(&mut MachineVcpu) -> Result<backend::VcpuState> + Send>;
         let jobs = (0..live.vcpus.len())
@@ -1231,17 +761,34 @@ impl Machine {
         Ok(())
     }
 
+    /// What a snapshot's state says the machine is, but for what only a snapshot says (its
+    /// extent store devices' snapshots, the caller's data).
+    fn header(&self, layout: crate::memory::MemoryLayout) -> crate::snapshot::MachineHeader {
+        crate::snapshot::MachineHeader {
+            cpu_fingerprint: self.cpu_fingerprint.clone(),
+            vcpus: self.vcpu_count,
+            mem_size: self.mem_size as u64,
+            layout,
+            balloon: self.balloon.is_some(),
+            disks: self.disks.clone(),
+            extent_stores: Vec::new(),
+            caller_data: Vec::new(),
+        }
+    }
+
     /// A new machine from `snapshot`, ready to [`run`](Machine::run) from where the snapshot's
-    /// machine stopped, on Hypervisor.framework. `config` says what machine to build, and must be
-    /// the snapshot's ([`Snapshot::config`](crate::Snapshot::config)) but for where its devices
-    /// are on the host: its disks' files, its extent store devices' cells (each forked from the
-    /// snapshot's version of its cell, or the cell itself reopened, as virtio_extent opens it),
-    /// with an extent daemon for them. Its RAM is a private copy-on-write mapping of the
-    /// snapshot's; its vsock connections from before the snapshot are reset; the guest's virtual
-    /// counter goes on from where it was, so no time passes for it while it was in the file.
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    /// machine stopped. `config` says what machine to build, and must be the snapshot's
+    /// ([`Snapshot::config`](crate::Snapshot::config)) but for where its devices are on the
+    /// host: its disks' files, its extent store devices' cells (each forked from the snapshot's
+    /// version of its cell, or the cell itself reopened, as virtio_extent opens it), with an
+    /// extent daemon for them; anything else is refused, never converted. Its RAM is a private
+    /// copy-on-write mapping of the snapshot's, and what the guest writes stays in this machine,
+    /// never reaching the file or other machines restored from it; its vsock connections from
+    /// before the snapshot are reset, and the guest agent reseeds the guest's RNG with host
+    /// entropy before running anything ([`agent`](crate::agent)); the guest's virtual counter
+    /// goes on from where it was, so no time passes for it while it was in the file.
     pub fn restore(snapshot: &crate::Snapshot, config: MachineConfig) -> Result<Self> {
-        Self::restore_with(snapshot, config, None, None)
+        Self::restore_with(snapshot, config, None)
     }
 
     /// [`restore`](Machine::restore), its RAM `ram`, which holds the snapshot's RAM already and
@@ -1252,22 +799,18 @@ impl Machine {
     ///
     /// [`SnapshotRam::Kept`]: crate::SnapshotRam::Kept
     /// [`Snapshot::open_without_ram`]: crate::Snapshot::open_without_ram
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     pub fn restore_onto(
         snapshot: &crate::Snapshot,
         config: MachineConfig,
         ram: Arc<crate::GuestRam>,
     ) -> Result<Self> {
-        Self::restore_with(snapshot, config, None, Some(ram))
+        Self::restore_with(snapshot, config, Some(ram))
     }
 
-    /// [`restore`](Machine::restore), onto `vsock` if given, as KVM's, and onto `ram` if given
-    /// ([`restore_onto`](Machine::restore_onto)).
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    pub(crate) fn restore_with(
+    /// [`restore`](Machine::restore), onto `ram` if given ([`restore_onto`](Machine::restore_onto)).
+    fn restore_with(
         snapshot: &crate::Snapshot,
         config: MachineConfig,
-        vsock: Option<crate::Vsock>,
         ram: Option<Arc<crate::GuestRam>>,
     ) -> Result<Self> {
         use crate::arch::aarch64::layout;
@@ -1288,14 +831,8 @@ impl Machine {
                 backend::Ram::Snapshot { file: snapshot.file()?, offsets: snapshot.ram_offsets() }
             }
         };
-        let (vm, vcpus) = backend::Vm::new(
-            config.mem_size,
-            config.cpu_model,
-            Platform::Board,
-            config.vcpus,
-            ram,
-        )?;
-        snapshot.check_cpu(config.cpu_model, vm.cpu_fingerprint())?;
+        let (vm, vcpus) = backend::Vm::new(config.mem_size, Platform::Board, config.vcpus, ram)?;
+        snapshot.check_cpu(vm.cpu_fingerprint())?;
         let mut d = snapshot.state();
         let vm_state = backend::VmState::decode(&mut d)?;
         let n = d.count(1)?;
@@ -1309,8 +846,7 @@ impl Machine {
             (0..n).map(|_| backend::VcpuState::decode(&mut d)).collect::<Result<Vec<_>>>()?;
 
         // The devices as `boot_linux` makes them, in its order, so that each is where it was.
-        let doorbell: Arc<Doorbell> = Arc::default();
-        let stop = Arc::new(StopShared::with_doorbell(doorbell.clone()));
+        let stop = Arc::<StopShared>::default();
         let mut bars = crate::devices::pci::BarAllocator::new();
         if !config.pmems.is_empty() {
             return Err(Error::Snapshot("a machine with pmem devices is never snapshotted".into()));
@@ -1318,13 +854,9 @@ impl Machine {
         let mut devices = extent_devices(&config, &vm, &mut bars, &stop, snapshot.extent_states())?;
         devices.extend(disk_devices(&config)?);
         let balloon = balloon_device(&config, &vm, &mut devices)?;
-        let (vsock_device, vsock) = match vsock {
-            Some(vsock) => (VsockDevice::adopt(&vsock)?, vsock),
-            None => VsockDevice::new(GUEST_CID)?,
-        };
+        let (vsock_device, vsock) = VsockDevice::new(GUEST_CID)?;
         devices.extend([Box::new(Rng) as Box<dyn VirtioDevice>, Box::new(vsock_device)]);
-        let pci =
-            Arc::new(crate::devices::Pci::new(devices, vm.guest_memory(), &vm, &doorbell, bars)?);
+        let pci = Arc::new(crate::devices::Pci::new(devices, vm.guest_memory(), &vm, bars)?);
         let output = serial::output(config.serial_capture_limit);
         let uart = IrqLine::Spi(vm.shared().clone(), layout::UART_SPI);
         let serial = serial::restore(&mut d, uart, output.clone())?;
@@ -1360,7 +892,7 @@ impl Machine {
         live.resend_interrupts();
 
         let mut machine =
-            Self::from_live(live, Platform::Board, config.mem_size, stop, exits, doorbell, output);
+            Self::from_live(live, Platform::Board, config.mem_size, stop, exits, output);
         machine.vsock = Some(vsock);
         machine.balloon = balloon;
         machine.disks = config.disks;
@@ -1368,614 +900,9 @@ impl Machine {
         Ok(machine)
     }
 
-    /// Writes the machine's state to a snapshot file at `path`, between
-    /// runs (the `&mut` guarantees no [`Run`] is in progress: every vCPU is
-    /// stopped). [`Snapshot::open`](crate::Snapshot::open) then reads it,
-    /// and [`Machine::restore`] makes machines from it. The machine itself
-    /// is not changed and can run on.
-    ///
-    /// PC machines only, without a network: a networked machine's
-    /// connections are host sockets no clone could share, so it is refused,
-    /// as is a machine with device memory mapped through
-    /// [`memory_slots`](Machine::memory_slots) (its devices must save it).
-    /// A suspended machine is restored for it, then suspended again (if
-    /// that fails, it stays suspended with its VM back, as before a
-    /// suspension frees it).
-    ///
-    /// Commands the guest agent runs at the time keep running in every
-    /// clone, orphaned (no clone's client knows them); take snapshots of an
-    /// idle guest.
-    pub fn snapshot(&mut self, path: impl AsRef<std::path::Path>) -> Result<()> {
-        self.snapshot_with(path, &SnapshotOptions::default())
-    }
-
-    /// [`snapshot`](Machine::snapshot), as `options` say: its RAM in a file of its own, for a
-    /// live migration, with the caller's data.
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    pub fn snapshot_with(
-        &mut self,
-        path: impl AsRef<std::path::Path>,
-        options: &SnapshotOptions<'_>,
-    ) -> Result<()> {
-        if self.platform != Platform::Board {
-            return Err(Error::Snapshot(
-                "only PC machines (Machine::boot_linux) can be snapshotted".into(),
-            ));
-        }
-        if self.network.is_some() {
-            return Err(Error::Snapshot(
-                "a machine with a network cannot be snapshotted: its connections are host \
-                 sockets that no restored machine could share"
-                    .into(),
-            ));
-        }
-        if self.balloon.is_some() {
-            return Err(Error::Snapshot(
-                "a machine with a balloon is not snapshotted on KVM yet (board 13994)".into(),
-            ));
-        }
-        if !self.disks.is_empty() || self.extent_stores > 0 {
-            return Err(Error::Snapshot(
-                "a machine with disks or extent store devices is not snapshotted on KVM yet \
-                 (Hypervisor.framework's are)"
-                    .into(),
-            ));
-        }
-        let refreeze = matches!(self.body, Body::Frozen(_));
-        self.thaw()?;
-        let taken = self.write_snapshot(path.as_ref(), options);
-        if refreeze {
-            // Its own file exists: the directory is not used.
-            let _ = self.suspend(std::path::Path::new("."));
-        }
-        taken
-    }
-
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    fn write_snapshot(
-        &mut self,
-        path: &std::path::Path,
-        options: &SnapshotOptions<'_>,
-    ) -> Result<()> {
-        use crate::memory::RegionKind;
-        use crate::snapshot::codec::Encoder;
-
-        let live = self.live()?;
-        let Some(pci) = &live.pci else {
-            return Err(Error::Snapshot(
-                "only PC machines (Machine::boot_linux) can be snapshotted".into(),
-            ));
-        };
-        let layout = live.vm.memory_layout();
-        if let Some(r) = layout.of_kind(RegionKind::DeviceMemory).next() {
-            return Err(Error::Snapshot(format!(
-                "device memory is mapped at {:#x} ({:#x} bytes), which no device saves",
-                r.start, r.size
-            )));
-        }
-        // The device thread waits until the state and RAM are written.
-        let mut quiesced = pci.quiesce();
-        let taken = (|| {
-            let extent_stores = quiesced.take_snapshots(snapshot_mode(options))?;
-            let mut e = Encoder::default();
-            self.encode_cpus(live, &mut e)?;
-            quiesced.save(&mut e)?;
-            let mut header = self.header(layout);
-            header.extent_stores = extent_stores;
-            header.caller_data = options.caller_data.to_vec();
-            let ram = options.ram;
-            crate::snapshot::write(path, &header, &e.finish(), live.vm.guest_memory(), ram)
-        })();
-        quiesced.snapshots_done(taken.is_ok());
-        taken
-    }
-
-    /// What a snapshot's or a suspension's state says the machine is, but for what only a
-    /// snapshot says (its extent store devices' snapshots, the caller's data).
-    fn header(&self, layout: crate::memory::MemoryLayout) -> crate::snapshot::MachineHeader {
-        crate::snapshot::MachineHeader {
-            cpu_model: self.cpu_model,
-            cpu_fingerprint: self.cpu_fingerprint.clone(),
-            vcpus: self.vcpu_count,
-            mem_size: self.mem_size as u64,
-            layout,
-            balloon: self.balloon.is_some(),
-            disks: self.disks.clone(),
-            extent_stores: Vec::new(),
-            caller_data: Vec::new(),
-        }
-    }
-
-    /// KVM's VM state, every vCPU's, and the UART's, between runs.
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    fn encode_cpus(&self, live: &Live, e: &mut crate::snapshot::codec::Encoder) -> Result<()> {
-        let vm_state = live.vm.save_state(&live.vcpus.get(0).vcpu)?;
-        vm_state.encode(e);
-        e.count(live.vcpus.len());
-        for i in 0..live.vcpus.len() {
-            live.vcpus.get(i).vcpu.save_state(&live.vm)?.encode(e);
-        }
-        serial::save(&live.bus.serial(), e);
-        Ok(())
-    }
-
-    /// Suspends the guest between runs, while it waits for something from
-    /// outside (a slow server's answer, an agent call): the whole machine
-    /// goes to a file in `dir` (its vCPUs' and devices' state, the network
-    /// stack's with every guest connection's TCP state, and the guest's
-    /// RAM), and its hypervisor VM, its vCPU, device and network threads
-    /// and the guest's RAM are freed. What cannot go in a file stays: the
-    /// host sockets of the guest's connections, the vsock's host end (agent
-    /// clients and streams carry on), the network's policy and log, the
-    /// console, and a thread that watches the sockets and the vsock. When
-    /// something comes for the guest (data or a close on one of its
-    /// connections, a packet for it on the vsock: an agent call), the
-    /// machine wakes: [`wait_woken`](Machine::wait_woken) returns, and
-    /// running it ([`run`](Machine::run)) restores it from the file onto
-    /// what was held, the guest carrying on where it was on the same
-    /// connections, its pages coming back from the file as it touches them.
-    ///
-    /// Only an idle guest is suspended, every vCPU halted with no interrupt
-    /// waiting, every device settled and the network with nothing to do by
-    /// itself (no DNS lookup or decider question in flight); else
-    /// [`Error::Busy`]: run it a little and try again. Its clocks run on
-    /// meanwhile, so it sees the time it waited, as if it had waited awake;
-    /// its own timers fire when it runs again. See [`crate::suspend`].
-    ///
-    /// The first suspension makes the file, unnamed, in `dir`, which must
-    /// be on a disk, not tmpfs or ramfs (refused), with room for the RAM
-    /// the guest uses; later ones write into the same file only what the
-    /// guest changed since, and the state (and ignore `dir`). It goes with
-    /// the machine. It is no template: it lacks the host sockets and the
-    /// vsock's host end, says so, and [`Snapshot::open`](crate::Snapshot::open)
-    /// refuses it.
-    ///
-    /// PC machines only, without device memory mapped through
-    /// [`memory_slots`](Machine::memory_slots) (whose handles map nothing
-    /// once the VM is freed: take a new one after a wake). Suspending a
-    /// suspended machine does nothing.
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    pub fn suspend(&mut self, dir: impl AsRef<std::path::Path>) -> Result<()> {
-        use crate::memory::RegionKind;
-
-        let live = match &self.body {
-            Body::Live(live) => live,
-            Body::Frozen(_) => return Ok(()),
-            Body::Lost(why) => return Err(lost(why)),
-        };
-        let Some(pci) = live.pci.clone() else {
-            return Err(Error::InvalidConfig(
-                "only PC machines (Machine::boot_linux) can be suspended".into(),
-            ));
-        };
-        if self.caller_devices {
-            return Err(Error::InvalidConfig(
-                "a machine with devices of the caller's cannot be suspended: a suspension frees \
-                 the devices, and only the caller could make them again"
-                    .into(),
-            ));
-        }
-        if self.balloon.is_some() {
-            return Err(Error::InvalidConfig(
-                "a machine with a balloon is not suspended yet (board 13994)".into(),
-            ));
-        }
-        if !self.disks.is_empty() || self.extent_stores > 0 {
-            return Err(Error::InvalidConfig(
-                "a machine with disks or extent store devices is not suspended yet".into(),
-            ));
-        }
-        let layout = live.vm.memory_layout();
-        if let Some(r) = layout.of_kind(RegionKind::DeviceMemory).next() {
-            return Err(Error::InvalidConfig(format!(
-                "device memory is mapped at {:#x} ({:#x} bytes), which a suspension cannot save",
-                r.start, r.size
-            )));
-        }
-        // Armed first: what a device puts in a queue from now on wakes the
-        // guest; what it put there before, an idle guest has taken (a
-        // driver polling its queue is not halted), or is an interrupt
-        // still waiting, which the checks see. (Already armed: the machine
-        // is suspended with its VM back, and a ring since counts.)
-        let was_armed = self.doorbell.armed();
-        if !was_armed {
-            self.doorbell.arm();
-        }
-        if let Err(e) = self.save_suspended(&pci, &layout, dir.as_ref()) {
-            if !was_armed {
-                self.doorbell.disarm();
-            }
-            return Err(e);
-        }
-        self.freeze();
-        Ok(())
-    }
-
-    /// Checks that the guest is idle, then writes the whole machine to its
-    /// file, its host ends handed over (the vsock detached, the network's
-    /// host streams in the slot); on any failure, they are taken back and
-    /// the machine is as it was.
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    fn save_suspended(
-        &mut self,
-        pci: &crate::devices::Pci,
-        layout: &crate::memory::MemoryLayout,
-        dir: &std::path::Path,
-    ) -> Result<()> {
-        use crate::snapshot::codec::Encoder;
-
-        let Body::Live(live) = &self.body else {
-            unreachable!("only a live machine is saved");
-        };
-        for i in 0..live.vcpus.len() {
-            if !live.vcpus.get(i).vcpu.idle()? {
-                return Err(Error::Busy(format!(
-                    "vCPU {i} is running or has an interrupt to take"
-                )));
-            }
-        }
-        // A device with something for the guest makes it busy too: what
-        // the guest gave it and it has not yet taken (the last packet of a
-        // vsock connection the guest closed, whose answer is on its way),
-        // or what its host side holds and has not yet queued.
-        let mut quiesced = pci.quiesce();
-        if let Some(device) = quiesced.settle() {
-            return Err(Error::Busy(format!(
-                "virtio device type {device} has something for the guest to take"
-            )));
-        }
-        // With the device thread held off, no device can ring now: one
-        // that rang since the bell was armed gave the guest something
-        // after the checks above began, which it may not have seen.
-        if self.doorbell.rung() {
-            return Err(Error::Busy(
-                "a device gave the guest something as it was being suspended".into(),
-            ));
-        }
-        let mut e = Encoder::default();
-        self.header(layout.clone()).encode(&mut e);
-        self.encode_cpus(live, &mut e)?;
-        let mut lacks = crate::suspend::LACKS_VSOCK;
-        if self.network.is_some() {
-            lacks |= crate::suspend::LACKS_NETWORK;
-        }
-        // From here on no device serves the host ends: the vsock's is
-        // detached before its device saves (board 13211), and the network
-        // stack hands its host streams over as it saves.
-        let vsock = self.vsock.as_ref().expect("a PC machine has a vsock");
-        vsock.detach();
-        let saved = (|| -> Result<()> {
-            // Takes back what it handed over if it fails (the network
-            // Busy, say).
-            quiesced.hand_over(&mut e)?;
-            let state = e.finish();
-            let written = crate::suspend::write_to_file(
-                live.vm.guest_memory(),
-                layout,
-                dir,
-                &mut self.ram_file,
-            )
-            .and_then(|()| {
-                let ram = self.ram_file.as_ref().expect("written");
-                crate::suspend::write_state(ram, layout, &state, lacks)
-            });
-            if let Err(e) = written {
-                return Err(match quiesced.take_back() {
-                    Ok(()) => e,
-                    Err(back) => Error::Snapshot(format!(
-                        "{e}; then the network could not be taken back: {back}"
-                    )),
-                });
-            }
-            Ok(())
-        })();
-        if saved.is_err() {
-            vsock.reattach();
-        }
-        saved
-    }
-
-    /// Frees the machine's VM, threads and RAM, its state being in its
-    /// file, and starts watching what it holds.
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    fn freeze(&mut self) {
-        let net = self.net_slot.lock().unwrap_or_else(|e| e.into_inner()).take();
-        let body = std::mem::replace(&mut self.body, Body::Lost("being suspended".into()));
-        let Body::Live(live) = body else {
-            unreachable!("only a live machine is frozen");
-        };
-        let slots = live.vm.memory_slots().clone();
-        // The vCPU threads stop and the device thread (the devices' saves
-        // stopped the network thread), then the VM closes and the RAM is
-        // unmapped.
-        drop(live);
-        // The handle held the VM open until now.
-        slots.retire();
-        self.retired_slots = Some(slots);
-        let watched = net.as_ref().map(HeldStreams::watched).unwrap_or_default();
-        let watcher = match crate::suspend::Watcher::spawn(
-            self.doorbell.clone(),
-            self.vsock.clone(),
-            &watched,
-        ) {
-            Ok(watcher) => Some(watcher),
-            // Nothing would wake it: it wakes now instead, and runs.
-            Err(_) => {
-                self.doorbell.ring();
-                None
-            }
-        };
-        self.body = Body::Frozen(Frozen { watcher, net, vsock: self.vsock.clone() });
-    }
-
-    /// Restores a suspended machine from its file onto what it held: the
-    /// guest is where it was, still suspended (the doorbell armed) until
-    /// it runs. If that fails, the machine is lost, and so is everything on
-    /// its vsock.
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    fn thaw(&mut self) -> Result<()> {
-        match &self.body {
-            Body::Live(_) => return Ok(()),
-            Body::Lost(why) => return Err(lost(why)),
-            Body::Frozen(_) => {}
-        }
-        let body = std::mem::replace(&mut self.body, Body::Lost("being woken".into()));
-        let Body::Frozen(mut frozen) = body else {
-            unreachable!("frozen");
-        };
-        // The watcher stops before the host ends go to the new devices.
-        drop(frozen.watcher.take());
-        frozen.vsock = None;
-        let net = frozen.net.take();
-        drop(frozen);
-        match self.wake(net) {
-            Ok(live) => {
-                self.body = Body::Live(live);
-                self.resend = true;
-                Ok(())
-            }
-            Err(e) => {
-                let why = format!("waking it from its suspension failed: {e}");
-                self.body = Body::Lost(why);
-                if let Some(vsock) = &self.vsock {
-                    vsock.machine_gone();
-                }
-                Err(e)
-            }
-        }
-    }
-
-    /// The live machine from the state in its file, onto its stop state,
-    /// doorbell, exit counters, console, vsock host end and network.
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    fn wake(&mut self, net: Option<HeldStreams>) -> Result<Live> {
-        use crate::snapshot::{MachineHeader, codec::Decoder};
-
-        let ram = self.ram_file.clone().expect("a suspended machine has its file");
-        let state = crate::suspend::read_state(&ram.file)?;
-        let mut d = Decoder::new(&state);
-        let header = MachineHeader::decode(&mut d)?;
-        let layout = crate::arch::x86_64::layout::memory_layout(self.mem_size as u64);
-        if header != self.header(layout) {
-            return Err(Error::Snapshot(
-                "the suspended machine's file holds another machine".into(),
-            ));
-        }
-        let config = MachineConfig {
-            mem_size: self.mem_size,
-            cpu_model: self.cpu_model,
-            vcpus: self.vcpu_count,
-            network: None,
-            serial_capture_limit: 0,
-            // No machine with extent store devices or a balloon is suspended.
-            extent_daemon: None,
-            extent_stores: Vec::new(),
-            nested_virtualization: false,
-            balloon: false,
-            disks: Vec::new(),
-            pmems: Vec::new(),
-        };
-        let network = self.network.as_ref().map(|n| {
-            NetCard::Adopt(
-                n.shared(),
-                self.net_slot.clone(),
-                net.unwrap_or_else(|| HeldStreams::new(Default::default(), &[])),
-            )
-        });
-        let fingerprint = self.cpu_fingerprint.clone();
-        let check_cpu = |model: CpuModel, theirs: &str| {
-            if theirs == fingerprint {
-                Ok(())
-            } else {
-                Err(Error::Snapshot(format!(
-                    "the suspended guest saw CPU fingerprint {fingerprint}; CPU model {model} now \
-                     gives {theirs}"
-                )))
-            }
-        };
-        let kept = Kept {
-            doorbell: self.doorbell.clone(),
-            stop: &self.stop,
-            exits: &self.exits,
-            serial: self.serial.clone(),
-            vsock: self.vsock.clone(),
-            network,
-        };
-        let (live, _) =
-            Self::rebuild(&config, &ram.file, &ram.offsets, &mut d, check_cpu, kept, false)?;
-        Ok(live)
-    }
-
-    /// Whether the machine is suspended ([`suspend`](Machine::suspend)) and
-    /// has not run since.
-    pub fn suspended(&self) -> bool {
-        self.doorbell.armed()
-    }
-
-    /// Waits, at most `timeout` (None: as long as it takes), until
-    /// something comes for the suspended guest ([`Woken::Device`]: run it),
-    /// or a [`StopHandle`] asks the machine to stop ([`Woken::Stop`]: the
-    /// request is used up, and the guest stays suspended). Returns
-    /// [`Woken::Device`] at once if something already came, or if the
-    /// machine is not suspended.
-    pub fn wait_woken(&self, timeout: Option<Duration>) -> Woken {
-        if !self.doorbell.armed() {
-            return Woken::Device;
-        }
-        self.doorbell.wait(|| self.stop.take_request(), timeout)
-    }
-
-    /// A new machine from `snapshot`, ready to [`run`](Machine::run) from
-    /// where the snapshot's machine stopped. `config` says what machine to
-    /// build, and must be the snapshot's ([`Snapshot::config`]): the same
-    /// vCPU count and RAM size (so the same address map), no network, and a
-    /// CPU model that gives the same CPU fingerprint on this host; anything
-    /// else is refused, never converted.
-    ///
-    /// The guest's RAM is a private copy-on-write mapping of the snapshot
-    /// file: what the guest writes stays in this machine, never reaching
-    /// the file or other machines restored from it. Its clock is moved on to
-    /// the present; its VM generation ID changes, so that its kernel
-    /// reseeds its RNG, and the guest agent reseeds it with host entropy
-    /// before running anything ([`agent`](crate::agent)); its vsock
-    /// connections from before the snapshot are reset (a transport reset
-    /// event).
-    ///
-    /// [`Snapshot::config`]: crate::Snapshot::config
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    pub fn restore(snapshot: &crate::Snapshot, config: MachineConfig) -> Result<Self> {
-        Self::restore_with(snapshot, config, None)
-    }
-
-    /// [`restore`](Machine::restore), onto `vsock` if given: the host end
-    /// of the machine the snapshot was taken of, detached from it
-    /// ([`Vsock::detach`](crate::Vsock::detach)) before the snapshot. Its
-    /// connections and listeners then carry on, with no transport reset,
-    /// and the agent clients and streams on it go on as if the machine had
-    /// only paused. Refused, with the host end unchanged, unless it is
-    /// detached and nothing has passed between it and a guest since the
-    /// snapshot. Without `vsock`, a new host end, connections reset.
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    pub(crate) fn restore_with(
-        snapshot: &crate::Snapshot,
-        config: MachineConfig,
-        vsock: Option<crate::Vsock>,
-    ) -> Result<Self> {
-        use crate::arch::x86_64::layout;
-
-        check_mem_size(config.mem_size)?;
-        check_vcpus(config.vcpus)?;
-        no_nested(&config, "a machine on KVM")?;
-        if !config.extent_stores.is_empty() {
-            return Err(Error::Snapshot(
-                "machines with extent store devices are not restored yet (board 13139)".into(),
-            ));
-        }
-        snapshot.check(&config, &layout::memory_layout(config.mem_size as u64))?;
-        let doorbell = Arc::<Doorbell>::default();
-        let stop = Arc::new(StopShared::with_doorbell(doorbell.clone()));
-        let exits: Vec<Arc<ExitCounters>> = (0..config.vcpus).map(|_| Arc::default()).collect();
-        let output = serial::output(config.serial_capture_limit);
-        let kept = Kept {
-            doorbell: doorbell.clone(),
-            stop: &stop,
-            exits: &exits,
-            serial: output.clone(),
-            vsock,
-            network: None,
-        };
-        let (live, vsock) = Self::rebuild(
-            &config,
-            snapshot.file()?,
-            snapshot.ram_offsets(),
-            &mut snapshot.state(),
-            |model, fingerprint| snapshot.check_cpu(model, fingerprint),
-            kept,
-            true,
-        )?;
-        let mut machine =
-            Self::from_live(live, Platform::Board, config.mem_size, stop, exits, doorbell, output);
-        machine.vsock = Some(vsock);
-        machine.ram_file = Some(crate::suspend::RamFile {
-            file: snapshot.file()?.clone(),
-            offsets: snapshot.ram_offsets().to_vec(),
-            ours: false,
-        });
-        Ok(machine)
-    }
-
-    /// A PC machine's live parts from saved state `d` (past its header)
-    /// and its RAM in `file` from `offsets` (mapped privately), onto what
-    /// `kept` gives; its host end of the vsock. A `clone` (of a snapshot)
-    /// gets a new VM generation ID; a suspended machine woken is the same
-    /// guest, which [`Live::resend_interrupts`] when it runs (not before:
-    /// a machine woken to be snapshotted is suspended again, and spare
-    /// interrupts would make its guest busy); a clone's do now.
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    fn rebuild(
-        config: &MachineConfig,
-        file: &Arc<std::fs::File>,
-        offsets: &[u64],
-        d: &mut crate::snapshot::codec::Decoder<'_>,
-        check_cpu: impl FnOnce(CpuModel, &str) -> Result<()>,
-        kept: Kept<'_>,
-        clone: bool,
-    ) -> Result<(Live, crate::Vsock)> {
-        use crate::arch::x86_64::layout::GED_IRQ;
-
-        let (vm, vcpus) = backend::Vm::new(
-            config.mem_size,
-            config.cpu_model,
-            Platform::Board,
-            config.vcpus,
-            backend::Ram::Snapshot { file, offsets },
-        )?;
-        check_cpu(config.cpu_model, vm.cpu_fingerprint())?;
-        let vm_state = backend::VmState::decode(d)?;
-        let n = d.count(1)?;
-        if n != vcpus.len() {
-            return Err(Error::Snapshot(format!(
-                "the snapshot's state holds {n} vCPUs, its header {}",
-                vcpus.len()
-            )));
-        }
-        let vcpu_states =
-            (0..n).map(|_| backend::VcpuState::decode(d)).collect::<Result<Vec<_>>>()?;
-
-        let bars = crate::devices::pci::BarAllocator::new();
-        let pc = PcDevices::new(&vm, kept.network, Vec::new(), kept.vsock, kept.doorbell, bars)?;
-        let serial = serial::restore(d, IrqLine::EventFd(pc.uart_irq), kept.serial)?;
-        // KVM's state first, so that what the devices do next (MSI routes,
-        // irqfds, interrupts) lands on the restored interrupt controllers.
-        let tsc_cycles = vm.restore_state(&vm_state, &vcpus)?;
-        for (vcpu, state) in vcpus.iter().zip(&vcpu_states) {
-            vcpu.restore_state(&vm, state, tsc_cycles)?;
-        }
-        pc.pci.restore(d, &vm)?;
-        d.end()?;
-        if clone {
-            // A new generation ID, and the event that tells the guest.
-            write_generation_id(&vm)?;
-            vm.set_irq_line(GED_IRQ, true)?;
-            vm.set_irq_line(GED_IRQ, false)?;
-        }
-        let bus = Bus::board(serial, pc.pci.clone());
-        let mut live = Live::spawn(vm, vcpus, bus, kept.stop, kept.exits)?;
-        live.pci = Some(pc.pci);
-        if clone {
-            live.resend_interrupts();
-        }
-        Ok((live, pc.vsock))
-    }
-
-    /// The CPU model the guest sees.
-    pub fn cpu_model(&self) -> CpuModel {
-        self.cpu_model
-    }
-
     /// A stable identifier of the CPU the guest sees (lowercase hex SHA-256):
-    /// equal fingerprints mean the same CPUID and feature MSRs, so a
-    /// snapshot taken on one machine is CPU-compatible with the other.
+    /// equal fingerprints mean the same CPU, so a snapshot taken on one host
+    /// is CPU-compatible with another.
     pub fn cpu_fingerprint(&self) -> &str {
         &self.cpu_fingerprint
     }
@@ -1983,14 +910,6 @@ impl Machine {
     /// How many vCPUs the machine has.
     pub fn vcpus(&self) -> u32 {
         self.vcpu_count
-    }
-
-    /// The CPUID result the guest gets for leaf `function`, subleaf `index`,
-    /// as configured for vCPU 0 (other vCPUs differ only in their APIC ID
-    /// and topology fields). `None` for a leaf the table does not hold.
-    #[cfg(target_arch = "x86_64")]
-    pub fn cpuid(&self, function: u32, index: u32) -> Option<CpuidEntry> {
-        self.cpuid.iter().find(|e| e.matches(function, index)).copied()
     }
 
     /// Size of guest RAM in bytes.
@@ -2002,122 +921,36 @@ impl Machine {
     /// memory mapped into them now. A snapshot records it, so that a restore
     /// puts everything back at the same addresses.
     pub fn memory_layout(&self) -> crate::memory::MemoryLayout {
-        match &self.body {
-            Body::Live(live) => live.vm.memory_layout(),
-            // A suspended machine has no device memory mapped.
-            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-            _ => crate::arch::x86_64::layout::memory_layout(self.mem_size as u64),
-        }
+        self.live.vm.memory_layout()
     }
 
-    /// A handle that maps host memory into the guest's MMIO windows at
-    /// runtime, from any thread, each mapping in a memory slot of its own
-    /// that is removed when dropped. [`load`](Machine::load) and
-    /// [`read_memory`](Machine::read_memory) reach RAM only; device memory
-    /// is accessed through its [`HostMemory`](crate::HostMemory).
-    ///
-    /// The handle is the hypervisor VM's: a [suspension](Machine::suspend)
-    /// frees the VM, after which the handle maps nothing (an error says
-    /// why), and this gives one that maps nothing until the machine runs
-    /// again.
-    #[cfg(target_os = "linux")]
-    pub fn memory_slots(&self) -> crate::MemorySlots {
-        match &self.body {
-            Body::Live(live) => live.vm.memory_slots().clone(),
-            #[cfg(target_arch = "x86_64")]
-            _ => self.retired_slots.clone().expect("a machine that is not live was suspended"),
-        }
-    }
-
-    /// The guest's RAM as this process maps it, on Hypervisor.framework: its one region's host
-    /// memory, which its guest and devices change as the machine runs, a memory cell's snapshot
-    /// reads (cladefs's `MemoryCell::write_resident`) while it doesn't.
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    /// The guest's RAM as this process maps it: its one region's host memory, which its guest
+    /// and devices change as the machine runs, a memory cell's snapshot reads (cladefs's
+    /// `MemoryCell::write_resident`) while it doesn't.
     pub fn ram_host(&self) -> Result<(std::ptr::NonNull<u8>, usize)> {
-        ram_host_of(self.live()?.vm.guest_memory())
+        ram_host_of(self.live.vm.guest_memory())
     }
 
-    /// Copies `bytes` into guest RAM at guest physical address `addr` (a
-    /// suspended machine is restored for it, and stays suspended).
+    /// Copies `bytes` into guest RAM at guest physical address `addr`.
     pub fn load(&mut self, addr: u64, bytes: &[u8]) -> Result<()> {
-        self.live_mut()?.vm.write_memory(addr, bytes)
+        self.live.vm.write_memory(addr, bytes)
     }
 
     /// Reads `len` bytes of guest RAM starting at guest physical address
-    /// `addr` (from its file, if the machine is suspended).
+    /// `addr`.
     pub fn read_memory(&self, addr: u64, len: usize) -> Result<Vec<u8>> {
         let mut buf = vec![0; len];
-        match &self.body {
-            Body::Live(live) => live.vm.read_memory(addr, &mut buf)?,
-            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-            Body::Frozen(_) => self.read_suspended(addr, &mut buf)?,
-            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-            Body::Lost(why) => return Err(lost(why)),
-        }
+        self.live.vm.read_memory(addr, &mut buf)?;
         Ok(buf)
-    }
-
-    /// Guest RAM at `addr`, read from a suspended machine's file.
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    fn read_suspended(&self, addr: u64, buf: &mut [u8]) -> Result<()> {
-        use crate::memory::RegionKind;
-        use std::os::unix::fs::FileExt;
-
-        let ram = self.ram_file.as_ref().expect("a suspended machine has its file");
-        let layout = crate::arch::x86_64::layout::memory_layout(self.mem_size as u64);
-        let mut at = addr;
-        let mut done = 0;
-        while done < buf.len() {
-            let (region, offset) = layout
-                .of_kind(RegionKind::Ram)
-                .zip(&ram.offsets)
-                .find(|(r, _)| r.start <= at && at < r.start + r.size)
-                .ok_or_else(|| {
-                    Error::InvalidConfig(format!(
-                        "{at:#x} is not guest RAM (reading {} bytes from {addr:#x})",
-                        buf.len()
-                    ))
-                })?;
-            let n = ((region.start + region.size - at) as usize).min(buf.len() - done);
-            ram.file
-                .read_exact_at(&mut buf[done..done + n], offset + (at - region.start))
-                .map_err(|source| Error::Io {
-                    path: "the suspended machine's file".into(),
-                    source,
-                })?;
-            done += n;
-            at += n as u64;
-        }
-        Ok(())
-    }
-
-    /// Points vCPU 0 at `addr` in 16-bit real mode (CS base 0, IP = `addr`).
-    /// `addr` must be below 64 KiB.
-    #[cfg(target_arch = "x86_64")]
-    pub fn set_entry(&mut self, addr: u64) -> Result<()> {
-        if addr > 0xffff {
-            return Err(Error::InvalidConfig(format!(
-                "real-mode entry point must be below 0x10000, got {addr:#x}"
-            )));
-        }
-        self.live_mut()?.vcpus.get(0).vcpu.set_real_mode_entry(addr)
     }
 
     /// Points vCPU 0 at `addr`, at EL1 with its MMU off and interrupts masked, as a kernel's
     /// entry is.
-    #[cfg(target_arch = "aarch64")]
     pub fn set_entry(&mut self, addr: u64) -> Result<()> {
         let cpu = crate::arch::aarch64::boot::BootCpu { pc: addr, x: [0; 4] };
         // On its own thread, which created it.
         let job = Box::new(move |v: &mut MachineVcpu| v.vcpu.set_boot_cpu(&cpu));
-        self.live_mut()?.vcpus.on(0, job)
-    }
-
-    /// vCPU 0's register state (not while the machine is suspended: they
-    /// are in its file until it runs).
-    #[cfg(target_arch = "x86_64")]
-    pub fn registers(&self) -> Result<Registers> {
-        self.live()?.vcpus.get(0).vcpu.registers()
+        self.live.vcpus.on(0, job)
     }
 
     fn output(&self) -> std::sync::MutexGuard<'_, serial::Output> {
@@ -2144,25 +977,6 @@ impl Machine {
         self.output().console = Some(std::sync::Mutex::new(Box::new(console)));
     }
 
-    /// The PCI bus, on a PC machine that is not suspended.
-    #[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
-    pub(crate) fn pci(&self) -> Option<&crate::devices::Pci> {
-        self.live().ok()?.pci.as_deref()
-    }
-
-    /// The vCPU that ended the last run (none for a stop request seen
-    /// before the run, or a timeout).
-    #[cfg(test)]
-    pub(crate) fn last_exit_vcpu(&self) -> Option<u32> {
-        self.live().ok()?.vcpus.last_vcpu()
-    }
-
-    /// The CPU time each vCPU thread has used.
-    #[cfg(all(test, target_os = "linux"))]
-    pub(crate) fn vcpu_thread_cpu_times(&self) -> Vec<Duration> {
-        self.live().map(|live| live.vcpus.thread_cpu_times()).unwrap_or_default()
-    }
-
     /// The host's side of the machine's balloon, if it has one ([`MachineConfig::balloon`]).
     pub fn balloon(&self) -> Option<&crate::Balloon> {
         self.balloon.as_ref()
@@ -2170,8 +984,7 @@ impl Machine {
 
     /// The host's end of the machine's vsock (board machines only): connect to
     /// the guest's ports and accept its connections, from any thread,
-    /// including while another is in [`run`](Machine::run), and across
-    /// suspensions.
+    /// including while another is in [`run`](Machine::run).
     pub fn vsock(&self) -> Option<crate::Vsock> {
         self.vsock.clone()
     }
@@ -2184,23 +997,22 @@ impl Machine {
     }
 
     /// How many vCPU exits of each kind the machine has taken since it was
-    /// created (across suspensions), over all its vCPUs: the accesses to
-    /// each device, the kicks that stopped a vCPU, and so on
-    /// ([`ExitCounts`]). Counting costs the exit path no measurable time.
-    /// While the machine runs, a reading may lag the vCPUs by a few exits.
+    /// created, over all its vCPUs: the accesses to each device, the kicks
+    /// that stopped a vCPU, and so on ([`ExitCounts`]). Counting costs the
+    /// exit path no measurable time. While the machine runs, a reading may
+    /// lag the vCPUs by a few exits.
     pub fn exit_counts(&self) -> ExitCounts {
         self.exits.iter().map(|e| e.read()).sum()
     }
 
     /// The machine's network, if [`MachineConfig::network`] gave it one:
     /// its policy can change from any thread, including while another is in
-    /// [`run`](Machine::run) or the machine is suspended.
+    /// [`run`](Machine::run).
     pub fn network(&self) -> Option<crate::net::Network> {
         self.network.clone()
     }
 
-    /// A handle that stops [`run`](Machine::run) from any thread (and ends
-    /// a suspended machine's [`wait_woken`](Machine::wait_woken)).
+    /// A handle that stops [`run`](Machine::run) from any thread.
     pub fn stop_handle(&self) -> StopHandle {
         StopHandle::new(self.stop.clone())
     }
@@ -2211,7 +1023,6 @@ impl Machine {
     /// stops before `run` returns, and the machine keeps its state: `run`
     /// again resumes them all. An error on any vCPU ends the run the same
     /// way and is returned. Blocks the calling thread while the guest runs.
-    /// A suspended machine is restored from its file first.
     ///
     /// When the guest powers off, resets or triple-faults, everything
     /// waiting on it fails at once: vsock streams and connects with a reset,
@@ -2237,12 +1048,9 @@ impl Machine {
     fn ran(&self, outcome: &Result<ExitReason>) {
         let stopped =
             matches!(outcome, Ok(ExitReason::Poweroff | ExitReason::Reset | ExitReason::Shutdown));
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         if stopped && let Some(vsock) = &self.vsock {
             vsock.guest_stopped();
         }
-        #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
-        let _ = stopped;
     }
 
     /// Starts a run like [`run`](Machine::run) (or, with a `timeout`,
@@ -2254,31 +1062,8 @@ impl Machine {
     /// The timeout is enforced while someone waits on the run; a run left
     /// unwaited past its timeout ends at the next wait.
     pub fn start_run(&mut self, timeout: Option<Duration>) -> Run<'_> {
-        // A suspended machine resumes: restored from its file, its RAM
-        // coming back as it is touched.
-        let thawed = self.live_mut().map(|_| ());
-        self.doorbell.disarm();
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-        if thawed.is_ok()
-            && std::mem::take(&mut self.resend)
-            && let Body::Live(live) = &self.body
-        {
-            live.resend_interrupts();
-        }
-        let ready = match thawed {
-            Ok(()) => self.running_vcpus().start(timeout.map(|t| Instant::now() + t)),
-            Err(e) => Some(Err(e)),
-        };
+        let ready = self.live.vcpus.start(timeout.map(|t| Instant::now() + t));
         Run { machine: self, ready }
-    }
-
-    /// The vCPUs of a machine with a run in progress (which is live).
-    fn running_vcpus(&mut self) -> &mut Vcpus<MachineVcpu> {
-        match &mut self.body {
-            Body::Live(live) => &mut live.vcpus,
-            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-            _ => unreachable!("a run in progress has its vCPUs"),
-        }
     }
 }
 
@@ -2320,7 +1105,7 @@ impl<'m> Run<'m> {
         if let Some(outcome) = self.ready.take() {
             return Waited::Ended(self.ended(outcome));
         }
-        match self.machine.running_vcpus().wait(Some(Instant::now() + timeout)) {
+        match self.machine.live.vcpus.wait(Some(Instant::now() + timeout)) {
             Some(outcome) => Waited::Ended(self.ended(outcome)),
             None => Waited::Running(self),
         }
@@ -2341,7 +1126,7 @@ impl<'m> Run<'m> {
         if let Some(outcome) = self.ready.take() {
             return self.ended(outcome);
         }
-        self.machine.running_vcpus().stop();
+        self.machine.live.vcpus.stop();
         self.finish()
     }
 
@@ -2352,7 +1137,7 @@ impl<'m> Run<'m> {
 
     fn finish(&mut self) -> Result<ExitReason> {
         let outcome =
-            self.machine.running_vcpus().wait(None).expect("a wait without a limit lasts the run");
+            self.machine.live.vcpus.wait(None).expect("a wait without a limit lasts the run");
         self.ended(outcome)
     }
 
@@ -2368,10 +1153,8 @@ impl<'m> Run<'m> {
 
 impl Drop for Run<'_> {
     fn drop(&mut self) {
-        if let Body::Live(live) = &mut self.machine.body
-            && live.vcpus.in_run()
-        {
-            live.vcpus.stop();
+        if self.machine.live.vcpus.in_run() {
+            self.machine.live.vcpus.stop();
             let _ = self.finish();
         }
     }
@@ -2383,8 +1166,8 @@ impl std::fmt::Debug for Run<'_> {
     }
 }
 
-// Machines are shared across threads by callers (and Python requires it),
-// and a run in progress can be waited on from another thread.
+// Machines are shared across threads by callers, and a run in progress can be waited on from
+// another thread.
 const _: () = {
     const fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<Machine>();
@@ -2397,13 +1180,12 @@ impl std::fmt::Debug for Machine {
             .field("platform", &self.platform)
             .field("mem_size", &self.mem_size)
             .field("vcpus", &self.vcpu_count)
-            .field("suspended", &self.suspended())
             .field("serial_bytes", &self.output().len())
             .finish_non_exhaustive()
     }
 }
 
-#[cfg(all(test, target_arch = "x86_64"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -2417,64 +1199,9 @@ mod tests {
         }
     }
 
-    /// A suspended machine whose wake fails (its file damaged here) is
-    /// lost cleanly: the run fails, so does every call waiting on its
-    /// vsock (none waits for good), and so does everything after.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_wake_that_fails_loses_the_machine_and_fails_its_callers() {
-        use std::os::unix::fs::FileExt;
-        let Some(dir) = crate::devices::guest_tests::guest() else {
-            return;
-        };
-        let boot = LinuxBoot {
-            kernel: dir.join("vmlinux"),
-            initrd: Some(dir.join("initramfs.cpio")),
-            cmdline: "quiet libmachine_action=agent".into(),
-        };
-        let config = MachineConfig { mem_size: 256 << 20, ..Default::default() };
-        let mut m = Machine::boot_linux(config, &boot).unwrap();
-        let agent = m.agent().unwrap().timeout(Some(Duration::from_secs(60)));
-        let stop = m.stop_handle();
-        let runner = std::thread::spawn(move || (m.run(), m));
-        agent.wait_ready(Duration::from_secs(60)).unwrap();
-        stop.stop();
-        let (exit, mut m) = runner.join().unwrap();
-        assert_eq!(exit.unwrap(), ExitReason::Stopped);
-        let ram_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target");
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            match m.suspend(&ram_dir) {
-                Ok(()) => break,
-                Err(Error::Busy(_)) if Instant::now() < deadline => {
-                    m.run_for(Duration::from_millis(2)).unwrap();
-                }
-                Err(e) => panic!("suspend: {e}"),
-            }
-        }
-        // A byte of the state's checksum, in the header.
-        let file = m.ram_file.as_ref().unwrap().file.clone();
-        let mut b = [0u8; 1];
-        file.read_exact_at(&mut b, 40).unwrap();
-        file.write_all_at(&[!b[0]], 40).unwrap();
-
-        let caller = std::thread::spawn(move || agent.exec(&crate::agent::Command::new("true")));
-        assert_eq!(m.wait_woken(Some(Duration::from_secs(30))), Woken::Device);
-        let err = m.run().unwrap_err();
-        assert!(err.to_string().contains("checksum"), "{err}");
-        let start = Instant::now();
-        assert!(caller.join().unwrap().is_err(), "the call fails");
-        assert!(start.elapsed() < Duration::from_secs(10));
-        assert!(!m.suspended());
-        assert!(matches!(m.run(), Err(Error::GuestGone(_))));
-        assert!(matches!(m.suspend(&ram_dir), Err(Error::GuestGone(_))));
-        assert!(m.read_memory(0x10_0000, 16).is_err());
-        assert!(m.vsock().unwrap().connect(1024, Duration::from_secs(1)).is_err());
-    }
-
     #[test]
     fn ram_size_limits() {
-        use crate::arch::x86_64::layout::MAX_RAM;
+        use crate::arch::aarch64::layout::MAX_RAM;
         for ok in [4096, 3 << 30, (3 << 30) + 4096, 4 << 30, MAX_RAM as usize] {
             assert!(check_mem_size(ok).is_ok(), "{ok:#x}");
         }

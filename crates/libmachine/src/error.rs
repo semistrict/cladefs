@@ -23,10 +23,6 @@ pub enum Error {
         source: std::io::Error,
     },
 
-    /// The requested CPU model cannot be provided on this host.
-    #[error("{0}")]
-    CpuModel(String),
-
     /// The hypervisor rejected an operation.
     #[error("hypervisor error during {op}: {source}")]
     Hypervisor {
@@ -107,17 +103,6 @@ pub enum Error {
     /// `private_max` (Firecracker's `AccessRefused`, TASK-70).
     #[error("extent store device: {0}")]
     AccessRefused(String),
-
-    /// The guest is not idle, so it cannot be suspended now
-    /// ([`Machine::suspend`](crate::Machine::suspend)): a vCPU is running
-    /// or has an interrupt to take.
-    #[error("the guest is busy: {0}")]
-    Busy(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
-
-#[cfg(target_os = "linux")]
-pub(crate) fn kvm_err(op: &'static str) -> impl FnOnce(kvm_ioctls::Error) -> Error {
-    move |e| Error::Hypervisor { op, source: std::io::Error::from_raw_os_error(e.errno()) }
-}

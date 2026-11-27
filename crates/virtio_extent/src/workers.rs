@@ -27,7 +27,7 @@ use std::sync::{Arc, Mutex};
 use log::error;
 
 use crate::BoxError;
-use crate::buffers::Buffers;
+use cladefs::extent_requests::Buffers;
 
 /// A request the driver made available: its descriptor chain's head, and its buffers, or why the
 /// chain is no request's (its guest memory not the guest's, or too long: [`BuffersError`]),

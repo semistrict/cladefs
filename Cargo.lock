@@ -3,15 +3,6 @@
 version = 4
 
 [[package]]
-name = "acpi_tables"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce821f856a3eb1d033287f2dcfcdf94276d7895dd5bdd8ca45ae17e7d33d4dd9"
-dependencies = [
- "zerocopy",
-]
-
-[[package]]
 name = "addr2line"
 version = "0.27.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1134,6 +1125,7 @@ dependencies = [
  "thiserror",
  "toml",
  "url",
+ "zerocopy",
 ]
 
 [[package]]
@@ -2463,15 +2455,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "iced-x86"
-version = "1.22.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c23ad4d19dca41180e835ef6fbd2c1ee655777eca086ad80dd517e0513322879"
-dependencies = [
- "lazy_static",
-]
-
-[[package]]
 name = "icu_collections"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2767,29 +2750,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "kvm-bindings"
-version = "0.14.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3819cba3d5b448587dbed4b186fb61b0a8d02c5eb88846c9463aa514afe61a8"
-dependencies = [
- "serde",
- "vmm-sys-util",
- "zerocopy",
-]
-
-[[package]]
-name = "kvm-ioctls"
-version = "0.25.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7a59b7ac62625a405112180b56a99acb4498e1d18f5a7c0cd0916c79a076b0a"
-dependencies = [
- "bitflags 2.13.2",
- "kvm-bindings",
- "libc",
- "vmm-sys-util",
-]
-
-[[package]]
 name = "lazy_static"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2822,20 +2782,14 @@ dependencies = [
 name = "libmachine"
 version = "0.1.0"
 dependencies = [
- "acpi_tables",
  "cladefs",
  "cladefs_core",
  "dynasm",
  "dynasmrt",
  "futures",
- "iced-x86",
- "kvm-bindings",
- "kvm-ioctls",
  "libc",
  "libcladefs",
  "libmachine-agent",
- "linux-loader",
- "madsim-tokio",
  "sha2 0.11.0",
  "smoltcp",
  "socket2",
@@ -2846,7 +2800,6 @@ dependencies = [
  "vm-fdt",
  "vm-memory",
  "vm-superio",
- "vmm-sys-util",
  "zerocopy",
 ]
 
@@ -2868,15 +2821,6 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "tempfile",
-]
-
-[[package]]
-name = "libmachine-py"
-version = "0.1.0"
-dependencies = [
- "libmachine",
- "madsim-tokio",
- "pyo3",
 ]
 
 [[package]]
@@ -2905,15 +2849,6 @@ name = "linked-hash-map"
 version = "0.5.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0717cef1bc8b636c6e1c1bbdefc09e6322da8a9321966e8928ef80d20f7f770f"
-
-[[package]]
-name = "linux-loader"
-version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d54207cb617cd75b10c57ad20235c914ab62b180ceeff2ef3111983670d3b321"
-dependencies = [
- "vm-memory",
-]
 
 [[package]]
 name = "linux-raw-sys"
@@ -3944,63 +3879,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pyo3"
-version = "0.30.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "229ca13b8a15bb0d1487b81ab975bfcd97513416499a8312011b6036e42e0de4"
-dependencies = [
- "libc",
- "once_cell",
- "portable-atomic",
- "pyo3-build-config",
- "pyo3-ffi",
- "pyo3-macros",
-]
-
-[[package]]
-name = "pyo3-build-config"
-version = "0.30.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "70130e2b6dd1ee589a8788026a429561ca5c40fa7a2fa7914c2282eddae24700"
-dependencies = [
- "target-lexicon",
-]
-
-[[package]]
-name = "pyo3-ffi"
-version = "0.30.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e7ff73c555c286d212d4ce7e5fbda845a973c4f61bd5f160f5f2c3c2a04d1c4"
-dependencies = [
- "libc",
- "pyo3-build-config",
-]
-
-[[package]]
-name = "pyo3-macros"
-version = "0.30.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c46d2e5862c7bb8207e3b639f713dda3c499933444784154c11d013c5a691b60"
-dependencies = [
- "proc-macro2",
- "pyo3-macros-backend",
- "quote",
- "syn 3.0.6",
-]
-
-[[package]]
-name = "pyo3-macros-backend"
-version = "0.30.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "38b89f066f2ae72a2aef52d1537ca2fcd104440ebfadee06e97aa90738a25b9b"
-dependencies = [
- "heck",
- "proc-macro2",
- "quote",
- "syn 3.0.6",
-]
-
-[[package]]
 name = "quick-error"
 version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4823,6 +4701,8 @@ checksum = "f9395f0f0eee849a9b707b2f06bb92a6a422090e2123bb2ef8e87a0e61892a8e"
 [[package]]
 name = "smoltcp"
 version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dad095989c1533c1c266d9b1e8d70a1329dd3723c3edac6d03bbd67e7bf6f4bb"
 dependencies = [
  "bitflags 1.3.2",
  "byteorder",
@@ -5064,12 +4944,6 @@ dependencies = [
  "filetime",
  "libc",
 ]
-
-[[package]]
-name = "target-lexicon"
-version = "0.13.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8c447be3a2abfa84b2d91680c56600bd6b2873866de27b36ec911be705e291da"
 
 [[package]]
 name = "tempfile"

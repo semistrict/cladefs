@@ -7,19 +7,17 @@
 //! [`MAX_FRAME`] bytes. It is the build's own (machined runs the helper of its own build, from
 //! beside it), unfrozen: a start of another [`PROTOCOL`] is refused.
 //!
-//! - **machined to the helper:** [`Start`] first, once; then [`Request`]s: stop, snapshot,
-//!   suspend, resume and balloon, as asked.
-//! - **The helper to machined:** [`Started`] once the machine runs (or [`Ended`] if it never
-//!   did); its console's bytes as they come; whether its guest is suspended as that changes; an
-//!   answer to each snapshot, suspend and resume, in the order they were asked; [`Ended`] last,
-//!   once it is freed.
+//! - **machined to the helper:** [`Start`] first, once; then [`Empty`], to stop the machine.
+//! - **The helper to machined:** [`event::Kind::Started`] once the machine runs (or
+//!   [`Ended`] if it never did); its console's bytes as they come; [`Ended`] last, once it is
+//!   freed.
 
 use std::io;
 
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 
 /// The wire's version: a helper of another refuses its start.
-pub(crate) const PROTOCOL: u32 = 1;
+pub(crate) const PROTOCOL: u32 = 2;
 /// The largest frame either side takes: a console chunk, a spec.
 pub(crate) const MAX_FRAME: usize = 4 << 20;
 
@@ -34,111 +32,38 @@ pub(crate) struct Start {
     /// machined's images directory, which the spec's paths are in.
     #[prost(string, tag = "3")]
     pub(crate) images: String,
-    /// A snapshot's file to restore from (KVM); empty to boot the spec's kernel.
-    #[prost(string, tag = "4")]
-    pub(crate) snapshot: String,
     /// Where the helper serves the machine's vsock socket.
-    #[prost(string, tag = "5")]
+    #[prost(string, tag = "4")]
     pub(crate) vsock_socket: String,
     /// Where machined's cladefs daemon serves VM processes, which the machine's extent store
     /// devices (its root's) connect to.
-    #[prost(string, tag = "6")]
+    #[prost(string, tag = "5")]
     pub(crate) cladefs_socket: String,
 }
 
-/// What machined asks of a running machine.
-#[derive(Clone, PartialEq, prost::Message)]
-pub(crate) struct Request {
-    #[prost(oneof = "request::Kind", tags = "2, 3, 4, 5, 6")]
-    pub(crate) kind: Option<request::Kind>,
-}
-
-pub(crate) mod request {
-    #[derive(Clone, PartialEq, prost::Oneof)]
-    pub(crate) enum Kind {
-        /// Stops the machine.
-        #[prost(message, tag = "2")]
-        Stop(super::Empty),
-        /// Writes a snapshot of it to this file.
-        #[prost(string, tag = "3")]
-        Snapshot(String),
-        /// Suspends its idle guest into a file in this directory.
-        #[prost(string, tag = "4")]
-        Suspend(String),
-        /// Wakes its suspended guest.
-        #[prost(message, tag = "5")]
-        Resume(super::Empty),
-        /// Sets its balloon's target, if given, and says how it stands.
-        #[prost(message, tag = "6")]
-        Balloon(super::BalloonTarget),
-    }
-}
-
+/// The frame that stops the machine, and the one that says it runs.
 #[derive(Clone, Copy, PartialEq, Eq, prost::Message)]
 pub(crate) struct Empty {}
-
-#[derive(Clone, Copy, PartialEq, Eq, prost::Message)]
-pub(crate) struct BalloonTarget {
-    #[prost(uint64, optional, tag = "1")]
-    pub(crate) bytes: Option<u64>,
-}
 
 /// What the helper says.
 #[derive(Clone, PartialEq, prost::Message)]
 pub(crate) struct Event {
-    #[prost(oneof = "event::Kind", tags = "1, 2, 3, 4, 5")]
+    #[prost(oneof = "event::Kind", tags = "1, 2, 3")]
     pub(crate) kind: Option<event::Kind>,
 }
 
 pub(crate) mod event {
     #[derive(Clone, PartialEq, prost::Oneof)]
     pub(crate) enum Kind {
-        /// The machine runs, of this vsock generation (0 if it booted).
-        #[prost(uint64, tag = "1")]
-        Started(u64),
+        /// The machine runs.
+        #[prost(message, tag = "1")]
+        Started(super::Empty),
         /// Its console's bytes.
         #[prost(bytes = "vec", tag = "2")]
         Console(Vec<u8>),
-        /// Whether its guest is suspended now.
-        #[prost(bool, tag = "3")]
-        Suspended(bool),
-        /// The answer to the oldest request not yet answered.
-        #[prost(message, tag = "4")]
-        Answer(super::Answer),
         /// How it ended: the last event.
-        #[prost(message, tag = "5")]
+        #[prost(message, tag = "3")]
         Ended(super::Ended),
-    }
-}
-
-/// An answer: done, or a status's code and message (machined's API's, as `errors::status`
-/// makes them).
-#[derive(Clone, PartialEq, prost::Message)]
-pub(crate) struct Answer {
-    #[prost(int32, tag = "1")]
-    pub(crate) code: i32,
-    #[prost(string, tag = "2")]
-    pub(crate) message: String,
-    /// A balloon's, as it stands, answering a Balloon request.
-    #[prost(message, optional, tag = "3")]
-    pub(crate) balloon: Option<crate::proto::BalloonStatus>,
-}
-
-impl Answer {
-    pub(crate) fn of(result: Result<Option<crate::proto::BalloonStatus>, tonic::Status>) -> Self {
-        match result {
-            Ok(balloon) => Self { code: 0, message: String::new(), balloon },
-            Err(status) => {
-                Self { code: status.code().into(), message: status.message().into(), balloon: None }
-            }
-        }
-    }
-
-    pub(crate) fn result(self) -> Result<Option<crate::proto::BalloonStatus>, tonic::Status> {
-        match self.code {
-            0 => Ok(self.balloon),
-            code => Err(tonic::Status::new(code.into(), self.message)),
-        }
     }
 }
 

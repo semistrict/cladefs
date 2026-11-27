@@ -5,15 +5,14 @@
 //! A machine's vCPU threads, and the runs they make together.
 //!
 //! Every vCPU has a host thread of its own for the machine's whole life:
-//! KVM, seccomp filters and cladefs's per-thread setup all want a vCPU to stay
-//! on one thread (KVM pays a `synchronize_rcu` whenever a vCPU's `KVM_RUN`
-//! comes from a new thread). Between runs the threads wait. A run starts
+//! Hypervisor.framework ties a vCPU to the thread that created it, and
+//! cladefs's per-thread setup wants it to stay there. Between runs the threads wait. A run starts
 //! them all; the caller's thread runs no vCPU, it waits for the run to end.
 //!
 //! A run ends with one outcome: the first of a vCPU's exit (power-off,
 //! reset, triple fault, an error, a panic), a stop request, or the timeout.
 //! Whoever records it then stops the others: it sets `stopping` and kicks
-//! every vCPU thread out of `KVM_RUN`. Outcomes that come later are
+//! every vCPU thread out of the guest. Outcomes that come later are
 //! dropped, except a stop request, which is kept for the next run. The run
 //! returns once every vCPU has stopped, so the machine's state is still
 //! between runs.
@@ -28,7 +27,7 @@
 //! snapshot and a restore go through there.
 //!
 //! The coordination is generic over the vCPU loop ([`VcpuLoop`]), so that
-//! its unit tests run fake vCPUs without KVM.
+//! its unit tests run fake vCPUs without a VM.
 
 use std::ops::ControlFlow;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -46,15 +45,9 @@ use crate::stop::StopShared;
 
 /// What a vCPU thread runs.
 pub(crate) trait VcpuLoop: Send + 'static {
-    /// What the kick needs to reach this vCPU (`backend::kick`): on KVM, the `immediate_exit`
-    /// byte the kick signal sets, which must stay valid as long as the value lives.
+    /// What the kick needs to reach this vCPU (`backend::kick`), which must stay valid as long as
+    /// the value lives.
     fn kick_target(&mut self) -> KickTarget;
-
-    /// Sets up the vCPU's thread, once, before the vCPU first runs on it.
-    fn thread_started(&mut self) {}
-
-    /// Undoes [`thread_started`](Self::thread_started) as the thread exits, the machine dropped.
-    fn thread_ended(&mut self) {}
 
     /// Runs the vCPU until it ends the run (`Some(outcome)`), or until
     /// [`RunControl::check`], which it calls before every entry into the
@@ -211,28 +204,15 @@ impl<V: VcpuLoop> Vcpus<V> {
         self.vcpus.len()
     }
 
-    /// vCPU `id`, between runs.
-    pub(crate) fn get(&self, id: usize) -> MutexGuard<'_, V> {
-        lock(&self.vcpus[id])
-    }
-
     /// Runs `jobs[i]` on vCPU `i`'s own thread, every vCPU's at once, between runs, and returns
     /// what each returned, in vCPU order: the first error, once every job has ended. One job per
     /// vCPU. A job that panics is an error.
-    #[cfg_attr(
-        not(all(target_os = "macos", target_arch = "aarch64")),
-        allow(dead_code, reason = "KVM sets a vCPU's state from any thread")
-    )]
     pub(crate) fn on_each<R: Send + 'static>(&self, jobs: Vec<VcpuJob<V, R>>) -> Result<Vec<R>> {
         assert_eq!(jobs.len(), self.vcpus.len(), "a job per vCPU");
         self.run_jobs(jobs.into_iter().enumerate().collect())
     }
 
     /// Runs `job` on vCPU `id`'s own thread, between runs, as [`on_each`](Self::on_each) does.
-    #[cfg_attr(
-        not(all(target_os = "macos", target_arch = "aarch64")),
-        allow(dead_code, reason = "KVM sets a vCPU's state from any thread")
-    )]
     pub(crate) fn on<R: Send + 'static>(&self, id: usize, job: VcpuJob<V, R>) -> Result<R> {
         let mut done = self.run_jobs(vec![(id, job)])?;
         Ok(done.pop().expect("one job, one answer"))
@@ -275,32 +255,6 @@ impl<V: VcpuLoop> Vcpus<V> {
     #[cfg_attr(not(test), allow(dead_code, reason = "diagnostics, read by tests"))]
     pub(crate) fn last_vcpu(&self) -> Option<u32> {
         self.last_vcpu
-    }
-
-    /// The CPU time each vCPU thread has used.
-    #[cfg(all(test, target_os = "linux"))]
-    pub(crate) fn thread_cpu_times(&self) -> Vec<Duration> {
-        use std::os::unix::thread::JoinHandleExt;
-        self.threads
-            .iter()
-            .map(|t| {
-                let mut clock: libc::clockid_t = 0;
-                let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
-                // SAFETY: the thread is alive (joined only on drop); valid
-                // pointers to owned values.
-                unsafe {
-                    assert_eq!(
-                        libc::pthread_getcpuclockid(
-                            t.as_pthread_t() as libc::pthread_t,
-                            &mut clock
-                        ),
-                        0
-                    );
-                    assert_eq!(libc::clock_gettime(clock, &mut ts), 0);
-                }
-                Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
-            })
-            .collect()
     }
 
     /// Runs every vCPU until one ends the run, a stop request, or
@@ -435,9 +389,7 @@ fn vcpu_thread<V: VcpuLoop>(
     ready: mpsc::SyncSender<Result<()>>,
 ) {
     let target = lock(&vcpu).kick_target();
-    // SAFETY: the target is this thread's vCPU's, which `vcpu` keeps alive
-    // until after the scope (declared later, dropped first).
-    let scope = unsafe { VcpuThreadScope::enter(target) };
+    let scope = VcpuThreadScope::enter(target);
     let _scope = match scope {
         Ok(scope) => scope,
         Err(e) => {
@@ -448,8 +400,6 @@ fn vcpu_thread<V: VcpuLoop>(
     // Dropped before `_scope`: the thread is never kicked once it
     // unregisters.
     let _registration = shared.stop.register(_scope.kicker());
-    // Undone as the thread quits, below.
-    lock(&vcpu).thread_started();
     let _ = ready.send(Ok(()));
     drop(ready);
 
@@ -467,8 +417,6 @@ fn vcpu_thread<V: VcpuLoop>(
                 continue;
             }
             if state.quit {
-                drop(state);
-                lock(&vcpu).thread_ended();
                 return;
             }
             seen = state.generation;

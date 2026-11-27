@@ -2,105 +2,60 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Helpers shared by the KVM integration tests: guest programs are written
-//! with iced-x86's code assembler, never as raw bytes.
+//! What the guest tests share: the arm64 guest they boot, the one VM a process has, and the
+//! guest programs of the bare machine's tests, assembled (dynasm, never raw bytes).
 #![allow(dead_code)]
 
 use std::path::PathBuf;
+use std::sync::{Mutex, MutexGuard};
 
-use iced_x86::IcedError;
-use iced_x86::code_asm::*;
-use libmachine::{Machine, MachineConfig};
+/// Hypervisor.framework gives a process one VM: one test's machine at a time.
+pub fn one_machine() -> MutexGuard<'static, ()> {
+    static ONE: Mutex<()> = Mutex::new(());
+    ONE.lock().unwrap_or_else(|e| e.into_inner())
+}
 
-/// Where test programs are loaded and start, in 16-bit real mode.
-pub const ENTRY: u64 = 0x1000;
+/// cladefs's arm64 kernel and the test initramfs, if both are there (else a note): the kernel is
+/// `CLADEFS_GUEST_KERNEL`, else `target/arm64-guest/Image`; the initramfs is in
+/// `LIBMACHINE_GUEST_DIR`, else `target/arm64-guest` (`crates/libmachine/scripts/arm64-guest.sh`
+/// fetches both).
+pub fn guest() -> Option<(PathBuf, PathBuf)> {
+    let default = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/arm64-guest");
+    let kernel = std::env::var_os("CLADEFS_GUEST_KERNEL")
+        .map_or_else(|| default.join("Image"), PathBuf::from);
+    let initrd = std::env::var_os("LIBMACHINE_GUEST_DIR")
+        .map_or(default, PathBuf::from)
+        .join("initramfs.cpio");
+    if !kernel.is_file() || !initrd.is_file() {
+        eprintln!(
+            "skipping: no arm64 guest at {} and {} (run crates/libmachine/scripts/arm64-guest.sh)",
+            kernel.display(),
+            initrd.display()
+        );
+        return None;
+    }
+    Some((kernel, initrd))
+}
 
-/// Whether /dev/kvm can be used. Tests return early (with a note) when it
-/// cannot, so the suite passes on CI machines without virtualization.
-pub fn kvm_available() -> bool {
-    let ok = std::fs::OpenOptions::new().read(true).write(true).open("/dev/kvm").is_ok();
+/// Where a bare machine's program goes: RAM's start.
+pub const ENTRY: u64 = 0x8000_0000;
+
+/// Assembles `program`, for `ENTRY`.
+pub fn assemble(
+    program: impl FnOnce(&mut dynasmrt::VecAssembler<dynasmrt::aarch64::Aarch64Relocation>),
+) -> Vec<u8> {
+    let mut ops = dynasmrt::VecAssembler::new(ENTRY as usize);
+    program(&mut ops);
+    ops.finalize().expect("assemble the guest program")
+}
+
+/// Whether this host runs Hypervisor.framework's VMs (`kern.hv_support`): GitHub's macOS runners,
+/// themselves VMs, don't (board 13847). Tests return early, with a note, where it doesn't.
+pub fn hypervisor() -> bool {
+    let support = std::process::Command::new("sysctl").args(["-n", "kern.hv_support"]).output();
+    let ok = support.is_ok_and(|out| out.status.success() && out.stdout.trim_ascii() == b"1");
     if !ok {
-        eprintln!("skipping: /dev/kvm is not accessible");
+        eprintln!("skipping: this host has no Hypervisor.framework (kern.hv_support)");
     }
     ok
-}
-
-/// The test guest's directory (`crates/libmachine/scripts/build-test-guest.sh`): its kernels
-/// (bzImage, vmlinux) and its initramfs (initramfs.cpio). `LIBMACHINE_GUEST_DIR`, by default
-/// the workspace's target/guest.
-pub fn test_guest_dir() -> PathBuf {
-    std::env::var_os("LIBMACHINE_GUEST_DIR").map_or_else(
-        || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/guest"),
-        PathBuf::from,
-    )
-}
-
-/// cladefs's guest kernel, the one Firecracker boots (`CLADEFS_GUEST_KERNEL`, which
-/// `scripts/guest-kernel.sh` prints the path of), if it is there (else a note).
-pub fn cladefs_kernel() -> Option<PathBuf> {
-    let Some(kernel) = std::env::var_os("CLADEFS_GUEST_KERNEL").map(PathBuf::from) else {
-        eprintln!("skipping: no CLADEFS_GUEST_KERNEL (scripts/guest-kernel.sh prints its path)");
-        return None;
-    };
-    if !kernel.is_file() {
-        eprintln!("skipping: no cladefs kernel at {}", kernel.display());
-        return None;
-    }
-    Some(kernel)
-}
-
-/// Assembles the 16-bit real-mode code `program` emits, to run at ENTRY.
-pub fn asm16(program: impl FnOnce(&mut CodeAssembler) -> Result<(), IcedError>) -> Vec<u8> {
-    let mut a = CodeAssembler::new(16).expect("16-bit assembler");
-    program(&mut a).expect("assemble guest program");
-    a.assemble(ENTRY).expect("encode guest program")
-}
-
-/// Loads `code` at ENTRY and points the vCPU at it.
-pub fn load(m: &mut Machine, code: &[u8]) {
-    m.load(ENTRY, code).expect("load code");
-    m.set_entry(ENTRY).expect("set entry");
-}
-
-/// A machine with `code` loaded at ENTRY.
-pub fn machine_with(config: MachineConfig, code: &[u8]) -> Machine {
-    let mut m = Machine::new(config).expect("create machine");
-    load(&mut m, code);
-    m
-}
-
-/// Assembles `program` followed by `data`. The program gets the data's
-/// guest address. (iced-x86 can only address labels RIP-relative, which 16-bit
-/// code lacks, so the address is computed: a first pass measures the code,
-/// whose length does not depend on the address.)
-pub fn asm16_with_data(
-    data: &[u8],
-    program: impl Fn(&mut CodeAssembler, u16) -> Result<(), IcedError>,
-) -> Vec<u8> {
-    let len = asm16(|a| program(a, 0)).len();
-    let data_addr = u16::try_from(ENTRY as usize + len).expect("data below 64 KiB");
-    let mut code = asm16(|a| program(a, data_addr));
-    assert_eq!(code.len(), len, "code length changed with the data address");
-    code.extend_from_slice(data);
-    code
-}
-
-/// A program that writes `text` to COM1 and halts.
-pub fn serial_print(text: &[u8]) -> Vec<u8> {
-    let mut msg = text.to_vec();
-    msg.push(0);
-    asm16_with_data(&msg, |a, msg_addr| {
-        let mut next = a.create_label();
-        let mut done = a.create_label();
-        a.mov(si, msg_addr as u32)?;
-        a.mov(dx, 0x3f8)?; // COM1 transmit register
-        a.set_label(&mut next)?;
-        a.lodsb()?;
-        a.test(al, al)?;
-        a.jz(done)?;
-        a.out(dx, al)?;
-        a.jmp(next)?;
-        a.set_label(&mut done)?;
-        a.hlt()
-    })
 }

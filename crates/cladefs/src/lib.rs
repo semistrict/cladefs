@@ -15,7 +15,8 @@ compile_error!(
 #[cfg(target_os = "linux")]
 pub use cladefs_core::stacks;
 pub use cladefs_core::{
-    BUILD_COMMIT, bucket, config, faults, host, pages, protocol, request, slabs, stats,
+    BUILD_COMMIT, bucket, config, extent_requests, faults, host, pages, protocol, request, slabs,
+    stats,
 };
 pub use cladefs_core::{signals, thread};
 pub use cladefs_fs::import;

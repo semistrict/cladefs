@@ -5,7 +5,7 @@
 //! TASK-685.9 (doc-24): cladefsd under madsim, built with `RUSTFLAGS="--cfg madsim"`: two daemons
 //! booted as simulated hosts, each its own node with its own environment, sharing a bucket in
 //! memory, their control APIs on the simulated network. A cell made on one, its commits synced, is
-//! taken by the other at a later placement's token. TASK-685.5: the bucket's requests delayed and
+//! taken by the other at a later placement's token. TASK-685.5: the bucket's requests ordered and
 //! failed, before or after landing, and the bucket out of reach for stretches, as the seed says
 //! (`bucket_cell::faults::Seeded`), which the daemons' retries ride out. TASK-685.7: fault
 //! profiles, each a family of FoundationDB's (partitions one way, both and shifting, loss, peers
@@ -179,6 +179,9 @@ async fn connect(
 /// real host ran them: something outside the simulation, a seed's outcome changing with it.
 const ROOTS: &str = "/hosts";
 
+/// How often the bucket lets a waiting request go ([`bucket_cell::faults::Seeded::schedule`]).
+const SCHEDULED_EVERY: Duration = Duration::from_micros(200);
+
 /// What every test's hosts share: their logger, their KMS's master key, and a bucket in memory,
 /// its requests delayed and failed as the seed says, and what heals it.
 fn world() -> (Arc<RoutedBucket>, Arc<bucket_cell::faults::Seeded>) {
@@ -188,14 +191,17 @@ fn world() -> (Arc<RoutedBucket>, Arc<bucket_cell::faults::Seeded>) {
     unsafe { std::env::set_var("CLADEFS_MASTER_KEY", "ab".repeat(32)) };
     bucket_cell::buggify::enable(madsim::runtime::Handle::current().seed());
     let odds = bucket_cell::faults::Odds {
-        delay_most: Duration::from_millis(50),
         fail_before: 0.05,
         fail_after: 0.05,
         out_of_reach: 0.01,
         out_for: Duration::from_millis(500),
     };
     let objects = Arc::new(object_store::memory::InMemory::new());
-    let seeded = Arc::new(bucket_cell::faults::Seeded::new(objects, madsim::rand::random(), odds));
+    // Board 14493: its requests let go one at a time, the one the seed picks of all waiting, as
+    // local_cell::sim's bucket completes them: one may wait out any number of others.
+    let seeded = bucket_cell::faults::Seeded::new(objects, madsim::rand::random(), odds);
+    let seeded = Arc::new(seeded);
+    madsim::task::spawn(seeded.clone().schedule(SCHEDULED_EVERY));
     let backend = bucket_cell::faults::SeededBackend(seeded.clone());
     let bucket = ObjectBucket::new(Arc::new(backend), "");
     (Arc::new(bucket.unrouted()), seeded)
@@ -710,7 +716,7 @@ const SEARCH_SEED_TIME: Duration = Duration::from_secs(120);
 fn searched(binary: &Path, name: &str, seed: u64) -> Option<String> {
     use std::io::Read as _;
     let mut child = std::process::Command::new(binary)
-        .args(["--exact", name, "--nocapture", "--test-threads", "1"])
+        .args(["--exact", name, "--include-ignored", "--nocapture", "--test-threads", "1"])
         .env(SEARCH_SEED, seed.to_string())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -771,6 +777,15 @@ fn needed(name: &str, off: fn(), profile: Profile, seeds: u64) {
 // are a writer's racing its own commits, which one simulated guest,
 // its requests one at a time, never does: Shuttle's searches find those (tests/shuttle).
 //
+// Board 14493 (2026-11-27), the bucket's requests ordered by the seed of all waiting, as
+// local_cell::sim's are, rather than each delayed up to 50 ms: the same four found
+// (head_swap at seed 3, collector_epochs 3, references 1, references_relisted 171), and none of the
+// other 19 of bucket_cell::Rules but the fast WAL's in 2,000 seeds each
+// (scripts/madsim-rule-searches.sh). What local_cell::sim reaches that this world doesn't is its
+// steps, not its bucket's order: stale writers checkpointing late, stale deletes, twin restores,
+// versions dropped while forked. A seed here costs 0.3 s (plain) to 0.8 s (collected), against
+// local_cell::sim's 0.15 s.
+//
 // A zombie writer, its head swap unconditional, writes the head over its successor's, whose blocks
 // told uploaded the head then names not.
 needs!(attrition_needs_head_swaps, head_swap, Profile::PLAIN);
@@ -785,6 +800,32 @@ needs!(forking_needs_references, references, Profile::BASES);
 // alone: none of CI's 2000 macOS seeds finds it since 975a7dc7e (board 6866).
 #[cfg(not(target_os = "macos"))]
 needs!(forking_needs_references_relisted, references_relisted, Profile::BASES);
+
+/// Board 14493: the search of the rule `CLADEFS_MADSIM_RULE` names (a field of
+/// `bucket_cell::Rules`) over `CLADEFS_MADSIM_SEEDS` seeds ([`SEARCHED`] unless said) of the profile
+/// `CLADEFS_MADSIM_PROFILE` names (`plain`, `collected` or `bases`): what measures which of the
+/// protocol's rules this world finds, beside its fixed searches, as local_cell::sim's find them all.
+#[test]
+#[ignore = "measures the search of a rule named in its environment (board 14493)"]
+fn search_named_rule() {
+    fn var(name: &str) -> Option<String> {
+        std::env::var(name).ok().filter(|value| !value.is_empty())
+    }
+    fn off() {
+        let name = var("CLADEFS_MADSIM_RULE").expect("CLADEFS_MADSIM_RULE names a rule");
+        let mut rules = bucket_cell::Rules::ALL;
+        assert!(rules.turn_off(&name), "no rule {name}");
+        bucket_cell::set_rules(rules);
+    }
+    let profile = match var("CLADEFS_MADSIM_PROFILE").as_deref().unwrap_or("plain") {
+        "plain" => Profile::PLAIN,
+        "collected" => Profile::COLLECTED,
+        "bases" => Profile::BASES,
+        other => panic!("no profile {other}: plain, collected or bases"),
+    };
+    let seeds = var("CLADEFS_MADSIM_SEEDS").map_or(SEARCHED, |seeds| seeds.parse().unwrap());
+    needed("search_named_rule", off, profile, seeds);
+}
 
 /// How a profile cuts its hosts off the network a while, at each round, as the seed says (doc-24,
 /// FoundationDB's partitions and swizzle).
