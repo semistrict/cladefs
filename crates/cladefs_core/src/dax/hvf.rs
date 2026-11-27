@@ -720,16 +720,23 @@ impl SecondStage for HvfSecondStage {
         if state.released {
             return;
         }
+        // The window maps and unmaps whole host pages: an unmap of some units of one takes its
+        // other units away too, which the window has let go of (a composed page's slab freed),
+        // keeping their private copies, as `dax::uffd`'s replaced memory does. Only the units
+        // asked end their private copies (board 14436).
+        let host_page = page_size();
+        let end = offset + len;
+        let whole = offset - offset % host_page..end.next_multiple_of(host_page).min(self.size);
         let mut gone = Vec::new();
         let mut ended = Vec::new();
-        for (&at, unit) in state.units.range(offset..offset + len) {
+        for (&at, unit) in state.units.range(whole) {
             match (unit, private) {
                 (Unit::Named { .. }, _) => gone.push(at),
-                (Unit::Private, Private::End) => {
+                (Unit::Private, Private::End) if (offset..end).contains(&at) => {
                     gone.push(at);
                     ended.push(at);
                 }
-                (Unit::Private, Private::Keep) => {}
+                (Unit::Private, _) => {}
             }
         }
         self.unmap_units(&gone);
@@ -802,6 +809,38 @@ mod tests {
                 format!("map ro {unit:#x} {:#x}", 2 * unit),
             ]
         );
+    }
+
+    /// On a host whose page holds several units, the window unmaps whole host pages: the
+    /// guest's `MAP` of one unit takes the page's other units away too, whose memory (a composed
+    /// page's slab) the window lets go of, keeping their private copies; only the unit asked ends
+    /// its own (board 14436, writes_under_rebinds read a slab reused). On a host of 4 KiB pages,
+    /// the unit alone.
+    #[test]
+    fn a_partial_unmap_takes_its_host_pages_named_units_away() {
+        let (stage, guest) = stage();
+        stage.copy_on_write(4).unwrap();
+        let (unit, host_page) = (map_unit(), page_size());
+        let units = host_page / unit;
+        stage.map(0, at(0), host_page);
+        stage.map(host_page, at(host_page), unit);
+        let mut state = stage.state.lock().unwrap();
+        stage.privatize(&mut state, 0..unit).unwrap();
+        stage.privatize(&mut state, host_page - unit..host_page).unwrap();
+        drop(state);
+        guest.0.lock().unwrap().clear();
+        stage.unmap(0, unit, Private::End);
+        // The last unit of the page, private, stays, and the next page's; the rest went.
+        let (left, private) = if units > 1 { (2, 1) } else { (1, 0) };
+        assert_eq!((stage.installed(), stage.private_pages()), (left, private));
+        let unmapped = match units {
+            1 => vec![format!("unmap 0x0 {unit:#x}")],
+            _ => vec![format!("unmap 0x0 {:#x}", host_page - unit)],
+        };
+        assert_eq!(*guest.0.lock().unwrap(), unmapped);
+        // A host's unmap keeps every private unit, the page's included.
+        stage.unmap(host_page, unit, Private::Keep);
+        assert_eq!((stage.installed(), stage.private_pages()), (private, private));
     }
 
     /// Faults whose daemon names nothing, refusing each with `refusal`, gone if `lost`.
