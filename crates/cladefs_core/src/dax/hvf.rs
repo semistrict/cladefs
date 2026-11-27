@@ -17,9 +17,14 @@
 //! cladefs: a writer's window copies on write (backlog doc-13): a guest's write to a page the
 //! window maps exits as a permission fault, and the page is made private here, a copy of what the
 //! window names there, in the window's private memory (an anonymous mapping as large as the
-//! window, laid out as it is), mapped writable in its place, of `private_max` pages at most. The
-//! guest's `MAP` or `UNMAP` over a private page ends it ([`Private::End`]); the host's own changes
-//! leave it ([`Private::Keep`]), as [`super::uffd`]'s do.
+//! window, laid out as it is), mapped writable in its place. The guest's `MAP` or `UNMAP` over a
+//! private page ends it ([`Private::End`]); the host's own changes leave it ([`Private::Keep`]),
+//! as [`super::uffd`]'s do.
+//!
+//! The private memory is the host's in host pages, whatever the unit: `private_max` counts the
+//! host pages holding a private unit, as [`super::uffd`] counts its pages, so that it bounds what
+//! the private memory holds resident, and a host page whose last private unit ends is given back
+//! to the host at once (board 14348).
 //!
 //! The guest's granule is the window's map unit, 4 KiB (`map_unit`), whatever the host's page:
 //! a VMM gives its VM 4 KiB stage 2 pages (`HV_IPA_GRANULE_4KB`), so that each unit maps on its
@@ -201,8 +206,9 @@ enum Unit {
 /// What the window's units are, the units not here being unmapped.
 struct State {
     units: BTreeMap<u64, Unit>,
-    /// How many units are private.
-    private: u64,
+    /// The host pages of the private memory holding private units, by offset, and how many each
+    /// holds: what the private memory holds resident.
+    private: BTreeMap<u64, u32>,
     /// Let go of ([`HvfSecondStage::release`]): nothing is mapped any more.
     released: bool,
 }
@@ -219,6 +225,38 @@ unsafe impl Send for PrivateMemory {}
 // SAFETY: As above.
 unsafe impl Sync for PrivateMemory {}
 
+impl PrivateMemory {
+    /// Gives the `len` bytes at `offset`, whole host pages the guest maps no unit of, back to the
+    /// host: fresh anonymous memory in their place, as the mapping was made, holding nothing.
+    fn give_back(&self, offset: u64, len: u64) {
+        let host_page = page_size();
+        assert!(
+            offset.is_multiple_of(host_page)
+                && len.is_multiple_of(host_page)
+                && offset + len <= self.len as u64,
+            "giving back {len:#x} bytes at {offset:#x} of private memory of {:#x}",
+            self.len
+        );
+        // SAFETY: Whole host pages of the stage's own mapping, which nothing maps into the guest
+        // any more: replaced where they are, the mapping's extent unchanged.
+        let addr = unsafe {
+            libc::mmap(
+                self.base.as_ptr().add(offset as usize).cast(),
+                len as usize,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANON | libc::MAP_NORESERVE | libc::MAP_FIXED,
+                -1,
+                0,
+            )
+        };
+        assert!(
+            addr != libc::MAP_FAILED,
+            "giving back {len:#x} bytes of private memory at {offset:#x}: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+}
+
 impl Drop for PrivateMemory {
     fn drop(&mut self) {
         // SAFETY: The stage's own mapping, which the guest maps no unit of once it is released.
@@ -233,7 +271,7 @@ pub struct HvfSecondStage {
     guest: Arc<dyn GuestMemory>,
     /// The arenas' memory objects, which the window's pages are of.
     memories: Vec<(ArenaId, OwnedFd)>,
-    /// Its private memory, of `most` units at most, once it copies on write.
+    /// Its private memory, of `most` host pages at most, once it copies on write.
     private: OnceLock<(PrivateMemory, u64)>,
     state: Mutex<State>,
     /// What resolves its faults, once it serves them ([`Self::serve`]).
@@ -271,13 +309,17 @@ impl HvfSecondStage {
             guest,
             memories,
             private: OnceLock::new(),
-            state: Mutex::new(State { units: BTreeMap::new(), private: 0, released: false }),
+            state: Mutex::new(State {
+                units: BTreeMap::new(),
+                private: BTreeMap::new(),
+                released: false,
+            }),
             faults: OnceLock::new(),
             copies: Default::default(),
         }))
     }
 
-    /// cladefs: copies on write, of `most` private units at most (backlog doc-13).
+    /// cladefs: copies on write, of `most` host pages of private units at most (backlog doc-13).
     pub fn copy_on_write(&self, most: u64) -> Result<(), Error> {
         if most == 0 {
             return Err(Error::new(Errno::EINVAL));
@@ -365,7 +407,9 @@ impl HvfSecondStage {
         offset: u64,
         len: u64,
     ) -> Result<(), Errno> {
-        let most = self.private.get().ok_or(Errno::EINVAL)?.1;
+        if !self.copying() {
+            return Err(Errno::EINVAL);
+        }
         let end = offset.checked_add(len).ok_or(Errno::EINVAL)?;
         if len == 0
             || !offset.is_multiple_of(self.unit)
@@ -408,9 +452,7 @@ impl HvfSecondStage {
             if !all {
                 continue;
             }
-            if state.private + named > most {
-                return Err(Errno::ENOMEM);
-            }
+            // Past the window's private pages, it refuses before making any unit private.
             self.privatize(&mut state, offset..end)?;
             self.count_copies(named, start);
             return Ok(());
@@ -420,7 +462,8 @@ impl HvfSecondStage {
 
     /// Makes the named units of `range` private, the stage's lock held (`state`): each copied into
     /// the private memory from its arena, its mapping in the guest replaced with the copy's,
-    /// writable. `EROFS` for a window that doesn't copy, `ENOMEM` past its private units.
+    /// writable. `EROFS` for a window that doesn't copy, `ENOMEM`, nothing made private, past its
+    /// private pages: the host pages holding private units.
     fn privatize(&self, state: &mut State, range: std::ops::Range<u64>) -> Result<(), Errno> {
         let Some((memory, most)) = self.private.get() else {
             return Err(Errno::EROFS);
@@ -433,7 +476,12 @@ impl HvfSecondStage {
                 Unit::Private => None,
             })
             .collect();
-        if state.private + named.len() as u64 > *most {
+        let mut new_pages: Vec<u64> = (named.iter())
+            .map(|&(at, _)| host_page_of(at))
+            .filter(|page| !state.private.contains_key(page))
+            .collect();
+        new_pages.dedup();
+        if (state.private.len() + new_pages.len()) as u64 > *most {
             return Err(Errno::ENOMEM);
         }
         for (at, phys) in named {
@@ -454,9 +502,24 @@ impl HvfSecondStage {
                 self.guest.map(at, NonNull::from(&mut bytes[0]), self.unit, true);
             }
             state.units.insert(at, Unit::Private);
-            state.private += 1;
+            *state.private.entry(host_page_of(at)).or_insert(0) += 1;
         }
         Ok(())
+    }
+
+    /// Ends the private units at `ended`, which the guest maps no more, the stage's lock held
+    /// (`state`): each host page left with none given back to the host.
+    fn end_private(&self, state: &mut State, ended: &[u64]) {
+        let (memory, _) = self.private.get().expect("private units of a window that copies");
+        for &at in ended {
+            let page = host_page_of(at);
+            let held = state.private.get_mut(&page).expect("a private unit's host page counted");
+            *held -= 1;
+            if *held == 0 {
+                state.private.remove(&page);
+                memory.give_back(page, page_size());
+            }
+        }
     }
 
     fn count_copies(&self, units: u64, start: std::time::Instant) {
@@ -541,9 +604,9 @@ impl HvfSecondStage {
         Ok(runs)
     }
 
-    /// How many units are private.
+    /// How many host pages hold private units: what `private_max` bounds.
     pub fn private_pages(&self) -> u64 {
-        self.state.lock().unwrap().private
+        self.state.lock().unwrap().private.len() as u64
     }
 
     /// What making units private cost: runs, units and nanoseconds.
@@ -585,7 +648,12 @@ impl HvfSecondStage {
         let units: Vec<u64> = state.units.keys().copied().collect();
         self.unmap_units(&units);
         state.units.clear();
-        state.private = 0;
+        let pages = std::mem::take(&mut state.private);
+        if let Some((memory, _)) = self.private.get() {
+            for page in pages.into_keys() {
+                memory.give_back(page, page_size());
+            }
+        }
     }
 }
 
@@ -649,13 +717,13 @@ impl SecondStage for HvfSecondStage {
             return;
         }
         let mut gone = Vec::new();
-        let mut ended = 0;
+        let mut ended = Vec::new();
         for (&at, unit) in state.units.range(offset..offset + len) {
             match (unit, private) {
                 (Unit::Named { .. }, _) => gone.push(at),
                 (Unit::Private, Private::End) => {
                     gone.push(at);
-                    ended += 1;
+                    ended.push(at);
                 }
                 (Unit::Private, Private::Keep) => {}
             }
@@ -664,8 +732,13 @@ impl SecondStage for HvfSecondStage {
         for at in &gone {
             state.units.remove(at);
         }
-        state.private -= ended;
+        self.end_private(&mut state, &ended);
     }
+}
+
+/// The offset of the host page holding the window's offset `at`.
+fn host_page_of(at: u64) -> u64 {
+    at - at % page_size()
 }
 
 impl Drop for HvfSecondStage {
@@ -754,5 +827,79 @@ mod tests {
                 format!("unmap 0x0 {unit:#x}"),
             ]
         );
+    }
+
+    /// Faults of a window whose every unit written is mapped already: none reaches it.
+    struct Mapped;
+
+    impl Faults for Mapped {
+        fn size(&self) -> u64 {
+            1 << 20
+        }
+
+        fn fault_page(&self, _: u64) -> futures::future::BoxFuture<'_, Result<(), Errno>> {
+            Box::pin(async { Err(Errno::ENOENT) })
+        }
+
+        fn probe(&self, _: u64) -> futures::future::BoxFuture<'_, Result<(), Errno>> {
+            Box::pin(async { Err(Errno::ENOENT) })
+        }
+    }
+
+    /// The bytes of `stage`'s private memory resident in this process, by `mincore`.
+    fn resident(stage: &HvfSecondStage) -> u64 {
+        let (memory, _) = stage.private.get().unwrap();
+        let host_page = page_size() as usize;
+        let mut pages = vec![0 as libc::c_char; memory.len / host_page];
+        // SAFETY: The stage's own mapping, whole, and a byte for each of its pages.
+        let ret =
+            unsafe { libc::mincore(memory.base.as_ptr().cast(), memory.len, pages.as_mut_ptr()) };
+        assert_eq!(ret, 0, "mincore: {}", std::io::Error::last_os_error());
+        let incore = pages.iter().filter(|&&page| page & libc::MINCORE_INCORE as libc::c_char != 0);
+        (incore.count() * host_page) as u64
+    }
+
+    /// A guest that writes a unit, has it ended (a `MAP` or `UNMAP` over it, `Private::End`) and
+    /// writes elsewhere, a unit of every host page of the window in turn, holds no more private
+    /// memory resident than `private_max` pages: each host page whose last private unit ends is
+    /// given back (board 14348, which kept every one). The host's unmap (`Private::Keep`) keeps it.
+    #[test]
+    fn private_units_ended_give_their_memory_back() {
+        let (stage, _guest) = stage();
+        stage.copy_on_write(2).unwrap();
+        let _serving = stage.serve(Arc::new(Mapped)).unwrap();
+        let (unit, host_page) = (map_unit(), page_size());
+        for offset in (0..stage.size()).step_by(host_page as usize) {
+            stage.map(offset, at(0), unit);
+            stage.fault(offset, Access::Write).unwrap();
+            stage.unmap(offset, unit, Private::Keep);
+            assert_eq!((stage.private_pages(), resident(&stage)), (1, host_page));
+            stage.unmap(offset, unit, Private::End);
+            assert_eq!((stage.private_pages(), resident(&stage)), (0, 0), "at {offset:#x}");
+        }
+        assert_eq!(stage.installed(), 0);
+    }
+
+    /// `private_max` counts the host pages holding private units, what the private memory holds
+    /// resident: the units of one host page take one, and a unit of another past it is refused,
+    /// `ENOMEM`, until the first page's units end.
+    #[test]
+    fn private_max_counts_host_pages() {
+        let (stage, _guest) = stage();
+        stage.copy_on_write(1).unwrap();
+        let _serving = stage.serve(Arc::new(Mapped)).unwrap();
+        let (unit, host_page) = (map_unit(), page_size());
+        stage.map(0, at(0), 2 * host_page);
+        for offset in (0..host_page).step_by(unit as usize) {
+            stage.fault(offset, Access::Write).unwrap();
+        }
+        assert_eq!(stage.private_pages(), 1);
+        assert_eq!(stage.fault(host_page, Access::Write), Err(Errno::ENOMEM));
+        stage.unmap(0, host_page, Private::End);
+        assert_eq!((stage.private_pages(), resident(&stage)), (0, 0));
+        assert_eq!(stage.fault(host_page, Access::Write), Ok(()));
+        assert_eq!((stage.private_pages(), resident(&stage)), (1, host_page));
+        stage.release();
+        assert_eq!((stage.private_pages(), resident(&stage)), (0, 0));
     }
 }
