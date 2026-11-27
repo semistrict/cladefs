@@ -4016,7 +4016,10 @@ impl<D: Dir> LocalCell<D> {
                 versions.extend_from_slice(&contents.versions);
             }
 
-            let tag = tag.unwrap_or_else(|| extent_frame::segment::tag(0, pending.epoch));
+            // Every commit's records end with one naming it (`Segments::record`).
+            let Some(tag) = tag else {
+                bail!("commit {} has no record naming it", pending.epoch);
+            };
             staged.push(crate::fast_wal::StagedCommit {
                 epoch: pending.epoch,
                 tag,
