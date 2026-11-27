@@ -10,8 +10,12 @@
 //!
 //! The channel is a socket pair the daemon makes as the VM process asks ([`crate::wire::VHOST_USER`]), on its
 //! connection, once its cell is open: bound to that authorized cell and tenant, as a bare
-//! vhost-user socket, with no `OPEN`, couldn't be. Its back-end runs on a thread of its own
-//! (`vhost_user::Channel`), stopped as the connection ends.
+//! vhost-user socket, with no `OPEN`, couldn't be. Or, for a stock front-end that connects to a
+//! path, Firecracker's (board 14620), the VM process hands the daemon a listening socket it bound
+//! in its jail ([`crate::wire::VHOST_USER_LISTENER`]), on which the daemon accepts the one front-end
+//! that connects from the VM process itself, on a thread of the connection's own, as the VM process
+//! may make the accept wait. Its back-end runs on a thread of its own (`vhost_user::Channel`),
+//! stopped as the connection ends.
 //!
 //! A chain is a request as a message is: checked against the protocol's bounds as it is taken,
 //! admitted in the connection's turns ([`super::Work`]), served as a future
@@ -43,7 +47,7 @@ use cladefs_core::{
     Commit, Errno, ExtentId, ExtentInfo, MappingContents, OpenCell, VolatileSlice,
     VolatileSliceMut, WindowMapping, WriteBarriers,
 };
-use std::os::fd::AsFd;
+use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use zerocopy::{FromBytes, FromZeros};
@@ -67,6 +71,9 @@ const BOUNDS: Bounds = Bounds {
 pub(super) enum VhostUser {
     #[default]
     Unstarted,
+    /// Accepting its front-end on the VM process's listener, which a stop shuts down
+    /// ([`crate::wire::VHOST_USER_LISTENER`]).
+    Listening(Arc<OwnedFd>),
     Running {
         channel: vhost_user::Channel,
         guest: Arc<GuestState>,
@@ -271,6 +278,7 @@ impl Connection {
         queues: u16,
         ordered_only: bool,
         tag: &str,
+        listener: Option<OwnedFd>,
         answer: super::Answer,
     ) {
         let reply = answer.reply_header();
@@ -283,31 +291,117 @@ impl Connection {
             let mut state = self.vhost_user.lock().unwrap_or_else(PoisonError::into_inner);
             match *state {
                 VhostUser::Unstarted => {}
-                VhostUser::Running { .. } => return Err(Errno::EEXIST),
+                VhostUser::Listening(_) | VhostUser::Running { .. } => return Err(Errno::EEXIST),
                 VhostUser::Stopped => return Err(Errno::EBADF),
             }
             let device = Arc::new(ExtentDevice::new(self.clone(), queues, ordered_only, tag));
-            let guest = device.guest.clone();
-            let (channel, theirs) =
-                vhost_user::Channel::start(device, "vhost-user").map_err(|err| {
-                    log::error!("cladefsd: starting a vhost-user back-end: {err}");
-                    match err.raw_os_error() {
-                        Some(libc::EINVAL | libc::EOPNOTSUPP) => Errno::ENOTSUP,
-                        Some(raw) => Errno::from_raw(raw),
-                        None => Errno::EIO,
-                    }
+            let Some(listener) = listener else {
+                let (channel, theirs) = vhost_user::Channel::start(device.clone(), "vhost-user")
+                    .map_err(start_error)?;
+                self.running(&mut state, channel, &device);
+                return Ok(Some(theirs));
+            };
+            let listener = Arc::new(check_listener(listener)?);
+            let connection = self.clone();
+            let accepting = listener.clone();
+            std::thread::Builder::new()
+                .name("cladefsd vhost-user accept".into())
+                .spawn(move || connection.accept_front_end(&accepting, &device))
+                .map_err(|err| {
+                    log::error!("cladefsd: accepting a vhost-user front-end: {err}");
+                    Errno::EAGAIN
                 })?;
-            // Set once, the back-end just made.
-            let _ = guest.notifier.set(channel.notifier());
-            // cladefs board 14603: its guest asked for its stats by the back-end, not the VM
-            // process, which may know nothing of the device.
-            self.report.asks_guest(Some(guest.clone()));
-            *state = VhostUser::Running { channel, guest };
-            Ok(theirs)
+            *state = VhostUser::Listening(listener);
+            Ok(None)
         });
         match started {
-            Ok(theirs) => answer.send(Ok(()), reply, Vec::new(), vec![theirs.as_fd()]),
+            Ok(Some(theirs)) => answer.send(Ok(()), reply, Vec::new(), vec![theirs.as_fd()]),
+            Ok(None) => answer.send(Ok(()), reply, Vec::new(), Vec::new()),
             Err(errno) => answer.send(Err(errno), reply, Vec::new(), Vec::new()),
+        }
+    }
+
+    /// Its vhost-user channel runs `channel`, the back-end of `device`, under its lock `state`.
+    fn running(&self, state: &mut VhostUser, channel: vhost_user::Channel, device: &ExtentDevice) {
+        let guest = device.guest.clone();
+        // Set once, the back-end just made.
+        let _ = guest.notifier.set(channel.notifier());
+        // cladefs board 14603: its guest asked for its stats by the back-end, not the VM process,
+        // which may know nothing of the device.
+        self.report.asks_guest(Some(guest.clone()));
+        *state = VhostUser::Running { channel, guest };
+    }
+
+    /// Accepts its VM process's vhost-user front-end on `listener`, and serves `device`'s channel
+    /// on it: any front-end that connects from another process closed, as one of another tenant's
+    /// may reach the listener too; until the connection's stop shuts the listener down, or it
+    /// fails. On a thread of its own: the VM process holds the listener too, which it may make
+    /// blocking, and accept the connection a wait woke for.
+    fn accept_front_end(self: Arc<Self>, listener: &OwnedFd, device: &Arc<ExtentDevice>) {
+        loop {
+            // Waited for here, not in the accept, which the VM process may make return at once
+            // (`O_NONBLOCK`, the listener's file its too), which would spin; woken by a shutdown.
+            let mut poll =
+                libc::pollfd { fd: listener.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+            // SAFETY: Polls one descriptor this holds.
+            if unsafe { libc::poll(&mut poll, 1, -1) } < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                log::error!("cladefsd: waiting for a vhost-user front-end: {err}");
+                return;
+            }
+            // SAFETY: Accepts on a listener this holds, into a descriptor owned below.
+            let accepted = unsafe {
+                libc::accept4(
+                    listener.as_raw_fd(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    libc::SOCK_CLOEXEC,
+                )
+            };
+            if accepted < 0 {
+                let err = std::io::Error::last_os_error();
+                match err.kind() {
+                    std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock => continue,
+                    // Shut down by the connection's stop, or failing: no front-end comes.
+                    _ => {
+                        log::info!("cladefsd: no more vhost-user front-ends accepted: {err}");
+                        return;
+                    }
+                }
+            }
+            // SAFETY: Just accepted, owned here.
+            let socket = unsafe { <OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(accepted) };
+            let (theirs, ours) = (peer_pid(&socket), self.vm_pid());
+            if theirs.is_none() || theirs != ours {
+                log::warn!(
+                    "cladefsd: refused a vhost-user front-end of pid {theirs:?}, not the VM \
+                     process's ({ours:?})"
+                );
+                continue;
+            }
+            let mut state = self.vhost_user.lock().unwrap_or_else(PoisonError::into_inner);
+            if !matches!(*state, VhostUser::Listening(_)) {
+                return;
+            }
+            match vhost_user::Channel::serve(device.clone(), "vhost-user", socket) {
+                Ok(channel) => self.running(&mut state, channel, device),
+                Err(err) => {
+                    log::error!("cladefsd: serving a vhost-user front-end: {err}");
+                    *state = VhostUser::Stopped;
+                }
+            }
+            return;
+        }
+    }
+
+    /// Its VM process's pid: this process's, a test's in-process VM; none once it exited.
+    fn vm_pid(&self) -> Option<libc::pid_t> {
+        match &self.peer.process {
+            None => libc::pid_t::try_from(std::process::id()).ok(),
+            Some(process) => process.pid(),
         }
     }
 
@@ -320,7 +414,16 @@ impl Connection {
         };
         // cladefs: where a test learns the connection stopped its channel (failpoints).
         fail::fail_point!("cladefsd::vhost-user-stopped");
-        let VhostUser::Running { channel, .. } = stopped else { return };
+        let channel = match stopped {
+            VhostUser::Running { channel, .. } => channel,
+            // Its accepting thread woken, which ends; its front-end, should it connect, refused.
+            VhostUser::Listening(listener) => {
+                // SAFETY: Shuts down a listener this holds.
+                unsafe { libc::shutdown(listener.as_raw_fd(), libc::SHUT_RDWR) };
+                return;
+            }
+            VhostUser::Unstarted | VhostUser::Stopped => return,
+        };
         self.report.asks_guest(None);
         if let Err(panicked) = crate::run::off_the_runtime(move || channel.stop()).await {
             log::error!("cladefsd: stopping a vhost-user back-end: {panicked}");
@@ -332,7 +435,7 @@ impl Connection {
     pub(super) fn vhost_guest(&self) -> Option<Arc<GuestState>> {
         match &*self.vhost_user.lock().unwrap_or_else(PoisonError::into_inner) {
             VhostUser::Running { guest, .. } => Some(guest.clone()),
-            VhostUser::Unstarted | VhostUser::Stopped => None,
+            VhostUser::Unstarted | VhostUser::Listening(_) | VhostUser::Stopped => None,
         }
     }
 
@@ -404,6 +507,58 @@ impl Connection {
             None => Ok(open_cell),
         }
     }
+}
+
+/// The errno for a vhost-user back-end that couldn't start: `ENOTSUP` where kicks can't be read
+/// without waiting (Linux before 5.8).
+fn start_error(err: std::io::Error) -> Errno {
+    log::error!("cladefsd: starting a vhost-user back-end: {err}");
+    match err.raw_os_error() {
+        Some(libc::EINVAL | libc::EOPNOTSUPP) => Errno::ENOTSUP,
+        Some(raw) => Errno::from_raw(raw),
+        None => Errno::EIO,
+    }
+}
+
+/// An integer option of the socket `fd`, if it is one.
+fn socket_option(fd: &OwnedFd, name: libc::c_int) -> Option<libc::c_int> {
+    let mut value: libc::c_int = 0;
+    let mut len = size_of::<libc::c_int>() as libc::socklen_t;
+    // SAFETY: Reads an integer socket option of `fd` into `value`, `len` its size.
+    let got = unsafe {
+        libc::getsockopt(fd.as_raw_fd(), libc::SOL_SOCKET, name, (&raw mut value).cast(), &mut len)
+    };
+    (got == 0).then_some(value)
+}
+
+/// `fd`, the VM process's listener ([`crate::wire::VHOST_USER_LISTENER`]): `EINVAL` unless it is a
+/// listening Unix stream socket's, as the VM process may send any descriptor at all.
+fn check_listener(fd: OwnedFd) -> Result<OwnedFd, Errno> {
+    let is = |name, value| socket_option(&fd, name) == Some(value);
+    match is(libc::SO_DOMAIN, libc::AF_UNIX)
+        && is(libc::SO_TYPE, libc::SOCK_STREAM)
+        && is(libc::SO_ACCEPTCONN, 1)
+    {
+        true => Ok(fd),
+        false => Err(Errno::EINVAL),
+    }
+}
+
+/// The pid of the process at the other end of `socket` as it connected (`SO_PEERCRED`).
+fn peer_pid(socket: &OwnedFd) -> Option<libc::pid_t> {
+    let mut credentials = libc::ucred { pid: 0, uid: 0, gid: 0 };
+    let mut len = size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: Reads the peer's credentials into `credentials`, of `len` bytes.
+    let read = unsafe {
+        libc::getsockopt(
+            socket.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&raw mut credentials).cast(),
+            &mut len,
+        )
+    };
+    (read == 0 && credentials.pid > 0).then_some(credentials.pid)
 }
 
 /// A chain's copies' bytes, held in its tenant's bytes in flight until dropped.

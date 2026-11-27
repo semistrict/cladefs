@@ -1129,3 +1129,82 @@ fn a_front_end_that_never_reads_its_backend_channel_stalls_nothing() {
     drop(queues);
     rig.finish();
 }
+
+/// Where [`child_connects_to_a_vhost_user_listener`] connects.
+const CHILD_LISTENER: &str = "CLADEFSD_TEST_VHOST_LISTENER";
+
+/// Board 14620: a guest's requests served through the VM process's listener
+/// (`VHOST_USER_LISTENER`): a listening socket bound at a path, as in a jail, which the daemon
+/// accepts the VM process's front-end on, as a stock front-end, Firecracker's, connects to a path;
+/// a front-end of another process, connecting first, refused, its socket closed; and a second
+/// channel refused (`EEXIST`).
+#[test]
+fn a_front_end_connecting_to_the_vm_process_listener_is_served() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let (cell, served) = connect(&dir.path().join("store"), 64 << 20);
+    let path = dir.path().join("vhost.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    cell.vhost_user_listening(1, false, "fxfs", listener.as_fd()).unwrap();
+    assert_eq!(
+        cell.vhost_user_listening(1, false, "fxfs", listener.as_fd()).err(),
+        Some(Errno::EEXIST)
+    );
+
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "tests::vhost::child_connects_to_a_vhost_user_listener"])
+        .args(["--ignored", "--nocapture"])
+        .env(CHILD_LISTENER, &path)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("CLOSED"), "another process's front-end served: {stdout}");
+
+    let front = FrontEnd::new(std::os::unix::net::UnixStream::connect(&path).unwrap().into());
+    let memory = Arc::new(GuestMemory::new((1 << 20) + BUFFERS).unwrap());
+    let mut queues = front.set_up(&memory, &[QueueLayout::nth(0, 256, BUFFERS)]).unwrap();
+    let info = bytes::<()>(doc4::VIRTIO_EXTENT_T_INFO, 0, None, &[]);
+    let (written, status) = request(&mut queues[0], &info, size_of::<Info>() + RESPONSE, 4096);
+    assert_eq!(status, 0);
+    assert_eq!(u64::from_le(Info::read_from_bytes(&written).unwrap().cell), cell.cell());
+    drop((queues, front, cell));
+    served.join().unwrap();
+    assert_eq!(vhost_user::panics(), 0, "a channel's thread panicked");
+}
+
+/// Board 14620: a listener that is no listening Unix stream socket refused (`EINVAL`); and a
+/// connection that ends while the daemon listens for its front-end ends, the front-end that
+/// connects after refused.
+#[test]
+fn listeners_are_checked_and_stop_with_their_connection() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let (cell, served) = connect(&dir.path().join("store"), 64 << 20);
+    let unbound = std::os::unix::net::UnixStream::pair().unwrap().0;
+    let not_socket = eventfd();
+    for fd in [unbound.as_fd(), not_socket.as_fd()] {
+        assert_eq!(cell.vhost_user_listening(1, false, "fxfs", fd).err(), Some(Errno::EINVAL));
+    }
+    let path = dir.path().join("vhost.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    cell.vhost_user_listening(1, false, "fxfs", listener.as_fd()).unwrap();
+    drop(cell);
+    let (ended, end) = std::sync::mpsc::channel();
+    std::thread::spawn(move || ended.send(served.join().is_ok()).unwrap());
+    assert_eq!(end.recv_timeout(WAIT), Ok(true), "the connection never ended");
+    // Shut down by the connection's stop: no front-end accepted.
+    let refused = std::os::unix::net::UnixStream::connect(&path);
+    assert!(refused.is_err(), "a front-end connected after its connection ended: {refused:?}");
+}
+
+/// A front-end of another process than the VM process's, for
+/// [`a_front_end_connecting_to_the_vm_process_listener_is_served`]: connects to the listener at
+/// [`CHILD_LISTENER`] and prints `CLOSED` once the daemon closes its socket, `OPEN` if it hasn't
+/// within [`WAIT`].
+#[test]
+#[ignore = "run by a_front_end_connecting_to_the_vm_process_listener_is_served"]
+fn child_connects_to_a_vhost_user_listener() {
+    let Ok(path) = std::env::var(CHILD_LISTENER) else { return };
+    let front = FrontEnd::new(std::os::unix::net::UnixStream::connect(path).unwrap().into());
+    println!("{}", if front.closed() { "CLOSED" } else { "OPEN" });
+}

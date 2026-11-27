@@ -86,8 +86,9 @@ pub enum Request<'a> {
     /// cladefs: [`VHOST_USER`]: the vhost-user channel of the connection's extent device, of
     /// `queues` request queues, 1 to [`MAX_VHOST_USER_QUEUES`], its guest's uploaded commits
     /// answered once ordered if `ordered_only` ([`VHOST_USER_UNSAFE`]), its tag `tag`, 1 to
-    /// [`MAX_VHOST_USER_TAG`] bytes, none NUL (board 14537).
-    VhostUser { queues: u16, ordered_only: bool, tag: &'a str },
+    /// [`MAX_VHOST_USER_TAG`] bytes, none NUL (board 14537); its front-end connecting to
+    /// `listener` if given ([`VHOST_USER_LISTENER`], board 14620).
+    VhostUser { queues: u16, ordered_only: bool, tag: &'a str, listener: Option<Area<'a>> },
 }
 
 /// How an [`OPEN`] opens its cell.
@@ -143,7 +144,8 @@ pub struct Fault {
     pub probe: bool,
 }
 
-/// The shared memory a [`TRANSFER`] carries, its descriptor.
+/// A descriptor a request carries: the shared memory a [`TRANSFER`] does, or the listening socket a
+/// [`VHOST_USER`] does ([`VHOST_USER_LISTENER`]).
 #[derive(Debug)]
 pub struct Area<'a>(pub BorrowedFd<'a>);
 
@@ -210,7 +212,7 @@ fn known_flags(kind: u32) -> Result<u32, Errno> {
         MAPPINGS => MAPPINGS_QUIESCENT,
         MAP => MAP_WARM,
         STATS => STATS_GUEST,
-        VHOST_USER => VHOST_USER_UNSAFE,
+        VHOST_USER => VHOST_USER_UNSAFE | VHOST_USER_LISTENER,
         FREE | UNMAP | ROOT | INFO | RESIZED | TRANSFER => 0,
         _ => return Err(Errno::EINVAL),
     })
@@ -439,11 +441,15 @@ impl<'a> Request<'a> {
                 &StatsBody { ask: *ask },
             )
             .carrying(guest.unwrap_or_default().as_bytes()),
-            Request::VhostUser { queues, ordered_only, tag } => Encoded::with_body(
-                VHOST_USER,
-                flag(*ordered_only, VHOST_USER_UNSAFE),
-                &VhostUserBody { queues: u64::from(*queues) },
-            )
+            Request::VhostUser { queues, ordered_only, tag, listener } => Encoded {
+                fd: listener.as_ref().map(|listener| listener.0),
+                ..Encoded::with_body(
+                    VHOST_USER,
+                    flag(*ordered_only, VHOST_USER_UNSAFE)
+                        | flag(listener.is_some(), VHOST_USER_LISTENER),
+                    &VhostUserBody { queues: u64::from(*queues) },
+                )
+            }
             .carrying(tag.as_bytes()),
         }
     }
@@ -464,10 +470,12 @@ impl<'a> Request<'a> {
         // cladefs: what its kind has, after the guest request it says, if any (TASK-260).
         let (_, payload) = guest_request(message)?;
         let flags = flags & !REQUEST;
-        // A request's descriptors: a TRANSFER's one, and none of any other.
-        let fd = match (kind, fds.as_slice()) {
-            (TRANSFER, [fd]) => Some(fd.as_fd()),
-            (_, []) if kind != TRANSFER => None,
+        // A request's descriptors: a TRANSFER's one, a listening VHOST_USER's one, and none of
+        // any other.
+        let carries = kind == TRANSFER || (kind == VHOST_USER && flags & VHOST_USER_LISTENER != 0);
+        let fd = match (carries, fds.as_slice()) {
+            (true, [fd]) => Some(fd.as_fd()),
+            (false, []) => None,
             _ => return Err(Errno::EINVAL),
         };
         let has = |flag: u32| flags & flag != 0;
@@ -688,7 +696,8 @@ impl<'a> Request<'a> {
                     return Err(Errno::EINVAL);
                 }
                 let tag = std::str::from_utf8(payload).map_err(|_| Errno::EINVAL)?;
-                Request::VhostUser { queues, ordered_only: has(VHOST_USER_UNSAFE), tag }
+                let ordered_only = has(VHOST_USER_UNSAFE);
+                Request::VhostUser { queues, ordered_only, tag, listener: fd.map(Area) }
             }
             _ => return Err(Errno::EINVAL),
         })
@@ -1630,6 +1639,13 @@ mod tests {
                 queues: (a % MAX_VHOST_USER_QUEUES) as u16 + 1,
                 ordered_only: one,
                 tag: &fields.build[..fields.build.len().min(MAX_VHOST_USER_TAG)],
+                listener: None,
+            },
+            Request::VhostUser {
+                queues: (b % MAX_VHOST_USER_QUEUES) as u16 + 1,
+                ordered_only: !one,
+                tag: &fields.build[..fields.build.len().min(MAX_VHOST_USER_TAG)],
+                listener: Some(Area(area)),
             },
         ]
     }
@@ -2655,7 +2671,7 @@ mod tests {
     fn the_wire_is_its_version() {
         /// The version, and the fingerprint of the wire it is. A change to the wire is a new
         /// version, both changed together, never the fingerprint alone.
-        const WIRE: (u64, u64) = (24, 0xa87ff1ba7cb2295b);
+        const WIRE: (u64, u64) = (25, 0xb04aba04cccaec4e);
         let fingerprint = fingerprint();
         assert_eq!(
             (VERSION, fingerprint),

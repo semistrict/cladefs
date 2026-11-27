@@ -31,7 +31,7 @@ use futures::channel::oneshot;
 use futures::future::BoxFuture;
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::os::fd::{AsFd, OwnedFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::ptr::NonNull;
@@ -234,13 +234,34 @@ impl CellClient {
     /// vhost-user device, of `queues` request queues, its guest's uploaded commits answered once
     /// ordered if `ordered_only`, its tag `tag`. Once a connection.
     pub fn vhost_user(&self, queues: u16, ordered_only: bool, tag: &str) -> Result<OwnedFd> {
-        let request = Request::VhostUser { queues, ordered_only, tag };
+        let request = Request::VhostUser { queues, ordered_only, tag, listener: None };
         let reply = self.client.request_blocking(&request)?;
         let mut fds = reply.fds.into_iter();
         match (fds.next(), fds.next()) {
             (Some(channel), None) => Ok(channel),
             // A daemon's reply of no channel, or of more, is no reply this build's daemon sends.
             _ => Err(Errno::EIO),
+        }
+    }
+
+    /// cladefs: [`CellClient::vhost_user`], its front-end connecting to `listener`, a listening Unix
+    /// stream socket the VM process bound where its vhost-user device connects, a path in its jail
+    /// ([`VHOST_USER_LISTENER`], board 14620): the daemon accepts the one that connects from this
+    /// process, and serves the channel on it. Once a connection.
+    pub fn vhost_user_listening(
+        &self,
+        queues: u16,
+        ordered_only: bool,
+        tag: &str,
+        listener: BorrowedFd<'_>,
+    ) -> Result<()> {
+        let listener = Some(crate::codec::Area(listener));
+        let request = Request::VhostUser { queues, ordered_only, tag, listener };
+        let reply = self.client.request_blocking(&request)?;
+        match reply.fds.is_empty() {
+            true => Ok(()),
+            // A daemon's reply of a descriptor is no reply this build's daemon sends.
+            false => Err(Errno::EIO),
         }
     }
 

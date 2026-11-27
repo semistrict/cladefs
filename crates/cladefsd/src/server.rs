@@ -1881,8 +1881,16 @@ impl Connection {
             Ok(Request::Fault(fault)) => self.clone().fault(fault, answer).await,
             // cladefs: its reply carries the channel's end (board 14537).
             #[cfg(all(target_os = "linux", not(madsim)))]
-            Ok(Request::VhostUser { queues, ordered_only, tag }) => {
-                self.serve_vhost_user(queues, ordered_only, tag, answer)
+            Ok(Request::VhostUser { queues, ordered_only, tag, listener }) => {
+                match listener.map(|listener| listener.0.try_clone_to_owned()).transpose() {
+                    Ok(listener) => {
+                        self.serve_vhost_user(queues, ordered_only, tag, listener, answer)
+                    }
+                    Err(err) => {
+                        log::warn!("cladefsd: keeping a vhost-user listener: {err}");
+                        refuse(answer, Errno::EMFILE)
+                    }
+                }
             }
             #[cfg(not(all(target_os = "linux", not(madsim))))]
             Ok(Request::VhostUser { .. }) => refuse(answer, Errno::ENOTSUP),

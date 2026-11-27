@@ -603,7 +603,9 @@ const _: () = {
 /// first non-DAX I/O and verify hole-free once at registration (board 11707, hotbed question 575).
 /// Version 24: [`VHOST_USER`] hands the VM process the vhost-user channel of its cell's extent
 /// device, which the daemon serves as the device's back-end (board 14537).
-pub const VERSION: u64 = 24;
+/// Version 25: [`VHOST_USER_LISTENER`]: the VM process hands the daemon a listening socket, and
+/// its vhost-user front-end connects to it, rather than taking a socket pair's end (board 14620).
+pub const VERSION: u64 = 25;
 
 /// cladefs: a flag of any request, which says the guest request it is a call for, the guest's
 /// number of it (`crate::request`, TASK-260): little-endian, not 0, in the first
@@ -754,6 +756,13 @@ pub const MAX_STATS: usize = cladefs_core::protocol::MAX_STATS;
 pub const VHOST_USER: u32 = 34;
 /// cladefs: a [`VHOST_USER`] device's cache is `Unsafe`.
 pub const VHOST_USER_UNSAFE: u32 = 1 << 0;
+/// cladefs: a [`VHOST_USER`] carries a listening Unix stream socket, which the VM process bound
+/// where its vhost-user front-end connects (a path in its jail), rather than the reply carrying a
+/// socket pair's end: a stock front-end, Firecracker's, connects to a path, and only the tenant's
+/// socket is in the jail (board 14620). The daemon accepts on it until one connects from the VM
+/// process itself (`SO_PEERCRED`), closing any other, and serves the channel on that; the reply,
+/// of no descriptor, says it listens.
+pub const VHOST_USER_LISTENER: u32 = 1 << 1;
 /// cladefs: the most request queues a [`VHOST_USER`] device has: its guest's chains in flight, a
 /// queue's size (`QUEUE_SIZE`) each queue at most, are half the requests a connection keeps in
 /// flight ([`MAX_REQUESTS`]), which counts them too, the other half its VM process's messages'.

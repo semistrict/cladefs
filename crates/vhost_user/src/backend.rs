@@ -134,9 +134,6 @@ impl Channel {
     /// front-end's end of the channel, a socket pair's, for the front-end. Refused where kicks
     /// can't be read without waiting (Linux before 5.8).
     pub fn start<D: Device>(device: Arc<D>, name: &str) -> io::Result<(Self, OwnedFd)> {
-        assert!(device.queues() <= 64, "a device of more queues than a call's bits");
-        assert!(device.queue_size().is_power_of_two(), "a queue size not a power of two");
-        install_interrupt()?;
         let mut fds = [0; 2];
         // SAFETY: Makes a socket pair into `fds`.
         let made = unsafe {
@@ -153,6 +150,16 @@ impl Channel {
         // SAFETY: Just made, owned here.
         let (ours, theirs) =
             unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+        Ok((Self::serve(device, name, ours)?, theirs))
+    }
+
+    /// Starts the back-end of `device` on a thread named `name`, on `socket`, the back-end's end of
+    /// a Unix stream socket the front-end connected to (cladefs board 14620). Refused where kicks
+    /// can't be read without waiting (Linux before 5.8).
+    pub fn serve<D: Device>(device: Arc<D>, name: &str, socket: OwnedFd) -> io::Result<Self> {
+        assert!(device.queues() <= 64, "a device of more queues than a call's bits");
+        assert!(device.queue_size().is_power_of_two(), "a queue size not a power of two");
+        install_interrupt()?;
         let shared = Arc::new(Shared {
             wake: Wake::new()?,
             calls: AtomicU64::new(0),
@@ -162,7 +169,7 @@ impl Channel {
             backend_channel: AtomicBool::new(false),
             acked: AtomicU64::new(0),
         });
-        let backend = Backend::new(device, shared.clone(), Socket::new(ours)?)?;
+        let backend = Backend::new(device, shared.clone(), Socket::new(socket)?)?;
         let (exits, exited) = mpsc::channel();
         let thread = std::thread::Builder::new().name(name.into()).spawn(move || {
             let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| backend.run()));
@@ -173,7 +180,7 @@ impl Channel {
             // Its stopper gone: nothing to tell.
             let _ = exits.send(());
         })?;
-        Ok((Self { shared, thread: Some(thread), exited }, theirs))
+        Ok(Self { shared, thread: Some(thread), exited })
     }
 
     /// What its device tells the front-end with beside its queues.
