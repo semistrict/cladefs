@@ -1,0 +1,20 @@
+{
+ "date": "2026-11-27T07:03:03.827032Z",
+ "base": "b8b99760f93559c08d1eafc3b717a8c6da42f4b5",
+ "head": "6b31d45eb76fefcaa3652e4f744e21c306cd2b49",
+ "status": 1,
+ "outcome": "could not run",
+ "why": "no round ran (the A/B ended 1; see remote.log and driver.log)",
+ "head_built": false,
+ "moved": [],
+ "broken": [],
+ "no_result": [],
+ "tasks": [
+  {
+   "key": "no-result",
+   "id": "board 11029",
+   "action": "noted"
+  }
+ ],
+ "push": []
+}
