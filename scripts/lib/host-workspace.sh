@@ -104,7 +104,8 @@ fetch() {
     (cd "$1/results" && find . -mindepth 1 \( -type d \( -name rootfs -o -name jail \
         -o -name '*-cache' -o -name '.cladefsd-cache.*' -o -name '*.root' -o -name '*.data' \
         -o -name '*.base' -o -name '*.bucket' -o -name '*.img' -o -name 'store-*' \
-        -o -name sandbox-image -o -name extents \) -o -name '*rootfs.ext4' \) -prune -o \
+        -o -name sandbox-image -o -name extents -o -name '*-disk[0-9]*' -o -name '.cladefsd-disk*' \) \
+        -o -name '*rootfs.ext4' \) -prune -o \
         -print0) | tar -czf - -C "$1/results" --null --no-recursion -T - | base64
 }
 

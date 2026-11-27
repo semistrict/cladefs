@@ -42,7 +42,8 @@ CLADEFS_E2E_RESULTS="$work" "$root/scripts/contamination.py" run \
 # (scripts/qualify.sh's, and a jailed VM's jail).
 find "$work" -type d \( -name '*.root' -o -name '*.data' -o -name '*.base' -o -name '*-cache' \
     -o -name '.cladefsd-cache.*' -o -name '*.bucket' -o -name 'store-*' -o -name sandbox-image \
-    -o -name rootfs -o -name extents -o -name jail \) -prune -exec rm -r {} +
+    -o -name rootfs -o -name extents -o -name jail -o -name '*-disk[0-9]*' -o -name '.cladefsd-disk*' \) \
+    -prune -exec rm -r {} +
 find "$work" -type f \( -name '*.ext4' -o -name '*.img' \) -delete
 cp -R "$work/." "$results/" || status=$(( status ? status : 1 ))
 # What the run said of its own directory, as its logs do, is of here now.

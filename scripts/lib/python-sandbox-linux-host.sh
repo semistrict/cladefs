@@ -49,5 +49,5 @@ find "$results/e2e" -name log.txt -path '*fxfs-guest-python-sandbox*' \
 rm -r -- "$bucket"
 # What the case leaves of its cells, caches, image and root when it fails: not results.
 find "$results/e2e" -depth -type d \( -name '*.root' -o -name '*.base' -o -name '*-cache' \
-    -o -name sandbox-image -o -name rootfs \) -exec rm -r -- {} +
+    -o -name sandbox-image -o -name rootfs -o -name '*-disk[0-9]*' \) -exec rm -r -- {} +
 exit "$status"
