@@ -171,8 +171,11 @@ impl Channel {
             if thread.is_finished() {
                 break;
             }
-            // SAFETY: Signals a thread not yet joined, whose handle this holds.
-            unsafe { libc::pthread_kill(thread.as_pthread_t(), interrupt_signal()) };
+            // SAFETY: Signals a thread not yet joined, whose handle this holds. `as
+            // libc::pthread_t` bridges `RawPthread` (u64) to musl's `pthread_t` (`*mut c_void`).
+            unsafe {
+                libc::pthread_kill(thread.as_pthread_t() as libc::pthread_t, interrupt_signal())
+            };
             match self.exited.recv_timeout(Duration::from_millis(10)) {
                 Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
