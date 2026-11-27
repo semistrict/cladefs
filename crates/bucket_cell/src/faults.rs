@@ -438,6 +438,8 @@ pub struct Seeded {
     out_until: Mutex<Option<tokio::time::Instant>>,
     /// cladefs: the requests waiting for the scheduler to let them go.
     waiting: Mutex<Vec<futures::channel::oneshot::Sender<()>>>,
+    /// cladefs: told as a request comes to wait, which wakes a scheduler asleep for want of one.
+    arrived: tokio::sync::Notify,
 }
 
 /// What a [`Seeded`] bucket does to a request it lets through.
@@ -455,16 +457,30 @@ impl Seeded {
     pub fn new(objects: Arc<dyn ObjectStore>, seed: u64, odds: Odds) -> Self {
         use rand::SeedableRng as _;
         let rng = Mutex::new(rand::rngs::StdRng::seed_from_u64(seed));
-        let waiting = Mutex::new(Vec::new());
-        Self { objects, odds: Mutex::new(odds), rng, out_until: Mutex::new(None), waiting }
+        let (waiting, arrived) = (Mutex::new(Vec::new()), tokio::sync::Notify::new());
+        Self { objects, odds: Mutex::new(odds), rng, out_until: Mutex::new(None), waiting, arrived }
     }
 
     /// cladefs: lets one request go each `every`, the one the seed picks of those waiting, for as
-    /// long as it lives: its scheduler, which its simulation spawns.
+    /// long as it lives: its scheduler, which its simulation spawns. Its turns come `every` apart
+    /// from its start, whether a request waits for one or not; those none waits for it sleeps
+    /// through, woken by the next request to come, so that a simulation idle for long (a lease
+    /// waited out, a week gone by) is not stopped at each turn of it (board 14521: a turn every
+    /// 200 us is five thousand a second of the simulation's clock, each a timer its runtime runs).
     pub async fn schedule(self: Arc<Self>, every: Duration) {
         use rand::RngExt as _;
+        let started = tokio::time::Instant::now();
         loop {
-            tokio::time::sleep(every).await;
+            // None waiting: asleep until one comes. A request come as this looks is told of by
+            // the permit its coming left.
+            while self.waiting.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).is_empty() {
+                self.arrived.notified().await;
+            }
+            // Its next turn: the first after now of those `every` apart from its start.
+            let since = tokio::time::Instant::now().duration_since(started).as_nanos();
+            let turns = since / every.as_nanos().max(1) + 1;
+            let turn = Duration::from_nanos((turns * every.as_nanos()) as u64);
+            tokio::time::sleep_until(started + turn).await;
             let going = {
                 let mut waiting =
                     self.waiting.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -503,6 +519,7 @@ impl Seeded {
         };
         let (going, gone) = futures::channel::oneshot::channel();
         self.waiting.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(going);
+        self.arrived.notify_one();
         // Let go, or the scheduler gone, which lets every request go.
         let _ = gone.await;
         let now = tokio::time::Instant::now();
@@ -511,7 +528,11 @@ impl Seeded {
             if until.is_some_and(|until| now >= until) {
                 *until = None;
             }
-            if until.is_none() && out && !odds.out_for.is_zero() {
+            // As its odds say now, which may have healed it as this waited its turn (board 14521:
+            // one that came to a bucket out of reach for a day, let go once it was mended, put it
+            // out of reach for a day again).
+            let odds = *self.odds.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if until.is_none() && out && odds.out_of_reach > 0.0 && !odds.out_for.is_zero() {
                 *until = Some(now + odds.out_for);
             }
             until.is_none()
