@@ -257,6 +257,10 @@ RUN find / -xdev -name '*.pyc' -delete
         ) -> anyhow::Result<std::process::Child> {
             let env: Vec<(&str, &std::ffi::OsStr)> =
                 env.iter().map(|(var, value)| (*var, value.as_os_str())).collect();
+            // Fixed, not governed as production's (board 14529): several hosts on one machine,
+            // where each governed daemon would take the machine's free memory as its own, as no
+            // host's daemon shares its host. Governed in a cgroup of its own awaits hotbed issue
+            // 14 (cgroups delegated to a workspace's commands).
             crate::common::spawn_daemon(test_setup, socket, name, &env, Some(DAEMON_MEMORY))
         }
 

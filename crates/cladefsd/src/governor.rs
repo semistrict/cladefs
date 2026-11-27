@@ -754,27 +754,6 @@ pub(super) fn start_on(daemon: &Arc<Daemon>) -> Result<(), String> {
         .map_err(|err| format!("starting the memory governor: {err}"))
 }
 
-/// Whether this host satisfies Linux governed-mode prerequisites (`require_host_support`).
-/// Used by test harnesses (`guest/tests`) to pass an explicit `CLADEFSD_MEMORY` budget on hosts
-/// without MGLRU/governor support while production `cladefsd` continues to fail hard in governed
-/// mode (board 13373, board 13393).
-pub fn host_supported() -> bool {
-    #[cfg(all(target_os = "linux", not(madsim)))]
-    {
-        let Ok(host) = host_memory() else {
-            return false;
-        };
-        let Ok(floor) = floor(limit(host.total)) else {
-            return false;
-        };
-        require_host_support(floor).is_ok()
-    }
-    #[cfg(not(all(target_os = "linux", not(madsim))))]
-    {
-        true
-    }
-}
-
 /// The host's support for governed mode on Linux (board 14217's doctor runs these, every one, before
 /// the daemon starts, refusing if any fails): `cachestat(2)`; MGLRU enabled; host swap
 /// (`SwapTotal >= floor`); and cgroup v2 reclaim permissions, a writable cgroup2 `/sys/fs/cgroup`

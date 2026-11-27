@@ -37,11 +37,12 @@
 #
 # The guests' extent stores are served by cladefs's extent daemon, which this
 # starts, as CLADEFSD tells the tests; its control API is beside it, at
-# cladefsd.control, in a directory of their own under /tmp. CLADEFSD_MEMORY
-# caps its memory, in bytes. cladefs: every cell of the run is encrypted, under a local KMS of the
-# run's (CLADEFS_KMS), and checked so, holding no key, case by case and at the end (TASK-411.15,
-# below). LIBCLANG_PATH names libclang's directory where
-# llvm-config cannot, and DAX needs access to /dev/userfaultfd (docs/operating-a-host.md).
+# cladefsd.control, in a directory of their own under /tmp. Its memory is governed, as
+# production's; CLADEFSD_MEMORY fixes it, in bytes, its and the cases' daemons'. cladefs: every
+# cell of the run is encrypted, under a local KMS of the run's (CLADEFS_KMS), and checked so,
+# holding no key, case by case and at the end (TASK-411.15, below). LIBCLANG_PATH names libclang's
+# directory where llvm-config cannot, and DAX needs access to /dev/userfaultfd
+# (docs/operating-a-host.md).
 #
 # cladefs: on an arm64 Mac (board 14336), the guests boot on libmachine's Firecracker-compatible VMM
 # on Hypervisor.framework (crates/libmachine-firecracker, which this builds, unless
@@ -422,7 +423,7 @@ if [[ -z $build_only$prebuilt ]]; then
     [[ $os == Linux ]] || test_parts=guest
     # Without a case's replay knobs, which the harness's own tests of scripts read and fail on
     # (a_hang_is_shrunk, with CLADEFS_RANDOM_OPS_DROP set): a script's replay line runs as said.
-    env -u CLADEFS_SEED -u CLADEFS_RANDOM_OPS_DROP CLADEFS_TEST_PARTS="$test_parts" "$root/scripts/test.sh"
+    env -u CLADEFS_SEED -u CLADEFS_RANDOM_OPS_DROP "CLADEFS_TEST_PARTS=$test_parts" "$root/scripts/test.sh"
 fi
 if [[ -z $prebuilt ]]; then
     # Cross-built on a Mac, with a musl cross toolchain (scripts/lib/musl.sh); natively on Linux.
@@ -499,9 +500,7 @@ echo "encryption: $(cat "$results/encryption.txt")" >&2
 # A host keeps cells in a bucket, CLADEFSD_BUCKET's or a file bucket in memory, on tmpfs,
 # as of placement 1 unless one is named; what it did with it scripts/bench-report.py reports. Not
 # one in the daemon's memory: the cases open the cells it made in processes of their own (cladefs's
-# Storage), which keep a cell in the bucket its description names (TASK-165.6). Its
-# memory is CLADEFSD_MEMORY bytes, if set; otherwise, as production's, a page cache of what
-# of the host's memory, and the run's cgroup's, is free (TASK-358).
+# Storage), which keep a cell in the bucket its description names (TASK-165.6).
 # cladefs: what its cells read from the bucket it keeps in a part cache of its own on disk, as
 # production's daemon does (CLADEFSD_PART_CACHE, doc-7), unless CLADEFSD_PART_CACHE says
 # otherwise, empty for none; not this process's, which the cases' own daemons would share
@@ -552,26 +551,15 @@ cladefsd_stop() {
     [[ -n $cladefsd_scope ]] || return 0
     systemctl stop "$cladefsd_scope" 2> /dev/null || true
 }
-# cladefs: on hosts without Linux MGLRU/governor support (e.g. hotbed VMs with
-# /sys/kernel/mm/lru_gen/enabled=0 or insufficient swap), pass an explicit test memory budget so
-# non-governor e2e tests run while production cladefsd keeps failing hard in governed mode
-# (board 13373, board 13393).
+# cladefs: its memory governed, as production's daemon's (no MEMORY_BYTES), unless
+# CLADEFSD_MEMORY fixes it (an A/B's fixed side): the run tests the mode that ships (board 14529).
+# On a host that can't run governed (no MGLRU, too little swap, no writable cgroup v2), the daemon
+# refuses to start, its doctor saying why (`cladefsd --doctor`), and so does the run, never quietly
+# testing another mode: `cladefsd --setup-host` provisions such a host. Its VMs' cgroups are taken
+# for delegated to it (CLADEFSD_VM_CGROUP_DELEGATED), as a test host's user holds no
+# CAP_DAC_OVERRIDE; exported, for the cases' own daemons too.
+export CLADEFSD_VM_CGROUP_DELEGATED="${CLADEFSD_VM_CGROUP_DELEGATED:-1}"
 cladefsd_memory=${CLADEFSD_MEMORY:-}
-if [[ -z $cladefsd_memory ]]; then
-    mglru_enabled=0
-    if [[ -r /sys/kernel/mm/lru_gen/enabled ]]; then
-        mglru_raw=$(tr -d '[:space:]' < /sys/kernel/mm/lru_gen/enabled 2> /dev/null || echo 0)
-        if [[ $mglru_raw =~ ^0[xX][0-9a-fA-F]+$ ]]; then
-            (( 16#${mglru_raw#0[xX]} != 0 )) && mglru_enabled=1
-        elif [[ $mglru_raw =~ ^[0-9]+$ ]]; then
-            (( 10#$mglru_raw != 0 )) && mglru_enabled=1
-        fi
-    fi
-    swap_kb=$(awk '/^SwapTotal:/ { print $2; exit }' /proc/meminfo 2> /dev/null || echo 0)
-    if (( mglru_enabled == 0 || swap_kb == 0 )); then
-        cladefsd_memory=$((1 << 30))
-    fi
-fi
 # The run's bucket, which the daemon keeps its cells in, named to the cases too: a case whose
 # daemon of its own forks a version the run's daemon made reads it there (bench-fork's cold and
 # predicted forks).
@@ -581,7 +569,6 @@ env CLADEFSD_BUCKET="$CLADEFS_E2E_BUCKET" \
     CLADEFSD_ROOTS="$disk_dir" \
     CLADEFSD_PART_CACHE="${CLADEFSD_PART_CACHE-$cache_dir}" \
     CLADEFSD_TOKEN="${CLADEFSD_TOKEN:-1}" \
-    CLADEFSD_VM_CGROUP_DELEGATED="${CLADEFSD_VM_CGROUP_DELEGATED:-1}" \
     CLADEFSD_STATS="$results/$daemon_file-stats.txt" CLADEFSD_GRPC="$control" \
     FAILPOINTS="${CLADEFS_FAILPOINTS:-}" ${cladefsd_wrap[@]+"${cladefsd_wrap[@]}"} "$cladefsd_bin" "$socket" ${cladefsd_memory:+"$cladefsd_memory"} \
     > "$results/$daemon_file.log" 2>&1 &
@@ -589,7 +576,8 @@ daemon=$!
 trap 'cladefsd_peak; kill "$daemon" 2> /dev/null; cladefsd_stop; rm -r "$sockets"; [[ -z $bucket_dir ]] || rm -r "$bucket_dir"; [[ -z $cache_dir ]] || rm -r "$cache_dir"; rm -r "$disk_dir"' EXIT
 while [[ ! -S $socket || ! -S $control ]]; do
     if ! kill -0 "$daemon" 2> /dev/null; then
-        echo "the extent daemon exited: see $results/$daemon_file.log" >&2
+        echo "the extent daemon exited ($results/$daemon_file.log):" >&2
+        cat "$results/$daemon_file.log" >&2
         exit 1
     fi
     sleep 0.1

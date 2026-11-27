@@ -437,12 +437,11 @@ fn cladefsd_mounting(dir: &Path, bucket: &Path, token: u64) -> (KillOnDrop, Path
 }
 
 /// cladefsd serving at `vm`, of placement `token`, its bucket the directory `bucket`, its memory
-/// fixed, as a test's, and its standard error piped.
+/// governed, as production's (board 14529), and its standard error piped.
 fn cladefsd(vm: &Path, bucket: &Path, token: u64) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_cladefsd"));
     command
         .arg(vm)
-        .arg((256u64 << 20).to_string())
         .env("CLADEFSD_BUCKET", url::Url::from_directory_path(bucket).unwrap().to_string())
         .env("CLADEFSD_TOKEN", token.to_string())
         // The disk it owns, its VM socket's directory, unless a test names another (board 14305).

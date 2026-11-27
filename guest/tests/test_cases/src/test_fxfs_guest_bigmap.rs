@@ -112,10 +112,9 @@ mod host {
             let metrics = crate::measure::metrics_address()?;
             let metrics_at = metrics.to_string();
             let env = [("CLADEFSD_METRICS", OsStr::new(&metrics_at))];
-            // The file whole in its memory, as a host keeps a base's pages for its forks, and room.
-            let memory = Some(bytes + (2 << 30));
-            let daemon =
-                crate::common::spawn_daemon(test_setup, &socket, "cladefsd", &env, memory)?;
+            // Governed, as production's (board 14529), on a host whose memory holds the file whole,
+            // as a host keeps a base's pages for its forks: the file and 2 GiB, fixed, until then.
+            let daemon = crate::common::spawn_daemon(test_setup, &socket, "cladefsd", &env, None)?;
             // The file, what the fork writes again of it, and room.
             let capacity = 2 * bytes + (4 << 30);
             let base = crate::common::create_cell(&socket, capacity)?;

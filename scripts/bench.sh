@@ -40,10 +40,9 @@ if compgen -G "$results/bench-*.json" > /dev/null || [[ -e $results/logs ]]; the
 fi
 
 status=0 report=0
-# The extent daemon holds as much memory as the sandbox team's does, 8 GiB, unless
-# CLADEFSD_MEMORY says otherwise: with its default, 1 GiB, a DAX guest's working set
-# doesn't fit, and its faults page in again what was evicted, which measures that (TASK-109.3).
-export CLADEFSD_MEMORY=${CLADEFSD_MEMORY:-$((8 << 30))}
+# The extent daemon's memory is governed, as production's (board 14529): what the bench measures
+# is what ships. CLADEFSD_MEMORY fixes it instead, as an A/B's fixed side does (8 GiB until board
+# 14529, the sandbox team's size, TASK-109.3).
 # shellcheck disable=SC2086 # The cases' selectors are words separated by spaces.
 CLADEFS_BENCH_ITERATIONS=$iterations CLADEFS_BENCH_RESULTS=$results \
     CLADEFS_E2E_RESULTS=$results/logs "$root/scripts/test-e2e.sh" $cases >&2 || status=$?

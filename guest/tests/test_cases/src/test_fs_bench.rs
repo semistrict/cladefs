@@ -578,9 +578,12 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
             }
         }
         // cladefs: what the working-set workloads size their files by (TASK-350.2): the extent
-        // daemon's fixed memory, CLADEFSD_MEMORY, if it has one, or 1 GiB, its old default,
-        // a daemon whose memory is a page cache having no size of its own (TASK-358). Every case
-        // gets it, the baselines too, so that each reads files of the same sizes.
+        // daemon's fixed memory, CLADEFSD_MEMORY, if it has one, or 1 GiB, its old default: a
+        // governed daemon, as production's (board 14529), has no size of its own, its memory a
+        // page cache of what the host's is free (TASK-358), so that a governed run's sets are of
+        // 1 GiB's multiples, the same in every run, its 2x and 4x past a fixed 1 GiB daemon's but
+        // not past a governed one on a large host. Every case gets it, the baselines too, so that
+        // each reads files of the same sizes.
         let daemon_memory =
             std::env::var("CLADEFSD_MEMORY").unwrap_or_else(|_| (1u64 << 30).to_string());
         vm.env(&CString::new(format!("CLADEFS_BENCH_DAEMON_MEMORY={daemon_memory}"))?);

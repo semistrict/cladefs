@@ -157,10 +157,6 @@ def encrypted_env(dir):
     return env
 
 
-# The daemon's memory, fixed: what pjdfstest's small files need, many times over.
-MEMORY_BYTES = 1 << 30
-
-
 def mounted(bin_dir, dir):
     """A daemon serving in `dir`, its FUSE mount of cells shown to other users too, which
     pjdfstest's tests become (`-u`, `-g`), and a new cell of it attached there: the daemon's
@@ -174,9 +170,9 @@ def mounted(bin_dir, dir):
                 # The disk the daemon owns, which its cells are kept on (board 14305).
                 "CLADEFSD_ROOTS": str(cells)})
     log = open(dir / "cladefsd.log", "w")
-    # Its memory fixed: governed, it would require the memory governor's MGLRU
-    # and swap of the host, which a CI runner has not (hotbed review 170).
-    process = subprocess.Popen([bin_dir / "cladefsd", str(dir / "vms.sock"), str(MEMORY_BYTES)],
+    # Its memory governed, as production's (board 14529): the host set up as a production
+    # host is (`cladefsd --setup-host`, ci.yml), or the daemon refuses to start, saying why.
+    process = subprocess.Popen([bin_dir / "cladefsd", str(dir / "vms.sock")],
                                env=env, stdout=log, stderr=subprocess.STDOUT)
     deadline = time.monotonic() + 60
     while not control.exists():

@@ -586,6 +586,11 @@ RUN apk add --no-cache postgresql postgresql-contrib git
                 // Each host's own placement.
                 let token = (at + 1).to_string();
                 let env = [("CLADEFSD_TOKEN", std::ffi::OsStr::new(&token))];
+                // Fixed, not governed as production's (board 14529): two hosts on one machine,
+                // each held to its budget (scripts/budgets.py), where each governed daemon would
+                // take the machine's free memory as its own, as no host's daemon shares its host.
+                // Governed in a cgroup of its own, its host's memory.max, awaits hotbed issue 14
+                // (cgroups delegated to a workspace's commands).
                 let daemon = crate::common::spawn_daemon(
                     test_setup,
                     &socket,

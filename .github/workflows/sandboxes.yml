@@ -72,6 +72,10 @@ jobs:
             target
             guest/tests/target
           key: sandboxes-cargo-${{ hashFiles('Cargo.lock', 'guest/tests/Cargo.lock', 'vendor/firecracker.lock') }}
+      # The runner set up as a production host's ExecStartPre sets it up (MGLRU, zram swap), so
+      # that the daemons are governed, as production's (board 14529).
+      - name: The host's settings the memory governor needs
+        run: sudo "$HOME/sandboxes-artifacts/cladefsd" --setup-host
       # As root, as the guest part's tests run: podman makes the guests' root images. What the
       # runner spends, every 30 s, goes in the results (resources.log, scripts/lib/resources.sh).
       - name: scripts/sandboxes.sh short
