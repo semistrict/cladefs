@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import { createR2Bridge } from "./r2-bridge.ts";
+import { probedBridge } from "./r2-bridge.ts";
 import {
 	cellUsage,
 	collectCell,
@@ -128,8 +128,9 @@ async function enqueueSweep(env: Env): Promise<{
 	shreddedTenants: string[];
 }> {
 	ensureWasm();
-	const bridge = createR2Bridge(env.BUCKET);
-	const sweepStartedMs = Date.now();
+	const bridge = await probedBridge(env.BUCKET);
+	// The bucket's clock, as the passes' leases record when they ended (`Holding::since`).
+	const sweepStartedMs = bridge.now();
 	const leaseMs = parseLeaseMs(env);
 	const [cellsJson, shreddedJson] = await Promise.all([
 		listCells(bridge),
@@ -190,7 +191,7 @@ export default {
 
 	async queue(batch: MessageBatch<CellMessage>, env: Env): Promise<void> {
 		ensureWasm();
-		const bridge = createR2Bridge(env.BUCKET);
+		const bridge = await probedBridge(env.BUCKET);
 		for (const msg of batch.messages) {
 			const started = Date.now();
 			const { cell, sweepStartedMs, leaseMs, shredded } = msg.body;
@@ -242,9 +243,8 @@ export default {
 		}
 
 		ensureWasm();
-		const bridge = createR2Bridge(env.BUCKET);
-
 		try {
+			const bridge = await probedBridge(env.BUCKET);
 			if (request.method === "POST" && path === "/sweep") {
 				const result = await enqueueSweep(env);
 				return jsonResponse(result);

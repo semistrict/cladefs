@@ -3,8 +3,8 @@
 // found in the LICENSE file.
 
 import { env, SELF } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
-import { createR2Bridge } from "../src/r2-bridge.ts";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { BucketClock, createR2Bridge, DRIFT_PPM, probe, probedBridge } from "../src/r2-bridge.ts";
 import worker, { type CellMessage, type CollectResult, type DryRunResult } from "../src/index.ts";
 
 const AUTH = { authorization: "Bearer test-gc-token" };
@@ -14,11 +14,19 @@ describe("R2Bridge primitives", () => {
 		const bridge = createR2Bridge(env.BUCKET);
 		const payload = new TextEncoder().encode("0123456789abcdef");
 
-		// Create succeeds once, then returns null (AlreadyExists).
+		// Create succeeds once, then returns null (AlreadyExists), the first's bytes kept.
 		const v1 = await bridge.put("test/obj", payload, "create", undefined);
 		expect(v1?.etag).toBeTruthy();
-		const dup = await bridge.put("test/obj", payload, "create", undefined);
+		const dup = await bridge.put(
+			"test/obj",
+			new TextEncoder().encode("other"),
+			"create",
+			undefined,
+		);
 		expect(dup).toBeNull();
+		expect(new TextDecoder().decode((await bridge.get("test/obj"))!.bytes)).toBe(
+			"0123456789abcdef",
+		);
 
 		// Conditional update with wrong etag returns null (Precondition); right etag succeeds.
 		const bad = await bridge.put("test/obj", payload, "update", "wrong-etag");
@@ -51,6 +59,93 @@ describe("R2Bridge primitives", () => {
 		await bridge.deleteBatch(["test/obj", "delim/a/1", "delim/b/2", "delim/root"]);
 		expect(await bridge.head("test/obj")).toBeNull();
 		expect((await bridge.list("delim/")).length).toBe(0);
+	});
+});
+
+describe("R2's conditionals, as the collector's protocol relies on them (board 14350)", () => {
+	it("lets one of many racing create-only writes of a key through, the rest refused", async () => {
+		const bridge = createR2Bridge(env.BUCKET);
+		const writes = Array.from({ length: 8 }, (_, i) =>
+			bridge.put("race/lease", new TextEncoder().encode(`writer ${i}`), "create", undefined),
+		);
+		const answers = await Promise.all(writes);
+		const won = answers.flatMap((answer, i) => (answer === null ? [] : [i]));
+		expect(won.length).toBe(1);
+		const stored = new TextDecoder().decode((await bridge.get("race/lease"))!.bytes);
+		expect(stored).toBe(`writer ${won[0]}`);
+	});
+
+	it("lets one of two updates of one etag through, the other refused", async () => {
+		const bridge = createR2Bridge(env.BUCKET);
+		const read = await bridge.put("race/head", new Uint8Array([0]), "create", undefined);
+		const [a, b] = await Promise.all([
+			bridge.put("race/head", new Uint8Array([1]), "update", read!.etag!),
+			bridge.put("race/head", new Uint8Array([2]), "update", read!.etag!),
+		]);
+		expect([a, b].filter((answer) => answer !== null).length).toBe(1);
+	});
+
+	it("probes a store that honours them, and refuses one that ignores create-only", async () => {
+		await probe(env.BUCKET, new BucketClock());
+		expect((await env.BUCKET.list({ prefix: "probe/" })).objects.length).toBe(0);
+		// A store taking every write, as R2 would if it took "*" for an etag.
+		const ignoring = new Proxy(env.BUCKET, {
+			get(target, name) {
+				if (name === "put") {
+					return (key: string, value: Uint8Array) => target.put(key, value);
+				}
+				const member = Reflect.get(target, name) as unknown;
+				return typeof member === "function" ? member.bind(target) : member;
+			},
+		});
+		await expect(probe(ignoring, new BucketClock())).rejects.toThrow(
+			/^the store does not honour conditional writes: a create where an object is gave /,
+		);
+	});
+});
+
+describe("the bucket's clock: R2's, never the Worker's (board 14350)", () => {
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it("keeps the best lower bound of the dates heard, going on less the drift", () => {
+		const clock = new BucketClock();
+		expect(clock.now(0)).toBe(0);
+		const date = 784_111_777_000;
+		clock.heard(date, 1_000);
+		expect(clock.now(1_000)).toBe(date);
+		expect(clock.now(1_001_000)).toBe(date + 1_000_000 - DRIFT_PPM);
+		// Behind what the best says as it arrives: nothing.
+		clock.heard(date + 1_000, 3_000);
+		expect(clock.now(3_000)).toBe(date + 1_999);
+		// Before it arrived, its date.
+		expect(clock.now(0)).toBe(date);
+		// Dates that are none say nothing.
+		for (const nothing of [Number.NaN, -1, Number.POSITIVE_INFINITY]) {
+			clock.heard(nothing, 3_000);
+			expect(clock.now(3_000)).toBe(date + 1_999);
+		}
+		// Ahead: taken.
+		clock.heard(date + 60_000, 10_000);
+		expect(clock.now(10_000)).toBe(date + 60_000);
+	});
+
+	it("reads R2's dates with the Worker's clock an hour ahead", async () => {
+		const clock = new BucketClock();
+		const bridge = createR2Bridge(env.BUCKET, clock);
+		expect(bridge.now()).toBe(0);
+		vi.useFakeTimers({ toFake: ["Date"] });
+		vi.setSystemTime(Date.now() + 3_600_000);
+		await bridge.put("clock/written", new Uint8Array([1]), "overwrite", undefined);
+		const dated = (await env.BUCKET.head("clock/written"))!.uploaded.getTime();
+		expect(bridge.now()).toBeGreaterThanOrEqual(dated);
+		expect(bridge.now() - dated).toBeLessThan(10_000);
+	});
+
+	it("starts with a date before any pass: the probe's", async () => {
+		const bridge = await probedBridge(env.BUCKET);
+		expect(Math.abs(bridge.now() - Date.now())).toBeLessThan(10_000);
 	});
 });
 

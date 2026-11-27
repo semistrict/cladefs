@@ -52,6 +52,50 @@ export interface R2Bridge {
 	sleep(ms: number): Promise<void>;
 }
 
+/**
+ * cladefs: the most the Worker's monotonic clock may run fast of R2's, in millionths, as
+ * `bucket_cell::clock::DRIFT_PPM`.
+ */
+export const DRIFT_PPM = 500;
+
+/**
+ * cladefs: a bucket's clock as the collector reads it (`Bucket::now`): R2's, never the Worker's own,
+ * as `crates/bucket_cell/src/clock.rs` has every host's (boards 8467, 8471, 14350). Collector leases
+ * are measured by it, and the dates R2 gives objects (`R2Object.uploaded`) by R2's clock. The binding's
+ * answers carry no `Date`, as native backends' do (`clock::Served`): the dates R2 gives what the
+ * Worker writes stand in for them. It keeps their best lower bound: R2's time, as a write's answer
+ * arrives, is at least the write's date, and since then it has gone on at least as fast as the
+ * Worker's monotonic clock (`performance.now()`), less {@link DRIFT_PPM}. Never ahead of R2's, so a
+ * lease it holds ends early, never late. 0 before any date: a lower bound still, which closes no
+ * window; {@link probedBridge} writes before any pass reads it.
+ */
+export class BucketClock {
+	#best: { ms: number; at: number } | null = null;
+
+	/** A write R2 dated `dateMs`, answered at `at` by the monotonic clock: kept if it says more. */
+	heard(dateMs: number, at: number = performance.now()): void {
+		if (!Number.isFinite(dateMs) || dateMs < 0) return;
+		const heard = { ms: dateMs, at };
+		const best = this.#best;
+		// Both as of the later's arrival, after which each goes on alike.
+		const later = best === null ? at : Math.max(best.at, at);
+		if (best === null || dated(best, later) < dated(heard, later)) {
+			this.#best = heard;
+		}
+	}
+
+	/** R2's time at `at`, at least: 0 before any date. */
+	now(at: number = performance.now()): number {
+		return this.#best === null ? 0 : Math.floor(dated(this.#best, at));
+	}
+}
+
+/** R2's time at `then`, at least, as `date` says: its date, and the time since less the drift. */
+function dated(date: { ms: number; at: number }, then: number): number {
+	const since = Math.max(0, then - date.at);
+	return date.ms + since - (since * DRIFT_PPM) / 1_000_000;
+}
+
 function toMeta(obj: R2Object): R2Meta {
 	return {
 		key: obj.key,
@@ -68,7 +112,11 @@ function makeCodedError(code: string, message: string): Error & { code: string }
 	return err;
 }
 
-export function createR2Bridge(bucket: R2Bucket): R2Bridge {
+/**
+ * The bridge over `bucket`, its clock `clock` ({@link BucketClock}), fed the date R2 gives each
+ * write.
+ */
+export function createR2Bridge(bucket: R2Bucket, clock: BucketClock = new BucketClock()): R2Bridge {
 	return {
 		async get(key: string): Promise<R2GetResult | null> {
 			const obj = await bucket.get(key);
@@ -150,17 +198,9 @@ export function createR2Bridge(bucket: R2Bucket): R2Bridge {
 			mode: "overwrite" | "create" | "update",
 			etag: string | undefined,
 		): Promise<R2Version | null> {
-			let options: R2PutOptions | undefined;
-			if (mode === "create") {
-				options = { onlyIf: { etagDoesNotMatch: "*" } };
-			} else if (mode === "update") {
-				if (!etag) {
-					throw makeCodedError("Precondition", `missing etag for update of ${key}`);
-				}
-				options = { onlyIf: { etagMatches: etag } };
-			}
-			const res = await bucket.put(key, bytes, options);
+			const res = await bucket.put(key, bytes, putOptions(key, mode, etag));
 			if (!res) return null;
+			clock.heard(res.uploaded.getTime());
 			return { etag: res.etag ?? null, version: res.version ?? null };
 		},
 
@@ -175,11 +215,102 @@ export function createR2Bridge(bucket: R2Bucket): R2Bridge {
 		},
 
 		now(): number {
-			return Date.now();
+			return clock.now();
 		},
 
 		sleep(ms: number): Promise<void> {
 			return new Promise((resolve) => setTimeout(resolve, ms));
 		},
 	};
+}
+
+/**
+ * cladefs: the condition of a write of `mode` (board 14350), as Cloudflare documents them for the
+ * binding's `onlyIf` (R2 Workers API reference: `R2Conditional | Headers`, "All conditional headers
+ * aside from `If-Range` are supported"; R2's conditional operations: "`*` matches any object", and
+ * competing conditional writes to one key are serialized, checked as each commits):
+ *
+ * - create: `If-None-Match: *`, in the `Headers` form, which documents the wildcard; the object
+ *   form documents `etagDoesNotMatch` as one etag compared, no wildcard (workerd sends both as the
+ *   same wildcard, `buildSingleEtagArray`, but only the header is R2's documented create-only).
+ * - update: `etagMatches` of the etag read, unquoted, as `R2Object.etag` gives it.
+ */
+export function putOptions(
+	key: string,
+	mode: "overwrite" | "create" | "update",
+	etag: string | undefined,
+): R2PutOptions | undefined {
+	switch (mode) {
+		case "overwrite":
+			return undefined;
+		case "create":
+			return { onlyIf: new Headers({ "If-None-Match": "*" }) };
+		case "update":
+			if (!etag) {
+				throw makeCodedError("Precondition", `missing etag for update of ${key}`);
+			}
+			return { onlyIf: { etagMatches: etag } };
+	}
+}
+
+/**
+ * cladefs: what a bucket's probe found wrong, as `bucket_cell::object_bucket::probe` refuses a store:
+ * the collector's lease and its one deleter rest on create-only and versioned writes.
+ */
+function refused(what: string, found: unknown): Error {
+	return makeCodedError(
+		"Refused",
+		`the store does not honour conditional writes: ${what} gave ${JSON.stringify(found)}`,
+	);
+}
+
+/**
+ * cladefs: probes `bucket` as native `cladefs-gc` probes its store before it writes anything
+ * (`object_bucket::probe`): a create-only write where there is none, refused where there is one; an
+ * update of another etag refused, of the object's taken; the object removed. Its writes' dates
+ * start the clock ({@link BucketClock}), so that no lease is taken by a clock with no time. A
+ * probe that finds the store wrong throws: no pass runs on it.
+ */
+export async function probe(bucket: R2Bucket, clock: BucketClock): Promise<void> {
+	const nonce = crypto.getRandomValues(new Uint32Array(2));
+	const key = `probe/worker-${nonce[0].toString(16)}${nonce[1].toString(16)}`;
+	const bridge = createR2Bridge(bucket, clock);
+	const created = await bridge.put(key, new TextEncoder().encode("probe"), "create", undefined);
+	if (created?.etag == null) throw refused(`a create of ${key}`, created);
+	const again = await bridge.put(key, new TextEncoder().encode("again"), "create", undefined);
+	if (again !== null) throw refused("a create where an object is", again);
+	const stale = await bridge.put(key, new TextEncoder().encode("stale"), "update", "cladefs-probe");
+	if (stale !== null) throw refused("an update of another version", stale);
+	const updated = await bridge.put(
+		key,
+		new TextEncoder().encode("updated"),
+		"update",
+		created.etag,
+	);
+	if (updated === null) throw refused("an update of the object's version", updated);
+	await bridge.delete(key);
+}
+
+/** cladefs: each binding's clock, probed once an isolate ({@link probedBridge}). */
+const probed = new WeakMap<R2Bucket, Promise<BucketClock>>();
+
+/**
+ * cladefs: the bridge over `bucket`, probed first ({@link probe}), once an isolate, as native
+ * `cladefs-gc` probes once a process: its clock R2's, shared by the invocations that follow. A
+ * failed probe is tried again by the next.
+ */
+export async function probedBridge(bucket: R2Bucket): Promise<R2Bridge> {
+	let clock = probed.get(bucket);
+	if (clock === undefined) {
+		const made = new BucketClock();
+		clock = probe(bucket, made).then(
+			() => made,
+			(error: unknown) => {
+				probed.delete(bucket);
+				throw error;
+			},
+		);
+		probed.set(bucket, clock);
+	}
+	return createR2Bridge(bucket, await clock);
 }
