@@ -19,8 +19,9 @@ mkdir -p "$out"
 blob=$(mktemp)
 trap 'rm -f "$blob"' EXIT
 # The build's log on standard error, the two files, packed, on standard output: base64, as
-# hotbed passes text.
-(cd "$root" && hotbed run --arch arm64 ${LIBMACHINE_HOTBED_NODE:+--node "$LIBMACHINE_HOTBED_NODE"} --soft-limit 40m -- bash -c '
+# hotbed passes text. All of it, waited for: an attached run prints 32K of its output by default
+# and leaves a run past its wait detached, and either cut the files short (board 14404).
+(cd "$root" && hotbed run --arch arm64 ${LIBMACHINE_HOTBED_NODE:+--node "$LIBMACHINE_HOTBED_NODE"} --soft-limit 40m --wait 45m --max-output 0 -- bash -c '
     set -euo pipefail
     export CARGO_BUILD_JOBS=4 CLADEFS_GUEST_KERNEL_JOBS=4
     guest=$PWD/target/guest
@@ -39,5 +40,8 @@ trap 'rm -f "$blob"' EXIT
     tar -C "$guest" -czf - Image initramfs.cpio | base64 -w 0
     echo
 ' 2> >(cat >&2)) | sed -n '/^--- arm64 guest ---$/{n;p;}' > "$blob"
-base64 -d < "$blob" | tar -C "$out" -xzf -
+if ! base64 -d < "$blob" | tar -C "$out" -xzf -; then
+    echo "arm64-guest.sh: the guest fetched from hotbed is cut short or corrupt" >&2
+    exit 1
+fi
 ls -l "$out/Image" "$out/initramfs.cpio"

@@ -14,7 +14,7 @@ repo_root="$(cd "$worker_dir/../.." && pwd)"
 wbg_version="0.2.129"
 
 cd "$repo_root"
-hotbed run --kind build -- sh -c "set -euo pipefail
+hotbed run --kind build --wait 30m -- sh -c "set -euo pipefail
 rustup target add wasm32-unknown-unknown
 cargo build --locked -p gc_wasm --target wasm32-unknown-unknown --release
 if [ ! -x /tmp/wbg/wasm-bindgen ]; then
@@ -32,7 +32,13 @@ rm -rf target/gc_wasm_pkg && mkdir -p target/gc_wasm_pkg
 "
 
 mkdir -p "$worker_dir/src/wasm"
-hotbed run --no-sync -- sh -c 'tar czf - -C target/gc_wasm_pkg . | base64' | base64 -d | tar xzf - -C "$worker_dir/src/wasm"
+# All of the output, waited for: an attached run prints 32K of it by default, which cut the module
+# short (board 14404).
+if ! hotbed run --no-sync --wait 10m --max-output 0 -- sh -c 'tar czf - -C target/gc_wasm_pkg . | base64' |
+  base64 -d | tar xzf - -C "$worker_dir/src/wasm"; then
+  echo "build-wasm.sh: the module fetched from hotbed is cut short or corrupt" >&2
+  exit 1
+fi
 
 if command -v wasm-opt >/dev/null 2>&1; then
   wasm-opt -Os --enable-bulk-memory --enable-sign-ext --enable-mutable-globals --enable-nontrapping-float-to-int \
