@@ -751,7 +751,6 @@ mod host {
                                 tenant: base.tenant,
                                 cell: base.id,
                                 token,
-                                force: false,
                                 kind: CellKind::Fxfs.into(),
                                 ..Default::default()
                             })
@@ -771,7 +770,6 @@ mod host {
                                     tenant: cell.tenant,
                                     cell: cell.id,
                                     token,
-                                    force: false,
                                     kind: CellKind::Fxfs.into(),
                                     ..Default::default()
                                 })

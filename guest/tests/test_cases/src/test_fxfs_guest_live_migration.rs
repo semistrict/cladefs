@@ -407,7 +407,6 @@ mod host {
                     tenant: store_src.0,
                     cell: store_src.1,
                     token: 2,
-                    force: false,
                 })
                 .await
             })?;
