@@ -10,15 +10,25 @@
 //!
 //! ```text
 //! 0       header (64 bytes): magic "lmsnap\0\0", format version (u32),
-//!         0 (u32), the state's length (u64), the RAM's offset (u64), the
-//!         state's SHA-256 (32 bytes)
+//!         0 (u32), the state's length (u64), the RAM's offset (u64; 0 for
+//!         RAM in a file of its own), the state's SHA-256 (32 bytes)
 //! 64      the state: what the machine is (CPU model and fingerprint, vCPU
-//!         count, RAM size, the memory layout, each RAM region's offset in
-//!         the file), then KVM's VM state, every vCPU's, the UART's and
-//!         every PCI function's with its device's (snapshot::codec)
+//!         count, RAM size, the memory layout, its balloon, disks and extent
+//!         store devices, the caller's data), then the backend's: on KVM its
+//!         VM state, every vCPU's, the UART's and every PCI function's with its
+//!         device's; on Hypervisor.framework the GIC's and the host's clock,
+//!         every vCPU's, the UART's, the RTC's and every PCI function's
+//!         (snapshot::codec)
 //! RAM     each RAM region in address order, each at a multiple of 2 MiB,
 //!         pages of zeroes left as holes
 //! ```
+//!
+//! Or the RAM is in a file of its own ([`Machine::snapshot_with`]), as a
+//! Firecracker snapshot's memory file is: the guest's RAM regions one after
+//! the other from its start, pages of zeroes left as holes.
+//!
+//! Version 3 added the devices and the caller's data to what the machine is,
+//! the RAM file of its own, and Hypervisor.framework's state.
 //!
 //! Formats are never converted (AGENTS.md): a file of another version, or
 //! one whose state another version of libmachine wrote, is refused with an
@@ -29,11 +39,15 @@
 //! The file is written beside its path and renamed over it, read-only for
 //! its owner: machines restored from it map it, so it must not change while
 //! they run (a file written in place would show its new pages to them).
+//!
+//! [`Machine::snapshot_with`]: crate::Machine::snapshot_with
 
 pub(crate) mod codec;
 
+use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{Read, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -43,13 +57,14 @@ use vm_memory::{GuestAddress, GuestMemoryBackend, GuestMemoryMmap};
 
 use crate::cpu::CpuModel;
 use crate::error::{Error, Result};
+use crate::extent::{ExtentCache, ExtentCell, ExtentStore};
 use crate::machine::MachineConfig;
 use crate::memory::{MemoryLayout, MemoryRegion, RegionKind};
 use codec::{Decoder, Encoder};
 
 /// The snapshot format this libmachine writes and reads; any other is
 /// refused.
-pub const FORMAT_VERSION: u32 = 2;
+pub const FORMAT_VERSION: u32 = 3;
 
 const MAGIC: [u8; 8] = *b"lmsnap\0\0";
 const HEADER_LEN: usize = 64;
@@ -58,7 +73,8 @@ const HEADER_LEN: usize = 64;
 const RAM_ALIGN: u64 = 2 << 20;
 const PAGE: usize = 4096;
 
-/// What a snapshot's machine is, at the head of its state.
+/// What a snapshot's machine is, at the head of its state: what a restore
+/// builds again before it puts the state back.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MachineHeader {
     pub(crate) cpu_model: CpuModel,
@@ -66,6 +82,15 @@ pub(crate) struct MachineHeader {
     pub(crate) vcpus: u32,
     pub(crate) mem_size: u64,
     pub(crate) layout: MemoryLayout,
+    /// Whether it has a balloon.
+    pub(crate) balloon: bool,
+    /// Its disks, in their order.
+    pub(crate) disks: Vec<crate::Disk>,
+    /// Its extent store devices, in their order, as virtio_extent saves each once its snapshot
+    /// is taken: its configuration, its cell's version (or a migration's), its window's mappings.
+    pub(crate) extent_stores: Vec<virtio_extent::persist::State>,
+    /// What the caller keeps with the snapshot ([`Snapshot::caller_data`]).
+    pub(crate) caller_data: Vec<u8>,
 }
 
 fn kind_code(kind: RegionKind) -> u8 {
@@ -101,6 +126,19 @@ impl MachineHeader {
             e.u64(r.size);
             e.u8(kind_code(r.kind));
         }
+        e.bool(self.balloon);
+        e.count(self.disks.len());
+        for disk in &self.disks {
+            e.bytes(disk.path.as_os_str().as_bytes());
+            e.bool(disk.read_only);
+            e.bool(disk.unsafe_flushes);
+            e.str(&disk.id);
+        }
+        e.count(self.extent_stores.len());
+        for store in &self.extent_stores {
+            e.bytes(&store.encode());
+        }
+        e.bytes(&self.caller_data);
     }
 
     pub(crate) fn decode(d: &mut Decoder<'_>) -> Result<Self> {
@@ -115,7 +153,39 @@ impl MachineHeader {
         let regions = (0..n)
             .map(|_| Ok(MemoryRegion::new(d.u64()?, d.u64()?, kind_of(d.u8()?)?)))
             .collect::<Result<_>>()?;
-        Ok(Self { cpu_model, cpu_fingerprint, vcpus, mem_size, layout: MemoryLayout { regions } })
+        let balloon = d.bool()?;
+        let n = d.count(10)?;
+        let disks = (0..n)
+            .map(|_| {
+                let path = PathBuf::from(OsStr::from_bytes(d.bytes()?));
+                Ok(crate::Disk {
+                    path,
+                    read_only: d.bool()?,
+                    unsafe_flushes: d.bool()?,
+                    id: d.str()?,
+                })
+            })
+            .collect::<Result<_>>()?;
+        let n = d.count(4)?;
+        let extent_stores = (0..n)
+            .map(|_| {
+                virtio_extent::persist::State::decode(d.bytes()?).map_err(|e| {
+                    Error::Snapshot(format!("the snapshot's extent store device: {e}"))
+                })
+            })
+            .collect::<Result<_>>()?;
+        let caller_data = d.bytes()?.to_vec();
+        Ok(Self {
+            cpu_model,
+            cpu_fingerprint,
+            vcpus,
+            mem_size,
+            layout: MemoryLayout { regions },
+            balloon,
+            disks,
+            extent_stores,
+            caller_data,
+        })
     }
 }
 
@@ -132,23 +202,50 @@ pub(crate) fn ram_offsets(layout: &MemoryLayout, ram_offset: u64) -> Vec<(Memory
         .collect()
 }
 
+/// Where each RAM region of `layout` goes in a RAM file of its own: one after the other from its
+/// start, as Firecracker's memory files hold them.
+fn flat_offsets(layout: &MemoryLayout) -> Vec<(MemoryRegion, u64)> {
+    let mut at = 0;
+    layout
+        .of_kind(RegionKind::Ram)
+        .map(|r| {
+            let offset = at;
+            at += r.size;
+            (*r, offset)
+        })
+        .collect()
+}
+
+/// Where a snapshot's RAM goes.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum RamAt<'a> {
+    /// In the snapshot's file, after its state.
+    Inline,
+    /// In a file of its own, at this path.
+    File(&'a Path),
+}
+
 /// Writes a snapshot of a machine: `machine` and `state` (encoded by the
-/// machine), and the guest's RAM from `mem`. Every vCPU is stopped and
-/// nothing writes guest memory while this runs.
+/// machine), and the guest's RAM from `mem`, where `ram` says. Every vCPU is
+/// stopped and nothing writes guest memory while this runs.
 pub(crate) fn write(
     path: &Path,
     machine: &MachineHeader,
     state: &[u8],
     mem: &GuestMemoryMmap,
+    ram: RamAt<'_>,
 ) -> Result<()> {
-    let io = |source| Error::Io { path: path.to_owned(), source };
     let mut head = Encoder::default();
     machine.encode(&mut head);
     let mut all = head.finish();
     all.extend_from_slice(state);
-    let ram_offset = (HEADER_LEN as u64 + all.len() as u64).next_multiple_of(RAM_ALIGN);
-    let regions = ram_offsets(&machine.layout, ram_offset);
-    let end = regions.last().map_or(ram_offset, |(r, offset)| offset + r.size);
+    let (ram_offset, regions) = match ram {
+        RamAt::Inline => {
+            let at = (HEADER_LEN as u64 + all.len() as u64).next_multiple_of(RAM_ALIGN);
+            (at, ram_offsets(&machine.layout, at))
+        }
+        RamAt::File(_) => (0, flat_offsets(&machine.layout)),
+    };
 
     let mut header = Vec::with_capacity(HEADER_LEN);
     header.extend_from_slice(&MAGIC);
@@ -159,6 +256,48 @@ pub(crate) fn write(
     header.extend_from_slice(&Sha256::digest(&all));
     debug_assert_eq!(header.len(), HEADER_LEN);
 
+    let write_state = |file: &File| -> std::io::Result<()> {
+        let mut file = file;
+        file.write_all(&header)?;
+        file.write_all(&all)
+    };
+    match ram {
+        RamAt::Inline => replace(path, |file| {
+            write_state(file)?;
+            write_ram(file, mem, &regions)
+        }),
+        // The RAM first: a state file names RAM that is there.
+        RamAt::File(ram_path) => {
+            replace(ram_path, |file| write_ram(file, mem, &regions))?;
+            replace(path, write_state)
+        }
+    }
+}
+
+/// Writes guest RAM from `mem` into `file` where `regions` say, and sizes the file to their end.
+fn write_ram(
+    file: &File,
+    mem: &GuestMemoryMmap,
+    regions: &[(MemoryRegion, u64)],
+) -> std::io::Result<()> {
+    let end = regions.last().map_or(0, |(r, offset)| offset + r.size);
+    file.set_len(end.max(file.metadata()?.len()))?;
+    for (region, offset) in regions {
+        let host =
+            mem.get_host_address(GuestAddress(region.start)).map_err(std::io::Error::other)?;
+        // SAFETY: the region is guest RAM, mapped for as long as `mem`
+        // lives, and nothing writes it while a snapshot is taken (every
+        // vCPU is stopped, the device thread held off).
+        let ram = unsafe { std::slice::from_raw_parts(host, region.size as usize) };
+        write_sparse(file, ram, *offset)?;
+    }
+    Ok(())
+}
+
+/// Makes the file `path` with what `fill` writes, read-only for its owner: written beside it,
+/// synced, and renamed over it, so that no machine mapping an old file at `path` sees it change.
+fn replace(path: &Path, fill: impl FnOnce(&File) -> std::io::Result<()>) -> Result<()> {
+    let io = |source| Error::Io { path: path.to_owned(), source };
     let dir = match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => Path::new("."),
@@ -171,26 +310,16 @@ pub(crate) fn write(
     let temp =
         dir.join(format!(".{}.{:016x}.tmp", name.to_string_lossy(), u64::from_le_bytes(nonce)));
     let written = (|| -> std::io::Result<()> {
-        let mut file =
+        let file =
             std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&temp)?;
-        file.write_all(&header)?;
-        file.write_all(&all)?;
-        file.set_len(end)?;
-        for (region, offset) in &regions {
-            let host =
-                mem.get_host_address(GuestAddress(region.start)).map_err(std::io::Error::other)?;
-            // SAFETY: the region is guest RAM, mapped for as long as `mem`
-            // lives, and nothing writes it while a snapshot is taken (every
-            // vCPU is stopped, the device thread held off).
-            let ram = unsafe { std::slice::from_raw_parts(host, region.size as usize) };
-            write_sparse(&file, ram, *offset)?;
-        }
+        fill(&file)?;
         file.sync_data()?;
         file.set_permissions(std::fs::Permissions::from_mode(0o400))?;
         std::fs::rename(&temp, path)?;
         File::open(dir)?.sync_all()
     })();
     if let Err(e) = written {
+        // The write's error is the one to report; a temporary file left behind is only that.
         let _ = std::fs::remove_file(&temp);
         return Err(io(e));
     }
@@ -236,9 +365,10 @@ fn as_words(bytes: &[u8]) -> (&[u8], &[u64], &[u8]) {
 /// its RAM.
 pub struct Snapshot {
     path: PathBuf,
-    file: Arc<File>,
+    /// The file holding its RAM: the snapshot's own, or its RAM file.
+    ram: Arc<File>,
     machine: MachineHeader,
-    /// Each RAM region's offset in the file, in the layout's order.
+    /// Each RAM region's offset in its file, in the layout's order.
     ram_offsets: Vec<u64>,
     /// The state after the machine's header, which a restore decodes.
     state: Vec<u8>,
@@ -257,9 +387,20 @@ impl std::fmt::Debug for Snapshot {
 
 impl Snapshot {
     /// Opens the snapshot at `path` and checks it: its format version, its
-    /// state's checksum, and that the file holds all of its RAM.
+    /// state's checksum, and that the file holds all of its RAM. One whose
+    /// RAM is in a file of its own is opened with [`open_split`](Self::open_split).
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let path = path.as_ref();
+        Self::open_parts(path.as_ref(), None)
+    }
+
+    /// Opens the snapshot at `path` whose RAM is in the file `ram`
+    /// ([`Machine::snapshot_with`](crate::Machine::snapshot_with)), and checks
+    /// them as [`open`](Self::open) does.
+    pub fn open_split(path: impl AsRef<Path>, ram: impl AsRef<Path>) -> Result<Self> {
+        Self::open_parts(path.as_ref(), Some(ram.as_ref()))
+    }
+
+    fn open_parts(path: &Path, ram_path: Option<&Path>) -> Result<Self> {
         let io = |source| Error::Io { path: path.to_owned(), source };
         let mut file = File::open(path).map_err(io)?;
         let mut header = [0u8; HEADER_LEN];
@@ -287,7 +428,8 @@ impl Snapshot {
         }
         let (state_len, ram_offset) = (u64_at(16), u64_at(24));
         let file_len = file.metadata().map_err(io)?.len();
-        if state_len > file_len || HEADER_LEN as u64 + state_len > ram_offset {
+        let inline = ram_offset != 0;
+        if state_len > file_len || (inline && HEADER_LEN as u64 + state_len > ram_offset) {
             return Err(not_a_snapshot(path, "its header is damaged"));
         }
         let mut state = vec![0; state_len as usize];
@@ -299,17 +441,54 @@ impl Snapshot {
         let mut d = Decoder::new(&state);
         let machine = MachineHeader::decode(&mut d)?;
         let machine_len = state.len() - d.remaining();
-        let regions = ram_offsets(&machine.layout, ram_offset);
-        let end = regions.last().map_or(ram_offset, |(r, offset)| offset + r.size);
-        if file_len < end {
+        let (ram, ram_path, regions) = match (inline, ram_path) {
+            (true, None) => (file, path, ram_offsets(&machine.layout, ram_offset)),
+            (false, Some(ram_path)) => {
+                let ram = File::open(ram_path)
+                    .map_err(|source| Error::Io { path: ram_path.to_owned(), source })?;
+                (ram, ram_path, flat_offsets(&machine.layout))
+            }
+            (false, None) => {
+                return Err(not_a_snapshot(
+                    path,
+                    "its RAM is in a file of its own (open it with Snapshot::open_split)",
+                ));
+            }
+            (true, Some(ram_path)) => {
+                return Err(not_a_snapshot(
+                    path,
+                    &format!("its RAM is in its own file, not in {}", ram_path.display()),
+                ));
+            }
+        };
+        let ram_len =
+            ram.metadata().map_err(|source| Error::Io { path: ram_path.into(), source })?;
+        let end = regions.last().map_or(0, |(r, offset)| offset + r.size);
+        if ram_len.len() < end {
             return Err(not_a_snapshot(
                 path,
-                &format!("it ends at {file_len} bytes, before its RAM's end at {end}"),
+                &format!(
+                    "{} ends at {} bytes, before its RAM's end at {end}",
+                    ram_path.display(),
+                    ram_len.len()
+                ),
+            ));
+        }
+        let page = crate::sys::page_size() as u64;
+        if let Some((r, offset)) = regions.iter().find(|(_, offset)| !offset.is_multiple_of(page)) {
+            return Err(not_a_snapshot(
+                path,
+                &format!(
+                    "its RAM at {:#x} is at {offset} bytes in {}, which this host's {page}-byte \
+                     pages cannot map",
+                    r.start,
+                    ram_path.display()
+                ),
             ));
         }
         let ram_offsets = regions.iter().map(|&(_, offset)| offset).collect();
         let rest = state.split_off(machine_len);
-        Ok(Self { path: path.to_owned(), file: Arc::new(file), machine, ram_offsets, state: rest })
+        Ok(Self { path: path.to_owned(), ram: Arc::new(ram), machine, ram_offsets, state: rest })
     }
 
     /// The file's path.
@@ -317,12 +496,13 @@ impl Snapshot {
         &self.path
     }
 
-    /// The configuration of the machine the snapshot was taken of (no
-    /// network, no extent store devices: a machine with either is never
-    /// snapshotted). Host-side
-    /// settings the snapshot does not record, such as
+    /// The configuration of the machine the snapshot was taken of: its
+    /// devices (its balloon, disks, and extent store devices, each on the cell
+    /// it had, which a restore may change), and no network (a machine with
+    /// one is never snapshotted). Host-side settings the snapshot does not
+    /// record, such as the extent daemon and
     /// [`serial_capture_limit`](MachineConfig::serial_capture_limit), are
-    /// the defaults; a restore may choose them freely.
+    /// the defaults; a restore chooses them.
     pub fn config(&self) -> MachineConfig {
         MachineConfig {
             mem_size: self.machine.mem_size as usize,
@@ -331,11 +511,17 @@ impl Snapshot {
             network: None,
             serial_capture_limit: MachineConfig::DEFAULT_SERIAL_CAPTURE_LIMIT,
             extent_daemon: None,
-            extent_stores: Vec::new(),
+            extent_stores: self.machine.extent_stores.iter().map(extent_store).collect(),
             nested_virtualization: false,
-            balloon: false,
-            disks: Vec::new(),
+            balloon: self.machine.balloon,
+            disks: self.machine.disks.clone(),
         }
+    }
+
+    /// What the caller kept with the snapshot as it took it
+    /// ([`Machine::snapshot_with`](crate::Machine::snapshot_with)): empty if nothing.
+    pub fn caller_data(&self) -> &[u8] {
+        &self.machine.caller_data
     }
 
     /// The fingerprint of the CPU the guest saw
@@ -350,12 +536,22 @@ impl Snapshot {
         &self.machine.layout
     }
 
+    /// The file the guest's RAM is in.
     pub(crate) fn file(&self) -> &Arc<File> {
-        &self.file
+        &self.ram
     }
 
     pub(crate) fn ram_offsets(&self) -> &[u64] {
         &self.ram_offsets
+    }
+
+    /// Its extent store devices' saved state, in their order.
+    #[cfg_attr(
+        not(all(target_os = "macos", target_arch = "aarch64")),
+        allow(dead_code, reason = "KVM restores no extent store device yet")
+    )]
+    pub(crate) fn extent_states(&self) -> &[virtio_extent::persist::State] {
+        &self.machine.extent_stores
     }
 
     /// The state past the machine's header.
@@ -365,7 +561,8 @@ impl Snapshot {
 
     /// Checks that a machine of `config` is the snapshot's: what a restore
     /// can tell before it builds one (the CPU fingerprint is checked on the
-    /// machine it builds).
+    /// machine it builds). Its devices are the snapshot's but for where they
+    /// are on the host: a disk's file, an extent store device's cell.
     pub(crate) fn check(&self, config: &MachineConfig, layout: &MemoryLayout) -> Result<()> {
         let m = &self.machine;
         if config.network.is_some() {
@@ -388,6 +585,33 @@ impl Snapshot {
                 m.mem_size, config.mem_size, m.layout.regions, layout.regions
             )));
         }
+        if config.balloon != m.balloon {
+            return Err(Error::Snapshot(format!(
+                "the snapshot's machine {} a balloon; this one would {}",
+                if m.balloon { "has" } else { "has no" },
+                if config.balloon { "have one" } else { "have none" },
+            )));
+        }
+        let unplaced = |disk: &crate::Disk| crate::Disk { path: PathBuf::new(), ..disk.clone() };
+        if config.disks.iter().map(unplaced).ne(m.disks.iter().map(unplaced)) {
+            return Err(Error::Snapshot(format!(
+                "the snapshot's disks are {:?}; this machine's would be {:?} (a restore may move \
+                 their files, nothing else)",
+                m.disks, config.disks
+            )));
+        }
+        let snapshot: Vec<ExtentStore> = m.extent_stores.iter().map(extent_store).collect();
+        let unplaced = |store: &ExtentStore| ExtentStore {
+            cell: ExtentCell::Directory(PathBuf::new()),
+            ..store.clone()
+        };
+        if config.extent_stores.iter().map(unplaced).ne(snapshot.iter().map(unplaced)) {
+            return Err(Error::Snapshot(format!(
+                "the snapshot's extent store devices are {snapshot:?}; this machine's would be \
+                 {:?} (a restore may open them on other cells, nothing else)",
+                config.extent_stores
+            )));
+        }
         Ok(())
     }
 
@@ -401,6 +625,23 @@ impl Snapshot {
             )));
         }
         Ok(())
+    }
+}
+
+/// The extent store device a snapshot's `state` is of, on the cell it had.
+fn extent_store(state: &virtio_extent::persist::State) -> ExtentStore {
+    let config = &state.config;
+    ExtentStore {
+        id: config.id.clone(),
+        tag: config.tag.clone(),
+        cell: ExtentCell::from_path_on_host(&config.path_on_host),
+        capacity: config.capacity,
+        dax_window_size: config.dax_window_size,
+        dax_private_max_bytes: config.dax_private_max_bytes,
+        cache: match config.cache_type {
+            virtio_extent::CacheType::Writeback => ExtentCache::Writeback,
+            virtio_extent::CacheType::Unsafe => ExtentCache::Unsafe,
+        },
     }
 }
 

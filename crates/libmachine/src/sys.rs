@@ -156,6 +156,13 @@ pub(crate) fn wait_readable(fds: &[RawFd], timeout_ms: i32) -> io::Result<Vec<us
         .collect())
 }
 
+/// The host's page size: what a file's mapping's offset is a multiple of.
+pub(crate) fn page_size() -> usize {
+    // SAFETY: no pointers.
+    let size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    usize::try_from(size).expect("the host has a page size")
+}
+
 /// Fills `buf` from the kernel's random number generator.
 pub(crate) fn getrandom(buf: &mut [u8]) {
     #[cfg(target_os = "linux")]

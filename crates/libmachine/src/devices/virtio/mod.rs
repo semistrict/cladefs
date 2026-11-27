@@ -174,6 +174,30 @@ pub(crate) trait VirtioDevice: Send {
         false
     }
 
+    /// Stops the threads of a device that serves its own queues
+    /// ([`serves_its_queues`](Self::serves_its_queues)), once what they took is served, and gives
+    /// back each queue they served, by index, as they left it: for a snapshot, which saves the
+    /// queues where they are. The transport starts the device on them again after it
+    /// ([`activate_queues`](Self::activate_queues)). Nothing by default.
+    fn pause_queues(&mut self) -> Vec<(usize, DeviceQueue)> {
+        Vec::new()
+    }
+
+    /// Takes what a snapshot of the machine needs of the device besides its
+    /// [`save`](Self::save), as `mode` says, its queues paused: an extent store device's
+    /// version of its cell (or a migration's mappings), the state a restore makes the device
+    /// from again. None by default.
+    fn take_snapshot(
+        &mut self,
+        _mode: virtio_extent::SnapshotMode,
+    ) -> crate::error::Result<Option<virtio_extent::persist::State>> {
+        Ok(None)
+    }
+
+    /// Drops what [`take_snapshot`](Self::take_snapshot) took: the machine's snapshot failed
+    /// after it, and no file names it.
+    fn drop_snapshot(&mut self) {}
+
     /// The device's state for a snapshot, taken with every vCPU stopped
     /// and the device thread held off (guest memory and the queues are the
     /// transport's to save). A device that keeps state the guest relies on

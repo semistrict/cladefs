@@ -172,6 +172,26 @@ impl CpuSlot {
     pub(crate) fn is_on(&self) -> bool {
         self.lock().power != Powered::Off
     }
+
+    /// The power state, for a snapshot.
+    pub(crate) fn power(&self) -> super::state::Power {
+        use super::state::Power;
+        match self.lock().power {
+            Powered::Off => Power::Off,
+            Powered::Starting { entry, context } => Power::Starting { entry, context },
+            Powered::On => Power::On,
+        }
+    }
+
+    /// Sets the power state a snapshot had, as the vCPU is restored.
+    pub(crate) fn set_power(&self, power: super::state::Power) {
+        use super::state::Power;
+        self.lock().power = match power {
+            Power::Off => Powered::Off,
+            Power::Starting { entry, context } => Powered::Starting { entry, context },
+            Power::On => Powered::On,
+        };
+    }
 }
 
 /// A vCPU a stop or a run's end kicks: its slot.

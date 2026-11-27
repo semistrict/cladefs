@@ -26,21 +26,33 @@
 //!   machine stops for good with `Error::ExtentStore` (`StopShared::fail`); the vCPUs stop it so
 //!   too when a guest's access to the window keeps failing (`virtio_extent::vcpu`; hotbed question
 //!   573).
-//! - **Snapshots:** refused, as the device's freeze and fork protocol is board 13139's.
+//! - **Snapshots** (board 13139), as doc-4 has them and Firecracker's adapter takes them: the
+//!   machine's snapshot pauses the device's workers, their queues back in the transport where
+//!   they left them (`VirtioDevice::pause_queues`), then has virtio_extent take the device's
+//!   snapshot (`Device::take_snapshot_with`): versioned, refused unless the guest's filesystem is
+//!   frozen, a version of the cell made and the window's mappings recorded, not its memory; or for
+//!   a migration, the cell handed over whole, refused while it has uncommitted open extents.
+//!   Either refuses while the window holds private pages. Its state goes into the snapshot's
+//!   header, so that a restore makes the device from it ([`ExtentDevice::new`] given it): its
+//!   cell forked from the version (or reopened), its window at the same BAR, mapped again as the
+//!   driver activates it as it was. The transport's state holds the device's protocol version,
+//!   which a restore checks. A snapshot that fails after the device's drops its version; the
+//!   workers start again either way.
 
 use std::os::fd::{AsRawFd, BorrowedFd};
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use std::ptr::NonNull;
 use std::sync::{Arc, Weak};
 
-use virtio_extent::protocol::{ConfigSpace, QUEUE_SIZE, VIRTIO_ID_EXTENT, check_acked};
+use virtio_extent::protocol::{
+    ConfigSpace, QUEUE_SIZE, VIRTIO_EXTENT_VERSION, VIRTIO_ID_EXTENT, check_acked, check_version,
+};
 use virtio_extent::{BoxError, Buffers, Popped, Workers};
 use vm_memory::{GuestMemoryBackend, GuestMemoryMmap};
 
 use super::queue::DeviceQueue;
 use super::{
-    OwnQueues, PlacedShm, VIRTIO_F_VERSION_1, VIRTIO_RING_F_EVENT_IDX, VirtioDevice,
-    not_snapshottable,
+    DeviceState, OwnQueues, PlacedShm, VIRTIO_F_VERSION_1, VIRTIO_RING_F_EVENT_IDX, VirtioDevice,
 };
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use crate::backend::MemorySlots;
@@ -86,6 +98,10 @@ impl ExtentDevice {
     /// The device `store` describes, with `queues` request queues, its cell opened on `daemon`,
     /// its DAX window (if it has one) placed from `bars`' 64-bit window and mapped by `window_vm`,
     /// given the window's BAR, prefaulted by `prefault` if given; `failing` stops the machine.
+    /// Restored from a snapshot, the device is made from what it `saved` of itself, its cell then
+    /// `store`'s (forked from the snapshot's version, or reopened), the rest of `store` as the
+    /// snapshot's (`Snapshot::check`), its window where its BAR was.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         store: &ExtentStore,
         daemon: &ExtentDaemon,
@@ -94,6 +110,7 @@ impl ExtentDevice {
         window_vm: impl FnOnce(Option<u64>) -> Arc<dyn virtio_extent::WindowVm>,
         prefault: Option<Arc<dyn virtio_extent::PrefaultGuestMemory>>,
         failing: Failing,
+        saved: Option<&virtio_extent::persist::State>,
     ) -> Result<Self> {
         let id = store.id.clone();
         let invalid =
@@ -137,8 +154,23 @@ impl ExtentDevice {
             let (id, failing) = (id.clone(), failing.clone());
             Arc::new(move || failing.fail(format!("{id}: the extent daemon went")))
         };
-        let mut device = virtio_extent::Device::connected(config, connection, queues, vm, on_lost)
-            .map_err(|err| Error::ExtentStore(format!("{id}: {err}")))?;
+        let device = match saved {
+            None => virtio_extent::Device::connected(config, connection, queues, vm, on_lost),
+            Some(saved) => {
+                if saved.window_addr != window.map(|(at, _)| at) {
+                    return Err(Error::Snapshot(format!(
+                        "extent store device {id}: the snapshot's DAX window was at {:x?}, this \
+                         machine's BAR for it at {:x?}",
+                        saved.window_addr,
+                        window.map(|(at, _)| at)
+                    )));
+                }
+                let mut state = saved.clone();
+                state.config = virtio_extent::persist::ConfigState::from(&config);
+                virtio_extent::Device::restore_connected(&state, connection, queues, vm, on_lost)
+            }
+        };
+        let mut device = device.map_err(|err| Error::ExtentStore(format!("{id}: {err}")))?;
         if let Some(prefault) = prefault {
             device.set_prefault(prefault);
         }
@@ -283,8 +315,43 @@ impl VirtioDevice for ExtentDevice {
     // Its queues are its workers': the device thread never hands it one.
     fn process_queue(&mut self, _: usize, _: &mut [DeviceQueue], _: &GuestMemoryMmap) {}
 
-    fn save(&self) -> Result<super::DeviceState> {
-        Err(not_snapshottable(DEVICE_TYPE, "the extent store device's snapshots are board 13139's"))
+    fn pause_queues(&mut self) -> Vec<(usize, DeviceQueue)> {
+        let stopped = self.workers.take().map(Workers::stop).unwrap_or_default();
+        stopped.into_iter().map(|(index, queue)| (usize::from(index), queue.queue)).collect()
+    }
+
+    fn take_snapshot(
+        &mut self,
+        mode: virtio_extent::SnapshotMode,
+    ) -> Result<Option<virtio_extent::persist::State>> {
+        // Its workers are paused already (`pause_queues`): nothing more to quiesce.
+        self.device
+            .take_snapshot_with(mode, || {})
+            .map_err(|err| Error::Snapshot(err.to_string()))?;
+        Ok(Some(self.device.state()))
+    }
+
+    fn drop_snapshot(&mut self) {
+        self.device.drop_snapshot();
+    }
+
+    /// The device's protocol version, which its guest's driver checked as it probed it: the rest
+    /// of its state is in the snapshot's header (`take_snapshot`), as a restore makes the device
+    /// from it.
+    fn save(&self) -> Result<DeviceState> {
+        Ok(DeviceState { version: VIRTIO_EXTENT_VERSION, data: Vec::new() })
+    }
+
+    fn restore(&mut self, state: &DeviceState) -> Result<()> {
+        check_version(state.version).map_err(|err| Error::Snapshot(err.to_string()))?;
+        if !state.data.is_empty() {
+            return Err(Error::Snapshot(format!(
+                "the snapshot's extent store device {} has state of its own, which this one \
+                 does not know",
+                self.device.config().id
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -370,8 +437,11 @@ pub(crate) struct ExtentVm {
 impl virtio_extent::WindowVm for ExtentVm {
     fn reserve(&self, _len: u64, at: Option<u64>) -> std::result::Result<u64, BoxError> {
         match (at, self.at) {
-            // A snapshot's window: libmachine restores none (board 13139).
-            (Some(at), _) => Err(format!("no window restored at {at:#x}: board 13139").into()),
+            // A snapshot's window, where its BAR was, as it is again (`ExtentDevice::new`).
+            (Some(at), Some(bar)) if at == bar => Ok(bar),
+            (Some(at), bar) => {
+                Err(format!("the snapshot's window at {at:#x}, its BAR at {bar:x?}").into())
+            }
             (None, Some(bar)) => Ok(bar),
             (None, None) => Err("a window the device's configuration has none of".into()),
         }
@@ -419,8 +489,11 @@ pub(crate) struct ExtentVm {
 impl virtio_extent::WindowVm for ExtentVm {
     fn reserve(&self, _len: u64, at: Option<u64>) -> std::result::Result<u64, BoxError> {
         match (at, self.at) {
-            // A snapshot's window: libmachine restores none (board 13139).
-            (Some(at), _) => Err(format!("no window restored at {at:#x}: board 13139").into()),
+            // A snapshot's window, where its BAR was, as it is again (`ExtentDevice::new`).
+            (Some(at), Some(bar)) if at == bar => Ok(bar),
+            (Some(at), bar) => {
+                Err(format!("the snapshot's window at {at:#x}, its BAR at {bar:x?}").into())
+            }
             (None, Some(bar)) => Ok(bar),
             (None, None) => Err("a window the device's configuration has none of".into()),
         }

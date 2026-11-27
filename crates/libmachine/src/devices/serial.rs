@@ -130,7 +130,6 @@ pub(crate) fn new(irq: IrqLine, output: SharedOutput) -> Serial {
 }
 
 /// The UART's registers and receive FIFO, for a snapshot.
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub(crate) fn save(serial: &Serial, e: &mut crate::snapshot::codec::Encoder) {
     let s = serial.state();
     for b in [
@@ -151,7 +150,6 @@ pub(crate) fn save(serial: &Serial, e: &mut crate::snapshot::codec::Encoder) {
 
 /// A UART in the state [`save`] wrote, raising `irq`, writing to `output`
 /// (a host-side thing, not part of the snapshot).
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub(crate) fn restore(
     d: &mut crate::snapshot::codec::Decoder<'_>,
     irq: IrqLine,

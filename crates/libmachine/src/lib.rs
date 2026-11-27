@@ -55,11 +55,11 @@
     all(target_os = "linux", target_arch = "x86_64"),
     all(target_os = "macos", target_arch = "aarch64")
 ))]
-// On macOS, snapshots and suspensions are KVM's still (board 13399): their code builds there,
-// unused.
+// On macOS, suspensions are KVM's still (board 13399): their code builds there, unused, with
+// KVM-only parts of the exits and memory slots.
 #![cfg_attr(
     target_os = "macos",
-    allow(dead_code, reason = "snapshots and suspensions come to HVF in board 13399")
+    allow(dead_code, reason = "suspensions come to HVF in board 13399")
 )]
 
 pub mod agent;
@@ -99,9 +99,8 @@ pub use exits::ExitCounts;
 pub use extent::{CellId, ExtentCache, ExtentCell, ExtentDaemon, ExtentDaemonConfig, ExtentStore};
 #[cfg(target_arch = "x86_64")]
 pub use machine::Registers;
-pub use machine::{ExitReason, LinuxBoot, Machine, MachineConfig, Run, Waited};
+pub use machine::{ExitReason, LinuxBoot, Machine, MachineConfig, Run, SnapshotOptions, Waited};
 pub use memory::{MemoryLayout, MemoryRegion, RegionKind};
-#[cfg(target_os = "linux")]
 pub use snapshot::{FORMAT_VERSION as SNAPSHOT_FORMAT_VERSION, Snapshot};
 pub use stop::StopHandle;
 pub use suspend::Woken;

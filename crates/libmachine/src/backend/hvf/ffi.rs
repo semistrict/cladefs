@@ -11,6 +11,16 @@
 use std::ffi::c_void;
 
 pub(crate) type hv_return_t = i32;
+pub(crate) type hv_simd_fp_reg_t = u32;
+pub(crate) type hv_gic_icc_reg_t = u16;
+
+/// `hv_vcpu_sme_state_t` (macOS 15.2): PSTATE.SM and PSTATE.ZA.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct hv_vcpu_sme_state_t {
+    pub(crate) streaming_sve_mode_enabled: bool,
+    pub(crate) za_storage_enabled: bool,
+}
 pub(crate) type hv_vcpu_t = u64;
 pub(crate) type hv_ipa_t = u64;
 pub(crate) type hv_memory_flags_t = u64;
@@ -133,6 +143,66 @@ unsafe extern "C" {
         vcpu: hv_vcpu_t,
         vtimer_offset: *mut u64,
     ) -> hv_return_t;
+    pub(crate) fn hv_vcpu_set_vtimer_offset(vcpu: hv_vcpu_t, vtimer_offset: u64) -> hv_return_t;
+    pub(crate) fn hv_vcpu_get_vtimer_mask(vcpu: hv_vcpu_t, masked: *mut bool) -> hv_return_t;
+    pub(crate) fn hv_vcpu_set_vtimer_mask(vcpu: hv_vcpu_t, masked: bool) -> hv_return_t;
+    /// `hv_simd_fp_uchar16_t` is a 16-byte vector, written here as its bytes.
+    pub(crate) fn hv_vcpu_get_simd_fp_reg(
+        vcpu: hv_vcpu_t,
+        reg: hv_simd_fp_reg_t,
+        value: *mut [u8; 16],
+    ) -> hv_return_t;
+    /// Takes its value, a 16-byte vector, in a SIMD register (v0), which no Rust signature can
+    /// say: called through [`hv_vcpu_set_simd_fp_reg`] alone.
+    #[link_name = "hv_vcpu_set_simd_fp_reg"]
+    fn hv_vcpu_set_simd_fp_reg_symbol();
+
+    // SME (macOS 15.2).
+    pub(crate) fn hv_sme_config_get_max_svl_bytes(value: *mut usize) -> hv_return_t;
+    pub(crate) fn hv_vcpu_get_sme_state(
+        vcpu: hv_vcpu_t,
+        sme_state: *mut hv_vcpu_sme_state_t,
+    ) -> hv_return_t;
+    pub(crate) fn hv_vcpu_set_sme_state(
+        vcpu: hv_vcpu_t,
+        sme_state: *const hv_vcpu_sme_state_t,
+    ) -> hv_return_t;
+    pub(crate) fn hv_vcpu_get_sme_z_reg(
+        vcpu: hv_vcpu_t,
+        reg: u32,
+        value: *mut u8,
+        length: usize,
+    ) -> hv_return_t;
+    pub(crate) fn hv_vcpu_set_sme_z_reg(
+        vcpu: hv_vcpu_t,
+        reg: u32,
+        value: *const u8,
+        length: usize,
+    ) -> hv_return_t;
+    pub(crate) fn hv_vcpu_get_sme_p_reg(
+        vcpu: hv_vcpu_t,
+        reg: u32,
+        value: *mut u8,
+        length: usize,
+    ) -> hv_return_t;
+    pub(crate) fn hv_vcpu_set_sme_p_reg(
+        vcpu: hv_vcpu_t,
+        reg: u32,
+        value: *const u8,
+        length: usize,
+    ) -> hv_return_t;
+    pub(crate) fn hv_vcpu_get_sme_za_reg(
+        vcpu: hv_vcpu_t,
+        value: *mut u8,
+        length: usize,
+    ) -> hv_return_t;
+    pub(crate) fn hv_vcpu_set_sme_za_reg(
+        vcpu: hv_vcpu_t,
+        value: *const u8,
+        length: usize,
+    ) -> hv_return_t;
+    pub(crate) fn hv_vcpu_get_sme_zt0_reg(vcpu: hv_vcpu_t, value: *mut [u8; 64]) -> hv_return_t;
+    pub(crate) fn hv_vcpu_set_sme_zt0_reg(vcpu: hv_vcpu_t, value: *const [u8; 64]) -> hv_return_t;
 
     pub(crate) fn hv_gic_config_create() -> os_object_t;
     pub(crate) fn hv_gic_config_set_distributor_base(
@@ -155,6 +225,11 @@ unsafe extern "C" {
     pub(crate) fn hv_gic_create(config: os_object_t) -> hv_return_t;
     pub(crate) fn hv_gic_get_distributor_size(size: *mut usize) -> hv_return_t;
     pub(crate) fn hv_gic_get_redistributor_size(size: *mut usize) -> hv_return_t;
+    /// The guest physical address of `vcpu`'s redistributor.
+    pub(crate) fn hv_gic_get_redistributor_base(
+        vcpu: hv_vcpu_t,
+        base: *mut hv_ipa_t,
+    ) -> hv_return_t;
     pub(crate) fn hv_gic_get_redistributor_region_size(size: *mut usize) -> hv_return_t;
     pub(crate) fn hv_gic_get_distributor_base_alignment(alignment: *mut usize) -> hv_return_t;
     pub(crate) fn hv_gic_get_redistributor_base_alignment(alignment: *mut usize) -> hv_return_t;
@@ -163,6 +238,54 @@ unsafe extern "C" {
     pub(crate) fn hv_gic_get_spi_interrupt_range(base: *mut u32, count: *mut u32) -> hv_return_t;
     pub(crate) fn hv_gic_set_spi(intid: u32, level: bool) -> hv_return_t;
     pub(crate) fn hv_gic_send_msi(address: hv_ipa_t, intid: u32) -> hv_return_t;
+    /// A vCPU's GIC CPU interface register, from its own thread.
+    pub(crate) fn hv_gic_get_icc_reg(
+        vcpu: hv_vcpu_t,
+        reg: hv_gic_icc_reg_t,
+        value: *mut u64,
+    ) -> hv_return_t;
+    pub(crate) fn hv_gic_set_icc_reg(
+        vcpu: hv_vcpu_t,
+        reg: hv_gic_icc_reg_t,
+        value: u64,
+    ) -> hv_return_t;
+    /// The GIC's state but its CPU interfaces', with the VM stopped: an OS object, released with
+    /// `os_release`; null if the framework can't represent it.
+    pub(crate) fn hv_gic_state_create() -> os_object_t;
+    pub(crate) fn hv_gic_state_get_size(state: os_object_t, size: *mut usize) -> hv_return_t;
+    pub(crate) fn hv_gic_state_get_data(state: os_object_t, data: *mut c_void) -> hv_return_t;
+    /// Puts back what `hv_gic_state_get_data` gave: once every vCPU exists, before any runs.
+    pub(crate) fn hv_gic_set_state(data: *const c_void, size: usize) -> hv_return_t;
+}
+
+/// `hv_vcpu_set_simd_fp_reg(vcpu, reg, value)`: its value, a 16-byte vector, passed in v0 as
+/// AAPCS64 passes a short vector, the call made in assembly since Rust's FFI takes no SIMD
+/// types by value.
+///
+/// # Safety
+///
+/// As the framework's: called on the thread that owns `vcpu`.
+pub(crate) unsafe fn hv_vcpu_set_simd_fp_reg(
+    vcpu: hv_vcpu_t,
+    reg: hv_simd_fp_reg_t,
+    value: [u8; 16],
+) -> hv_return_t {
+    // SAFETY: 16 bytes are a 16-byte vector.
+    let value: std::arch::aarch64::uint8x16_t = unsafe { std::mem::transmute(value) };
+    let ret: u64;
+    // SAFETY: a call of the framework's function by the C ABI: its arguments in x0, w1 and v0,
+    // its result in w0, every register a call may change marked clobbered.
+    unsafe {
+        std::arch::asm!(
+            "bl {f}",
+            f = sym hv_vcpu_set_simd_fp_reg_symbol,
+            inlateout("x0") vcpu => ret,
+            in("x1") u64::from(reg),
+            in("v0") value,
+            clobber_abi("C"),
+        );
+    }
+    ret as u32 as hv_return_t
 }
 
 /// `mach_timebase_info_data_t`: host ticks to nanoseconds, `numer / denom`.

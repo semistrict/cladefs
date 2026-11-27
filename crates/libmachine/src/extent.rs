@@ -144,6 +144,16 @@ pub enum ExtentCell {
 }
 
 impl ExtentCell {
+    /// The cell `path` names as the daemon's open takes it, Firecracker's `path_on_host`: a
+    /// cell's ID `TENANT/ID`, ID 0 making one of the tenant's; else a directory.
+    pub fn from_path_on_host(path: &str) -> Self {
+        match path.parse::<CellId>() {
+            Ok(cell) if cell.id == 0 => Self::New { tenant: cell.tenant },
+            Ok(cell) => Self::Existing(cell),
+            Err(_) => Self::Directory(path.into()),
+        }
+    }
+
     /// The cell as the daemon's open names it: a directory's path, or a cell's ID, ID 0 making
     /// one.
     pub(crate) fn path_on_host(&self) -> Result<String, String> {

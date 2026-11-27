@@ -83,6 +83,12 @@ impl Bus {
         self.serial.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// The arm64 board's real-time clock.
+    #[cfg(target_arch = "aarch64")]
+    pub(crate) fn rtc(&self) -> &crate::devices::rtc::Rtc {
+        &self.rtc
+    }
+
     /// The kind of exit an access to `port` is, by the device at it.
     #[cfg(target_arch = "x86_64")]
     fn io_kind(&self, port: u16) -> ExitKind {

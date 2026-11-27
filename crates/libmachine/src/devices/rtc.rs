@@ -57,6 +57,24 @@ impl Rtc {
         }
     }
 
+    /// The clock's state for a snapshot: what the guest loaded, as the offset off the host's
+    /// clock it set, and the alarm's count. A restore's clock goes on from the host's, as the
+    /// snapshot's did.
+    pub(crate) fn save(&self, e: &mut crate::snapshot::codec::Encoder) {
+        e.i64(self.offset.load(Ordering::Relaxed));
+        e.u32(self.alarm.load(Ordering::Relaxed));
+    }
+
+    /// Puts back what [`save`](Self::save) wrote.
+    pub(crate) fn restore(
+        &self,
+        d: &mut crate::snapshot::codec::Decoder<'_>,
+    ) -> crate::error::Result<()> {
+        self.offset.store(d.i64()?, Ordering::Relaxed);
+        self.alarm.store(d.u32()?, Ordering::Relaxed);
+        Ok(())
+    }
+
     /// Writes the 32-bit register at `offset`: a load, or the alarm's
     /// count; the rest (the interrupt's mask and clear) mean nothing here.
     pub(crate) fn write(&self, offset: u64, value: u32) {

@@ -56,6 +56,28 @@ mod pc {
             self.transports.iter().try_for_each(|t| t.save(e))
         }
 
+        /// Readies every device for a snapshot of the machine, as `mode` says
+        /// (`VirtioPci::prepare_snapshot`): the extent store devices' state, in bus order.
+        /// [`snapshots_done`](Self::snapshots_done) follows, whether or not this succeeded.
+        pub(crate) fn take_snapshots(
+            &mut self,
+            mode: virtio_extent::SnapshotMode,
+        ) -> Result<Vec<virtio_extent::persist::State>> {
+            let mut states = Vec::new();
+            for t in &mut self.transports {
+                states.extend(t.prepare_snapshot(mode)?);
+            }
+            Ok(states)
+        }
+
+        /// After a snapshot of the machine, `kept` or failed: every device carries on, what
+        /// they took for a failed one dropped.
+        pub(crate) fn snapshots_done(&mut self, kept: bool) {
+            for t in &mut self.transports {
+                t.snapshot_done(kept);
+            }
+        }
+
         /// Every function's state for a suspension, in bus order: each
         /// device hands over what must outlive its machine. On an error,
         /// what was handed over is taken back.

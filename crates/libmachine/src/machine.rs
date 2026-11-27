@@ -24,8 +24,27 @@ const PAGE_SIZE: usize = 4096;
 /// panic resets the machine (a sandbox never hangs on one).
 pub(crate) const BASE_CMDLINE: &str = "console=ttyS0 panic=-1";
 /// The UART's IIR bit that says no interrupt is pending (16550).
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const UART_NO_INTERRUPT: u8 = 1;
+
+/// How [`Machine::snapshot_with`] takes a snapshot.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SnapshotOptions<'a> {
+    /// Where the guest's RAM goes: a file of its own at this path, as a Firecracker snapshot's
+    /// memory file holds it ([`Snapshot::open_split`](crate::Snapshot::open_split) opens the
+    /// two); None, the snapshot's file, after its state.
+    pub ram: Option<&'a std::path::Path>,
+    /// A snapshot for a live migration: its extent store devices' cells are handed over whole,
+    /// with no version made of them and their guest's filesystem not frozen, refused while a
+    /// cell has uncommitted open extents; else each device's cell gets a version, refused unless
+    /// its guest's filesystem is frozen. Either is refused while a device's DAX window holds
+    /// private pages.
+    pub for_migration: bool,
+    /// What the caller keeps with the snapshot, which [`Snapshot::caller_data`] gives back:
+    /// nothing of libmachine's reads it.
+    ///
+    /// [`Snapshot::caller_data`]: crate::Snapshot::caller_data
+    pub caller_data: &'a [u8],
+}
 
 /// Configuration for a new [`Machine`].
 #[derive(Debug, Clone)]
@@ -210,6 +229,13 @@ pub struct Machine {
     balloon: Option<crate::Balloon>,
     /// The network's handle, if the machine has one.
     network: Option<crate::net::Network>,
+    /// Its disks, which a snapshot names for a restore to open again.
+    disks: Vec<crate::Disk>,
+    /// How many extent store devices it has.
+    extent_stores: usize,
+    /// Whether its vCPUs have EL2 (nested virtualization), which no snapshot holds yet.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    nested: bool,
     /// Where the virtio-net device puts its host streams when suspended.
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     net_slot: NetSlot,
@@ -289,11 +315,17 @@ impl Live {
                 }),
             });
         }
-        Ok(Self { vcpus: Vcpus::spawn(runners, stop.clone())?, vm, pci: None, bus })
+        let vcpus = Vcpus::spawn(runners, stop.clone())?;
+        // Each vCPU created on its thread in its order, as the framework hands out the GIC's
+        // redistributors (`hvf::Vcpu::create`).
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        for i in 0..vcpus.len() {
+            vcpus.on(i, Box::new(|v: &mut MachineVcpu| v.vcpu.create_now()))?;
+        }
+        Ok(Self { vcpus, vm, pci: None, bus })
     }
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 impl Live {
     /// Interrupts the guest again from every device that may have had an
     /// interrupt on its way when its state was saved, which went with the
@@ -620,12 +652,14 @@ fn balloon_device(
 /// The extent store devices of `config`'s ([`MachineConfig::extent_stores`]), with a request
 /// queue per vCPU, their DAX windows' BARs from `bars`, stopping the machine through `stop` as one
 /// can't go on: on Hypervisor.framework, the windows' pages mapped by libmachine (board 13069).
+/// Restored from a snapshot, each made from what it `saved` of itself, in order.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn extent_devices(
     config: &MachineConfig,
     vm: &backend::Vm,
     bars: &mut crate::devices::pci::BarAllocator,
     stop: &Arc<StopShared>,
+    saved: &[virtio_extent::persist::State],
 ) -> Result<Vec<Box<dyn crate::devices::virtio::VirtioDevice>>> {
     use crate::devices::virtio::extent::{ExtentDevice, ExtentVm, Failing};
 
@@ -636,7 +670,8 @@ fn extent_devices(
     config
         .extent_stores
         .iter()
-        .map(|store| {
+        .enumerate()
+        .map(|(i, store)| {
             let device = ExtentDevice::new(
                 store,
                 daemon,
@@ -645,6 +680,7 @@ fn extent_devices(
                 |at| Arc::new(ExtentVm { vm: vm.shared().clone(), at }),
                 None,
                 Failing::new(stop),
+                saved.get(i),
             )?;
             Ok(Box::new(device) as Box<dyn crate::devices::virtio::VirtioDevice>)
         })
@@ -692,10 +728,28 @@ fn extent_devices(
                 |at| Arc::new(ExtentVm { slots: slots.clone(), at }),
                 prefault.clone(),
                 Failing::new(stop),
+                // KVM restores no extent store device yet.
+                None,
             )?;
             Ok(Box::new(device) as Box<dyn crate::devices::virtio::VirtioDevice>)
         })
         .collect()
+}
+
+/// How `options` have the extent store devices' snapshots taken.
+fn snapshot_mode(options: &SnapshotOptions<'_>) -> virtio_extent::SnapshotMode {
+    match options.for_migration {
+        true => virtio_extent::SnapshotMode::Migration,
+        false => virtio_extent::SnapshotMode::Versioned,
+    }
+}
+
+/// Where `options` put a snapshot's RAM.
+fn ram_at<'a>(options: &SnapshotOptions<'a>) -> crate::snapshot::RamAt<'a> {
+    match options.ram {
+        Some(path) => crate::snapshot::RamAt::File(path),
+        None => crate::snapshot::RamAt::Inline,
+    }
 }
 
 /// The error for anything asked of a machine whose wake failed.
@@ -785,6 +839,10 @@ impl Machine {
             vsock: None,
             balloon: None,
             network: None,
+            disks: Vec::new(),
+            extent_stores: 0,
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            nested: false,
             #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
             net_slot: NetSlot::default(),
             #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -914,6 +972,8 @@ impl Machine {
         machine.network = network;
         machine.net_slot = net_slot;
         machine.caller_devices = caller_devices;
+        machine.disks = config.disks;
+        machine.extent_stores = config.extent_stores.len();
         Ok(machine)
     }
 
@@ -988,7 +1048,7 @@ impl Machine {
         let stop = Arc::new(StopShared::with_doorbell(doorbell.clone()));
         // The extent store devices first, as on the PC.
         let mut bars = crate::devices::pci::BarAllocator::new();
-        let mut devices = extent_devices(&config, &vm, &mut bars, &stop)?;
+        let mut devices = extent_devices(&config, &vm, &mut bars, &stop, &[])?;
         devices.extend(disk_devices(&config)?);
         let balloon = balloon_device(&config, &vm, &mut devices)?;
         let (vsock_device, vsock) = VsockDevice::new(GUEST_CID)?;
@@ -1017,6 +1077,188 @@ impl Machine {
         machine.balloon = balloon;
         machine.network = network;
         machine.vsock = Some(vsock);
+        machine.disks = config.disks;
+        machine.extent_stores = config.extent_stores.len();
+        machine.nested = config.nested_virtualization;
+        Ok(machine)
+    }
+
+    /// [`snapshot`](Machine::snapshot), as `options` say: its RAM in a file of its own, for a
+    /// live migration, with the caller's data. On Hypervisor.framework: the arm64 board, its
+    /// balloon, disks (their files are the host's: a restore opens them again) and extent store
+    /// devices with it, not one with a network or nested virtualization.
+    ///
+    /// Each extent store device's snapshot is taken first (doc-4): unless `for_migration`, its
+    /// guest's filesystem must be frozen (`fsfreeze`, which `VIRTIO_EXTENT_T_FREEZE` tells the
+    /// device of), and its cell gets a version, which a snapshot failing after drops. The guest's
+    /// virtual counter goes on from the snapshot's count in a restore.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    pub fn snapshot_with(
+        &mut self,
+        path: impl AsRef<std::path::Path>,
+        options: &SnapshotOptions<'_>,
+    ) -> Result<()> {
+        if self.platform != Platform::Board {
+            return Err(Error::Snapshot(
+                "only board machines (Machine::boot_linux) can be snapshotted".into(),
+            ));
+        }
+        if self.network.is_some() {
+            return Err(Error::Snapshot(
+                "a machine with a network cannot be snapshotted: its connections are host \
+                 sockets that no restored machine could share"
+                    .into(),
+            ));
+        }
+        if self.nested {
+            return Err(Error::Snapshot(
+                "a machine with nested virtualization is not snapshotted yet: its EL2 state is \
+                 not saved"
+                    .into(),
+            ));
+        }
+        let live = self.live()?;
+        let pci = live.pci.as_ref().expect("a board machine has a PCI bus");
+        // The device thread waits until the state and RAM are written.
+        let mut quiesced = pci.quiesce();
+        let taken = (|| {
+            let extent_stores = quiesced.take_snapshots(snapshot_mode(options))?;
+            let mut e = crate::snapshot::codec::Encoder::default();
+            self.encode_cpus(live, &mut e)?;
+            quiesced.save(&mut e)?;
+            let mut header = self.header(live.vm.memory_layout());
+            header.extent_stores = extent_stores;
+            header.caller_data = options.caller_data.to_vec();
+            let ram = ram_at(options);
+            crate::snapshot::write(path.as_ref(), &header, &e.finish(), live.vm.guest_memory(), ram)
+        })();
+        quiesced.snapshots_done(taken.is_ok());
+        taken
+    }
+
+    /// The GIC's state and the host's clock, every vCPU's (read on its own thread), the UART's
+    /// and the RTC's, between runs.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    fn encode_cpus(&self, live: &Live, e: &mut crate::snapshot::codec::Encoder) -> Result<()> {
+        type Job = Box<dyn FnOnce(&mut MachineVcpu) -> Result<backend::VcpuState> + Send>;
+        let jobs = (0..live.vcpus.len())
+            .map(|_| Box::new(|v: &mut MachineVcpu| v.vcpu.save_state()) as Job)
+            .collect();
+        let vcpus = live.vcpus.on_each(jobs)?;
+        backend::VmState::save()?.encode(e);
+        e.count(vcpus.len());
+        vcpus.iter().for_each(|state| state.encode(e));
+        serial::save(&live.bus.serial(), e);
+        live.bus.rtc().save(e);
+        Ok(())
+    }
+
+    /// A new machine from `snapshot`, ready to [`run`](Machine::run) from where the snapshot's
+    /// machine stopped, on Hypervisor.framework. `config` says what machine to build, and must be
+    /// the snapshot's ([`Snapshot::config`](crate::Snapshot::config)) but for where its devices
+    /// are on the host: its disks' files, its extent store devices' cells (each forked from the
+    /// snapshot's version of its cell, or the cell itself reopened, as virtio_extent opens it),
+    /// with an extent daemon for them. Its RAM is a private copy-on-write mapping of the
+    /// snapshot's; its vsock connections from before the snapshot are reset; the guest's virtual
+    /// counter goes on from where it was, so no time passes for it while it was in the file.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    pub fn restore(snapshot: &crate::Snapshot, config: MachineConfig) -> Result<Self> {
+        Self::restore_with(snapshot, config, None)
+    }
+
+    /// [`restore`](Machine::restore), onto `vsock` if given: as KVM's.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    pub(crate) fn restore_with(
+        snapshot: &crate::Snapshot,
+        config: MachineConfig,
+        vsock: Option<crate::Vsock>,
+    ) -> Result<Self> {
+        use crate::arch::aarch64::layout;
+        use crate::devices::virtio::vsock::{GUEST_CID, VsockDevice};
+        use crate::devices::virtio::{VirtioDevice, rng::Rng};
+
+        check_mem_size(config.mem_size)?;
+        check_vcpus(config.vcpus)?;
+        if config.nested_virtualization {
+            return Err(Error::Snapshot(
+                "no machine with nested virtualization is snapshotted, nor restored".into(),
+            ));
+        }
+        snapshot.check(&config, &layout::memory_layout(config.mem_size as u64))?;
+        let (vm, vcpus) = backend::Vm::new(
+            config.mem_size,
+            config.cpu_model,
+            Platform::Board,
+            config.vcpus,
+            backend::Ram::Snapshot { file: snapshot.file(), offsets: snapshot.ram_offsets() },
+        )?;
+        snapshot.check_cpu(config.cpu_model, vm.cpu_fingerprint())?;
+        let mut d = snapshot.state();
+        let vm_state = backend::VmState::decode(&mut d)?;
+        let n = d.count(1)?;
+        if n != vcpus.len() {
+            return Err(Error::Snapshot(format!(
+                "the snapshot's state holds {n} vCPUs, its header {}",
+                vcpus.len()
+            )));
+        }
+        let vcpu_states =
+            (0..n).map(|_| backend::VcpuState::decode(&mut d)).collect::<Result<Vec<_>>>()?;
+
+        // The devices as `boot_linux` makes them, in its order, so that each is where it was.
+        let doorbell: Arc<Doorbell> = Arc::default();
+        let stop = Arc::new(StopShared::with_doorbell(doorbell.clone()));
+        let mut bars = crate::devices::pci::BarAllocator::new();
+        let mut devices = extent_devices(&config, &vm, &mut bars, &stop, snapshot.extent_states())?;
+        devices.extend(disk_devices(&config)?);
+        let balloon = balloon_device(&config, &vm, &mut devices)?;
+        let (vsock_device, vsock) = match vsock {
+            Some(vsock) => (VsockDevice::adopt(&vsock)?, vsock),
+            None => VsockDevice::new(GUEST_CID)?,
+        };
+        devices.extend([Box::new(Rng) as Box<dyn VirtioDevice>, Box::new(vsock_device)]);
+        let pci =
+            Arc::new(crate::devices::Pci::new(devices, vm.guest_memory(), &vm, &doorbell, bars)?);
+        let output = serial::output(config.serial_capture_limit);
+        let uart = IrqLine::Spi(vm.shared().clone(), layout::UART_SPI);
+        let serial = serial::restore(&mut d, uart, output.clone())?;
+        let bus = Bus::board(serial, pci.clone());
+        bus.rtc().restore(&mut d)?;
+        let exits: Vec<Arc<ExitCounters>> = (0..config.vcpus).map(|_| Arc::default()).collect();
+        let mut live = Live::spawn(vm, vcpus, bus, &stop, &exits)?;
+        live.pci = Some(pci.clone());
+
+        // Each vCPU made and set on its own thread; the GIC's state once they all exist, before
+        // any runs, as the framework has it; then their CPU interfaces, against it.
+        type Job = Box<dyn FnOnce(&mut MachineVcpu) -> Result<()> + Send>;
+        let states = Arc::new(vcpu_states);
+        let shift = vm_state.shift();
+        let jobs = (0..states.len())
+            .map(|i| {
+                let states = states.clone();
+                Box::new(move |v: &mut MachineVcpu| v.vcpu.restore_state(&states[i], shift)) as Job
+            })
+            .collect();
+        live.vcpus.on_each(jobs)?;
+        vm_state.restore_gic()?;
+        let jobs = (0..states.len())
+            .map(|i| {
+                let states = states.clone();
+                Box::new(move |v: &mut MachineVcpu| v.vcpu.restore_icc(&states[i])) as Job
+            })
+            .collect();
+        live.vcpus.on_each(jobs)?;
+        // The devices last, so that their interrupts land on the restored GIC.
+        pci.restore(&mut d, &*live.vm)?;
+        d.end()?;
+        live.resend_interrupts();
+
+        let mut machine =
+            Self::from_live(live, Platform::Board, config.mem_size, stop, exits, doorbell, output);
+        machine.vsock = Some(vsock);
+        machine.balloon = balloon;
+        machine.disks = config.disks;
+        machine.extent_stores = config.extent_stores.len();
         Ok(machine)
     }
 
@@ -1037,8 +1279,18 @@ impl Machine {
     /// Commands the guest agent runs at the time keep running in every
     /// clone, orphaned (no clone's client knows them); take snapshots of an
     /// idle guest.
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     pub fn snapshot(&mut self, path: impl AsRef<std::path::Path>) -> Result<()> {
+        self.snapshot_with(path, &SnapshotOptions::default())
+    }
+
+    /// [`snapshot`](Machine::snapshot), as `options` say: its RAM in a file of its own, for a
+    /// live migration, with the caller's data.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    pub fn snapshot_with(
+        &mut self,
+        path: impl AsRef<std::path::Path>,
+        options: &SnapshotOptions<'_>,
+    ) -> Result<()> {
         if self.platform != Platform::Board {
             return Err(Error::Snapshot(
                 "only PC machines (Machine::boot_linux) can be snapshotted".into(),
@@ -1053,12 +1305,19 @@ impl Machine {
         }
         if self.balloon.is_some() {
             return Err(Error::Snapshot(
-                "a machine with a balloon is not snapshotted yet (board 13994)".into(),
+                "a machine with a balloon is not snapshotted on KVM yet (board 13994)".into(),
+            ));
+        }
+        if !self.disks.is_empty() || self.extent_stores > 0 {
+            return Err(Error::Snapshot(
+                "a machine with disks or extent store devices is not snapshotted on KVM yet \
+                 (Hypervisor.framework's are)"
+                    .into(),
             ));
         }
         let refreeze = matches!(self.body, Body::Frozen(_));
         self.thaw()?;
-        let taken = self.write_snapshot(path.as_ref());
+        let taken = self.write_snapshot(path.as_ref(), options);
         if refreeze {
             // Its own file exists: the directory is not used.
             let _ = self.suspend(std::path::Path::new("."));
@@ -1067,7 +1326,11 @@ impl Machine {
     }
 
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    fn write_snapshot(&mut self, path: &std::path::Path) -> Result<()> {
+    fn write_snapshot(
+        &mut self,
+        path: &std::path::Path,
+        options: &SnapshotOptions<'_>,
+    ) -> Result<()> {
         use crate::memory::RegionKind;
         use crate::snapshot::codec::Encoder;
 
@@ -1085,18 +1348,24 @@ impl Machine {
             )));
         }
         // The device thread waits until the state and RAM are written.
-        let quiesced = pci.quiesce();
-        let mut e = Encoder::default();
-        self.encode_cpus(live, &mut e)?;
-        quiesced.save(&mut e)?;
-        let header = self.header(layout);
-        crate::snapshot::write(path, &header, &e.finish(), live.vm.guest_memory())?;
-        drop(quiesced);
-        Ok(())
+        let mut quiesced = pci.quiesce();
+        let taken = (|| {
+            let extent_stores = quiesced.take_snapshots(snapshot_mode(options))?;
+            let mut e = Encoder::default();
+            self.encode_cpus(live, &mut e)?;
+            quiesced.save(&mut e)?;
+            let mut header = self.header(layout);
+            header.extent_stores = extent_stores;
+            header.caller_data = options.caller_data.to_vec();
+            let ram = ram_at(options);
+            crate::snapshot::write(path, &header, &e.finish(), live.vm.guest_memory(), ram)
+        })();
+        quiesced.snapshots_done(taken.is_ok());
+        taken
     }
 
-    /// What a snapshot's or a suspension's state says the machine is.
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    /// What a snapshot's or a suspension's state says the machine is, but for what only a
+    /// snapshot says (its extent store devices' snapshots, the caller's data).
     fn header(&self, layout: crate::memory::MemoryLayout) -> crate::snapshot::MachineHeader {
         crate::snapshot::MachineHeader {
             cpu_model: self.cpu_model,
@@ -1104,6 +1373,10 @@ impl Machine {
             vcpus: self.vcpu_count,
             mem_size: self.mem_size as u64,
             layout,
+            balloon: self.balloon.is_some(),
+            disks: self.disks.clone(),
+            extent_stores: Vec::new(),
+            caller_data: Vec::new(),
         }
     }
 
@@ -1179,6 +1452,11 @@ impl Machine {
         if self.balloon.is_some() {
             return Err(Error::InvalidConfig(
                 "a machine with a balloon is not suspended yet (board 13994)".into(),
+            ));
+        }
+        if !self.disks.is_empty() || self.extent_stores > 0 {
+            return Err(Error::InvalidConfig(
+                "a machine with disks or extent store devices is not suspended yet".into(),
             ));
         }
         let layout = live.vm.memory_layout();
@@ -1715,7 +1993,9 @@ impl Machine {
     #[cfg(target_arch = "aarch64")]
     pub fn set_entry(&mut self, addr: u64) -> Result<()> {
         let cpu = crate::arch::aarch64::boot::BootCpu { pc: addr, x: [0; 4] };
-        self.live_mut()?.vcpus.get(0).vcpu.set_boot_cpu(&cpu)
+        // On its own thread, which created it.
+        let job = Box::new(move |v: &mut MachineVcpu| v.vcpu.set_boot_cpu(&cpu));
+        self.live_mut()?.vcpus.on(0, job)
     }
 
     /// vCPU 0's register state (not while the machine is suspended: they

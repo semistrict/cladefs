@@ -23,6 +23,10 @@
 //! its limit returns with the vCPUs still running, undisturbed. The run's
 //! own timeout is enforced by whoever waits.
 //!
+//! Between runs, work can be sent to every vCPU's own thread ([`Vcpus::on_each`]):
+//! Hypervisor.framework lets only the thread that created a vCPU read or set its state, so a
+//! snapshot and a restore go through there.
+//!
 //! The coordination is generic over the vCPU loop ([`VcpuLoop`]), so that
 //! its unit tests run fake vCPUs without KVM.
 
@@ -95,12 +99,20 @@ struct Shared {
     stop: Arc<StopShared>,
 }
 
+/// Work for one vCPU's thread, between runs ([`Vcpus::on_each`]).
+type Job = Box<dyn FnOnce() + Send>;
+
+/// What a vCPU's thread does with its vCPU, between runs, for [`Vcpus::on_each`].
+pub(crate) type VcpuJob<V, R> = Box<dyn FnOnce(&mut V) -> Result<R> + Send>;
+
 #[derive(Default)]
 struct State {
     /// Counts runs; a vCPU thread runs once for each.
     generation: u64,
     /// The machine is dropped: threads exit.
     quit: bool,
+    /// Work waiting for each vCPU's thread, by vCPU.
+    jobs: Vec<Option<Job>>,
     /// vCPU threads still in the current run.
     running: usize,
     /// The run's outcome, and the vCPU that reported it (none for a
@@ -156,9 +168,10 @@ impl<V: VcpuLoop> Vcpus<V> {
     ///
     /// [`run`]: Vcpus::run
     pub(crate) fn spawn(vcpus: Vec<V>, stop: Arc<StopShared>) -> Result<Self> {
+        let jobs = vcpus.iter().map(|_| None).collect();
         let mut this = Self {
             shared: Arc::new(Shared {
-                state: Mutex::default(),
+                state: Mutex::new(State { jobs, ..State::default() }),
                 start: Condvar::new(),
                 parked: Condvar::new(),
                 stopping: AtomicBool::new(false),
@@ -201,6 +214,60 @@ impl<V: VcpuLoop> Vcpus<V> {
     /// vCPU `id`, between runs.
     pub(crate) fn get(&self, id: usize) -> MutexGuard<'_, V> {
         lock(&self.vcpus[id])
+    }
+
+    /// Runs `jobs[i]` on vCPU `i`'s own thread, every vCPU's at once, between runs, and returns
+    /// what each returned, in vCPU order: the first error, once every job has ended. One job per
+    /// vCPU. A job that panics is an error.
+    #[cfg_attr(
+        not(all(target_os = "macos", target_arch = "aarch64")),
+        allow(dead_code, reason = "KVM sets a vCPU's state from any thread")
+    )]
+    pub(crate) fn on_each<R: Send + 'static>(&self, jobs: Vec<VcpuJob<V, R>>) -> Result<Vec<R>> {
+        assert_eq!(jobs.len(), self.vcpus.len(), "a job per vCPU");
+        self.run_jobs(jobs.into_iter().enumerate().collect())
+    }
+
+    /// Runs `job` on vCPU `id`'s own thread, between runs, as [`on_each`](Self::on_each) does.
+    #[cfg_attr(
+        not(all(target_os = "macos", target_arch = "aarch64")),
+        allow(dead_code, reason = "KVM sets a vCPU's state from any thread")
+    )]
+    pub(crate) fn on<R: Send + 'static>(&self, id: usize, job: VcpuJob<V, R>) -> Result<R> {
+        let mut done = self.run_jobs(vec![(id, job)])?;
+        Ok(done.pop().expect("one job, one answer"))
+    }
+
+    /// Runs each job on its vCPU's thread, at once: their answers in their order.
+    fn run_jobs<R: Send + 'static>(&self, jobs: Vec<(usize, VcpuJob<V, R>)>) -> Result<Vec<R>> {
+        assert!(!self.in_run, "vCPU jobs run between runs");
+        let (tx, rx) = mpsc::channel();
+        let count = jobs.len();
+        {
+            let mut state = self.shared.state();
+            for (order, (id, job)) in jobs.into_iter().enumerate() {
+                let (vcpu, tx) = (self.vcpus[id].clone(), tx.clone());
+                let job: Job = Box::new(move || {
+                    let done = catch_unwind(AssertUnwindSafe(|| job(&mut lock(&vcpu))))
+                        .unwrap_or_else(|panic| Err(panicked(id as u32, &*panic)));
+                    // The caller waits for every job's answer.
+                    let _ = tx.send((order, done));
+                });
+                assert!(state.jobs[id].is_none(), "one job of a vCPU's at a time");
+                state.jobs[id] = Some(job);
+            }
+            self.shared.start.notify_all();
+        }
+        drop(tx);
+        let mut done: Vec<Option<Result<R>>> = (0..count).map(|_| None).collect();
+        // Each job answers once, as its thread runs it; a thread runs every job it is given
+        // before it quits, and quits only when the machine drops, after this returns.
+        for (order, outcome) in rx {
+            done[order] = Some(outcome);
+        }
+        done.into_iter()
+            .map(|outcome| outcome.expect("every vCPU thread answers its job"))
+            .collect()
     }
 
     /// The vCPU that ended the last run (`None` for a timeout, a stop
@@ -390,8 +457,14 @@ fn vcpu_thread<V: VcpuLoop>(
     loop {
         {
             let mut state = shared.state();
-            while !state.quit && state.generation == seen {
+            while !state.quit && state.generation == seen && state.jobs[id as usize].is_none() {
                 state = shared.start.wait(state).unwrap_or_else(|e| e.into_inner());
+            }
+            // Work between runs first: it is given only between runs, and its giver waits.
+            if let Some(job) = state.jobs[id as usize].take() {
+                drop(state);
+                job();
+                continue;
             }
             if state.quit {
                 drop(state);
@@ -734,6 +807,32 @@ mod tests {
         let shared = Arc::downgrade(&m.vcpus.shared);
         drop(m);
         assert!(shared.upgrade().is_none());
+    }
+
+    /// Jobs run on each vCPU's own thread, between runs, their answers in vCPU order; a job's
+    /// error or panic is the call's error, and the threads run on after it.
+    #[test]
+    fn jobs_run_on_each_vcpus_own_thread() {
+        type Job = Box<dyn FnOnce(&mut Fake) -> Result<String> + Send>;
+        let name = || Ok(std::thread::current().name().unwrap_or_default().to_owned());
+        let mut m = machine(3);
+        let jobs: Vec<Job> = (0..3).map(|_| Box::new(move |_: &mut Fake| name()) as Job).collect();
+        assert_eq!(m.vcpus.on_each(jobs).unwrap(), ["vcpu0", "vcpu1", "vcpu2"]);
+
+        let jobs: Vec<Job> = vec![
+            Box::new(move |_| name()),
+            Box::new(|_| Err(Error::Snapshot("vCPU 1's".into()))),
+            Box::new(|_| panic!("a job's fault")),
+        ];
+        let err = m.vcpus.on_each(jobs).unwrap_err().to_string();
+        assert!(err.contains("vCPU 1's"), "{err}");
+        let jobs: Vec<Job> =
+            vec![Box::new(move |_| name()), Box::new(move |_| name()), Box::new(|_| panic!("x"))];
+        let err = m.vcpus.on_each(jobs).unwrap_err().to_string();
+        assert!(err.contains("vCPU 2 panicked: x"), "{err}");
+        m.script(1, Script::After(MS, || Ok(ExitReason::Poweroff)));
+        assert_eq!(m.run_for(NEVER).unwrap(), ExitReason::Poweroff);
+        assert_eq!(m.runs(), [1, 1, 1]);
     }
 
     #[test]

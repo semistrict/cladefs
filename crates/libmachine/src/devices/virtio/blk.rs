@@ -12,10 +12,14 @@ use std::os::unix::fs::FileExt;
 use vm_memory::{Bytes, GuestAddress, GuestMemoryMmap};
 
 use super::queue::DeviceQueue;
-use super::{DeviceState, VirtioDevice, not_snapshottable};
+use super::{DeviceState, VirtioDevice, other_version};
 use crate::error::{Error, Result};
 
 const VIRTIO_ID_BLOCK: u16 = 2;
+/// The version of what a disk saves of itself in a snapshot: nothing, its file being the host's
+/// (a restore opens it again, where the snapshot's header says), and its requests served by the
+/// time the device thread is held off.
+const STATE_VERSION: u32 = 1;
 const QUEUE_SIZES: [u16; 1] = [256];
 const SECTOR: u64 = 512;
 
@@ -223,10 +227,14 @@ impl VirtioDevice for Block {
     }
 
     fn save(&self) -> Result<DeviceState> {
-        Err(not_snapshottable(
-            VIRTIO_ID_BLOCK,
-            "a disk's file is the host's, which no snapshot holds",
-        ))
+        Ok(DeviceState { version: STATE_VERSION, data: Vec::new() })
+    }
+
+    fn restore(&mut self, state: &DeviceState) -> Result<()> {
+        if state.version != STATE_VERSION || !state.data.is_empty() {
+            return Err(other_version(VIRTIO_ID_BLOCK, state.version, STATE_VERSION));
+        }
+        Ok(())
     }
 }
 

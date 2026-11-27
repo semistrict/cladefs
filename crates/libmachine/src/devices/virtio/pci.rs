@@ -190,6 +190,12 @@ pub(crate) struct VirtioPci {
     queue_vectors: Vec<u16>,
     isr: u8,
     activated: bool,
+    /// The device's own queue threads are stopped for a snapshot ([`VirtioPci::prepare_snapshot`]),
+    /// to start again once it is taken.
+    paused: bool,
+    /// The device took something of its own for the snapshot being taken, which a failed one
+    /// drops.
+    took_snapshot: bool,
     /// Bumped each time the device's configuration changes on its own (the balloon's target), so
     /// that a driver reading it reads it whole (virtio 1.2, section 4.1.4.3).
     config_generation: u8,
@@ -368,6 +374,8 @@ impl VirtioPci {
             isr: 0,
             config_generation: 0,
             activated: false,
+            paused: false,
+            took_snapshot: false,
             notify,
             notify_registered: None,
             shm_offsets,
@@ -804,6 +812,39 @@ impl VirtioPci {
             self.msix.table_write((offset - MSIX_TABLE_OFFSET) as usize, data, host)?;
         }
         Ok(())
+    }
+
+    /// Readies the device for a snapshot of the machine, as `mode` says: the threads of one that
+    /// serves its own queues stopped, its queues where they left them, then what it takes of its
+    /// own ([`VirtioDevice::take_snapshot`]). [`snapshot_done`](Self::snapshot_done) follows,
+    /// whether or not this succeeded.
+    pub(crate) fn prepare_snapshot(
+        &mut self,
+        mode: virtio_extent::SnapshotMode,
+    ) -> Result<Option<virtio_extent::persist::State>> {
+        if self.activated && self.device.serves_its_queues() && !self.paused {
+            self.paused = true;
+            for (index, queue) in self.device.pause_queues() {
+                self.queues[index] = queue;
+            }
+        }
+        let taken = self.device.take_snapshot(mode);
+        self.took_snapshot = matches!(taken, Ok(Some(_)));
+        taken
+    }
+
+    /// After a snapshot of the machine, `kept` or failed: what the device took for it dropped if
+    /// it failed, and its own queue threads started again where they stopped.
+    pub(crate) fn snapshot_done(&mut self, kept: bool) {
+        // Only what this snapshot took: an earlier one's, kept, is its file's.
+        if std::mem::take(&mut self.took_snapshot) && !kept {
+            self.device.drop_snapshot();
+        }
+        if std::mem::take(&mut self.paused) && !self.start_device() {
+            // As an activation that fails: the device says why, and stops the machine if it
+            // can't go on (the extent store device does).
+            self.status |= STATUS_DEVICE_NEEDS_RESET;
+        }
     }
 
     /// The function's state for a snapshot, its device's included: the

@@ -20,13 +20,17 @@
 //!
 //! The framework gives a process one VM: one machine runs at a time in a process
 //! ([`Vm::new`] refuses a second). A vCPU belongs to the thread that created it, and every call
-//! about it must come from that thread: a [`Vcpu`] is created on its vCPU thread, on its first
-//! run, and destroyed when that thread exits.
+//! about it must come from that thread: a [`Vcpu`] is created on its vCPU thread as the machine
+//! is made, one after the other in their order, and destroyed when that thread exits; its state
+//! is read and set there for a snapshot ([`state`]).
 
 mod ffi;
 pub(crate) mod irqfd;
 pub(crate) mod kick;
 mod psci;
+mod state;
+
+pub(crate) use state::{VcpuState, VmState};
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -102,6 +106,8 @@ pub(crate) struct Shared {
     next_slot: AtomicU32,
     /// Whether the vCPUs have EL2 (nested virtualization): they start there.
     el2: bool,
+    /// Each vCPU's redistributor's size: vCPU `i`'s is at `GIC_REDIST_ADDR + i * redist_size`.
+    redist_size: u64,
     /// Whether the VM exists, for the DAX windows' maps, which their cells' connections make, and
     /// may make as the machine goes, after its VM: none once it is gone, which mapped nothing
     /// more ([`Shared::map_window`]).
@@ -234,9 +240,39 @@ pub(crate) fn raise_spi(shared: &Shared, intid: u32) -> std::io::Result<()> {
 }
 
 /// Where a new VM's RAM comes from.
-pub(crate) enum Ram {
+pub(crate) enum Ram<'a> {
     /// Anonymous memory, reading as zeroes.
     Anonymous,
+    /// A private (copy-on-write) mapping of a snapshot's RAM: each RAM region, in address order,
+    /// from its offset in `file`. The guest's writes never reach the file.
+    Snapshot { file: &'a Arc<std::fs::File>, offsets: &'a [u64] },
+}
+
+/// Guest RAM for `ranges` (guest address, size), from `ram`.
+fn guest_ram(ranges: &[(GuestAddress, usize)], ram: Ram<'_>) -> Result<GuestMemoryMmap> {
+    let alloc = |e: &dyn std::fmt::Display| Error::MemoryAllocation(e.to_string());
+    match ram {
+        Ram::Anonymous => GuestMemoryMmap::<()>::from_ranges(ranges).map_err(|e| alloc(&e)),
+        Ram::Snapshot { file, offsets } => {
+            assert_eq!(ranges.len(), offsets.len(), "a file offset per RAM region");
+            let regions = ranges
+                .iter()
+                .zip(offsets)
+                .map(|(&(addr, size), &offset)| {
+                    let region = vm_memory::MmapRegion::build(
+                        Some(vm_memory::FileOffset::from_arc(file.clone(), offset)),
+                        size,
+                        libc::PROT_READ | libc::PROT_WRITE,
+                        libc::MAP_PRIVATE,
+                    )
+                    .map_err(|e| alloc(&e))?;
+                    vm_memory::GuestRegionMmap::new(region, addr)
+                        .ok_or_else(|| alloc(&"a RAM region past the address space"))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            GuestMemoryMmap::from_regions(regions).map_err(|e| alloc(&e))
+        }
+    }
 }
 
 impl Vm {
@@ -248,7 +284,7 @@ impl Vm {
         cpu_model: CpuModel,
         platform: Platform,
         vcpu_count: u32,
-        ram: Ram,
+        ram: Ram<'_>,
     ) -> Result<(Self, Vec<Vcpu>)> {
         Self::with_el2(mem_size, cpu_model, platform, vcpu_count, ram, false)
     }
@@ -260,10 +296,9 @@ impl Vm {
         cpu_model: CpuModel,
         platform: Platform,
         vcpu_count: u32,
-        ram: Ram,
+        ram: Ram<'_>,
         el2: bool,
     ) -> Result<(Self, Vec<Vcpu>)> {
-        let Ram::Anonymous = ram;
         if cpu_model != CpuModel::Host {
             return Err(Error::CpuModel(
                 "on Hypervisor.framework the guest's CPU is the host's (CpuModel::Host)".into(),
@@ -292,8 +327,7 @@ impl Vm {
                 .into_iter()
                 .map(|(start, size)| (GuestAddress(start), size as usize))
                 .collect();
-            let mem = GuestMemoryMmap::<()>::from_ranges(&regions)
-                .map_err(|e| Error::MemoryAllocation(e.to_string()))?;
+            let mem = guest_ram(&regions, ram)?;
             for &(start, size) in &regions {
                 let host = mem.get_host_address(start)?;
                 // SAFETY: `mem` maps the region and outlives the VM (field order, and vCPUs
@@ -331,6 +365,7 @@ impl Vm {
             next_slot: AtomicU32::new(0),
             live: RwLock::new(true),
             el2,
+            redist_size: gic.redist_size,
         });
         let irqfds = irqfd::Forwarder::spawn(shared.clone())?;
         let vcpus = (0..vcpu_count)
@@ -638,12 +673,12 @@ thread_local! {
     static OWNED: RefCell<Option<Owned>> = const { RefCell::new(None) };
 }
 
-/// One vCPU of a [`Vm`], created on the thread that runs it, at its first run.
+/// One vCPU of a [`Vm`], created on the thread that runs it ([`Vcpu::create_now`]).
 pub(crate) struct Vcpu {
     index: u32,
     shared: Arc<Shared>,
     slot: Arc<CpuSlot>,
-    /// The state its first run starts it in (vCPU 0's: the kernel's entry).
+    /// The state it starts in once created (vCPU 0's: the kernel's entry).
     boot: Option<BootCpu>,
     pending_read: Option<PendingRead>,
     /// The bytes of the last MMIO exit's access.
@@ -669,10 +704,56 @@ impl Vcpu {
         self.slot.clone()
     }
 
-    /// Puts the vCPU in the state a kernel's entry point expects, from its first run.
+    /// Puts the vCPU in the state a kernel's entry point expects.
+    /// On the vCPU's own thread once it exists ([`Vcpus::on`]), set at once; before, from its
+    /// creation.
+    ///
+    /// [`Vcpus::on`]: crate::vcpus::Vcpus::on
     pub(crate) fn set_boot_cpu(&mut self, cpu: &BootCpu) -> Result<()> {
         self.boot = Some(*cpu);
+        if owned().is_some() {
+            let (id, _) = self.create()?;
+            self.apply_boot(id)?;
+        }
         Ok(())
+    }
+
+    /// Puts the vCPU in its boot state, if it has one to take.
+    fn apply_boot(&mut self, id: hv_vcpu_t) -> Result<()> {
+        if let Some(boot) = self.boot.take() {
+            let mut regs = vec![(HV_REG_PC, boot.pc), (HV_REG_CPSR, self.entry_pstate())];
+            regs.extend(boot.x.iter().enumerate().map(|(i, &x)| (HV_REG_X0 + i as u32, x)));
+            set_regs(id, &regs)?;
+        }
+        Ok(())
+    }
+
+    /// The vCPU's state for a snapshot, between runs, on its own thread ([`Vcpus::on_each`]):
+    /// created now, in its boot state, if it has not run yet.
+    ///
+    /// [`Vcpus::on_each`]: crate::vcpus::Vcpus::on_each
+    pub(crate) fn save_state(&mut self) -> Result<VcpuState> {
+        debug_assert!(self.pending_read.is_none(), "a run finishes its last access");
+        let (id, _) = self.create()?;
+        VcpuState::save(id, self.slot.power())
+    }
+
+    /// Sets the vCPU as `state` says, but for its GIC CPU interface
+    /// ([`restore_icc`](Self::restore_icc)), on its own thread, before it first runs: its
+    /// counter shifted by `shift` host ticks ([`VmState::shift`]).
+    pub(crate) fn restore_state(&mut self, state: &VcpuState, shift: u64) -> Result<()> {
+        debug_assert!(self.boot.is_none(), "a restored vCPU boots nothing");
+        let (id, _) = self.create()?;
+        state.restore(id, shift)?;
+        self.slot.set_power(state.power);
+        Ok(())
+    }
+
+    /// Sets the vCPU's GIC CPU interface as `state` says, on its own thread, once the GIC's
+    /// state is back ([`VmState::restore_gic`]).
+    pub(crate) fn restore_icc(&mut self, state: &VcpuState) -> Result<()> {
+        let (id, _) = self.create()?;
+        state.restore_icc(id)
     }
 
     /// Runs the guest until an exit the bus handles, or one the backend handled itself
@@ -717,7 +798,22 @@ impl Vcpu {
         }
     }
 
-    /// This thread's vCPU, created now if it has none yet, in its boot state.
+    /// Creates this thread's vCPU now, if it has none yet: the machine creates them in their
+    /// order, one after the other, as they come up ([`Vcpus::on`]).
+    ///
+    /// [`Vcpus::on`]: crate::vcpus::Vcpus::on
+    pub(crate) fn create_now(&mut self) -> Result<()> {
+        self.create().map(drop)
+    }
+
+    /// This thread's vCPU, created now if it has none yet, in its boot state, its redistributor
+    /// where its index puts it (refused otherwise: the device tree says so to the guest).
+    ///
+    /// Every machine creates its vCPUs in their order ([`create_now`](Self::create_now)), the
+    /// framework's handles counting up with them, vCPU `i`'s handle `i` (refused otherwise):
+    /// created as their threads raced, a restore's order differed from the snapshot's machine's,
+    /// and one restore in twenty-odd, under load, had a vCPU never interrupted again, the GIC's
+    /// state going back to the vCPUs by handle.
     fn create(&mut self) -> Result<(hv_vcpu_t, *const hv_vcpu_exit_t)> {
         if let Some(owned) = OWNED.with(|o| o.borrow().as_ref().map(|o| (o.0, o.1))) {
             return Ok(owned);
@@ -728,18 +824,39 @@ impl Vcpu {
             hv_vcpu_create(&mut id, &mut exit, std::ptr::null_mut())
         })?;
         OWNED.with(|o| *o.borrow_mut() = Some(Owned(id, exit)));
+        if id != u64::from(self.index) {
+            return Err(Error::Hypervisor {
+                op: "create a vCPU",
+                source: std::io::Error::other(format!(
+                    "vCPU {} got the framework's handle {id}: the vCPUs were not created in their \
+                     order, as a snapshot's GIC state needs them",
+                    self.index
+                )),
+            });
+        }
         // SAFETY: this thread owns the vCPU.
         check("set MPIDR_EL1", unsafe {
             hv_vcpu_set_sys_reg(id, HV_SYS_REG_MPIDR_EL1, mpidr(self.index))
         })?;
+        let mut redist = 0;
+        // SAFETY: writes into a live local; the vCPU's affinity is set.
+        check("get a vCPU's GIC redistributor", unsafe {
+            hv_gic_get_redistributor_base(id, &mut redist)
+        })?;
+        let expected = GIC_REDIST_ADDR + u64::from(self.index) * self.shared.redist_size;
+        if redist != expected {
+            return Err(Error::Hypervisor {
+                op: "create a vCPU",
+                source: std::io::Error::other(format!(
+                    "vCPU {} has the GIC redistributor at {redist:#x}, not {expected:#x}",
+                    self.index
+                )),
+            });
+        }
         if self.shared.el2 {
             hide_from_el2(id)?;
         }
-        if let Some(boot) = self.boot.take() {
-            let mut regs = vec![(HV_REG_PC, boot.pc), (HV_REG_CPSR, self.entry_pstate())];
-            regs.extend(boot.x.iter().enumerate().map(|(i, &x)| (HV_REG_X0 + i as u32, x)));
-            set_regs(id, &regs)?;
-        }
+        self.apply_boot(id)?;
         self.slot.created(id);
         Ok((id, exit))
     }

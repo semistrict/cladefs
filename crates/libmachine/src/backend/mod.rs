@@ -22,7 +22,7 @@ pub(crate) use kvm::{Ram, Vcpu, VcpuState, Vm, VmState, kick};
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub(crate) mod hvf;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-pub(crate) use hvf::{Ram, Vcpu, Vm, kick};
+pub(crate) use hvf::{Ram, Vcpu, VcpuState, Vm, VmState, kick};
 
 /// Which machine the backend builds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
