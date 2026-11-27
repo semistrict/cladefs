@@ -1,0 +1,63 @@
+# Copyright 2026 The cladefs Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("//tools/bazel:rust.bzl", "cladefs_rust_library", "cladefs_rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["Cargo.toml"])
+
+filegroup(
+    name = "crate_files",
+    srcs = glob(["Cargo.toml", "src/**/*"], allow_empty = True),
+)
+
+cladefs_rust_library(
+    name = "vhost_user",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    deps = all_crate_deps(normal = True),
+)
+
+cladefs_rust_library(
+    name = "vhost_user_testing",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
+    crate_features = ["testing"],
+    crate_name = "vhost_user",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    deps = all_crate_deps(normal = True),
+)
+
+cladefs_rust_library(
+    name = "vhost_user_loom",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
+    crate_features = ["loom"],
+    crate_name = "vhost_user",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    deps = ["@crates//:loom"] + all_crate_deps(normal = True),
+)
+
+cladefs_rust_test(
+    name = "vhost_user_test",
+    aliases = aliases(normal_dev = True, proc_macro_dev = True),
+    crate = ":vhost_user_testing",
+    crate_features = ["testing"],
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    deps = all_crate_deps(normal_dev = True),
+)
+
+cladefs_rust_test(
+    name = "vhost_user_loom_test",
+    aliases = aliases(normal_dev = True, proc_macro_dev = True),
+    args = ["loom::"],
+    crate = ":vhost_user_loom",
+    crate_features = ["loom"],
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    tags = ["loom"],
+    deps = all_crate_deps(normal_dev = True),
+)

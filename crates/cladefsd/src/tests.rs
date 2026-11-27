@@ -7608,6 +7608,10 @@ mod hostile;
 /// TASK-258: the daemon's spans, exported.
 mod otel;
 
+/// Board 14537: the extent device's vhost-user back-end, against a test front-end.
+#[cfg(all(target_os = "linux", not(madsim)))]
+mod vhost;
+
 /// TASK-330.3: the daemon against a degraded bucket, for a long while.
 mod soak;
 
