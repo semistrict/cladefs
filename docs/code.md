@@ -248,8 +248,9 @@ virtio extent store. Its first pieces, from TASK-26.1's spike:
   it supports, with fs/cladefs built in, the Rust linked into it as one object of
   what the kernel calls (link-time optimized). The kernel itself has no Rust
   support enabled: Kbuild never sees the Rust. cladefs's changes to the kernel
-  are a series of commits on the release (`guest/linux/patches`, each
-  with the files of `guest/linux` it adds), which the script makes in the
+  are a series of commits on the release (`guest/linux/patches`, indexed with
+  each patch's origin in `guest/linux/patches/README.md`, each with the files
+  of `guest/linux` it adds), which the script makes in the
   kernel's tree and builds. Its `out/<arch>` has what builds the same kernel
   elsewhere: `patches/` (`git am` them on the release), `libcladefs_linux.a`
   (copy it to `fs/cladefs/`) and `cladefs.config` (cladefs's options, over

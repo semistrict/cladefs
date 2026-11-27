@@ -327,7 +327,6 @@ use_repo(npm, "guide_npm")
 amazon_linux_kernel = use_extension("//tools/bazel:kernel.bzl", "amazon_linux_kernel")
 amazon_linux_kernel.sim_kernel(
     patches = [
-        "//guest/linux:patches/0007-dax-say-why-a-fault-fails.patch",
         "//guest/linux:patches/0010-dax-read-replaces-no-entry-naming-its-page.patch",
         "//guest/linux:patches/0011-dax-a-folio-put-for-good-keeps-no-share-count.patch",
     ],

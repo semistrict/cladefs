@@ -91,10 +91,8 @@ commit() {
 }
 commit 0003-virtio-extent.patch drivers/virtio_extent include/linux/virtio_extent.h
 commit 0004-cladefs.patch fs/cladefs
-commit 0007-dax-say-why-a-fault-fails.patch
 commit 0010-dax-read-replaces-no-entry-naming-its-page.patch
 commit 0011-dax-a-folio-put-for-good-keeps-no-share-count.patch
-commit 0013-mprotect-writable-batches-alike-in-dirtiness.patch
 commit 0014-fs-rotate-inodes-whose-page-cache-could-not-be-dropped.patch
 commit 0015-fs-dont-lose-inodes-another-lru-walker-is-isolating.patch
 rm -f "$index"

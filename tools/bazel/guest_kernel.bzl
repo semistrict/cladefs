@@ -118,10 +118,8 @@ tar -xf "$root/{kernel_tar}" -C "$src"
 for patch in \\
     0003-virtio-extent.patch \\
     0004-cladefs.patch \\
-    0007-dax-say-why-a-fault-fails.patch \\
     0010-dax-read-replaces-no-entry-naming-its-page.patch \\
     0011-dax-a-folio-put-for-good-keeps-no-share-count.patch \\
-    0013-mprotect-writable-batches-alike-in-dirtiness.patch \\
     0014-fs-rotate-inodes-whose-page-cache-could-not-be-dropped.patch \\
     0015-fs-dont-lose-inodes-another-lru-walker-is-isolating.patch; do
     patch -d "$src" -p1 -s < "$root/guest/linux/patches/$patch"

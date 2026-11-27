@@ -25,7 +25,7 @@ git clone -q --depth 1 --filter=blob:none --sparse --branch "$kernel_tag" \
 kernel_release_check "$tree"
 git -C "$tree" sparse-checkout set --no-cone /fs/dax.c /fs/iomap/ /include/ /lib/xarray.c \
     /lib/radix-tree.h /lib/genalloc.c
-for patch in ../linux/patches/000[5-9]-*.patch ../linux/patches/001[0-1]-*.patch; do
+for patch in ../linux/patches/001[0-1]-*.patch; do
     git -C "$tree" apply "$(realpath "$patch")"
 done
 touch "$tree/.sim-tree-$kernel_tag"

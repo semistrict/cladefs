@@ -258,5 +258,41 @@ esac
         self.assertEqual(self.tree(PINNED, kept=True), (0, "", 0, True))
 
 
+class GuestKernelPatchIndex(unittest.TestCase):
+    """guest/linux/patches/README.md indexes every guest kernel patch with its origin and stays in
+    sync with the patch files on disk, scripts/build-guest-kernel.sh, and
+    tools/bazel/guest_kernel.bzl."""
+
+    ORIGINS = {"project", "cladefs-generic", "upstream"}
+
+    def test_patch_index_matches_disk_and_build_lists(self):
+        root = SCRIPTS.parent
+        patches_dir = root / "guest" / "linux" / "patches"
+        on_disk = sorted(p.name for p in patches_dir.glob("*.patch"))
+
+        readme_rows = re.findall(
+            r"^\|\s*`([^`]+\.patch)`\s*\|\s*`([^`]+)`\s*\|",
+            (patches_dir / "README.md").read_text(),
+            re.MULTILINE,
+        )
+        indexed = [name for name, _ in readme_rows]
+        self.assertEqual(indexed, on_disk)
+        for name, origin in readme_rows:
+            self.assertIn(origin, self.ORIGINS, f"{name}: unexpected origin {origin!r}")
+
+        build_sh = re.findall(
+            r"^commit\s+(\S+\.patch)\b",
+            (SCRIPTS / "build-guest-kernel.sh").read_text(),
+            re.MULTILINE,
+        )
+        self.assertEqual(build_sh, indexed)
+
+        bzl_text = (root / "tools" / "bazel" / "guest_kernel.bzl").read_text()
+        bzl_block = re.search(r"for patch in \\(.*?); do", bzl_text, re.DOTALL)
+        self.assertIsNotNone(bzl_block, "patch loop not found in tools/bazel/guest_kernel.bzl")
+        bzl_patches = re.findall(r"\b(\d{4}-[^\s\\]+\.patch)\b", bzl_block.group(1))
+        self.assertEqual(bzl_patches, indexed)
+
+
 if __name__ == "__main__":
     unittest.main()

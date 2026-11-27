@@ -197,6 +197,15 @@ struct cladefs_dax_range {
 	 * file's semaphore held for writing.
 	 */
 	bool unsure;
+	/*
+	 * cladefs: once a range is written to, `no_pmd` forbids PMD faults and any existing PMD
+	 * entry (`has_pmd`) is invalidated in place under invalidate_lock write and file->sem write
+	 * so its 2 MiB compound folio splits back to order-0 folios (board 14407). That ensures no
+	 * large folio ever mixes private dirty pages with clean shared pages under mprotect,
+	 * mremap, fork, or arm64 contpte.
+	 */
+	bool no_pmd;
+	bool has_pmd;
 	/* Freed after a grace period: the stats walk files' ranges without their semaphores. */
 	struct rcu_head rcu;
 };

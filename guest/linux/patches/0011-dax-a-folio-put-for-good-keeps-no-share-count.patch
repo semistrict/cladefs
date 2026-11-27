@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: GPL-2.0
 # Copyright 2026 The cladefs Authors.
+# Upstream: fixed in Linux 7.1 by 59eb73b98ae0 ("dax: Factor out dax_folio_reset_order() helper";
+# union aliasing documented in 3fc3ebf40b5c), which clears folio->share = 0 unconditionally before
+# the order-0 early return. Not backported to 6.18 stable; this carries the minimal 1-line fix
+# without pulling in the 7.1 fsdev helper refactor.
 dax: a folio's last entry going leaves it no share count
 
 folio->share is a union with folio->index, and dax_folio_put left an

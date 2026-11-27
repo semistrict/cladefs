@@ -1292,6 +1292,7 @@ static struct cladefs_dax_range *cladefs_dax_get_range(struct inode *inode, pgof
 	}
 	new->file = file;
 	new->chunk = chunk;
+	new->no_pmd = !slice;
 	atomic_set(&new->users, 1);
 	err = xa_err(xa_store(&file->ranges, chunk, new, GFP_NOFS));
 	if (!err) {
@@ -1413,16 +1414,90 @@ static int cladefs_dax_fit(struct inode *inode, loff_t size)
 }
 
 /*
- * Drops `inode`'s range of the chunk at `pos`, a slice a write can't use (-EXDEV), to be mapped
- * again as a range of its own. cladefs: unless `pinned`, -EBUSY rather than wait for pages pinned
- * (TASK-79.49).
+ * Readies `inode`'s range of the chunk at `pos` for a write that returned -EXDEV:
+ * drops and unmaps a slice (`range->region`) or a range too small to cover `pos`; for a range of
+ * its own that still allows PMD mappings (`!range->no_pmd`), forbids future PMD faults and, if a
+ * PMD entry was mapped (`has_pmd`), invalidates the chunk's DAX entries in place so its 2 MiB
+ * compound folio splits back to order-0 folios without unmapping the chunk from the window
+ * (board 14407). With the inode's invalidate_lock held for writing.
+ * cladefs: unless `pinned`, -EBUSY rather than wait for pages pinned (TASK-79.49).
+ */
+static int cladefs_dax_prepare_write_range(struct inode *inode, loff_t pos, bool pinned)
+{
+	struct cladefs_dax_file *file = cladefs_dax_file(inode);
+	struct cladefs_dax *dax = cladefs_dax_of(inode);
+	pgoff_t chunk = pos >> CLADEFS_DAX_SHIFT;
+	struct cladefs_dax_range *range;
+	int err;
+	cladefs_nofs_scope();
+
+	lockdep_assert_held_write(&inode->i_mapping->invalidate_lock);
+
+	for (;;) {
+		long seen = atomic_long_read(&dax->released);
+		bool busy = false, dirty = false;
+
+		cladefs_nofs_down_write(&file->sem);
+		range = xa_load(&file->ranges, chunk);
+		if (range) {
+			loff_t start = cladefs_dax_chunk_start(range);
+			bool drop = range->region ||
+				    start + ((loff_t)range->pages << PAGE_SHIFT) <= pos;
+
+			if (drop) {
+				dirty = cladefs_dax_range_dirty(range);
+				if (dirty || atomic_read(&range->users) ||
+				    !cladefs_dax_release(inode, range))
+					busy = true;
+				else
+					cladefs_dax_unmap_range(dax, range);
+			} else if (!range->no_pmd) {
+				if (!READ_ONCE(range->has_pmd)) {
+					smp_store_release(&range->no_pmd, true);
+				} else {
+					dirty = cladefs_dax_range_dirty(range);
+					if (dirty || atomic_read(&range->users) ||
+					    !cladefs_dax_release(inode, range)) {
+						busy = true;
+					} else {
+						WRITE_ONCE(range->has_pmd, false);
+						smp_store_release(&range->no_pmd, true);
+					}
+				}
+			}
+		}
+		cladefs_nofs_up_write(&file->sem);
+		if (!busy)
+			return 0;
+		if (dirty) {
+			err = cladefs_dax_write_back(inode);
+			if (err)
+				return err;
+			continue;
+		}
+		if (!pinned && dax_layout_busy_page_range(inode->i_mapping,
+							   (loff_t)chunk << CLADEFS_DAX_SHIFT,
+							   ((loff_t)(chunk + 1) << CLADEFS_DAX_SHIFT) - 1))
+			return -EBUSY;
+		err = cladefs_dax_break_layouts(inode, (loff_t)chunk << CLADEFS_DAX_SHIFT);
+		if (err)
+			return err;
+		if (cladefs_dax_wait_released(dax, seen, 10) < 0)
+			return -EINTR;
+	}
+}
+
+/*
+ * Readies `inode`'s range of the chunk at `pos` after a write returned -EXDEV: dropping a slice or
+ * undersized range, or splitting a PMD-mapped range back to order-0 folios. cladefs: unless
+ * `pinned`, -EBUSY rather than wait for pages pinned (TASK-79.49).
  */
 static int cladefs_dax_drop_slice(struct inode *inode, loff_t pos, bool pinned)
 {
 	int err;
 
 	filemap_invalidate_lock(inode->i_mapping);
-	err = cladefs_dax_drop_pinned(inode, pos >> CLADEFS_DAX_SHIFT, pos >> CLADEFS_DAX_SHIFT, -1, pinned);
+	err = cladefs_dax_prepare_write_range(inode, pos, pinned);
 	filemap_invalidate_unlock(inode->i_mapping);
 	return err;
 }
@@ -1534,6 +1609,13 @@ static int cladefs_dax_iomap_read(struct inode *inode, loff_t pos, loff_t length
 		cladefs_dax_put_range(dax, range);
 		return -EIO;
 	}
+	/*
+	 * cladefs: once a range has been written to (`no_pmd`), PMD read faults fall back to
+	 * order-0 PTEs so no 2 MiB compound folio mixes private dirty pages with clean shared pages
+	 * (board 14407).
+	 */
+	if (fault && length >= PMD_SIZE && smp_load_acquire(&range->no_pmd))
+		length = PAGE_SIZE;
 	/* cladefs: a page of the file with no window page is no hole: mapped first. */
 	if (!cladefs_dax_pages_mapped(range->state, page)) {
 		cladefs_nofs_up_read(&file->sem);
@@ -1572,8 +1654,10 @@ static int cladefs_dax_iomap_read(struct inode *inode, loff_t pos, loff_t length
 	if (fault) {
 		cladefs_dax_trace(dax, CLADEFS_DAX_TRACE_READ, inode->i_ino,
 			       (start >> PAGE_SHIFT) + page, at, 0, length >> PAGE_SHIFT, 0);
-		if (length >= PMD_SIZE && IS_ALIGNED(at, PMD_SIZE))
+		if (length >= PMD_SIZE && IS_ALIGNED(at, PMD_SIZE)) {
+			WRITE_ONCE(range->has_pmd, true);
 			atomic64_inc(&dax->huge_maps);
+		}
 		/*
 		 * cladefs: a slice's page may be in other files' DAX entries too, or this one's at
 		 * another offset, as blocks of a staging extent or a reflink's are: said so, as XFS
@@ -2450,7 +2534,8 @@ static int cladefs_dax_iomap_write(struct inode *inode, loff_t pos, loff_t lengt
 	if (IS_ERR(range))
 		return PTR_ERR(range);
 	start = cladefs_dax_chunk_start(range);
-	if (range->region || start + ((loff_t)range->pages << PAGE_SHIFT) <= pos) {
+	if (range->region || !smp_load_acquire(&range->no_pmd) ||
+	    start + ((loff_t)range->pages << PAGE_SHIFT) <= pos) {
 		cladefs_dax_put_range(dax, range);
 		return -EXDEV;
 	}
@@ -3584,6 +3669,17 @@ void cladefs_dax_evict(struct inode *inode)
 			err = cladefs_dax_write_back_keeping(inode, false);
 		if (err)
 			pr_warn("cladefs: writing back ino %lu as it is evicted: %d\n", inode->i_ino, err);
+		/*
+		 * cladefs: every DAX entry is gone (truncate_inode_pages_final ran above), so a
+		 * later read-in of this file can map clean 2 MiB PMDs again; any subsequent write
+		 * will split them back to order-0 folios (board 14407).
+		 */
+		cladefs_nofs_down_write(&file->sem);
+		xa_for_each(&file->ranges, chunk, range) {
+			WRITE_ONCE(range->has_pmd, false);
+			smp_store_release(&range->no_pmd, false);
+		}
+		cladefs_nofs_up_write(&file->sem);
 	} else {
 		cladefs_nofs_down_write(&file->sem);
 		xa_for_each(&file->ranges, chunk, range)
@@ -3643,7 +3739,7 @@ static int cladefs_dax_zero_part(struct inode *inode, loff_t pos, loff_t len)
 		}
 		if (err != -EXDEV)
 			return err;
-		err = cladefs_dax_drop(inode, pos >> CLADEFS_DAX_SHIFT, pos >> CLADEFS_DAX_SHIFT, -1);
+		err = cladefs_dax_prepare_write_range(inode, pos, true);
 		if (err)
 			return err;
 	}

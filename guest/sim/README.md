@@ -49,7 +49,7 @@ Compiled as they are, from the tree or the repo:
 | --- | --- |
 | `dax.c`, `pages.c`, `device.c`, `hist.h`, `vfs.h`, `cladefs.h`, `device.h` | fs/cladefs: all of the window's protocol |
 | `data.c` | fs/cladefs: a file's changes as a whole, resize, punch (fallocate) and clone, with dax.c's operations (TASK-160.2) |
-| `fs/dax.c` | with guest/linux/patches/0007 and 0010-0011: DAX entries, their locks, shared folios |
+| `fs/dax.c` | with guest/linux/patches/0010-0011: DAX entries, their locks, shared folios |
 | `fs/iomap/iter.c`, `lib/xarray.c`, `lib/genalloc.c` | the kernel's |
 | `linux/{list,rculist,hash,hashtable,xarray,iomap,dax,genalloc,wait,wait_bit}.h` | the kernel's headers |
 

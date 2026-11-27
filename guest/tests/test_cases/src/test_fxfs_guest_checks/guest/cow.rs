@@ -155,12 +155,19 @@ impl SplitChunk {
         stats()["dax_private_pages"]
     }
 
+    /// Writes to the page at `offset` left read-only through the mapping, as it is now, from this
+    /// process: the write must fault, which makes the page private.
+    fn write_to_read_only_at(&mut self, offset: usize, how: &str) {
+        self.map.bytes()[offset] = 0xcd;
+        self.data[offset] = 0xcd;
+        self.private += 1;
+        assert_eq!(Self::private(), self.private, "private pages after the write {how}");
+    }
+
     /// Writes to the page left read-only through the mapping, as it is now, from this process:
     /// the write must fault, which makes the page private.
     fn write_to_read_only(&mut self, how: &str) {
-        self.map.bytes()[Self::READ_ONLY] = 0xcd;
-        self.data[Self::READ_ONLY] = 0xcd;
-        assert_eq!(Self::private(), self.private + 1, "private pages after the write {how}");
+        self.write_to_read_only_at(Self::READ_ONLY, how);
     }
 
     /// The mapping holds what was stored, and so does the file, evicted.
@@ -200,16 +207,30 @@ pub(super) fn test_cow_fork_after_a_split_pmd() {
 
 /// cladefs: copying on write (doc-13), the mapping of a chunk mapped whole and split (SplitChunk)
 /// made read-only (mprotect) and writable again: a write to a page only read faults, which makes
-/// the page private (TASK-149.42). mprotect batches a large folio's PTEs, their write bits alike,
-/// their dirty bits not (6.18's change_pte_range, FPB_RESPECT_WRITE, soft-dirty unset as the
-/// guest builds no MEM_SOFT_DIRTY), clears them collecting the dirty bits into the first's
-/// (modify_prot_start_ptes, get_and_clear_full_ptes), and makes the batch writable, writable
-/// again, if that one is dirty (can_change_shared_pte_writable): all of them, for one stored to.
+/// the page private (TASK-149.42, board 14407). Checks:
+/// - 2-step `PROT_READ` -> `PROT_READ | PROT_WRITE`;
+/// - 3-step `PROT_READ` -> `PROT_NONE` -> `PROT_READ | PROT_WRITE` (where an intermediate
+///   non-writable mprotect smeared dirty bits across clean siblings of a compound folio);
+/// - dirtying page 15 (the tail of a 16-PTE / 64 KiB arm64 contpte block) then toggling
+///   `PROT_READ` -> `PROT_READ | PROT_WRITE` and storing to clean sibling page 12.
 pub(super) fn test_cow_mprotect_after_a_split_pmd() {
     let mut chunk = SplitChunk::new("cow-mprotect-after-split");
     chunk.map.protect(libc::PROT_READ);
     chunk.map.protect(libc::PROT_READ | libc::PROT_WRITE);
-    chunk.write_to_read_only("after mprotect");
+    chunk.write_to_read_only("after 2-step mprotect");
+
+    // 3-step mprotect: dirty page 15 (arm64 contpte block tail), toggle PROT_READ -> PROT_NONE ->
+    // PROT_READ|PROT_WRITE, then store to clean sibling page 12 of the same 16-PTE block and to a
+    // page in another block.
+    chunk.write_to_read_only_at(15 * SplitChunk::PAGE + 7, "dirtying contpte block tail");
+    chunk.map.protect(libc::PROT_READ);
+    chunk.map.protect(libc::PROT_NONE);
+    chunk.map.protect(libc::PROT_READ | libc::PROT_WRITE);
+    chunk.write_to_read_only_at(
+        12 * SplitChunk::PAGE + 7,
+        "after 3-step mprotect (contpte sibling)",
+    );
+    chunk.write_to_read_only_at(200 * SplitChunk::PAGE + 7, "after 3-step mprotect");
     chunk.finish();
 }
 
@@ -343,13 +364,17 @@ impl Uffd {
 
 /// cladefs: copying on write (doc-13), the mapping of a chunk mapped whole and split (SplitChunk)
 /// moved (mremap), its PTEs with it: a write to a page only read faults, which makes the page
-/// private (TASK-149.42). mremap moves a large folio's PTEs in batches whose write bits are alike
-/// (6.18's move_ptes, mremap_folio_pte_batch's FPB_RESPECT_WRITE), each batch set as its first
-/// with the batch's dirty and young bits (get_and_clear_ptes, set_ptes): none made writable.
+/// private (TASK-149.42, board 14407). Also checks `mprotect(PROT_READ)` -> `mremap` ->
+/// `mprotect(PROT_READ | PROT_WRITE)`: on a compound folio, `mremap_folio_pte_batch` ORs dirty
+/// bits across the batch so the final `mprotect` would make clean sibling PTEs writable.
 pub(super) fn test_cow_mremap_after_a_split_pmd() {
     let mut chunk = SplitChunk::new("cow-mremap-after-split");
     chunk.map.moved();
     chunk.write_to_read_only("after mremap");
+    chunk.map.protect(libc::PROT_READ);
+    chunk.map.moved();
+    chunk.map.protect(libc::PROT_READ | libc::PROT_WRITE);
+    chunk.write_to_read_only_at(200 * SplitChunk::PAGE + 13, "after mprotect + mremap + mprotect");
     chunk.finish();
 }
 
