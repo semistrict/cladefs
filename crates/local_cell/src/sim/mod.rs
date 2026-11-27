@@ -229,7 +229,6 @@ fn one() {
             "versions_kept" => rules.versions_kept = false,
             "versions_carried" => rules.versions_carried = false,
             "versions_acked" => rules.versions_acked = false,
-            "installs_own" => rules.installs_own = false,
             "protect_wal_epoch" => rules.protect_wal_epoch = false,
             "wal_fences" => rules.wal_fences = false,
             "wal_offset_checked" => rules.wal_offset_checked = false,
@@ -271,8 +270,6 @@ fn one() {
         "versions" => versions(),
         "regions" => regions(),
         "mirrors" => mirrors(),
-        "replicated" => replicated(),
-        "retakes" => retakes(),
         "relocations" => relocations(),
         "fast_wals" => fast_wals(),
         "fast_wal_takeovers" => fast_wal_takeovers(),
@@ -303,7 +300,6 @@ fn seeds_replay() {
         twin_restores(),
         regions(),
         mirrors(),
-        replicated(),
         fast_wals(),
     ];
     for profile in profiles {
@@ -338,7 +334,7 @@ fn buggify_sites_are_reached() {
 fn swarm(seed: u64) -> Profile {
     use rand::{RngExt as _, SeedableRng as _};
     let mut rng = rand::rngs::StdRng::seed_from_u64(seed ^ 0x5a5a_f00d);
-    let bases: [fn() -> Profile; 26] = [
+    let bases: [fn() -> Profile; 24] = [
         Profile::default,
         forks,
         deleted_bases,
@@ -362,8 +358,6 @@ fn swarm(seed: u64) -> Profile {
         collectors,
         recovering,
         versions,
-        replicated,
-        retakes,
         fast_wals,
     ];
     let mut profile = bases[rng.random_range(0..bases.len())]();
@@ -385,9 +379,6 @@ fn swarm(seed: u64) -> Profile {
     profile.fail_after = either(profile.fail_after, 0.15);
     profile.hold = either(profile.hold, 0.5);
     profile.forget = either(profile.forget, 0.5);
-    if profile.replicated > 0.0 {
-        profile.net_faults = either(profile.net_faults, 0.2);
-    }
     profile.one_cell = rng.random_range(0.0..=1.0);
     profile.restarts = rng.random_bool(0.5);
     profile.corrupting = rng.random_bool(0.5);
@@ -926,56 +917,6 @@ test_needs!(versions_need_takeovers_to_carry_them, versions_carried, versions())
 test_needs!(versions_need_naming_with_their_segments, versions_acked, versions());
 
 test_needs!(restores_of_versions_need_their_heads_read, forks_check_versions, versions());
-
-/// cladefs: replicated cells (doc-21, TASK-680), of f 1 and 2 on five hosts, beside cells that
-/// are not: their writers' commits sent to their members a turn at a time, over a network that
-/// breaks between hosts, one way or both, and delays, duplicates and drops calls; hosts crashing,
-/// keeping their disks, corrupting what they never synced, or losing them, their replica
-/// directories with them, and taking their cells back at once; other hosts taking them over.
-/// Every commit told replicated survives every take.
-fn replicated() -> Profile {
-    let mut profile = weights(|weights| {
-        weights.deliver = 40;
-        weights.late = 4;
-        weights.partition = 3;
-        weights.crash = 3;
-        weights.open = 8;
-        weights.takeover = 3;
-        weights.close = 8;
-        weights.version = 0;
-        weights.restore_version = 0;
-        weights.delete = 0;
-        weights.collect = 1;
-    });
-    profile.hosts = 5;
-    profile.replicated = 0.8;
-    profile.net_faults = 0.1;
-    profile.corrupting = true;
-    profile.restarts = true;
-    profile
-}
-
-test_holds!(replicated_cells_survive_takes_crashes_and_the_network, replicated());
-
-/// cladefs: TASK-678's case, likelier: cells of f 1 on four hosts whose writers' hosts crash and
-/// take them back at once, on their own disks, while the network between hosts breaks, so that a
-/// take may hold, of its own log, commits told replicated that the members it fences lack.
-fn retakes() -> Profile {
-    let mut profile = replicated();
-    profile.hosts = 4;
-    profile.replicated = 1.0;
-    profile.net_faults = 0.0;
-    profile.corrupting = false;
-    profile.weights.crash = 6;
-    profile.weights.partition = 8;
-    profile.weights.takeover = 4;
-    profile.weights.late = 0;
-    profile
-}
-
-test_holds!(replicated_cells_retaken_on_their_writers_disks, retakes());
-
-test_needs!(retakes_need_to_install_their_own_logs, installs_own, retakes(), 0..2_000);
 
 /// cladefs: fast WAL cells (doc-29, board 14433), most of a world's, beside plain ones, on four
 /// hosts in two zones: their writers appending to their zones' fast buckets, which fail appends

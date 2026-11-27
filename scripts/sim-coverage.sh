@@ -33,10 +33,10 @@ toolchain=${CLADEFS_COVERAGE_TOOLCHAIN:-$(sed -n 's/^channel = "\(.*\)"$/\1/p' \
     "$root/guest/rust/rust-toolchain.toml")}
 mkdir -p "$out"
 
-# The protocol's code: the stores' uploads, replication and cells, the bucket's writer and heads,
-# and the daemon's cells, requests and peers.
+# The protocol's code: the stores' uploads and cells, the bucket's writer and heads, and the
+# daemon's cells, requests and peers.
 protocol=(
-    local_cell/src/upload.rs local_cell/src/replicate.rs local_cell/src/cell.rs
+    local_cell/src/upload.rs local_cell/src/cell.rs
     bucket_cell/src/writer.rs bucket_cell/src/head.rs
     cladefs/src/cladefsd/cells.rs cladefs/src/cladefsd/server.rs cladefs/src/cladefsd/peers.rs
     cladefs/src/cladefsd/migration.rs cladefs/src/host_cell.rs cladefs/src/open_cell.rs

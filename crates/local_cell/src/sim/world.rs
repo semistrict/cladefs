@@ -26,9 +26,7 @@
 //! writer once one serves, its host crashed, its disk lost, before it was uploaded or not.
 
 use crate::fast_wal::{FastWalConfig, FastWalOpener};
-use crate::replica::{Key, Replicas};
-use crate::replicate::{LinkError, MemberLink, Replicator};
-use crate::upload::{self, Awaited, Clock, Failure, Members, MembersOf, Shared, Spawn};
+use crate::upload::{self, Awaited, Clock, Failure, Shared, Spawn};
 use crate::{Description, LocalCell, MemDir, Place, Recovering};
 use base32_id::Short;
 use bucket_cell::any_bucket::AnyBucket;
@@ -49,7 +47,7 @@ use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use storage_device::ExtentId;
 
@@ -99,13 +97,6 @@ pub struct Weights {
     pub restore_version: u32,
     /// The cell's clock advances.
     pub tick: u32,
-    /// cladefs: a replicated cell's writer sends a member of its configuration what it lacks
-    /// next, a turn of the member's (TASK-680).
-    pub deliver: u32,
-    /// cladefs: a call to a member that the network held lands, late, or again.
-    pub late: u32,
-    /// cladefs: the network between two hosts breaks, one way or both, or mends.
-    pub partition: u32,
     /// cladefs: a cell's writer runs a relocation round, as its uploader does at its checkpoint
     /// rounds, of an allowance of its own (doc-27, board 6214).
     pub relocate: u32,
@@ -137,18 +128,11 @@ pub struct Profile {
     /// requests routed by their cells' buckets ([`SimBucket::at`]), a region's bucket down for a
     /// stretch at times. None draws nothing of the seed's.
     pub regions: u16,
-    /// cladefs: the chance that a cell is replicated (doc-21, TASK-680), its f 1, or 2 if the world
-    /// has hosts for it: none draws nothing of the seed's, and makes no replica directories.
-    pub replicated: f64,
-    /// cladefs: the chance that a call between hosts the network lets through is answered as out
-    /// of reach, landing or not, or lands later, again or for the first time.
-    pub net_faults: f64,
     /// cladefs: the chance that a cell keeps its unuploaded commits in a fast WAL (doc-29, board
-    /// 14433), if it is not replicated: none draws nothing of the seed's, and gives the hosts no
-    /// fast buckets.
+    /// 14433): none draws nothing of the seed's, and gives the hosts no fast buckets.
     pub fast_wal: f64,
     /// cladefs: whether a crash corrupts what a disk kept of the writes its files never synced
-    /// ([`MemDir::crash_corrupting`]), its cells' and replica directories', at random.
+    /// ([`MemDir::crash_corrupting`]), at random.
     pub corrupting: bool,
     /// cladefs: whether its end deletes every cell, once checked, and sweeps until the collectors
     /// do nothing more, checking then that nothing is left ([`World::tear_down`]): the copies of
@@ -190,9 +174,6 @@ impl Weights {
             drop_version,
             restore_version,
             tick,
-            deliver,
-            late,
-            partition,
             relocate
         );
     }
@@ -217,9 +198,7 @@ impl Default for Profile {
             one_cell: 0.5,
             forget: 0.0,
             regions: 0,
-            replicated: 0.0,
             fast_wal: 0.0,
-            net_faults: 0.0,
             corrupting: false,
             teardown: false,
             weights: Weights {
@@ -244,9 +223,6 @@ impl Default for Profile {
                 drop_version: 0,
                 restore_version: 1,
                 tick: 3,
-                deliver: 0,
-                late: 0,
-                partition: 0,
                 relocate: 0,
             },
             ticks: 4,
@@ -378,341 +354,9 @@ impl FastWalOpener for FastBuckets {
         async move { opened }.boxed()
     }
 }
-
-/// cladefs: the most a configuration's logs hold on a member: no bound the simulation reaches.
-const REPLICA_MOST: u64 = 1 << 40;
-
-/// cladefs: how many turns of draining the replicators and running out the takes' clocks a
-/// settling takes at most: a take waiting on members it never reaches waits for ever.
-const PUMPS: usize = 64;
-
 /// cladefs: the most requests one settling completes before the world is found livelocked: far
 /// past what a seed's steps leave waiting, so that only a world that never quiets down reaches it.
 const SETTLE_MOST: usize = 200_000;
-
-/// cladefs: a host's peer address, as configurations name their members.
-fn address(host: usize) -> String {
-    format!("h{host}")
-}
-
-/// cladefs: the host whose peer address `address` is.
-fn host_of(address: &str) -> usize {
-    address.strip_prefix('h').and_then(|host| host.parse().ok()).expect("a host's address")
-}
-
-/// cladefs: the hosts' replica directories and the network between them (TASK-680): a writer's
-/// links to its members, and a take's calls, go through it, out of reach across a break, and,
-/// as `faults` says, answered out of reach or landing late, again or for the first time.
-struct Net {
-    /// Its own draws, of a seed of the world's, in the order the calls come.
-    rng: StdRng,
-    /// The chance of each fault of a call let through ([`Profile::net_faults`]).
-    faults: f64,
-    /// Each host's replica directory, and its directory on the host's disk.
-    replicas: Vec<Arc<Replicas<MemDir>>>,
-    dirs: Vec<MemDir>,
-    /// The breaks: from a host to another, one way.
-    blocked: BTreeSet<(usize, usize)>,
-    /// The calls held, to land later.
-    late: Vec<Late>,
-    /// The replicators of the hosts' writers, which the world drives ([`Members::drives`]).
-    replicators: Vec<Weak<Replicator>>,
-}
-
-/// cladefs: a call to a member that the network held: to which host, of what, and the call.
-struct Late {
-    to: usize,
-    of: (bucket_cell::layout::CellId, Key, u64),
-    call: Call,
-}
-
-#[derive(Clone)]
-enum Call {
-    Append {
-        log: u64,
-        offset: u64,
-        bytes: Vec<u8>,
-    },
-    /// Drops through a log, or, with none, every configuration's before the call's.
-    Drop(Option<u64>),
-    Fence(u64),
-}
-
-/// cladefs: what the network does with a call it lets through ([`Net::fate`]).
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Fate {
-    /// It lands, and is answered.
-    Lands,
-    /// It lands, and its answer is lost.
-    Unanswered,
-    /// It lands, and lands again later.
-    Twice,
-    /// It is held, to land later, and answered out of reach.
-    Held,
-    /// It never lands.
-    Lost,
-}
-
-impl Net {
-    /// What the network does with a call from `from` to `to`: lost across a break; else as its
-    /// draws say.
-    fn fate(&mut self, from: usize, to: usize) -> Fate {
-        if self.blocked.contains(&(from, to)) {
-            return Fate::Lost;
-        }
-        if self.faults == 0.0 || !self.rng.random_bool(self.faults) {
-            return Fate::Lands;
-        }
-        match self.rng.random_range(0..4) {
-            0 => Fate::Unanswered,
-            1 => Fate::Twice,
-            2 => Fate::Held,
-            _ => Fate::Lost,
-        }
-    }
-
-    /// Makes `call`, of `of`, to `to`, as `fate` says: what it was answered, if it landed and its
-    /// answer came.
-    fn call(
-        net: &Mutex<Net>,
-        (from, to): (usize, usize),
-        of: (bucket_cell::layout::CellId, Key, u64),
-        call: Call,
-    ) -> Result<Answer, Failed> {
-        let (fate, replicas) = {
-            let mut net = net.lock().unwrap();
-            let fate = net.fate(from, to);
-            if matches!(fate, Fate::Held | Fate::Twice) {
-                net.late.push(Late { to, of, call: call.clone() });
-            }
-            (fate, net.replicas[to].clone())
-        };
-        if matches!(fate, Fate::Held | Fate::Lost) {
-            return Err(Failed::Out(format!("{} out of reach", address(to))));
-        }
-        let answer = Self::land(&replicas, of, call);
-        match fate {
-            Fate::Unanswered => Err(Failed::Out(format!("{} answered not", address(to)))),
-            _ => answer.map_err(Failed::Member),
-        }
-    }
-
-    /// Lands `call`, of `of`, on `replicas`.
-    fn land(
-        replicas: &Replicas<MemDir>,
-        of: (bucket_cell::layout::CellId, Key, u64),
-        call: Call,
-    ) -> Result<Answer, crate::replica::Error> {
-        Ok(match call {
-            Call::Append { log, offset, bytes } => {
-                Answer::End(replicas.append(of, log, offset, &bytes)?)
-            }
-            Call::Drop(through) => {
-                replicas.drop_logs(of, through)?;
-                Answer::Done
-            }
-            Call::Fence(epoch) => Answer::Ends(replicas.fence(of, epoch)?),
-        })
-    }
-}
-
-/// cladefs: what a member answered a call ([`Net::call`]).
-enum Answer {
-    End(u64),
-    Ends(Vec<(u64, u64)>),
-    Done,
-}
-
-/// cladefs: why a call had no answer ([`Net::call`]): the network's, or the member's.
-#[derive(Debug)]
-enum Failed {
-    Out(String),
-    Member(crate::replica::Error),
-}
-
-impl std::fmt::Display for Failed {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Out(why) => f.write_str(why),
-            Self::Member(err) => write!(f, "{err:#}"),
-        }
-    }
-}
-
-/// cladefs: a host's members ([`upload::Members`]), through the world's network.
-struct SimMembers {
-    me: usize,
-    net: Arc<Mutex<Net>>,
-}
-
-impl SimMembers {
-    fn of(
-        cell: bucket_cell::layout::CellId,
-        configuration: &bucket_cell::layout::Configuration,
-        member: &bucket_cell::layout::Member,
-    ) -> (bucket_cell::layout::CellId, Key, u64) {
-        let key = Key { number: configuration.number, epoch: configuration.epoch };
-        (cell, key, member.incarnation)
-    }
-}
-
-impl Members for SimMembers {
-    fn me(&self) -> Result<bucket_cell::layout::Member, String> {
-        let incarnation = self.net.lock().unwrap().replicas[self.me].incarnation();
-        Ok(bucket_cell::layout::Member { address: address(self.me), incarnation })
-    }
-
-    /// The first 2f by a hash of the configuration of the hosts this one reaches, those at `avoid`
-    /// aside.
-    fn pick<'a>(
-        &'a self,
-        cell: bucket_cell::layout::CellId,
-        number: u64,
-        f: u8,
-        avoid: &'a [String],
-    ) -> futures::future::BoxFuture<'a, Result<Vec<bucket_cell::layout::Member>, String>> {
-        Box::pin(async move {
-            let net = self.net.lock().unwrap();
-            let mut others: Vec<usize> = (0..net.replicas.len())
-                .filter(|&host| host != self.me && !net.blocked.contains(&(self.me, host)))
-                .filter(|&host| !avoid.contains(&address(host)))
-                .collect();
-            let rank = |host: &usize| {
-                let mut bytes = [0; 32];
-                bytes[..8].copy_from_slice(&cell.tenant.to_le_bytes());
-                bytes[8..16].copy_from_slice(&cell.id.to_le_bytes());
-                bytes[16..24].copy_from_slice(&number.to_le_bytes());
-                bytes[24..].copy_from_slice(&(*host as u64).to_le_bytes());
-                rapidhash::rapidhash(&bytes)
-            };
-            others.sort_by_key(rank);
-            let wanted = 2 * usize::from(f);
-            if others.len() < wanted {
-                return Err(format!("{} of the {wanted} members answered", others.len()));
-            }
-            let member = |host: usize| bucket_cell::layout::Member {
-                address: address(host),
-                incarnation: net.replicas[host].incarnation(),
-            };
-            Ok(others.into_iter().take(wanted).map(member).collect())
-        })
-    }
-
-    fn link(
-        &self,
-        cell: bucket_cell::layout::CellId,
-        configuration: &bucket_cell::layout::Configuration,
-        member: &bucket_cell::layout::Member,
-    ) -> Arc<dyn MemberLink> {
-        let to = host_of(&member.address);
-        let of = Self::of(cell, configuration, member);
-        Arc::new(SimLink { from: self.me, to, of, net: self.net.clone() })
-    }
-
-    fn fence<'a>(
-        &'a self,
-        cell: bucket_cell::layout::CellId,
-        configuration: &'a bucket_cell::layout::Configuration,
-        member: &'a bucket_cell::layout::Member,
-        epoch: u64,
-    ) -> futures::future::BoxFuture<'a, Result<Vec<(u64, u64)>, String>> {
-        Box::pin(async move {
-            let (to, of) = (host_of(&member.address), Self::of(cell, configuration, member));
-            match Net::call(&self.net, (self.me, to), of, Call::Fence(epoch)) {
-                Ok(Answer::Ends(ends)) => Ok(ends),
-                Ok(_) => unreachable!("a fence answers ends"),
-                Err(failed) => Err(failed.to_string()),
-            }
-        })
-    }
-
-    fn read<'a>(
-        &'a self,
-        cell: bucket_cell::layout::CellId,
-        configuration: &'a bucket_cell::layout::Configuration,
-        member: &'a bucket_cell::layout::Member,
-        log: u64,
-        end: u64,
-    ) -> futures::future::BoxFuture<'a, Result<Vec<u8>, String>> {
-        Box::pin(async move {
-            let to = host_of(&member.address);
-            let replicas = {
-                let mut net = self.net.lock().unwrap();
-                match net.fate(self.me, to) {
-                    Fate::Lands | Fate::Twice => net.replicas[to].clone(),
-                    _ => return Err(format!("{} out of reach", member.address)),
-                }
-            };
-            let of = Self::of(cell, configuration, member);
-            replicas.read(of, log, 0, end).map_err(|err| format!("{err:#}"))
-        })
-    }
-
-    fn drop_before<'a>(
-        &'a self,
-        cell: bucket_cell::layout::CellId,
-        configuration: &'a bucket_cell::layout::Configuration,
-        member: &'a bucket_cell::layout::Member,
-    ) -> futures::future::BoxFuture<'a, Result<(), String>> {
-        Box::pin(async move {
-            let (to, of) = (host_of(&member.address), Self::of(cell, configuration, member));
-            Net::call(&self.net, (self.me, to), of, Call::Drop(None))
-                .map(drop)
-                .map_err(|failed| failed.to_string())
-        })
-    }
-
-    fn drives(&self, replicator: &Arc<Replicator>) -> bool {
-        self.net.lock().unwrap().replicators.push(Arc::downgrade(replicator));
-        true
-    }
-}
-
-/// cladefs: a writer's link to a member, through the world's network.
-struct SimLink {
-    from: usize,
-    to: usize,
-    of: (bucket_cell::layout::CellId, Key, u64),
-    net: Arc<Mutex<Net>>,
-}
-
-impl SimLink {
-    fn call(&self, call: Call) -> Result<Answer, LinkError> {
-        use crate::replica::{Error, Refused};
-        Net::call(&self.net, (self.from, self.to), self.of, call).map_err(|failed| match failed {
-            Failed::Out(why) => LinkError::Down(why),
-            Failed::Member(Error::Refused(fenced @ Refused::Fenced { .. })) => {
-                LinkError::Fenced(fenced.to_string())
-            }
-            Failed::Member(Error::Refused(refused)) => LinkError::Refused(refused.to_string()),
-            Failed::Member(Error::Io(err)) => LinkError::Down(format!("{err:#}")),
-        })
-    }
-}
-
-impl MemberLink for SimLink {
-    fn append<'a>(
-        &'a self,
-        log: u64,
-        offset: u64,
-        bytes: Vec<u8>,
-    ) -> futures::future::BoxFuture<'a, Result<u64, LinkError>> {
-        Box::pin(async move {
-            let bytes = &bytes[..];
-            match self.call(Call::Append { log, offset, bytes: bytes.to_vec() })? {
-                Answer::End(end) => Ok(end),
-                _ => unreachable!("an append answers its end"),
-            }
-        })
-    }
-
-    fn drop_through<'a>(
-        &'a self,
-        through: u64,
-    ) -> futures::future::BoxFuture<'a, Result<(), LinkError>> {
-        Box::pin(async move { self.call(Call::Drop(Some(through))).map(drop) })
-    }
-}
 
 struct CellId {
     origin: Option<Origin>,
@@ -724,14 +368,9 @@ struct CellId {
     deleting: bool,
     /// The highest fencing token a writer took it with: its latest placement's.
     taken: u64,
-    /// cladefs: what its takings ask of its replication, if it is replicated (TASK-680).
-    replicated: Option<layout::Wish>,
-    /// cladefs: the commits its guests were told are replicated: in the history of its writer once
-    /// one serves, or in the bucket.
+    /// cladefs: the commits its fast WAL told its guests are durable: in the history of its writer
+    /// once one serves, or in the bucket.
     told: BTreeSet<u64>,
-    /// cladefs: whether a take of it is forced ([`World::force`]), which may lose what was told
-    /// replicated past what it recovered, and no more.
-    forcing: bool,
     /// cladefs: what its guests' syncs wait for, if it keeps its commits in a fast WAL (doc-29):
     /// what its takings ask.
     fast_wal: Option<layout::Fsync>,
@@ -746,9 +385,7 @@ impl CellId {
             acked: BTreeSet::new(),
             deleting: false,
             taken: 0,
-            replicated: None,
             told: BTreeSet::new(),
-            forcing: false,
             fast_wal: None,
         }
     }
@@ -833,9 +470,6 @@ struct Session {
     /// spawns them; and once it did, each one's; and its relocation rounds' ([`World::relocate`]).
     kept: Arc<Mutex<Vec<BoxFuture<'static, ()>>>>,
     keepers: Vec<AbortHandle>,
-    /// cladefs: whether its take restored its members' logs into its cell directory, which
-    /// the world followed ([`World::follow_restore`]).
-    restored: bool,
 }
 
 #[derive(Default)]
@@ -980,9 +614,6 @@ pub struct World {
     /// ([`World::check_uploaded`]).
     tasks: Rc<RefCell<BTreeMap<u64, &'static std::panic::Location<'static>>>>,
     next_task: u64,
-    /// cladefs: the hosts' replica directories and the network between them, of a world whose
-    /// cells may be replicated ([`Profile::replicated`]).
-    net: Option<Arc<Mutex<Net>>>,
     pub violations: Vec<String>,
     /// cladefs: what the hosts' mirrors came to, by outcome, and the copies sweeps alone deleted
     /// ("collected"): what a run reached of mirrors (TASK-633.10).
@@ -1045,22 +676,9 @@ impl World {
             quiescing: false,
             tasks: Rc::default(),
             next_task: 0,
-            net: None,
             violations: Vec::new(),
             mirrored: BTreeMap::new(),
         };
-        if profile.replicated > 0.0 {
-            let rng = StdRng::seed_from_u64(world.rng.random());
-            let dirs: Vec<MemDir> = (0..profile.hosts).map(|_| MemDir::serial()).collect();
-            let replicas = (dirs.iter())
-                .map(|dir| world.replicas(dir.clone()))
-                .collect::<Result<Vec<_>, _>>()
-                .expect("new replica directories");
-            let faults = profile.net_faults;
-            let (blocked, late, replicators) = (BTreeSet::new(), Vec::new(), Vec::new());
-            let net = Net { rng, faults, replicas, dirs, blocked, late, replicators };
-            world.net = Some(Arc::new(Mutex::new(net)));
-        }
         if profile.fast_wal > 0.0 {
             world.bucket.set_max_appends(Some(FAST_PARTS));
             let buckets = Arc::new(FastBuckets(world.bucket.clone()));
@@ -1107,20 +725,11 @@ impl World {
         }
     }
 
-    /// cladefs: a cell forked from `origin`, of its parent's commit `base`: replicated, as the
-    /// profile's chance says, at f 1, or 2 if the world has the hosts for it.
+    /// cladefs: a cell forked from `origin`, of its parent's commit `base`.
     fn new_cell(&mut self, origin: Option<Origin>, base: Option<u64>) -> CellId {
         let mut found = CellId::forked(origin, base);
-        if self.net.is_some() && self.rng.random_bool(self.profile.replicated) {
-            let most = u8::try_from((self.profile.hosts - 1) / 2).unwrap_or(u8::MAX).min(2);
-            let f = self.rng.random_range(1..=most.max(1));
-            found.replicated = layout::Wish::new(f, layout::Fsync::Replicated);
-        }
-        // cladefs: or in a fast WAL, its guests' syncs waiting for it, or for uploads alone.
-        if self.profile.fast_wal > 0.0
-            && found.replicated.is_none()
-            && self.rng.random_bool(self.profile.fast_wal)
-        {
+        // cladefs: fast WAL cell, its guests' syncs waiting for it, or for uploads alone.
+        if self.profile.fast_wal > 0.0 && self.rng.random_bool(self.profile.fast_wal) {
             let fsync = match self.rng.random_bool(0.5) {
                 true => layout::Fsync::FastWal,
                 false => layout::Fsync::Ordered,
@@ -1128,12 +737,6 @@ impl World {
             found.fast_wal = Some(fsync);
         }
         found
-    }
-
-    /// cladefs: the replica directory in `dir`, its incarnation, if it makes one, the world's draw.
-    fn replicas(&mut self, dir: MemDir) -> Result<Arc<Replicas<MemDir>>, crate::replica::Error> {
-        let incarnation = self.rng.random::<u64>() | 1;
-        Ok(Arc::new(Replicas::open_as(dir, REPLICA_MOST, || incarnation)?))
     }
 
     /// What the run asked of the bucket, in order ([`SimBucket::journal`]).
@@ -1204,9 +807,6 @@ impl World {
             w.drop_version,
             w.restore_version,
             w.tick,
-            w.deliver,
-            w.late,
-            w.partition,
             w.relocate,
         ];
         let mut roll = self.rng.random_range(0..choices.iter().sum::<u32>());
@@ -1240,9 +840,6 @@ impl World {
                 let ticks = self.rng.random_range(1..=self.profile.ticks);
                 self.bucket.advance(ticks);
             }
-            21 => self.deliver(),
-            22 => self.land_late(),
-            23 => self.partition(),
             _ => self.relocate(),
         }
         self.settle_tasks();
@@ -1456,15 +1053,6 @@ impl World {
                 }
                 let session = &self.hosts[host].sessions[&cell];
                 let id = session.id;
-                // cladefs: a take that restored its members' logs into the cell directory, as
-                // its write-ahead log, opened or not yet (TASK-680).
-                if session.cell.is_none()
-                    && !session.restored
-                    && let Some(from) = session.uploader.recovered_from()
-                {
-                    self.follow_restore(host, cell, &from);
-                    changed = true;
-                }
                 let session = self.hosts[host].sessions.get_mut(&cell).unwrap();
                 if session.cell.is_none() {
                     match session.started.try_recv() {
@@ -1504,16 +1092,11 @@ impl World {
                     .map(|(_, &tag)| tag)
                     .filter(|tag| commits[tag].cell == cell)
                     .collect();
-                // cladefs: and of what was replicated, by its replicator's word (TASK-680); or
-                // appended to its fast WAL, by its sink's (doc-29, board 14433).
+                // cladefs: and of what was appended to its fast WAL, by its sink's word (doc-29,
+                // board 14433).
                 let open_cell = session.cell.as_ref();
-                let replicator = open_cell.and_then(|open_cell| open_cell.replicator());
-                let fast_wal = open_cell.and_then(|open_cell| open_cell.fast_wal());
-                let told_through = match (replicator, fast_wal) {
-                    (Some(replicator), _) => Some(replicator.told(uploaded)),
-                    (None, Some(sink)) => Some(sink.durable()),
-                    (None, None) => None,
-                };
+                let told_through =
+                    open_cell.and_then(|open_cell| open_cell.fast_wal()).map(|sink| sink.durable());
                 let told: Vec<u64> = match told_through {
                     Some(through) => (self.lineages[&lineage].range(..=through))
                         .map(|(_, &tag)| tag)
@@ -1528,66 +1111,6 @@ impl World {
             }
         }
         changed
-    }
-
-    /// cladefs: the take of `cell`'s session on `host` restored the logs of the members of `from`
-    /// into its cell directory, as its write-ahead log (TASK-680): the cell's history is, from
-    /// now on, what `from`'s writer's cell held.
-    fn follow_restore(&mut self, host: usize, cell: u64, from: &layout::Configuration) {
-        self.hosts[host].sessions.get_mut(&cell).unwrap().restored = true;
-        let Some(&source) = self.stamps.get(&(cell, from.epoch)) else {
-            return self.violation(format!(
-                "cell {cell} recovered from configuration {} of a writer of epoch {}, \
-                 which no session's was",
-                from.number,
-                from.epoch,
-                cell = Short(cell)
-            ));
-        };
-        let held = self.lineages[&source].clone();
-        let lineage = self.id();
-        self.lineages.insert(lineage, held);
-        self.hosts[host].disks.get_mut(&cell).unwrap().lineage = lineage;
-        self.hosts[host].sessions.get_mut(&cell).unwrap().lineage = lineage;
-        trace!(
-            "host {host}: {cell} restored from configuration {} of writer {}: history \
-             {lineage}, of {source}'s",
-            from.number,
-            from.epoch,
-            cell = Short(cell)
-        );
-    }
-
-    /// cladefs: a forced take of `cell` opened, the bucket holding its commits through epoch
-    /// `epoch`, its cell's last commit `head` (TASK-681): what was told replicated past that epoch,
-    /// which the members that did not answer alone may have held, is let go of; what was told
-    /// through it must be its history, as the bucket holds it.
-    fn forced(&mut self, cell: u64, epoch: u64, head: Option<u64>) {
-        let told = self.cells[&cell].told.clone();
-        let place = |tag: u64| {
-            let mut places = self.lineages.values().flat_map(|history| history.iter());
-            places.find(|&(_, &made)| made == tag).map(|(&at, _)| at)
-        };
-        let (mut lost, mut violations) = (Vec::new(), Vec::new());
-        for tag in told {
-            if self.precedes(tag, head) {
-                continue;
-            }
-            match place(tag) {
-                Some(at) if at > epoch => lost.push(tag),
-                at => violations.push(format!(
-                    "cell {cell}'s forced take lost commit {tag}, told replicated, at epoch {at:?}, \
-                     which it recovered through {epoch}",
-                    cell = Short(cell)
-                )),
-            }
-        }
-        for violation in violations {
-            self.violation(violation);
-        }
-        trace!("{cell}'s forced take lets go of {lost:?}, told replicated", cell = Short(cell));
-        let found = self.cells.get_mut(&cell).unwrap();
-        found.told.retain(|tag| !lost.contains(tag));
     }
 
     /// The cell directory of `cell` on `host`, made if its disk has none.
@@ -1635,14 +1158,6 @@ impl World {
         // forced one is (TASK-681): what its writer takes the cell with, whatever it is asked.
         let token = recovering.token().or(token).unwrap_or(holder);
         let intervals = Arc::<Intervals>::default();
-        // cladefs: its members, through the world's network, of a world of replicated cells; and
-        // replacing a member at once, as no host's clock decides when here (TASK-680).
-        let members = (self.net.clone())
-            .map(|net| MembersOf(Arc::new(SimMembers { me: host, net }) as Arc<dyn Members>));
-        let replace_after = match members {
-            Some(_) => Duration::ZERO,
-            None => upload::Options::default().replace_after,
-        };
         let options = upload::Options {
             interval: INTERVAL,
             upload_closed: true,
@@ -1655,10 +1170,6 @@ impl World {
             checkpoint_min_on_close: upload::CHECKPOINT_MIN_ON_CLOSE,
             // The simulation's clock advances on demand, as for `filling_wait`.
             ack_coalesce: Duration::ZERO,
-            replication: self.cells.get(&cell).and_then(|found| found.replicated),
-            members,
-            replace_after,
-            force: false,
             // The interval closes a segment filled at once, as the first full one closed between
             // commits, its commits uploading, is what the world's clock can't wait for
             // (TASK-92.41).
@@ -1698,7 +1209,6 @@ impl World {
             guest: Guest::default(),
             kept,
             keepers: Vec::new(),
-            restored: false,
         };
         self.hosts[host].sessions.insert(cell, session);
     }
@@ -1735,19 +1245,9 @@ impl World {
                 Err(violation) => return self.violation(violation),
             },
         };
-        // cladefs: and, of a world of replicated cells, one that goes on past it: the history of a
-        // writer gone, which a take may recover from its members' logs, stays as it was
-        // (TASK-680).
-        let past = self.net.is_some() && history.range(epoch + 1..).next().is_some();
         let lineage = if head.is_some() && history.get(&epoch).copied() != head {
             let lineage = self.id();
             self.lineages.insert(lineage, BTreeMap::new());
-            self.hosts[host].disks.get_mut(&cell).unwrap().lineage = lineage;
-            lineage
-        } else if past {
-            let held = history.range(..=epoch).map(|(&at, &tag)| (at, tag)).collect();
-            let lineage = self.id();
-            self.lineages.insert(lineage, held);
             self.hosts[host].disks.get_mut(&cell).unwrap().lineage = lineage;
             lineage
         } else {
@@ -1761,9 +1261,6 @@ impl World {
         }
         let found = self.cells.get_mut(&cell).unwrap();
         found.taken = found.taken.max(token);
-        if std::mem::take(&mut found.forcing) {
-            self.forced(cell, last.map_or(0, epoch_of), head);
-        }
         let (held, _) = self.expected(head);
         let session = self.hosts[host].sessions.get_mut(&cell).unwrap();
         let next_sequence = uploader.next_sequence();
@@ -1828,66 +1325,9 @@ impl World {
             self.hosts[host].disks.get_mut(&cell).unwrap().lineage = lineage;
             return self.run_session(host, cell, Some(token), recovering);
         }
-        // cladefs: a replicated cell more of whose configuration's members lost their disks than a
-        // take can do without is taken by force, as an operator would (TASK-681): what was told
-        // replicated may be lost then, which it is told.
-        if self.quiescing && failure.to_string().contains("a take must fence answered") {
-            match self.members_gone(host, cell) {
-                Ok(true) => return self.force(host, cell),
-                Ok(false) => {}
-                Err(violation) => return self.violation(violation),
-            }
-        }
         if self.quiescing {
             self.violation(format!("cell {cell} does not open: {failure}", cell = Short(cell)));
         }
-    }
-
-    /// cladefs: whether too many members of the configuration `cell`'s head names lost their disks,
-    /// their replica directories of another incarnation now, for a take on `host` to fence
-    /// enough of them: f+1 others than its writer, or f, if `host` is its writer, in the
-    /// incarnation it names, and its cell holds a write-ahead log, as `upload`'s fence counts
-    /// (TASK-681).
-    fn members_gone(&self, host: usize, cell: u64) -> Result<bool, String> {
-        let Some(net) = &self.net else { return Ok(false) };
-        let direct = Direct(self.bucket.clone());
-        let head = block_on(bucket_cell::head::get(&direct, sim_cell(cell)));
-        let head = head.map_err(|err| format!("cell {cell}'s head: {err}", cell = Short(cell)))?;
-        let configuration = head.and_then(|head| head.replication?.configuration);
-        let Some(configuration) = configuration.filter(|configuration| configuration.f >= 1) else {
-            return Ok(false);
-        };
-        let net = net.lock().unwrap();
-        let alive = |member: &bucket_cell::layout::Member| {
-            net.replicas[host_of(&member.address)].incarnation() == member.incarnation
-        };
-        let answering = configuration.members.iter().skip(1).filter(|member| alive(member)).count();
-        let writer = &configuration.members[0];
-        let disk = &self.hosts[host].disks[&cell];
-        let recovering = match disk.made {
-            true => LocalCell::recover(disk.dir.clone()),
-            false => LocalCell::recover_unmade(disk.dir.clone()),
-        };
-        // As the take counts it (TASK-683).
-        let epoch = configuration.epoch;
-        let own = recovering.is_ok_and(|recovering| recovering.holds_own_copy(epoch));
-        let mine = host_of(&writer.address) == host && alive(writer) && own;
-        let needed = usize::from(configuration.f) + 1 - usize::from(mine);
-        Ok(answering < needed)
-    }
-
-    /// cladefs: takes `cell` on `host` by force (TASK-681): its cell placed forced, at a new
-    /// placement; what its guests were told replicated past what it recovered may be lost, and is
-    /// let go of once it opened ([`World::forced`]).
-    fn force(&mut self, host: usize, cell: u64) {
-        let token = self.id();
-        trace!("host {host} takes {cell} by force, at {token}", cell = Short(cell));
-        let dir = self.disk(host, cell).dir.clone();
-        if let Err(err) = crate::place(&dir, token, true) {
-            return self.violation(format!("placing cell {cell}: {err:#}", cell = Short(cell)));
-        }
-        self.cells.get_mut(&cell).unwrap().forcing = true;
-        self.start_session(host, cell, Some(token));
     }
 
     /// The commit the guests made that `tag`, a commit's in a footer or a state of `cell`'s,
@@ -2309,23 +1749,6 @@ impl World {
                 };
             }
         }
-        // cladefs: its replica directory as the crash left it, or lost, a new incarnation's.
-        if let Some(net) = self.net.clone() {
-            let dir = net.lock().unwrap().dirs[host].clone();
-            let seed = self.rng.random();
-            let dir = match (lost, corrupting) {
-                (true, _) => MemDir::serial(),
-                (false, true) => dir.crash_corrupting(seed),
-                (false, false) => dir.crash(seed),
-            };
-            match self.replicas(dir.clone()) {
-                Ok(replicas) => {
-                    let mut net = net.lock().unwrap();
-                    (net.dirs[host], net.replicas[host]) = (dir, replicas);
-                }
-                Err(err) => self.violation(format!("host {host}'s replica directory: {err:#}")),
-            }
-        }
         let cells: Vec<u64> = sessions.keys().copied().collect();
         // Their cells close on what the crash left behind.
         for (cell, session) in sessions {
@@ -2356,81 +1779,6 @@ impl World {
             running.abort();
         }
         self.hosts[host].known = Default::default();
-    }
-
-    /// cladefs: a member of a live replicator's configuration takes a turn: sent what it lacks
-    /// next, through the network (TASK-680).
-    fn deliver(&mut self) {
-        let Some(net) = self.net.clone() else { return };
-        let replicators: Vec<Arc<Replicator>> =
-            net.lock().unwrap().replicators.iter().filter_map(Weak::upgrade).collect();
-        if replicators.is_empty() {
-            return;
-        }
-        let replicator = &replicators[self.rng.random_range(0..replicators.len())];
-        let members = replicator.members();
-        if members > 0 {
-            let m = self.rng.random_range(0..members);
-            let sent = replicator.drive(m);
-            trace!("a replicator's member {m} takes a turn: {sent}");
-        }
-    }
-
-    /// cladefs: a call the network held lands, late: an append, a drop or a fence a member takes
-    /// after the calls made since, its caller long told it was out of reach (TASK-680).
-    fn land_late(&mut self) {
-        let Some(net) = self.net.clone() else { return };
-        let late = {
-            let mut net = net.lock().unwrap();
-            if net.late.is_empty() {
-                return;
-            }
-            let at = self.rng.random_range(0..net.late.len());
-            net.late.remove(at)
-        };
-        self.land(late);
-    }
-
-    /// cladefs: `late`, a call the network held, lands on its host's replica directory as it is
-    /// now: refused, or taken, as a call taken late is.
-    fn land(&mut self, late: Late) {
-        let Some(net) = self.net.clone() else { return };
-        let replicas = net.lock().unwrap().replicas[late.to].clone();
-        let landed = Net::land(&replicas, late.of, late.call).map(drop);
-        trace!("a call to host {} lands late: {landed:?}", late.to);
-    }
-
-    /// cladefs: the network between two hosts breaks, one way or both, or mends; or every break
-    /// mends at once (TASK-680).
-    fn partition(&mut self) {
-        let Some(net) = self.net.clone() else { return };
-        let hosts = self.hosts.len();
-        let mut net = net.lock().unwrap();
-        if self.rng.random_bool(0.2) {
-            trace!("the network mends");
-            return net.blocked.clear();
-        }
-        let from = self.rng.random_range(0..hosts);
-        let to = (from + self.rng.random_range(1..hosts)) % hosts;
-        let both = self.rng.random_bool(0.5);
-        let broken = !net.blocked.remove(&(from, to));
-        if broken {
-            net.blocked.insert((from, to));
-        }
-        if both {
-            match broken {
-                true => net.blocked.insert((to, from)),
-                false => net.blocked.remove(&(to, from)),
-            };
-        }
-        trace!(
-            "host {from} to {to}{}: {}",
-            if both { " and back" } else { "" },
-            match broken {
-                true => "broken",
-                false => "mended",
-            }
-        );
     }
 
     /// `child`, a fork of a version that failed, or a crash left, goes as its host's cleanup
@@ -2882,15 +2230,9 @@ impl World {
     /// Requests complete, without failing, until none is left, those held too.
     fn settle(&mut self) {
         self.bucket.release();
-        let (mut pumps, mut completed) = (0, 0);
+        let mut completed = 0;
         loop {
             self.settle_tasks();
-            // cladefs: replicated cells' members sent what they lack, and takes waiting for them
-            // let go on (TASK-680), a bounded number of times.
-            if pumps < PUMPS && self.pump() {
-                pumps += 1;
-                continue;
-            }
             if self.bucket.waiting() == 0 {
                 return;
             }
@@ -2909,32 +2251,6 @@ impl World {
                 return;
             }
         }
-    }
-
-    /// cladefs: sends every member of every live replicator what it lacks, as long as any takes
-    /// something, and runs out the clocks of the takes waiting, for their members, or the bucket:
-    /// whether anything moved (TASK-680).
-    fn pump(&mut self) -> bool {
-        let Some(net) = self.net.clone() else { return false };
-        let replicators: Vec<Arc<Replicator>> = {
-            let mut net = net.lock().unwrap();
-            net.replicators.retain(|replicator| replicator.strong_count() > 0);
-            net.replicators.iter().filter_map(Weak::upgrade).collect()
-        };
-        let mut moved = false;
-        for replicator in replicators {
-            for m in 0..replicator.members() {
-                while replicator.drive(m) {
-                    moved = true;
-                }
-            }
-        }
-        for host in &self.hosts {
-            for session in host.sessions.values().filter(|session| session.cell.is_none()) {
-                moved |= session.intervals.run_out();
-            }
-        }
-        moved
     }
 
     /// The live cells, by their records.
@@ -3383,9 +2699,8 @@ impl World {
                     ));
                 }
             }
-            // cladefs: every commit told replicated is in the history of the cell's writer that
-            // serves, the head's (TASK-680): the spec's ReplicatedSurvives. And every commit its
-            // fast WAL told durable (doc-29): FastWal.tla's DurableSurvives.
+            // cladefs: every commit its fast WAL told durable is in the history of the cell's
+            // writer that serves, the head's (doc-29): FastWal.tla's DurableSurvives.
             if !cell.told.is_empty() {
                 let serving =
                     self.hosts.iter().filter_map(|host| host.sessions.get(&id)).find(|session| {
@@ -3656,18 +2971,6 @@ impl World {
     async fn quiesce(&mut self) {
         trace!("quiescing");
         self.faults = false;
-        // cladefs: the network mends, and lets every call through, those held landing.
-        if let Some(net) = self.net.clone() {
-            let late = {
-                let mut net = net.lock().unwrap();
-                net.blocked.clear();
-                net.faults = 0.0;
-                std::mem::take(&mut net.late)
-            };
-            for late in late {
-                self.land(late);
-            }
-        }
         for region in std::mem::take(&mut self.down) {
             self.bucket.down(region, false);
         }

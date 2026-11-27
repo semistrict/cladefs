@@ -114,25 +114,14 @@
 //! cladefs: peers authenticate each other by mutual TLS (board 8437): `CLADEFSD_PEER_TLS` names a
 //! directory of the hosts' credentials, `ca.crt` (the hosts' CA), `peer.crt` and `peer.key` (this
 //! host's certificate, for `cladefs-peer`, and its key, PEM), without which a daemon serving peers
-//! refuses to start; every call, served or made, is of a peer whose certificate the CA signed. A
-//! replication call is admitted only if its cell's head in the bucket could have asked it (board
-//! 8445). What a peer gives is checked against the CRCs of the asker's own tail of the object; on any
+//! refuses to start; every call, served or made, is of a peer whose certificate the CA signed. What
+//! a peer gives is checked against the CRCs of the asker's own tail of the object; on any
 //! failure a part comes from the bucket, and the peer is asked nothing for 30 seconds. cladefs:
 //! peers are of one cloud region (TASK-633.4, backlog doc-23): a host's region is its home
 //! bucket, and a peer refuses one of another region, or another system of buckets, which then
 //! asks it nothing again, nor counts it among a part's owners, whatever its list says; within the
 //! region, parts of any bucket are served, those of another region's buckets fetched from there
 //! once by their owner here.
-//! With `CLADEFSD_REPLICAS` naming one or more colon-separated JBOD directories, each made if it
-//! is not there, the daemon is a
-//! member of other hosts' replicated cells' configurations (backlog doc-21, TASK-537): it keeps
-//! their writers' logs spread across them until the bucket does, each cell's to the lag bound in
-//! bytes, and sweeps what their heads name no more every ten minutes. With one directory, its
-//! incarnation names this host; with multiple JBOD directories, a composite incarnation derived
-//! from all shards' incarnations names it, so losing or wiping any single disk rotates it.
-//! A writer of a replicated cell replaces a member down for `CLADEFSD_REPLACE_AFTER` seconds
-//! (default 30), and, its configuration holding no quorum that long, none to be had, drops it to
-//! f = 0 once the bucket holds what it told.
 //! However far behind the bucket its cells fall, what waits for it is on the host's disk, each
 //! cell's write-ahead log, bounded by its lag (backlog doc-7, Uploads); what of it the daemon
 //! holds in memory is what it uploads at once, `CLADEFSD_UPLOAD_MEMORY` bytes at most (512 MiB

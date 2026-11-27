@@ -115,14 +115,6 @@ groups:
           severity: critical
         annotations:
           summary: "disk {{ $labels.device }} on {{ $labels.instance }}: free space under its headroom"
-      # Fewer than f members take the writer's commits, or none, its commits waiting for the bucket.
-      - alert: CladefsdReplicationDegraded
-        expr: cladefsd_replication_degraded{job="cladefsd"} == 1
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "cell {{ $labels.cell }} on {{ $labels.instance }}: replication degraded"
       # A build no commit names (a dirty tree's, or of no checkout): not what was qualified.
       - alert: CladefsdUnqualifiedBuild
         expr: cladefsd_build_info{job="cladefsd", commit=~".*-dirty|unknown"} == 1

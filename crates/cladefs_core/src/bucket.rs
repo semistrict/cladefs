@@ -285,7 +285,6 @@ pub struct HostState {
     uploads: std::sync::OnceLock<Arc<Budget>>,
     upload_memory: std::sync::OnceLock<u64>,
     peers: std::sync::OnceLock<(Arc<RoutedBucket>, Arc<peers::Peers>)>,
-    members: std::sync::OnceLock<Arc<dyn local_cell::upload::Members>>,
 }
 
 impl HostState {
@@ -298,7 +297,6 @@ impl HostState {
             uploads: std::sync::OnceLock::new(),
             upload_memory: std::sync::OnceLock::new(),
             peers: std::sync::OnceLock::new(),
-            members: std::sync::OnceLock::new(),
         }
     }
 
@@ -1181,36 +1179,6 @@ pub fn peers_on(host: &crate::Host) -> Option<Arc<peers::Peers>> {
 #[cfg(not(madsim))]
 pub fn peers() -> Option<Arc<peers::Peers>> {
     peers_on(crate::Host::process())
-}
-
-/// cladefs: has `host`'s replicated cells' configurations be made of `members` from now on. Once.
-pub fn replicate_with_on(
-    host: &crate::Host,
-    members: Arc<dyn local_cell::upload::Members>,
-) -> Result<(), String> {
-    host.bucket_state()
-        .members
-        .set(members)
-        .map_err(|_| "the host's members are set already".to_owned())
-}
-
-/// cladefs: has the host's replicated cells' configurations be made of `members`, its peers, from
-/// now on (doc-21, TASK-537.3.3): before any open cell opens. Once.
-#[cfg(not(madsim))]
-pub fn replicate_with(members: Arc<dyn local_cell::upload::Members>) -> Result<(), String> {
-    replicate_with_on(crate::Host::process(), members)
-}
-
-/// cladefs: the hosts `host`'s replicated cells' configurations are made of ([`replicate_with_on`]).
-pub fn members_on(host: &crate::Host) -> Option<Arc<dyn local_cell::upload::Members>> {
-    host.bucket_state().members.get().cloned()
-}
-
-/// cladefs: the hosts the host's replicated cells' configurations are made of, if it has peers
-/// and a replica directory ([`replicate_with`]).
-#[cfg(not(madsim))]
-pub fn members() -> Option<Arc<dyn local_cell::upload::Members>> {
-    members_on(crate::Host::process())
 }
 
 /// cladefs: what serves the hosts sharing `bucket` on `host` the parts they ask it for.

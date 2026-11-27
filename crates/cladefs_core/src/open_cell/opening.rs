@@ -84,12 +84,6 @@ impl Opening {
         self
     }
 
-    /// Sets whether taking a replicated cell is forced (`keeping.force`, TASK-681).
-    pub fn force(mut self, force: bool) -> Self {
-        self.keeping.force = force;
-        self
-    }
-
     /// Opens the cell directory at `path`, as of its last commit, as this [`Opening`] configures:
     /// its uploader takes its cell's head, with the token its placement names or `keeping`'s, and
     /// recovers it, the open cell's write-ahead log put after its end (TASK-165.9); a log another
@@ -247,11 +241,7 @@ impl Opening {
             return Err(Error::new(anyhow::Error::new(Errno::EEXIST).context(refused)));
         } else {
             if let Some(token) = token {
-                let force = self.keeping.force;
-                local_cell::upload::blocking(|| match force {
-                    true => OpenCell::place_forced_on(&self.host, path, token),
-                    false => OpenCell::place_on(&self.host, path, token),
-                })?;
+                local_cell::upload::blocking(|| OpenCell::place_on(&self.host, path, token))?;
             }
             host_cell::take_on(&self.host, path, self.keeping.clone()).await?
         };
@@ -485,7 +475,6 @@ impl OpenCell {
     ) -> Result<host_cell::Opened, Error> {
         let keeping =
             local_cell::upload::Options { token: token.unwrap_or(keeping.token), ..keeping };
-        let force = keeping.force;
         let opened = Self::creating(path, async |span| {
             let opened =
                 host_cell::create_unmade_on(host, path, capacity, of, kind, None, keeping).await?;
@@ -496,13 +485,11 @@ impl OpenCell {
         // cladefs: placed, then made whole, and removed if either fails: made first, a placement
         // failing left a store no placement had placed, which every making after refused
         // (`EEXIST`, board 5668); and the making's last step failing may leave the store looking
-        // made. A forced taking's placement forced from then on (TASK-681).
+        // made.
         let placed = local_cell::upload::blocking(|| {
-            match (token, force) {
-                (Some(token), true) => Self::place_forced_on(host, path, token),
-                (Some(token), false) => Self::place_on(host, path, token),
-                (None, _) => Ok(()),
-            }?;
+            if let Some(token) = token {
+                Self::place_on(host, path, token)?;
+            }
             opened.made().map_err(Error::new)
         });
         if let Err(err) = placed {
@@ -524,22 +511,6 @@ impl OpenCell {
     #[cfg(not(madsim))]
     pub fn place(path: impl AsRef<Path>, token: u64) -> Result<(), Error> {
         Self::place_on(crate::Host::process(), path, token)
-    }
-
-    /// cladefs: places the cell directory at `path` on `host` with forced takings.
-    pub fn place_forced_on(
-        host: &crate::Host,
-        path: impl AsRef<Path>,
-        token: u64,
-    ) -> Result<(), Error> {
-        local_cell::place_host_on(host.local(), path.as_ref(), token, true).map_err(Error::new)
-    }
-
-    /// cladefs: places the cell directory at `path` as [`OpenCell::place`] does, its placement's
-    /// takings of a replicated cell forced (doc-21, TASK-681).
-    #[cfg(not(madsim))]
-    pub fn place_forced(path: impl AsRef<Path>, token: u64) -> Result<(), Error> {
-        Self::place_forced_on(crate::Host::process(), path, token)
     }
 
     /// cladefs: deletes the cell directory at `path` on `host`.

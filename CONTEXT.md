@@ -418,10 +418,6 @@ A commit the daemon has, in order, not yet on disk.
 A commit synced to the host's disk.
 _Avoid_: durable, durable locally
 
-**Replicated**:
-A commit on the disks of f+1 of its configuration's 2f+1 members, the writer's counting as one (doc-21); between Local and Uploaded, and released by Uploaded too.
-_Avoid_: durable, quorum-committed
-
 **Fast WAL**:
 A commit appended via an offset-checked write to an appendable zonal object store (`tenants/<T>/cells/<C>/wal/<epoch>/<segment>`, Amazon S3 Express One Zone today, GCS Rapid Storage via gRPC `BidiWriteObject` planned, doc-29), or acknowledged in the cold regional bucket. Compute nodes stay stateless cache-only with zero local disk `fsync`s; large extents (`>= 256 KiB` by default) upload directly to the cold regional bucket before referencing them metadata-only in the fast WAL.
 _Avoid_: zonal log, express WAL (say Fast WAL)
@@ -430,32 +426,9 @@ _Avoid_: zonal log, express WAL (say Fast WAL)
 A commit whose segments the bucket has acknowledged.
 _Avoid_: durable
 
-**Configuration**:
-A replicated cell's writer and 2f peers at one time, holding a write-once log of the commits the bucket has not acknowledged; the head names the active one.
-_Avoid_: ensemble, replica set (in code, say configuration)
-
-**Member**:
-A host in an incarnation, holding a configuration's log; the writer is one.
-_Avoid_: replica (alone), follower
-
 **Incarnation**:
-A random number a daemon's replica directory is made with, new when its disk is lost: a member is a host in one incarnation, so a host that lost its disk, and its promises with it, is no longer that member. Erlang's node creation; BookKeeper's cookie. Ephemeral cells' references name it too (doc-25).
+A random number an ephemeral host's directory is made with, new when its disk is lost: ephemeral cells' references name it so a host that lost its disk retires its old references (doc-25). Erlang's node creation; BookKeeper's cookie.
 _Avoid_: cookie (Erlang's is a shared secret for authentication), generation
-
-**Fence** (a member):
-What a take does to f+1 members of the active configuration before it reads their logs: raises each one's promise to the take's epoch, so that it refuses the appends of every older one (BookKeeper's word). A head's swap fences a writer as a fencing token fences a placement.
-_Avoid_: seal (a barrier seals extents)
-
-**Promise**:
-The greatest epoch that fenced a member, on its disk.
-
-**Replacement**:
-A writer's move from its configuration to the next, of its epoch, without a take: its members given the unacknowledged tail, a commit Replicated only on quorums of both until the head's swap lands (the joint rule), then on the new one alone. A drop to f = 0 is one.
-_Avoid_: reconfiguration (a take also reconfigures), view change
-
-**Degraded**:
-A replicated cell whose active configuration holds no quorum: fewer than f members take its writer's commits, or it is of f = 0. Its commits wait for the bucket and are uploaded at once.
-_Avoid_: down, failed (the cell serves)
 
 **Crash bound**:
 How much of what was ordered a crash may lose: at most a second's worth.

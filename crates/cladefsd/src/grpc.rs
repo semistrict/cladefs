@@ -491,10 +491,12 @@ mod tests {
     #[test]
     fn methods_are_the_protos_or_unknown() {
         let peer = Calls::of(PEER.name);
-        let fence = peer.method("/cladefs.peer.v1.Peer/Fence");
-        assert_eq!(PEER.methods[fence], "/cladefs.peer.v1.Peer/Fence");
-        assert_eq!(peer.span_name(fence), "cladefs.peer.v1.Peer/Fence");
-        for made_up in ["", "/", "/cladefs.peer.v1.Peer/", "/cladefs.peer.v1.Peer/Fenc", "Fence"] {
+        let get_part = peer.method("/cladefs.peer.v1.Peer/GetPart");
+        assert_eq!(PEER.methods[get_part], "/cladefs.peer.v1.Peer/GetPart");
+        assert_eq!(peer.span_name(get_part), "cladefs.peer.v1.Peer/GetPart");
+        for made_up in
+            ["", "/", "/cladefs.peer.v1.Peer/", "/cladefs.peer.v1.Peer/GetPar", "GetPart"]
+        {
             assert_eq!(peer.method(made_up), PEER.methods.len(), "{made_up:?}");
         }
         assert_eq!(peer.span_name(PEER.methods.len()), "cladefs.peer.v1.Peer");

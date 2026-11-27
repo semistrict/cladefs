@@ -9,8 +9,8 @@
 //! ```sh
 //! # Through the daemon (`CLADEFSD_GRPC`, or `--config PATH` naming it): cells by TENANT/CELL.
 //! cladefsctl create [--tenant TENANT] CAPACITY
-//! cladefsctl take [--force] CAPACITY TENANT/CELL [TOKEN]
-//! cladefsctl place [--force] TENANT/CELL TOKEN
+//! cladefsctl take CAPACITY TENANT/CELL [TOKEN]
+//! cladefsctl place TENANT/CELL TOKEN
 //! cladefsctl sync TENANT/CELL
 //! cladefsctl import [--tenant TENANT] CAPACITY IMAGE [REF]
 //! cladefsctl import-memory [--version] [--tenant TENANT] FILE
@@ -99,19 +99,15 @@
 //! `create` makes an empty cell at DIR, of CAPACITY bytes, of a new cell, a new cell's of the
 //! default tenant's (doc-20), its ID its bucket's to give (TASK-364), and prints the cell. `take`
 //! makes an empty cell at DIR, of CAPACITY bytes, of CELL (`TENANT/CELL`, each in base 32, its
-//! cell's, TASK-364), which its bucket has (`ENOENT` otherwise), its taking of a replicated cell
-//! forced with `--force`, as `place --force` places a cell (TASK-681): once cladefsd opens it, with
+//! cell's, TASK-364), which its bucket has (`ENOENT` otherwise): once cladefsd opens it, with
 //! `CLADEFSD_BUCKET` naming the cell's bucket, it takes what the cell holds there, whose data it
 //! fetches as it is read; placed at TOKEN, if given, as `place` places it. A version, a VM
 //! snapshot's or another, it reads, taking no head, as any number of hosts do at once. `place`
 //! places the cell at DIR at the placement whose fencing token, its boot ID, is TOKEN (TASK-39.7):
 //! its writer takes its cell in object storage with that token from then on, which a later
 //! placement's exceeds, so that a placement cut off takes no cell back from the one after it
-//! (`ESTALE`), and its commits fail once a later one takes it. `--force`d, that placement's takings
-//! of a replicated cell go on with the members of the configuration its head names that answer,
-//! fewer than a take needs, as when f+1 of them are gone for good (doc-21, TASK-681): commits told
-//! replicated that only the others held are lost, and the cell's status says past which commit
-//! (`forced_after`). `sync` returns once every commit of the cell at DIR is durable and in object
+//! (`ESTALE`), and its commits fail once a later one takes it. `sync` returns once every commit of
+//! the cell at DIR is durable and in object
 //! storage, as before a clean stop: through the daemon, a cell a VM has open as of then. `import`
 //! makes a cell at DIR, of CAPACITY bytes, holding an Fxfs filesystem of the container image IMAGE
 //! (TASK-39.5), a base for VMs to boot forks of: IMAGE is an OCI image layout, as `skopeo copy`
@@ -497,8 +493,8 @@ mod cli {
         anyhow::anyhow!(
             "usage (daemon via --config PATH / CLADEFSD_GRPC): \
          cladefsctl create [--tenant TENANT] CAPACITY | \
-         cladefsctl take [--force] CAPACITY TENANT/CELL [TOKEN] | \
-         cladefsctl place [--force] TENANT/CELL TOKEN | \
+         cladefsctl take CAPACITY TENANT/CELL [TOKEN] | \
+         cladefsctl place TENANT/CELL TOKEN | \
          cladefsctl sync TENANT/CELL | \
          cladefsctl import [--tenant TENANT] CAPACITY IMAGE [REF] | \
          cladefsctl import-memory [--version] [--tenant TENANT] FILE | \
@@ -583,12 +579,10 @@ mod cli {
             capacity: u64,
             cell: cladefs::CellId,
             token: Option<u64>,
-            force: bool,
         },
         Place {
             target: cladefs::CellId,
             token: u64,
-            force: bool,
         },
         Sync {
             target: cladefs::CellId,
@@ -980,17 +974,10 @@ mod cli {
             let target = parse_cell;
             let words: Vec<&str> = args.iter().map(String::as_str).collect();
             Ok(match words[..] {
-                ["take", "--force", size, cell, ref rest @ ..] if rest.len() <= 1 => Self::Take {
-                    capacity: capacity(size)?,
-                    cell: parse_cell(cell)?,
-                    token: rest.first().map(|rest| token(rest)).transpose()?,
-                    force: true,
-                },
                 ["take", size, cell, ref rest @ ..] if rest.len() <= 1 => Self::Take {
                     capacity: capacity(size)?,
                     cell: parse_cell(cell)?,
                     token: rest.first().map(|rest| token(rest)).transpose()?,
-                    force: false,
                 },
                 ["create", "--tenant", t, size] => {
                     Self::Create { tenant: tenant(t)?, capacity: capacity(size)? }
@@ -1000,10 +987,7 @@ mod cli {
                     capacity: capacity(size)?,
                 },
                 ["place", cell, given] => {
-                    Self::Place { target: target(cell)?, token: token(given)?, force: false }
-                }
-                ["place", "--force", cell, given] => {
-                    Self::Place { target: target(cell)?, token: token(given)?, force: true }
+                    Self::Place { target: target(cell)?, token: token(given)? }
                 }
                 ["sync", cell] => Self::Sync { target: target(cell)? },
                 ["import", "--tenant", t, size, image, ref rest @ ..] if rest.len() <= 1 => {
@@ -1241,22 +1225,20 @@ mod cli {
                     let made = call!("making a cell", create_cell, request);
                     println!("{}", cladefs::CellId { tenant: made.tenant, id: made.cell });
                 }
-                Self::Take { capacity, cell, token, force, .. } => {
+                Self::Take { capacity, cell, token, .. } => {
                     let request = CreateCellRequest {
                         capacity,
                         tenant: cell.tenant,
                         cell: cell.id,
                         token,
-                        force,
                         kind: CellKind::Fxfs.into(),
                         ..Default::default()
                     };
                     call!(format!("taking cell {cell}"), create_cell, request);
                 }
-                Self::Place { target, token, force } => {
+                Self::Place { target, token } => {
                     let cell = target;
-                    let request =
-                        PlaceCellRequest { tenant: cell.tenant, cell: cell.id, token, force };
+                    let request = PlaceCellRequest { tenant: cell.tenant, cell: cell.id, token };
                     call!(format!("placing cell {cell}"), place_cell, request);
                 }
                 Self::Sync { target } => {
@@ -2027,8 +2009,7 @@ mod cli {
     }
 
     /// cladefs: what `StatCell` says of a cell, `stat`, every field by its name, as `cells` prints it
-    /// (board 8585): its tenant and cell in base 32, its fsync level by name, `forced_after` null
-    /// without one.
+    /// (board 8585): its tenant and cell in base 32, its fsync level by name.
     fn stat_json(stat: &cladefs::cladefsd::control::proto::StatCellResponse) -> serde_json::Value {
         let cladefs::cladefsd::control::proto::StatCellResponse {
             tenant,
@@ -2050,13 +2031,7 @@ mod cli {
             uploaded,
             pending_upload_bytes,
             oldest_pending_ms,
-            replicas,
             fsync: _,
-            configuration,
-            degraded,
-            members_up,
-            active_replicas,
-            forced_after,
             fast_wal,
             fast_wal_bucket,
             fast_wal_degraded,
@@ -2084,13 +2059,7 @@ mod cli {
             "uploaded": uploaded,
             "pending_upload_bytes": pending_upload_bytes,
             "oldest_pending_ms": oldest_pending_ms,
-            "replicas": replicas,
             "fsync": stat.fsync().as_str_name(),
-            "configuration": configuration,
-            "degraded": degraded,
-            "members_up": members_up,
-            "active_replicas": active_replicas,
-            "forced_after": forced_after,
             "fast_wal": fast_wal,
             "fast_wal_bucket": fast_wal_bucket,
             "fast_wal_degraded": fast_wal_degraded,

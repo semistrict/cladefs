@@ -20,7 +20,6 @@ use crate::layout::{
 use crate::making::Making;
 use crate::pool::spawn_or_return;
 use crate::raw::{RawEncryption, RawFile};
-use crate::replicate::{Flushed, Replicator, log_of, own_frame, own_of};
 use crate::seals;
 use crate::segments::{self, Behind, LogInit, SECTOR, Segments, Unframed, Unsectored, footer_last};
 use crate::shared::SharedLock;
@@ -32,8 +31,7 @@ use crate::sync::{AsyncMutex, AsyncMutexGuard, Event, Mutex, rules};
 use crate::timings::{self, Flush, Waits, flush};
 use crate::uploads::Closed;
 use crate::wal::{
-    LOG_HEADER, LogRecord, Queue, Queued, Recovered, ReplicaLog, Runs, SegmentLog, StartFile,
-    log_salt,
+    LOG_HEADER, LogRecord, Queue, Queued, Recovered, Runs, SegmentLog, StartFile, log_salt,
 };
 use crate::written;
 use anyhow::{Context as _, Error, anyhow, bail, ensure};
@@ -264,170 +262,15 @@ pub struct LocalCell<D: Dir> {
     /// cladefs: its keys, which its segments and extents stored on their own are encrypted and
     /// read under (TASK-411.3).
     keys: Arc<Ring>,
-    /// cladefs: of a replicated cell's writer, what sends each flush's commits to the members of
-    /// its configuration (doc-21, TASK-537.3.3), once it started.
-    replicator: std::sync::Mutex<Option<Arc<Replicator>>>,
     /// cladefs: of a fast WAL cell's writer, what stages each flush's commits for appendable zonal
     /// object storage with zero local disk fsyncs (doc-29).
     fast_wal: std::sync::Mutex<Option<Arc<crate::fast_wal::FastWalSink>>>,
     /// cladefs: true when local disk files are cache-only (fast WAL mode, doc-29) so `Framer`
     /// skips local disk `fsync`s/barriers in `segments::make_durable`.
     cache_only: Arc<std::sync::atomic::AtomicBool>,
-    /// cladefs: logs of framed segments retained until bucket acknowledgement while replicating so
-    /// [`CellLogSource`] can reconstruct evicted replica logs from existing cell files (board 6902).
-    kept_logs: std::sync::Mutex<BTreeSet<SegmentId>>,
     /// cladefs: of an ephemeral cell, its local checkpoint as it stands, and what its next
     /// checkpoint covers (doc-25, TASK-698.2): held by a checkpoint, one at a time.
     ephemeral: Option<std::sync::Mutex<ephemeral::Ephemeral>>,
-}
-
-/// cladefs: read-only backing source for a replicator's evicted hot chunks (board 6902): streams
-/// lagging or replacement peers directly from the cell's existing `logs/`, `open-segments/` or
-/// `segments/`, and `extents/` without maintaining a separate `replica-spool/` copy on disk.
-struct CellLogSource<D: Dir> {
-    dir: Arc<D>,
-    cell: CellId,
-    keys: Arc<Ring>,
-}
-
-impl<D: Dir> crate::replicate::LogSource for CellLogSource<D> {
-    fn read(&self, log: u64, offset: u64, len: u64) -> io::Result<Vec<u8>> {
-        let segment = SegmentId { cell: self.cell.id, number: log >> 1 };
-        let log_file = match self.dir.open(&log_path(segment), false) {
-            Ok(file) => file,
-            Err(err) if not_found(&err) => return Ok(Vec::new()),
-            Err(err) => return Err(err),
-        };
-        let bytes = read_file(&log_file, crate::MAX_LOG_BYTES)?;
-        if bytes.len() < crate::wal::LOG_RECORDS as usize {
-            return Ok(Vec::new());
-        }
-        let header = crate::wal::LogHeader::of(&bytes, segment)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "bad log header"))?;
-        let encryption = header.encryption(segment, &self.keys).map_err(io::Error::other)?;
-        let records =
-            LogRecord::decode(&bytes, segment, Some(&encryption)).map_err(io::Error::other)?;
-        let want_end = offset.saturating_add(len);
-        let mut out = Vec::new();
-        let mut pos = 0u64;
-        let push = |out: &mut Vec<u8>, pos: &mut u64, chunk: &[u8]| {
-            let chunk_end = pos.saturating_add(chunk.len() as u64);
-            if chunk_end > offset && *pos < want_end {
-                let from = offset.saturating_sub(*pos) as usize;
-                let to = want_end.min(chunk_end).saturating_sub(*pos) as usize;
-                out.extend_from_slice(&chunk[from..to]);
-            }
-            *pos = chunk_end;
-        };
-        if log & 1 == 1 {
-            for record in records {
-                for &(sequence, _) in &record.contents.own {
-                    if pos >= want_end {
-                        return Ok(out);
-                    }
-                    let path = extent_path(ExtentId { cell: self.cell.id, sequence });
-                    let file = match self.dir.open(&path, true) {
-                        Ok(file) => file,
-                        Err(err) if not_found(&err) => return Ok(out),
-                        Err(err) => return Err(err),
-                    };
-                    let size = file.size()?;
-                    let frame_len = crate::replicate::OWN_FRAME_HEADER.saturating_add(size);
-                    if pos.saturating_add(frame_len) <= offset {
-                        pos = pos.saturating_add(frame_len);
-                        continue;
-                    }
-                    let file_bytes = crate::framed::read_whole(&file)?;
-                    let frame = own_frame(sequence, &file_bytes);
-                    push(&mut out, &mut pos, &frame);
-                }
-            }
-            return Ok(out);
-        }
-        let (header_bytes, mut replica) = ReplicaLog::new(
-            &bytes[..crate::wal::LOG_RECORDS as usize],
-            segment,
-            encryption.clone(),
-        )
-        .map_err(io::Error::other)?;
-        push(&mut out, &mut pos, &header_bytes);
-        let mut raw: Option<D::File> = None;
-        let mut framed: Option<crate::framed::Framed<D::File>> = None;
-        for record in records {
-            if pos >= want_end {
-                break;
-            }
-            let rec_len = crate::wal::held_framed_len(&record.contents);
-            if pos.saturating_add(rec_len) <= offset {
-                pos = pos.saturating_add(rec_len);
-                replica.advance(rec_len);
-                continue;
-            }
-            let held = match record.runs {
-                Runs::Held(runs) => LogRecord { contents: record.contents, runs: Runs::Held(runs) },
-                Runs::Checked(_) | Runs::Synced => {
-                    let mut runs =
-                        Vec::with_capacity(LogRecord::run_bytes(&record.contents) as usize);
-                    for &(_, run_offset, run_len) in record.contents.runs() {
-                        if raw.is_none() && framed.is_none() {
-                            match self.dir.open(&open_segment_path(segment), true) {
-                                Ok(file) => raw = Some(file),
-                                Err(err) if not_found(&err) => {
-                                    let path = segment_path(segment);
-                                    let file = self.dir.open(&path, true)?;
-                                    let keys = self.keys.of(self.cell.id);
-                                    framed = Some(
-                                        crate::framed::Framed::open(
-                                            file,
-                                            &path,
-                                            &keys,
-                                            crate::framed::unpacked_for(self.dir.host()),
-                                        )
-                                        .map_err(io::Error::other)?,
-                                    );
-                                }
-                                Err(err) => return Err(err),
-                            }
-                        }
-                        if let Some(raw_file) = &raw {
-                            let start = runs.len();
-                            runs.resize(start + run_len as usize, 0);
-                            raw_file.read_at(&mut runs[start..], run_offset)?;
-                        } else if let Some(framed_file) = &framed {
-                            let mut buf = framed_file
-                                .parts
-                                .read(run_offset..run_offset + run_len, |range| {
-                                    crate::framed::read_aligned(
-                                        &*framed_file.file,
-                                        range.start,
-                                        (range.end - range.start) as usize,
-                                    )
-                                    .map(|aligned| aligned.as_slice().to_vec())
-                                    .map_err(|err| {
-                                        extent_frame::Error::Corrupt(extent_frame::Corrupt(
-                                            err.to_string(),
-                                        ))
-                                    })
-                                })
-                                .map_err(io::Error::other)?;
-                            encryption.encrypt(run_offset, &mut buf);
-                            runs.extend_from_slice(&buf);
-                        } else {
-                            unreachable!()
-                        }
-                    }
-                    LogRecord {
-                        contents: record.contents,
-                        runs: Runs::Held(crate::wal::Bytes(runs)),
-                    }
-                }
-            };
-            let encoded = replica.append([&held]);
-            debug_assert_eq!(encoded.len() as u64, rec_len);
-            push(&mut out, &mut pos, &encoded);
-        }
-        Ok(out)
-    }
 }
 
 /// A cell directory, taken for this process ([`Dir::take`]): let go of once dropped.
@@ -485,14 +328,6 @@ struct Pending<F> {
 struct Logs<F> {
     by_segment: BTreeMap<SegmentId, SegmentLog<F>>,
     unsynced: Syncs<F>,
-    /// cladefs: of a replicated cell, each segment's replica log and its own log's end, as its
-    /// members are sent them (TASK-537.3.3), from the segment's first records after the replicator
-    /// started.
-    replica: BTreeMap<SegmentId, (ReplicaLog, u64)>,
-    /// cladefs: the segments whose logs held records as the replicator started, which no member
-    /// holds from their headers: commits recorded in them after are never told replicated before
-    /// the bucket holds them ([`Replicator::raise_base`]).
-    unreplicated: BTreeSet<SegmentId>,
 }
 
 /// A write in progress (see [`LocalCell::begin_write`]): its data goes to its file, by
@@ -993,27 +828,6 @@ impl<D: Dir> Recovering<D> {
         !self.wal.segments.is_empty() || !self.wal.closing.is_empty()
     }
 
-    /// cladefs: the cell recovered again once what members of its replicated cell's
-    /// configuration hold, `logs`, is written as its write-ahead log after `last`, the last commit
-    /// its cell's head names ([`crate::replicate::restore`], doc-21, TASK-537.3.4): of a cell
-    /// holding none.
-    pub fn restored(self, logs: &[(u64, Vec<u8>)], last: Option<u64>) -> Result<Self, Error> {
-        ensure!(!self.has_wal(), "restoring members' logs into a cell holding a write-ahead log");
-        crate::replicate::restore(&*self.dir, self.file.cell, logs, last)?;
-        let Recovering { dir, taken, claim, file, .. } = self;
-        let wal = crate::wal::recover(&*dir, file.cell, None)?;
-        Ok(Recovering { dir, taken, claim, file, wal })
-    }
-
-    /// cladefs: ensures the cell opens its next segment past every segment number present in
-    /// `logs`, so a takeover never opens a segment whose log number a seed it spools holds
-    /// (board 5398).
-    pub fn advance_next_past(&mut self, logs: &[(u64, Vec<u8>)]) {
-        if let Some(past) = logs.iter().map(|&(log, _)| (log >> 1).saturating_add(1)).max() {
-            self.wal.next = self.wal.next.max(past);
-        }
-    }
-
     /// The URL of the bucket its cell is kept in, if its description names one.
     pub fn bucket(&self) -> Option<&str> {
         self.file.bucket.as_deref()
@@ -1022,64 +836,6 @@ impl<D: Dir> Recovering<D> {
     /// The fencing token of its placement, if it was placed (TASK-39.7).
     pub fn token(&self) -> Option<u64> {
         self.file.token
-    }
-
-    /// cladefs: whether its placement's takings of its cell are forced (`PlaceCell`'s `force`,
-    /// TASK-681): its placement was placed forced, and is the cell's placement still.
-    pub fn forced(&self) -> bool {
-        self.file.forced.is_some() && self.file.forced == self.file.token
-    }
-
-    /// cladefs: of its forced placement, the epoch of the last commit the bucket held as a
-    /// taking of it fenced fewer members than a take needs, if one did
-    /// ([`Recovering::note_forced_after`] noted it).
-    pub fn forced_after(&self) -> Option<u64> {
-        self.file.forced_after.filter(|_| self.forced())
-    }
-
-    /// cladefs: notes, durably, in its description, that its taking, of the placement `placement`,
-    /// forced, fenced fewer members than a take needs, the bucket holding its commits through epoch
-    /// `kept` (TASK-681): what its status says from now on, until another placement holds it. The
-    /// placement noted too, as a cell made by a forced take is placed after (`CreateCell`).
-    pub fn note_forced_after(&mut self, placement: u64, kept: u64) -> Result<(), Error> {
-        self.file.token = Some(placement);
-        self.file.forced = Some(placement);
-        self.file.forced_after = Some(kept);
-        self.dir.replace(DESCRIPTION, self.file.text().as_bytes())?;
-        self.dir.sync_dir("")?;
-        Ok(())
-    }
-
-    /// cladefs: whether it is its writer's copy of what a replicated cell's configuration made at
-    /// `epoch` holds (TASK-683): its description names `epoch` among its copies
-    /// ([`Recovering::note_writer_copies`]), so that its write-ahead log holds what that writer
-    /// synced and the bucket doesn't, all of it, or, empty, nothing the bucket doesn't, the
-    /// writer's end counting toward Replicated only once synced (doc-21). Not from its log's
-    /// holding records alone: a log dropped and then restored only in part, or a later writer's,
-    /// holds records too. A cell made anew names none.
-    pub fn holds_own_copy(&self, epoch: u64) -> bool {
-        self.file.writer_copies.contains(&epoch)
-    }
-
-    /// cladefs: notes, durably, in its description, that it is its writer's copy of the
-    /// configurations made at `epochs` (TASK-683), keeping those it was of at `named` or after,
-    /// the epoch of the configuration its cell's head names as it is taken, whose copy, and its
-    /// later ones', a take may look for still: before the configurations of the epoch it takes
-    /// its cell as are named or replicate anything.
-    pub fn note_writer_copies(&mut self, epochs: &[u64], named: Option<u64>) -> Result<(), Error> {
-        let mut copies: Vec<u64> = (self.file.writer_copies.iter().copied())
-            .filter(|&epoch| named.is_some_and(|named| epoch >= named))
-            .chain(epochs.iter().copied())
-            .collect();
-        copies.sort_unstable();
-        copies.dedup();
-        if copies == self.file.writer_copies {
-            return Ok(());
-        }
-        self.file.writer_copies = copies;
-        self.dir.replace(DESCRIPTION, self.file.text().as_bytes())?;
-        self.dir.sync_dir("")?;
-        Ok(())
     }
 
     /// cladefs: its cell's kind, if its description names one (TASK-364, doc-20).
@@ -1477,12 +1233,7 @@ impl<D: Dir> LocalCell<D> {
             durability: SharedLock::new("store durability", Mutex::new(Durability::new(epoch))),
             flushing: AsyncMutex::new(
                 "store flush",
-                Logs {
-                    by_segment: BTreeMap::new(),
-                    unsynced: Syncs::default(),
-                    replica: BTreeMap::new(),
-                    unreplicated: BTreeSet::new(),
-                },
+                Logs { by_segment: BTreeMap::new(), unsynced: Syncs::default() },
             ),
             start: SharedLock::new("store log start", Mutex::new(start_file)),
             cache,
@@ -1490,10 +1241,8 @@ impl<D: Dir> LocalCell<D> {
             idle: Arc::new(Event::new()),
             segment_written: Arc::new(std::sync::OnceLock::new()),
             keys,
-            replicator: std::sync::Mutex::new(None),
             fast_wal: std::sync::Mutex::new(None),
             cache_only: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            kept_logs: std::sync::Mutex::new(BTreeSet::new()),
             ephemeral: ephemeral.map(std::sync::Mutex::new),
         }
     }
@@ -3562,10 +3311,6 @@ impl<D: Dir> LocalCell<D> {
             return Ok(());
         };
         self.wait_framed_through(last).await?;
-        // cladefs: the members' logs of it, and before it, go: the bucket holds them (doc-21).
-        if let Some(replicator) = self.replicator() {
-            replicator.acknowledged(last);
-        }
         // cladefs: writes and syncs the WAL start once for the batch, removes raw files and logs,
         // and moves acknowledged segments to the part cache off the bucket runtime's workers
         // (board 10824).
@@ -3620,14 +3365,6 @@ impl<D: Dir> LocalCell<D> {
                 (leaving, raw)
             };
             self.remove_raw(raw);
-            let done_logs: Vec<SegmentId> = {
-                let mut kept = self.kept_logs.lock().unwrap();
-                let rest = kept.split_off(&SegmentId { cell: self.cell.id, number: last + 1 });
-                std::mem::replace(&mut *kept, rest).into_iter().collect()
-            };
-            for segment in done_logs {
-                self.recycle_or_remove_log(segment);
-            }
             leave(&*self.dir, self.cache.as_deref(), leaving);
             Ok::<_, Error>(())
         })?;
@@ -3637,13 +3374,12 @@ impl<D: Dir> LocalCell<D> {
     }
 
     /// cladefs: lets go of the logs `logs` appends to of segments whose logs went (`Segments::raw`,
-    /// a spare's or removed), and their replica logs: kept until the next flush before, which an
-    /// idle cell never makes, the last spare it renamed held open for good (board 14305). Its
-    /// caller holds the flush's lock, which is taken before the cell's state lock.
+    /// a spare's or removed): kept until the next flush before, which an idle cell never makes,
+    /// the last spare it renamed held open for good (board 14305). Its caller holds the flush's
+    /// lock, which is taken before the cell's state lock.
     fn let_logs_go(&self, logs: &mut Logs<D::File>) {
         let state = self.lock();
         logs.by_segment.retain(|segment, _| state.segments.has_log(*segment));
-        logs.replica.retain(|segment, _| state.segments.has_log(*segment));
     }
 
     /// cladefs: makes the commits ordered so far durable, in order, as few syncs as they need
@@ -3737,7 +3473,7 @@ impl<D: Dir> LocalCell<D> {
         let durable = match batch {
             None => self.durability.with(Mutex::lock).local(),
             Some(Due { last, mut commits }) => {
-                let records = match self.make_durable(logs, &mut commits, timed, last) {
+                let records = match self.make_durable(logs, &mut commits, timed) {
                     Ok(records) => records,
                     Err(error) => {
                         let error = error.context("committing the extent store");
@@ -3773,150 +3509,6 @@ impl<D: Dir> LocalCell<D> {
         self.let_logs_go(logs);
         timed.phases.took(flush::RAW, started);
         Ok(())
-    }
-
-    /// cladefs: of a replicated cell's writer, sends the commits of a flush, local now, through
-    /// `last`, `records` the records it appended, to the members of its configuration (doc-21,
-    /// TASK-537.3.3): each segment's records held whole, in its replica log
-    /// ([`ReplicaLog`]), started with its local log's header, and the extents they stored on their
-    /// own, in its own log ([`own_frame`]). Nothing, of a cell not replicating.
-    fn replicate(
-        &self,
-        logs: &mut Logs<D::File>,
-        commits: &[Pending<D::File>],
-        records: &[(SegmentId, LogRecord)],
-        last: u64,
-    ) -> Result<(), Error> {
-        let Some(replicator) = self.replicator.lock().unwrap().clone() else { return Ok(()) };
-        // Held whole, as a replica's records are: the flush's own, if it held them; else read back.
-        let read_back;
-        let held: &[(SegmentId, LogRecord)] =
-            match records.iter().all(|(_, record)| matches!(record.runs, Runs::Held(_))) {
-                true => records,
-                false => {
-                    read_back = self.records(commits, Runs::Held(Default::default()))?;
-                    &read_back
-                }
-            };
-        let mut flushed = Flushed { epoch: last, appends: Vec::new() };
-        let mut at = 0;
-        while at < held.len() {
-            let segment = held[at].0;
-            let run = held[at..].iter().take_while(|(of, _)| *of == segment).count();
-            let records = &held[at..at + run];
-            at += run;
-            if logs.unreplicated.contains(&segment) {
-                replicator.raise_base(last);
-                continue;
-            }
-            let mut started = Vec::new();
-            if !logs.replica.contains_key(&segment) {
-                let log = self.segment_log(logs, segment)?;
-                let header = log.header().context("reading a log's header")?;
-                let (bytes, replica) = ReplicaLog::new(&header, segment, log.encryption().clone())?;
-                started = bytes;
-                logs.replica.insert(segment, (replica, 0));
-            }
-            let (replica, own_end) = logs.replica.get_mut(&segment).unwrap();
-            let offset = replica.end() - if started.is_empty() { 0 } else { started.len() as u64 };
-            started.extend(replica.append(records.iter().map(|(_, record)| record)));
-            flushed.appends.push((log_of(segment.number), offset, Arc::from(started)));
-            let mut own = Vec::new();
-            for (_, record) in records {
-                for &(sequence, _) in &record.contents.own {
-                    let extent = storage_device::ExtentId { cell: self.cell.id, sequence };
-                    let path = extent_path(extent);
-                    let file =
-                        self.dir.open(&path, true).with_context(|| format!("opening {path}"))?;
-                    let bytes = crate::framed::read_whole(&file)
-                        .with_context(|| format!("reading {path}"))?;
-                    own.extend(own_frame(sequence, &bytes));
-                }
-            }
-            if !own.is_empty() {
-                let len = own.len() as u64;
-                flushed.appends.push((own_of(segment.number), *own_end, Arc::from(own)));
-                *own_end += len;
-            }
-        }
-        replicator.flushed(flushed);
-        Ok(())
-    }
-
-    /// cladefs: the log of `segment` a flush appends to: kept while the segment has one, made at
-    /// its first records.
-    fn segment_log<'a>(
-        &self,
-        logs: &'a mut Logs<D::File>,
-        segment: SegmentId,
-    ) -> Result<&'a mut SegmentLog<D::File>, Error> {
-        Ok(match logs.by_segment.entry(segment) {
-            std::collections::btree_map::Entry::Occupied(log) => log.into_mut(),
-            std::collections::btree_map::Entry::Vacant(vacant) => {
-                let log = self.lock().segments.log_file(&*self.dir, segment)?;
-                vacant.insert(SegmentLog::new(log.file, log.salt, log.encryption))
-            }
-        })
-    }
-
-    /// cladefs: sends a flush's `records`, as it appends them, before its syncs, to the members of
-    /// a replicated cell's configuration ([`LocalCell::replicate`]): their round trips overlap its
-    /// own sync (doc-21), and no waiter is told a commit replicated before its own copy is local,
-    /// as every waiter flushes first. A failure to read what it sends breaks the replicator, whose
-    /// commits then wait for the bucket, and fails nothing else: the flush is the cell's own
-    /// (Codex's review of TASK-537.3.3).
-    fn send(
-        &self,
-        logs: &mut Logs<D::File>,
-        commits: &[Pending<D::File>],
-        records: &[(SegmentId, LogRecord)],
-        last: u64,
-    ) {
-        if let Err(err) = self.replicate(logs, commits, records, last)
-            && let Some(replicator) = self.replicator()
-        {
-            replicator.break_with(format!("{err:#}"));
-        }
-    }
-
-    /// cladefs: has `replicator` send the commits of every flush from now on to the members of the
-    /// cell's configuration (doc-21, TASK-537.3.3): as the cell opens after its writer's taking,
-    /// every segment before closed, so that what it sends of each segment starts at its log's
-    /// header. The epoch of the cell's last commit, local, is what none of them holds
-    /// ([`Replicator::base`]).
-    pub async fn replicate_to(&self, replicator: Arc<Replicator>) {
-        let mut logs = self.flushing.lock().await;
-        let started = logs.by_segment.iter().filter(|(_, log)| log.holds_records());
-        logs.unreplicated = started.map(|(&segment, _)| segment).collect();
-        *self.replicator.lock().unwrap() = Some(replicator);
-    }
-
-    /// cladefs: replicates no more, its replicator stopped and any logs retained for lagging peers
-    /// released: its cell's head names a configuration of f = 0, as it asks (TASK-537.3.5).
-    pub async fn unreplicate(&self) {
-        let mut logs = self.flushing.lock().await;
-        logs.replica.clear();
-        logs.unreplicated.clear();
-        if let Some(replicator) = self.replicator.lock().unwrap().take() {
-            replicator.stop();
-        }
-        let kept: Vec<SegmentId> =
-            std::mem::take(&mut *self.kept_logs.lock().unwrap()).into_iter().collect();
-        for segment in kept {
-            self.recycle_or_remove_log(segment);
-        }
-    }
-
-    /// cladefs: a read-only [`crate::replicate::LogSource`] backed by this cell's existing
-    /// `logs/`, `open-segments/` or `segments/`, and `extents/` for lagging/replacement peer
-    /// catch-up when bytes are evicted from the replicator's hot window (board 6902).
-    pub fn replica_source(&self) -> Arc<dyn crate::replicate::LogSource> {
-        Arc::new(CellLogSource { dir: self.dir.clone(), cell: self.cell, keys: self.keys.clone() })
-    }
-
-    /// cladefs: its replicator, if it replicates.
-    pub fn replicator(&self) -> Option<Arc<Replicator>> {
-        self.replicator.lock().unwrap().clone()
     }
 
     /// cladefs: attaches `sink` so commits are staged for the fast WAL with zero local disk
@@ -4043,12 +3635,7 @@ impl<D: Dir> LocalCell<D> {
     /// written in place, its blocks there.
     fn remove_raw(&self, raw: Vec<SegmentId>) {
         self.remove(raw.iter().map(|segment| open_segment_path(*segment)));
-        let replicating = self.replicator().is_some();
         for segment in raw {
-            if replicating {
-                self.kept_logs.lock().unwrap().insert(segment);
-                continue;
-            }
             self.recycle_or_remove_log(segment);
         }
     }
@@ -4135,7 +3722,6 @@ impl<D: Dir> LocalCell<D> {
         logs: &mut Logs<D::File>,
         commits: &mut [Pending<D::File>],
         timed: &mut Flush,
-        last: u64,
     ) -> Result<Vec<(SegmentId, LogRecord)>, Error> {
         let started = Instant::now();
         timed.commits = commits.len();
@@ -4157,7 +3743,6 @@ impl<D: Dir> LocalCell<D> {
             syncs.sync_dirs(&*self.dir)?;
             let synced = timed.phases.took(flush::DIRS, synced);
             let records = self.records(commits, Runs::Synced)?;
-            self.send(logs, commits, &records, last);
             self.append_records(logs, &records)?;
             self.dir.barrier()?;
             timed.phases.took(flush::LOGS, synced);
@@ -4173,7 +3758,6 @@ impl<D: Dir> LocalCell<D> {
                 if hold { Runs::Held(Default::default()) } else { Runs::Checked(Vec::new()) };
             let records =
                 self.records(commits, runs).context("reading back the runs commits sealed")?;
-            self.send(logs, commits, &records, last);
             let recorded = timed.phases.took(flush::DATA, started);
             // What is synced beside the records: the directories alone, if they hold the runs.
             let sync_data = || -> Result<FileSyncs, Error> {
@@ -4191,11 +3775,6 @@ impl<D: Dir> LocalCell<D> {
             timed.phases.took(flush::LOGS, recorded);
             records
         };
-        // cladefs: records and data are durable in local logs/segments now, so any hot chunks sent
-        // before append may be evicted past HOT_BYTES and served via CellLogSource (board 6902).
-        if let Some(replicator) = self.replicator() {
-            replicator.persisted();
-        }
         // cladefs: the logs of segments whose logs went: no commit made in them is still to come.
         // Those of segments closed since stay, with where their records end, which their files'
         // sizes don't say of spares (TASK-301): a flush may yet append commits made in them before
@@ -4205,7 +3784,6 @@ impl<D: Dir> LocalCell<D> {
             state.segments.log_entries_synced(&created_logs);
         }
         logs.by_segment.retain(|segment, _| state.segments.has_log(*segment));
-        logs.replica.retain(|segment, _| state.segments.has_log(*segment));
         Ok(records)
     }
 
@@ -4272,7 +3850,13 @@ impl<D: Dir> LocalCell<D> {
         while at < records.len() {
             let segment = records[at].0;
             let run = records[at..].iter().take_while(|(of, _)| *of == segment).count();
-            let log = self.segment_log(logs, segment)?;
+            let log = match logs.by_segment.entry(segment) {
+                std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    let log = self.lock().segments.log_file(&*self.dir, segment)?;
+                    entry.insert(SegmentLog::new(log.file, log.salt, log.encryption))
+                }
+            };
             // Salted as its log's (`wal::LOG_MAGIC`); cladefs: MACed (TASK-411.5).
             let appended = records[at..at + run].iter().map(|(_, record)| record);
             log.append(appended).context("appending commits' records")?;
@@ -4717,7 +4301,6 @@ mod tests {
         send(cell.wait_idle());
         send(cell.closed(1));
         send(cell.acknowledged(0));
-        send(cell.unreplicate());
         send(cell.checkpoint(true));
         send(cell.close());
     }

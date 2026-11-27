@@ -16,9 +16,6 @@ _DEEP_CFGS = [
     "ephemeral/EphemeralDeep.cfg",
     "fast-wal/FastWalDeep.cfg",
     "part-slabs/PartSlabsWide.cfg",
-    "replication/ReplicationDeep.cfg",
-    "replication/ReplicationDeferReplaces.cfg",
-    "replication/ReplicationFailuresDeep.cfg",
 ]
 
 _SPECS = [
@@ -29,7 +26,6 @@ _SPECS = [
     "fast-wal",
     "journal",
     "part-slabs",
-    "replication",
 ]
 
 [

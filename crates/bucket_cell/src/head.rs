@@ -28,7 +28,7 @@
 use crate::bucket::{self, Bucket, Created, PutMode, Version};
 use crate::cell::Kind;
 use crate::keys::{Dek, InheritedDek, Kek};
-use crate::layout::{self, CellId, Head, Replication, Wish};
+use crate::layout::{self, CellId, Head};
 use crate::lifecycle::{Start, Step};
 use crate::{Error, rules};
 use bytes::Bytes;
@@ -115,10 +115,6 @@ pub struct Taking {
     /// cladefs: the keys given a head with none, as found when they were made
     /// ([`crate::keys::taking`]).
     pub keys: Option<Given>,
-    /// cladefs: what the cell's replication is to be (doc-21, TASK-537.3.1), its configuration
-    /// kept: given whatever the head said, as the VM manager may change a cell's f or its fsync's
-    /// level at any taking. None keeps what the head says.
-    pub replication: Option<Wish>,
     /// cladefs: what the cell's fast WAL commit mode is to be (doc-29): `None` keeps what the head
     /// says, `Some(Some(fsync))` enables fast WAL with `fsync` (`Ordered` or `FastWal`) while
     /// preserving any `active` WAL epoch/bucket so the taker fences and flushes it first
@@ -138,7 +134,6 @@ impl std::fmt::Debug for Taking {
             .field("token", &self.token)
             .field("kind", &self.kind)
             .field("keys", &self.keys)
-            .field("replication", &self.replication)
             .field("fast_wal", &self.fast_wal)
             .field("fast_wal_allowed", &self.fast_wal_allowed.is_some())
             .finish()
@@ -187,6 +182,13 @@ pub async fn take(
         if rules().tokens && head.token > token {
             return Err(Error::Stale);
         }
+        if head.replication.is_some() {
+            return Err(Error::Corrupt(format!(
+                "{cell}: cell head names peer replication (doc-21), which has been removed; \
+                 refusing to open as a Standard cell because acknowledged commits may sit on \
+                 peers alone"
+            )));
+        }
         let kind = match (head.kind, taking.kind) {
             (Some(had), Some(kind)) if had != kind => return Err(Error::OtherKind(had.name())),
             (had, given) => had.or(given),
@@ -196,10 +198,6 @@ pub async fn take(
         // TASK-476); without the rule, as a test shows it needed, none.
         if !rules().versions_carried {
             next.versions.clear();
-        }
-        if let Some(wish) = taking.replication {
-            let configuration = next.replication.take().and_then(|had| had.configuration);
-            next.replication = Some(Replication { wish, configuration });
         }
         if let Some(fast_wal) = taking.fast_wal {
             // cladefs: kept until the taker's activation replaces it (`wal_kept_on_take`).
@@ -214,24 +212,11 @@ pub async fn take(
                 }),
             };
         }
-        if next.fast_wal.is_some() {
-            if next.replication.as_ref().is_some_and(|r| {
-                r.wish.f > 0
-                    || r.wish.fsync == layout::Fsync::Replicated
-                    || r.configuration.as_ref().is_some_and(|c| c.f > 0)
-            }) {
-                return Err(Error::Corrupt(format!(
-                    "{cell}: fast WAL cannot be combined with peer replication or an active peer \
-                     configuration (disable replication with replicas=0 and sync first)"
-                )));
-            }
-            // Clear any drained f=0 peer replication record when switching cleanly to Fast WAL.
-            next.replication = None;
-            if let Some(check) = &taking.fast_wal_allowed
-                && let Some(active) = next.fast_wal.as_ref().and_then(|fw| fw.active.as_ref())
-            {
-                check(&active.bucket).map_err(|msg| Error::Corrupt(format!("{cell}: {msg}")))?;
-            }
+        if next.fast_wal.is_some()
+            && let Some(check) = &taking.fast_wal_allowed
+            && let Some(active) = next.fast_wal.as_ref().and_then(|fw| fw.active.as_ref())
+        {
+            check(&active.bucket).map_err(|msg| Error::Corrupt(format!("{cell}: {msg}")))?;
         }
         if let Some(given) = &taking.keys {
             if !given.fits(&next) {

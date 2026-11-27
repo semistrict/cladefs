@@ -752,30 +752,6 @@ fn render_rest(daemon: &Daemon, mut out: String, mut laps: Laps) -> String {
     }
 
     laps.lap("uploads");
-    // cladefs: each replicated cell's writer's replication (doc-21, Degraded; TASK-537.3.5).
-    let replicated: Vec<_> =
-        (uploads.iter()).filter_map(|(cell, status)| Some((cell, status.replication?))).collect();
-    let series: [(&str, &str, fn(&local_cell::upload::ReplicationStatus) -> String); 2] = [
-        (
-            "replication_degraded",
-            "1 while fewer than f members of a replicated cell's configuration take its writer's \
-             commits, or it dropped to f = 0: its commits wait for the bucket, by its cell.",
-            |replication| u8::from(replication.degraded).to_string(),
-        ),
-        (
-            "replication_members_up",
-            "The members of a replicated cell's configuration, its writer aside, that take its \
-             writer's commits, by its cell.",
-            |replication| replication.members_up.to_string(),
-        ),
-    ];
-    for (name, help, value) in series {
-        let _ = writeln!(out, "# HELP cladefsd_{name} {help}");
-        let _ = writeln!(out, "# TYPE cladefsd_{name} gauge");
-        for (cell, replication) in &replicated {
-            let _ = writeln!(out, "cladefsd_{name}{{cell=\"{cell}\"}} {}", value(replication));
-        }
-    }
 
     // cladefs: 0 until a cell opens the bucket, so that its series are there from the start
     // (board 8561).

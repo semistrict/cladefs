@@ -2866,24 +2866,18 @@ mod tests {
         assert_eq!(forking.map(drop), Ok(()));
     }
 
-    /// cladefs: a taking gives a cell the replication it is asked for, keeping the configuration
-    /// its head names; a taking asked for none keeps what the head says, whoever takes it
-    /// (doc-21, TASK-537.3.1).
+    /// cladefs: a stored head naming peer replication (doc-21, removed) still decodes, and taking
+    /// it is refused with a clear error rather than opening it as a Standard cell (whose
+    /// acknowledged commits may sit on peers alone).
     #[test]
-    fn takings_give_cells_their_replication_and_keep_their_configuration() {
+    fn takings_refuse_heads_naming_replication() {
         use crate::layout::{Configuration, Fsync, Member, Replication, Wish};
         let (_dir, _counted, kms) = kms();
         let bucket = Direct(SimBucket::new());
         block_on(lifecycle::create(&bucket, TEST_CELL, 1)).unwrap();
-        let take = |holder: u64, replication: Option<Wish>| {
-            let taking = head::Taking { holder, replication, ..head::Taking::default() };
-            block_on(taking_(&bucket, &kms, TEST_CELL, taking)).unwrap().0
-        };
+        let taking = head::Taking { holder: 5, ..head::Taking::default() };
+        let (held, _) = block_on(taking_(&bucket, &kms, TEST_CELL, taking)).unwrap();
         let wish = Wish::new(1, Fsync::Replicated).unwrap();
-        let held = take(5, Some(wish));
-        assert_eq!(held.head.replication, Some(Replication { wish, configuration: None }));
-
-        // Its writer installs a configuration: kept by every taking after.
         let configuration = Configuration {
             number: 1,
             epoch: held.head.epoch,
@@ -2893,24 +2887,26 @@ mod tests {
                 .collect(),
         };
         let mut next = held.head.clone();
-        next.replication.as_mut().unwrap().configuration = Some(configuration.clone());
+        next.replication = Some(Replication { wish, configuration: Some(configuration) });
         block_on(head::swap(&bucket, TEST_CELL, &held, next)).unwrap();
-        let held = take(6, None);
-        assert_eq!(
-            held.head.replication,
-            Some(Replication { wish, configuration: Some(configuration.clone()) })
+
+        // Still decodes cleanly.
+        let decoded = block_on(head::get(&bucket, TEST_CELL)).unwrap().unwrap();
+        assert!(decoded.replication.is_some());
+
+        // Refused on take/open.
+        let err = block_on(taking_(
+            &bucket,
+            &kms,
+            TEST_CELL,
+            head::Taking { holder: 6, ..head::Taking::default() },
+        ))
+        .err()
+        .expect("taking replicated head should fail");
+        assert!(
+            matches!(err, Error::Corrupt(ref msg) if msg.contains("peer replication")),
+            "expected Corrupt refusal naming peer replication, got {err:?}"
         );
-        let other = Wish::new(2, Fsync::Ordered).unwrap();
-        let held = take(7, Some(other));
-        assert_eq!(
-            held.head.replication,
-            Some(Replication { wish: other, configuration: Some(configuration) })
-        );
-        assert_eq!(block_on(head::get(&bucket, TEST_CELL)).unwrap().unwrap(), held.head);
-        // No f past the most, and no fsync waiting for copies an f of 0 never makes.
-        assert_eq!(Wish::new(crate::layout::MAX_F + 1, Fsync::Ordered), None);
-        assert_eq!(Wish::new(0, Fsync::Replicated), None);
-        assert!(Wish::new(0, Fsync::Ordered).is_some());
     }
 
     /// Takes `cell` as `holder`, of token 0, by `kms`, the host's, giving it `kind`: its head as

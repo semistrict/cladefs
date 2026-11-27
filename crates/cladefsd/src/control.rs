@@ -503,66 +503,49 @@ pub(crate) fn saying(errno: Errno, message: String) -> Status {
     status
 }
 
-/// cladefs: the replication and/or Fast WAL mode CreateCell's `replicas`, `fast_wal`, and `fsync`
-/// ask for (doc-21, doc-29, TASK-537.3.1): refused (`EINVAL`) if `replicas >= 1` and `fast_wal ==
-/// Some(true)` are combined, if `replicas` is past `bucket_cell::layout::MAX_F`, if `fsync` names
-/// a level its mode cannot satisfy, or if `fsync` is set without `replicas` or `fast_wal`.
-#[allow(clippy::type_complexity)]
+/// cladefs: the Fast WAL mode CreateCell's `fast_wal` and `fsync` ask for (doc-29): refused
+/// (`EINVAL`) if `fsync` names a level its mode cannot satisfy, or if `fsync` is set without
+/// `fast_wal`.
 fn durability_mode(
-    replicas: Option<u32>,
     fast_wal: Option<bool>,
     fsync: i32,
-) -> Result<(Option<bucket_cell::layout::Wish>, Option<Option<bucket_cell::layout::Fsync>>), Status>
-{
-    use bucket_cell::layout::{Fsync, Wish};
+) -> Result<Option<Option<bucket_cell::layout::Fsync>>, Status> {
+    use bucket_cell::layout::Fsync;
     #[allow(deprecated)]
     let (fsync, local) = match FsyncLevel::try_from(fsync) {
         Ok(FsyncLevel::Ordered) => (Fsync::Ordered, false),
         Ok(FsyncLevel::Local) => (Fsync::Ordered, true),
-        Ok(FsyncLevel::Replicated) => (Fsync::Replicated, false),
         Ok(FsyncLevel::FastWal) => (Fsync::FastWal, false),
         Err(_) => return Err(status(Errno::EINVAL)),
     };
     if fast_wal == Some(true) {
-        if replicas.is_some_and(|r| r >= 1) || local || fsync == Fsync::Replicated {
+        if local {
             return Err(status(Errno::EINVAL));
         }
-        let replication = match replicas {
-            Some(0) => Some(Wish::new(0, Fsync::Ordered).ok_or_else(|| status(Errno::EINVAL))?),
-            Some(_) => return Err(status(Errno::EINVAL)),
-            None => None,
-        };
-        return Ok((replication, Some(Some(fsync))));
+        return Ok(Some(Some(fsync)));
     }
     if fsync == Fsync::FastWal {
         return Err(status(Errno::EINVAL));
+    }
+    if local {
+        log::warn!(
+            "cladefsd: FSYNC_LEVEL_LOCAL is deprecated and removed; using FSYNC_LEVEL_ORDERED"
+        );
     }
     let fast_wal = match fast_wal {
         Some(false) => Some(None),
         None => None,
         Some(true) => unreachable!(),
     };
-    let Some(replicas) = replicas else {
-        if !local && fsync == Fsync::Ordered {
-            return Ok((None, fast_wal));
-        }
-        return Err(status(Errno::EINVAL));
-    };
-    let f = u8::try_from(replicas).map_err(|_| status(Errno::EINVAL))?;
-    let wish = Wish::new(f, fsync).ok_or_else(|| status(Errno::EINVAL))?;
-    if local {
-        log::warn!(
-            "cladefsd: FSYNC_LEVEL_LOCAL is deprecated and removed; using FSYNC_LEVEL_ORDERED"
-        );
-    }
-    Ok((Some(wish), fast_wal))
+    Ok(fast_wal)
 }
 
 /// What StatCell's FsyncLevel is of `fsync`.
 fn fsync_level(fsync: bucket_cell::layout::Fsync) -> FsyncLevel {
     match fsync {
-        bucket_cell::layout::Fsync::Ordered => FsyncLevel::Ordered,
-        bucket_cell::layout::Fsync::Replicated => FsyncLevel::Replicated,
+        bucket_cell::layout::Fsync::Ordered | bucket_cell::layout::Fsync::Replicated => {
+            FsyncLevel::Ordered
+        }
         bucket_cell::layout::Fsync::FastWal => FsyncLevel::FastWal,
     }
 }
@@ -577,7 +560,6 @@ fn stat_response(state: cells::CellState) -> StatCellResponse {
         pending_bytes: 0,
         oldest_pending: None,
         stalls: 0,
-        replication: None,
         fast_wal: None,
     });
     let millis = |time: std::time::SystemTime| {
@@ -586,13 +568,8 @@ fn stat_response(state: cells::CellState) -> StatCellResponse {
     let waited = |since: std::time::SystemTime| {
         since.elapsed().map_or(0, |waited| waited.as_millis() as u64)
     };
-    let replicated = upload.taking.and_then(|taking| taking.replication);
     let fast_wal_fsync = upload.taking.and_then(|taking| taking.fast_wal);
-    let fsync = if let Some(fsync) = fast_wal_fsync {
-        fsync_level(fsync)
-    } else {
-        replicated.map_or(FsyncLevel::Ordered, |replicated| fsync_level(replicated.fsync))
-    };
+    let fsync = fast_wal_fsync.map_or(FsyncLevel::Ordered, fsync_level);
     let fast_wal_active = fast_wal_fsync.is_some() || upload.fast_wal.is_some();
     let (fast_wal_bucket, fast_wal_degraded) = match upload.fast_wal {
         Some(fw) => (fw.bucket, fw.degraded),
@@ -618,13 +595,7 @@ fn stat_response(state: cells::CellState) -> StatCellResponse {
         uploaded: upload.uploaded,
         pending_upload_bytes: upload.pending_bytes,
         oldest_pending_ms: upload.oldest_pending.map_or(0, waited),
-        replicas: replicated.map_or(0, |replicated| u32::from(replicated.f)),
         fsync: fsync as i32,
-        configuration: replicated.and_then(|replicated| replicated.configuration).unwrap_or(0),
-        degraded: upload.replication.is_some_and(|replication| replication.degraded),
-        members_up: upload.replication.map_or(0, |replication| replication.members_up),
-        active_replicas: upload.replication.map_or(0, |replication| u32::from(replication.f)),
-        forced_after: replicated.and_then(|replicated| replicated.forced_after),
         fast_wal: fast_wal_active,
         fast_wal_bucket,
         fast_wal_degraded,
@@ -849,9 +820,7 @@ impl Cladefsd for Control {
             tenant,
             cell,
             kind,
-            replicas,
             fsync,
-            force,
             upload_interval_ms,
             fast_wal,
             ephemeral,
@@ -859,10 +828,8 @@ impl Cladefsd for Control {
         if ephemeral
             && (cell != 0
                 || token.is_some()
-                || replicas.is_some()
                 || fast_wal.is_some()
                 || fsync != FsyncLevel::Ordered as i32
-                || force
                 || upload_interval_ms.is_some())
         {
             return Err(status(Errno::EINVAL));
@@ -870,19 +837,7 @@ impl Cladefsd for Control {
         let upload_interval =
             cells::parse_upload_interval_ms(upload_interval_ms).map_err(status)?;
         room_for_a_cell(&self.daemon)?;
-        let (replication, fast_wal) = durability_mode(replicas, fast_wal, fsync)?;
-        // cladefs: a replicated cell's members are the daemon's peers, in their replica
-        // directories (doc-21): without them, refused before anything is made.
-        if replication.is_some_and(|wish| wish.f >= 1)
-            && cladefs_core::bucket::members_on(&self.daemon.host).is_none()
-        {
-            return Err(saying(
-                Errno::ENOTSUP,
-                "a replicated cell needs the daemon's peers and replica directory \
-                 (peers.address, peers.addresses, peers.replicas)"
-                    .to_owned(),
-            ));
-        }
+        let fast_wal = durability_mode(fast_wal, fsync)?;
         // cladefs: a fast WAL cell needs a configured appendable zonal bucket (doc-29):
         // refused before anything is made.
         if fast_wal.is_some_and(|fw| fw.is_some()) {
@@ -936,7 +891,7 @@ impl Cladefsd for Control {
                 final_path.clone(),
                 capacity,
                 target_id,
-                (token, kind, replication, fast_wal, force, upload_interval, false),
+                (token, kind, fast_wal, upload_interval, false),
             )
             .await
             .map_err(status)?;
@@ -949,7 +904,7 @@ impl Cladefsd for Control {
             staging.clone(),
             capacity,
             cladefs_core::CellId { tenant, id: 0 },
-            (token, kind, replication, fast_wal, force, upload_interval, ephemeral),
+            (token, kind, fast_wal, upload_interval, ephemeral),
         )
         .await
         {
@@ -1255,11 +1210,9 @@ impl Cladefsd for Control {
         &self,
         request: Request<PlaceCellRequest>,
     ) -> Result<Response<PlaceCellResponse>, Status> {
-        let PlaceCellRequest { token, force, tenant, cell } = request.into_inner();
+        let PlaceCellRequest { token, tenant, cell } = request.into_inner();
         let (_, cell_dir) = self.resolve_cell(tenant, cell).await?;
-        reply(
-            cells::place(&self.daemon, cell_dir, token, force).await.map(|()| PlaceCellResponse {}),
-        )
+        reply(cells::place(&self.daemon, cell_dir, token).await.map(|()| PlaceCellResponse {}))
     }
 
     async fn make_public(

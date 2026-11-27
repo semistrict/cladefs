@@ -423,14 +423,6 @@ pub(crate) const LOG_MAGIC: &[u8; 8] = &{
 /// What a log of 18 on begins with, its version after it.
 const LOG_KIND: &[u8; 4] = b"FXLG";
 
-/// cladefs: whether `magic`, a segment's log's first eight bytes, say a format this build reads:
-/// `FXLG` and a version of [`FORMAT`]'s.
-pub(crate) fn log_magic_read(magic: &[u8]) -> bool {
-    let Some((kind, version)) = magic.split_first_chunk::<4>() else { return false };
-    let version = version.first_chunk::<4>().map(|version| u32::from_le_bytes(*version));
-    kind == LOG_KIND && version.is_some_and(|version| FORMAT.check(version).is_ok())
-}
-
 /// cladefs: whether `log` begins as a log of a format this build doesn't read does: an older
 /// `FXLOG\0\0*`, or `FXLG` and a version outside [`FORMAT`]'s; its first bytes, if so. Refused
 /// rather than treated as empty and deleted by recovery (board 6902, doc-28).
@@ -578,24 +570,6 @@ impl<F: File> SegmentLog<F> {
         Self { file, end: LOG_RECORDS, salt, encryption }
     }
 
-    /// cladefs: its header, its first [`LOG_RECORDS`] bytes, which its replica starts with
-    /// ([`ReplicaLog`], TASK-537.3.3).
-    pub fn header(&self) -> std::io::Result<Vec<u8>> {
-        let mut header = vec![0; LOG_RECORDS as usize];
-        self.file.read_at(&mut header, 0)?;
-        Ok(header)
-    }
-
-    /// cladefs: what MACs its records, which MACs its replica's too.
-    pub fn encryption(&self) -> &Arc<RawEncryption> {
-        &self.encryption
-    }
-
-    /// cladefs: whether it holds records: one appended to since it was made, or reused.
-    pub fn holds_records(&self) -> bool {
-        self.end > LOG_RECORDS
-    }
-
     /// Appends `records` after those before, encoded, salted ([`crate::layout::encode_salted`]),
     /// and syncs them. cladefs: keeping the log's pages in the host's page cache, as the open
     /// segment's raw file keeps its (TASK-301): a log is appended to and synced again and again,
@@ -631,131 +605,6 @@ pub(crate) fn framed(
     let mac = encryption.mac(at, &payload);
     payload.extend_from_slice(&mac);
     frame_salted(&payload, salt)
-}
-
-/// The byte length of `contents` encoded as a [`Runs::Held`] record by [`framed`], without reading
-/// its runs' bytes.
-pub(crate) fn held_framed_len(contents: &Contents) -> u64 {
-    let empty = LogRecord { contents: contents.clone(), runs: Runs::Held(Bytes(Vec::new())) };
-    let empty_len = bincode::serialized_size(&empty).expect("records serialize");
-    let run_bytes = LogRecord::run_bytes(contents);
-    // The frame's header, the version, the record, its MAC.
-    12 + 4 + empty_len + run_bytes + MAC_LEN as u64
-}
-
-/// Keyless recovery of a member's replica log end (board 6902): 0 if the 4 KiB header is absent or
-/// fails its hash, else `LOG_RECORDS` plus the bytes of intact salted records after it.
-pub(crate) fn replica_valid_end(log: &[u8], segment: SegmentId) -> u64 {
-    if log.len() < LOG_RECORDS as usize {
-        return 0;
-    }
-    let Some(header) = LogHeader::of(log, segment) else {
-        return 0;
-    };
-    let (_, end) =
-        crate::layout::decode_with(&log[LOG_RECORDS as usize..], header.salt, |_, _| Some(()));
-    LOG_RECORDS + end as u64
-}
-
-/// cladefs: the commits the records of `log`, segment `segment`'s replica log as a member holds it,
-/// name, in order: read holding no key, as a taker restores it before it opens (TASK-537.3.3).
-pub(crate) fn replica_commits(log: &[u8], segment: SegmentId) -> Vec<u64> {
-    replica_records(log, segment).into_iter().flatten().collect()
-}
-
-/// cladefs: whether `log`, segment `segment`'s replica log as a member holds it, is authentic under
-/// `keys`, the cell's: its header's MAC, and each of its records' (TASK-680's review). What a
-/// member sends is unauthenticated: a take gives nothing up on its word alone.
-pub(crate) fn replica_authentic(
-    log: &[u8],
-    segment: SegmentId,
-    keys: &bucket_cell::keys::Ring,
-) -> Result<(), Error> {
-    replica_whole(log, segment, keys).map(drop)
-}
-
-/// cladefs: how much of `log`, segment `segment`'s replica log as a member holds it, is whole and
-/// authentic under `keys`, the cell's: its header, MAC checked, then its records as far as each is
-/// framed whole, as a torn tail ends a log. Refused if its header, or a record framed whole, is not
-/// authentic (TASK-684): a member's copy a take may take.
-pub(crate) fn replica_whole(
-    log: &[u8],
-    segment: SegmentId,
-    keys: &bucket_cell::keys::Ring,
-) -> Result<usize, Error> {
-    replica_whole_own(log, segment, keys).map(|(end, _)| end)
-}
-
-/// cladefs: like [`replica_whole`], also returning the `(sequence, len)` pairs of every own extent
-/// named by the authentic records in `0..end`, so takeover can authenticate the segment's odd
-/// own-extent log against them (board 5406).
-pub(crate) fn replica_whole_own(
-    log: &[u8],
-    segment: SegmentId,
-    keys: &bucket_cell::keys::Ring,
-) -> Result<(usize, Vec<(u64, u64)>), Error> {
-    let header = LogHeader::of(log, segment)
-        .ok_or_else(|| anyhow::anyhow!("{segment:?}'s log has no header of its own"))?;
-    let encryption = header.encryption(segment, keys)?;
-    let (records, end) = LogRecord::decode_to(log, segment, Some(&encryption))?;
-    let own = records.into_iter().flat_map(|record| record.contents.own).collect();
-    Ok((end, own))
-}
-
-/// cladefs: the commits each of the records of `log`, as [`replica_commits`] reads it, names:
-/// none, of a record of a commit it does not end (TASK-537.3.6).
-pub(crate) fn replica_records(log: &[u8], segment: SegmentId) -> Vec<Vec<u64>> {
-    let records = LogRecord::decode(log, segment, None).unwrap_or_default();
-    records.into_iter().map(|record| record.contents.commits).collect()
-}
-
-/// cladefs: a segment's log as a replicated cell's members hold it (doc-21, TASK-537.3.3): the
-/// local log's header, then each of its records held whole ([`Runs::Held`], whatever the local
-/// log holds), framed, salted and MACed at its offset in this log as [`SegmentLog::append`] does
-/// in the local one. A log of the segment in its own right: a taker writes it as the segment's log
-/// beside an empty raw file, and recovers the segment from it, its records restoring their runs
-/// ([`LogRecord::restore`]).
-pub(crate) struct ReplicaLog {
-    end: u64,
-    salt: u64,
-    encryption: Arc<RawEncryption>,
-}
-
-impl ReplicaLog {
-    /// The replica of a segment's log whose header is `header`, the local log's first
-    /// [`LOG_RECORDS`] bytes: the bytes it starts with, and the log.
-    pub fn new(
-        header: &[u8],
-        segment: SegmentId,
-        encryption: Arc<RawEncryption>,
-    ) -> Result<(Vec<u8>, Self), Error> {
-        let salt = log_salt(header, segment)
-            .ok_or_else(|| anyhow::anyhow!("{segment:?}'s log has no header of its own"))?;
-        let bytes = header[..LOG_RECORDS as usize].to_vec();
-        Ok((bytes, Self { end: LOG_RECORDS, salt, encryption }))
-    }
-
-    /// The bytes `records`, each held whole, append to the log, at its end before.
-    pub fn append<'a>(&mut self, records: impl IntoIterator<Item = &'a LogRecord>) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        for record in records {
-            debug_assert!(!matches!(record.runs, Runs::Checked(_)), "a replica's records are held");
-            let record = framed(record, self.end, self.salt, &self.encryption);
-            self.end += record.len() as u64;
-            bytes.extend_from_slice(&record);
-        }
-        bytes
-    }
-
-    /// Advances the log offset past a skipped record whose encoded length is `len` bytes.
-    pub fn advance(&mut self, len: u64) {
-        self.end += len;
-    }
-
-    /// Where its next record goes.
-    pub fn end(&self) -> u64 {
-        self.end
-    }
 }
 
 /// A cell's WAL as its directory holds it, recovered ([`recover`]): its start; its segments,

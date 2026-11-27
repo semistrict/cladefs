@@ -761,7 +761,6 @@ fn cells_and_counters_through_the_daemon() {
     assert_eq!(line("cells.0.stat.open"), Some("true"), "{lines}");
     assert_eq!(line("cells.0.stat.capacity"), Some("16777216"), "{lines}");
     assert_eq!(line("cells.0.stat.fsync"), Some("FSYNC_LEVEL_ORDERED"), "{lines}");
-    assert_eq!(line("cells.0.stat.forced_after"), Some("null"), "{lines}");
     assert_eq!(line("cells.1.cell"), None, "{lines}");
     let json: serde_json::Value = serde_json::from_str(&run(&["cells", "--json"])).unwrap();
     assert_eq!(json["cells"][0]["cell"], cell_b32);

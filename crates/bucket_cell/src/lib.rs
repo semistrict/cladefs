@@ -486,13 +486,6 @@ pub struct Rules {
     /// name among them, at a segment the head does not hold.
     /// TLA+: `specs/bucket/mutations/NoVersionsAcked.cfg`.
     pub versions_acked: bool,
-    /// cladefs: a take of a replicated cell opened holding more than the members of
-    /// the configuration it fenced gave, its own write-ahead log's commits, activates its own
-    /// configuration only by the acknowledgement that names them all (`local_cell::upload`'s
-    /// `Shared::replicate`, TASK-678): without it, the head names a configuration none of whose
-    /// members hold commits told replicated, and the next take, elsewhere, loses them.
-    /// TLA+: `specs/replication/mutations/InstallMembersOnly.cfg`.
-    pub installs_own: bool,
     /// cladefs: the collector keeps large own-extents of a live cell's active fast WAL epoch
     /// (`head.fast_wal.active.epoch`) at or past `head.end`, even after a takeover bumped
     /// `head.epoch` past it, until the taker flushes the fast WAL and switches `active` (doc-29).
@@ -584,7 +577,6 @@ impl Rules {
         versions_kept: true,
         versions_carried: true,
         versions_acked: true,
-        installs_own: true,
         protect_wal_epoch: true,
         wal_fences: true,
         wal_offset_checked: true,

@@ -96,8 +96,6 @@ pub(super) async fn boot_daemon(
     crate::storage::open_fast_wal(daemon).await.map_err(anyhow::Error::msg)?;
     // cladefs: where traces of what VMs read go, if anywhere (TASK-702.1).
     crate::reads::configure_on(daemon).map_err(anyhow::Error::msg)?;
-    // cladefs: how long its replicated cells' members are down before they are replaced (doc-21).
-    crate::replace_after().map_err(anyhow::Error::msg)?;
     // cladefs: its disks governed, each but a headroom of it its, or as much as CLADEFSD_DISK_BYTES
     // says (doc-22, TASK-539.9).
     let disks = crate::disk::DiskConfig::from_env().map_err(anyhow::Error::msg)?;
@@ -237,7 +235,6 @@ pub(super) async fn boot_embedded(
     crate::doctor::at_boot(crate::doctor::Needs { governed: config.memory.bytes.is_none() })?;
 
     let enable_part_cache = config.disk.part_cache;
-    let enable_replicas = config.peers.replicas;
     let disk_entries = config.disks.clone();
     let disk_defaults = config.disk.clone();
     let pool = Arc::new(
@@ -247,7 +244,6 @@ pub(super) async fn boot_embedded(
                 &disk_entries,
                 &disk_defaults,
                 enable_part_cache,
-                enable_replicas,
             )
         })
         .map_err(anyhow::Error::msg)?,
@@ -273,7 +269,6 @@ pub(super) async fn boot_embedded(
     crate::storage::open_fast_wal(daemon).await.map_err(anyhow::Error::msg)?;
 
     crate::reads::configure_on(daemon).map_err(anyhow::Error::msg)?;
-    crate::replace_after().map_err(anyhow::Error::msg)?;
     let disk_cfg = crate::disk::DiskConfig::from_toml(&config.disk);
     crate::disk::start_on(daemon, disk_cfg).map_err(anyhow::Error::msg)?;
     crate::migration::idle().map_err(anyhow::Error::msg)?;

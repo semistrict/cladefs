@@ -197,7 +197,7 @@ pub struct DiskEntryConfig {
     /// Stable operator-facing identifier for this disk (defaults to `disk-<index>`).
     #[serde(default)]
     pub id: Option<String>,
-    /// Root directory owned by `cladefsd` on this filesystem (`cells/`, `part-cache/`, `replicas/`
+    /// Root directory owned by `cladefsd` on this filesystem (`cells/` and `part-cache/`
     /// are managed automatically inside it).
     pub path: PathBuf,
     /// Per-disk hard byte cap (`cells + reserve + pledged + cache`). Unset = uncapped (governed
@@ -213,16 +213,12 @@ pub struct DiskEntryConfig {
     /// Per-disk `PageCache` dirty-page hard ceiling override.
     #[serde(default)]
     pub dirty_budget: Option<ByteSize>,
-    /// Whether this disk participates in replica log storage when `[peers].replicas = true`
-    /// (default `true`).
-    #[serde(default = "default_true")]
-    pub replicas: bool,
     /// Placement/write policy for this disk (`"read_write"`, `"drain"`, or `"read_only"`).
     #[serde(default)]
     pub placement: PlacementSpec,
 }
 
-/// `[peers]` section: peer-to-peer part sharing, replication, and live migration.
+/// `[peers]` section: peer-to-peer part sharing and live migration.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PeersConfig {
@@ -235,12 +231,6 @@ pub struct PeersConfig {
     /// Directory containing mTLS credentials (`ca.crt`, `peer.crt`, `peer.key`).
     #[serde(default)]
     pub tls_dir: Option<PathBuf>,
-    /// Enable replica member serving across `[[disks]]` with `replicas = true`.
-    #[serde(default)]
-    pub replicas: bool,
-    /// Seconds a down replica member waits before being replaced (default 30).
-    #[serde(default)]
-    pub replace_after_secs: Option<u64>,
     /// Seconds an idle incoming migration is kept before timing out.
     #[serde(default)]
     pub migration_idle_secs: Option<u64>,
@@ -674,9 +664,6 @@ impl Config {
         if let Some(delegated) = self.memory.vm_cgroup_delegated {
             set("CLADEFSD_VM_CGROUP_DELEGATED", if delegated { "1" } else { "0" });
         }
-        if let Some(replace) = self.peers.replace_after_secs {
-            set("CLADEFSD_REPLACE_AFTER", &replace.to_string());
-        }
         if let Some(idle) = self.peers.migration_idle_secs {
             set("CLADEFSD_MIGRATION_IDLE", &idle.to_string());
         }
@@ -780,7 +767,6 @@ placement = "drain"
 address = "10.0.0.1:9185"
 peers = ["10.0.0.2:9185"]
 tls_dir = "/etc/cladefs/peer-tls"
-replicas = true
 
 [mount]
 mountpoint = "/mnt/cladefs"

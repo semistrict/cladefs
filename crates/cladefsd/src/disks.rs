@@ -6,7 +6,7 @@
 //! per-disk governance (hotbed question 547).
 //!
 //! Callers never pick host directories: `cladefsd` owns every configured disk root and lays out
-//! `cells/<TENANT>/<CELL>`, `part-cache/`, and `replicas/` inside each root automatically.
+//! `cells/<TENANT>/<CELL>` and `part-cache/` inside each root automatically.
 
 use bucket_cell::host_disk::{DiskHeadroom, DiskPlacement, DiskPolicy, HostDisk};
 use cladefs_core::config::{DiskDefaultsConfig, DiskEntryConfig};
@@ -19,8 +19,6 @@ use std::sync::{Arc, Mutex};
 pub(crate) const CELLS_SUBDIR: &str = "cells";
 /// Subdirectory inside each managed disk root holding that disk's part-cache shard.
 pub(crate) const PART_CACHE_SUBDIR: &str = "part-cache";
-/// Subdirectory inside each managed disk root holding that disk's replica shard.
-pub(crate) const REPLICAS_SUBDIR: &str = "replicas";
 
 /// One managed local disk inside [`DiskPool`].
 #[derive(Debug)]
@@ -31,10 +29,6 @@ pub(crate) struct ManagedDisk {
     pub cells_dir: PathBuf,
     /// `<root>/part-cache` shard directory on the same filesystem (`st_dev`) as `cells_dir`.
     pub part_cache_dir: PathBuf,
-    /// `<root>/replicas` shard directory when replica serving is enabled on this disk.
-    pub replicas_dir: PathBuf,
-    /// Whether this disk participates in replica log storage.
-    pub replicas_enabled: bool,
     /// Per-filesystem [`HostDisk`] carrying live accounting, allowance, caps, and health.
     pub host_disk: Arc<HostDisk>,
     /// Per-entry policy copy so virtual multi-disk setups sharing one test filesystem still track
@@ -154,14 +148,13 @@ pub(crate) struct DiskPool {
 }
 
 impl DiskPool {
-    /// Opens and validates all configured `[[disks]]`, creating `cells/`, `part-cache/`, and
-    /// (when requested) `replicas/` inside each root and applying each disk's [`DiskPolicy`].
+    /// Opens and validates all configured `[[disks]]`, creating `cells/` and (when requested)
+    /// `part-cache/` inside each root and applying each disk's [`DiskPolicy`].
     pub(crate) fn open(
         host: &bucket_cell::Host,
         entries: &[DiskEntryConfig],
         defaults: &DiskDefaultsConfig,
         enable_part_cache: bool,
-        enable_replicas: bool,
     ) -> Result<Self, String> {
         if entries.is_empty() {
             return Err("DiskPool requires at least one configured disk".to_owned());
@@ -187,17 +180,11 @@ impl DiskPool {
                 own(&root).map_err(|err| format!("disk {id} ({}): {err}", root.display()))?;
             let cells_dir = root.join(CELLS_SUBDIR);
             let part_cache_dir = root.join(PART_CACHE_SUBDIR);
-            let replicas_dir = root.join(REPLICAS_SUBDIR);
             host_fs::create_dir_all(&cells_dir)
                 .map_err(|err| format!("disk {id} ({}): {err}", cells_dir.display()))?;
             if enable_part_cache {
                 host_fs::create_dir_all(&part_cache_dir)
                     .map_err(|err| format!("disk {id} ({}): {err}", part_cache_dir.display()))?;
-            }
-            let replicas_enabled = enable_replicas && entry.replicas;
-            if replicas_enabled {
-                host_fs::create_dir_all(&replicas_dir)
-                    .map_err(|err| format!("disk {id} ({}): {err}", replicas_dir.display()))?;
             }
             let host_disk = HostDisk::of_on(host, &cells_dir)
                 .map_err(|err| format!("disk {id} ({}): {err}", cells_dir.display()))?;
@@ -212,30 +199,11 @@ impl DiskPool {
                 }
             }
             let policy = entry.to_policy(i, defaults);
-            raw_disks.push((
-                id,
-                cells_dir,
-                part_cache_dir,
-                replicas_dir,
-                replicas_enabled,
-                host_disk,
-                policy,
-                owned,
-            ));
+            raw_disks.push((id, cells_dir, part_cache_dir, host_disk, policy, owned));
         }
         let mut disks = Vec::with_capacity(raw_disks.len());
         let mut shared_devs: HashSet<u64> = HashSet::new();
-        for (
-            id,
-            cells_dir,
-            part_cache_dir,
-            replicas_dir,
-            replicas_enabled,
-            host_disk,
-            policy,
-            owned,
-        ) in raw_disks
-        {
+        for (id, cells_dir, part_cache_dir, host_disk, policy, owned) in raw_disks {
             let shared_fs =
                 host_disk.dev().is_some_and(|dev| dev_counts.get(&dev).copied().unwrap_or(0) > 1);
             if !shared_fs {
@@ -247,8 +215,6 @@ impl DiskPool {
                 id,
                 cells_dir,
                 part_cache_dir,
-                replicas_dir,
-                replicas_enabled,
                 host_disk,
                 policy: Mutex::new(policy),
                 shared_fs,
@@ -276,11 +242,10 @@ impl DiskPool {
                 headroom: None,
                 cache_cap: None,
                 dirty_budget: None,
-                replicas: true,
                 placement: cladefs_core::config::PlacementSpec::ReadWrite,
             })
             .collect();
-        Self::open(host, &entries, &DiskDefaultsConfig::default(), false, false)
+        Self::open(host, &entries, &DiskDefaultsConfig::default(), false)
     }
 
     /// Scans `<disk>/cells/<TENANT>/<CELL>` on boot to warm the in-memory cell index.
@@ -334,11 +299,6 @@ impl DiskPool {
     /// All `<disk>/part-cache` directories.
     pub(crate) fn part_cache_dirs(&self) -> Vec<PathBuf> {
         self.disks.iter().map(|d| d.part_cache_dir.clone()).collect()
-    }
-
-    /// All `<disk>/replicas` directories for disks with replication enabled.
-    pub(crate) fn replica_dirs(&self) -> Vec<PathBuf> {
-        self.disks.iter().filter(|d| d.replicas_enabled).map(|d| d.replicas_dir.clone()).collect()
     }
 
     /// Picks the best managed disk for placing a new cell:
@@ -656,7 +616,6 @@ mod tests {
             headroom: None,
             cache_cap: None,
             dirty_budget: None,
-            replicas: true,
             placement: PlacementSpec::ReadWrite,
         }
     }
@@ -701,7 +660,6 @@ mod tests {
             ],
             &defaults,
             false,
-            false,
         )
         .unwrap();
         assert_eq!(pool_ab.disks()[0].host_disk.cap(), Some(cap_40g));
@@ -714,7 +672,6 @@ mod tests {
                 entry("a", dir.path().join("a2"), Some(cap_40g)),
             ],
             &defaults,
-            false,
             false,
         )
         .unwrap();

@@ -206,9 +206,9 @@ func (DiskHealthMode) EnumDescriptor() ([]byte, []int) {
 	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{1}
 }
 
-// What a guest's fsync, fdatasync, msync and O_SYNC wait for in a cell (doc-12, doc-21, doc-29).
-// Its sync, syncfs and unmount wait for its commits replicated in a replicated cell, durable in
-// the fast WAL in a fast-WAL cell, and uploaded in any other.
+// What a guest's fsync, fdatasync, msync and O_SYNC wait for in a cell (doc-12, doc-29).
+// Its sync, syncfs and unmount wait for its commits durable in the fast WAL in a fast-WAL cell,
+// and uploaded in any other.
 type FsyncLevel int32
 
 const (
@@ -218,8 +218,6 @@ const (
 	//
 	// Deprecated: Marked as deprecated in cladefs/cladefsd/v1/cladefsd.proto.
 	FsyncLevel_FSYNC_LEVEL_LOCAL FsyncLevel = 1
-	// On f+1 hosts' disks, or uploaded: survives the writer's host.
-	FsyncLevel_FSYNC_LEVEL_REPLICATED FsyncLevel = 2
 	// Appended to the cell's fast WAL in appendable zonal object storage, or uploaded to the cold
 	// regional bucket: survives losing the writer's host with zero local disk state (doc-29).
 	FsyncLevel_FSYNC_LEVEL_FAST_WAL FsyncLevel = 3
@@ -230,14 +228,12 @@ var (
 	FsyncLevel_name = map[int32]string{
 		0: "FSYNC_LEVEL_ORDERED",
 		1: "FSYNC_LEVEL_LOCAL",
-		2: "FSYNC_LEVEL_REPLICATED",
 		3: "FSYNC_LEVEL_FAST_WAL",
 	}
 	FsyncLevel_value = map[string]int32{
-		"FSYNC_LEVEL_ORDERED":    0,
-		"FSYNC_LEVEL_LOCAL":      1,
-		"FSYNC_LEVEL_REPLICATED": 2,
-		"FSYNC_LEVEL_FAST_WAL":   3,
+		"FSYNC_LEVEL_ORDERED":  0,
+		"FSYNC_LEVEL_LOCAL":    1,
+		"FSYNC_LEVEL_FAST_WAL": 3,
 	}
 )
 
@@ -1471,34 +1467,21 @@ type CreateCellRequest struct {
 	Cell uint64 `protobuf:"varint,6,opt,name=cell,proto3" json:"cell,omitempty"`
 	// The cell's kind, which says what opens it.
 	Kind CellKind `protobuf:"varint,7,opt,name=kind,proto3,enum=cladefs.cladefsd.v1.CellKind" json:"kind,omitempty"`
-	// Whether the cell is replicated (doc-21, TASK-537): its f, its commits on f+1 of 2f+1 hosts'
-	// disks before the bucket, the hosts the daemon's peers (SetPeers); 0 for a cell durable off its
-	// host once uploaded alone. At most 3. Unset keeps what the cell's head says, of a cell taken,
-	// and makes a new one not replicated; set, it is the cell's from this taking on, on any host.
-	// Of 1 or more, refused by a daemon with no peers or no replica directory (ENOTSUP).
-	Replicas *uint32 `protobuf:"varint,9,opt,name=replicas,proto3,oneof" json:"replicas,omitempty"`
-	// What its guest's fsync waits for (doc-12, doc-21), given with `replicas` alone (INVALID_ARGUMENT
-	// otherwise): FSYNC_LEVEL_REPLICATED needs replicas of 1 or more.
+	// What its guest's fsync waits for (doc-12, doc-29): FSYNC_LEVEL_FAST_WAL needs `fast_wal = true`.
 	Fsync FsyncLevel `protobuf:"varint,10,opt,name=fsync,proto3,enum=cladefs.cladefsd.v1.FsyncLevel" json:"fsync,omitempty"`
-	// Whether its taking of a replicated cell is forced (doc-21, TASK-681), as PlaceCell's `force`
-	// places a cell: it goes on with the members of the configuration the cell's head names that
-	// answer, fewer than a take needs, as when f+1 of them are gone for good; commits told replicated
-	// that only the others held are lost, and StatCell's forced_after says past which commit. With
-	// `token`, the placement it is placed at is forced from then on.
-	Force bool `protobuf:"varint,11,opt,name=force,proto3" json:"force,omitempty"`
 	// Optional per-cell uploader interval in milliseconds (hotbed question 534). Unset keeps the
 	// daemon default; 0 or values past 24 hours are refused (INVALID_ARGUMENT).
 	UploadIntervalMs *uint64 `protobuf:"varint,12,opt,name=upload_interval_ms,json=uploadIntervalMs,proto3,oneof" json:"upload_interval_ms,omitempty"`
 	// Whether the cell uses Fast WAL commits backed by appendable zonal object storage (doc-29):
 	// compute nodes stay stateless cache-only with zero local disk fsyncs. Unset keeps what the
 	// cell's head says (and makes a new cell without Fast WAL); true enables Fast WAL (refused with
-	// ENOTSUP if CLADEFSD_FAST_WAL_BUCKET is unset, and EINVAL if combined with replicas >= 1);
-	// false disables Fast WAL, flushing any active WAL on take.
+	// ENOTSUP if CLADEFSD_FAST_WAL_BUCKET is unset); false disables Fast WAL, flushing any active
+	// WAL on take.
 	FastWal *bool `protobuf:"varint,13,opt,name=fast_wal,json=fastWal,proto3,oneof" json:"fast_wal,omitempty"`
 	// Whether to create a standalone (parentless) host-local ephemeral cell (doc-25): kept on host
 	// SSD alone, encrypted under the tenant's KMS key, never uploaded to the bucket, with no
-	// versions and no bucket reference. Must be a new cell (`cell == 0`) with `token`, `replicas`,
-	// `force`, `upload_interval_ms`, and `fast_wal` unset and `fsync == FSYNC_LEVEL_ORDERED`
+	// versions and no bucket reference. Must be a new cell (`cell == 0`) with `token`,
+	// `upload_interval_ms`, and `fast_wal` unset and `fsync == FSYNC_LEVEL_ORDERED`
 	// (INVALID_ARGUMENT otherwise).
 	Ephemeral     bool `protobuf:"varint,14,opt,name=ephemeral,proto3" json:"ephemeral,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -1570,25 +1553,11 @@ func (x *CreateCellRequest) GetKind() CellKind {
 	return CellKind_CELL_KIND_FXFS
 }
 
-func (x *CreateCellRequest) GetReplicas() uint32 {
-	if x != nil && x.Replicas != nil {
-		return *x.Replicas
-	}
-	return 0
-}
-
 func (x *CreateCellRequest) GetFsync() FsyncLevel {
 	if x != nil {
 		return x.Fsync
 	}
 	return FsyncLevel_FSYNC_LEVEL_ORDERED
-}
-
-func (x *CreateCellRequest) GetForce() bool {
-	if x != nil {
-		return x.Force
-	}
-	return false
 }
 
 func (x *CreateCellRequest) GetUploadIntervalMs() uint64 {
@@ -2378,8 +2347,6 @@ type PlaceCellRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The placement's fencing token, its boot ID: greater than every earlier placement's.
 	Token uint64 `protobuf:"varint,2,opt,name=token,proto3" json:"token,omitempty"`
-	// Whether this placement's takings of a replicated cell are forced (doc-21, TASK-681).
-	Force bool `protobuf:"varint,3,opt,name=force,proto3" json:"force,omitempty"`
 	// The cell's tenant.
 	Tenant uint64 `protobuf:"varint,4,opt,name=tenant,proto3" json:"tenant,omitempty"`
 	// The cell's ID.
@@ -2423,13 +2390,6 @@ func (x *PlaceCellRequest) GetToken() uint64 {
 		return x.Token
 	}
 	return 0
-}
-
-func (x *PlaceCellRequest) GetForce() bool {
-	if x != nil {
-		return x.Force
-	}
-	return false
 }
 
 func (x *PlaceCellRequest) GetTenant() uint64 {
@@ -3376,24 +3336,8 @@ type StatCellResponse struct {
 	OwnExtents uint64 `protobuf:"varint,19,opt,name=own_extents,json=ownExtents,proto3" json:"own_extents,omitempty"`
 	// How many it holds that it inherited: those whose bytes are `inherited`.
 	InheritedExtents uint64 `protobuf:"varint,20,opt,name=inherited_extents,json=inheritedExtents,proto3" json:"inherited_extents,omitempty"`
-	// Whether its cell is replicated, as its writer's taking found its head (doc-21): its f, 0 if
-	// not; with `uploading` alone.
-	Replicas uint32 `protobuf:"varint,22,opt,name=replicas,proto3" json:"replicas,omitempty"`
 	// What its guest's fsync waits for, as its writer's taking found it.
 	Fsync FsyncLevel `protobuf:"varint,23,opt,name=fsync,proto3,enum=cladefs.cladefsd.v1.FsyncLevel" json:"fsync,omitempty"`
-	// The number of its active configuration, 0 if it has none yet.
-	Configuration uint64 `protobuf:"varint,24,opt,name=configuration,proto3" json:"configuration,omitempty"`
-	// Whether it is degraded: fewer than f members of its active configuration take its writer's
-	// commits, or that configuration is of f = 0, its commits waiting for the bucket (doc-21).
-	Degraded bool `protobuf:"varint,25,opt,name=degraded,proto3" json:"degraded,omitempty"`
-	// How many members of its active configuration, its writer aside, take its writer's commits.
-	MembersUp uint32 `protobuf:"varint,26,opt,name=members_up,json=membersUp,proto3" json:"members_up,omitempty"`
-	// The f of its active configuration: less than replicas once it dropped to f = 0, degraded.
-	ActiveReplicas uint32 `protobuf:"varint,27,opt,name=active_replicas,json=activeReplicas,proto3" json:"active_replicas,omitempty"`
-	// If its writer's taking was forced (PlaceCell's or CreateCell's force) and fenced fewer members
-	// than a take needs: the commit number of the last commit the bucket held, past which commits told
-	// replicated may be lost (TASK-681); 0 if the bucket held none. Unset if not.
-	ForcedAfter *uint64 `protobuf:"varint,28,opt,name=forced_after,json=forcedAfter,proto3,oneof" json:"forced_after,omitempty"`
 	// Whether the cell uses Fast WAL commits backed by appendable zonal object storage (doc-29).
 	FastWal bool `protobuf:"varint,29,opt,name=fast_wal,json=fastWal,proto3" json:"fast_wal,omitempty"`
 	// URL of the appendable zonal bucket holding the cell's active fast WAL, empty if not using
@@ -3578,53 +3522,11 @@ func (x *StatCellResponse) GetInheritedExtents() uint64 {
 	return 0
 }
 
-func (x *StatCellResponse) GetReplicas() uint32 {
-	if x != nil {
-		return x.Replicas
-	}
-	return 0
-}
-
 func (x *StatCellResponse) GetFsync() FsyncLevel {
 	if x != nil {
 		return x.Fsync
 	}
 	return FsyncLevel_FSYNC_LEVEL_ORDERED
-}
-
-func (x *StatCellResponse) GetConfiguration() uint64 {
-	if x != nil {
-		return x.Configuration
-	}
-	return 0
-}
-
-func (x *StatCellResponse) GetDegraded() bool {
-	if x != nil {
-		return x.Degraded
-	}
-	return false
-}
-
-func (x *StatCellResponse) GetMembersUp() uint32 {
-	if x != nil {
-		return x.MembersUp
-	}
-	return 0
-}
-
-func (x *StatCellResponse) GetActiveReplicas() uint32 {
-	if x != nil {
-		return x.ActiveReplicas
-	}
-	return 0
-}
-
-func (x *StatCellResponse) GetForcedAfter() uint64 {
-	if x != nil && x.ForcedAfter != nil {
-		return *x.ForcedAfter
-	}
-	return 0
 }
 
 func (x *StatCellResponse) GetFastWal() bool {
@@ -6164,24 +6066,22 @@ const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\n" +
 	"references\x18\x02 \x01(\x04R\n" +
 	"references\x12&\n" +
-	"\x0edecommissioned\x18\x03 \x01(\bR\x0edecommissioned\"\xd5\x03\n" +
+	"\x0edecommissioned\x18\x03 \x01(\bR\x0edecommissioned\"\xae\x03\n" +
 	"\x11CreateCellRequest\x12\x1a\n" +
 	"\bcapacity\x18\x02 \x01(\x04R\bcapacity\x12\x19\n" +
 	"\x05token\x18\x04 \x01(\x04H\x00R\x05token\x88\x01\x01\x12\x16\n" +
 	"\x06tenant\x18\x05 \x01(\x04R\x06tenant\x12\x12\n" +
 	"\x04cell\x18\x06 \x01(\x04R\x04cell\x121\n" +
-	"\x04kind\x18\a \x01(\x0e2\x1d.cladefs.cladefsd.v1.CellKindR\x04kind\x12\x1f\n" +
-	"\breplicas\x18\t \x01(\rH\x01R\breplicas\x88\x01\x01\x125\n" +
+	"\x04kind\x18\a \x01(\x0e2\x1d.cladefs.cladefsd.v1.CellKindR\x04kind\x125\n" +
 	"\x05fsync\x18\n" +
-	" \x01(\x0e2\x1f.cladefs.cladefsd.v1.FsyncLevelR\x05fsync\x12\x14\n" +
-	"\x05force\x18\v \x01(\bR\x05force\x121\n" +
-	"\x12upload_interval_ms\x18\f \x01(\x04H\x02R\x10uploadIntervalMs\x88\x01\x01\x12\x1e\n" +
-	"\bfast_wal\x18\r \x01(\bH\x03R\afastWal\x88\x01\x01\x12\x1c\n" +
+	" \x01(\x0e2\x1f.cladefs.cladefsd.v1.FsyncLevelR\x05fsync\x121\n" +
+	"\x12upload_interval_ms\x18\f \x01(\x04H\x01R\x10uploadIntervalMs\x88\x01\x01\x12\x1e\n" +
+	"\bfast_wal\x18\r \x01(\bH\x02R\afastWal\x88\x01\x01\x12\x1c\n" +
 	"\tephemeral\x18\x0e \x01(\bR\tephemeralB\b\n" +
-	"\x06_tokenB\v\n" +
-	"\t_replicasB\x15\n" +
+	"\x06_tokenB\x15\n" +
 	"\x13_upload_interval_msB\v\n" +
-	"\t_fast_walJ\x04\b\x01\x10\x02J\x04\b\x03\x10\x04J\x04\b\b\x10\t\"F\n" +
+	"\t_fast_walJ\x04\b\x01\x10\x02J\x04\b\x03\x10\x04J\x04\b\b\x10\tJ\x04\b\t\x10\n" +
+	"J\x04\b\v\x10\fR\breplicasR\x05force\"F\n" +
 	"\x12CreateCellResponse\x12\x16\n" +
 	"\x06tenant\x18\x02 \x01(\x04R\x06tenant\x12\x12\n" +
 	"\x04cell\x18\x03 \x01(\x04R\x04cellJ\x04\b\x01\x10\x02\"\x82\x01\n" +
@@ -6229,12 +6129,11 @@ const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\bcapacity\x18\x02 \x01(\x04R\bcapacity\x12\x16\n" +
 	"\x06tenant\x18\x03 \x01(\x04R\x06tenant\x12\x12\n" +
 	"\x04cell\x18\x04 \x01(\x04R\x04cellJ\x04\b\x01\x10\x02\"\x14\n" +
-	"\x12ResizeCellResponse\"p\n" +
+	"\x12ResizeCellResponse\"g\n" +
 	"\x10PlaceCellRequest\x12\x14\n" +
-	"\x05token\x18\x02 \x01(\x04R\x05token\x12\x14\n" +
-	"\x05force\x18\x03 \x01(\bR\x05force\x12\x16\n" +
+	"\x05token\x18\x02 \x01(\x04R\x05token\x12\x16\n" +
 	"\x06tenant\x18\x04 \x01(\x04R\x06tenant\x12\x12\n" +
-	"\x04cell\x18\x05 \x01(\x04R\x04cellJ\x04\b\x01\x10\x02\"\x13\n" +
+	"\x04cell\x18\x05 \x01(\x04R\x04cellJ\x04\b\x01\x10\x02J\x04\b\x03\x10\x04R\x05force\"\x13\n" +
 	"\x11PlaceCellResponse\"i\n" +
 	"\x12MakeVersionRequest\x12\x1b\n" +
 	"\tkeep_last\x18\x02 \x01(\rR\bkeepLast\x12\x16\n" +
@@ -6281,7 +6180,7 @@ const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\x10SyncCellResponse\"C\n" +
 	"\x0fStatCellRequest\x12\x16\n" +
 	"\x06tenant\x18\x02 \x01(\x04R\x06tenant\x12\x12\n" +
-	"\x04cell\x18\x03 \x01(\x04R\x04cellJ\x04\b\x01\x10\x02\"\xaa\b\n" +
+	"\x04cell\x18\x03 \x01(\x04R\x04cellJ\x04\b\x01\x10\x02\"\xbd\a\n" +
 	"\x10StatCellResponse\x12\x1a\n" +
 	"\bcapacity\x18\x02 \x01(\x04R\bcapacity\x12\x12\n" +
 	"\x04used\x18\x03 \x01(\x04R\x04used\x12\x1c\n" +
@@ -6305,21 +6204,14 @@ const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\x04cell\x18\x12 \x01(\x04R\x04cell\x12\x1f\n" +
 	"\vown_extents\x18\x13 \x01(\x04R\n" +
 	"ownExtents\x12+\n" +
-	"\x11inherited_extents\x18\x14 \x01(\x04R\x10inheritedExtents\x12\x1a\n" +
-	"\breplicas\x18\x16 \x01(\rR\breplicas\x125\n" +
-	"\x05fsync\x18\x17 \x01(\x0e2\x1f.cladefs.cladefsd.v1.FsyncLevelR\x05fsync\x12$\n" +
-	"\rconfiguration\x18\x18 \x01(\x04R\rconfiguration\x12\x1a\n" +
-	"\bdegraded\x18\x19 \x01(\bR\bdegraded\x12\x1d\n" +
-	"\n" +
-	"members_up\x18\x1a \x01(\rR\tmembersUp\x12'\n" +
-	"\x0factive_replicas\x18\x1b \x01(\rR\x0eactiveReplicas\x12&\n" +
-	"\fforced_after\x18\x1c \x01(\x04H\x00R\vforcedAfter\x88\x01\x01\x12\x19\n" +
+	"\x11inherited_extents\x18\x14 \x01(\x04R\x10inheritedExtents\x125\n" +
+	"\x05fsync\x18\x17 \x01(\x0e2\x1f.cladefs.cladefsd.v1.FsyncLevelR\x05fsync\x12\x19\n" +
 	"\bfast_wal\x18\x1d \x01(\bR\afastWal\x12&\n" +
 	"\x0ffast_wal_bucket\x18\x1e \x01(\tR\rfastWalBucket\x12*\n" +
 	"\x11fast_wal_degraded\x18\x1f \x01(\bR\x0ffastWalDegraded\x12\x1c\n" +
 	"\tephemeral\x18  \x01(\bR\tephemeral\x12'\n" +
-	"\x0fplacement_token\x18! \x01(\x04R\x0eplacementTokenB\x0f\n" +
-	"\r_forced_afterJ\x04\b\x01\x10\x02J\x04\b\x15\x10\x16\"\x12\n" +
+	"\x0fplacement_token\x18! \x01(\x04R\x0eplacementTokenJ\x04\b\x01\x10\x02J\x04\b\x15\x10\x16J\x04\b\x16\x10\x17J\x04\b\x18\x10\x19J\x04\b\x19\x10\x1aJ\x04\b\x1a\x10\x1bJ\x04\b\x1b\x10\x1cJ\x04\b\x1c\x10\x1dR\breplicasR\rconfigurationR\bdegradedR\n" +
+	"members_upR\x0factive_replicasR\fforced_after\"\x12\n" +
 	"\x10ListCellsRequest\"L\n" +
 	"\x11ListCellsResponse\x127\n" +
 	"\x06stores\x18\x01 \x03(\v2\x1f.cladefs.cladefsd.v1.ListedCellR\x06stores\"\x92\x01\n" +
@@ -6520,13 +6412,12 @@ const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\x12DISK_HEALTH_ONLINE\x10\x00\x12\x17\n" +
 	"\x13DISK_HEALTH_SUSPECT\x10\x01\x12\x17\n" +
 	"\x13DISK_HEALTH_OFFLINE\x10\x02\x12\x19\n" +
-	"\x15DISK_HEALTH_RETURNING\x10\x03*v\n" +
+	"\x15DISK_HEALTH_RETURNING\x10\x03*x\n" +
 	"\n" +
 	"FsyncLevel\x12\x17\n" +
 	"\x13FSYNC_LEVEL_ORDERED\x10\x00\x12\x19\n" +
-	"\x11FSYNC_LEVEL_LOCAL\x10\x01\x1a\x02\b\x01\x12\x1a\n" +
-	"\x16FSYNC_LEVEL_REPLICATED\x10\x02\x12\x18\n" +
-	"\x14FSYNC_LEVEL_FAST_WAL\x10\x03*J\n" +
+	"\x11FSYNC_LEVEL_LOCAL\x10\x01\x1a\x02\b\x01\x12\x18\n" +
+	"\x14FSYNC_LEVEL_FAST_WAL\x10\x03\"\x04\b\x02\x10\x02*\x16FSYNC_LEVEL_REPLICATED*J\n" +
 	"\bCellKind\x12\x12\n" +
 	"\x0eCELL_KIND_FXFS\x10\x00\x12\x14\n" +
 	"\x10CELL_KIND_SQLITE\x10\x01\x12\x14\n" +
@@ -6829,7 +6720,6 @@ func file_cladefs_cladefsd_v1_cladefsd_proto_init() {
 	file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[9].OneofWrappers = []any{}
 	file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[18].OneofWrappers = []any{}
 	file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[24].OneofWrappers = []any{}
-	file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[50].OneofWrappers = []any{}
 	file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[55].OneofWrappers = []any{}
 	file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[58].OneofWrappers = []any{}
 	file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[62].OneofWrappers = []any{}

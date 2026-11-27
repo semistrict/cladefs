@@ -23,13 +23,7 @@
 // checked against the target's readable range (`formats::Format::check`) before it notes or stages
 // anything (FAILED_PRECONDITION outside range, or when versions is absent as an older build sends);
 // and its hand-over opens the cell it staged, as its opening would, before taking it into place,
-// answering no (the source serving the cell again) if it does not open. Replication calls carry
-// per-family versions too (ReplicaOf.versions, IncarnationRequest.versions: cell_directory,
-// replica_directory, extent_frame, bucket_layout), refused (FAILED_PRECONDITION) only outside what
-// the member reads, or when absent: a rolling upgrade across a version bump keeps serving whenever
-// the receiver reads the sender's versions. A member refuses a segment's log not begun with a
-// readable log format (FAILED_PRECONDITION, "... of another format, refused") before it acks any of
-// it, and its replica directory is a frozen family read by range (board 10046).
+// answering no (the source serving the cell again) if it does not open.
 //
 // Wire compatibility: this proto only grows, enforced by `buf breaking` in CI (board 10054).
 
@@ -47,42 +41,6 @@ service Peer {
   // either of no region yet, its bucket's URL not this host's; UNAVAILABLE if fetching it failed.
   // The object may be of any bucket of the system: the host fetches it from its cell's bucket.
   rpc GetPart(GetPartRequest) returns (GetPartResponse);
-
-  // Replicated cells (doc-21, TASK-537): a daemon is a member of other hosts' cells'
-  // configurations, holding their writers' logs, until the bucket does, in its replica directory
-  // (CLADEFSD_REPLICAS). Every call names the asker's bucket (FAILED_PRECONDITION if it is not this
-  // host's) and formats (FAILED_PRECONDITION if they are not this host's, board 8457), and the
-  // member's incarnation it means (ABORTED if this host's replica directory is another's: its disk
-  // lost, its promises with it). A daemon with no replica directory refuses
-  // them all (FAILED_PRECONDITION). The writer's records are ciphertext, MACed, which a member
-  // never opens. Append, Fence and DropLogs are admitted only if the cell's head in the bucket,
-  // read for the call, could have asked them (board 8445; FAILED_PRECONDITION, "... refused",
-  // UNAVAILABLE if the head can't be read): appends to its active configuration or one after it
-  // of its epoch, a fence of the active one at no later epoch than its, drops of those
-  // configurations' logs, or of configurations before one no later than the active.
-
-  // This host's replica directory's incarnation: what a configuration naming it names.
-  rpc Incarnation(IncarnationRequest) returns (IncarnationResponse);
-  // A writer's appends to its configuration's logs on this member, each answered once synced, in
-  // order, with the log's end: an append past it writes nothing, and the writer sends again from
-  // the end answered. Refused, the stream ended with the refusal: FAILED_PRECONDITION if a take of
-  // a later epoch fenced the cell (its promise said), or a segment's log is not of this host's log
-  // format (board 8457); RESOURCE_EXHAUSTED past the bytes, or the logs, a member holds for a
-  // configuration, past the configurations it holds of a cell, or past what the disk governor
-  // admits (board 8451). Messages are a writer's piece of a log, 4 MiB, and 64 KiB more, at most.
-  rpc Append(stream AppendRequest) returns (stream AppendResponse);
-  // A take fences the cell at its epoch, durably, before this answers: appends of older epochs
-  // refused from then on (FAILED_PRECONDITION if a later one fenced it already). Answers the ends
-  // of the logs it holds of the configuration named, which the take reads: in order, each once, at
-  // most as many, and as many bytes, as a member holds of a configuration, which a take refuses
-  // past (board 8453).
-  rpc Fence(FenceRequest) returns (FenceResponse);
-  // A log's bytes from an offset to its end, in pieces of 1 MiB at most: a take refuses a piece
-  // past the end the fence answered (board 8453).
-  rpc ReadLog(ReadLogRequest) returns (stream ReadLogResponse);
-  // Drops the logs no take reads: of the configuration named to a log the bucket holds, and of
-  // every configuration before it.
-  rpc DropLogs(DropLogsRequest) returns (DropLogsResponse);
 
   // Live migration of an ephemeral cell to this host (backlog doc-25, TASK-698.4;
   // specs/ephemeral): the source prepares it here, which writes this host's reference to the
@@ -122,14 +80,9 @@ service Peer {
 }
 
 // The versions of the format families a peer's calls carry (doc-28, board 10054): each family
-// names both the sender's current (write) version and its oldest readable version, so:
-// - for writer -> member calls (Incarnation, Append) and source -> target migration
-//   (MigratePrepare), the receiver checks that it reads the sender's write version;
-// - for member -> taker calls (Fence, ReadLog), the member checks that the taker's readable range
-//   [oldest..=current] covers every version this member may hold (its own oldest..=current);
-// - for DropLogs, the member accepts either a writer dropping uploaded logs on a newer member or a
-//   newer taker dropping superseded logs on an older member.
-// Zero means absent and is refused for every family the call checks.
+// names both the sender's current (write) version and its oldest readable version, so for source
+// -> target migration (MigratePrepare), the receiver checks that it reads the sender's write
+// versions. Zero means absent and is refused for every family the call checks.
 message Formats {
   // Cell directory format (`local_cell::FORMAT`: store, WAL, segment logs, local checkpoints):
   // the version the sender writes (and newest it reads).
@@ -137,9 +90,9 @@ message Formats {
   // cladefs's records in a cell directory (`cladefs::cell_dir::FORMAT`). Checked by migration
   // targets.
   uint32 cell_records = 2;
-  // Replica directory format (`local_cell::replica::FORMAT`: own-log frames). Checked by
-  // replication members.
-  uint32 replica_directory = 3;
+  // Retired with peer-replicated commits (doc-21, hotbed question 592).
+  reserved 3, 8;
+  reserved "replica_directory", "replica_directory_oldest";
   // Extent frame format (`extent_frame::FORMAT`).
   uint32 extent_frame = 4;
   // Bucket layout format (`bucket_cell::layout::FORMAT`).
@@ -148,8 +101,6 @@ message Formats {
   uint32 cell_directory_oldest = 6;
   // Oldest cell records format version the sender reads.
   uint32 cell_records_oldest = 7;
-  // Oldest replica directory format version the sender reads.
-  uint32 replica_directory_oldest = 8;
   // Oldest extent frame format version the sender reads.
   uint32 extent_frame_oldest = 9;
   // Oldest bucket layout format version the sender reads.
@@ -286,122 +237,6 @@ message MigrateReleaseRequest {
 
 // A migration released.
 message MigrateReleaseResponse {}
-
-// A configuration of a cell: its number, and the epoch of the writer that made it.
-message Configuration {
-  // Its number, greater than every configuration's before it in the cell.
-  uint64 number = 1;
-  // The epoch of the writer that made it, the only one that appends to it.
-  uint64 epoch = 2;
-}
-
-// What a call to a member is of: the bucket, the cell, the configuration, and the member's
-// incarnation the configuration names.
-message ReplicaOf {
-  // The URL of the bucket, as the asker names it (CLADEFSD_BUCKET): this host's.
-  string bucket = 1;
-  // The cell's tenant.
-  uint64 tenant = 2;
-  // The cell.
-  uint64 cell = 3;
-  // The configuration of the cell.
-  Configuration configuration = 4;
-  // This host's incarnation, as the configuration names it.
-  uint64 incarnation = 5;
-  // Before board 10054: one opaque string compared whole. Unused now; replaced by `versions`.
-  string formats = 6 [deprecated = true];
-  // The asker's format family versions (doc-28, board 10054): each checked against this host's
-  // readable range, refused (FAILED_PRECONDITION) if absent or outside range.
-  Formats versions = 7;
-}
-
-// Asks for this host's replica directory's incarnation.
-message IncarnationRequest {
-  // The URL of the bucket, as the asker names it: this host's.
-  string bucket = 1;
-  // Before board 10054: one opaque string compared whole. Unused now; replaced by `versions`.
-  string formats = 2 [deprecated = true];
-  // The asker's format family versions, as ReplicaOf names them: refused (FAILED_PRECONDITION) if
-  // absent or outside this host's readable range.
-  Formats versions = 3;
-}
-
-// This host's replica directory's incarnation.
-message IncarnationResponse {
-  // A random number, not 0, made with the directory.
-  uint64 incarnation = 1;
-}
-
-// Bytes appended at an offset of one of the writer's logs. The first of a stream names what it is
-// of; the rest are of the same.
-message AppendRequest {
-  // What it appends to: said by the first of a stream, and read of it alone.
-  ReplicaOf of = 1;
-  // The writer's log, by its number.
-  uint64 log = 2;
-  // Where in it: at its end on this member, or before it, the same bytes again.
-  uint64 offset = 3;
-  // The bytes, as the writer's log holds them.
-  bytes bytes = 4;
-}
-
-// A log's end on this member, synced.
-message AppendResponse {
-  // The log appended to.
-  uint64 log = 1;
-  // Its end on this member, synced.
-  uint64 end = 2;
-}
-
-// Fences a cell at a take's epoch.
-message FenceRequest {
-  // The cell, and the configuration whose logs to answer with.
-  ReplicaOf of = 1;
-  // The take's epoch.
-  uint64 epoch = 2;
-}
-
-// The cell fenced: the logs this member holds of the configuration named.
-message FenceResponse {
-  // Each log and its end, synced.
-  repeated LogEnd logs = 1;
-}
-
-// A log a member holds, and its end.
-message LogEnd {
-  // The writer's log, by its number.
-  uint64 log = 1;
-  // Its end on this member, synced.
-  uint64 end = 2;
-}
-
-// Reads a log a member holds.
-message ReadLogRequest {
-  // The cell and configuration.
-  ReplicaOf of = 1;
-  // The writer's log, by its number.
-  uint64 log = 2;
-  // Where to read from, to its end.
-  uint64 offset = 3;
-}
-
-// A piece of a log, in order.
-message ReadLogResponse {
-  // Its bytes.
-  bytes bytes = 1;
-}
-
-// Drops a cell's logs no take reads.
-message DropLogsRequest {
-  // The cell and configuration: without through, every configuration's before it dropped.
-  ReplicaOf of = 1;
-  // The last log of the configuration named the bucket holds: its logs to it dropped, and
-  // nothing of another configuration.
-  optional uint64 through = 2;
-}
-
-// The logs dropped.
-message DropLogsResponse {}
 
 // A part asked for.
 message GetPartRequest {

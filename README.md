@@ -59,7 +59,6 @@ Short animated films, no voice (`explainer/`):
 
 - [How cladefs works](https://storage.googleapis.com/echophase-cladefs-explainers/cladefs-overview.mp4), 132 s
 - [Encryption at rest and shredding](https://storage.googleapis.com/echophase-cladefs-explainers/cladefs-encryption.mp4), 62 s
-- [Replicated commits: durable before the bucket](https://storage.googleapis.com/echophase-cladefs-explainers/cladefs-replication.mp4), 70 s
 - [Many regions: cells across buckets](https://storage.googleapis.com/echophase-cladefs-explainers/cladefs-regions.mp4), 72 s
 - [Shared volumes](https://storage.googleapis.com/echophase-cladefs-explainers/cladefs-shared-volumes.mp4), 72 s
 - [Container images as bases](https://storage.googleapis.com/echophase-cladefs-explainers/cladefs-images.mp4), 62 s
@@ -92,7 +91,7 @@ Firecracker              vendor/firecracker: the device, a client of the daemon
 cladefsd                 crates/cladefs: extent cache in part slabs, DAX windows, peer network
   │  O_DIRECT / F_NOCACHE (one memory budget, one disk governor)
 local disk               crates/local_cell: open segment, write-ahead log, part cache
-  │  async framing & upload (optional quorum replication over peer daemons first)
+  │  async framing & upload (or optional Fast WAL to appendable zonal object storage)
 bucket(s)                crates/bucket_cell: durable cells across S3 / GCS / Azure, cladefs-gc
 ```
 
@@ -110,12 +109,12 @@ bucket(s)                crates/bucket_cell: durable cells across S3 / GCS / Azu
 - **A commit (durability levels).** Commits progress through four levels ([doc-12](<docs/design/doc-12 - The-fsync-durability-contract.md>)):
   1. **Ordered:** `cladefsd` has the commit in order in memory (default for `fsync`).
   2. **Local:** synced to the host's disk (within a second, 50 ms at the median).
-  3. **Replicated** *(optional, per cell)*: synced to the disks of a majority (f+1 of 2f+1) of
-     host members over the peer network—surviving a host loss in one LAN round trip without waiting
-     for object storage, while the bucket stays the sole authority ([doc-21](<docs/design/doc-21 - Replicated-commits-a-majority-of-hosts-disks-before-the-bucket.md>)).
+  3. **Fast WAL** *(optional, per cell)*: appended via an offset-checked write to an appendable
+     zonal object store (Amazon S3 Express One Zone today)—surviving host loss with zero local
+     disk `fsync`s ([doc-29](<docs/design/doc-29 - Fast-WAL-commits-appendable-object-storage-without-local-state.md>)).
   4. **Uploaded:** sealed extents framed into compressed, encrypted segments, uploaded to the
      bucket, and acknowledged by a conditional write of the cell's head (`sync` waits for
-     Uploaded, or Replicated on a replicated cell).
+     Uploaded, or Fast WAL on a Fast WAL cell).
 
   A crash loses at most a suffix of recent unacknowledged history and recovers to a commit, never
   to a torn state.
@@ -154,8 +153,9 @@ See [docs/architecture.md](docs/architecture.md) for the full mechanics.
 - **Multi-region buckets:** one bucket per cloud region across S3, GCS and Azure Blob Storage,
   coordinated by a shared bucket registry, with cross-bucket forks and automatic mirroring
   ([doc-23](<docs/design/doc-23 - Cells-across-buckets-a-bucket-per-cloud-region-forks-that-span-them.md>)).
-- **Replicated commits:** optional 2f+1 quorum replication across peer hosts so commits survive a
-  host loss before bucket upload completes ([doc-21](<docs/design/doc-21 - Replicated-commits-a-majority-of-hosts-disks-before-the-bucket.md>)).
+- **Fast WAL commits:** optional appendable zonal object storage (S3 Express One Zone) so commits
+  survive host loss before cold-bucket upload completes, with stateless compute hosts
+  ([doc-29](<docs/design/doc-29 - Fast-WAL-commits-appendable-object-storage-without-local-state.md>)).
 - **One memory budget and one disk governor:** every data file and cache bypasses the host OS page
   cache (`O_DIRECT` on Linux, `F_NOCACHE` on macOS). `cladefsd` manages its extent cache, cells'
   page cache, uploads and fetches under one memory governor, and bounds local cells and the part
@@ -189,7 +189,7 @@ Storage protocols fail on rare interleavings, crashes and degraded networks, so 
 at several layers ([docs/testing.md](docs/testing.md)):
 
 - **Formal specifications:** TLA+ models (`specs/`) cover the bucket protocol,
-  multi-bucket mirroring, replication, ephemeral hand-over, DAX copy-on-write and the journal—each
+  multi-bucket mirroring, fast WAL, ephemeral hand-over, DAX copy-on-write and the journal—each
   paired with spec mutations that TLC must reject (`make check-tla`).
 - **Deterministic simulation:** single-threaded seeded simulations test both the storage engine
   (`local_cell::sim`) and multi-daemon clusters under `madsim` ([doc-24](<docs/design/doc-24 - Full-stack-deterministic-simulation-N-daemons-one-seed.md>)), injecting crashes, torn disks, network partitions and failing buckets.
@@ -266,7 +266,7 @@ read [docs/integrator-guide.md](docs/integrator-guide.md).
 | Path | What |
 |---|---|
 | `crates/cladefs` | The extent daemon (`cladefsd`), `cladefsctl`, and the host's library. |
-| `crates/local_cell`, `crates/bucket_cell` | An extent store on local disk, and cells in the bucket (including replication and `cladefs-gc`). |
+| `crates/local_cell`, `crates/bucket_cell` | An extent store on local disk, and cells in the bucket (including Fast WAL and `cladefs-gc`). |
 | `crates/virtio_extent` | The extent store device, transport-independent, for a VMM to host. |
 | `crates/sqlite_cladefs`, `crates/block_device` | SQLite over a block device kept on extents, and the block device itself (one a SQLite or VM memory-image cell). |
 | `crates/fxfs`, `crates/fxfs-posix` | Fxfs, copied from Fuchsia, and the POSIX layer the guest and the host both call. |
@@ -284,13 +284,13 @@ read [docs/integrator-guide.md](docs/integrator-guide.md).
 
 - [CONTEXT.md](CONTEXT.md): the glossary. One word per concept.
 - [docs/architecture.md](docs/architecture.md): requests, the DAX window, the extent daemon, ephemeral cells and whom it trusts.
-- [docs/operating-a-host.md](docs/operating-a-host.md): the daemon's memory and disk, buckets, replication, encryption and shredding, VM processes' exit statuses.
+- [docs/operating-a-host.md](docs/operating-a-host.md): the daemon's memory and disk, buckets, Fast WAL, encryption and shredding, VM processes' exit statuses.
 - [docs/integrator-guide.md](docs/integrator-guide.md): for whoever writes the VM manager, call by call.
 - [docs/upgrading-a-host.md](docs/upgrading-a-host.md): draining and upgrading a host.
 - [docs/code.md](docs/code.md): where the code comes from, crate by crate; the Firecracker series; the guest's kernel; updating from Fuchsia.
 - [docs/testing.md](docs/testing.md): the test suites, the qualification of a candidate, the nightly measurement, benchmarks.
 - [docs/memory-ordering.md](docs/memory-ordering.md): atomic protocols and `loom` models.
-- `docs/design/`: the design docs—start with [doc-2](<docs/design/doc-2 - Guest-owned-metadata-Fxfs-in-the-guest-kernel-over-a-virtio-extent-store.md>) (why Fxfs is in the guest), [doc-4](<docs/design/doc-4 - Virtio-extent-store-device-specification.md>) (the device), [doc-13](<docs/design/doc-13 - Copy-on-write-DAX.md>) (copy-on-write DAX), [doc-7](<docs/design/doc-7 - Object-storage-how-the-host-keeps-branches-in-S3-and-GCS.md>) and [doc-14](<docs/design/doc-14 - Local-disk-as-the-buckets-write-ahead-log-and-cache-one-storage-engine.md>) (the bucket and local disk), [doc-12](<docs/design/doc-12 - The-fsync-durability-contract.md>) (what an `fsync` survives), [doc-16](<docs/design/doc-16 - Per-tenant-encryption-at-rest-tenant-KEKs-cell-KEKs-vdisk-DEKs.md>) (encryption), [doc-21](<docs/design/doc-21 - Replicated-commits-a-majority-of-hosts-disks-before-the-bucket.md>) (replicated commits), [doc-23](<docs/design/doc-23 - Cells-across-buckets-a-bucket-per-cloud-region-forks-that-span-them.md>) (multi-region buckets) and [doc-25](<docs/design/doc-25 - Ephemeral-cells-host-local-children-of-a-version-migrated-live.md>) (ephemeral cells).
+- `docs/design/`: the design docs—start with [doc-2](<docs/design/doc-2 - Guest-owned-metadata-Fxfs-in-the-guest-kernel-over-a-virtio-extent-store.md>) (why Fxfs is in the guest), [doc-4](<docs/design/doc-4 - Virtio-extent-store-device-specification.md>) (the device), [doc-13](<docs/design/doc-13 - Copy-on-write-DAX.md>) (copy-on-write DAX), [doc-7](<docs/design/doc-7 - Object-storage-how-the-host-keeps-branches-in-S3-and-GCS.md>) and [doc-14](<docs/design/doc-14 - Local-disk-as-the-buckets-write-ahead-log-and-cache-one-storage-engine.md>) (the bucket and local disk), [doc-12](<docs/design/doc-12 - The-fsync-durability-contract.md>) (what an `fsync` survives), [doc-16](<docs/design/doc-16 - Per-tenant-encryption-at-rest-tenant-KEKs-cell-KEKs-vdisk-DEKs.md>) (encryption), [doc-23](<docs/design/doc-23 - Cells-across-buckets-a-bucket-per-cloud-region-forks-that-span-them.md>) (multi-region buckets), [doc-25](<docs/design/doc-25 - Ephemeral-cells-host-local-children-of-a-version-migrated-live.md>) (ephemeral cells) and [doc-29](<docs/design/doc-29 - Fast-WAL-commits-appendable-object-storage-without-local-state.md>) (Fast WAL).
 - [AGENTS.md](AGENTS.md): how work on cladefs is done.
 
 cladefs was fxdax (Fxfs plus DAX, the first prototype's name) until TASK-437. Records of what ran

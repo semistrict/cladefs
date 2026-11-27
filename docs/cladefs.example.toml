@@ -52,7 +52,7 @@ headroom = "5%"
 ephemeral_journal = "/var/lib/cladefsd/ephemeral"
 part_cache = true
 
-# Managed JBOD disks. cladefsd owns cells/, part-cache/, and replicas/ inside each path
+# Managed JBOD disks. cladefsd owns cells/ and part-cache/ inside each path
 # and automatically places cells on the healthiest ReadWrite disk with the most spare space.
 [[disks]]
 id = "nvme0-os"
@@ -61,7 +61,6 @@ cap = "500GiB"
 headroom = "10%"
 cache_cap = "200GiB"
 dirty_budget = "128MiB"
-replicas = true
 placement = "read_write"
 
 [[disks]]
@@ -69,15 +68,12 @@ id = "nvme1-scratch"
 path = "/mnt/fxdax-scratch-nvme1/cladefsd"
 cap = "1.5TiB"
 headroom = "5%"
-replicas = true
 placement = "read_write"
 
 [peers]
 address = "10.0.0.1:9185"
 peers = ["10.0.0.2:9185", "10.0.0.3:9185"]
 tls_dir = "/etc/cladefs/peer-tls"
-replicas = true
-replace_after_secs = 30
 migration_idle_secs = 300
 
 # Optional host FUSE mount served by cladefsd on the same control socket:

@@ -524,49 +524,39 @@ message CreateCellRequest {
   // The cell's kind, which says what opens it.
   CellKind kind = 7;
   // Once a version to copy: versions fork straight, ForkCell's `version`.
-  reserved 8;
-  // Whether the cell is replicated (doc-21, TASK-537): its f, its commits on f+1 of 2f+1 hosts'
-  // disks before the bucket, the hosts the daemon's peers (SetPeers); 0 for a cell durable off its
-  // host once uploaded alone. At most 3. Unset keeps what the cell's head says, of a cell taken,
-  // and makes a new one not replicated; set, it is the cell's from this taking on, on any host.
-  // Of 1 or more, refused by a daemon with no peers or no replica directory (ENOTSUP).
-  optional uint32 replicas = 9;
-  // What its guest's fsync waits for (doc-12, doc-21), given with `replicas` alone (INVALID_ARGUMENT
-  // otherwise): FSYNC_LEVEL_REPLICATED needs replicas of 1 or more.
+  // 9 (`replicas`) and 11 (`force`): retired with peer-replicated commits (doc-21, hotbed question 592).
+  reserved 8, 9, 11;
+  reserved "replicas", "force";
+  // What its guest's fsync waits for (doc-12, doc-29): FSYNC_LEVEL_FAST_WAL needs `fast_wal = true`.
   FsyncLevel fsync = 10;
-  // Whether its taking of a replicated cell is forced (doc-21, TASK-681), as PlaceCell's `force`
-  // places a cell: it goes on with the members of the configuration the cell's head names that
-  // answer, fewer than a take needs, as when f+1 of them are gone for good; commits told replicated
-  // that only the others held are lost, and StatCell's forced_after says past which commit. With
-  // `token`, the placement it is placed at is forced from then on.
-  bool force = 11;
   // Optional per-cell uploader interval in milliseconds (hotbed question 534). Unset keeps the
   // daemon default; 0 or values past 24 hours are refused (INVALID_ARGUMENT).
   optional uint64 upload_interval_ms = 12;
   // Whether the cell uses Fast WAL commits backed by appendable zonal object storage (doc-29):
   // compute nodes stay stateless cache-only with zero local disk fsyncs. Unset keeps what the
   // cell's head says (and makes a new cell without Fast WAL); true enables Fast WAL (refused with
-  // ENOTSUP if CLADEFSD_FAST_WAL_BUCKET is unset, and EINVAL if combined with replicas >= 1);
-  // false disables Fast WAL, flushing any active WAL on take.
+  // ENOTSUP if CLADEFSD_FAST_WAL_BUCKET is unset); false disables Fast WAL, flushing any active
+  // WAL on take.
   optional bool fast_wal = 13;
   // Whether to create a standalone (parentless) host-local ephemeral cell (doc-25): kept on host
   // SSD alone, encrypted under the tenant's KMS key, never uploaded to the bucket, with no
-  // versions and no bucket reference. Must be a new cell (`cell == 0`) with `token`, `replicas`,
-  // `force`, `upload_interval_ms`, and `fast_wal` unset and `fsync == FSYNC_LEVEL_ORDERED`
+  // versions and no bucket reference. Must be a new cell (`cell == 0`) with `token`,
+  // `upload_interval_ms`, and `fast_wal` unset and `fsync == FSYNC_LEVEL_ORDERED`
   // (INVALID_ARGUMENT otherwise).
   bool ephemeral = 14;
 }
 
-// What a guest's fsync, fdatasync, msync and O_SYNC wait for in a cell (doc-12, doc-21, doc-29).
-// Its sync, syncfs and unmount wait for its commits replicated in a replicated cell, durable in
-// the fast WAL in a fast-WAL cell, and uploaded in any other.
+// What a guest's fsync, fdatasync, msync and O_SYNC wait for in a cell (doc-12, doc-29).
+// Its sync, syncfs and unmount wait for its commits durable in the fast WAL in a fast-WAL cell,
+// and uploaded in any other.
 enum FsyncLevel {
   // In the daemon's memory, in order: survives what leaves the daemon alive.
   FSYNC_LEVEL_ORDERED = 0;
   // Deprecated: mapped to FSYNC_LEVEL_ORDERED with a warning.
   FSYNC_LEVEL_LOCAL = 1 [deprecated = true];
-  // On f+1 hosts' disks, or uploaded: survives the writer's host.
-  FSYNC_LEVEL_REPLICATED = 2;
+  // Retired with peer-replicated commits (doc-21, hotbed question 592).
+  reserved 2;
+  reserved "FSYNC_LEVEL_REPLICATED";
   // Appended to the cell's fast WAL in appendable zonal object storage, or uploaded to the cold
   // regional bucket: survives losing the writer's host with zero local disk state (doc-29).
   FSYNC_LEVEL_FAST_WAL = 3;
@@ -711,11 +701,10 @@ message ResizeCellResponse {}
 
 // Places a cell.
 message PlaceCellRequest {
-  reserved 1;
+  reserved 1, 3;
+  reserved "force";
   // The placement's fencing token, its boot ID: greater than every earlier placement's.
   uint64 token = 2;
-  // Whether this placement's takings of a replicated cell are forced (doc-21, TASK-681).
-  bool force = 3;
   // The cell's tenant.
   uint64 tenant = 4;
   // The cell's ID.
@@ -899,25 +888,11 @@ message StatCellResponse {
   // How many it holds that it inherited: those whose bytes are `inherited`.
   uint64 inherited_extents = 20;
   // Once the version of its cell a copy was of: versions are forked straight.
-  reserved 21;
-  // Whether its cell is replicated, as its writer's taking found its head (doc-21): its f, 0 if
-  // not; with `uploading` alone.
-  uint32 replicas = 22;
+  // 22, 24..=28: retired with peer-replicated commits (doc-21, hotbed question 592).
+  reserved 21, 22, 24, 25, 26, 27, 28;
+  reserved "replicas", "configuration", "degraded", "members_up", "active_replicas", "forced_after";
   // What its guest's fsync waits for, as its writer's taking found it.
   FsyncLevel fsync = 23;
-  // The number of its active configuration, 0 if it has none yet.
-  uint64 configuration = 24;
-  // Whether it is degraded: fewer than f members of its active configuration take its writer's
-  // commits, or that configuration is of f = 0, its commits waiting for the bucket (doc-21).
-  bool degraded = 25;
-  // How many members of its active configuration, its writer aside, take its writer's commits.
-  uint32 members_up = 26;
-  // The f of its active configuration: less than replicas once it dropped to f = 0, degraded.
-  uint32 active_replicas = 27;
-  // If its writer's taking was forced (PlaceCell's or CreateCell's force) and fenced fewer members
-  // than a take needs: the commit number of the last commit the bucket held, past which commits told
-  // replicated may be lost (TASK-681); 0 if the bucket held none. Unset if not.
-  optional uint64 forced_after = 28;
   // Whether the cell uses Fast WAL commits backed by appendable zonal object storage (doc-29).
   bool fast_wal = 29;
   // URL of the appendable zonal bucket holding the cell's active fast WAL, empty if not using

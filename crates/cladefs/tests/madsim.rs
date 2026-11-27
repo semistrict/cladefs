@@ -7,12 +7,11 @@
 //! memory, their control APIs on the simulated network. A cell made on one, its commits synced, is
 //! taken by the other at a later placement's token. TASK-685.5: the bucket's requests delayed and
 //! failed, before or after landing, and the bucket out of reach for stretches, as the seed says
-//! (`bucket_cell::faults::Seeded`), which the daemons' retries ride out. TASK-685.7: the hosts
-//! peers too, replicating each other's cells over the simulated network (doc-21), cut off it a
-//! while as the seed says. TASK-685.7: fault profiles, each a family of FoundationDB's (partitions
-//! one way, both and shifting, loss, forced takes, peers changed, drains, frees and the collector,
-//! bases forked and deleted, memory and disk pressure), a swarm of them per seed, and a search per
-//! rule of the protocol's and the open cells' that the profiles reach, which finds it needed.
+//! (`bucket_cell::faults::Seeded`), which the daemons' retries ride out. TASK-685.7: fault
+//! profiles, each a family of FoundationDB's (partitions one way, both and shifting, loss, peers
+//! changed, drains, frees and the collector, bases forked and deleted, memory and disk pressure),
+//! a swarm of them per seed, and a search per rule of the protocol's and the open cells' that the
+//! profiles reach, which finds it needed.
 
 #![cfg(madsim)]
 
@@ -33,7 +32,7 @@ fn control(host: u8) -> SocketAddr {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, host)), CONTROL)
 }
 
-/// The port of the daemons' peers' service (doc-21), on each host's address.
+/// The port of the daemons' peers' service, on each host's address.
 const PEERS: u16 = 7001;
 
 /// The address of host `host`'s daemon's peers' service.
@@ -45,31 +44,24 @@ fn peer(host: u8) -> SocketAddr {
 #[derive(Clone, Copy, Debug)]
 struct Kept {
     /// Of how many hosts, 1 to it, all serving their peers and asking each other: every host given
-    /// the same list, itself among them, so that each finds a part's owner the same (doc-21).
+    /// the same list, itself among them, so that each finds a part's owner the same.
     peers: Option<u8>,
-    /// Whether the peers replicate each other's cells (doc-21).
-    replicas: bool,
     /// Whether they keep ephemeral cells (doc-25).
     ephemeral: bool,
 }
 
 impl Kept {
     /// Nothing more.
-    const NONE: Self = Self { peers: None, replicas: false, ephemeral: false };
+    const NONE: Self = Self { peers: None, ephemeral: false };
 
     /// Of `count` hosts, peers serving each other parts of the bucket's objects (TASK-406.2).
     const fn peers(count: u8) -> Self {
-        Self { peers: Some(count), replicas: false, ephemeral: false }
-    }
-
-    /// Of `count` hosts, peers replicating each other's cells.
-    const fn replicas(count: u8) -> Self {
-        Self { peers: Some(count), replicas: true, ephemeral: false }
+        Self { peers: Some(count), ephemeral: false }
     }
 
     /// Of `count` hosts, peers keeping ephemeral cells.
     fn ephemeral(count: u8) -> Self {
-        Self { peers: Some(count), replicas: false, ephemeral: true }
+        Self { peers: Some(count), ephemeral: true }
     }
 }
 
@@ -104,10 +96,6 @@ async fn boot(host: u8, root: &Path, bucket: Arc<RoutedBucket>, kept: Kept) {
             ),
             ("CLADEFSD_PART_CACHE", root.join("cache").display().to_string()),
         ]);
-    }
-    if kept.replicas {
-        let replicas = root.join("replicas").display().to_string();
-        vars.push(("CLADEFSD_REPLICAS", replicas));
     }
     if kept.ephemeral {
         vars.push(("CLADEFSD_EPHEMERAL", root.join("ephemeral").display().to_string()));
@@ -469,10 +457,6 @@ struct Told {
     versioning: bool,
     /// Whether writers free blocks told uploaded, as the seed says, after a commit.
     freeing: bool,
-    /// Whether forced takes may run on a replicated cell: `Commit::Uploaded` returns once
-    /// replicated (doc-21, TASK-537.3.3), which a forced take may lose, so writers wait for
-    /// `SyncCell` before noting a commit uploaded to the bucket (board 6699).
-    syncing: bool,
     /// The versions made, each with the blocks told uploaded before it was begun: once a commit
     /// after it was told uploaded, which uploads it too, as a version is told made once committed
     /// at rest, and named in the head once uploaded (doc-20).
@@ -484,18 +468,6 @@ fn block_of(round: u64, sequence: u64) -> Vec<u8> {
     (0..4096u64).map(|at| ((round * 31 + sequence * 7 + at) % 251) as u8).collect()
 }
 
-/// Waits for `cell`'s commits on `host` to be uploaded to the bucket when `told.syncing` holds
-/// (board 6699).
-async fn confirm_uploaded(host: u8, cell: u64, told: &Told) -> bool {
-    if !told.syncing {
-        return true;
-    }
-    let Ok(mut daemon) = cladefs::cladefsd::control::connect(control(host)).await else {
-        return false;
-    };
-    daemon.sync_cell(SyncCellRequest { tenant: 0, cell }).await.is_ok()
-}
-
 /// A writer guest's round on its host: opens `existing` if given (taken there already) or makes a
 /// new cell, and writes blocks from its cell's next sequence on, each committed uploaded and noted
 /// in `told` once the daemon says so, `writes` of them, or until a write or commit fails, as a
@@ -504,7 +476,6 @@ async fn confirm_uploaded(host: u8, cell: u64, told: &Told) -> bool {
 /// and frees a block told uploaded ([`free_one`]). The cell's ID; or none, if its open was
 /// refused, as a later placement's taking, before it opened, has it refused (`ESTALE`).
 async fn write_round(
-    host: u8,
     existing: Option<u64>,
     round: u64,
     writes: u64,
@@ -537,9 +508,6 @@ async fn write_round(
         if guest.commit(cladefs::Commit::Uploaded).await.is_err() {
             break;
         }
-        if !confirm_uploaded(host, cell, &told).await {
-            break;
-        }
         told.uploaded.lock().unwrap().insert(sequence, block);
         told.versions.lock().unwrap().append(&mut made);
         if told.versioning && madsim::rand::thread_rng().gen_bool(0.3) {
@@ -551,16 +519,13 @@ async fn write_round(
         }
         if told.freeing
             && madsim::rand::thread_rng().gen_bool(0.3)
-            && !free_one(host, &guest, cell, &told).await
+            && !free_one(&guest, cell, &told).await
         {
             break;
         }
     }
     // Its last versions uploaded, if its writes went on to the end.
-    if !made.is_empty()
-        && guest.commit(cladefs::Commit::Uploaded).await.is_ok()
-        && confirm_uploaded(host, cell, &told).await
-    {
+    if !made.is_empty() && guest.commit(cladefs::Commit::Uploaded).await.is_ok() {
         told.versions.lock().unwrap().append(&mut made);
     }
     guest.close();
@@ -571,12 +536,7 @@ async fn write_round(
 /// commits uploaded: noted freed once that commit is told uploaded, and no longer noted uploaded
 /// from the start, as its free may have taken though the commit was not told. Whether both were
 /// told done.
-async fn free_one(
-    host: u8,
-    guest: &cladefs::cladefsd::guest::Guest,
-    cell: u64,
-    told: &Told,
-) -> bool {
+async fn free_one(guest: &cladefs::cladefsd::guest::Guest, cell: u64, told: &Told) -> bool {
     use madsim::rand::Rng as _;
     let (sequence, block) = {
         let mut uploaded = told.uploaded.lock().unwrap();
@@ -588,27 +548,22 @@ async fn free_one(
         uploaded.remove_entry(&sequence).unwrap()
     };
     let extent = cladefs::ExtentId { cell, sequence };
-    if guest.free(extent).await.is_err()
-        || guest.commit(cladefs::Commit::Uploaded).await.is_err()
-        || !confirm_uploaded(host, cell, told).await
-    {
+    if guest.free(extent).await.is_err() || guest.commit(cladefs::Commit::Uploaded).await.is_err() {
         return false;
     }
     told.freed.lock().unwrap().insert(sequence, block);
     true
 }
 
-/// Takes `cell` onto host `host`, at placement `token`, forced if `force` (doc-21: going on with
-/// the members that answer, fewer than a take needs), as the VM manager does, dropping any stale
+/// Takes `cell` onto host `host`, at placement `token`, as the VM manager does, dropping any stale
 /// local copy first and trying again while the bucket refuses.
-async fn take(host: u8, cell: u64, token: u64, force: bool) {
+async fn take(host: u8, cell: u64, token: u64) {
     use cladefs::cladefsd::control::proto::DropCellRequest;
     let mut daemon = connect(host).await;
     let taking = CreateCellRequest {
         capacity: 64 << 20,
         token: Some(token),
         cell,
-        force,
         ..CreateCellRequest::default()
     };
     for _ in 0..200 {
@@ -648,48 +603,6 @@ async fn take(host: u8, cell: u64, token: u64, force: bool) {
 #[madsim::test]
 async fn uploaded_commits_survive_attrition() {
     survives(Profile::PLAIN).await;
-}
-
-/// TASK-685.7, doc-21: the attrition profile in a replicated cell, of f 1, its three hosts each
-/// other's peers: a writer's commit told uploaded is on two hosts' disks, or in the bucket, and
-/// each round's host takes the cell from its members, one of them killed as the seed says, the
-/// bucket failing and stalling meanwhile. Every block told uploaded reads back as written.
-#[madsim::test]
-async fn replicated_commits_survive_attrition() {
-    survives(Profile { kept: Kept::replicas(3), ..Profile::PLAIN }).await;
-}
-
-/// TASK-685.7: the replicated attrition profile, its hosts cut off the network a while too, as the
-/// seed says, both ways: the writer's from its members and the VM manager, its guest writing on,
-/// or a member's. Every block told uploaded reads back as written.
-#[madsim::test]
-async fn replicated_commits_survive_attrition_and_partitions() {
-    survives(Profile { kept: Kept::replicas(3), net: Net::Cut, ..Profile::PLAIN }).await;
-}
-
-/// TASK-685.7: the replicated attrition profile, a host's packets lost one way a while, as the
-/// seed says: it hears its peers and the manager but is not heard, or is heard but hears not.
-#[madsim::test]
-async fn replicated_commits_survive_one_way_partitions() {
-    survives(Profile { kept: Kept::replicas(3), net: Net::OneWay, ..Profile::PLAIN }).await;
-}
-
-/// TASK-685.7: the replicated attrition profile, its network's shape shifting (FoundationDB's
-/// swizzle): links between the nodes cut one after another, then mended one after another, in
-/// another order, and the network losing and delaying packets throughout.
-#[madsim::test]
-async fn replicated_commits_survive_shifting_partitions_and_loss() {
-    let profile =
-        Profile { kept: Kept::replicas(3), net: Net::Shifting, loss: true, ..Profile::PLAIN };
-    survives(profile).await;
-}
-
-/// TASK-685.7, doc-21 (TASK-681): the replicated attrition profile, a member killed with the
-/// writer's host, more than a take can do without, and down still as the next host takes the
-/// cell, forced: commits told uploaded are none of those a forced take may lose.
-#[madsim::test]
-async fn replicated_commits_survive_forced_takes() {
-    survives(Profile { kept: Kept::replicas(3), forced: true, ..Profile::PLAIN }).await;
 }
 
 /// TASK-685.7, doc-20: the attrition profile, its writers making versions as they go, as a VM's
@@ -740,13 +653,6 @@ async fn uploaded_commits_survive_memory_and_disk_pressure() {
 #[madsim::test]
 async fn uploaded_commits_survive_disk_faults() {
     survives(Profile { disk: true, ..Profile::PLAIN }).await;
-}
-
-/// Board 5654: the replicated attrition profile, the hosts' disks failing calls too: their
-/// replica logs, fences and promises among them.
-#[madsim::test]
-async fn replicated_commits_survive_disk_faults() {
-    survives(Profile { kept: Kept::replicas(3), disk: true, ..Profile::PLAIN }).await;
 }
 
 /// TASK-685.7, doc-24: FoundationDB's swarm: each seed its own mix of the profiles' families,
@@ -880,215 +786,6 @@ needs!(forking_needs_references, references, Profile::BASES);
 #[cfg(not(target_os = "macos"))]
 needs!(forking_needs_references_relisted, references_relisted, Profile::BASES);
 
-/// Makes a cell replicated at f 1 (doc-21) on host `host`, at placement `token`, trying again
-/// while the bucket refuses: its ID.
-async fn create_replicated(host: u8, token: u64) -> u64 {
-    let mut daemon = connect(host).await;
-    let creating = CreateCellRequest {
-        capacity: 64 << 20,
-        token: Some(token),
-        replicas: Some(1),
-        ..CreateCellRequest::default()
-    };
-    for _ in 0..200 {
-        match daemon.create_cell(creating.clone()).await {
-            Ok(made) => return made.into_inner().cell,
-            Err(status) => {
-                eprintln!("host {host} making a cell: {:?} {}", status.code(), status.message());
-                madsim::time::sleep(Duration::from_millis(200)).await;
-            }
-        }
-    }
-    panic!("host {host} never made a replicated cell");
-}
-
-/// Board 8579: a member of a replicated cell's configuration, of f 1 on three hosts of four, that its
-/// writer's host's peers name no more (SetPeers), its host up still, is replaced at once, not once
-/// it is gone for `replace_after`: two others picked, the removed host not among them, and the cell
-/// never degraded meanwhile; a SetPeers removing so many that no replacement is to be had leaves
-/// the configuration as it is, degraded not. Every commit told replicated, before and after, reads
-/// back once the writer's host is lost and the removed host takes the cell.
-#[madsim::test]
-async fn members_removed_from_the_peers_are_replaced_at_once() {
-    use cladefs::cladefsd::control::proto::SetPeersRequest;
-    const WRITES: u64 = 4;
-    let (bucket, faults) = world();
-    faults.set(bucket_cell::faults::Odds::NONE);
-    let (nodes, _roots) = hosts_keeping(4, &bucket, Kept::replicas(4));
-    let handle = madsim::runtime::Handle::current();
-    let manager = manager();
-    let cell = manager.spawn(async move { create_replicated(1, 10).await }).await.unwrap();
-    let id = bucket_cell::layout::CellId { tenant: 0, id: cell };
-    // The writer: its commits told replicated (`Commit::Uploaded` returns once they are, doc-21),
-    // a round before the peers change, one after.
-    let (ready, mut readied) = tokio::sync::mpsc::channel::<()>(1);
-    let (go, mut going) = tokio::sync::mpsc::channel::<()>(1);
-    let writer = nodes[0].spawn(async move {
-        let guest = guest().await;
-        let cell = guest.open_cell(cladefs::CellId { tenant: 0, id: cell }).await.unwrap();
-        let mut told = Blocks::new();
-        for round in 0..2 {
-            let first = guest.next_sequence().await.unwrap();
-            for sequence in first..first + WRITES {
-                let block = block_of(round, sequence);
-                guest.write(cladefs::ExtentId { cell, sequence }, 0, &block).await.unwrap();
-                guest.commit(cladefs::Commit::Uploaded).await.unwrap();
-                told.insert(sequence, block);
-            }
-            if round == 0 {
-                ready.send(()).await.unwrap();
-                going.recv().await.unwrap();
-            }
-        }
-        told
-    });
-    readied.recv().await.unwrap();
-    let members = || {
-        let bucket = bucket.clone();
-        async move {
-            let head = bucket_cell::head::get(&*bucket, id).await.unwrap().unwrap();
-            let configuration = head.replication.unwrap().configuration.unwrap();
-            let addresses = configuration.members.iter().map(|member| member.address.clone());
-            (configuration.number, addresses.collect::<Vec<_>>())
-        }
-    };
-    let (before, named) = members().await;
-    assert_eq!(named.len(), 3, "{named:?}");
-    assert_eq!(named[0], peer(1).to_string());
-    let removed = named[1].clone();
-    let stat = move || async move {
-        let mut daemon = connect(1).await;
-        daemon.stat_cell(StatCellRequest { tenant: 0, cell }).await.unwrap().into_inner()
-    };
-    // Its host up still, the member is removed from the writer's host's peers.
-    let peers: Vec<String> = (1..=4).map(|host| peer(host).to_string()).collect();
-    let others: Vec<String> = peers.iter().filter(|at| **at != removed).cloned().collect();
-    let told = others.clone();
-    let set = manager.spawn(async move {
-        let mut daemon = connect(1).await;
-        daemon.set_peers(SetPeersRequest { addresses: told }).await.unwrap();
-    });
-    set.await.unwrap();
-    let watching = stat;
-    let replaced = manager.spawn(async move {
-        let started = madsim::time::Instant::now();
-        loop {
-            let status = watching().await;
-            assert!(!status.degraded, "degraded {:?} after the peers changed", started.elapsed());
-            if status.configuration > before {
-                return started.elapsed();
-            }
-            // Well within `replace_after` (30 s): a removal replaces it, not its loss.
-            assert!(started.elapsed() < Duration::from_secs(10), "never replaced");
-            madsim::time::sleep(Duration::from_millis(100)).await;
-        }
-    });
-    replaced.await.unwrap();
-    let (after, named) = members().await;
-    assert!(after > before, "{after} after {before}");
-    assert_eq!(named.len(), 3, "{named:?}");
-    assert!(!named.contains(&removed), "{removed} a member still: {named:?}");
-
-    // Peers so few that no configuration of f 1 is to be had: it is left as it is.
-    let kept = vec![peer(1).to_string(), named[1].clone()];
-    let set = manager.spawn(async move {
-        let mut daemon = connect(1).await;
-        daemon.set_peers(SetPeersRequest { addresses: kept }).await.unwrap();
-    });
-    set.await.unwrap();
-    let watching = stat;
-    let left = manager.spawn(async move {
-        for _ in 0..30 {
-            let status = watching().await;
-            assert!(!status.degraded, "degraded with too few peers");
-            assert_eq!(status.configuration, after, "replaced with too few peers");
-            madsim::time::sleep(Duration::from_millis(100)).await;
-        }
-    });
-    left.await.unwrap();
-    go.send(()).await.unwrap();
-    let told = writer.await.unwrap();
-
-    // The writer's host lost; the removed host takes the cell, and reads every block told.
-    node_local::kill(nodes[0].id()).await;
-    let host: u8 =
-        removed.trim_end_matches(&format!(":{PEERS}")).rsplit('.').next().unwrap().parse().unwrap();
-    manager.spawn(async move { take(host, cell, 20, false).await }).await.unwrap();
-    let node = handle.get_node(nodes[usize::from(host) - 1].id()).unwrap();
-    let lost = node.spawn(lost_in(cell, cell, told, Blocks::new())).await.unwrap();
-    assert_eq!(lost, Vec::<u64>::new(), "blocks told replicated lost");
-}
-
-/// Board 11671: a replica member restarted while the bucket is completely unreachable still admits
-/// `Append` for already-held cells using its persisted rebuildable `seen.cache`, allowing f=1
-/// replicated commits to keep succeeding when the third member is also down (so only writer +
-/// restarted member form the f+1 quorum). After the writer is lost and the bucket recovers,
-/// taking the cell from the restarted member recovers every block committed during the outage.
-#[madsim::test]
-async fn restarted_replica_member_admits_commits_during_bucket_outage() {
-    const WRITES: u64 = 4;
-    let (bucket, faults) = world();
-    faults.set(bucket_cell::faults::Odds::NONE);
-    let (nodes, _roots) = hosts_keeping(3, &bucket, Kept::replicas(3));
-    let handle = madsim::runtime::Handle::current();
-    let manager = manager();
-    let cell = manager.spawn(async move { create_replicated(1, 10).await }).await.unwrap();
-
-    let (ready, mut readied) = tokio::sync::mpsc::channel::<()>(1);
-    let (go, mut going) = tokio::sync::mpsc::channel::<()>(1);
-    let writer = nodes[0].spawn(async move {
-        let guest = guest().await;
-        let cell = guest.open_cell(cladefs::CellId { tenant: 0, id: cell }).await.unwrap();
-        let mut told = Blocks::new();
-        for round in 0..2 {
-            let first = guest.next_sequence().await.unwrap();
-            for sequence in first..first + WRITES {
-                let block = block_of(round, sequence);
-                guest.write(cladefs::ExtentId { cell, sequence }, 0, &block).await.unwrap();
-                guest.commit(cladefs::Commit::Uploaded).await.unwrap();
-                told.insert(sequence, block);
-            }
-            if round == 0 {
-                ready.send(()).await.unwrap();
-                going.recv().await.unwrap();
-            }
-        }
-        told
-    });
-    // Round 0 commits replicated to both peers (hosts 2 and 3), populating their `seen.cache`.
-    readied.recv().await.unwrap();
-
-    // Restart host 2 while the writer is paused (so host 2 loses all in-memory `Held::seen` state
-    // and receives no writes while the bucket is still up, reloading `seen.cache` from disk on
-    // boot). Then cut the bucket completely and kill host 3 so host 1 MUST form its f+1 quorum
-    // with restarted host 2 alone without any bucket head read.
-    node_local::kill(nodes[1].id()).await;
-    node_local::restart(nodes[1].id()).await;
-    let _ = manager.spawn(async move { connect(2).await }).await.unwrap();
-    faults.set(bucket_cell::faults::Odds { fail_before: 1.0, ..bucket_cell::faults::Odds::NONE });
-    node_local::kill(nodes[2].id()).await;
-
-    // Round 1 commits MUST succeed via replicated quorum (host 1 + restarted host 2) even while
-    // the bucket is 100% unreachable.
-    go.send(()).await.unwrap();
-    let told = tokio::time::timeout(Duration::from_secs(30), writer)
-        .await
-        .expect("replicated commits stalled after replica member restart during bucket outage")
-        .unwrap();
-
-    // Kill the writer host 1 permanently before healing the bucket; restart host 3 (which missed
-    // all Round 1 commits) so host 2 + host 3 form an unforced f+1 fencing quorum, and verify
-    // host 2's take recovers every block committed both before and during the outage.
-    node_local::kill(nodes[0].id()).await;
-    faults.set(bucket_cell::faults::Odds::NONE);
-    node_local::restart(nodes[2].id()).await;
-    let _ = manager.spawn(async move { connect(3).await }).await.unwrap();
-    manager.spawn(async move { take(2, cell, 20, false).await }).await.unwrap();
-    let node = handle.get_node(nodes[1].id()).unwrap();
-    let lost = node.spawn(lost_in(cell, cell, told, Blocks::new())).await.unwrap();
-    assert_eq!(lost, Vec::<u64>::new(), "blocks told replicated during outage lost");
-}
-
 /// How a profile cuts its hosts off the network a while, at each round, as the seed says (doc-24,
 /// FoundationDB's partitions and swizzle).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1108,7 +805,7 @@ enum Net {
 /// families (doc-24, TASK-685.7).
 #[derive(Clone, Copy, Debug)]
 struct Profile {
-    /// What its hosts keep: its cell replicated if they replicate.
+    /// What its hosts keep.
     kept: Kept,
     /// How its hosts are cut off the network.
     net: Net,
@@ -1120,9 +817,6 @@ struct Profile {
     /// Whether the hosts' disks fail calls, as the seed says, once the cell is made, until the
     /// bucket heals ([`DISK_FAULTS`], board 5654).
     disk: bool,
-    /// Whether a member of the replicated cell is killed with the writer's host, more than a take
-    /// does without, and down still as the next host takes the cell, forced (doc-21, TASK-681).
-    forced: bool,
     /// Whether the hosts, peers, are told other peers between rounds, each its own list
     /// (SetPeers, TASK-406.2).
     peers: bool,
@@ -1150,7 +844,6 @@ impl Profile {
         loss: false,
         versions: false,
         disk: false,
-        forced: false,
         peers: false,
         drains: false,
         frees: false,
@@ -1167,15 +860,14 @@ impl Profile {
     const BASES: Self = Self { bases: true, collector: true, ..Self::PLAIN };
 
     /// FoundationDB's swarm (doc-24, its `addFailureInjection`): each family on or off as the
-    /// simulation's seed says, its hosts plain, peers or replicating, so that each seed runs its
-    /// own mix. Families that need peers or replicas only with them.
+    /// simulation's seed says, its hosts plain or peers, so that each seed runs its own mix.
+    /// Families that need peers only with them.
     fn swarm() -> Self {
         use madsim::rand::Rng as _;
         let mut rng = madsim::rand::thread_rng();
-        let kept = match rng.gen_range(0..3) {
+        let kept = match rng.gen_range(0..2) {
             0 => Kept::NONE,
-            1 => Kept::peers(3),
-            _ => Kept::replicas(3),
+            _ => Kept::peers(3),
         };
         let net = match rng.gen_range(0..4) {
             0 => Net::Whole,
@@ -1189,7 +881,6 @@ impl Profile {
             loss: rng.gen_bool(0.3),
             versions: rng.gen_bool(0.5),
             disk: rng.gen_bool(0.3),
-            forced: kept.replicas && rng.gen_bool(0.5),
             peers: kept.peers.is_some() && rng.gen_bool(0.5),
             drains: rng.gen_bool(0.3),
             frees: rng.gen_bool(0.5),
@@ -1467,34 +1158,18 @@ async fn attrition(profile: Profile) -> Result<(), String> {
     use madsim::rand::Rng as _;
     const ROUNDS: u64 = 5;
     const WRITES: u64 = 6;
-    let Profile { kept, net, loss, versions, disk, forced, peers, drains, frees, bases, .. } =
-        profile;
+    let Profile { kept, net, loss, versions, disk, peers, drains, frees, bases, .. } = profile;
     let (bucket, faults) = world();
     let (nodes, _roots) = hosts_keeping(3, &bucket, kept);
     let handle = madsim::runtime::Handle::current();
-    let told = Arc::new(Told {
-        versioning: versions,
-        freeing: frees,
-        syncing: forced && kept.replicas,
-        ..Told::default()
-    });
+    let told = Arc::new(Told { versioning: versions, freeing: frees, ..Told::default() });
     let manager = manager();
     let mut cell = None;
-    // A replicated cell, made by the manager as a guest's open makes none: the first round's
-    // writer opens it.
-    let mut made = false;
-    if kept.replicas {
-        let making = async move { create_replicated(1, 10).await };
-        cell = Some(manager.spawn(making).await.unwrap());
-        made = true;
-    }
     // A host's node as it is now: one started again is a node anew, which a handle of the one
     // killed spawns nothing on.
     let node = |host: usize| handle.get_node(nodes[host].id()).unwrap();
-    // Hosts killed, started again before the next round, a while after, as the seed says; and one
-    // held down through the next round's take, which it forces, then started again.
+    // Hosts killed, started again before the next round, a while after, as the seed says.
     let mut killed: Vec<madsim::runtime::NodeHandle> = Vec::new();
-    let mut held: Option<madsim::runtime::NodeHandle> = None;
     let restart = |killed: Vec<madsim::runtime::NodeHandle>| async move {
         if killed.is_empty() {
             return;
@@ -1554,26 +1229,20 @@ async fn attrition(profile: Profile) -> Result<(), String> {
             meanwhile.extend(reshuffle_peers(&manager, 3));
         }
         let host = (round % 3) as usize;
-        if let Some(cell) = cell
-            && !std::mem::take(&mut made)
-        {
-            let force = held.is_some();
-            let taking = async move { take(host as u8 + 1, cell, round + 10, force).await };
+        if let Some(cell) = cell {
+            let taking = async move { take(host as u8 + 1, cell, round + 10).await };
             manager.spawn(taking).await.unwrap();
         }
-        restart(held.take().into_iter().collect()).await;
-        // Its bases' round once every host is up: a host held down is no base's.
         if bases {
             let (source, target) = (host, (host + 1) % 3);
             inherited.extend(
                 base_round(round, node(source), &manager, source as u8 + 1, target as u8 + 1).await,
             );
         }
-        let writing = write_round(host as u8 + 1, cell, round, WRITES, told.clone());
+        let writing = write_round(cell, round, WRITES, told.clone());
         let mut written = node(host).spawn(writing);
         // As the seed says: the writer done; or the next round taking the cell as it writes; or
-        // its host killed as it writes, drained first now and then, started again a while after,
-        // a member killed with it if takes are forced.
+        // its host killed as it writes, drained first now and then, started again a while after.
         let wait = Duration::from_millis(madsim::rand::thread_rng().gen_range(0..3000));
         match madsim::time::timeout(wait, &mut written).await {
             Ok(done) => cell = cell.or(done.unwrap()),
@@ -1594,17 +1263,12 @@ async fn attrition(profile: Profile) -> Result<(), String> {
                     }
                     node_local::kill(nodes[host].id()).await;
                     killed.push(nodes[host].clone());
-                    if forced {
-                        let member = (host + 2) % 3;
-                        node_local::kill(nodes[member].id()).await;
-                        held = Some(nodes[member].clone());
-                    }
                 }
             }
         }
     }
     let cell = cell.unwrap();
-    restart(killed.into_iter().chain(held).collect()).await;
+    restart(killed).await;
     // Healed: the bucket, the disks and the network whole, every host's limits lifted and its
     // peers all, and the last host takes the cell.
     for task in meanwhile {
@@ -1634,7 +1298,7 @@ async fn attrition(profile: Profile) -> Result<(), String> {
         Ok::<_, cladefs::Errno>(())
     });
     healing.await.unwrap().map_err(|errno| format!("lifting the limits: {errno:?}"))?;
-    manager.spawn(async move { take(1, cell, ROUNDS + 10, false).await }).await.unwrap();
+    manager.spawn(async move { take(1, cell, ROUNDS + 10).await }).await.unwrap();
     // The collector's last passes, one after the other.
     if let (Some(collector), Some(passes)) = (&collector, passes) {
         passes.abort();
@@ -1649,7 +1313,7 @@ async fn attrition(profile: Profile) -> Result<(), String> {
     let uploaded = told.uploaded.lock().unwrap().clone();
     let freed = told.freed.lock().unwrap().clone();
     // Some write told uploaded, unless the network was cut or lossy: then every take may have
-    // failed, a replicated cell's members out of reach, which is no loss.
+    // failed, which is no loss.
     if uploaded.is_empty() {
         assert!(net != Net::Whole || loss, "no write was told uploaded");
         eprintln!("no write was told uploaded: every round's take or open failed, cut off");
@@ -2007,7 +1671,7 @@ async fn ephemeral_attrition(disk: bool, aborts: bool) -> Result<(), String> {
     // Migrations prepared, and those that moved the cell.
     let (mut tried, mut handed) = (0u32, 0u32);
     for round in 0..ROUNDS {
-        let writing = write_round(host as u8 + 1, Some(child), round, WRITES, told.clone());
+        let writing = write_round(Some(child), round, WRITES, told.clone());
         let mut written = node(host).spawn(writing);
         let wait = Duration::from_millis(madsim::rand::thread_rng().gen_range(0..2000));
         if madsim::time::timeout(wait, &mut written).await.is_err() {

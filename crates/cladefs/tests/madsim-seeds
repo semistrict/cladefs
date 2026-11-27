@@ -19,16 +19,12 @@
 171     board 5730: a handed-over cell's journal entry, its note now, unlinked as it was let go of, its directory's sync failing, answered EIO; asking again found nothing (ENOENT)
 210     board 5734: a target's acceptance released by its source, the cell's noting taken having failed after it: the target started again took its entry for a migration never accepted and removed the cell
 157     board 5948: a host's boot failed on its part cache's EIO, and the VM manager gave up on its control API within 5 s, before madsim started it again (1 to 10 s; GitHub's runner, Linux)
-868     board 5914: a member's first append of a log failing after its file was made, the empty file was no authentic copy, and every take failed (macOS)
-1171    board 5914: the same, its take failing for good (macOS)
 636     board 5908: a host started again ran a guest's open before its boot, through what its kill left; the boot's own opening of the cell beside it, the first's close linked files the second never counted (macOS)
 29      board 5748: a read of an open cell's attached bases failing (EIO) dropped the cell open, unclosed, panicking
 90      board 5748: a host journal note unread (EIO) removed as torn, its cell then noted on no host
-34      board 5748: the same open cell dropped open, in the replicated disk-faults profile
 149     board 10506: board 5668's, its store's removal failing too, the description's rename (EIO): the store, looking made, refused every take after (EEXIST) (Linux)
 145     board 10663: every extent a writer made freed before another host took the cell, the harness's guest minted from 0 again, past its extents alone, not its writer's floor: each write refused (EPERM), none told uploaded
 92      board 6034: ephemeral disk-faults profile with BUGGIFY enabled lost Local-committed blocks
 109     board 6032: ephemeral disk-faults profile host 3 never answered under live-migration disk faults
 199     board 6032: ephemeral disk-faults profile cell noted on every host under live-migration disk faults
 1795627792743012262 board 12293: a host's crash tore its part cache's .disk-id, written unsynced, and its reboot refused the cache on the bytes (invalid utf-8), its daemon never booting: red at eebea4edf, fixed by board 12102 (Linux)
-1795700008  board 13821: replicated writer fenced by member kept waiting in Waiting::Told instead of failing EROFS, leaving zombie open and blocking drop_cell/take

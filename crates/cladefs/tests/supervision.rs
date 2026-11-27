@@ -134,22 +134,17 @@ fn a_panic_on_any_service_aborts_the_daemon_naming_it() {
         ],
         nothing,
     ));
-    // board 9414: the replica directory's sweep and the reaping of migrations abandoned, on the
-    // bucket runtime, which serving peers starts; and the VM processes' watchdog, which the first
-    // VM process to connect starts.
-    let replicated = dir("replicas env");
-    let serving_peers = |replicas: bool| {
-        let mut env = vec![
+    // board 9414: the reaping of migrations abandoned, on the bucket runtime, which serving peers
+    // starts; and the VM processes' watchdog, which the first VM process to connect starts.
+    let reaping = dir("reap env");
+    services.push(Service::starting(
+        "cladefsd reap",
+        vec![
             ("CLADEFSD_PEER_ADDRESS", free_address()),
-            ("CLADEFSD_PART_CACHE", replicated.join("cache").display().to_string()),
-        ];
-        if replicas {
-            env.push(("CLADEFSD_REPLICAS", replicated.join("replicas").display().to_string()));
-        }
-        env
-    };
-    services.push(Service::starting("cladefsd sweep", serving_peers(true), nothing));
-    services.push(Service::starting("cladefsd reap", serving_peers(false), nothing));
+            ("CLADEFSD_PART_CACHE", reaping.join("cache").display().to_string()),
+        ],
+        nothing,
+    ));
     services.push(Service::starting("cladefsd watchdog", vec![], |dir: &Path| {
         // Its first VM process starts it: the daemon aborting meanwhile, the opening fails, which
         // is what is looked for.

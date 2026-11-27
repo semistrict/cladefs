@@ -990,13 +990,7 @@ fn bucket_backed_cells_refuse_peer_migration_and_move_via_bucket() {
     target
         .control
         .call(async |c| {
-            c.place_cell(PlaceCellRequest {
-                tenant: cell.tenant,
-                cell: cell.id,
-                token: 2,
-                force: false,
-            })
-            .await
+            c.place_cell(PlaceCellRequest { tenant: cell.tenant, cell: cell.id, token: 2 }).await
         })
         .unwrap();
     let target_client = CellClient::connect_cell(&target.vms, cell).unwrap();

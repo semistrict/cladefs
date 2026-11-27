@@ -225,25 +225,6 @@ cell, whether a VM process has it open or not (board 13879): the token
 host's copy is the cell's latest placement while no other host holds one of a
 greater token. `taken_token` says the same, but only while the cell uploads.
 
-### Replicated cells' replica directories
-
-A host keeps the logs it holds of other hosts' replicated cells, and its promises
-to their takes, in its replica directory (`CLADEFSD_REPLICAS`, doc-21). **Never
-restore it from a snapshot or a backup, and never copy it to another host**
-(TASK-682). A restored directory keeps its incarnation but goes back to older
-promises, so a writer a take fenced can have commits told Replicated again that
-no later writer holds. A host whose disk was restored, or whose image was cloned,
-deletes its replica directory before its daemon starts: it comes back as a new
-member, whose configurations replace it as they replace a lost disk.
-
-A cell more of whose members are lost for good than its f can't be taken: take it
-forced (TASK-681), on a host holding its cell by placing that forced
-(`cladefsctl place --force DIR TOKEN`, `PlaceCell`'s `force`), on a new host by
-taking it forced (`cladefsctl take --force DIR CAPACITY CELL TOKEN`,
-`CreateCell`'s `force`). That placement's takes go on with the members that answer
-and the bucket, and lose what only the others held; `StatCell`'s `forced_after`
-names the last commit the bucket held, past which commits told Replicated may be lost.
-
 ### Fast WAL cells (appendable zonal object storage)
 
 When compute hosts have access to an appendable zonal object store (Amazon S3
@@ -259,9 +240,7 @@ fast WAL bucket URLs; takeover refuses any bucket URL in a cell head outside
 (`CreateCellRequest.fast_wal = true`, `FsyncLevel.FSYNC_LEVEL_FAST_WAL`) perform
 zero local disk `fsync`s and keep compute nodes 100% stateless cache-only; losing
 any node at any time loses zero acknowledged commits, and takeover from another
-host fences and recovers the active WAL automatically. Fast WAL cannot be
-combined with peer replication (`replicas >= 1` or an active peer configuration;
-disable replication with `replicas = 0` and `SyncCell` first).
+host fences and recovers the active WAL automatically.
 
 ### Buckets and their numbers
 
@@ -467,7 +446,7 @@ Bind either to localhost or to a network only operators reach. A profile whose c
 ends then; one profile at a time (`409` while one is taken).
 
 Metrics label a cell `cell="TENANT/CELL"`, in base 32, as cells name it, in every family
-(`cladefsd_vm_*`, `cladefsd_vm_build_info`, `cladefsd_upload_*`, `cladefsd_replication_*`), so
+(`cladefsd_vm_*`, `cladefsd_vm_build_info`, `cladefsd_upload_*`), so
 that they join on it. Those families are per cell, and a fork is a cell of its own: their series
 come and go with the cells opened, so aggregate them (`sum without (cell)`, recording rules)
 rather than keep each cell's. `cladefsd_vm_*` tells a cell's writer from its followers by
@@ -481,7 +460,7 @@ is listed in `crates/cladefs/src/cladefsd/metrics.rs`'s module doc):
 | Family | What |
 |---|---|
 | `cladefsd_grpc_server_calls_total`, `cladefsd_grpc_server_errors_total`, `cladefsd_grpc_server_duration_seconds` (histogram) | gRPC calls served, by `service` (`cladefs.cladefsd.v1.Cladefsd`, the control API; `cladefs.mount.v1.Mount`; `cladefs.peer.v1.Peer`) and `method`, each of the .protos' and `unknown`: their count, those failed (a status other than OK, or their stream cut), and how long each took to its answer's end, a stream's whole life. Refusals while the daemon drains count, `UNAVAILABLE`. |
-| `cladefsd_grpc_client_calls_total`, `cladefsd_grpc_client_errors_total`, `cladefsd_grpc_client_duration_seconds` | The calls the daemon made of its peers (parts, replication, migrations), alike. |
+| `cladefsd_grpc_client_calls_total`, `cladefsd_grpc_client_errors_total`, `cladefsd_grpc_client_duration_seconds` | The calls the daemon made of its peers (parts, migrations), alike. |
 | `cladefsd_migrations{state}` | Live migrations under way: from this host `preparing` and `moving`, to it `taking`. |
 | `cladefsd_migrations_total{outcome}` | Migrations from this host `prepared`, `aborted` (their prepare failed), `accepted`, `refused`, and `given_up` by their targets. |
 | `cladefsd_migration_rounds_total`, `cladefsd_migration_sent_bytes_total`, `cladefsd_migration_taken_bytes_total`, `cladefsd_migrations_taken_given_up_total` | Their rounds, bytes sent from this host and taken by it, and migrations to it given up (aborted, or idle `CLADEFSD_MIGRATION_IDLE`). |
@@ -755,7 +734,6 @@ and `scripts/tests/test_ops_examples.py` that every metric they name is one the 
 | `CladefsdVmProcessesWedged` | warning | VM processes it killed that have not gone, for 15 minutes. |
 | `CladefsdDiskPressure` | warning | A disk under pressure for 10 minutes: uploads urged, tenants held to their shares. |
 | `CladefsdDiskFull` | critical | A disk's free space under its headroom for 5 minutes: another writer (`cladefsd_host_disk_other_bytes`), and guests' writes refused `ENOSPC` soon. |
-| `CladefsdReplicationDegraded` | warning | A replicated cell degraded for 5 minutes. |
 | `CladefsdUnqualifiedBuild` | warning | `cladefsd_build_info` names a `-dirty` or `unknown` build. |
 | `CladefsdBuildsDiffer` | warning | The hosts run more than one build for a day: an upgrade left part way. |
 

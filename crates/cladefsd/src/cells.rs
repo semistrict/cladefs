@@ -699,12 +699,6 @@ fn keeping(daemon: &Daemon) -> Result<local_cell::upload::Options, Errno> {
     let token = daemon_token()?;
     let (cache, interval) = (part_cache(daemon)?, upload_interval());
     let held = Some(crate::memory::held_parts_on(daemon).clone());
-    // cladefs: and the hosts its replicated cells' configurations are made of (doc-21).
-    let members = cladefs_core::bucket::members_on(&daemon.host).map(local_cell::upload::MembersOf);
-    let replace_after = replace_after().map_err(|err| {
-        log::error!("cladefsd: {err}");
-        Errno::EINVAL
-    })?;
     let (fast_wal_config, fast_wal_large_extent) = match crate::storage::fast_wal_config(daemon)? {
         Some((config, large_extent)) => (Some(config), large_extent),
         None => (None, local_cell::fast_wal::DEFAULT_LARGE_EXTENT),
@@ -716,29 +710,10 @@ fn keeping(daemon: &Daemon) -> Result<local_cell::upload::Options, Errno> {
         token,
         interval,
         upload_closed: upload_closed(),
-        members,
-        replace_after,
         fast_wal_config,
         fast_wal_large_extent,
         ..Default::default()
     })
-}
-
-/// cladefs: how long a member of a replicated cell's configuration is down before its writer
-/// replaces it, and the cell degraded before it drops to f = 0 (doc-21, TASK-537.3.5): the
-/// seconds `CLADEFSD_REPLACE_AFTER` says, a positive number, or 30. Read at the daemon's start, to
-/// refuse what it can't use, and as each cell opens.
-pub fn replace_after() -> Result<std::time::Duration, String> {
-    let Some(set) = node_local::env::var_os("CLADEFSD_REPLACE_AFTER") else {
-        return Ok(local_cell::upload::Options::default().replace_after);
-    };
-    // Not UTF-8, or not a number: refused below.
-    match set.to_str().and_then(|seconds| seconds.parse::<u64>().ok()) {
-        Some(0) | None => {
-            Err(format!("CLADEFSD_REPLACE_AFTER must be a positive number of seconds: {set:?}"))
-        }
-        Some(seconds) => Ok(std::time::Duration::from_secs(seconds)),
-    }
 }
 
 /// The cell at `path` as `daemon` opens it to work on it, not a VM.
@@ -776,12 +751,10 @@ pub(super) async fn create(
     path: PathBuf,
     capacity: u64,
     cell: CellId,
-    (token, kind, replication, fast_wal, force, upload_interval, ephemeral): (
+    (token, kind, fast_wal, upload_interval, ephemeral): (
         Option<u64>,
         Kind,
-        Option<bucket_cell::layout::Wish>,
         Option<Option<bucket_cell::layout::Fsync>>,
-        bool,
         Option<std::time::Duration>,
         bool,
     ),
@@ -800,13 +773,7 @@ pub(super) async fn create(
     })
     .await?;
     if ephemeral {
-        if cell.id != 0
-            || token.is_some()
-            || replication.is_some()
-            || fast_wal.is_some()
-            || force
-            || upload_interval.is_some()
-        {
+        if cell.id != 0 || token.is_some() || fast_wal.is_some() || upload_interval.is_some() {
             return Err(Errno::EINVAL);
         }
         return attached(daemon, &path, async |keeping| {
@@ -829,13 +796,11 @@ pub(super) async fn create(
         (_, 0) | (0, _) => return Err(Errno::EINVAL),
         (_, _) => CellOf::Taken(cell),
     };
-    // cladefs: the replication or Fast WAL mode its call asked for, which its taking gives the
-    // cell's head (doc-21, doc-29, TASK-537.3.1); its taking forced, if asked (TASK-681); and any
-    // per-cell uploader interval override (hotbed question 534).
+    // cladefs: the Fast WAL mode its call asked for, which its taking gives the cell's head
+    // (doc-29); and any per-cell uploader interval override (hotbed question 534).
     let made = attached(daemon, &path, async |keeping| {
         let interval = upload_interval.unwrap_or(keeping.interval);
-        let keeping =
-            local_cell::upload::Options { replication, fast_wal, force, interval, ..keeping };
+        let keeping = local_cell::upload::Options { fast_wal, interval, ..keeping };
         OpenCell::create_placed_on(&daemon.host, &path, (capacity, of, token), kind, keeping).await
     })
     .await?;
@@ -1549,12 +1514,7 @@ pub(super) async fn resize(
 }
 
 /// Places the cell at `path` on `daemon` at the placement whose fencing token is `token`.
-pub(super) async fn place(
-    daemon: &Arc<Daemon>,
-    path: PathBuf,
-    token: u64,
-    force: bool,
-) -> Result<(), Errno> {
+pub(super) async fn place(daemon: &Arc<Daemon>, path: PathBuf, token: u64) -> Result<(), Errno> {
     let held = hold_alone(daemon, &path).await?;
     let host = daemon.host.clone();
     blocking(move || {
@@ -1562,11 +1522,8 @@ pub(super) async fn place(
         if host_fs::exists(path.join(crate::migration::MARKER)) {
             return Err(Errno::EBUSY);
         }
-        let placed = match force {
-            true => OpenCell::place_forced_on(&host, &path, token),
-            false => OpenCell::place_on(&host, &path, token),
-        };
-        placed.map_err(|err| errno_of(format_args!("placing {}", path.display()), err))
+        OpenCell::place_on(&host, &path, token)
+            .map_err(|err| errno_of(format_args!("placing {}", path.display()), err))
     })
     .await
 }

@@ -46,7 +46,6 @@ Environment=CLADEFSD_GRPC=/run/cladefsd/control.sock
 # colon-separated, or [[disks]] of a TOML config.
 Environment=CLADEFSD_ROOTS=/var/lib/cladefsd/disk0
 Environment=CLADEFSD_PART_CACHE=/var/lib/cladefsd/part-cache
-Environment=CLADEFSD_REPLICAS=/var/lib/cladefsd/replicas
 Environment=CLADEFSD_METRICS=127.0.0.1:9184
 Environment=CLADEFS_LOG_FORMAT=json
 # The drain's bound, which TimeoutStopSec must exceed.

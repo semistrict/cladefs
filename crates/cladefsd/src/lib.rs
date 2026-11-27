@@ -145,7 +145,6 @@ use std::sync::Arc;
 
 #[cfg(all(target_os = "linux", not(madsim)))]
 pub use boot::boot;
-pub use cells::replace_after;
 pub use client::{CellClient, DaemonConnection, Unmapped, spawn_on_replies};
 #[cfg(not(madsim))]
 pub use control::serve_control;

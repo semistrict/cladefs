@@ -65,15 +65,7 @@ fn cells_through_the_control_api() {
             uploaded: 1,
             pending_upload_bytes: 0,
             oldest_pending_ms: 0,
-            // Not replicated (TASK-537.3.1).
-            replicas: 0,
             fsync: FsyncLevel::Ordered.into(),
-            configuration: 0,
-            degraded: false,
-            members_up: 0,
-            active_replicas: 0,
-            // Taken unforced (TASK-681).
-            forced_after: None,
             // Not using Fast WAL (doc-29).
             fast_wal: false,
             fast_wal_bucket: String::new(),
@@ -920,94 +912,6 @@ fn master_keys_reload_without_a_restart_keeping_those_in_use() {
     daemon.create(of(4), None).unwrap();
 }
 
-/// TASK-537.3.1 (doc-21): CreateCell gives a cell its replication, its f and what its fsync waits
-/// for, in its head, which StatCell reports of the open cell; a taking that asks for nothing, on
-/// any host, keeps them, and one that asks for another changes them. Asks no f can satisfy are
-/// refused, and an f of 1 or more by a daemon with no peers (TASK-537.3.3).
-#[test]
-fn cells_are_made_replicated_through_the_control_api() {
-    // SAFETY: as in cells_through_the_control_api.
-    unsafe {
-        std::env::set_var("CLADEFSD_BUCKET", "memory:///replicated");
-        std::env::set_var("CLADEFSD_TOKEN", "1");
-    }
-    let dir = tempfile::tempdir().unwrap();
-    let mut daemon = Daemon::new(dir.path());
-    let request = |cell: u64, replicas: Option<u32>, fsync: FsyncLevel| CreateCellRequest {
-        capacity: CAPACITY,
-        cell,
-        replicas,
-        fsync: fsync.into(),
-        ..CreateCellRequest::default()
-    };
-    let create = |daemon: &mut Daemon, request: CreateCellRequest| {
-        daemon.runtime.block_on(daemon.client.create_cell(request)).map(|made| made.into_inner())
-    };
-    let replicated = |daemon: &mut Daemon, cell: CellId| {
-        let client = daemon.open(cell);
-        let stat = daemon.stat(cell).unwrap();
-        drop(client);
-        daemon.wait_closed(cell);
-        (stat.replicas, stat.fsync(), stat.configuration)
-    };
-
-    // This daemon has no peers, nor a replica directory: an f of 1 or more is refused before
-    // anything is made (TASK-537.3.3's fail-hard rule), and the head keeps what an f of 0 asks.
-    let refused = create(&mut daemon, request(0, Some(1), FsyncLevel::Replicated));
-    // Board 8583: what the daemon said of it, as a client of the API, cladefsctl's, says it, its
-    // errno with it; an errno said alone, not said twice.
-    let said = cladefs::cladefsd::control::failed("making the cell".into(), refused.unwrap_err());
-    assert_eq!(
-        format!("{said:#}"),
-        "making the cell: a replicated cell needs the daemon's peers and replica directory \
-         (peers.address, peers.addresses, peers.replicas): ENOTSUP (errno 95)"
-    );
-    assert_eq!(said.errno(), Some(Errno::ENOTSUP));
-    let bare = create(&mut daemon, request(0, Some(4), FsyncLevel::Ordered));
-    let said = cladefs::cladefsd::control::failed("making the cell".into(), bare.unwrap_err());
-    assert_eq!(format!("{said:#}"), "making the cell: EINVAL (errno 22)");
-    assert_eq!(said.errno(), Some(Errno::EINVAL));
-    // Deprecated FSYNC_LEVEL_LOCAL maps to FSYNC_LEVEL_ORDERED with a warning for backwards
-    // compatibility.
-    #[allow(deprecated)]
-    let made = create(&mut daemon, request(0, Some(0), FsyncLevel::Local)).unwrap();
-    let first = CellId { tenant: made.tenant, id: made.cell };
-    assert_eq!(replicated(&mut daemon, first), (0, FsyncLevel::Ordered, 0));
-    daemon.sync(first).unwrap();
-
-    // Dropped locally and taken back, asking for nothing: kept. Then asking for another: changed.
-    daemon.drop_cell(first).unwrap();
-    create(&mut daemon, request(made.cell, None, FsyncLevel::Ordered)).unwrap();
-    assert_eq!(replicated(&mut daemon, first), (0, FsyncLevel::Ordered, 0));
-    daemon.sync(first).unwrap();
-    daemon.drop_cell(first).unwrap();
-    create(&mut daemon, request(made.cell, Some(0), FsyncLevel::Ordered)).unwrap();
-    assert_eq!(replicated(&mut daemon, first), (0, FsyncLevel::Ordered, 0));
-
-    // A cell made asking for nothing is not replicated.
-    let plain = create(&mut daemon, request(0, None, FsyncLevel::Ordered)).unwrap();
-    let plain = CellId { tenant: plain.tenant, id: plain.cell };
-    assert_eq!(replicated(&mut daemon, plain), (0, FsyncLevel::Ordered, 0));
-
-    // No f past 3, no fsync level without replicas, no fsync waiting for copies an f of 0 never
-    // makes: refused, nothing made.
-    #[allow(deprecated)]
-    let refused_cases = [
-        (Some(4), FsyncLevel::Ordered),
-        (None, FsyncLevel::Local),
-        (None, FsyncLevel::Replicated),
-        (Some(0), FsyncLevel::Replicated),
-    ];
-    for (replicas, fsync) in refused_cases {
-        let refused = create(&mut daemon, request(0, replicas, fsync));
-        assert_eq!(
-            failure(refused),
-            (Code::InvalidArgument, Errno::EINVAL),
-            "{replicas:?} {fsync:?}"
-        );
-    }
-}
-
 /// What a guest of today says of its stats, as its Fxfs and its driver write them: its device's
 /// and its window's requests timed (a count, nanoseconds, a histogram of 24 buckets each), and the
 /// rest of its counters, some 50 lines and 12 histograms in all.
@@ -1357,28 +1261,18 @@ fn fast_wal_refused_without_bucket_and_on_invalid_combinations() {
     assert!(daemon.list().is_empty());
 
     // Invalid combinations are refused with EINVAL and create no cell.
-    let invalid = [
-        (Some(1), Some(true), FsyncLevel::FastWal),
-        (None, Some(true), FsyncLevel::Replicated),
-        (None, None, FsyncLevel::FastWal),
-        (None, Some(false), FsyncLevel::FastWal),
-    ];
-    for (replicas, fast_wal, fsync) in invalid {
+    let invalid = [(None, FsyncLevel::FastWal), (Some(false), FsyncLevel::FastWal)];
+    for (fast_wal, fsync) in invalid {
         let res = create(
             &mut daemon,
             CreateCellRequest {
                 capacity: CAPACITY,
-                replicas,
                 fast_wal,
                 fsync: fsync.into(),
                 ..CreateCellRequest::default()
             },
         );
-        assert_eq!(
-            failure(res),
-            (Code::InvalidArgument, Errno::EINVAL),
-            "{replicas:?} {fast_wal:?} {fsync:?}"
-        );
+        assert_eq!(failure(res), (Code::InvalidArgument, Errno::EINVAL), "{fast_wal:?} {fsync:?}");
         assert!(daemon.list().is_empty());
     }
 }
@@ -1421,7 +1315,6 @@ fn cells_are_made_fast_wal_through_the_control_api() {
     assert_eq!(stat.fast_wal_bucket, fast_wal_url);
     assert!(!stat.fast_wal_degraded);
     assert_eq!(stat.fsync(), FsyncLevel::FastWal);
-    assert_eq!(stat.replicas, 0);
     drop(vm);
     let closed = daemon2.wait_closed(first);
     assert!(closed.fast_wal);
@@ -1447,12 +1340,11 @@ fn cells_are_made_fast_wal_through_the_control_api() {
     assert_eq!(stat2.fast_wal_bucket, fast_wal_url);
     drop(vm2);
 
-    // Explicit replicas=0 with fast_wal=true and FSYNC_LEVEL_FAST_WAL keeps FastWal fsync.
+    // Explicit fast_wal=true and FSYNC_LEVEL_FAST_WAL keeps FastWal fsync.
     let made3 = create(
         &mut daemon2,
         CreateCellRequest {
             capacity: CAPACITY,
-            replicas: Some(0),
             fast_wal: Some(true),
             fsync: FsyncLevel::FastWal.into(),
             ..CreateCellRequest::default()
@@ -1461,8 +1353,7 @@ fn cells_are_made_fast_wal_through_the_control_api() {
     .unwrap();
     let zero_rep = CellId { tenant: made3.tenant, id: made3.cell };
     let vm3 = daemon2.open(zero_rep);
-    // Exercise guest fsync (`commit_ordered` -> `Waiting::FastWal` via `head.fast_wal.fsync`)
-    // with explicit `replicas=0`, ensuring `replicas=0` never bypasses Fast WAL durability.
+    // Exercise guest fsync (`commit_ordered` -> `Waiting::FastWal` via `head.fast_wal.fsync`).
     let extent = cladefs::ExtentId { cell: vm3.cell(), sequence: 1 };
     let data = pattern(2);
     vm3.write(extent, 0, &[cladefs::VolatileSlice::from(&data[..])]).unwrap();
@@ -1477,7 +1368,7 @@ fn cells_are_made_fast_wal_through_the_control_api() {
     );
     let wal_ep2 = fast_wal_dir.join(bucket_cell::layout::wal(cell3, 2, 0));
     let wal_len = std::fs::metadata(&wal_ep2)
-        .expect("replicas=0 + FSYNC_LEVEL_FAST_WAL must append to fast WAL before returning")
+        .expect("FSYNC_LEVEL_FAST_WAL must append to fast WAL before returning")
         .len();
     assert!(
         wal_len > local_cell::fast_wal::HEADER_LEN as u64,
@@ -1485,7 +1376,6 @@ fn cells_are_made_fast_wal_through_the_control_api() {
     );
     let stat3 = daemon2.stat(zero_rep).unwrap();
     assert!(stat3.fast_wal);
-    assert_eq!(stat3.replicas, 0);
     assert_eq!(stat3.fsync(), FsyncLevel::FastWal);
     drop(vm3);
     daemon2.wait_closed(zero_rep);

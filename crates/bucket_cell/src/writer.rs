@@ -122,9 +122,6 @@ struct Inner {
     /// cladefs: the versions dropped, which no acknowledgement names, local ones among them, cut
     /// by segments not yet acknowledged (TASK-476).
     dropped: BTreeSet<u64>,
-    /// cladefs: a replicated cell's configuration its next acknowledgement naming the commit of
-    /// this epoch or a later one names in the same swap ([`Writer::configure_past`], TASK-537.3.6).
-    switch: Option<(u64, layout::Configuration)>,
     /// cladefs: a fast WAL head update (`head.fast_wal`) applied atomically in the same head swap
     /// that acknowledges `through >= through_segment` ([`Writer::activate_fast_wal_past`], doc-29).
     fast_wal_switch: Option<(u64, Option<layout::FastWal>)>,
@@ -139,12 +136,11 @@ struct Inner {
 }
 
 /// What an acknowledgement names ([`Writer::naming`]): the last segment, the versions cut at the
-/// ends of those it names, each with its segment, and the configuration / fast-WAL switch if this
-/// acknowledgement crosses their targets.
+/// ends of those it names, each with its segment, and the fast-WAL switch if this acknowledgement
+/// crosses its target.
 struct Naming {
     through: u64,
     cuts: Vec<(u64, layout::NewVersion)>,
-    switch: Option<layout::Configuration>,
     fast_wal_switch: Option<Option<layout::FastWal>>,
 }
 
@@ -226,7 +222,6 @@ impl<B: Bucket> Writer<B> {
                 checkpoint,
                 stopped: None,
                 dropped: BTreeSet::new(),
-                switch: None,
                 fast_wal_switch: None,
                 preuploaded_own: BTreeSet::new(),
                 preuploading_own: BTreeMap::new(),
@@ -506,47 +501,6 @@ impl<B: Bucket> Writer<B> {
         Ok(bucket::create(&*self.bucket, key, bytes).await?)
     }
 
-    /// cladefs: activates `configuration` as the cell's replicated configuration (doc-21,
-    /// TASK-537.3.3): a swap of the head it holds naming it, conditional as every swap is, so that
-    /// a writer fenced since fails it, and stops. Refused for a cell its head says is not
-    /// replicated ([`Error::Corrupt`]): its taking asked for no replication.
-    pub async fn configure(&self, configuration: layout::Configuration) -> Result<(), Error> {
-        if let Some(error) = &self.inner().stopped {
-            return Err(error.clone());
-        }
-        let mut held = self.held.lock().await;
-        let mut next = held.head.clone();
-        let Some(replication) = next.replication.as_mut() else {
-            return Err(Error::Corrupt(format!("{:?}: not replicated, configured", self.cell)));
-        };
-        replication.configuration = Some(configuration);
-        match head::swap(&*self.bucket, self.cell, &held, next).await {
-            Ok(swapped) => {
-                *held = swapped;
-                Ok(())
-            }
-            Err(error) => Err(self.stop(error)),
-        }
-    }
-
-    /// cladefs: has the acknowledgement that first names the commit of epoch `epoch` (by its
-    /// number, `extent_frame::segment::epoch_of`), or a later one, name `configuration` as its
-    /// cell's in the same swap (doc-21, TASK-537.3.6): a take that recovered from the members of
-    /// the configuration the head names, through `epoch`, and could give them to none of its
-    /// own, serves alone, the head naming that configuration, fenced, until the bucket holds what
-    /// it recovered; and no later commit of its own is acknowledged before the head names its own
-    /// configuration, of f = 0, so that a take after reads the bucket, not the configuration
-    /// before, whose members hold another writer's commits past the recovered ones. An
-    /// acknowledgement already past it, none.
-    pub fn configure_past(&self, epoch: u64, configuration: layout::Configuration) {
-        self.inner().switch = Some((epoch, configuration));
-    }
-
-    /// cladefs: whether a switch [`Writer::configure_past`] asked for is yet to land.
-    pub fn switching(&self) -> bool {
-        self.inner().switch.is_some()
-    }
-
     /// cladefs: the head as it last swapped it, or took it.
     pub async fn head(&self) -> layout::Head {
         self.held.lock().await.head.clone()
@@ -575,7 +529,7 @@ impl<B: Bucket> Writer<B> {
         self.bucket.rewritable(&layout::head(self.cell)).await;
         let through = {
             let mut held = self.held.lock().await;
-            let Some(Naming { through, cuts, switch, fast_wal_switch }) = self.naming()? else {
+            let Some(Naming { through, cuts, fast_wal_switch }) = self.naming()? else {
                 return Ok(self.inner().state.through);
             };
             if held.head.end <= through {
@@ -590,20 +544,12 @@ impl<B: Bucket> Writer<B> {
                 if let Some(landed) = self.landed(&held.head) {
                     next.checkpoint = Some((landed, self.epoch));
                 }
-                if let Some(configuration) = &switch
-                    && let Some(replication) = next.replication.as_mut()
-                {
-                    replication.configuration = Some(configuration.clone());
-                }
                 if let Some(fast_wal) = &fast_wal_switch {
                     next.fast_wal = fast_wal.clone();
                 }
                 match head::swap(&*self.bucket, self.cell, &held, next).await {
                     Ok(swapped) => *held = swapped,
                     Err(error) => return Err(self.stop(error)),
-                }
-                if switch.is_some() {
-                    self.inner().switch = None;
                 }
                 if fast_wal_switch.is_some() {
                     self.inner().fast_wal_switch = None;
@@ -654,18 +600,10 @@ impl<B: Bucket> Writer<B> {
             true => inner.pending.range(..=through).flat_map(cut).collect(),
             false => inner.pending.iter().flat_map(cut).collect(),
         };
-        // cladefs: the configuration a switch names, if this acknowledgement names its commit.
-        let last = (inner.pending.range(..=through))
-            .flat_map(|(_, pending)| pending.footer.contents.commits.iter())
-            .map(|&commit| extent_frame::segment::epoch_of(commit))
-            .max();
-        let switch = (inner.switch.as_ref())
-            .filter(|(epoch, _)| last.is_some_and(|last| last >= *epoch))
-            .map(|(_, configuration)| configuration.clone());
         let fast_wal_switch = (inner.fast_wal_switch.as_ref())
             .filter(|(target_seg, _)| through >= *target_seg)
             .map(|(_, fast_wal)| fast_wal.clone());
-        Ok(Some(Naming { through, cuts, switch, fast_wal_switch }))
+        Ok(Some(Naming { through, cuts, fast_wal_switch }))
     }
 
     /// cladefs: the checkpoint this writer landed that `head` names not, its newest, if any: one
@@ -818,50 +756,6 @@ mod tests {
                 .close(&mut writer.chain())
                 .frame(writer.keys().encrypting()),
         )
-    }
-
-    /// TASK-537.3.6 (doc-21; the spec's aloneSwitch): a configuration a writer asked to name past
-    /// a commit is named by the acknowledgement that first names that commit, in the same swap of
-    /// the head, and by none before it (Codex's review: not a swap of its own after).
-    #[test]
-    fn configurations_switch_with_the_acknowledgement_past_their_commit() {
-        use crate::layout::{Configuration, Fsync, Member, Wish};
-        futures::executor::block_on(async {
-            let bucket = memory();
-            let cell = test_cell(1);
-            lifecycle::create(&*bucket, cell, 0).await.unwrap();
-            let kms = crate::keys::testing::host_kms();
-            let read = head::read(&*bucket, cell).await.unwrap();
-            let wish = Wish::new(1, Fsync::Replicated);
-            let taking = head::Taking { holder: 10, replication: wish, ..head::Taking::default() };
-            let (held, keys) =
-                crate::keys::taking(&*bucket, &kms, cell, read, taking).await.unwrap();
-            let ring = crate::keys::ring(&*bucket, &keys, cell, &held.head, true).await.unwrap();
-            let writer = Writer::holding(bucket.clone(), cell, held, None, ring).await.unwrap();
-            let alone = Configuration {
-                number: 2,
-                epoch: writer.epoch(),
-                f: 0,
-                members: vec![Member { address: "me:1".into(), incarnation: 7 }],
-            };
-            writer.configure_past(2, alone.clone());
-            let named = || async {
-                let head = head::get(&*bucket, cell).await.unwrap().unwrap();
-                head.replication.unwrap().configuration
-            };
-            let first = add(&writer, Commit { tag: 1, ..Commit::default() }).unwrap();
-            let second = add(&writer, Commit { tag: 2, ..Commit::default() }).unwrap();
-            writer.upload(first).await.unwrap();
-            writer.acknowledge().await.unwrap();
-            assert_eq!(named().await, None, "named before its commit was");
-            assert!(writer.switching());
-            writer.upload(second).await.unwrap();
-            writer.acknowledge().await.unwrap();
-            let head = head::get(&*bucket, cell).await.unwrap().unwrap();
-            assert_eq!(head.end, second + 1, "the swap naming the commit");
-            assert_eq!(head.replication.unwrap().configuration, Some(alone));
-            assert!(!writer.switching());
-        });
     }
 
     /// A writer another took the cell from uploads its segment, at its own key, but its swap of

@@ -176,13 +176,13 @@ class RunTest(unittest.TestCase):
     def test_the_first_fresh_seed_is_checked_to_replay(self):
         """Board 7583: the first fresh seed runs with MADSIM_TEST_CHECK_DETERMINISM, and its
         failure says how to replay it so."""
-        diverged = ("cladefs::madsim", "replicated_commits_survive_attrition",
+        diverged = ("cladefs::madsim", "uploaded_commits_survive_attrition",
                     panic("non-determinism detected at 0x2a", 1))
         status, said, calls = self.run_seeds({"1": [diverged]})
         self.assertEqual(status, 1)
         self.assertEqual([(call["seed"], call["checked"]) for call in calls],
                          [("71", False), ("1", True), ("2", False), ("3", False)])
-        self.assertIn("madsim: new: seed 1: cladefs::madsim replicated_commits_survive_attrition: "
+        self.assertIn("madsim: new: seed 1: cladefs::madsim uploaded_commits_survive_attrition: "
                       "non-determinism detected at 0x2a: MADSIM_TEST_SEED=1 "
                       "MADSIM_TEST_CHECK_DETERMINISM=1 replays it\n", said)
 

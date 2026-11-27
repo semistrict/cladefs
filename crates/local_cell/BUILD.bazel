@@ -194,7 +194,7 @@ cladefs_rust_test(
         srcs = ["tests/" + test_name + ".rs"] + glob(["tests/common/**/*.rs"]),
         aliases = MADSIM_TOKIO_ALIAS,
         crate_root = "tests/" + test_name + ".rs",
-        isolated = test_name in ["cell", "replicated"],
+        isolated = test_name == "cell",
         proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
         shard_count = 4 if test_name == "cell" else None,
         deps = [
@@ -206,7 +206,6 @@ cladefs_rust_test(
         "corrupt",
         "host",
         "hot_path",
-        "replicated",
         "reserve",
     ]
 ]

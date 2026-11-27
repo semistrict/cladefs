@@ -175,13 +175,7 @@ impl Daemon {
     }
 
     pub fn place(&mut self, cell: CellId, token: u64) -> Result<(), tonic::Status> {
-        let request = PlaceCellRequest { tenant: cell.tenant, cell: cell.id, token, force: false };
-        self.runtime.block_on(self.client.place_cell(request)).map(drop)
-    }
-
-    /// Places `cell` at `token`'s placement, its takings forced (TASK-681).
-    pub fn place_forced(&mut self, cell: CellId, token: u64) -> Result<(), tonic::Status> {
-        let request = PlaceCellRequest { tenant: cell.tenant, cell: cell.id, token, force: true };
+        let request = PlaceCellRequest { tenant: cell.tenant, cell: cell.id, token };
         self.runtime.block_on(self.client.place_cell(request)).map(drop)
     }
 

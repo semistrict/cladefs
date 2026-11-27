@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 /// Explicit per-host state for `local_cell` (board 10962): owns the `bucket_cell::Host`, page
 /// cache, directory locks/claims, disk footprints, uploader count, bucket Tokio runtime,
-/// durability lag histogram, hot replication buffer budget, failed-making unmade set, unpacked
+/// durability lag histogram, staged commit buffer budget, failed-making unmade set, unpacked
 /// part cache, and deferred-durability table.
 pub struct Host {
     bucket: Arc<bucket_cell::Host>,
@@ -29,7 +29,7 @@ pub struct Host {
     pub(crate) uploaders: tokio::sync::watch::Sender<usize>,
     pub(crate) bucket_runtime: crate::upload::BucketRuntime,
     pub(crate) durability_lags: Mutex<crate::durability::Lags>,
-    pub(crate) hot_budget: Arc<crate::replicate::HotBudget>,
+    pub(crate) hot_budget: Arc<crate::hot_budget::HotBudget>,
     pub(crate) left_unmade: Mutex<HashSet<PathBuf>>,
     unpacked: Arc<crate::framed::Unpacked>,
     pub(crate) deferred: Mutex<HashMap<PathBuf, Arc<crate::deferral::Deferral>>>,
@@ -52,7 +52,7 @@ impl Host {
             uploaders: tokio::sync::watch::channel(0).0,
             bucket_runtime: crate::upload::BucketRuntime::new(),
             durability_lags: Mutex::new(crate::durability::Lags::new()),
-            hot_budget: crate::replicate::HotBudget::new(),
+            hot_budget: crate::hot_budget::HotBudget::new(),
             left_unmade: Mutex::new(HashSet::new()),
             unpacked,
             deferred: Mutex::new(HashMap::new()),
@@ -92,19 +92,9 @@ impl Host {
         crate::durability::durability_lags_on(self)
     }
 
-    /// Total bytes held in hot replication buffers on this host.
+    /// Total bytes held in staged commit buffers on this host.
     pub fn hot_bytes(&self) -> u64 {
-        crate::replicate::hot_bytes_on(self)
-    }
-
-    /// Sets this host's soft cap on hot replication buffers.
-    pub fn size_hot_to(&self, limit: u64) {
-        crate::replicate::size_hot_to_on(self, limit);
-    }
-
-    /// Evicts persisted hot replication chunks on this host down to `target`.
-    pub fn evict_hot_to(&self, target: u64) -> u64 {
-        crate::replicate::evict_hot_to_on(self, target)
+        crate::hot_budget::hot_bytes_on(self)
     }
 
     /// This host's bucket Tokio runtime.

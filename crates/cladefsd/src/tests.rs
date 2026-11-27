@@ -2880,7 +2880,7 @@ async fn control_takes_cells_at_the_placements_given() {
         path("first"),
         1 << 24,
         new,
-        (Some(5), Kind::Fxfs, None, None, false, None, false),
+        (Some(5), Kind::Fxfs, None, None, false),
     );
     let cell = control(made).unwrap();
     let extent = ExtentId { cell: cell.id, sequence: 1 };
@@ -2901,7 +2901,7 @@ async fn control_takes_cells_at_the_placements_given() {
         path("third"),
         1 << 24,
         cell,
-        (Some(7), Kind::Fxfs, None, None, false, None, false),
+        (Some(7), Kind::Fxfs, None, None, false),
     );
     assert_eq!(control(taken), Ok(cell));
     let third = CellClient::connect(&socket, path("third"), 1 << 24).unwrap();
@@ -6469,7 +6469,7 @@ async fn the_governor_lets_parts_held_go_before_tenants_pages() {
     assert_eq!(cached().await, 4 * CHUNK);
     let parts = crate::memory::held_parts();
     // What the governor governs besides counted too since (the fetches' parts and tails, board
-    // 6026; hot replication buffers, board 6902): the parts held add to it.
+    // 6026): the parts held add to it.
     let governed = crate::memory::governed_bytes();
     let _held: Vec<_> = (0..4).map(|_| parts.hold_bytes(CHUNK as usize / 2)).collect();
     assert_eq!(crate::memory::governed_bytes(), governed + 2 * CHUNK);

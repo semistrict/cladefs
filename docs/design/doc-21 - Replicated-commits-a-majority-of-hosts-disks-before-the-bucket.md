@@ -7,6 +7,8 @@ updated_date: '2026-11-20 04:00'
 ---
 # Replicated commits: a majority of hosts' disks before the bucket
 
+> **Removed (2026-11-27, board 14440):** Peer-replicated commits (`CLADEFSD_REPLICAS`, `FsyncLevel::Replicated`, and the `formats/replica-directory` family) were removed from cladefs after a first-principles review: no deployment, script, or guest test enabled peer replication, and Fast WAL ([doc-29](<doc-29 - Fast-WAL-commits-appendable-object-storage-without-local-state.md>)) is the kept durability mechanism for surviving host loss before cold-bucket upload. Stored bucket heads that name peer replication still decode cleanly and are refused at open/take time rather than opened as Standard cells. This document is kept as a historical record of the removed design.
+
 Design, 2026-11-18 (TASK-537.1). The user decided its direction in an interview that day (TASK-537's
 description). This doc chooses the protocol, against prior art and against what doc-7's fencing already
 gives. It then defines what the TLA+ spec (TASK-537.2) checks and what the implementation (TASK-537.3)

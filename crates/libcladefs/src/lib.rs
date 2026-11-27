@@ -87,7 +87,6 @@ impl Config {
             headroom: None,
             cache_cap: None,
             dirty_budget: None,
-            replicas: true,
             placement: Default::default(),
         });
         Self(config)

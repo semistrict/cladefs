@@ -260,7 +260,6 @@ _INTEGRATION_TESTS = {
     "page_in_tracing": {"linux": True, "common": True, "bins": [], "data": []},
     "pages": {"linux": False, "common": False, "bins": [], "data": []},
     "peers": {"linux": True, "common": False, "bins": ["cladefsd"], "data": [":peer_tls_testdata"]},
-    "replicated": {"linux": True, "common": False, "bins": ["cladefsd"], "data": [":peer_tls_testdata"]},
     "storage": {"linux": False, "common": False, "bins": [], "data": []},
     "supervision": {"linux": True, "common": False, "bins": ["cladefsd"], "data": []},
     "tenants": {"linux": True, "common": True, "bins": [], "data": []},

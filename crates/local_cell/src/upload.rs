@@ -46,14 +46,12 @@
 
 #[cfg(test)]
 mod encrypted;
-mod replication;
 #[cfg(all(test, feature = "shuttle"))]
 mod shuttle_tests;
 #[cfg(test)]
 mod tests;
 
 pub use crate::fast_wal::{FastWalConfig, FastWalOpener, FastWalStatus};
-pub use replication::{Members, MembersOf, Replicated, ReplicationStatus};
 
 use crate::{Dir, DirHold, File, HeldParts, LocalCell, Opening, Recovering, relocations};
 use bucket_cell::cache::Cache;
@@ -413,24 +411,6 @@ pub struct Options {
     /// ([`relocations`], doc-27), the only way they shrink: always, but where a caller runs the
     /// rounds itself, as the simulation and tests that count a round's work do.
     pub relocate: bool,
-    /// cladefs: the replication a taking of the cell gives it (doc-21, TASK-537.3.1):
-    /// a cell made, or taken, by the control API, as its call asked; none keeps what the cell's
-    /// head says.
-    pub replication: Option<bucket_cell::layout::Wish>,
-    /// cladefs: the hosts a replicated cell's configurations are made of, and how they are reached
-    /// (doc-21, TASK-537.3.3): the daemon's peers, if it has them and a replica directory.
-    pub members: Option<MembersOf>,
-    /// cladefs: how long a member of a replicated cell's configuration is down before a
-    /// replacement is picked, and how long the cell is degraded, no replacement to be had, before
-    /// it drops to f = 0 (doc-21, Degraded; TASK-537.3.5). 30 s: a replacement sends the whole tail
-    /// not uploaded to 2f members, which a peer daemon's restart should not cost, and meanwhile
-    /// one member down of f = 1 leaves the cell's commits replicated on the other, and a cell with
-    /// no quorum its commits uploaded at once (the user's word, 2026-11-19: 1 s was far too short).
-    pub replace_after: Duration,
-    /// cladefs: whether this opening's taking of a replicated cell is forced, as a cell placed
-    /// forced is (TASK-681, `CreateCell`'s `force`): it goes on with the members of the
-    /// configuration the cell's head names that answer, however few.
-    pub force: bool,
     /// cladefs: the Fast WAL commit mode a taking of the cell gives it (doc-29): `None` keeps
     /// what the cell's head says, `Some(Some(fsync))` enables Fast WAL with that guest fsync
     /// level, and `Some(None)` disables Fast WAL (flushing any active WAL on take).
@@ -473,10 +453,6 @@ impl Default for Options {
             filling_wait: Duration::from_secs(30),
             relocate: true,
             fetching: None,
-            replication: None,
-            members: None,
-            replace_after: Duration::from_secs(30),
-            force: false,
             fast_wal: None,
             fast_wal_config: None,
             fast_wal_large_extent: crate::fast_wal::DEFAULT_LARGE_EXTENT,
@@ -797,21 +773,10 @@ pub(crate) struct Shared<D: Dir, B: bucket_cell::Bucket = RoutedBucket> {
     keys: keys::Host,
     /// cladefs: the cell's keys, held among the host's for as long as the uploader lives.
     held: Mutex<Option<RingHold>>,
-    /// cladefs: of a replicated cell, what its head asks for and the configuration its taking
-    /// activated, which [`Shared::keep`] keeps from then on (TASK-537.3.5).
-    keeping: Mutex<Option<(bucket_cell::layout::Wish, bucket_cell::layout::Configuration, bool)>>,
-    /// cladefs: said, as its sender goes, once its keeper is done, which holds it, and so its
-    /// cell, meanwhile: what [`Shared::run`] waits for before it returns (TASK-701).
-    kept: Mutex<Option<futures::channel::oneshot::Receiver<()>>>,
     /// cladefs: the relocation round under way, if one is ([`Shared::relocating`]): what aborts it,
     /// and what says it went, the cell it held with it, which [`Shared::run`] waits for.
     relocation:
         Mutex<Option<(futures::future::AbortHandle, futures::channel::oneshot::Receiver<()>)>>,
-    /// cladefs: the configuration whose members' logs its taking recovered the cell from, if it
-    /// did, its own write-ahead log holding less (TASK-537.3.4): what the simulation follows the
-    /// history of the commits of (TASK-680).
-    #[cfg(test)]
-    recovered_from: Mutex<Option<bucket_cell::layout::Configuration>>,
     /// cladefs: active Fast WAL sink for a fast-WAL cell (doc-29), set once, as its writer takes the
     /// cell: no lock a panic could poison for its other users (board 9412).
     fast_wal_sink: std::sync::OnceLock<Arc<crate::fast_wal::FastWalSink>>,
@@ -942,8 +907,6 @@ pub(crate) enum Awaited {
 enum Waiting {
     /// What [`Shared::reached`] finds, up to an epoch.
     For(Awaited, u64),
-    /// The commits up to an epoch told replicated by a replicator, or uploaded.
-    Told(Arc<crate::replicate::Replicator>, u64),
     /// The commits up to an epoch appended to the fast WAL, or uploaded to the cold bucket.
     FastWal(Arc<crate::fast_wal::FastWalSink>, u64),
     /// Fast WAL lag backpressure for `commit_epoch` (waits until `lag_epoch` is within lag OR
@@ -995,9 +958,6 @@ pub struct Taking {
     pub epoch: u64,
     /// When the writer took it.
     pub taken: SystemTime,
-    /// cladefs: its cell's replication as the head it took says (doc-21, TASK-537.3.1): none for
-    /// a cell durable off its host once uploaded alone.
-    pub replication: Option<Replicated>,
     /// cladefs: its cell's Fast WAL fsync level as the head it took says (doc-29): none unless
     /// the cell uses Fast WAL.
     pub fast_wal: Option<bucket_cell::layout::Fsync>,
@@ -1017,8 +977,6 @@ pub struct UploadStatus {
     pub oldest_pending: Option<SystemTime>,
     /// How many commits waited for the lag to shrink ([`Uploader::stalls`]).
     pub stalls: u64,
-    /// cladefs: of a replicated cell, its replication now (TASK-537.3.5).
-    pub replication: Option<ReplicationStatus>,
     /// cladefs: of a Fast WAL cell, its live fast WAL status (doc-29).
     pub fast_wal: Option<FastWalStatus>,
 }
@@ -1081,7 +1039,6 @@ impl<D: Dir> Uploader<D> {
         let shared = &self.shared;
         shared.observe()?;
         let pending_bytes = self.cell().wal_bytes()?;
-        let replication = self.replication_status();
         let fast_wal = shared.fast_wal_sink.get().map(|sink| sink.status());
         let progress = shared.progress();
         Ok(UploadStatus {
@@ -1090,7 +1047,6 @@ impl<D: Dir> Uploader<D> {
             pending_bytes,
             oldest_pending: progress.seen.front().map(|(_, seen)| *seen),
             stalls: progress.stalls,
-            replication,
             fast_wal,
         })
     }
@@ -1491,11 +1447,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             holders: Mutex::default(),
             keys,
             held: Mutex::default(),
-            keeping: Mutex::default(),
-            kept: Mutex::default(),
             relocation: Mutex::default(),
-            #[cfg(test)]
-            recovered_from: Mutex::default(),
             fast_wal_sink: std::sync::OnceLock::new(),
             fast_wal_done: Mutex::default(),
         })
@@ -1551,13 +1503,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     /// Why uploading stopped, if it did.
     pub(crate) fn failed(&self) -> Option<Failure> {
         let failed = self.progress().failed.clone();
-        failed.or_else(|| self.fast_wal_sink.get().and_then(|sink| sink.failed())).or_else(|| {
-            self.cell
-                .get()
-                .and_then(|cell| cell.replicator())
-                .and_then(|replicator| replicator.fenced())
-                .map(|_| Failure::Bucket(bucket_cell::Error::Fenced))
-        })
+        failed.or_else(|| self.fast_wal_sink.get().and_then(|sink| sink.failed()))
     }
 
     /// The cell's writer, once one took it.
@@ -1661,16 +1607,6 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     fn found(&self, progress: &Progress, waiting: &Waiting) -> Option<Result<(), Failure>> {
         match waiting {
             Waiting::For(awaited, epoch) => self.reached(progress, *epoch, *awaited),
-            Waiting::Told(replicator, epoch) if replicator.told(progress.uploaded) >= *epoch => {
-                Some(Ok(()))
-            }
-            Waiting::Told(replicator, _) => progress
-                .failed
-                .clone()
-                .or_else(|| {
-                    replicator.fenced().map(|_| Failure::Bucket(bucket_cell::Error::Fenced))
-                })
-                .map(Err),
             Waiting::FastWal(sink, epoch)
                 if sink.durable().max(sink.head_acked()).max(progress.uploaded) >= *epoch =>
             {
@@ -1739,11 +1675,6 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             // Sent or dropped as the round's task ends: either is what is waited for.
             let _ = gone.await;
         }
-        let kept = self.kept.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
-        if let Some(kept) = kept {
-            // Said as the keeper's task ends, or goes, its sender with it.
-            let _ = kept.await;
-        }
     }
 
     /// cladefs: stops uploading, `what` having panicked, its task or its keeper's, with `panic`
@@ -1805,8 +1736,6 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             }
             return;
         };
-        // cladefs: a replicated cell's configuration kept whole beside (TASK-537.3.5).
-        self.spawn_keeper(&writer);
         // The segments uploaded, and as many as were when the last checkpoint was begun; and the
         // newest segment taken that freed extents, which a clean close checkpoints unless the
         // head's checkpoint covers it (hotbed question 535): by its number, not a flag a periodic
@@ -2277,12 +2206,10 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             token: placement,
             kind: recovering.kind(),
             keys: None,
-            replication: self.options.replication,
             fast_wal: self.options.fast_wal,
             fast_wal_allowed,
         };
         let (held, cell_keys) = keys::taking(&**bucket, kms, cell, read, taking).await?;
-        let fenced_take = self.fence_for_take(cell, &recovering, &held.head).await?;
         // cladefs: the host serves a cell of the tenant's: its pool of new cell KEKs, which forks
         // of its cells into new cells take, filled off this path (TASK-411.4).
         kms.refill(cell);
@@ -2290,8 +2217,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         let writer = Writer::holding(bucket.clone(), cell, held, before, keys).await?;
         let writer = Arc::new(writer.uploading_within(self.uploads.clone()));
         let keys = writer.keys().clone();
-        let (mut recovering, replicated_take) =
-            self.recover_replicated(cell, &writer, recovering, placement, fenced_take).await?;
+        let mut recovering = recovering;
 
         // cladefs: Fast WAL takeover fencing, recovery, and activation (doc-29).
         let taken_head = writer.head().await;
@@ -2389,7 +2315,6 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         self.hold_ring(&keys);
         self.token.set(placement).expect("an uploader's writers take one placement's token");
         self.took(&writer, placement, &head_now);
-        self.start_replication(cell, &writer, replicated_take).await?;
         if target_fast_wal.is_some() {
             let cfg =
                 self.options.fast_wal_config.as_ref().expect("fast WAL config checked before take");
@@ -2440,15 +2365,8 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     /// upload.
     fn took(&self, writer: &Arc<Writer<B>>, token: u64, head: &Head) {
         *self.writer.lock().unwrap() = Some(writer.clone());
-        let replication = head.replication.as_ref().map(Replicated::of);
         let fast_wal = head.fast_wal.as_ref().map(|fw| fw.fsync);
-        let taking = Taking {
-            token,
-            epoch: writer.epoch(),
-            taken: SystemTime::now(),
-            replication,
-            fast_wal,
-        };
+        let taking = Taking { token, epoch: writer.epoch(), taken: SystemTime::now(), fast_wal };
         let mut progress = self.progress();
         (progress.next_sequence, progress.taking) = (writer.chain().next_sequence(), Some(taking));
         if let Some(last) = writer.state().last_commit {

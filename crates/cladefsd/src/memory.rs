@@ -198,7 +198,7 @@ pub(super) fn governed_bytes_on(daemon: &Daemon) -> u64 {
     let fetch_mem = cladefs_core::bucket::memory_on(&daemon.host);
     daemon.host.slabs().arenas_bytes()
         + held_parts_on(daemon).bytes()
-        + local_cell::replicate::hot_bytes_on(daemon.host.local())
+        + local_cell::hot_budget::hot_bytes_on(daemon.host.local())
         + fetch_mem.recent_bytes()
         + fetch_mem.tails_bytes()
         + daemon.host.local().pages().bytes()
@@ -236,13 +236,7 @@ fn trim_derived_caches(daemon: &Daemon, allowance: u64) {
     if parts.bytes() > room {
         parts.evict_to(room);
     }
-    // cladefs: hot replication buffers (board 6902): persisted chunks are derived from the cell's
-    // local files (`LogSource`), so evict and size them to the remaining allowance before caches.
     let room = room.saturating_sub(parts.bytes());
-    local_cell::replicate::size_hot_to_on(daemon.host.local(), room);
-    if local_cell::replicate::hot_bytes_on(daemon.host.local()) > room {
-        local_cell::replicate::evict_hot_to_on(daemon.host.local(), room);
-    }
     // cladefs: unified recent/unpacked parts (local framed + bucket fetch) and object tails
     // (TASK-603, board 6026). While FUSE cells are attached (`OpenCellDevice::read` bypasses
     // `ExtentCache`, board 8260), `PartMemory` is the only unpacked-part cache: scale it to half
@@ -251,7 +245,7 @@ fn trim_derived_caches(daemon: &Daemon, allowance: u64) {
     // FUSE page cache (board 12313). Without FUSE cells, `ExtentCache` holds unpacked extents for
     // VMs, so keep `PartMemory` bounded to `RECENT.min(room)`.
     let fetch_mem = cladefs_core::bucket::memory_on(&daemon.host);
-    let room = room.saturating_sub(local_cell::replicate::hot_bytes_on(daemon.host.local()));
+    let room = room.saturating_sub(local_cell::hot_budget::hot_bytes_on(daemon.host.local()));
     let recent_limit = recent_limit_for(room, crate::mount::has_attached_on(daemon));
     fetch_mem.size_recent_to(recent_limit);
     let room = room.saturating_sub(fetch_mem.recent_bytes());
@@ -1089,55 +1083,6 @@ mod tests {
         }
         let left = anonymous().saturating_sub(before);
         assert!(left < 16 << 20, "{} MiB of freed buffers resident", left >> 20);
-    }
-
-    /// Board 6902 (Codex review): `governed_bytes()` counts hot replication buffers (including
-    /// take-time seeds) and `govern()` evicts persisted hot buffers under pressure.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn govern_counts_and_reclaims_replication_hot_buffers() {
-        use local_cell::replicate::{
-            Flushed, LinkError, LogSource, MemberLink, Replicator, log_of,
-        };
-        use std::sync::Arc;
-
-        struct Stalled;
-        impl MemberLink for Stalled {
-            fn append(
-                &self,
-                _: u64,
-                _: u64,
-                _: Vec<u8>,
-            ) -> futures::future::BoxFuture<'_, Result<u64, LinkError>> {
-                Box::pin(async { Err(LinkError::Down("gated".into())) })
-            }
-            fn drop_through(
-                &self,
-                _: u64,
-            ) -> futures::future::BoxFuture<'_, Result<(), LinkError>> {
-                Box::pin(async { Err(LinkError::Down("gated".into())) })
-            }
-        }
-        struct EmptySource;
-        impl LogSource for EmptySource {
-            fn read(&self, _: u64, _: u64, _: u64) -> std::io::Result<Vec<u8>> {
-                Ok(Vec::new())
-            }
-        }
-
-        let links: Vec<Arc<dyn MemberLink>> = vec![Arc::new(Stalled), Arc::new(Stalled)];
-        let rep = Replicator::idle(1, 0, Some(Arc::new(EmptySource)), links, || {});
-        let bytes = vec![0x33u8; 2 << 20];
-        let before = super::governed_bytes();
-        rep.flushed(Flushed {
-            epoch: 1,
-            appends: vec![(log_of(1), 0, Arc::from(bytes.as_slice()))],
-        });
-        rep.persisted();
-        assert!(super::governed_bytes() >= before + bytes.len() as u64);
-        super::govern(0).await;
-        assert_eq!(rep.hot_bytes(), 0);
-        // Restore unrestricted allowance for other tests in the process.
-        super::govern(u64::MAX).await;
     }
 
     /// `govern_with_on` in `IdleOnly` mode evicts idle (unmapped) extents and stops growth by

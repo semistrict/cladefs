@@ -102,7 +102,7 @@ pub struct Daemon {
     pub(super) disk_pool: OnceLock<Arc<crate::disks::DiskPool>>,
     /// Mutual TLS credentials for peer gRPC (`CLADEFSD_PEER_TLS`).
     pub(super) peer_credentials: Mutex<Option<peers::Credentials>>,
-    /// Shared HTTP/2 peer gRPC channel pool across GetPart, replication, and migration (board
+    /// Shared HTTP/2 peer gRPC channel pool across GetPart and migration (board
     /// 11713, board 11659).
     pub(super) peer_channels: OnceLock<peers::Channels>,
     /// Highest `PeersUpdated` generation installed locally on this daemon, serialized with peer

@@ -2310,7 +2310,7 @@ impl Connection {
                             staging.clone(),
                             capacity,
                             cladefs_core::CellId { tenant: req_cell.tenant, id: 0 },
-                            (None, kind, None, None, false, None, true),
+                            (None, kind, None, None, true),
                         )
                         .await;
                         let made = match made {

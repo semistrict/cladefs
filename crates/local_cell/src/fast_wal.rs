@@ -30,7 +30,7 @@
 //!   segments across rollovers (`fenceFollowsRoll`), flushes recovered commits to cold segments,
 //!   and atomically switches `head.fast_wal` in the same head CAS (`activateAfterFlush`).
 
-use crate::replicate::{Holding, HotBudget};
+use crate::hot_budget::{Holding, HotBudget};
 use crate::upload::{Clock, Failure};
 use bucket_cell::any_bucket::AnyBucket;
 use bucket_cell::batch::{Commit, SegmentBuilder};
