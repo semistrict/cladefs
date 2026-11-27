@@ -71,7 +71,7 @@ if part clippy; then
         -p cladefs_proto -p cladefs_wire -p cladefsd -p cladefs-examples
         -p extent_frame -p extent_keys -p formats -p fxfs-posix
         -p fxfs-sim-diff -p gc_wasm -p host_fs -p libcladefs -p local_cell -p node_local
-        -p sqlite_cladefs -p virtio_extent
+        -p sqlite_cladefs -p vhost_user -p virtio_extent
     )
     cladefs_lints=(
         -A clippy::all -D clippy::correctness -D clippy::suspicious
@@ -86,7 +86,7 @@ if part clippy; then
     cargo clippy --locked --manifest-path "$root/Cargo.toml" --no-deps -p local_cell -p cladefs_core \
         --features shuttle --tests -- "${cladefs_lints[@]}"
     cargo clippy --locked --manifest-path "$root/Cargo.toml" --no-deps -p cladefs_core -p virtio_extent \
-        --features loom --tests -- "${cladefs_lints[@]}"
+        -p vhost_user --features loom --tests -- "${cladefs_lints[@]}"
     # libmachine's crates (crates/libmachine*, doc-30) and machined's: all of clippy's default lints,
     # as libmachine kept them before it came into this repo; and its fuzz harness's build.
     libmachine_crates=(-p libmachine -p libmachine-agent -p libmachine-firecracker -p machined)
@@ -164,7 +164,7 @@ if part shuttle; then
     # The protocols of atomics under loom, each crate's `loom` feature, whose every interleaving
     # and weak ordering Shuttle, seeing every atomic as SeqCst, can't run (docs/memory-ordering.md,
     # TASK-444.2).
-    for crate in cladefs_core virtio_extent; do
+    for crate in cladefs_core virtio_extent vhost_user; do
         cargo nextest run --locked --manifest-path "$root/Cargo.toml" -p "$crate" --features loom \
             --lib loom::
     done

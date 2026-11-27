@@ -2,7 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Serving the device's requests: a guest's, as doc-4 has them ([`Guest`]), with the interpreter
+//! Serving the device's requests: a guest's, as doc-4 has them (`cladefs::extent_requests::Guest`,
+//! which the extent daemon's vhost-user back-end serves too, board 14537), with the interpreter
 //! every transport of doc-4's requests shares ([`handle`], board 14378). The device applies requests
 //! in any order but across barriers (doc-4), so a guest's `MAP` doesn't wait for the writes and
 //! uploaded commits queued before it: each is served as a future ([`handle`]), several at once. On
@@ -12,13 +13,9 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use cladefs::Errno;
 use cladefs::extent_requests::protocol::*;
-use cladefs::extent_requests::{Dialect, GuestBackend, Reader, Writer, handle};
+use cladefs::extent_requests::{Guest, handle};
 use log::info;
-
-use crate::config::CacheType;
-use crate::notices::Notices;
 
 /// The requests served, and the time serving them took, by type, logged as a VMM's worker stops:
 /// against what the guest waits for a request (its driver's request_ns), what the transport
@@ -61,88 +58,6 @@ impl Served {
                     mean / 1000.0
                 );
             }
-        }
-    }
-}
-
-/// A guest's requests, as its extent device has them: doc-4 as it is, with the guest's notices of
-/// its freezes and resizes, and its cache's uploaded commits ordered if it is `Unsafe` (TASK-363).
-/// The [`Dialect`] the VMM serves its virtqueues in; a local process's ring is another
-/// ([`cladefs::extent_requests::Process`], board 14378).
-pub struct Guest<'a> {
-    pub notices: &'a Notices,
-    pub cache: CacheType,
-}
-
-impl<S: GuestBackend> Dialect<S> for Guest<'_> {
-    // Its commits complete once uploaded or ordered, its cell kept in the bucket: no local flag,
-    // nor any warming, which its MAPs ask of no one.
-    const COMMIT_LOCAL: Option<u32> = None;
-    const WRITE_LOCAL: Option<u32> = None;
-    const MAP_WARM: Option<u32> = None;
-
-    fn known_flags(&self, type_: u32) -> Option<u32> {
-        known_flags(type_)
-    }
-
-    fn served_flags(&self, type_: u32, flags: u32) -> u32 {
-        match self.cache {
-            CacheType::Writeback => flags,
-            CacheType::Unsafe => ordered_only(type_, flags),
-        }
-    }
-
-    fn prefault(&self, cell: &S, window_offset: u64, len: u64) {
-        cell.prefault(window_offset, len);
-    }
-
-    async fn serve_own(
-        &self,
-        cell: &S,
-        type_: u32,
-        flags: u32,
-        bounds: Bounds,
-        reader: &mut Reader<'_>,
-        _: &Writer<'_>,
-        _: usize,
-    ) -> Result<usize, Errno> {
-        match type_ {
-            // cladefs: a window that copies on write's (backlog doc-13), its arguments UNMAP's.
-            VIRTIO_EXTENT_T_PRIVATE => {
-                if !cell.copies_on_write() {
-                    return Err(Errno::EINVAL);
-                }
-                let args: UnmapArgs = reader.obj()?;
-                let (window_offset, len) =
-                    (u64::from_le(args.window_offset), u64::from_le(args.len));
-                bounds.window(window_offset, len)?;
-                cell.make_private(window_offset, len).await?;
-                Ok(0)
-            }
-            VIRTIO_EXTENT_T_FREEZE => {
-                self.notices.set_frozen(flags & VIRTIO_EXTENT_FREEZE_FROZEN != 0);
-                Ok(0)
-            }
-            // cladefs: the guest's stats, which the daemon asked for (TASK-111.4).
-            VIRTIO_EXTENT_T_STATS => {
-                let args: StatsArgs = reader.obj()?;
-                if reader.available() > MAX_STATS {
-                    return Err(Errno::EINVAL);
-                }
-                let text = reader.bytes(reader.available())?;
-                let text = cladefs::protocol::check_stats_text(&text)?;
-                cell.answer_stats(u64::from_le(args.asked), Some(text)).await?;
-                Ok(0)
-            }
-            VIRTIO_EXTENT_T_RESIZED => {
-                let args: ResizedArgs = reader.obj()?;
-                let capacity = u64::from_le(args.capacity);
-                let took = flags & VIRTIO_EXTENT_RESIZED_TOOK != 0;
-                self.notices.resizing.answered(capacity, took);
-                cell.resized(capacity, took).await?;
-                Ok(0)
-            }
-            _ => Err(Errno::EINVAL),
         }
     }
 }
@@ -247,7 +162,10 @@ mod serving {
             let served = async move {
                 let len = match buffers {
                     Ok(buffers) => {
-                        let guest = Guest { notices: &requests.notices, cache: requests.cache };
+                        let guest = Guest {
+                            notices: &*requests.notices,
+                            ordered_only: requests.cache.ordered_only(),
+                        };
                         handle(&*requests.cell, &guest, requests.bounds, buffers).await.len
                     }
                     Err(err) => {
@@ -306,14 +224,16 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::{Mutex, PoisonError};
 
-    use cladefs::extent_requests::{Backend, Buffers, Handled};
+    use cladefs::extent_requests::{Backend, Buffers, GuestBackend, Handled};
     use cladefs::{
-        Commit, ExtentId, ExtentInfo, MappingContents, VolatileSlice, VolatileSliceMut,
+        Commit, Errno, ExtentId, ExtentInfo, MappingContents, VolatileSlice, VolatileSliceMut,
         WindowMapping, WriteBarriers,
     };
     use zerocopy::{Immutable, IntoBytes};
 
     use super::*;
+    use crate::config::CacheType;
+    use crate::notices::Notices;
 
     const RESPONSE: usize = size_of::<Response>();
     /// The fake device's block size and map alignment: a 4 KiB page's, whatever the host's.
@@ -631,8 +551,12 @@ mod tests {
             // SAFETY: As above, which nothing else accesses meanwhile.
             unsafe { buffers.push_writable(part.as_mut_ptr(), part.len()) }.unwrap();
         }
-        let handled =
-            futures::executor::block_on(handle(cell, &Guest { notices, cache }, BOUNDS, buffers));
+        let handled = futures::executor::block_on(handle(
+            cell,
+            &Guest { notices, ordered_only: cache.ordered_only() },
+            BOUNDS,
+            buffers,
+        ));
         let used = handled.len as usize;
         assert_eq!(used, writable, "the device wrote {used} of {writable} bytes");
         let response: Response = read_obj(&written[writable - RESPONSE..]);
@@ -880,7 +804,7 @@ mod tests {
         // SAFETY: As above.
         unsafe { buffers.push_writable(written.as_mut_ptr(), written.len()) }.unwrap();
         let notices = Notices::default();
-        let guest = Guest { notices: &notices, cache: CacheType::Writeback };
+        let guest = Guest { notices: &notices, ordered_only: false };
         let mut handling = Box::pin(handle(&cell, &guest, BOUNDS, buffers));
         let waker = futures::task::noop_waker();
         let mut context = std::task::Context::from_waker(&waker);
@@ -990,7 +914,7 @@ mod tests {
         // SAFETY: The test's memory, which outlives the request.
         unsafe { buffers.push_readable(header.as_mut_ptr(), header.len()) };
         let notices = Notices::default();
-        let guest = Guest { notices: &notices, cache: CacheType::Writeback };
+        let guest = Guest { notices: &notices, ordered_only: false };
         let served = handle(&cell, &guest, BOUNDS, buffers);
         let handled = futures::executor::block_on(served);
         assert_eq!(handled, Handled { len: 0, status: Err(Errno::EINVAL) });

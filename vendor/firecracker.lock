@@ -1263,6 +1263,7 @@ dependencies = [
  "tonic-health",
  "tower",
  "url",
+ "vhost_user",
  "zerocopy",
 ]
 
@@ -5404,6 +5405,16 @@ dependencies = [
  "uuid",
  "vm-memory",
  "vmm-sys-util",
+]
+
+[[package]]
+name = "vhost_user"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "log",
+ "thiserror 2.0.21",
+ "zerocopy",
 ]
 
 [[package]]

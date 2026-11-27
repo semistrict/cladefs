@@ -366,6 +366,15 @@ pub struct TransferBody {
     pub len: u64,
 }
 
+/// cladefs: inline body of [`VHOST_USER`]: the extent device's request queues (board 14537).
+#[repr(C)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, FromBytes, IntoBytes, Immutable, KnownLayout,
+)]
+pub struct VhostUserBody {
+    pub queues: u64,
+}
+
 /// Inline body of [`STATS`] and [`STATS_ASK`].
 #[repr(C)]
 #[derive(
@@ -592,7 +601,9 @@ const _: () = {
 /// `MapBody`/`MAP_ZEROS`, keeping [`MAP_WARM`]), and `STAGE_PRIVATE_COUNTS` into `STAGE_COUNTS`'s
 /// 40-byte payload; drop always-true `FAULT_PAGE` (board 11697); register `TRANSFER` lazily on
 /// first non-DAX I/O and verify hole-free once at registration (board 11707, hotbed question 575).
-pub const VERSION: u64 = 23;
+/// Version 24: [`VHOST_USER`] hands the VM process the vhost-user channel of its cell's extent
+/// device, which the daemon serves as the device's back-end (board 14537).
+pub const VERSION: u64 = 24;
 
 /// cladefs: a flag of any request, which says the guest request it is a call for, the guest's
 /// number of it (`crate::request`, TASK-260): little-endian, not 0, in the first
@@ -730,6 +741,26 @@ pub const STATS_GUEST: u32 = 1 << 0;
 pub const MAX_STATS: usize = cladefs_core::protocol::MAX_STATS;
 // 32 was `MAP_MANY`, folded into `MAP` in version 23 (board 11697), not reused.
 // 33 was `STAGE_PRIVATE_COUNTS`, folded into `STAGE_COUNTS`'s payload in version 23 (board 11697).
+/// cladefs: the vhost-user channel of the connection's extent device (board 14537), whose back-end
+/// the daemon is, serving the guest's doc-4 requests with the connection's cell: the reply carries
+/// the front-end's end of a socket pair the daemon made, which the VM process gives its vhost-user
+/// device. The channel is bound to the connection's authorized cell and tenant, as a bare
+/// vhost-user socket, with no `OPEN`, couldn't be. [`VhostUserBody::queues`] is how many request
+/// queues the device has, 1 to [`MAX_VHOST_USER_QUEUES`]; [`VHOST_USER_UNSAFE`] answers the
+/// guest's uploaded commits once ordered, as an `Unsafe` cache does (TASK-363); the payload is the
+/// device's tag, the guest's mount source, 1 to [`MAX_VHOST_USER_TAG`] bytes, none NUL. Once,
+/// after [`OPEN`]: `EBADF` before, `EEXIST` again; `ENOTSUP` where the daemon serves no vhost-user
+/// (not Linux, or under madsim).
+pub const VHOST_USER: u32 = 34;
+/// cladefs: a [`VHOST_USER`] device's cache is `Unsafe`.
+pub const VHOST_USER_UNSAFE: u32 = 1 << 0;
+/// cladefs: the most request queues a [`VHOST_USER`] device has: its guest's chains in flight, a
+/// queue's size (`QUEUE_SIZE`) each queue at most, are half the requests a connection keeps in
+/// flight ([`MAX_REQUESTS`]), which counts them too, the other half its VM process's messages'.
+pub const MAX_VHOST_USER_QUEUES: u64 =
+    (MAX_REQUESTS / 2 / cladefs_core::extent_requests::protocol::QUEUE_SIZE as usize) as u64;
+/// cladefs: the most bytes of a [`VHOST_USER`] device's tag (doc-4's).
+pub const MAX_VHOST_USER_TAG: usize = cladefs_core::extent_requests::protocol::MAX_TAG_LEN;
 /// cladefs: how long a VM process's stage operations go uncounted at most while it makes them
 /// ([`STAGE_COUNTS`]): within a sample of the daemon's stats file (`CLADEFSD_STATS`).
 pub const STAGE_COUNTS_EVERY: std::time::Duration = std::time::Duration::from_millis(500);

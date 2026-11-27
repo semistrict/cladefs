@@ -140,6 +140,7 @@ cladefs_core = { path = "crates/cladefs_core" }
 cladefs_wire = { path = "crates/cladefs_wire" }
 cladefs_fs = { path = "crates/cladefs_fs" }
 cladefsd = { path = "crates/cladefsd" }
+vhost_user = { path = "crates/vhost_user" }
 libcladefs = { path = "crates/libcladefs" }
 
 # libmachine, the library VMM (crates/libmachine, board 13054), and its guest agent: on the

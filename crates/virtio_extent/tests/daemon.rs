@@ -144,7 +144,7 @@ fn serve(cell: &CellClient, readable: &[u8], writable: usize, split: usize) -> (
     let mut written = vec![0xa5; writable];
     let buffers = buffers(&mut readable, &mut written, split);
     let notices = Notices::default();
-    let guest = Guest { notices: &notices, cache: CacheType::Writeback };
+    let guest = Guest { notices: &notices, ordered_only: false };
     let served = handle(cell, &guest, bounds(), buffers);
     let used = futures::executor::block_on(served).len;
     (used as usize, written)

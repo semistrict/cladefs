@@ -50,6 +50,7 @@ tonic = { package = "madsim-tonic", version = "=0.6.0", features = ["tls-aws-lc"
 tonic-health = "0.14.6"
 tower = "0.5.3"
 url.workspace = true
+vhost_user.workspace = true
 zerocopy.workspace = true
 
 [target.'cfg(target_env = "musl")'.dependencies]
@@ -71,6 +72,7 @@ opentelemetry_sdk = { version = "0.33.1", default-features = false, features = [
 proptest.workspace = true
 rustls = { version = "0.23.46", default-features = false, features = ["aws-lc-rs", "std"] }
 tempfile.workspace = true
+vhost_user = { workspace = true, features = ["testing"] }
 
 [lints]
 workspace = true

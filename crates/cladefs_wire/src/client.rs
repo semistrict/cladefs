@@ -229,6 +229,21 @@ impl CellClient {
         self.client.answer_stats(ask, guest).await.map(drop)
     }
 
+    /// cladefs: the vhost-user channel of the cell's extent device, whose back-end the daemon is
+    /// ([`VHOST_USER`], board 14537): the front-end's end of a socket pair, for the VM process's
+    /// vhost-user device, of `queues` request queues, its guest's uploaded commits answered once
+    /// ordered if `ordered_only`, its tag `tag`. Once a connection.
+    pub fn vhost_user(&self, queues: u16, ordered_only: bool, tag: &str) -> Result<OwnedFd> {
+        let request = Request::VhostUser { queues, ordered_only, tag };
+        let reply = self.client.request_blocking(&request)?;
+        let mut fds = reply.fds.into_iter();
+        match (fds.next(), fds.next()) {
+            (Some(channel), None) => Ok(channel),
+            // A daemon's reply of no channel, or of more, is no reply this build's daemon sends.
+            _ => Err(Errno::EIO),
+        }
+    }
+
     /// The cell whose extents the guest mints.
     pub fn cell(&self) -> u64 {
         self.cell

@@ -76,6 +76,7 @@ filegroup(
         "//crates/storage_device:crate_files",
         "//crates/storage_units:crate_files",
         "//crates/storage_xts:crate_files",
+        "//crates/vhost_user:crate_files",
         "//crates/virtio_extent:crate_files",
         "//guest/linux:all_sources",
         "//guest/rust:all_sources",
