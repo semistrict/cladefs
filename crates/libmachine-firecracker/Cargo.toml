@@ -1,0 +1,20 @@
+# A Firecracker-compatible VMM on libmachine, for macOS (board 13446): what cladefs's guest tests
+# run as CLADEFS_FIRECRACKER on a Mac, booting each case's VM on Hypervisor.framework from
+# Firecracker's command line and configuration file, its console on standard output, its vsock
+# behind Firecracker's Unix sockets.
+[package]
+name = "libmachine-firecracker"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
+libmachine.workspace = true
+serde_json = "1.0.154"
+
+[lints]
+workspace = true
+
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dev-dependencies]
+tempfile.workspace = true

@@ -2874,6 +2874,7 @@ name = "libcladefs"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bucket_cell",
  "cladefs_core",
  "cladefs_wire",
  "cladefsd",
@@ -2922,6 +2923,15 @@ name = "libmachine-agent"
 version = "0.1.0"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "libmachine-firecracker"
+version = "0.1.0"
+dependencies = [
+ "libmachine",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
