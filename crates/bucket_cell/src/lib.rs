@@ -69,6 +69,8 @@ pub mod checkpoint;
 pub mod client;
 #[cfg(feature = "full")]
 pub mod clock;
+#[cfg(all(feature = "full", madsim))]
+pub mod clouds;
 pub mod collector;
 #[cfg(feature = "full")]
 pub mod direct;

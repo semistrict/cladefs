@@ -158,6 +158,9 @@ async fn refer(
         here.create(&key, bytes).await?;
         return Ok(Referred { owner, here: true });
     }
+    // A fork stopped here read no marker, and refers in the parent's bucket once it goes on, its
+    // version's mirror marked meanwhile or not (a test's).
+    failpoint!("version::unmarked");
     bucket::create(bucket, &key, bytes).await?;
     Ok(Referred { owner, here: false })
 }

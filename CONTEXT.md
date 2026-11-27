@@ -240,6 +240,18 @@ _Avoid_: bucket 0, home bucket (a host's own)
 **Registry** (of buckets):
 The record of every bucket, its number and details, in the root of every bucket: the root bucket's, and copies of it.
 
+**Cloud region**:
+A cloud provider's geographic region, which has one bucket, its hosts' home bucket, and its own KMS (doc-23). Peers serve parts within one alone.
+_Avoid_: region alone (that is the guest's mapping of a sealed extent), zone
+
+**Home bucket**:
+The bucket a host keeps its own cells in (`CLADEFSD_BUCKET`), its cloud region's; and, of a cell, the bucket its ID names. A host reaches other buckets through the registry.
+_Avoid_: local bucket, own bucket for the root bucket
+
+**Mirror**:
+A copy of a version's objects in another bucket than its cell's home bucket, at the same keys, made when the version is first forked there (doc-23). Its **marker** says the copy is whole, from which on that bucket's hosts read it there; its **pin** keeps the copy from that bucket's collector while it is made; its **hold** keeps the version in its cell's home bucket while the copy stands.
+_Avoid_: replica, cache, sync
+
 **Formatting** (a bucket):
 Making a bucket never formatted the root of buckets of its own, number 1 (`cladefsctl format-bucket`, or its first allocator), writing its identity, registry, and initial format gates.
 

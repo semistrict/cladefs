@@ -10,3 +10,4 @@
 #
 # BOARD TEST                                            PANIC
 14556 ephemeral_cells_survive_disk_faults                  the faults healed, the cell's migration from host \d+ failed: Errno\(EEXIST\)
+14617 regions::versions_forked_across_regions_are_mirrored_and_read_there non-determinism detected

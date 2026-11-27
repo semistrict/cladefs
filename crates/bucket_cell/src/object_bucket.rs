@@ -1284,8 +1284,17 @@ fn cloud<V: AsRef<str>>(
     }
     let (backend, pages, clock, appends) = match scheme {
         Scheme::Memory => {
-            let memory: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
-            let appends = Appends::InProcess(Arc::new(tokio::sync::Mutex::new(())));
+            // cladefs: the simulation's cloud at this URL, if it serves one, which every host of
+            // the simulation reaches by it (`crate::clouds`, board 14521); else a store of this
+            // opening's own.
+            #[cfg(madsim)]
+            let served = crate::clouds::at(url);
+            #[cfg(not(madsim))]
+            let served: Option<(Arc<dyn ObjectStore>, Arc<tokio::sync::Mutex<()>>)> = None;
+            let (memory, appending) = served.unwrap_or_else(|| {
+                (Arc::new(object_store::memory::InMemory::new()), Arc::default())
+            });
+            let appends = Appends::InProcess(appending);
             (memory, None, Clock::Host, appends)
         }
         Scheme::AmazonS3 => {

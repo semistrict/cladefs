@@ -42,10 +42,20 @@ pub fn process_var_os(name: impl AsRef<OsStr>) -> Option<OsString> {
     }
 }
 
-/// Every variable of the process's environment, as [`std::env::vars_os`], with the embedder's
-/// ([`set_embedded_vars`]) over it, each name once. Never a simulated node's: what reads them all
-/// (a KMS's variables, a bucket's options) reads the process's in the simulation, as it did.
+/// Every variable of the environment, as [`std::env::vars_os`]: the simulated node's, if it was
+/// given one, as [`var_os`] reads it, so that what reads them all (a KMS's variables and what
+/// they trust, a bucket's options) is each simulated host's own, as each host's process's is
+/// (board 14521); else the process's, with the embedder's ([`set_embedded_vars`]) over it, each
+/// name once.
 pub fn vars_os() -> Vec<(OsString, OsString)> {
+    #[cfg(madsim)]
+    {
+        let of = key();
+        let all = VARS.lock().unwrap();
+        if let Some((_, vars)) = all.iter().find(|(k, _)| *k == of) {
+            return vars.clone();
+        }
+    }
     let embedded = EMBEDDED.read().unwrap();
     let process = std::env::vars_os().filter(|(name, _)| !embedded.iter().any(|(k, _)| k == name));
     embedded.iter().cloned().chain(process).collect()

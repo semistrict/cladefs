@@ -412,6 +412,78 @@ for every host's connections and calls, and simulations sharing a process woke e
 (board 5806); with BUGGIFY on, an ephemeral cell's Local commits lost (board 6034); and, on main as
 it was, two live-migration endings of the ephemeral disk-faults profile (board 6032).
 
+## Cells across buckets as built (board 14521, 2026-11-27)
+
+doc-23's cells across buckets ran in no simulated daemon: the worlds above share one bucket, given
+to each daemon unrouted, and `local_cell::sim`'s `mirrors` profile routes through its own
+`SimBucket::at`. `crates/cladefs/tests/madsim/regions.rs` runs them on the daemon's own path.
+
+- **The clouds are the simulation's, and nothing above them** (`bucket_cell::clouds`,
+  `cfg(madsim)`): a simulation says which store a `memory:///NAME` URL names, and every opening of
+  that URL in it reaches that store. A daemon names its home bucket by its URL
+  (`CLADEFSD_BUCKET`), opens it as production does (`host_cell::bucket_on`: `Registered`,
+  `RoutedBucket`), and finds the other cloud regions' buckets in the registry of buckets, which
+  the case's operator wrote with `identity::format`, `add` and `spread_to` before the hosts
+  booted. No daemon is handed a bucket, a resolver or a KMS.
+- **A world**: three cloud regions, two hosts each; each region's bucket under its own
+  `faults::Seeded`, journalled under the faults (every write and deletion that landed, by key);
+  each region its own `local://` KMS, recorded in its registry entry, which another region's host
+  reaches as far as it trusts it (`CLADEFSD_KMS_LOCAL`, `CLADEFSD_KMS_HOSTS`); each region its
+  collector, sweeping as `cladefs-gc` does (`Sweep::run_limited` with the bucket's own). A node's
+  whole environment is its own (`node_local::env::vars_os`), so that each host's KMS and trust are
+  its own.
+- **Faults aimed at the protocol's state** (adoption 5): a round stops the first forking host to
+  come to a step of its fork or of its mirror, by the step's failpoint (`version::recorded` to
+  `version::made`, `mirror::pinned` to `mirror::referred`): the failpoint's callback pauses the
+  host's node where it stands, and the case then kills it, or resumes it once its pin stood stale.
+  A mirror stalled, its cell and children are deleted under it the likelier, so that its copy is
+  collected before it goes on. Besides: both hosts of a region forking a version at once, a third
+  fork later, a version dropped or its cell deleted as its mirror goes, a second version sharing
+  the first's objects, a region's whole bucket out of reach.
+- **The checker**: every child reads what it inherits and its own told uploaded; every version
+  named still, a child of it living in another region, ends marked there, its children referring
+  there and no more in its cell's bucket; `bucket_cell::testing`'s `uncollected` and
+  `uncollected_copies`, the other simulator's end checks, over the buckets as the clouds have them
+  (no copy short under a marker, no marker without its hold, no pin left); its cell's bucket out
+  of reach, each child of a marked version taken by a host that never had it, reading blocks no
+  host read before, and committing; every cell deleted and a week gone, no copy, hold, pin or
+  marker left, nor anything else no cell needs. And by the journals, read together in the order
+  things landed, at every moment and not at a check's alone: a marker lands marked with its hold
+  standing, its checkpoint copied and no object of its copy deleted since its run claimed it;
+  and no object of a copy is deleted while a marker of its cell stands marked.
+- **A reach check** (`mirrors_across_regions_needs_every_outcome_reached`, run once with the
+  rules' searches): each outcome the case checks (a read before its version's marker, one from
+  the child's own bucket with the cell's out of reach, runs raced, a host crashed at a
+  step, one stalled past its lease, a slot taken over, a mirror given up, a copy collected, two
+  versions sharing objects marked, the teardown) is reached by a seed of its set, or it fails.
+- **Peers** (`peers_serve_parts_within_their_cloud_region_alone`): every host told every host;
+  each region's hosts' parts given are those its own hosts served, by each daemon's own metrics
+  (its served counts were process statics, every simulated host's together).
+- **KMS trust** (`recorded_kms_urls_reach_what_the_host_trusts_alone`): a recorded `local://` URL
+  forks on the host that allows it (`CLADEFSD_KMS_LOCAL`) and not on the one that does not, each
+  host's own environment's say. What a recorded URL may reach besides (`CLADEFSD_KMS_HOSTS`, the
+  GCP projects, the AWS accounts) no simulated daemon tells from its absence: the simulation has
+  no KMS's server, and a KMS at a host not allowed and one allowed and not there both refuse.
+
+**What it found**: a conditional-write probe stopped short left its object at `probe/<nonce>` for
+good, nothing reclaiming it, which `cladefs-gc` now deletes after a sweep (board 14544); one failed read of a host's
+registry of buckets answered a fork of another bucket's version `EACCES`, a KMS's refusal, where
+it is the bucket out of reach (board 14562); a ForkCell whose host dies after its child's record
+leaves a fork being made for as long as its version is named, the VM manager's retry forking
+another cell (board 14559, open); and `scripts/rust-rules.py` failing on main (board 14534).
+
+**Mutants** (2026-11-27): each rule of `specs/buckets/mutations` put back as a bug by hand, 40
+seeds each. The case catches `mirrorHolds`, `markerAfterCopy`, `markerGoesFirst` (every seed),
+`mirrorListsAfterMark` (11), `forksReferFirst` (7), `mirrorResumesMarked` (6), `releasesOwn` (3),
+`forksRecheck` (3), `marksOwn` (1) and `forksLeaveA` (1); and, of what the spec does not model,
+reads sent to the cell's bucket for a marked version (every seed), peers serving across regions,
+every recorded KMS trusted, and probes' objects unreaped. It catches none of `mirrorChecks`,
+`mirrorHoldsUnmarked`, `mirrorRereadsBeforeRetiring`, `mirrorPins`, `copyRelists`,
+`copiesKeptWhileAlive`, `copyChecksDead` and `forksRereadBeforeLeaving`: each needs a pass of the
+copy's bucket's collector stopped between its read of the cell's head, its listing and its
+deletions while a fork or a mirror goes, and the case stops hosts at their steps, not collectors
+(board 14576). `local_cell::sim`'s aimed steps and TLC find those.
+
 ## What FoundationDB does that we don't (2026-11-20)
 
 Read in `~/src/foundationdb` at 7e7611f82 (2026-11-06). The user asked for this to be compared

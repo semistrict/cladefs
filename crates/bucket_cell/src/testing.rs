@@ -1016,10 +1016,16 @@ pub const SWEEPS: u64 = 32;
 /// stay, and references' marks. cladefs: but a dead cell's, none marked under it, whose head is a
 /// root's or a clone's made, deleted, of an ID an allocator gave, which goes whole, head and lease
 /// (TASK-455); and the lease of a cell of no head once nothing else is left.
+///
+/// cladefs: what a daemon writes outside the protocol, the simulation of the protocol alone none
+/// (board 14521), stays as long as a sweep leaves it, by the bucket's time: read evidence, each
+/// tenant's newest of each version, for a week ([`crate::evidence::doomed`], as a pass that skips
+/// its cell trims it, whatever the versions its head names); and a probe's own object, for an hour
+/// ([`crate::bucket::probe_left`]).
 pub async fn uncollected(bucket: &impl Bucket) -> Vec<String> {
     use layout::Head;
-    let keys: BTreeSet<String> =
-        crate::bucket::list(bucket, "").await.unwrap().into_iter().map(|meta| meta.key).collect();
+    let listed = crate::bucket::list(bucket, "").await.unwrap();
+    let keys: BTreeSet<String> = listed.iter().map(|meta| meta.key.clone()).collect();
     let mut records: BTreeMap<CellId, Head> = BTreeMap::new();
     let mut references = Vec::new();
     // cladefs: the holds of mirrors of its cells' versions in other buckets, each kept for as long
@@ -1141,6 +1147,22 @@ pub async fn uncollected(bucket: &impl Bucket) -> Vec<String> {
         needed.extend(read);
         needed.extend(state.extents.values().map(|location| location.key.clone()));
     }
+    let now = bucket.now();
+    let mut evident: BTreeSet<CellId> = BTreeSet::new();
+    for key in &keys {
+        if let Kind::Evidence { parent, .. } = layout::kind(key) {
+            evident.insert(parent);
+        }
+    }
+    let mut doomed: BTreeSet<&str> = BTreeSet::new();
+    for &cell in &evident {
+        let trimmed = crate::evidence::doomed(cell, &listed, None, &BTreeSet::new(), now);
+        doomed.extend(trimmed.into_iter().map(|meta| meta.key.as_str()));
+    }
+    let probing: BTreeSet<&str> = (listed.iter())
+        .filter(|meta| crate::bucket::probe(&meta.key) && !crate::bucket::probe_left(meta, now))
+        .map(|meta| meta.key.as_str())
+        .collect();
     let mut left = Vec::new();
     for key in &keys {
         // cladefs: blocks of object IDs taken, and the bucket's identity, for good (TASK-364,
@@ -1166,7 +1188,10 @@ pub async fn uncollected(bucket: &impl Bucket) -> Vec<String> {
             // cladefs: fast WAL objects are managed by fast-WAL tombstones, never cold GC (doc-29).
             Kind::Wal { .. } => true,
             Kind::Reference { .. } => !retirable.contains(key) && !unnamed.contains(key),
-            Kind::Unknown => key == layout::EVENTS || key == layout::FORMATS,
+            Kind::Evidence { .. } => !doomed.contains(key.as_str()),
+            Kind::Unknown => {
+                key == layout::EVENTS || key == layout::FORMATS || probing.contains(key.as_str())
+            }
             _ => false,
         };
         if !kept && !needed.contains(key) {
@@ -1194,6 +1219,29 @@ pub async fn uncollected_copies(
     bucket: &impl Bucket,
     own: &impl Bucket,
     number: u16,
+) -> Vec<String> {
+    copies_left(bucket, own, number, false).await
+}
+
+/// cladefs: [`uncollected_copies`], of buckets daemons keep cells in (board 14521): a fork still
+/// being made is passed over, no child yet. A daemon's, its host killed before it was made, stays
+/// so, the VM manager's retry forking another cell, with a reference its version's mirror listed
+/// too early to move, or none (board 14559); the simulation of the protocol alone makes such a
+/// fork again, the same child, and counts it.
+pub async fn uncollected_copies_of_daemons(
+    bucket: &impl Bucket,
+    own: &impl Bucket,
+    number: u16,
+) -> Vec<String> {
+    copies_left(bucket, own, number, true).await
+}
+
+/// [`uncollected_copies`], forks still being made passed over or not.
+async fn copies_left(
+    bucket: &impl Bucket,
+    own: &impl Bucket,
+    number: u16,
+    daemons: bool,
 ) -> Vec<String> {
     use crate::layout::Origin;
     let mut left = Vec::new();
@@ -1281,7 +1329,9 @@ pub async fn uncollected_copies(
     }
     for child in children {
         let Ok(Some(head)) = crate::head::get(bucket, child).await else { continue };
-        let Some(Origin { parent, at, .. }) = head.origin().filter(|_| !head.deleted()) else {
+        let being_made = daemons && head.forking().is_some();
+        let made = head.origin().filter(|_| !head.deleted() && !being_made);
+        let Some(Origin { parent, at, .. }) = made else {
             continue;
         };
         if marked_mirrors.contains(&layout::mirror(parent, at))

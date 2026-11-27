@@ -15,6 +15,9 @@
 
 #![cfg(madsim)]
 
+#[path = "madsim/regions.rs"]
+mod regions;
+
 use bucket_cell::object_bucket::{ObjectBucket, RoutedBucket};
 use cladefs::cladefsd::control::proto::{
     CreateCellRequest, ForkCellRequest, StatCellRequest, SyncCellRequest,
@@ -65,9 +68,26 @@ impl Kept {
     }
 }
 
-/// Boots host `host`'s daemon, its cell directories under `root`, its cells in `bucket`, at
+/// The master key of the bucket KMS of the hosts sharing a bucket ([`Home::Shared`]).
+fn master_key() -> String {
+    "ab".repeat(32)
+}
+
+/// Where a host's daemon keeps its cells, and under what KMS.
+#[derive(Clone)]
+enum Home {
+    /// In the bucket the simulation's hosts share, given it as a test gives a daemon its bucket
+    /// (`Daemon::use_bucket`), its tenants' KEKs kept in it, under [`master_key`].
+    Shared(Arc<RoutedBucket>),
+    /// In the bucket at `url`, which it opens itself, as a host does its `CLADEFSD_BUCKET`
+    /// (board 14521): the simulation serves it there (`bucket_cell::clouds`). With `vars` besides,
+    /// its KMS's among them.
+    At { url: String, vars: Vec<(&'static str, String)> },
+}
+
+/// Boots host `host`'s daemon, its cell directories under `root`, its cells in `home`'s bucket, at
 /// placement token `host`, keeping what `kept` says, and serves for as long as the host runs.
-async fn boot(host: u8, root: &Path, bucket: Arc<RoutedBucket>, kept: Kept) {
+async fn boot(host: u8, root: &Path, home: Home, kept: Kept) {
     // As a host's process boots: its statics anew, its node started again by madsim itself too, as
     // after a boot failing (`BOOT_FAILED`), which `node_local::restart` doesn't start.
     node_local::starting();
@@ -76,8 +96,15 @@ async fn boot(host: u8, root: &Path, bucket: Arc<RoutedBucket>, kept: Kept) {
     host_fs::may_block(|| host_fs::create_dir_all_durably(root).unwrap());
     let tenants = root.join("tenants").display().to_string();
     // One call: it sets the node's whole environment.
+    let (url, more, shared) = match home {
+        Home::Shared(bucket) => {
+            let vars = vec![("CLADEFS_MASTER_KEY", master_key())];
+            ("memory:///cells".to_owned(), vars, Some(bucket))
+        }
+        Home::At { url, vars } => (url, vars, None),
+    };
     let mut vars = vec![
-        ("CLADEFSD_BUCKET", "memory:///cells".to_owned()),
+        ("CLADEFSD_BUCKET", url),
         ("CLADEFSD_TOKEN", host.to_string()),
         ("CLADEFSD_GRPC", control(host).to_string()),
         ("CLADEFSD_TENANTS", tenants),
@@ -102,10 +129,13 @@ async fn boot(host: u8, root: &Path, bucket: Arc<RoutedBucket>, kept: Kept) {
         // Its cells migrated here at names in its root, as the migrations' `to` names them.
         vars.push(("CLADEFSD_EPHEMERAL_CELLS", root.display().to_string()));
     }
+    vars.extend(more);
     node_local::env::set_vars(vars);
     let daemon = cladefs::cladefsd::Daemon::new();
     set_daemon(daemon.clone());
-    daemon.use_bucket(bucket);
+    if let Some(bucket) = shared {
+        daemon.use_bucket(bucket);
+    }
     if let Err(err) = daemon.boot(&root.join("vms.sock"), Some(256 << 20)).await {
         // As its supervisor starts a daemon whose boot failed again: its node, started anew.
         panic!("{BOOT_FAILED}: {err:#}");
@@ -182,13 +212,12 @@ const ROOTS: &str = "/hosts";
 /// How often the bucket lets a waiting request go ([`bucket_cell::faults::Seeded::schedule`]).
 const SCHEDULED_EVERY: Duration = Duration::from_micros(200);
 
-/// What every test's hosts share: their logger, their KMS's master key, and a bucket in memory,
-/// its requests delayed and failed as the seed says, and what heals it.
+/// What every test's hosts share: their logger, and a bucket in memory, its requests ordered and
+/// failed as the seed says, and what heals it. Their KMS's master key is each host's own
+/// environment's ([`boot`]).
 fn world() -> (Arc<RoutedBucket>, Arc<bucket_cell::faults::Seeded>) {
     // Once a process: a determinism check runs the test twice in it.
     let _ = cladefs::cladefsd::logging::to_stderr();
-    // SAFETY: the simulation's one thread, before any node reads the environment.
-    unsafe { std::env::set_var("CLADEFS_MASTER_KEY", "ab".repeat(32)) };
     bucket_cell::buggify::enable(madsim::runtime::Handle::current().seed());
     let odds = bucket_cell::faults::Odds {
         fail_before: 0.05,
@@ -235,8 +264,8 @@ fn hosts_keeping(
                 .ip(control(host).ip())
                 .restart_on_panic_matching(BOOT_FAILED)
                 .init(move || {
-                    let (root, bucket) = (root.clone(), bucket.clone());
-                    async move { boot(host, &root, bucket, kept).await }
+                    let (root, home) = (root.clone(), Home::Shared(bucket.clone()));
+                    async move { boot(host, &root, home, kept).await }
                 })
                 .build()
         })
@@ -712,8 +741,8 @@ const LOST: &str = "cladefs-madsim-search lost: ";
 const SEARCH_SEED_TIME: Duration = Duration::from_secs(120);
 
 /// Runs `seed` of the search `name` in a process of `binary`'s own: what it said on its standard
-/// output; nothing if it ran past [`SEARCH_SEED_TIME`].
-fn searched(binary: &Path, name: &str, seed: u64) -> Option<String> {
+/// output; nothing if it ran past `within`, in real time.
+fn searched(binary: &Path, name: &str, seed: u64, within: Duration) -> Option<String> {
     use std::io::Read as _;
     let mut child = std::process::Command::new(binary)
         .args(["--exact", name, "--include-ignored", "--nocapture", "--test-threads", "1"])
@@ -728,10 +757,10 @@ fn searched(binary: &Path, name: &str, seed: u64) -> Option<String> {
         let _ = stdout.read_to_string(&mut said);
         said
     });
-    let deadline = std::time::Instant::now() + SEARCH_SEED_TIME;
+    let deadline = std::time::Instant::now() + within;
     while child.try_wait().unwrap().is_none() {
         if std::time::Instant::now() > deadline {
-            eprintln!("seed {seed} of {name} ran past {SEARCH_SEED_TIME:?}: killed");
+            eprintln!("seed {seed} of {name} ran past {within:?}: killed");
             child.kill().unwrap();
             child.wait().unwrap();
             return None;
@@ -759,7 +788,7 @@ fn needed(name: &str, off: fn(), profile: Profile, seeds: u64) {
     }
     let binary = std::env::current_exe().unwrap();
     let found = (1..=seeds).find_map(|seed| {
-        let said = searched(&binary, name, seed)?;
+        let said = searched(&binary, name, seed, SEARCH_SEED_TIME)?;
         // Where in its line: libtest's own `test NAME ... ` comes before it there.
         let (_, lost) = said.split_once(LOST)?;
         Some((seed, lost.lines().next().unwrap_or_default().to_owned()))
@@ -1060,7 +1089,11 @@ fn collector(bucket: &Arc<RoutedBucket>) -> madsim::runtime::NodeHandle {
         let bucket = bucket.clone();
         async move {
             // A host's token the daemon's bucket asks for, which no placement of the hosts' is.
-            let vars = [("CLADEFSD_BUCKET", "memory:///cells"), ("CLADEFSD_TOKEN", "1000")];
+            let vars = [
+                ("CLADEFSD_BUCKET", "memory:///cells".to_owned()),
+                ("CLADEFSD_TOKEN", "1000".to_owned()),
+                ("CLADEFS_MASTER_KEY", master_key()),
+            ];
             node_local::env::set_vars(vars);
             let daemon = cladefs::cladefsd::Daemon::new();
             daemon.use_bucket(bucket);

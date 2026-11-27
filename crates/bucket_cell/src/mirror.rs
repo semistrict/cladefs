@@ -411,6 +411,9 @@ pub async fn mirror(
                         let_go(bucket, own, pin, &hold).await?;
                         return Ok(Mirrored::GaveUp(TAKEN.to_owned()));
                     }
+                    // A host stopped here, its pin its own still as it last heard, marks late (a
+                    // test's).
+                    failpoint!("mirror::refreshed");
                     // Transition `Copying -> Marked` conditionally on `marker_version` (`marksOwn`,
                     // board 9498). On `Err`, the conditional update may have landed before the
                     // transient failure, so leave this run's hold and pin for `collect_copy` to

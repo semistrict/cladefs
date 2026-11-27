@@ -222,7 +222,11 @@ cladefs_rust_binary(
 
 cladefs_rust_test(
     name = "madsim_test",
-    srcs = ["tests/madsim.rs"],
+    srcs = [
+        "tests/madsim.rs",
+        "tests/madsim/regions.rs",
+    ],
+    crate_root = "tests/madsim.rs",
     aliases = _CLADEFS_ALIASES,
     data = [":peer_tls_testdata"],
     proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
