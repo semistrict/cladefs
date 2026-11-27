@@ -101,7 +101,6 @@ impl Daemon {
             images: image_dir,
             helper: env!("CARGO_BIN_EXE_machined-vm").into(),
             state: dir.path().join("state"),
-            hotbed: None,
         };
         configure(&mut config);
         let server = machined::start(config).await.unwrap();

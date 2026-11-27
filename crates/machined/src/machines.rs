@@ -51,14 +51,6 @@ impl Current {
     pub(crate) fn to_proto(&self) -> proto::MachineStatus {
         proto::MachineStatus { state: self.state.into(), last_exit: self.last_exit.clone() }
     }
-
-    pub(crate) fn state(&self) -> MachineState {
-        self.state
-    }
-
-    pub(crate) fn last_exit(&self) -> Option<&proto::Exit> {
-        self.last_exit.as_ref()
-    }
 }
 
 fn exit(reason: proto::ExitReason, detail: impl Into<String>) -> proto::Exit {
@@ -97,10 +89,6 @@ struct Running {
 }
 
 impl Entry {
-    pub(crate) fn name(&self) -> &str {
-        &self.name
-    }
-
     pub(crate) fn status(&self) -> watch::Receiver<Current> {
         self.status.subscribe()
     }
@@ -214,8 +202,6 @@ pub(crate) struct Machines {
     images: PathBuf,
     /// The helper binary each machine's VM runs in (`crate::helper`).
     helper: PathBuf,
-    /// cladefs's daemon, this process's, which machines' roots are cells of.
-    cladefs: libcladefs::Daemon,
     /// Where the daemon serves helpers, as VM processes (its VM-process wire).
     cladefs_socket: PathBuf,
     vsock_dir: PathBuf,
@@ -305,7 +291,6 @@ impl Machines {
         Ok(Self {
             images: images.to_owned(),
             helper: helper.to_owned(),
-            cladefs,
             cladefs_socket,
             vsock_dir,
             #[cfg(target_os = "linux")]
@@ -317,24 +302,6 @@ impl Machines {
             snapshots: Mutex::default(),
             next_socket: AtomicU32::new(1),
         })
-    }
-
-    /// A new cell forked from the version `from`, of `capacity` bytes, on a disk of the
-    /// daemon's: a machine's root, its own.
-    pub(crate) async fn fork_cell(
-        &self,
-        from: libcladefs::CellVersion,
-        capacity: u64,
-    ) -> Result<proto::Cell, Status> {
-        let daemon = self.cladefs.clone();
-        // A cell's client's calls block its thread; the client goes as it is made, closing it.
-        let forked = tokio::task::spawn_blocking(move || {
-            let client = daemon.fork(from.tenant, from, capacity)?;
-            Ok::<_, libcladefs::Error>(proto::Cell { tenant: client.tenant(), cell: client.cell() })
-        })
-        .await
-        .map_err(|e| Status::internal(format!("forking a cell: {e}")))?;
-        forked.map_err(|e| Status::unavailable(format!("forking {from:?}: {e:#}")))
     }
 
     /// The machine named `name`.
@@ -372,11 +339,6 @@ impl Machines {
         });
         entries.insert(name.to_owned(), entry.clone());
         Ok(entry)
-    }
-
-    /// Checks that `spec` makes a machine, as [`create`](Self::create) would.
-    pub(crate) fn check(&self, spec: &proto::MachineSpec) -> Result<(), Status> {
-        checks::plan(&self.images, spec).map(drop)
     }
 
     /// Makes a machine, CREATED.

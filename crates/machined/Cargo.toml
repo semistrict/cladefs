@@ -9,7 +9,6 @@ publish = false
 # machined runs where libmachine does: x86-64 Linux with KVM, arm64 macOS with
 # Hypervisor.framework (src/lib.rs); elsewhere it is empty and needs nothing.
 [target.'cfg(any(all(target_os = "linux", target_arch = "x86_64"), all(target_os = "macos", target_arch = "aarch64")))'.dependencies]
-base64.workspace = true
 clap = { version = "4.6.7", features = ["derive"] }
 futures.workspace = true
 # The client's connector to a Unix socket (src/client.rs), as cladefsd's control client's.
@@ -20,16 +19,8 @@ libcladefs.workspace = true
 libmachine = { workspace = true, default-features = false }
 log.workspace = true
 prost.workspace = true
-prost-types = "0.14.4"
-reqwest = { version = "0.13.5", default-features = false, features = ["rustls"] }
-rustls = { version = "0.23.46", default-features = false, features = ["aws-lc-rs", "std"] }
-rustls-platform-verifier = "0.7.1"
-serde.workspace = true
-serde_json = "1.0.154"
 tokio = { workspace = true, features = ["io-util", "signal"] }
-tokio-rustls = { version = "0.26.6", default-features = false, features = ["aws-lc-rs"] }
 tokio-stream = { version = "0.1.19", features = ["net"] }
-tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
 # The workspace's tonic (madsim's, which is tonic outside the simulation; machined is never in it),
 # with TLS (rustls over aws-lc-rs) for TCP's mutual authentication, as cladefsd's peers'.
 tonic = { package = "madsim-tonic", version = "=0.6.0", features = ["tls-aws-lc"] }
@@ -39,9 +30,6 @@ tower = "0.5.3"
 [target.'cfg(any(all(target_os = "linux", target_arch = "x86_64"), all(target_os = "macos", target_arch = "aarch64")))'.dev-dependencies]
 cladefs_core = { workspace = true, features = ["tests-kms"] }
 cladefsd.workspace = true
-http-body-util = "0.1.5"
-hyper = { version = "1.12.0", features = ["server", "http1"] }
-hyper-util = { version = "0.1.21", features = ["tokio"] }
 libmachine-agent.workspace = true
 tar = { version = "0.4.46", default-features = false }
 tempfile.workspace = true

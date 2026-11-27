@@ -136,7 +136,6 @@ pub struct Server {
     machines: Arc<Machines>,
     /// cladefs's daemon, this process's: drained as machined stops.
     cladefs: libcladefs::Daemon,
-    hotbed: Option<crate::hotbed::Node>,
     shutdown: watch::Sender<bool>,
     serving: Vec<tokio::task::JoinHandle<Result<(), tonic::transport::Error>>>,
 }
@@ -152,13 +151,9 @@ impl Server {
         self.tcp
     }
 
-    /// Stops serving: takes no more callers (its hotbed node leaves its tunnel), stops every
-    /// machine and waits until each is freed, ends the streams on them (watches, consoles, execs),
-    /// then waits for the calls under way.
+    /// Stops serving: takes no more callers, stops every machine and waits until each is freed,
+    /// ends the streams on them (watches, consoles, execs), then waits for the calls under way.
     pub async fn shutdown(self) -> io::Result<()> {
-        if let Some(node) = self.hotbed {
-            node.shutdown().await;
-        }
         self.shutdown.send_replace(true);
         // Before the servers' graceful ends, which wait for every stream to end.
         self.machines.close().await;
@@ -197,12 +192,6 @@ pub async fn start(config: Config) -> io::Result<Server> {
         .map_err(|e| io::Error::other(format!("starting cladefs's daemon: {e:#}")))?;
     let machines =
         Arc::new(Machines::new(&config.images, &config.helper, &config.state, cladefs.clone())?);
-    // Joined first, run last: a node that can't join fails the start with nothing bound, and
-    // runs only once machined serves.
-    let joining = match &config.hotbed {
-        Some(hotbed) => Some(crate::hotbed::join(hotbed, machines.clone(), &config.state).await?),
-        None => None,
-    };
     let service = Service::new(machines.clone());
     // cladefs's daemon's control API (its Cladefsd service, and the health service, which says
     // whether the daemon serves) and machined's own, on each endpoint.
@@ -244,14 +233,5 @@ pub async fn start(config: Config) -> io::Result<Server> {
             builder.add_routes(routes).serve_with_incoming_shutdown(incoming, stopped(&shutdown));
         serving.push(tokio::spawn(server));
     }
-    let hotbed = joining.map(crate::hotbed::Joining::run);
-    Ok(Server {
-        socket: config.socket,
-        tcp: bound_tcp,
-        machines,
-        cladefs,
-        hotbed,
-        shutdown,
-        serving,
-    })
+    Ok(Server { socket: config.socket, tcp: bound_tcp, machines, cladefs, shutdown, serving })
 }

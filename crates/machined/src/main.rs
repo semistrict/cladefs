@@ -6,8 +6,7 @@
 //! SIGINT, then stops every machine and exits.
 //!
 //!   machined --images DIR --state DIR [--socket PATH] [--tcp ADDR --tls-cert PEM --tls-key PEM
-//!            --tls-client-ca PEM] [--hotbed-controller URL --hotbed-token-file PATH
-//!            --hotbed-node NAME --hotbed-kernel KERNEL [--hotbed-initramfs ...]]
+//!            --tls-client-ca PEM]
 
 #[cfg(any(
     all(target_os = "linux", target_arch = "x86_64"),
@@ -18,7 +17,6 @@ mod run {
     use std::path::PathBuf;
 
     use clap::Parser;
-    use machined::hotbed::Hotbed;
     use machined::{Config, Tcp};
 
     /// machined: many libmachine machines in one process, managed over gRPC.
@@ -50,47 +48,6 @@ mod run {
         /// given.
         #[arg(long)]
         helper: Option<PathBuf>,
-        /// Be a node of the hotbed controller at this URL (https://...): its machines then
-        /// hotbed's workspaces, as the --hotbed flags say.
-        #[arg(
-            long,
-            requires_all = [
-                "hotbed_token_file", "hotbed_node", "hotbed_kernel", "hotbed_root_cell",
-                "hotbed_root_version",
-            ]
-        )]
-        hotbed_controller: Option<String>,
-        /// A file holding the token the node joins with: hotbed's join token (hbj_...), or a
-        /// node's worker token (hbw_...). Read until machined has joined.
-        #[arg(long)]
-        hotbed_token_file: Option<PathBuf>,
-        /// The node's name in hotbed (machined1).
-        #[arg(long)]
-        hotbed_node: Option<String>,
-        /// Each workspace's machine's kernel, in --images.
-        #[arg(long)]
-        hotbed_kernel: Option<String>,
-        /// Its initramfs, in --images: one whose init runs libmachine's agent.
-        #[arg(long, default_value = "")]
-        hotbed_initramfs: String,
-        /// Its kernel command line.
-        #[arg(long, default_value = "libmachine_action=agent")]
-        hotbed_command_line: String,
-        /// Its vCPUs.
-        #[arg(long, default_value_t = 2)]
-        hotbed_vcpus: u32,
-        /// Its memory, in MiB.
-        #[arg(long, default_value_t = 1024)]
-        hotbed_memory_mib: u64,
-        /// The cell version each workspace's root is forked from: its tenant,
-        #[arg(long, default_value_t = 0)]
-        hotbed_root_tenant: u64,
-        /// its cell,
-        #[arg(long)]
-        hotbed_root_cell: Option<u64>,
-        /// and its version.
-        #[arg(long)]
-        hotbed_root_version: Option<u64>,
         /// cladefs's daemon's configuration, cladefsd's TOML (`cladefsd --config`): unless given,
         /// one local disk in <state>/cladefs, under a master key of its own there.
         #[arg(long)]
@@ -129,27 +86,6 @@ mod run {
             }
             _ => None,
         };
-        let hotbed = match (flags.hotbed_controller, flags.hotbed_token_file, flags.hotbed_node) {
-            (Some(controller), Some(token_file), Some(node)) => {
-                let workspace = machined::proto::MachineSpec {
-                    vcpus: flags.hotbed_vcpus,
-                    memory_bytes: flags.hotbed_memory_mib.saturating_mul(1 << 20),
-                    boot: Some(machined::proto::Boot {
-                        kernel: flags.hotbed_kernel.unwrap_or_default(),
-                        initramfs: flags.hotbed_initramfs,
-                        command_line: flags.hotbed_command_line,
-                    }),
-                    ..Default::default()
-                };
-                let root = machined::hotbed::CellVersion {
-                    tenant: flags.hotbed_root_tenant,
-                    cell: flags.hotbed_root_cell.unwrap_or_default(),
-                    version: flags.hotbed_root_version.unwrap_or_default(),
-                };
-                Some(Hotbed::new(controller, token_file, node, workspace, root))
-            }
-            _ => None,
-        };
         let helper = match flags.helper {
             Some(helper) => helper,
             None => Config::default_helper()?,
@@ -167,7 +103,6 @@ mod run {
             images: flags.images,
             helper,
             state: flags.state,
-            hotbed,
         };
         tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(async {
             let server = machined::start(config).await?;
