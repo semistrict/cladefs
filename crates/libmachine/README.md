@@ -7,7 +7,7 @@ Linux/KVM (x86_64) is the production platform; a macOS backend on Apple
 Silicon (Hypervisor.framework, board 13063) is to run cladefs's guests there in
 full, DAX included (board 13054). Its architecture is doc-30
 (`docs/design/`), its decisions before it came into this repo doc-31; its
-tasks are on the board (`vb tasks tasks --label tag.libmachine=yes`).
+tasks are on the board (`hotbed board task ls --label tag.libmachine=yes`).
 
 **Status:** a `Machine` boots Linux: an ELF `vmlinux` through PVH or a
 `bzImage` through the 64-bit boot protocol, on a PC platform with KVM's

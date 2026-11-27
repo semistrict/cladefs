@@ -9,7 +9,7 @@ read and run; the tree stays as you found it.
 
 Input: a hotbed review ID (`hotbed review show <id>` gives `base`, `head`, and `instructions`) or
 a commit range / "uncommitted", and the board task ID it serves. Read the diff, the task
-(`vb read <id>`), the code the change touches and its callers, and the tests that cover it.
+(`hotbed board read <id>`), the code the change touches and its callers, and the tests that cover it.
 
 Look for what breaks: wrong results, data loss across crashes and power cuts, ordering and races
 (locks, atomics, the DAX fault path against seals and UNMAPs), lifetimes, error paths that leak or
@@ -24,7 +24,7 @@ Verify each candidate before you report it:
 2. Argue as the author: find the check, lock, caller convention or design note that makes it
    safe (AGENTS.md, `docs/design/`, `dead-ends/`, the TLA+ specs). Refute that with code, or drop
    the candidate.
-3. Search the tests for one covering this path. Check the board (`vb tasks tasks --label type=bug`)
+3. Search the tests for one covering this path. Check the board (`hotbed board task ls --all --label type=bug`)
    for an open task: cite it rather than report again.
 4. Name the reproducer that would make it red: a guest/sim seed or scenario, a Shuttle or loom
    model, a model-test case, a unit test, a guest case, with its shape. Where you can run it from

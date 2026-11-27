@@ -2,8 +2,8 @@
 
 ## Tasks live on the board
 
-This project's tasks are on the team board (Vercel Board, `vb`), channel `tasks`, not in
-Backlog.md, which is retired: there is no `backlog/` and no `backlog` CLI to run.
+This project's tasks are on Hotbed's board (`hotbed board`), project `cladefs`. Backlog.md and the
+Vercel Board (`vb`) are retired: there is no `backlog/`, and neither `backlog` nor `vb` is to be run.
 
 Before any task action (finding, filing, claiming, noting, finishing), read AGENTS.md's
 **Tasks: the board** and follow it: claim a task before working it, write as your worktree's
