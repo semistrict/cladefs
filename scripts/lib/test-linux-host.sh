@@ -118,8 +118,17 @@ if [[ -n ${CLADEFS_TEST_HOST_TRACE:-} ]]; then
     tracer=$!
 fi
 e2e_status=0
-CLADEFS_E2E_RESULTS="$results/e2e" "$repo/scripts/test-e2e.sh" "$@" > "$results/e2e.log" 2>&1 ||
-    e2e_status=$?
+# A jailed run's jailer (its user, chroot and devices) needs root, which a hotbed workspace's user
+# has through sudo (AGENTS.md): as root, as CI runs it, and its results given back after.
+as_root=()
+if [[ -n ${CLADEFS_FIRECRACKER_JAIL:-} ]] && (( EUID != 0 )); then
+    as_root=(sudo --preserve-env env "PATH=$PATH" "HOME=$HOME")
+fi
+CLADEFS_E2E_RESULTS="$results/e2e" ${as_root[@]+"${as_root[@]}"} "$repo/scripts/test-e2e.sh" "$@" \
+    > "$results/e2e.log" 2>&1 || e2e_status=$?
+if (( ${#as_root[@]} )); then
+    sudo chown -R "$(id -u):$(id -g)" "$results"
+fi
 echo "guest tests: exit $e2e_status" >&2
 # The tracer prints its maps as it is interrupted.
 if [[ -n $tracer ]]; then
