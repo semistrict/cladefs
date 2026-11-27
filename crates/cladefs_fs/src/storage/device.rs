@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 //! cladefs: an open cell as an Fxfs device (`storage_device::Device`), the device of an image this
-//! process mounts: an import's, `cladefs-mount`'s, the daemon's FUSE mount of cells', a host
+//! process mounts: an import's, the daemon's FUSE mount of cells', a host
 //! tool's, a SQLite image's. Its reads, writes, frees and commits are the open cell's, as a guest's
 //! requests of the extent daemon are (`cladefsd::device::DaemonDevice` is this over a
 //! connection to the daemon): through the cell's page cache (`local_cell::pages`), under the one

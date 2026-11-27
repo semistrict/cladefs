@@ -71,14 +71,13 @@ class PjdfstestFuseTest(unittest.TestCase):
     def test_every_known_failure_has_a_task(self):
         fuse.known(fuse.KNOWN.read_text())
 
-    def test_ci_runs_it_as_root_on_cladefs_mount(self):
+    def test_ci_runs_it_as_root_on_the_daemons_mount(self):
         ci = (SCRIPTS.parent / ".github" / "workflows" / "ci.yml").read_text()
         job = re.search(r"^  pjdfstest-fuse:\n(.*?)(?=^  \S|\Z)", ci, re.MULTILINE | re.DOTALL)
         self.assertIsNotNone(job, "no pjdfstest-fuse job")
         job = job.group(1)
-        self.assertIn('cargo build --locked --target "$MUSL_TARGET" -p cladefs --bin cladefs-mount', job)
-        self.assertRegex(
-            job, r"sudo .*scripts/pjdfstest-fuse\.py target/x86_64-unknown-linux-musl/debug/cladefs-mount")
+        self.assertIn('cargo build --locked --target "$MUSL_TARGET" -p cladefs --bin cladefsd --bin cladefsctl', job)
+        self.assertRegex(job, r"sudo .*scripts/pjdfstest-fuse\.py target/x86_64-unknown-linux-musl/debug\n")
         for package in ["musl-tools", "fuse3", "autoconf", "automake"]:
             self.assertIn(package, job)
 

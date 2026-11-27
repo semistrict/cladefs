@@ -243,13 +243,13 @@ jobs:
             target
           key: cargo-${{ runner.os }}-pjdfstest-fuse-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-pjdfstest-fuse-
-      - name: Build cladefs-mount
+      - name: Build cladefsd and cladefsctl
         run: |
           source scripts/lib/musl.sh
           musl_setup x86_64-unknown-linux-musl
-          env "${MUSL_ENV[@]}" cargo build --locked --target "$MUSL_TARGET" -p cladefs --bin cladefs-mount
-      - name: pjdfstest on FUSE mounts of new stores, as root
-        run: sudo --preserve-env env "PATH=$PATH" scripts/pjdfstest-fuse.py target/x86_64-unknown-linux-musl/debug/cladefs-mount
+          env "${MUSL_ENV[@]}" cargo build --locked --target "$MUSL_TARGET" -p cladefs --bin cladefsd --bin cladefsctl
+      - name: pjdfstest on the daemon's FUSE mounts of new cells, as root
+        run: sudo --preserve-env env "PATH=$PATH" scripts/pjdfstest-fuse.py target/x86_64-unknown-linux-musl/debug
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: failure()
         with:

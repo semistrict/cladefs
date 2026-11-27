@@ -2,17 +2,19 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! A cell a daemon served opens in another process at once once its VM process goes, as a host's
-//! check of a guest's crash opens it: whole, as of its last commit, durable or only ordered, as a
-//! guest's fsyncs are (TASK-26.6.2). The daemon closes the
-//! cell as the VM process goes, flushing it, and the other process's opening waits for that,
-//! as opening a cell another process has open does (`local_cell::Dir::take`), rather than
-//! recover the cell from under it.
+//! A cell a daemon served is whole on its disk once its VM process goes, as a host's check of a
+//! guest's crash finds it: as of its last commit, durable or only ordered, as a guest's fsyncs are
+//! (TASK-26.6.2). The daemon closes the cell as the VM process goes, flushing it. cladefs: a host's
+//! one daemon owns its cells, which no other process opens beside it (board 14305): so the check
+//! waits for that close as a writer does, by opening the cell again through the daemon, then kills
+//! the daemon, as a crash would, no drain flushing anything, and opens the cell itself.
 
 // cladefs: the daemon's, on Linux and macOS (board 13065).
 #![cfg(not(madsim))]
 
-use cladefs::{CellClient, ExtentId, OpenCell, VolatileSlice, VolatileSliceMut};
+mod common;
+
+use cladefs::{CellClient, CellId, ExtentId, OpenCell, VolatileSlice, VolatileSliceMut};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
@@ -34,6 +36,7 @@ fn daemon(dir: &Path) -> (KillOnDrop, PathBuf) {
     let bucket = format!("file://{}/", dir.canonicalize().unwrap().join("bucket").display());
     let daemon = Command::new(env!("CARGO_BIN_EXE_cladefsd"))
         .arg(&socket)
+        .env("CLADEFSD_ROOTS", dir)
         .env("CLADEFSD_BUCKET", bucket)
         .env("CLADEFSD_TOKEN", "1")
         .spawn()
@@ -47,14 +50,28 @@ fn daemon(dir: &Path) -> (KillOnDrop, PathBuf) {
     (daemon, socket)
 }
 
+/// The cell `cell`, closed by `daemon` as its VM process went, then `daemon` killed: its VM's
+/// next connection waiting for that close (the cell table's `writers_wait_for_closing`), the
+/// daemon then dying, as a crash kills it, nothing flushed past what its close did; and the
+/// daemon started again for the next round.
+fn closed_then_crashed(dir: &Path, daemon: &mut (KillOnDrop, PathBuf), cell: CellId) {
+    let waited = CellClient::connect_cell(&daemon.1, cell).unwrap();
+    daemon.0.0.kill().unwrap();
+    daemon.0.0.wait().unwrap();
+    drop(waited);
+    std::fs::remove_file(&daemon.1).unwrap();
+    *daemon = self::daemon(dir);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn cells_open_whole_in_another_process_once_their_vm_goes() {
     let dir = tempfile::tempdir().unwrap();
-    let (_daemon, socket) = daemon(dir.path());
-    let path = dir.path().join("store");
+    let mut daemon = daemon(dir.path());
+    let cell = common::cell_of(&CellClient::connect_new(&daemon.1, 0, 1 << 28).unwrap());
+    let path = common::cell_dir(dir.path(), cell);
     let mut sequence = 1;
     for round in 0..50 {
-        let client = CellClient::connect(&socket, &path, 1 << 28).unwrap();
+        let client = CellClient::connect_cell(&daemon.1, cell).unwrap();
         let mut root = Vec::new();
         for commit in 0..20 {
             for _ in 0..4 {
@@ -67,9 +84,11 @@ async fn cells_open_whole_in_another_process_once_their_vm_goes() {
             client.commit(Some(&root)).unwrap();
         }
         drop(client);
+        closed_then_crashed(dir.path(), &mut daemon, cell);
         let opened = OpenCell::open(&path).await.unwrap();
         assert_eq!(opened.root().unwrap(), root, "round {round}");
         sequence = opened.info().unwrap().next_sequence.max(sequence);
+        opened.close().await;
     }
 }
 
@@ -80,11 +99,12 @@ async fn cells_open_whole_in_another_process_once_their_vm_goes() {
 #[tokio::test(flavor = "multi_thread")]
 async fn ordered_commits_are_whole_in_another_process_once_their_vm_goes() {
     let dir = tempfile::tempdir().unwrap();
-    let (_daemon, socket) = daemon(dir.path());
-    let path = dir.path().join("store");
+    let mut daemon = daemon(dir.path());
+    let cell = common::cell_of(&CellClient::connect_new(&daemon.1, 0, 1 << 28).unwrap());
+    let path = common::cell_dir(dir.path(), cell);
     let mut sequence = 1;
     for round in 0..50u64 {
-        let client = CellClient::connect(&socket, &path, 1 << 28).unwrap();
+        let client = CellClient::connect_cell(&daemon.1, cell).unwrap();
         let mut last = Vec::new();
         for commit in 0..20u64 {
             let extent = ExtentId { cell: client.cell(), sequence };
@@ -95,6 +115,7 @@ async fn ordered_commits_are_whole_in_another_process_once_their_vm_goes() {
             last.push((extent, data));
         }
         drop(client);
+        closed_then_crashed(dir.path(), &mut daemon, cell);
         let opened = OpenCell::open(&path).await.unwrap();
         for (extent, data) in &last {
             let mut read = vec![0; data.len()];
@@ -102,6 +123,7 @@ async fn ordered_commits_are_whole_in_another_process_once_their_vm_goes() {
             assert_eq!(found.map(|()| read), Ok(data.clone()), "round {round}: {extent:?}");
         }
         sequence = opened.info().unwrap().next_sequence.max(sequence);
+        opened.close().await;
     }
 }
 
@@ -111,13 +133,13 @@ async fn ordered_commits_are_whole_in_another_process_once_their_vm_goes() {
 fn cells_are_told_when_their_daemon_goes() {
     let dir = tempfile::tempdir().unwrap();
     let (mut daemon, socket) = daemon(dir.path());
-    let closed = CellClient::connect(&socket, dir.path().join("closed"), 1 << 28).unwrap();
+    let closed = CellClient::connect_new(&socket, 0, 1 << 28).unwrap();
     let (told, lost) = std::sync::mpsc::channel();
     let told_closed = told.clone();
     closed.on_daemon_lost(move || told_closed.send("closed").unwrap());
     drop(closed);
 
-    let client = CellClient::connect(&socket, dir.path().join("store"), 1 << 28).unwrap();
+    let client = CellClient::connect_new(&socket, 0, 1 << 28).unwrap();
     client.on_daemon_lost(move || told.send("cell").unwrap());
     let write = |sequence| {
         let extent = ExtentId { cell: client.cell(), sequence };

@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 //! How the release binaries link, shared by the build scripts of the crates that ship them:
-//! crates/cladefs/build.rs (cladefsd, cladefsctl, cladefs-mount) and crates/bucket_cell/build.rs
+//! crates/cladefs/build.rs (cladefsd, cladefsctl) and crates/bucket_cell/build.rs
 //! (cladefs-gc), so that the four scripts/build-musl.sh builds link alike (board 12766).
 
 /// cladefs: has a release build's binaries on Linux link with their debug sections compressed

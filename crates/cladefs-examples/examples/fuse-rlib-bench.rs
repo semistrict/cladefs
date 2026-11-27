@@ -68,6 +68,8 @@ fn main() {
         std::env::set_var("CLADEFSD_GRPC", &control);
         std::env::set_var("CLADEFSD_MOUNT", &mountpoint);
         std::env::set_var("CLADEFSD_MOUNT_STORES", &cells);
+        // The disk it owns, whose cells directory is the mount's (board 14305).
+        std::env::set_var("CLADEFSD_ROOTS", cells.parent().unwrap());
         std::env::set_var("CLADEFSD_PART_CACHE", &part_cache);
         std::env::set_var("CLADEFSD_PART_CACHE_BYTES", (4u64 << 30).to_string());
         std::env::set_var("CLADEFSD_VM_CGROUP_DELEGATED", "1");

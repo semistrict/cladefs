@@ -341,7 +341,7 @@ device naming that field is refused.
 **Extents.** The daemon holds a few hundred bytes of memory for each extent of every open cell, its
 own and those it inherited: each fork of a base of _n_ extents holds about 220-470 bytes times _n_,
 whichever VM has it open (measured on macOS, TASK-443.2; TASK-453 is to share it). StatCell says
-how many a cell holds, `own_extents` and `inherited_extents` (TASK-454); `cladefsctl stat DIR`
+how many a cell holds, `own_extents` and `inherited_extents` (TASK-454); `cladefsctl stat TENANT/CELL`
 prints them. Read a base's before choosing how many forks of it a host serves. Of a cell a VM has
 open, StatCell reads the count kept as it changes, at no cost; of one none has, it opens the cell
 as a VM's would (its state read, its cell's head taken, the map of its extents built: time and,

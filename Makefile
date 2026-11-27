@@ -22,7 +22,7 @@ fix-license-headers:
 check-tla:
 	scripts/check-tla.sh
 
-# Builds fully static musl release binaries (cladefsd, cladefsctl, cladefs-mount, cladefs-gc)
+# Builds fully static musl release binaries (cladefsd, cladefsctl, cladefs-gc)
 # for the host's Linux architecture (or TARGET=x86_64-unknown-linux-musl / aarch64-unknown-linux-musl).
 build-musl:
 	scripts/build-musl.sh $(if $(TARGET),--target $(TARGET),) $(if $(OUT),--out $(OUT),)

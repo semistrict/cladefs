@@ -59,10 +59,7 @@
 //! cladefsctl mount detach [--force] TENANT CELL
 //! cladefsctl mount list
 //!
-//! # Without the daemon: offline bootstrap, read-only inspection, and bucket administration.
-//! cladefsctl import DIR CAPACITY IMAGE [REF]
-//! cladefsctl import-memory [--version] DIR FILE
-//! cladefsctl stat DIR
+//! # Without the daemon: bucket administration.
 //! cladefsctl shred-cell TENANT/CELL       # with CLADEFSD_BUCKET, as with --bucket
 //! cladefsctl shred-tenant TENANT          # with CLADEFSD_BUCKET, as with --bucket
 //!
@@ -91,16 +88,13 @@
 //! With `CLADEFSD_GRPC` naming the control socket of the extent daemon (TASK-43.5), commands go
 //! through its control API (`cladefs::cladefsd::control`) and act on cells as the daemon serves
 //! them: on a cell a VM has open, live, or not at all (`EBUSY`). Without `CLADEFSD_GRPC` (board
-//! 11705, hotbed question 542), only offline workflows run locally: bucket administration
-//! (`format-bucket`, `add-bucket`, `buckets`, and keyless `shred-tenant`/`shred-cell`/`set-peers`),
-//! offline base-image bootstrap (`import`, `import-memory`), and read-only `stat`. All live-cell
-//! lifecycle commands (`create`, `take`, `place`, `sync`, `fork`, `version`, `versions`,
-//! `drop-versions`, `share`, `unshare`, `fork-version`, `delete`, `drop`, `resize`, `public`,
-//! `public-attach-only`, `attach`) require `CLADEFSD_GRPC`.
+//! 11705, hotbed question 542), only bucket administration runs (`format-bucket`, `add-bucket`,
+//! `buckets`, and keyless `shred-tenant`/`shred-cell`/`set-peers`). Every command on a cell
+//! (`create`, `take`, `import`, `import-memory`, `stat`, `fork`, ...) requires `CLADEFSD_GRPC`: a
+//! host's one daemon owns its cells, which nothing else opens (the user, 2026-11-26, board 14305).
 //!
-//! Below, "the cell at DIR" is the cell a command names: by its directory without the daemon, by
-//! TENANT/CELL through it, which places a new cell's directory itself, of the default tenant's
-//! unless `--tenant` names another.
+//! Below, "the cell at DIR" is the cell a command names, TENANT/CELL, the daemon placing a new
+//! cell's directory itself, of the default tenant's unless `--tenant` names another.
 //!
 //! `create` makes an empty cell at DIR, of CAPACITY bytes, of a new cell, a new cell's of the
 //! default tenant's (doc-20), its ID its bucket's to give (TASK-364), and prints the cell. `take`
@@ -309,7 +303,6 @@ fn main() {
 #[cfg(not(madsim))]
 mod cli {
     use anyhow::{Context as _, bail};
-    use cladefs::OpenCell;
     use std::path::{Path, PathBuf};
 
     /// The ID `given` writes, in base 32 (`base32_id`): `what`, as a refusal names it.
@@ -550,7 +543,7 @@ mod cli {
          cladefsctl format-bucket URL [DETAILS] | cladefsctl add-bucket ROOT URL [DETAILS] | \
          cladefsctl buckets URL | cladefsctl formats URL | \
          cladefsctl ratchet URL [--storage N] [--fxfs N] | cladefsctl --version; \
-         offline (no daemon): take/create/import/fork/stat/delete/drop/resize take DIR; \
+         without CLADEFSD_GRPC, bucket administration alone; \
          global flags: [--config PATH] [--timeout SECONDS]"
         )
     }
@@ -583,35 +576,6 @@ mod cli {
         renamed.chain(keys).collect()
     }
 
-    /// Cell target: a `(tenant, cell)` ID when talking to the daemon, or a local directory path
-    /// when operating offline without a daemon.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    enum Target {
-        Cell(cladefs::CellId),
-        Dir(PathBuf),
-    }
-
-    impl Target {
-        #[cfg(target_os = "linux")]
-        fn cell(self) -> anyhow::Result<cladefs::CellId> {
-            match self {
-                Self::Cell(cell) => Ok(cell),
-                Self::Dir(dir) => {
-                    bail!("expected TENANT/CELL in daemon mode, got directory {}", dir.display())
-                }
-            }
-        }
-
-        fn dir(self) -> anyhow::Result<PathBuf> {
-            match self {
-                Self::Dir(dir) => Ok(dir),
-                Self::Cell(cell) => {
-                    bail!("offline mode requires a cell directory path, not {cell}")
-                }
-            }
-        }
-    }
-
     /// What cladefsctl was asked to do. cladefs: what only the daemon does is read by `through`
     /// alone, which is Linux's alone.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -628,15 +592,14 @@ mod cli {
             force: bool,
         },
         Place {
-            target: Target,
+            target: cladefs::CellId,
             token: u64,
             force: bool,
         },
         Sync {
-            target: Target,
+            target: cladefs::CellId,
         },
         Import {
-            dir: Option<PathBuf>,
             tenant: u64,
             capacity: u64,
             image: PathBuf,
@@ -644,29 +607,28 @@ mod cli {
         },
         /// cladefs: a new memory cell holding a snapshot memory file (board 11222).
         ImportMemory {
-            dir: Option<PathBuf>,
             tenant: u64,
             file: PathBuf,
             make_version: bool,
         },
         Fork {
-            src: Target,
+            src: cladefs::CellId,
             target_tenant: Option<u64>,
         },
         /// cladefs: a version made (doc-20).
         Version {
-            target: Target,
+            target: cladefs::CellId,
         },
         Versions {
-            target: Target,
+            target: cladefs::CellId,
         },
         DropVersions {
-            target: Target,
+            target: cladefs::CellId,
             versions: Vec<u64>,
         },
         /// cladefs: a version shared, or no longer (TASK-395.7).
         Share {
-            target: Target,
+            target: cladefs::CellId,
             version: u64,
             shared: bool,
         },
@@ -677,27 +639,27 @@ mod cli {
             target_tenant: Option<u64>,
         },
         Delete {
-            target: Target,
+            target: cladefs::CellId,
         },
         Drop {
-            target: Target,
+            target: cladefs::CellId,
         },
         Resize {
-            target: Target,
+            target: cladefs::CellId,
             capacity: u64,
         },
         Public {
-            target: Target,
+            target: cladefs::CellId,
         },
         PublicAttachOnly {
-            target: Target,
+            target: cladefs::CellId,
         },
         Attach {
-            target: Target,
-            base: Target,
+            target: cladefs::CellId,
+            base: cladefs::CellId,
         },
         Stat {
-            target: Target,
+            target: cladefs::CellId,
         },
         /// cladefs: the stats of the daemon, its VM processes and their guests, as JSON if `json`
         /// (TASK-111.4), the VM processes' answers waited for `wait` at most, the daemon's default
@@ -1010,65 +972,31 @@ mod cli {
     }
 
     impl Command {
-        fn parse(args: &[String], daemon_mode: bool) -> anyhow::Result<Self> {
+        fn parse(args: &[String]) -> anyhow::Result<Self> {
             let capacity = |capacity: &str| capacity.parse().context("CAPACITY must be a number");
             let token = |token: &str| token.parse().context("TOKEN must be a number");
             let id =
                 |id: &str, what| id.parse().with_context(|| format!("{what} must be a number"));
             let tenant = |tenant: &str| self::id("TENANT", tenant);
-            let target = |raw: &str| -> anyhow::Result<Target> {
-                if daemon_mode {
-                    Ok(Target::Cell(parse_cell(raw)?))
-                } else {
-                    Ok(Target::Dir(raw.into()))
-                }
-            };
+            let target = parse_cell;
             let words: Vec<&str> = args.iter().map(String::as_str).collect();
             Ok(match words[..] {
-                ["take", "--force", size, cell, ref rest @ ..]
-                    if daemon_mode && rest.len() <= 1 =>
-                {
-                    Self::Take {
-                        capacity: capacity(size)?,
-                        cell: parse_cell(cell)?,
-                        token: rest.first().map(|rest| token(rest)).transpose()?,
-                        force: true,
-                    }
-                }
-                ["take", size, cell, ref rest @ ..] if daemon_mode && rest.len() <= 1 => {
-                    Self::Take {
-                        capacity: capacity(size)?,
-                        cell: parse_cell(cell)?,
-                        token: rest.first().map(|rest| token(rest)).transpose()?,
-                        force: false,
-                    }
-                }
-                ["take", "--force", _dir, size, cell, ref rest @ ..]
-                    if !daemon_mode && rest.len() <= 1 =>
-                {
-                    Self::Take {
-                        capacity: capacity(size)?,
-                        cell: parse_cell(cell)?,
-                        token: rest.first().map(|rest| token(rest)).transpose()?,
-                        force: true,
-                    }
-                }
-                ["take", _dir, size, cell, ref rest @ ..] if !daemon_mode && rest.len() <= 1 => {
-                    Self::Take {
-                        capacity: capacity(size)?,
-                        cell: parse_cell(cell)?,
-                        token: rest.first().map(|rest| token(rest)).transpose()?,
-                        force: false,
-                    }
-                }
-                ["create", "--tenant", t, size] if daemon_mode => {
+                ["take", "--force", size, cell, ref rest @ ..] if rest.len() <= 1 => Self::Take {
+                    capacity: capacity(size)?,
+                    cell: parse_cell(cell)?,
+                    token: rest.first().map(|rest| token(rest)).transpose()?,
+                    force: true,
+                },
+                ["take", size, cell, ref rest @ ..] if rest.len() <= 1 => Self::Take {
+                    capacity: capacity(size)?,
+                    cell: parse_cell(cell)?,
+                    token: rest.first().map(|rest| token(rest)).transpose()?,
+                    force: false,
+                },
+                ["create", "--tenant", t, size] => {
                     Self::Create { tenant: tenant(t)?, capacity: capacity(size)? }
                 }
-                ["create", size] if daemon_mode => Self::Create {
-                    tenant: bucket_cell::layout::DEFAULT_TENANT,
-                    capacity: capacity(size)?,
-                },
-                ["create", _dir, size] if !daemon_mode => Self::Create {
+                ["create", size] => Self::Create {
                     tenant: bucket_cell::layout::DEFAULT_TENANT,
                     capacity: capacity(size)?,
                 },
@@ -1079,36 +1007,21 @@ mod cli {
                     Self::Place { target: target(cell)?, token: token(given)?, force: true }
                 }
                 ["sync", cell] => Self::Sync { target: target(cell)? },
-                ["import", "--tenant", t, size, image, ref rest @ ..]
-                    if daemon_mode && rest.len() <= 1 =>
-                {
+                ["import", "--tenant", t, size, image, ref rest @ ..] if rest.len() <= 1 => {
                     Self::Import {
-                        dir: None,
                         tenant: tenant(t)?,
                         capacity: capacity(size)?,
                         image: image.into(),
                         reference: rest.first().map(|reference| reference.to_string()),
                     }
                 }
-                ["import", size, image, ref rest @ ..] if daemon_mode && rest.len() <= 1 => {
-                    Self::Import {
-                        dir: None,
-                        tenant: bucket_cell::layout::DEFAULT_TENANT,
-                        capacity: capacity(size)?,
-                        image: image.into(),
-                        reference: rest.first().map(|reference| reference.to_string()),
-                    }
-                }
-                ["import", dir, size, image, ref rest @ ..] if !daemon_mode && rest.len() <= 1 => {
-                    Self::Import {
-                        dir: Some(dir.into()),
-                        tenant: bucket_cell::layout::DEFAULT_TENANT,
-                        capacity: capacity(size)?,
-                        image: image.into(),
-                        reference: rest.first().map(|reference| reference.to_string()),
-                    }
-                }
-                ["import-memory", ref rest @ ..] if daemon_mode => {
+                ["import", size, image, ref rest @ ..] if rest.len() <= 1 => Self::Import {
+                    tenant: bucket_cell::layout::DEFAULT_TENANT,
+                    capacity: capacity(size)?,
+                    image: image.into(),
+                    reference: rest.first().map(|reference| reference.to_string()),
+                },
+                ["import-memory", ref rest @ ..] => {
                     let mut make_version = false;
                     let mut t = bucket_cell::layout::DEFAULT_TENANT;
                     let mut r = rest;
@@ -1126,30 +1039,12 @@ mod cli {
                         };
                     }
                     let [file] = *r else { bail!(usage()) };
-                    Self::ImportMemory { dir: None, tenant: t, file: file.into(), make_version }
+                    Self::ImportMemory { tenant: t, file: file.into(), make_version }
                 }
-                ["import-memory", "--version", dir, file] if !daemon_mode => Self::ImportMemory {
-                    dir: Some(dir.into()),
-                    tenant: bucket_cell::layout::DEFAULT_TENANT,
-                    file: file.into(),
-                    make_version: true,
-                },
-                ["import-memory", dir, file] if !daemon_mode => Self::ImportMemory {
-                    dir: Some(dir.into()),
-                    tenant: bucket_cell::layout::DEFAULT_TENANT,
-                    file: file.into(),
-                    make_version: false,
-                },
-                ["fork", "--tenant", t, src] if daemon_mode => Self::Fork {
-                    src: Target::Cell(parse_cell(src)?),
-                    target_tenant: Some(tenant(t)?),
-                },
-                ["fork", src] if daemon_mode => {
-                    Self::Fork { src: Target::Cell(parse_cell(src)?), target_tenant: None }
+                ["fork", "--tenant", t, src] => {
+                    Self::Fork { src: parse_cell(src)?, target_tenant: Some(tenant(t)?) }
                 }
-                ["fork", src, _dst] if !daemon_mode => {
-                    Self::Fork { src: Target::Dir(src.into()), target_tenant: None }
-                }
+                ["fork", src] => Self::Fork { src: parse_cell(src)?, target_tenant: None },
                 ["version", cell] => Self::Version { target: target(cell)? },
                 ["versions", cell] => Self::Versions { target: target(cell)? },
                 ["drop-versions", cell, ref ids @ ..] if !ids.is_empty() => Self::DropVersions {
@@ -1364,13 +1259,13 @@ mod cli {
                     call!(format!("taking cell {cell}"), create_cell, request);
                 }
                 Self::Place { target, token, force } => {
-                    let cell = target.cell()?;
+                    let cell = target;
                     let request =
                         PlaceCellRequest { tenant: cell.tenant, cell: cell.id, token, force };
                     call!(format!("placing cell {cell}"), place_cell, request);
                 }
                 Self::Sync { target } => {
-                    let cell = target.cell()?;
+                    let cell = target;
                     let request = SyncCellRequest { tenant: cell.tenant, cell: cell.id };
                     call!(format!("waiting for cell {cell} to be uploaded"), sync_cell, request);
                 }
@@ -1405,7 +1300,7 @@ mod cli {
                     }
                 }
                 Self::Fork { src, target_tenant, .. } => {
-                    let cell = src.cell()?;
+                    let cell = src;
                     let request = ForkCellRequest {
                         tenant: cell.tenant,
                         cell: cell.id,
@@ -1416,7 +1311,7 @@ mod cli {
                     println!("{}", cladefs::CellId { tenant: made.tenant, id: made.cell });
                 }
                 Self::Version { target } => {
-                    let cell = target.cell()?;
+                    let cell = target;
                     let request =
                         MakeVersionRequest { tenant: cell.tenant, cell: cell.id, keep_last: 0 };
                     let made =
@@ -1424,7 +1319,7 @@ mod cli {
                     println!("{:x}", made.version);
                 }
                 Self::Versions { target } => {
-                    let cell = target.cell()?;
+                    let cell = target;
                     let request = ListVersionsRequest { tenant: cell.tenant, cell: cell.id };
                     let listed = call!(
                         format!("listing the versions of cell {cell}"),
@@ -1443,13 +1338,13 @@ mod cli {
                     print_versions(&versions);
                 }
                 Self::DropVersions { target, versions } => {
-                    let cell = target.cell()?;
+                    let cell = target;
                     let request =
                         DropVersionsRequest { tenant: cell.tenant, cell: cell.id, versions };
                     call!(format!("dropping versions of cell {cell}"), drop_versions, request);
                 }
                 Self::Share { target, version, shared } => {
-                    let cell = target.cell()?;
+                    let cell = target;
                     let request =
                         ShareVersionRequest { tenant: cell.tenant, cell: cell.id, version, shared };
                     call!(
@@ -1476,17 +1371,17 @@ mod cli {
                     println!("{}", cladefs::CellId { tenant: made.tenant, id: made.cell });
                 }
                 Self::Delete { target } => {
-                    let cell = target.cell()?;
+                    let cell = target;
                     let request = DeleteCellRequest { tenant: cell.tenant, cell: cell.id };
                     call!(format!("deleting cell {cell}"), delete_cell, request);
                 }
                 Self::Drop { target } => {
-                    let cell = target.cell()?;
+                    let cell = target;
                     let request = DropCellRequest { tenant: cell.tenant, cell: cell.id };
                     call!(format!("dropping cell {cell}"), drop_cell, request);
                 }
                 Self::Resize { target, capacity } => {
-                    let cell = target.cell()?;
+                    let cell = target;
                     let request =
                         ResizeCellRequest { tenant: cell.tenant, cell: cell.id, capacity };
                     call!(
@@ -1496,7 +1391,7 @@ mod cli {
                     );
                 }
                 Self::Public { target } => {
-                    let cell = target.cell()?;
+                    let cell = target;
                     let request = MakePublicRequest {
                         tenant: cell.tenant,
                         cell: cell.id,
@@ -1505,14 +1400,13 @@ mod cli {
                     call!(format!("making cell {cell} public"), make_public, request);
                 }
                 Self::PublicAttachOnly { target } => {
-                    let cell = target.cell()?;
+                    let cell = target;
                     let request =
                         MakePublicRequest { tenant: cell.tenant, cell: cell.id, attach_only: true };
                     call!(format!("making cell {cell} public to attach"), make_public, request);
                 }
                 Self::Attach { target, base } => {
-                    let cell = target.cell()?;
-                    let base = base.cell()?;
+                    let cell = target;
                     let request = AttachBaseRequest {
                         tenant: cell.tenant,
                         cell: cell.id,
@@ -1522,7 +1416,7 @@ mod cli {
                     call!(format!("attaching {base} to {cell}"), attach_base, request);
                 }
                 Self::Stat { target } => {
-                    let cell = target.cell()?;
+                    let cell = target;
                     let request = StatCellRequest { tenant: cell.tenant, cell: cell.id };
                     let stat = call!(format!("asking what cell {cell} holds"), stat_cell, request);
                     let cell = cladefs::CellId { tenant: stat.tenant, id: stat.cell };
@@ -1897,9 +1791,10 @@ mod cli {
             Ok(())
         }
 
-        /// Offline commands when `CLADEFSD_GRPC` is unset (board 11705, hotbed question 542):
-        /// bucket administration, offline bootstrap (`import`, `import-memory`), and read-only
-        /// `stat`. Every live-cell lifecycle and daemon-control command requires `CLADEFSD_GRPC`.
+        /// Commands when `CLADEFSD_GRPC` is unset (board 11705, hotbed question 542): bucket
+        /// administration alone. cladefs: every command on a cell is the daemon's, which owns its
+        /// host's cells, nothing else opening them (the user, 2026-11-26, board 14305): imports and
+        /// stats too, which opened cell directories here before.
         fn locally(self) -> anyhow::Result<()> {
             if self.is_on_buckets() {
                 return self.on_buckets();
@@ -1917,50 +1812,6 @@ mod cli {
                 }
             }
             match self {
-                Self::Import { dir, capacity, image, reference, .. } => {
-                    let dir = dir.context("offline import requires DIR")?;
-                    cladefs::bucket::require_kms().map_err(anyhow::Error::msg)?;
-                    let made =
-                        cladefs::import::make_base(&dir, capacity, &image, reference.as_deref());
-                    futures::executor::block_on(made)
-                        .with_context(|| format!("importing {}", image.display()))
-                }
-                Self::ImportMemory { dir, file, make_version, .. } => {
-                    let dir = dir.context("offline import-memory requires DIR")?;
-                    cladefs::bucket::require_kms().map_err(anyhow::Error::msg)?;
-                    let made = cladefs::import::import_memory(&dir, &file, make_version);
-                    let (cell, version) = futures::executor::block_on(made)
-                        .with_context(|| format!("importing memory {}", file.display()))?;
-                    if let Some(version) = version {
-                        println!("{cell} {version:x}");
-                    } else {
-                        println!("{cell}");
-                    }
-                    Ok(())
-                }
-                Self::Stat { target } => {
-                    let dir = target.dir()?;
-                    cladefs::bucket::require_kms().map_err(anyhow::Error::msg)?;
-                    local_cell::upload::wait_on(async move {
-                        let cell = OpenCell::open(&dir).await?;
-                        let stat = || -> anyhow::Result<Stat> {
-                            let info = cell.info()?;
-                            Ok(Stat {
-                                cell: cell.cell(),
-                                capacity: info.capacity,
-                                used: info.used,
-                                available: info.available,
-                                holding: cell.holding()?,
-                                public: cell.is_public(),
-                                open: None,
-                            })
-                        };
-                        let stat = stat();
-                        cell.close().await;
-                        print!("{}", stat?);
-                        Ok(())
-                    })
-                }
                 other => {
                     let what = match other {
                         Self::Stats { .. } => "stats are",
@@ -2005,10 +1856,9 @@ mod cli {
                         | Self::Public { .. }
                         | Self::PublicAttachOnly { .. }
                         | Self::Attach { .. } => "live cell commands are",
-                        Self::Import { .. }
-                        | Self::ImportMemory { .. }
-                        | Self::Stat { .. }
-                        | Self::FormatBucket { .. }
+                        Self::Import { .. } | Self::ImportMemory { .. } => "its imports are",
+                        Self::Stat { .. } => "its cells' stats are",
+                        Self::FormatBucket { .. }
                         | Self::AddBucket { .. }
                         | Self::Buckets { .. }
                         | Self::Formats { .. }
@@ -2452,7 +2302,7 @@ mod cli {
             },
         };
         let control_socket = std::env::var_os("CLADEFSD_GRPC").filter(|socket| !socket.is_empty());
-        let command = Command::parse(rest, control_socket.is_some())?;
+        let command = Command::parse(rest)?;
         match control_socket {
             Some(_) if command.is_on_buckets() => command.on_buckets(),
             #[cfg(target_os = "linux")]

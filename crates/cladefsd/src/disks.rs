@@ -42,6 +42,10 @@ pub(crate) struct ManagedDisk {
     policy: Mutex<DiskPolicy>,
     /// True if another [`ManagedDisk`] in this pool shares the same `st_dev` (single-FS tests).
     shared_fs: bool,
+    /// cladefs: its root, locked for the daemon's life: one extent daemon owns a disk, and its
+    /// cells, which nothing else opens beside it (the user, 2026-11-26, board 14305).
+    #[allow(dead_code, reason = "held for its lock")]
+    owned: host_fs::Flock,
 }
 
 impl ManagedDisk {
@@ -126,6 +130,20 @@ impl Drop for CellReservation {
     }
 }
 
+/// cladefs: the disk at `root` owned by this daemon: its root locked, exclusively, as long as the
+/// daemon runs; refused while another process owns it, another extent daemon, which a host has
+/// one of (board 14305).
+fn own(root: &std::path::Path) -> Result<host_fs::Flock, String> {
+    let dir = host_fs::File::open(root).map_err(|err| format!("opening it: {err}"))?;
+    host_fs::Flock::try_lock(dir).map_err(|err| match err.kind() {
+        std::io::ErrorKind::WouldBlock => {
+            "another extent daemon owns it: a host has one, which its cells are opened through"
+                .to_owned()
+        }
+        _ => format!("locking it: {err}"),
+    })
+}
+
 /// The daemon's managed pool of local disks and cell-ID-to-path index.
 pub(crate) struct DiskPool {
     disks: Vec<Arc<ManagedDisk>>,
@@ -149,6 +167,7 @@ impl DiskPool {
             return Err("DiskPool requires at least one configured disk".to_owned());
         }
         let mut dev_counts: HashMap<u64, usize> = HashMap::new();
+        let mut roots: HashMap<PathBuf, String> = HashMap::new();
         let mut raw_disks = Vec::with_capacity(entries.len());
         for (i, entry) in entries.iter().enumerate() {
             let id = entry.effective_id(i);
@@ -156,6 +175,16 @@ impl DiskPool {
                 .map_err(|err| format!("disk {id} ({}): {err}", entry.path.display()))?;
             let root = host_fs::canonicalize(&entry.path)
                 .map_err(|err| format!("disk {id} ({}): {err}", entry.path.display()))?;
+            // cladefs: one directory named twice, as by a symlink, is refused as such, not taken
+            // for another daemon's, its first entry's lock refusing its second (review 170).
+            if let Some(other) = roots.insert(root.clone(), id.clone()) {
+                return Err(format!(
+                    "disk {id} ({}): the directory of disk {other}",
+                    root.display()
+                ));
+            }
+            let owned =
+                own(&root).map_err(|err| format!("disk {id} ({}): {err}", root.display()))?;
             let cells_dir = root.join(CELLS_SUBDIR);
             let part_cache_dir = root.join(PART_CACHE_SUBDIR);
             let replicas_dir = root.join(REPLICAS_SUBDIR);
@@ -191,12 +220,21 @@ impl DiskPool {
                 replicas_enabled,
                 host_disk,
                 policy,
+                owned,
             ));
         }
         let mut disks = Vec::with_capacity(raw_disks.len());
         let mut shared_devs: HashSet<u64> = HashSet::new();
-        for (id, cells_dir, part_cache_dir, replicas_dir, replicas_enabled, host_disk, policy) in
-            raw_disks
+        for (
+            id,
+            cells_dir,
+            part_cache_dir,
+            replicas_dir,
+            replicas_enabled,
+            host_disk,
+            policy,
+            owned,
+        ) in raw_disks
         {
             let shared_fs =
                 host_disk.dev().is_some_and(|dev| dev_counts.get(&dev).copied().unwrap_or(0) > 1);
@@ -214,6 +252,7 @@ impl DiskPool {
                 host_disk,
                 policy: Mutex::new(policy),
                 shared_fs,
+                owned,
             }));
         }
         let pool =

@@ -156,11 +156,11 @@ pub trait Dir: Send + Sync + 'static {
         Ok(())
     }
 
-    /// Takes the directory for this process, against other processes' takings of it: what a
-    /// process holds while it has the cell open, or opens or deletes it, so that two
-    /// processes never change one cell at once. It waits a while for another process to let
-    /// it go, as one whose last cell is closing does. A directory no other process sees takes
-    /// nothing.
+    /// Takes the directory, held while its cell is open, or opened or deleted, counted in the
+    /// process. cladefs: no other process takes a cell's directory: one extent daemon owns a
+    /// host's disks, locking each disk's root as it boots (cladefsd's `disks`), and what else
+    /// works on a cell does so through it (the user, 2026-11-26, board 14305); each cell's flock
+    /// went, and the descriptor its lock held. A directory no other process sees takes nothing.
     fn take(&self) -> io::Result<()> {
         Ok(())
     }
@@ -261,9 +261,6 @@ pub(crate) fn not_found(err: &io::Error) -> bool {
     err.kind() == io::ErrorKind::NotFound
 }
 
-/// How long [`Dir::take`] waits for another process to let a directory of the host's go.
-const TAKE_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
-
 /// A directory of the host's.
 ///
 /// cladefs: every file of it bypasses the host's page cache (`O_DIRECT` on Linux, `F_NOCACHE` on
@@ -346,8 +343,7 @@ impl HostDir {
 pub struct DiskDir {
     host: Arc<crate::Host>,
     path: PathBuf,
-    /// The directory, open, for `barrier`, and for the `flock` taking it, which outlives this
-    /// while other takings of it in the process do ([`Dir::take`]).
+    /// The directory, open, for `barrier`.
     handle: Arc<host_fs::File>,
     /// The directory's device and inode, fixed for the life of `handle`.
     id: DirId,
@@ -507,52 +503,23 @@ impl Dir for DiskDir {
         }
     }
 
-    /// Takes the directory with an exclusive `flock` of it, which a descriptor of the directory's
-    /// of the process's holds until the process lets it go, or exits. cladefs: the process's
-    /// takings of it share that, counted, each `HostDir` of it taking it once: what is taken in
-    /// this process another opening of it here shares, as a cell's uploader stopping, which holds
-    /// it ([`LocalCell::hold_dir`](crate::LocalCell::hold_dir)), and its cell's next opening do;
-    /// which cell is open here, its claim says ([`Dir::claim`], TASK-165.7).
-    ///
-    /// cladefs: waiting for another process, it holds no lock of this process's, whose takings
-    /// and lettings go of other directories go on meanwhile (board 5440): it tries the directory's
-    /// lock under the process's takings, and waits between tries with them let go, a taking of the
-    /// same directory by another thread here, meanwhile, shared as it is found.
+    /// Takes the directory, counted, each `HostDir` of it taking it once: what is taken in this
+    /// process another opening of it here shares, as a cell's uploader stopping, which holds it
+    /// ([`LocalCell::hold_dir`](crate::LocalCell::hold_dir)), and its cell's next opening do;
+    /// which cell is open here, its claim says ([`Dir::claim`], TASK-165.7). No other process's
+    /// taking is waited for: none takes it (see [`Dir::take`]).
     fn take(&self) -> io::Result<()> {
-        let id = self.id;
-        let deadline = std::time::Instant::now() + TAKE_WAIT;
-        loop {
-            {
-                let mut taken = self.host.dirs.taken.lock().unwrap();
-                if let Some((count, _)) = taken.get_mut(&id) {
-                    *count += 1;
-                    return Ok(());
-                }
-                // Its lock, held while any taking in the process holds it.
-                if let Some(locked) = try_take_from_others(&self.handle)? {
-                    taken.insert(id, (1, locked));
-                    return Ok(());
-                }
-            }
-            if std::time::Instant::now() >= deadline {
-                return Err(io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    "another process has the store's cells open",
-                ));
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
+        *self.host.dirs.taken.lock().unwrap().entry(self.id).or_default() += 1;
+        Ok(())
     }
 
     fn let_go(&self) {
         let mut taken = self.host.dirs.taken.lock().unwrap();
-        let Some((count, _)) = taken.get_mut(&self.id) else { return };
+        let Some(count) = taken.get_mut(&self.id) else { return };
         *count -= 1;
-        if *count > 0 {
-            return;
+        if *count == 0 {
+            taken.remove(&self.id);
         }
-        // Unlocked as it goes.
-        drop(taken.remove(&self.id));
     }
 
     fn claim(&self) -> io::Result<()> {
@@ -619,8 +586,9 @@ impl Dir for DiskDir {
 /// cladefs: per-host table of taken directory locks and open/closing cell claims, owned by
 /// [`crate::Host`].
 pub(crate) struct Locks {
-    /// The directories this host has taken ([`Dir::take`]), by their devices and inodes.
-    taken: Mutex<BTreeMap<DirId, (usize, host_fs::Flock)>>,
+    /// The directories this host has taken ([`Dir::take`]), by their devices and inodes: how
+    /// many takings of each.
+    taken: Mutex<BTreeMap<DirId, usize>>,
     /// The directories whose cells this host has open ([`Dir::claim`]), and whether closing.
     claimed: Mutex<BTreeMap<DirId, bool>>,
     /// Woken as a claim goes ([`Dir::unclaim`]), for openings waiting for a cell closing.
@@ -738,18 +706,6 @@ const CLOSING_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// A directory's device and inode, which name it however a path names it.
 type DirId = (u64, u64);
-
-/// Tries to take the directory through `handle`, a descriptor of it, against other processes'
-/// takings of it ([`Dir::take`]): its lock, through a `dup` of the descriptor, of its open file
-/// description; none while another holds it.
-fn try_take_from_others(handle: &host_fs::File) -> io::Result<Option<host_fs::Flock>> {
-    match host_fs::Flock::try_lock(handle.try_clone()?) {
-        Ok(locked) => Ok(Some(locked)),
-        // Another's: the caller waits a while.
-        Err(err) if err.kind() == io::ErrorKind::WouldBlock => Ok(None),
-        Err(err) => Err(err),
-    }
-}
 
 /// cladefs: a file of the host's disk, bypassing its page cache ([`DiskDir`]): read and written by
 /// the blocks around what is asked, from memory aligned to them, the block ending the last write

@@ -1,4 +1,4 @@
-# cladefs facade library, production binaries (cladefsd, cladefsctl, cladefs-mount, cladefs-gets),
+# cladefs facade library, production binaries (cladefsd, cladefsctl, cladefs-gets),
 # and end-to-end integration tests.
 [package]
 name = "cladefs"

@@ -7,7 +7,7 @@ The VM manager's side, the control API call by call, is `integrator-guide.md`; u
 
 ## Configuration (TOML)
 
-`cladefsd`, `cladefs-gc`, `cladefsctl`, and `cladefs-mount` read a single TOML configuration file
+`cladefsd`, `cladefs-gc`, and `cladefsctl` read a single TOML configuration file
 via `--config PATH` / `-c PATH` or `CLADEFS_CONFIG=PATH`. See
 [`docs/cladefs.example.toml`](cladefs.example.toml) for every section and option.
 
@@ -216,8 +216,8 @@ outlives the daemon and is shared with cladefsctl and cladefs-gc. What a bucket 
 acknowledged leaves the cell directory (TASK-165.8): an in-memory bucket is
 its process's, and what left for it is gone once that process exits, so a cell
 used by more than one process, or across a daemon's restarts, needs a file or
-cloud bucket. cladefsctl, without the daemon, changes existing cells on the same terms, and makes new cell directories (`take`, `import`)
-anywhere.
+cloud bucket. cladefsctl reaches cells through the host's daemon alone, which owns them, nothing
+else opening them (board 14305).
 
 `StatCell`'s `placement_token` is the fencing token of this host's placement of a
 cell, whether a VM process has it open or not (board 13879): the token
@@ -330,7 +330,7 @@ under the KMS its own environment names, as below.
 Design doc-16 is the design. Every cell is encrypted, always:
 the bucket, the cell directories and the part cache hold its data encrypted,
 under its cell's KEK, which its tenant's KEK wraps. Every process that opens
-cells (cladefsd, cladefsctl, cladefs-mount) refuses to start
+cells (cladefsd) refuses to start
 unless `CLADEFS_KMS` names the host's KMS or `CLADEFS_MASTER_KEY` gives a master key
 for the bucket KMS (below); a tenant the KMS has no KEK of gets no cell,
 refused as destroyed (`EACCES`). The KMS `CLADEFS_KMS` names is `local:///DIR`, a
@@ -593,6 +593,9 @@ A **requirement** the daemon refuses to start without, every one said at once:
 What the daemon's configuration names it refuses as it starts too, as only failing once it served
 before (board 8595):
 
+- **A disk at least**, `[[disks]]` or `CLADEFSD_ROOTS`: a host's one daemon owns the directories
+  its cells are kept in, each locked as it starts, refusing a second daemon, and one named twice
+  (board 14305).
 - **Every `CLADEFSD_ROOTS` directory there**, and a directory: one missing is refused as it
   starts, rather than every cell under it later.
 - **A part cache it can open**: every `CLADEFSD_PART_CACHE` shard there, not locked by another
@@ -631,7 +634,7 @@ What a host can tell from a VM process's status (TASK-70):
 ## Building a release daemon
 
 A host runs a static `musl` release build of one commit, of the Rust `rust-toolchain.toml` pins
-(board 8603). Linux release builds of `cladefsd`, `cladefsctl`, `cladefs-mount`, and `cladefs-gc`
+(board 8603). Linux release builds of `cladefsd`, `cladefsctl`, and `cladefs-gc`
 are `musl`-only (non-`musl` Linux release builds fail at compile time) so one static binary per
 architecture runs across Ubuntu, Debian, Fedora Asahi (16 KiB pages), etc. with zero glibc
 version coupling:
@@ -639,13 +642,13 @@ version coupling:
 ```sh
 git submodule update --init
 scripts/build-musl.sh                  # native $(uname -m)-unknown-linux-musl (or: make build-musl)
-scripts/install-musl.sh --restart      # lockstep-installs cladefsd, cladefsctl, cladefs-mount, cladefs-gc
+scripts/install-musl.sh --restart      # lockstep-installs cladefsd, cladefsctl, cladefs-gc
 # or for a specific target / output directory:
 scripts/build-musl.sh --target x86_64-unknown-linux-musl --out dist/x86_64
 scripts/build-musl.sh --target aarch64-unknown-linux-musl --out dist/aarch64
 ```
 
-This builds `cladefsd`, `cladefsctl`, `cladefs-mount`, and `cladefs-gc` statically against `musl`
+This builds `cladefsd`, `cladefsctl`, and `cladefs-gc` statically against `musl`
 (matching how `scripts/test-e2e.sh` builds Firecracker for `musl`), verifies with `readelf` that
 each binary has no `PT_INTERP` dynamic linker or `DT_NEEDED` shared libraries (accepting both
 static and static-PIE ELFs) and retains `.debug_line`, and uses `mimalloc` as `#[global_allocator]`
@@ -669,7 +672,7 @@ on `target_env = "musl"` (hotbed question 533):
   (`crates/cladefs/build/stamp.rs`, board 8597). A build that needs flags of its own adds that one.
 - The release profile (root `Cargo.toml`) keeps line tables, so that `/z/pprof`
   name each frame's file and line, unwinds panics, as a cell's halt needs, and checks arithmetic
-  for overflow, as every test's build does. `cladefsd`, `cladefsctl` and `cladefs-mount` link with
+  for overflow, as every test's build does. `cladefsd` and `cladefsctl` link with
   those debug sections zlib-compressed (`crates/cladefs/build.rs`, board 10269), which `/z/pprof`
   reads as it is: `cladefsd` 105 MB, 293 MB uncompressed, 61 MB stripped (aarch64, measured
   2026-11-25).

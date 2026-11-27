@@ -10,6 +10,8 @@
 // cladefs: the daemon's binary, on Linux and macOS (board 13065).
 #![cfg(not(madsim))]
 
+mod common;
+
 use cladefs::{CellClient, ExtentId, OpenCell, VolatileSlice, VolatileSliceMut};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
@@ -31,6 +33,7 @@ impl Drop for KillOnDrop {
 fn daemon(socket: &Path, bucket: &Path, token: u64) -> KillOnDrop {
     let daemon = Command::new(env!("CARGO_BIN_EXE_cladefsd"))
         .arg(socket)
+        .env("CLADEFSD_ROOTS", socket.parent().unwrap())
         .env("CLADEFSD_BUCKET", format!("file://{}", bucket.display()))
         .env("CLADEFSD_TOKEN", token.to_string())
         .spawn()
@@ -55,16 +58,17 @@ async fn sigterm_closes_every_cell_durable_and_uploaded() {
     let dir = tempfile::tempdir().unwrap();
     let bucket = dir.path().join("bucket");
     std::fs::create_dir(&bucket).unwrap();
-    let (socket, path) = (dir.path().join("cladefsd.sock"), dir.path().join("store"));
+    let socket = dir.path().join("cladefsd.sock");
     let mut first = daemon(&socket, &bucket, 1);
 
     // A VM's cell, its last commit only ordered, which its uploader, uploading within a second of
     // a durable commit, has not uploaded as the daemon is told to stop.
-    let client = CellClient::connect(&socket, &path, 1 << 28).unwrap();
+    let client = CellClient::connect_new(&socket, 0, 1 << 28).unwrap();
     let (told, lost) = std::sync::mpsc::channel();
     client.on_daemon_lost(move || told.send(()).unwrap());
-    let cell = client.cell();
-    let extent = ExtentId { cell, sequence: 1 };
+    let cell = common::cell_of(&client);
+    let path = common::cell_dir(dir.path(), cell);
+    let extent = ExtentId { cell: cell.id, sequence: 1 };
     client.write(extent, 0, &[VolatileSlice::from(&[7; BLOCK][..])]).unwrap();
     client.commit_ordered(Some(b"drained")).unwrap();
 
@@ -86,9 +90,10 @@ async fn sigterm_closes_every_cell_durable_and_uploaded() {
     std::fs::create_dir(&other).unwrap();
     let second_socket = other.join("cladefsd.sock");
     let _second = daemon(&second_socket, &bucket, 2);
-    let taken: PathBuf = other.join("taken");
-    // TASK-364: its VM manager makes the cell there first, as the one its tenant, cell
-    // and ID name; taken from the bucket.
+    // TASK-364: its VM manager makes the cell there first, where the daemon owning that disk
+    // keeps it, taken from the bucket.
+    let taken: PathBuf = common::cell_dir(&other, cell);
+    std::fs::create_dir_all(taken.parent().unwrap()).unwrap();
     let full = host_fs::may_block(|| local_cell::host_cell(&path).unwrap());
     // SAFETY: The test's own process, whose other threads read no environment meanwhile.
     unsafe { std::env::set_var("CLADEFSD_BUCKET", format!("file://{}", bucket.display())) };
@@ -99,7 +104,7 @@ async fn sigterm_closes_every_cell_durable_and_uploaded() {
         .unwrap()
         .close()
         .await;
-    let taken = CellClient::connect(&second_socket, &taken, 1 << 28).unwrap();
+    let taken = CellClient::connect_cell(&second_socket, cell).unwrap();
     assert_eq!(taken.root().unwrap(), b"drained");
     assert_eq!(read(&taken, extent), [7; BLOCK]);
 }
@@ -121,6 +126,7 @@ async fn drains_whose_health_reporter_went_fail_within_their_bound() {
     let bound = Duration::from_secs(10);
     let daemon = Command::new(env!("CARGO_BIN_EXE_cladefsd"))
         .arg(&socket)
+        .env("CLADEFSD_ROOTS", dir.path())
         .env("CLADEFSD_BUCKET", format!("file://{}", bucket.display()))
         .env("CLADEFSD_TOKEN", "1")
         .env("CLADEFSD_GRPC", &control)

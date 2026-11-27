@@ -193,31 +193,6 @@ async fn deleting_cells() {
     assert!(host_fs::may_block(|| open_host(&path)).is_err(), "the deleted cell opened");
 }
 
-/// A directory is taken by one process at a time: a taking waits for another's to be let go, and
-/// takes it then. Another's is a `flock` of the directory here, through a descriptor of its own, as
-/// another process's is.
-#[test]
-fn directories_are_taken_one_at_a_time() {
-    use std::os::fd::AsRawFd as _;
-    let dir = tempfile::tempdir().unwrap();
-    let others = std::fs::File::open(dir.path()).unwrap();
-    // SAFETY: Plain system call on the directory's descriptor.
-    assert_eq!(unsafe { libc::flock(others.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) }, 0);
-    let ours = HostDir::new(dir.path()).unwrap();
-    std::thread::scope(|scope| {
-        // Let go once ours is waiting: well within the wait, and after its first try.
-        scope.spawn(|| {
-            std::thread::sleep(std::time::Duration::from_millis(200));
-            // SAFETY: Plain system call on the directory's descriptor.
-            assert_eq!(unsafe { libc::flock(others.as_raw_fd(), libc::LOCK_UN) }, 0);
-        });
-        let waiting = std::time::Instant::now();
-        ours.take().expect("taken once let go");
-        assert!(waiting.elapsed() >= std::time::Duration::from_millis(150), "taken while held");
-    });
-    ours.let_go();
-}
-
 /// A file removed is gone.
 #[test]
 fn removed_files_are_gone() {
@@ -227,24 +202,4 @@ fn removed_files_are_gone() {
     assert_eq!(host.list("").unwrap(), ["file"]);
     host.remove("file").unwrap();
     assert_eq!(host.list("").unwrap(), Vec::<String>::new());
-}
-
-/// Board 5440: a taking of a cell's directory waiting for another process to let it go holds up no
-/// taking of another directory in this process, as it once held the process's takings throughout.
-#[test]
-fn takings_waiting_for_another_process_hold_up_no_other() {
-    use local_cell::Dir as _;
-    let (ours, other) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    // Another process's taking of `ours`: its lock, through a description of its own.
-    let theirs = host_fs::Flock::try_lock(host_fs::File::open(ours.path()).unwrap()).unwrap();
-    let path = ours.path().to_owned();
-    let waiting = std::thread::spawn(move || local_cell::HostDir::new(&path).unwrap().take());
-    // The waiting taking past its first try, as nothing it does says otherwise.
-    std::thread::sleep(std::time::Duration::from_millis(100));
-    let another = local_cell::HostDir::new(other.path()).unwrap();
-    another.take().unwrap();
-    another.let_go();
-    assert!(!waiting.is_finished(), "the taking of `ours` waits for the other process still");
-    drop(theirs);
-    waiting.join().unwrap().unwrap();
 }

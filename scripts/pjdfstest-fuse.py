@@ -6,7 +6,9 @@
 permissions, owners, setgid and sticky directories, times and errnos, as the host's Node layer,
 fxfs-posix under it and cladefs::fuse's server over it keep them.
 
-Two runs, each on a new cell cladefs-mount makes (`--new`) and mounts:
+Two runs, each on a new cell of a daemon's of its own, which `cladefsctl mount create` makes and
+the daemon's FUSE mount shows (`CLADEFSD_MOUNT`, TASK-475.2): the daemon owns its host's cells,
+nothing else opening them (board 14305; `cladefs-mount` mounted a cell of its own before):
 
 - in a directory made in the mount, as the guest's pjdfstest case runs in its Fxfs;
 - from the mount's root itself, chowned and chmodded first: a new volume's root has no POSIX
@@ -18,10 +20,10 @@ that failed whole (a bad plan, an exit status); scripts/pjdfstest-fuse-known lis
 bugs, each with its task. The script fails if any other fails, or if one listed fails in neither
 run, so that the list stays true. The runs' logs are left in the work directory.
 
-Usage: sudo scripts/pjdfstest-fuse.py CLADEFS_MOUNT [DIR...]
+Usage: sudo scripts/pjdfstest-fuse.py BIN_DIR [DIR...]
 
-CLADEFS_MOUNT is the cladefs-mount binary; DIRs name pjdfstest's directories of tests (such as chmod),
-all of them otherwise.
+BIN_DIR holds the cladefsd and cladefsctl binaries; DIRs name pjdfstest's directories of tests
+(such as chmod), all of them otherwise.
 """
 
 import os
@@ -30,6 +32,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -141,8 +144,8 @@ TEST_MASTER_KEY = "7e" * 32
 
 
 def encrypted_env(dir):
-    """The environment of a mount of a new cell in `dir`: every cell is encrypted, and cladefs-mount
-    refuses to start with no KMS (TASK-411.28). Unless the environment names one, a host's: its
+    """The environment of a daemon in `dir`: every cell is encrypted, and the daemon refuses to
+    start with no KMS (TASK-411.28). Unless the environment names one, a host's: its
     bucket a directory in `dir`, placement 1, and the bucket KMS of the tests' master key."""
     env = dict(os.environ)
     if not any(env.get(name) for name in ("CLADEFS_KMS", "CLADEFS_MASTER_KEY", "CLADEFS_MASTER_KEY_FILE")):
@@ -154,32 +157,51 @@ def encrypted_env(dir):
     return env
 
 
-def mounted(cladefs_mount, dir):
-    """cladefs-mount of a new cell in `dir`, once it says it is mounted: the process, the mount
-    version and its log."""
-    cell, mountpoint = dir / "cell", dir / "mnt"
+# The daemon's memory, fixed: what pjdfstest's small files need, many times over.
+MEMORY_BYTES = 1 << 30
+
+
+def mounted(bin_dir, dir):
+    """A daemon serving in `dir`, its FUSE mount of cells shown to other users too, which
+    pjdfstest's tests become (`-u`, `-g`), and a new cell of it attached there: the daemon's
+    process, the cell's directory in the mount, and the daemon's log."""
+    mountpoint, cells, control = dir / "mnt", dir / "cells", dir / "control.sock"
     mountpoint.mkdir()
-    log = open(dir / "cladefs-mount.log", "w")
-    # Other users' too, which pjdfstest's tests become (`-u`, `-g`): a FUSE mount is its mounting
-    # user's alone otherwise.
-    command = [cladefs_mount, "--allow-other", "--new", str(CAPACITY), str(cell), str(mountpoint)]
-    process = subprocess.Popen(command, env=encrypted_env(dir),
-                               stdout=subprocess.PIPE, stderr=log, text=True)
-    said = process.stdout.readline().strip()
-    if said != str(mountpoint):
+    cells.mkdir()
+    env = encrypted_env(dir)
+    env.update({"CLADEFSD_GRPC": str(control), "CLADEFSD_MOUNT": str(mountpoint),
+                "CLADEFSD_MOUNT_STORES": str(cells), "CLADEFSD_MOUNT_ALLOW_OTHER": "1",
+                # The disk the daemon owns, which its cells are kept on (board 14305).
+                "CLADEFSD_ROOTS": str(cells)})
+    log = open(dir / "cladefsd.log", "w")
+    # Its memory fixed: governed, it would require the memory governor's MGLRU
+    # and swap of the host, which a CI runner has not (hotbed review 170).
+    process = subprocess.Popen([bin_dir / "cladefsd", str(dir / "vms.sock"), str(MEMORY_BYTES)],
+                               env=env, stdout=log, stderr=subprocess.STDOUT)
+    deadline = time.monotonic() + 60
+    while not control.exists():
+        if process.poll() is not None or time.monotonic() > deadline:
+            sys.exit(f"cladefsd: not serving, {process.poll()}: {(dir / 'cladefsd.log').read_text()}")
+        time.sleep(0.05)
+    made = subprocess.run([bin_dir / "cladefsctl", "mount", "create", "0", str(CAPACITY)], env=env,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if made.returncode != 0:
+        process.send_signal(signal.SIGTERM)
         process.wait()
-        sys.exit(f"cladefs-mount: not mounted, {process.returncode}: "
-                 f"{(dir / 'cladefs-mount.log').read_text()}")
-    return process, mountpoint, log
+        sys.exit(f"cladefsctl mount create: {made.stderr}{(dir / 'cladefsd.log').read_text()}")
+    tenants = [entry for entry in mountpoint.iterdir()]
+    if len(tenants) != 1:
+        sys.exit(f"the mount shows {len(tenants)} tenants, not the one cell's")
+    return process, tenants[0] / made.stdout.strip(), log
 
 
-def run(name, cladefs_mount, tests, dirs, setup, logs):
-    """One run: a new cell mounted, `setup` given its mount point and saying where prove runs,
-    then pjdfstest; the mount unmounted. Its failures."""
+def run(name, bin_dir, tests, dirs, setup, logs):
+    """One run: a new cell mounted, `setup` given its directory and saying where prove runs,
+    then pjdfstest; the daemon stopped, draining, which unmounts. Its failures."""
     with tempfile.TemporaryDirectory(prefix=f"pjdfstest-fuse-{name}-") as dir:
         # Searchable by the users pjdfstest's tests become, as the mount is.
         os.chmod(dir, 0o755)
-        process, mountpoint, log = mounted(cladefs_mount, Path(dir))
+        process, mountpoint, log = mounted(bin_dir, Path(dir))
         try:
             cwd = setup(mountpoint)
             paths = [str(tests / d) for d in dirs] or [str(tests)]
@@ -193,7 +215,7 @@ def run(name, cladefs_mount, tests, dirs, setup, logs):
         print(f"== {name}: prove exit {proved.returncode}; {logs / f'{name}.log'}")
         print("\n".join(proved.stdout.splitlines()[-4:]))
         if status != 0:
-            sys.exit(f"cladefs-mount exited {status}: {(Path(dir) / 'cladefs-mount.log').read_text()}")
+            sys.exit(f"cladefsd exited {status}: {(Path(dir) / 'cladefsd.log').read_text()}")
         found = failures(proved.stdout)
         if proved.returncode != 0 and not found:
             sys.exit(f"prove failed, {proved.returncode}, and said no test failed")
@@ -222,12 +244,12 @@ def main():
         sys.exit(__doc__.split("Usage: ")[1].split("\n")[0])
     if os.geteuid() != 0:
         sys.exit("pjdfstest-fuse.py runs as root: pjdfstest chowns, and mounts by mount(2)")
-    cladefs_mount, dirs = os.path.abspath(sys.argv[1]), sys.argv[2:]
+    bin_dir, dirs = Path(sys.argv[1]).resolve(), sys.argv[2:]
     work = Path(os.environ.get("CLADEFS_PJDFSTEST_WORK", ROOT / "target" / "pjdfstest")).resolve()
     tests = build(work) / "tests"
     found = set()
     for name, setup in (("in-a-directory", in_a_directory), ("from-the-root", from_the_root)):
-        found |= run(name, cladefs_mount, tests, dirs, setup, work)
+        found |= run(name, bin_dir, tests, dirs, setup, work)
     listed = known(KNOWN.read_text())
     unlisted, gone = unexpected(found, listed, dirs)
     for failure in sorted(found - set(unlisted)):

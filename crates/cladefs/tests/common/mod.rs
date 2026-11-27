@@ -10,6 +10,20 @@
 #[cfg(not(madsim))]
 pub mod daemon;
 
+/// The directory of `cell` on the disk at `root`, which the daemon owning it keeps it in: a
+/// daemon owning disks opens cells by their IDs alone, not by paths (board 14305).
+pub fn cell_dir(root: &std::path::Path, cell: cladefs::CellId) -> std::path::PathBuf {
+    root.join("cells")
+        .join(base32_id::Padded(cell.tenant).to_string())
+        .join(base32_id::Padded(cell.id).to_string())
+}
+
+/// The cell `client` has open.
+#[cfg(not(madsim))]
+pub fn cell_of(client: &cladefs::CellClient) -> cladefs::CellId {
+    cladefs::CellId { tenant: client.tenant(), id: client.cell() }
+}
+
 /// Makes this process a host of the multi-node system, as an extent daemon's must be: its cells'
 /// cells in a bucket in its memory, as of placement 1, unless the test named others.
 pub fn host() {

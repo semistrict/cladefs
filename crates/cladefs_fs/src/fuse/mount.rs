@@ -84,7 +84,7 @@ impl MountOptions {
         }
     }
 
-    /// Recommended worker count for host mounts (`cladefsd`, `cladefs-mount`): scales with host
+    /// Recommended worker count for host mounts (`cladefsd`'s): scales with host
     /// CPUs, clamped to `8..=32` (board 12092).
     pub fn default_threads() -> NonZeroUsize {
         let cpus = std::thread::available_parallelism().map_or(8, NonZeroUsize::get);

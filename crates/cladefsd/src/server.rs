@@ -313,7 +313,8 @@ enum CellDirs {
     /// (TASK-43.4).
     Dirs(Arc<[PathBuf]>),
     /// In the daemon's roots, if it has any ([`roots`]); anywhere, if it has none: the default
-    /// tenant's.
+    /// tenant's. A booted daemon has some, refusing to boot owning no disk (board 14305): none is
+    /// a test's daemon serving without a boot (board 14318).
     Roots(Option<Arc<[PathBuf]>>),
 }
 

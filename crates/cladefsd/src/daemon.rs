@@ -303,7 +303,7 @@ impl Daemon {
 
     /// Resolves `cell`'s existing path in [`crate::disks::DiskPool`], or picks an eligible
     /// `ReadWrite` disk and prepares `<disk>/cells/<TENANT>/<CELL>`. Returns `Ok(None)` when no
-    /// managed disk pool is configured (standalone `cladefs-mount`).
+    /// managed disk pool is configured (a daemon booted of `CLADEFSD_MOUNT_STORES` alone).
     // cladefs: the FUSE mount's (`fuse_control`): Linux's.
     #[cfg(all(target_os = "linux", not(madsim)))]
     pub(crate) fn resolve_or_pick_cell_path(

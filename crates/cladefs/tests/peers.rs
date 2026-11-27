@@ -342,6 +342,7 @@ fn a_cache_budget_the_daemon_cant_take_stops_it() {
         .arg(dir.path().join("cladefsd.sock"))
         .env("CLADEFSD_BUCKET", format!("file://{}/", dir.path().display()))
         .env("CLADEFSD_TOKEN", "1")
+        .env("CLADEFSD_ROOTS", dir.path())
         .env("CLADEFSD_PART_CACHE", dir.path().join("cache"))
         .env("CLADEFSD_PART_CACHE_BYTES", "1G")
         .output()

@@ -4,6 +4,9 @@
 
 //! Tests of importing container images into filesystems (TASK-39.5).
 
+#[cfg(target_os = "linux")]
+mod common;
+
 use cladefs::import::testing::{Entry, Kind, MTIME, gzip, layer, oci_layout, opaque, whiteout};
 use cladefs::import::{Importer, OciImage};
 use cladefs::{Attr, Errno, FileType, Filesystem, Node, Storage};
@@ -1007,11 +1010,15 @@ async fn cells_made_of_images_fork_where_no_daemon_is() {
     assert_eq!(cell_manifest(&base), manifest);
 }
 
-/// Runs cladefsctl with `args`, and returns whether it succeeded, and what it printed to stderr.
-fn cladefsctl(args: &[&str]) -> (bool, String) {
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_cladefsctl")).args(args).output();
-    let output = output.expect("running cladefsctl failed");
-    (output.status.success(), String::from_utf8_lossy(&output.stderr).into_owned())
+/// Runs cladefsctl with `args` through the daemon at `control`, and returns whether it succeeded,
+/// what it printed, and what it said on stderr.
+#[cfg(target_os = "linux")]
+fn cladefsctl(control: &Path, args: &[&str]) -> (bool, String, String) {
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_cladefsctl"));
+    command.args(args).env("CLADEFSD_GRPC", control).env_remove("CLADEFS_CONFIG");
+    let output = command.output().expect("running cladefsctl failed");
+    let said = |bytes: &[u8]| String::from_utf8_lossy(bytes).into_owned();
+    (output.status.success(), said(&output.stdout), said(&output.stderr))
 }
 
 /// The manifest of the filesystem in the cell at `dir`.
@@ -1024,35 +1031,42 @@ fn cell_manifest(dir: &Path) -> Vec<String> {
     })
 }
 
+/// `cladefsctl import` makes cells of images, through the daemon, which owns its host's cells
+/// (board 14305; into a directory, offline, before): an OCI layout's, and a `docker export`
+/// tarball's; one that can't be imported leaves no cell behind.
+#[cfg(target_os = "linux")]
 #[test]
 fn cladefsctl_makes_cells_of_images() {
     let dir = tempfile::tempdir().unwrap();
+    let daemon = common::daemon::Daemon::new(dir.path());
+    let control = dir.path().join("control.sock");
     let layout = dir.path().join("image");
     let layers = sample_layers();
     oci_layout(&layout, "sample:1", &layers).unwrap();
     let path = |name: &str| dir.path().join(name).to_str().unwrap().to_owned();
+    let imported = |said: &str| daemon.cell_path(said.trim().parse().unwrap());
 
-    let (ok, stderr) =
-        cladefsctl(&["import", &path("oci"), "67108864", &path("image"), "sample:1"]);
+    let (ok, said, stderr) =
+        cladefsctl(&control, &["import", "67108864", &path("image"), "sample:1"]);
     assert!(ok, "{stderr}");
-    assert_eq!(cell_manifest(Path::new(&path("oci"))), import_layout(&layout, None));
+    assert_eq!(cell_manifest(&imported(&said)), import_layout(&layout, None));
 
     // A `docker export` tarball: one layer.
     std::fs::write(path("export.tar"), &layers[0]).unwrap();
-    let (ok, stderr) = cladefsctl(&["import", &path("export"), "67108864", &path("export.tar")]);
+    let (ok, said, stderr) = cladefsctl(&control, &["import", "67108864", &path("export.tar")]);
     assert!(ok, "{stderr}");
-    let manifest = cell_manifest(Path::new(&path("export")));
+    let manifest = cell_manifest(&imported(&said));
     assert_eq!(manifest.iter().filter(|line| line.starts_with("/gone File")).count(), 1);
     assert_eq!(manifest.len(), 10, "{manifest:#?}");
 
     // An image that cannot be imported leaves no cell behind.
-    let (ok, stderr) = cladefsctl(&["import", &path("missing"), "67108864", &path("image"), "x:1"]);
+    let tenant = dir.path().join("disk0/cells").join(base32_id::Padded(0).to_string());
+    let cells = || std::fs::read_dir(&tenant).map_or(0, |cells| cells.count());
+    let before = cells();
+    let (ok, _, stderr) = cladefsctl(&control, &["import", "67108864", &path("image"), "x:1"]);
     assert!(!ok);
-    assert!(stderr.contains("no image is named \"x:1\""), "{stderr}");
-    assert!(!dir.path().join("missing").exists());
-    // Nor does it touch what is there.
-    let (ok, stderr) = cladefsctl(&["import", &path("oci"), "67108864", &path("image")]);
-    assert!(!ok);
-    assert!(stderr.contains("File exists"), "{stderr}");
-    assert_eq!(cell_manifest(Path::new(&path("oci"))), import_layout(&layout, None));
+    // Board 14314: the daemon's reason (`no image is named "x:1"`) stays in its log, the call
+    // failing EIO alone; checked here again once the control API carries it.
+    assert!(stderr.contains(&format!("importing {}", path("image"))), "{stderr}");
+    assert_eq!(cells(), before, "a cell left behind");
 }

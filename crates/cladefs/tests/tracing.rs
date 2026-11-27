@@ -148,6 +148,7 @@ fn daemon(socket: &Path, traces: Option<&str>, endpoint: &str, env: &[(&str, &st
     let mut command = Command::new(env!("CARGO_BIN_EXE_cladefsd"));
     command
         .arg(socket)
+        .env("CLADEFSD_ROOTS", socket.parent().unwrap())
         .env("CLADEFSD_BUCKET", "memory:///cells")
         .env("CLADEFSD_TOKEN", "1")
         .env("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint)
@@ -177,10 +178,9 @@ fn serve_and_drain(dir: &Path, traces: Option<&str>) -> Vec<(String, Vec<u8>)> {
     exports.try_iter().collect()
 }
 
-/// cladefs: has the daemon serving in `dir` write, commit and close a cell there, as a VM would.
+/// cladefs: has the daemon serving in `dir` write, commit and close a new cell, as a VM would.
 fn write_and_commit(dir: &Path) {
-    let client =
-        CellClient::connect(dir.join("cladefsd.sock"), dir.join("store"), 1 << 28).unwrap();
+    let client = CellClient::connect_new(dir.join("cladefsd.sock"), 0, 1 << 28).unwrap();
     let extent = ExtentId { cell: client.cell(), sequence: 1 };
     client.write(extent, 0, &[VolatileSlice::from(&[7; BLOCK][..])]).unwrap();
     client.commit(Some(b"traced")).unwrap();

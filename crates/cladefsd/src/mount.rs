@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: the daemon's FUSE mount of tenants' cells (TASK-475.2), which `cladefs-mount
-//! --control` served from a process of its own before: one directory of cells, each Fxfs cell
+//! cladefs: the daemon's FUSE mount of tenants' cells (TASK-475.2), the one mount of cells a host
+//! has (`cladefs-mount` went, board 14305): one directory of cells, each Fxfs cell
 //! attached shown at `TENANT/CELL` (`crate::fuse_control`), its Mount service
 //! served on the daemon's control socket beside Cladefsd ([`super::control`]). In the daemon, a
 //! cell is held by one process, whichever serves it, VMs or the mount, with one

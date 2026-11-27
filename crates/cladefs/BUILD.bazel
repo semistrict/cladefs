@@ -189,15 +189,6 @@ cladefs_rust_binary(
 )
 
 cladefs_rust_binary(
-    name = "cladefs-mount",
-    srcs = ["src/bin/cladefs-mount.rs"],
-    aliases = _CLADEFS_ALIASES,
-    proc_macro_deps = _COMMON_PROC_MACRO_DEPS,
-    target_compatible_with = ["@platforms//os:linux"],
-    deps = _PROD_BIN_DEPS,
-)
-
-cladefs_rust_binary(
     name = "cladefs-gets",
     srcs = ["src/bin/cladefs-gets.rs"],
     aliases = _CLADEFS_ALIASES,
@@ -226,16 +217,6 @@ cladefs_rust_binary(
     deps = _TEST_BIN_DEPS,
 )
 
-cladefs_rust_binary(
-    name = "cladefs-mount_for_test",
-    srcs = ["src/bin/cladefs-mount.rs"],
-    aliases = _CLADEFS_ALIASES,
-    crate_features = ["failpoints", "testing", "tests-kms"],
-    proc_macro_deps = _COMMON_PROC_MACRO_DEPS,
-    target_compatible_with = ["@platforms//os:linux"],
-    deps = _TEST_BIN_DEPS,
-)
-
 cladefs_rust_test(
     name = "madsim_test",
     srcs = ["tests/madsim.rs"],
@@ -260,19 +241,19 @@ _INTEGRATION_TESTS = {
     "bases": {"linux": True, "common": True, "bins": [], "data": []},
     "bucket_logging": {"linux": True, "common": False, "bins": [], "data": []},
     "cells": {"linux": True, "common": False, "bins": ["cladefsctl", "cladefsd"], "data": []},
-    "cladefsctl": {"linux": True, "common": False, "bins": ["cladefsctl", "cladefsd"], "data": []},
+    "cladefsctl": {"linux": True, "common": True, "bins": ["cladefsctl", "cladefsd"], "data": []},
     "control": {"linux": True, "common": True, "bins": ["cladefsd"], "data": [], "isolated": True},
     "disk": {"linux": True, "common": True, "bins": [], "data": []},
     "disk_full": {"linux": True, "common": True, "bins": [], "data": []},
-    "drain": {"linux": True, "common": False, "bins": ["cladefsd"], "data": []},
+    "drain": {"linux": True, "common": True, "bins": ["cladefsd"], "data": []},
     "filesystem": {"linux": False, "common": False, "bins": [], "data": []},
     "fuse": {"linux": False, "common": False, "bins": [], "data": []},
     "fuse_differential": {"linux": True, "common": False, "bins": [], "data": []},
-    "fuse_mount": {"linux": True, "common": False, "bins": ["cladefs-mount", "cladefsctl", "cladefsd"], "data": []},
+    "fuse_mount": {"linux": True, "common": False, "bins": ["cladefsctl", "cladefsd"], "data": []},
     "governor": {"linux": True, "common": False, "bins": [], "data": []},
     "grants": {"linux": True, "common": True, "bins": ["cladefsd"], "data": []},
-    "handover": {"linux": True, "common": False, "bins": ["cladefsd"], "data": []},
-    "import": {"linux": False, "common": False, "bins": ["cladefsctl"], "data": []},
+    "handover": {"linux": True, "common": True, "bins": ["cladefsd"], "data": []},
+    "import": {"linux": False, "common": True, "bins": ["cladefsctl"], "data": []},
     "isolation": {"linux": True, "common": True, "bins": ["cladefsd"], "data": []},
     "memory": {"linux": True, "common": True, "bins": [], "data": [], "isolated": True},
     "memory_cell": {"linux": True, "common": False, "bins": [], "data": [], "isolated": True},
@@ -290,7 +271,6 @@ _INTEGRATION_TESTS = {
 _BIN_TARGETS = {
     "cladefsd": ":cladefsd_for_test",
     "cladefsctl": ":cladefsctl_for_test",
-    "cladefs-mount": ":cladefs-mount_for_test",
 }
 
 [

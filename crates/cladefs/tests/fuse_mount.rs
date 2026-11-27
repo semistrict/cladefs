@@ -3,14 +3,14 @@
 // found in the LICENSE file.
 
 //! Tests of cells mounted with FUSE through Linux's kernel (`cladefs::fuse::MountOptions`,
-//! `cladefs-mount`, TASK-222; cladefsd's mount of cells, TASK-475.2), used with ordinary file
+//! TASK-222; cladefsd's mount of cells, TASK-475.2), used with ordinary file
 //! system calls, then read back from the cell.
 //!
 //! A test run by root mounts with mount(2); any other user's, through `fusermount3`, which the
 //! hosts the tests run on have (libfuse 3's `fuse3`: .github/workflows/ci.yml,
 //! scripts/lib/linux-host-setup.sh).
 //!
-//! Each test unmounts lazily, as the daemon and `cladefs-mount` do, and joins the mount, which
+//! Each test unmounts lazily, as the daemon does, and joins the mount, which
 //! waits until the kernel is done with it: other processes of the host may look into a new mount
 //! at any time, as a desktop session's trash monitor does every one (`gvfsd-trash`: the root's
 //! access, an inotify watch, `.Trash` and `.Trash-1000` looked up), and an unmount that comes
@@ -277,52 +277,7 @@ impl Drop for KillOnDrop {
     }
 }
 
-/// `cladefs-mount [FLAGS] CELL_DIR MOUNTPOINT`, its output piped, once it has said it is mounted.
-fn cladefs_mount(flags: &[&str], cell_dir: &Path, mountpoint: &Path) -> KillOnDrop {
-    let mut child = KillOnDrop(
-        Command::new(env!("CARGO_BIN_EXE_cladefs-mount"))
-            .args(flags)
-            .arg(cell_dir)
-            .arg(mountpoint)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap(),
-    );
-    let mut said = String::new();
-    std::io::BufReader::new(child.0.stdout.take().unwrap()).read_line(&mut said).unwrap();
-    if said.is_empty() {
-        let mut stderr = String::new();
-        child.0.stderr.take().unwrap().read_to_string(&mut stderr).unwrap();
-        panic!("cladefs-mount ended unmounted, {}: {stderr}", child.0.wait().unwrap());
-    }
-    assert_eq!(said.trim_end(), mountpoint.to_str().unwrap());
-    child
-}
-
-/// `cladefs-mount` serves a cell until SIGTERM, which unmounts it; then it closes it and exits 0,
-/// and the cell holds what was written through the mount.
-#[test]
-fn cladefs_mount_serves_a_cell_until_sigterm() {
-    let dir = tempfile::tempdir().unwrap();
-    let (cell_dir, m) = paths(dir.path());
-    block_on(format(&cell_dir).close()).unwrap();
-    let child = cladefs_mount(&[], &cell_dir, &m);
-    std::fs::create_dir(m.join("dir")).unwrap();
-    std::fs::write(m.join("dir/file"), "through cladefs-mount").unwrap();
-    terminate(child, &m);
-    block_on(async {
-        let storage =
-            local_cell::upload::wait_on(Storage::open(&cell_dir)).unwrap().check().await.unwrap();
-        let fs = Filesystem::mount(storage).await.unwrap();
-        let (dir, _) = fs.root().lookup(b"dir").await.unwrap();
-        assert_eq!(contents(&dir, b"file").await, b"through cladefs-mount");
-        drop(dir);
-        fs.close().await.unwrap();
-    });
-}
-
-/// Sends `cladefs-mount`'s `child` SIGTERM, and checks that it unmounted `mountpoint` and exited 0.
+/// Sends `child`, a mount's process (cladefsd's), SIGTERM, and checks that it unmounted `mountpoint` and exited 0.
 fn terminate(mut child: KillOnDrop, mountpoint: &Path) {
     // SAFETY: Signals a process this test started.
     assert_eq!(unsafe { libc::kill(child.0.id() as i32, libc::SIGTERM) }, 0);
@@ -331,64 +286,6 @@ fn terminate(mut child: KillOnDrop, mountpoint: &Path) {
     child.0.stderr.take().unwrap().read_to_string(&mut stderr).unwrap();
     assert!(status.success(), "{status}: {stderr}");
     assert_eq!(names(mountpoint), Vec::<String>::new(), "still mounted");
-}
-
-/// `cladefs-mount --new CAPACITY` makes a new cell of CAPACITY bytes, its filesystem empty, its
-/// root a new volume's (0755, root's), and mounts it; a cell already there it refuses, as it does
-/// a capacity that isn't a number.
-#[test]
-fn cladefs_mount_makes_a_new_cell() {
-    let dir = tempfile::tempdir().unwrap();
-    let (cell_dir, m) = paths(dir.path());
-    let child = cladefs_mount(&["--new", "67108864"], &cell_dir, &m);
-    assert_eq!(names(&m), Vec::<String>::new());
-    let root = std::fs::metadata(&m).unwrap();
-    assert_eq!((root.mode() & 0o7777, root.uid(), root.gid()), (0o755, 0, 0));
-    terminate(child, &m);
-    block_on(async {
-        let storage =
-            local_cell::upload::wait_on(Storage::open(&cell_dir)).unwrap().check().await.unwrap();
-        let fs = Filesystem::mount(storage).await.unwrap();
-        assert_eq!(fs.statfs().await.unwrap().blocks, 67108864 / 4096);
-        fs.close().await.unwrap();
-    });
-
-    for (args, said) in [
-        (vec!["--new", "67108864"], "making"),
-        (vec!["--new", "lots"], "--new CAPACITY, in bytes?"),
-    ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_cladefs-mount"))
-            .args(args)
-            .arg(&cell_dir)
-            .arg(&m)
-            .output()
-            .unwrap();
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(!output.status.success(), "mounted");
-        assert!(stderr.contains(said), "{stderr}");
-    }
-}
-
-/// A cell mounted is its mount's alone: `cladefs-mount` fails to open it, once it has waited for it
-/// as long as the extent store waits for another process's (`TAKE_WAIT`), exits unsuccessfully,
-/// and says why.
-#[test]
-fn a_cell_mounted_is_not_mounted_again() {
-    let dir = tempfile::tempdir().unwrap();
-    let (cell_dir, m) = paths(dir.path());
-    let mount = MountOptions::new().mount(format(&cell_dir), &m).unwrap();
-    let other = dir.path().join("other");
-    std::fs::create_dir(&other).unwrap();
-    let output =
-        Command::new(env!("CARGO_BIN_EXE_cladefs-mount")).arg(&cell_dir).arg(&other).output();
-    let output = output.unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!output.status.success(), "mounted twice");
-    assert!(stderr.contains(&format!("opening {}", cell_dir.display())), "{stderr}");
-    assert!(stderr.contains("another process has the store's cells open"), "{stderr}");
-    assert_eq!(names(&other), Vec::<String>::new());
-    mount.unmount(true).unwrap();
-    block_on(mount.join().unwrap().check()).unwrap();
 }
 
 /// TASK-306: a new cell's root, given the user for its owner and mounted, reads 0755 through the
@@ -548,6 +445,8 @@ fn cladefsd(vm: &Path, bucket: &Path, token: u64) -> Command {
         .arg((256u64 << 20).to_string())
         .env("CLADEFSD_BUCKET", url::Url::from_directory_path(bucket).unwrap().to_string())
         .env("CLADEFSD_TOKEN", token.to_string())
+        // The disk it owns, its VM socket's directory, unless a test names another (board 14305).
+        .env("CLADEFSD_ROOTS", vm.parent().unwrap())
         .stderr(Stdio::piped());
     command
 }
@@ -712,15 +611,17 @@ async fn sigterm_drains_vms_cells_and_the_mount_of_cells() {
     let shown = m.join("0000000000001").join(&cell);
     std::fs::write(shown.join("file"), "drained").unwrap();
 
-    let vm = cladefs::CellClient::connect(first.join("vm.sock"), first.join("vm"), 1 << 28);
-    let vm = vm.unwrap();
+    let vm = cladefs::CellClient::connect_new(first.join("vm.sock"), 0, 1 << 28).unwrap();
+    let vm_cell = cladefs::CellId { tenant: vm.tenant(), id: vm.cell() };
     vm.commit_ordered(Some(b"vm drained")).unwrap();
     terminate(child, &m);
     drop(vm);
-    assert_eq!(
-        cladefs::OpenCell::open(first.join("vm")).await.unwrap().root().unwrap(),
-        b"vm drained"
-    );
+    // In the daemon's disk, `first`, where it kept the cell (board 14305).
+    let vm_dir = first
+        .join("cells")
+        .join(base32_id::Padded(vm_cell.tenant).to_string())
+        .join(base32_id::Padded(vm_cell.id).to_string());
+    assert_eq!(cladefs::OpenCell::open(vm_dir).await.unwrap().root().unwrap(), b"vm drained");
 
     let second = dir.path().join("second");
     std::fs::create_dir(&second).unwrap();
@@ -1396,6 +1297,8 @@ fn fuse_strided_multi_file_reads_scale_part_memory_without_thrashing() {
         std::env::set_var("CLADEFSD_GRPC", &control);
         std::env::set_var("CLADEFSD_MOUNT", &mountpoint);
         std::env::set_var("CLADEFSD_MOUNT_STORES", &cells);
+        // The disk it owns, whose cells directory is the mount's (board 14305).
+        std::env::set_var("CLADEFSD_ROOTS", cells.parent().unwrap());
         std::env::set_var("CLADEFSD_PART_CACHE", &part_cache);
         std::env::set_var("CLADEFSD_PART_CACHE_BYTES", (2u64 << 30).to_string());
         std::env::set_var(

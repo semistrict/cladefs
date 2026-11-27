@@ -70,7 +70,8 @@
 //! arena, whose pages are public bases', read-only, and nothing of another tenant's. The daemon's
 //! own VM socket is the default tenant's, whose pages are of an arena of its own, as a tenant's
 //! are, the default arena holding public bases' alone (TASK-79.17): its connections name cells in
-//! the daemon's roots alone (`CLADEFSD_ROOTS`), or anywhere, without any. One rule, a
+//! the daemon's roots alone (`CLADEFSD_ROOTS`), which it owns, and boots owning one at least
+//! (board 14305). One rule, a
 //! directory, for every tenant: what a VM process's user may read or write does not matter (it did
 //! before, TASK-39.2), as nothing below a tenant is separated. Its physical memory goes to a
 //! connection only once it opens a cell.

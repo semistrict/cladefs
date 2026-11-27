@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Project-wide TOML configuration for `cladefsd`, `cladefsctl`, `cladefs-mount`, and `cladefs-gc`.
+//! Project-wide TOML configuration for `cladefsd`, `cladefsctl`, and `cladefs-gc`.
 //!
 //! A single `cladefs.toml` (or per-service TOML file) configures the daemon, its managed JBOD
 //! `[[disks]]` with per-disk caps and governance, bucket/KMS settings, peers, FUSE mount,
@@ -728,7 +728,7 @@ impl Config {
 
     /// Exports environment-backed process settings (bucket URL, token, KMS, per-bucket overrides,
     /// logging, compression, telemetry) before threads start in CLI binaries (`cladefsd`,
-    /// `cladefs-mount`, `cladefs-gc`, `cladefsctl`).
+    /// `cladefs-gc`, `cladefsctl`).
     ///
     /// # Safety
     /// Must only be called during single-threaded process startup before spawning worker threads.

@@ -42,6 +42,9 @@ EnvironmentFile=/etc/cladefs/cladefsd.env
 LoadCredential=master-key:/etc/cladefs/master-key
 Environment=CLADEFS_MASTER_KEY_FILE=%d/master-key
 Environment=CLADEFSD_GRPC=/run/cladefsd/control.sock
+# The disk its cells are kept on, which it owns (board 14305): one directory a filesystem,
+# colon-separated, or [[disks]] of a TOML config.
+Environment=CLADEFSD_ROOTS=/var/lib/cladefsd/disk0
 Environment=CLADEFSD_PART_CACHE=/var/lib/cladefsd/part-cache
 Environment=CLADEFSD_REPLICAS=/var/lib/cladefsd/replicas
 Environment=CLADEFSD_METRICS=127.0.0.1:9184

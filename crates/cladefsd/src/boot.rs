@@ -81,6 +81,14 @@ pub(super) async fn boot_daemon(
             let _ = daemon.disk_pool.set(Arc::new(pool));
         }
     }
+    // cladefs: a host's one daemon owns the disks its cells are on, each root locked as it
+    // opens (`disks::own`), which a second daemon is refused: one owning none would serve cells at
+    // any path, another daemon's too (review 170; board 14305).
+    anyhow::ensure!(
+        daemon.disk_pool.get().is_some(),
+        "the extent daemon owns no disk: name its disks, CLADEFSD_ROOTS or [[disks]] of --config; \
+         a host's one daemon owns the directories its cells are kept in"
+    );
     local_cell::upload::blocking(|| crate::storage::open_part_cache(daemon))
         .map_err(anyhow::Error::msg)?;
     // cladefs: its appendable zonal fast WAL bucket, if configured: opened and append-probed at

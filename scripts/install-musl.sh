@@ -3,7 +3,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# Install all four static musl cladefs binaries (cladefsd, cladefsctl, cladefs-mount, cladefs-gc)
+# Install all three static musl cladefs binaries (cladefsd, cladefsctl, cladefs-gc)
 # in lockstep so cladefs-gc never drifts behind cladefsd across format bumps (hotbed question 536).
 #
 #   scripts/install-musl.sh [--from DIR] [--to PREFIX] [--restart]
@@ -15,7 +15,7 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
-bins=(cladefsd cladefsctl cladefs-mount cladefs-gc)
+bins=(cladefsd cladefsctl cladefs-gc)
 from="${CARGO_TARGET_DIR:-$root/target}/$(uname -m)-unknown-linux-musl/release"
 to="/usr/local/bin"
 restart=0

@@ -3,7 +3,8 @@
 // found in the LICENSE file.
 
 //! FUSE: a [`Filesystem`](crate::Filesystem) mounted on the host, such as a cell's, an image's
-//! or a stopped VM's, as any filesystem is (TASK-222). `cladefs-mount` mounts a cell so.
+//! or a stopped VM's, as any filesystem is (TASK-222). The extent daemon's mount of cells mounts
+//! them so (`cladefsd::mount`).
 //!
 //! - [`Server`] serves the FUSE protocol, a request's bytes in, its reply's out, whatever carries
 //!   them, on every host, as its tests drive it.

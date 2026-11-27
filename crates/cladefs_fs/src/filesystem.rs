@@ -249,7 +249,7 @@ pub const VOLUME_NAME: &str = "default";
 
 /// Returns a Tokio runtime handle for Fxfs tasks: the caller-supplied handle if any; under
 /// `madsim`, the current simulated host runtime; otherwise one shared single-threaded runtime
-/// lazily created for standalone callers (`cladefs-mount`, `cladefsctl`, `Storage::check`, and
+/// lazily created for standalone callers (`Storage::check`, and
 /// tests driving futures with `futures::executor::block_on`) (board 11689, board 11679).
 pub fn fxfs_runtime(handle: Option<&tokio::runtime::Handle>) -> tokio::runtime::Handle {
     if let Some(handle) = handle {

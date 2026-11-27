@@ -178,8 +178,8 @@ See [docs/architecture.md](docs/architecture.md) for the full mechanics.
 - **Linux file semantics:** `mmap`, `O_DIRECT`, reflinks, `fallocate`, ACLs, extended attributes,
   idmapped mounts, freezing and online resize. [docs/code.md](docs/code.md) lists what the guest's
   Fxfs does not do.
-- **Host access and control API:** `cladefs-mount` (and `cladefsd`'s Mount service) exposes cells
-  on the host via FUSE; `cladefs` is a Rust library for formatting, populating and checking images;
+- **Host access and control API:** `cladefsd`'s Mount service exposes cells on the host via
+  FUSE; `cladefs` is a Rust library for formatting, populating and checking images;
   a gRPC control API on a Unix socket—with a Go client (`go/`) and the `cladefsctl` CLI—drives the
   daemon for a VM manager.
 
@@ -238,12 +238,17 @@ Make a base from a container image's files and inspect it offline (no VM and no 
 export CLADEFSD_BUCKET=file:///tmp/cladefs/bucket CLADEFSD_TOKEN=1
 export CLADEFS_MASTER_KEY=$(openssl rand -hex 32)   # cells are always encrypted
 docker export "$(docker create alpine)" > /tmp/alpine.tar
-# /tmp/cladefs/base is a local cell directory backed by CLADEFSD_BUCKET
-cargo run --bin cladefsctl -- import /tmp/cladefs/base 1073741824 /tmp/alpine.tar
-cargo run --bin cladefsctl -- stat /tmp/cladefs/base
+# The host's one daemon owns its cells, which cladefsctl reaches through its control socket.
+export CLADEFSD_GRPC=/tmp/cladefs/control.sock CLADEFSD_ROOTS=/tmp/cladefs/disk0
+# 1 GiB of memory given, so no memory governor (and its host setup) is needed.
+mkdir -p /tmp/cladefs/disk0 && cargo run --bin cladefsd -- /tmp/cladefs/vms.sock 1073741824 &
+base=$(cargo run --bin cladefsctl -- import 1073741824 /tmp/alpine.tar)
+cargo run --bin cladefsctl -- stat "$base"
+fork=$(cargo run --bin cladefsctl -- fork "$base")
+cargo run --bin cladefsctl -- stat "$fork"
 ```
 
-On Linux, start `cladefsd` with `CLADEFSD_GRPC` to fork and manage live cells through the daemon (`cladefsctl fork 0/<CELL>` using the cell ID printed by `cladefsctl import`); `stat` on the fork then shows its bytes as `inherited`, holding the base's extents without copying them.
+`stat` on the fork shows its bytes as `inherited`, holding the base's extents without copying them.
 
 Boot guests, on Linux with KVM. This builds the guest kernel and Firecracker, starts a daemon and
 runs the guest tests, each of which boots VMs that mount Fxfs from an extent store device:
@@ -260,7 +265,7 @@ read [docs/integrator-guide.md](docs/integrator-guide.md).
 
 | Path | What |
 |---|---|
-| `crates/cladefs` | The extent daemon (`cladefsd`), `cladefsctl`, `cladefs-mount`, and the host's library. |
+| `crates/cladefs` | The extent daemon (`cladefsd`), `cladefsctl`, and the host's library. |
 | `crates/local_cell`, `crates/bucket_cell` | An extent store on local disk, and cells in the bucket (including replication and `cladefs-gc`). |
 | `crates/virtio_extent` | The extent store device, transport-independent, for a VMM to host. |
 | `crates/sqlite_cladefs`, `crates/block_device` | SQLite over a block device kept on extents, and the block device itself (one a SQLite or VM memory-image cell). |

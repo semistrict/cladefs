@@ -12,6 +12,9 @@ use cladefs::{OpenCell, VolatileSlice};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[cfg(target_os = "linux")]
+mod common;
+
 const BLOCK: usize = OpenCell::BLOCK_SIZE as usize;
 
 /// The environment of a host of the multi-node system, as tests have it: a bucket in each
@@ -253,18 +256,27 @@ fn stat_counts_extents_through_the_daemon() {
     drop(vm);
 }
 
-/// Offline `cladefsctl stat` inspects a closed cell without a running daemon (board 11705, hotbed
-/// question 542).
-#[tokio::test(flavor = "multi_thread")]
-async fn stat_reads_cells_offline() {
+/// `cladefsctl stat` says what a cell holds, through the daemon, which owns its host's cells:
+/// offline once (board 11705), the daemon's alone since (board 14305).
+#[cfg(target_os = "linux")]
+#[test]
+fn stat_says_what_a_cell_holds() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store");
-    let open = OpenCell::create(&path, 1 << 24).await.unwrap();
-    let extent = cladefs::ExtentId { cell: open.cell().id, sequence: 1 };
-    open.write(extent, 0, &[VolatileSlice::from(&[5; BLOCK][..])]).await.unwrap();
-    open.commit(None).await.unwrap();
-    drop(open);
-    let stat = Cladefsctl::with_env(&[]).run(&[Path::new("stat"), &path]).unwrap();
+    let cladefsctl = Cladefsctl::through_daemon(dir.path(), &[]);
+    // The VM socket, which the daemon binds last, once its control socket serves.
+    let vms = dir.path().join("vms.sock");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !vms.exists() {
+        assert!(std::time::Instant::now() < deadline, "the daemon never bound its VM socket");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let vm = cladefs::CellClient::connect_new(&vms, 0, 1 << 24).unwrap();
+    let cell = cladefs::CellId { tenant: 0, id: vm.cell() }.to_string();
+    let extent = cladefs::ExtentId { cell: vm.cell(), sequence: 1 };
+    vm.write(extent, 0, &[VolatileSlice::from(&[5; BLOCK][..])]).unwrap();
+    vm.commit(None).unwrap();
+    drop(vm);
+    let stat = cladefsctl.run(&[Path::new("stat"), Path::new(&cell)]).unwrap();
     assert!(stat.contains(&format!("own {BLOCK}\ninherited 0\n")), "{stat}");
     assert!(stat.contains("own_extents 1\ninherited_extents 0\n"), "{stat}");
 }
@@ -340,37 +352,42 @@ fn buckets_are_added_in_turn_and_recorded_in_every_root() {
     let socket = dir.path().join("unused-control.sock");
     let with_socket = Cladefsctl::with_env(&[("CLADEFSD_GRPC", socket.to_str().unwrap())]);
     assert_eq!(with_socket.run(&[Path::new("buckets"), Path::new(&root)]), Ok(expected));
-    // A cell imported offline into `east` carries bucket 2 in its ID's high bits.
-    let image = dir.path().join("layer.tar");
-    std::fs::write(&image, layer(&[Entry::new("hello", Kind::File(b"hi\n"))]).unwrap()).unwrap();
-    let store = dir.path().join("store");
-    run(&["import", store.to_str().unwrap(), "67108864", image.to_str().unwrap()]).unwrap();
-    let stat = run(&["stat", store.to_str().unwrap()]).unwrap();
-    let cell_line = stat.lines().find_map(|line| line.strip_prefix("cell ")).unwrap();
-    let cell: cladefs::CellId = cell_line.parse().unwrap();
-    assert_eq!(cell.id >> 48, 2, "{cell}");
+    // A cell imported into `east`, through a daemon whose bucket it is, carries bucket 2 in its
+    // ID's high bits.
+    #[cfg(target_os = "linux")]
+    {
+        let image = dir.path().join("layer.tar");
+        std::fs::write(&image, layer(&[Entry::new("hello", Kind::File(b"hi\n"))]).unwrap())
+            .unwrap();
+        let host = dir.path().join("host");
+        std::fs::create_dir(&host).unwrap();
+        let daemon = Cladefsctl::through_daemon(&host, &[("CLADEFSD_BUCKET", &east)]);
+        let imported = daemon.run(&[Path::new("import"), Path::new("67108864"), &image]).unwrap();
+        let cell: cladefs::CellId = imported.trim().parse().unwrap();
+        assert_eq!(cell.id >> 48, 2, "{cell}");
+    }
 }
 
-/// Offline `cladefsctl import` builds a base image into a cell directory backed by the host's
-/// bucket without a daemon; its filesystem mounts and reads back cleanly.
-#[tokio::test(flavor = "multi_thread")]
-async fn images_imported_offline_mount_and_read_back() {
+/// `cladefsctl import` builds a base image into a cell of the daemon's, the daemon owning its
+/// host's cells (board 14305; offline, into a directory, before): its filesystem mounts and reads
+/// back cleanly, in the daemon's process.
+#[cfg(target_os = "linux")]
+#[test]
+fn images_imported_mount_and_read_back() {
     use cladefs::import::testing::{Entry, Kind, layer};
     use cladefs::{Filesystem, Storage};
     use futures::executor::block_on;
     let dir = tempfile::tempdir().unwrap();
-    let bucket = format!("file://{}/", dir.path().canonicalize().unwrap().join("bucket").display());
-    let cladefsctl = Cladefsctl::with_env(&[("CLADEFSD_BUCKET", &bucket), ("CLADEFSD_TOKEN", "1")]);
+    let daemon = common::daemon::Daemon::new(dir.path());
+    let control = dir.path().join("control.sock");
+    let cladefsctl = Cladefsctl::with_env(&[("CLADEFSD_GRPC", control.to_str().unwrap())]);
     let image = dir.path().join("layer.tar");
     std::fs::write(&image, layer(&[Entry::new("hello", Kind::File(b"hello\n"))]).unwrap()).unwrap();
-    let base = dir.path().join("base");
-    let run = |args: &[&dyn AsRef<Path>]| {
-        let args: Vec<&Path> = args.iter().map(|arg| arg.as_ref()).collect();
-        cladefsctl.run(&args)
-    };
-    run(&[&"import", &base, &"67108864", &image]).unwrap();
-    let stat = run(&[&"stat", &base]).unwrap();
+    let imported = cladefsctl.run(&[Path::new("import"), Path::new("67108864"), &image]).unwrap();
+    let cell: cladefs::CellId = imported.trim().parse().unwrap();
+    let stat = cladefsctl.run(&[Path::new("stat"), Path::new(imported.trim())]).unwrap();
     assert!(stat.contains("capacity 67108864\n"), "{stat}");
+    let base = daemon.cell_path(cell);
     let read = block_on(async {
         let fs = Filesystem::mount(Storage::open(&base).await.unwrap()).await.unwrap();
         let (file, _) = fs.root().lookup(b"hello").await.unwrap();
@@ -667,45 +684,38 @@ fn the_daemon_stops_on_sigterm() {
     }
 }
 
-/// board 11705, hotbed question 542: without `CLADEFSD_GRPC`, offline bootstrap (`import`) and
-/// read-only `stat` succeed, while live-cell lifecycle commands refuse naming `CLADEFSD_GRPC`.
-#[tokio::test(flavor = "multi_thread")]
-async fn offline_commands_work_and_live_cell_commands_need_the_daemon() {
-    use cladefs::import::testing::{Entry, Kind, layer};
-    let dir = tempfile::tempdir().unwrap();
-    let image = dir.path().join("layer.tar");
-    std::fs::write(&image, layer(&[Entry::new("hello", Kind::File(b"hello\n"))]).unwrap()).unwrap();
-    let imported = dir.path().join("imported");
-    let import = [Path::new("import"), &imported, Path::new("67108864"), &image];
-    Cladefsctl::with_env(&[]).run(&import).unwrap();
-    assert!(OpenCell::open(&imported).await.is_ok());
-
-    // Live-cell lifecycle commands require CLADEFSD_GRPC.
+/// board 11705, hotbed question 542, board 14305: without `CLADEFSD_GRPC`, every command on a cell
+/// refuses, naming `CLADEFSD_GRPC`: imports and stats too, which ran offline before, the daemon
+/// owning its host's cells.
+#[test]
+fn cell_commands_need_the_daemon() {
     let cladefsctl = Cladefsctl::local();
     for args in [
-        ["create", "d", "16777216"].as_slice(),
-        &["take", "d", "16777216", "0/1"],
-        &["place", "d", "2"],
-        &["sync", "d"],
-        &["fork", "d", "e"],
-        &["version", "d"],
-        &["versions", "d"],
-        &["drop-versions", "d", "1"],
-        &["share", "d", "1"],
-        &["unshare", "d", "1"],
+        ["create", "16777216"].as_slice(),
+        &["take", "16777216", "0/1"],
+        &["import", "67108864", "layer.tar"],
+        &["import-memory", "memory.file"],
+        &["stat", "0/1"],
+        &["place", "0/1", "2"],
+        &["sync", "0/1"],
+        &["fork", "0/1"],
+        &["version", "0/1"],
+        &["versions", "0/1"],
+        &["drop-versions", "0/1", "1"],
+        &["share", "0/1", "1"],
+        &["unshare", "0/1", "1"],
         &["fork-version", "0/1", "1"],
-        &["delete", "d"],
-        &["drop", "d"],
-        &["resize", "d", "33554432"],
-        &["public", "d"],
-        &["public-attach-only", "d"],
-        &["attach", "d", "e"],
+        &["delete", "0/1"],
+        &["drop", "0/1"],
+        &["resize", "0/1", "33554432"],
+        &["public", "0/1"],
+        &["public-attach-only", "0/1"],
+        &["attach", "0/1", "0/2"],
     ] {
         let paths: Vec<&Path> = args.iter().map(Path::new).collect();
-        let error = cladefsctl.run(&paths).expect_err("ran live-cell command without daemon");
+        let error = cladefsctl.run(&paths).expect_err("ran a cell's command without the daemon");
         assert!(
-            error.contains("live cell commands are the extent daemon's")
-                && error.contains("CLADEFSD_GRPC"),
+            error.contains("the extent daemon's") && error.contains("CLADEFSD_GRPC"),
             "{args:?}: {error}"
         );
     }
@@ -719,10 +729,10 @@ fn commands_with_more_arguments_print_the_usage() {
     let cladefsctl = Cladefsctl::with_env(&[]);
     let image = dir.path().join("layer.tar");
     for args in [
-        ["take", "67108864", "1f", "2", "3"].as_slice(),
+        ["take", "67108864", "0/1f", "2", "3"].as_slice(),
         ["import", "67108864", "layer.tar", "ref", "more"].as_slice(),
     ] {
-        let mut all: Vec<&Path> = vec![Path::new(args[0]), &path];
+        let mut all: Vec<&Path> = vec![Path::new(args[0])];
         all.extend(args[1..].iter().map(|arg| match *arg {
             "layer.tar" => image.as_path(),
             arg => Path::new(arg),
@@ -1082,7 +1092,8 @@ fn refused_to_start(dir: &Path, env: &[(&str, &str)], limit: Option<u64>) -> Str
     use std::os::unix::process::CommandExt as _;
     let mut command = Command::new(env!("CARGO_BIN_EXE_cladefsd"));
     command.arg(dir.join("vms.sock")).env("CLADEFSD_GRPC", dir.join("control.sock"));
-    command.envs(HOST).envs(env.iter().copied());
+    // The disk it owns, `dir`, unless `env` names others (board 14305).
+    command.env("CLADEFSD_ROOTS", dir).envs(HOST).envs(env.iter().copied());
     if let Some(limit) = limit {
         // SAFETY: Between fork and exec, a system call alone, async-signal-safe.
         unsafe {

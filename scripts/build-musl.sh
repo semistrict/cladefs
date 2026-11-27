@@ -3,7 +3,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# Build fully static Linux musl release binaries for cladefsd, cladefsctl, cladefs-mount, and
+# Build fully static Linux musl release binaries for cladefsd, cladefsctl, and
 # cladefs-gc (matching how Firecracker builds statically against musl in scripts/test-e2e.sh),
 # using mimalloc as the global allocator on musl so one binary per architecture runs across
 # Ubuntu, Debian, Fedora Asahi (16 KiB pages), etc. with zero glibc coupling.
@@ -19,7 +19,7 @@ set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 source "$root/scripts/lib/musl.sh"
-bins=(cladefsd cladefsctl cladefs-mount cladefs-gc)
+bins=(cladefsd cladefsctl cladefs-gc)
 
 usage() {
     echo "Usage: $0 [--target x86_64-unknown-linux-musl|aarch64-unknown-linux-musl] [--out DIR]" >&2
@@ -56,7 +56,7 @@ musl_setup "$target"
 env "${MUSL_ENV[@]}" cargo build --release --locked \
     --manifest-path "$root/Cargo.toml" \
     --target "$MUSL_TARGET" \
-    -p cladefs --bin cladefsd --bin cladefsctl --bin cladefs-mount \
+    -p cladefs --bin cladefsd --bin cladefsctl \
     -p bucket_cell --bin cladefs-gc
 
 target_dir="${CARGO_TARGET_DIR:-$root/target}/${MUSL_TARGET}/release"

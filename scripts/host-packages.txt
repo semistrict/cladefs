@@ -22,6 +22,6 @@ zstd
 elfutils
 # spatch, which checks the guest's C (scripts/cocci-guest.py, TASK-44.17).
 coccinelle
-# fusermount3, which mounts FUSE filesystems for users other than root, as cladefs-mount does
-# (TASK-222).
+# fusermount3, which mounts FUSE filesystems for users other than root, as cladefsd's mount of
+# cells does (TASK-222, TASK-475.2).
 fuse3

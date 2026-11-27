@@ -102,9 +102,7 @@ board 10598).
 - `fuse/` mounts a `Filesystem` on the host with FUSE (TASK-222): a server of
   the protocol, a request's bytes in and its reply's out, on every host, and on
   Linux a mount through `/dev/fuse`, by mount(2) as root or `fusermount3`
-  otherwise. `cladefs-mount CELL_DIR MOUNTPOINT` mounts a cell nothing else has
-  open, read-write, until it is unmounted or sent SIGINT or SIGTERM; with
-  `--new CAPACITY`, a new cell it makes. cladefsd, with `CLADEFSD_MOUNT`
+  otherwise. cladefsd, with `CLADEFSD_MOUNT`
   naming a MOUNTPOINT and `CLADEFSD_MOUNT_STORES` a DIR, is one mount for any
   number of cells (TASK-302, TASK-475.2): its Mount service, on the daemon's
   control socket (`proto/cladefs/mount/v1/mount.proto`; `cladefsctl mount

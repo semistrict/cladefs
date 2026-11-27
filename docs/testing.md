@@ -35,7 +35,7 @@ root (`crates/cladefs/tests/fuse_differential.rs`, what may differ in its
 `ALLOWED`). CI also runs pjdfstest on mounts, as root:
 
 ```sh
-sudo scripts/pjdfstest-fuse.py target/$(uname -m)-unknown-linux-musl/debug/cladefs-mount   # Linux
+sudo scripts/pjdfstest-fuse.py target/$(uname -m)-unknown-linux-musl/debug   # Linux: cladefsd's mount
 ```
 
 What the extent daemon costs is a test's assertion too, its budgets the design's (TASK-330): its

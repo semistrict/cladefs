@@ -44,7 +44,7 @@ impl CellSource {
     /// Resolves the local cell directory path for `cell` (`shown` = `TENANT/CELL`): when the
     /// daemon has a managed `DiskPool`, reuses an existing directory (even on a draining disk) or
     /// delegates new placement to `DiskPool::pick_disk` (enforcing `ReadWrite`/cap/headroom policy).
-    /// Without a `DiskPool` (standalone `cladefs-mount`), falls back to probing `self.dirs` and
+    /// Without a `DiskPool` (a daemon booted of `CLADEFSD_MOUNT_STORES` alone), probes `self.dirs` and
     /// picking by filesystem free space.
     fn resolve_cell_path(
         &self,

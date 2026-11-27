@@ -21,11 +21,15 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
-/// A daemon of its own, serving at a socket in `dir`, once it does.
+/// A daemon of its own, serving at a socket in `dir`, once it does, owning a directory of its own
+/// there, `dir/NAME`, which its cells are kept in: one daemon owns a disk (board 14305).
 fn daemon(dir: &Path, name: &str) -> (PathBuf, KillOnDrop) {
     let socket = dir.join(format!("{name}.sock"));
+    let owned = dir.join(name);
+    std::fs::create_dir(&owned).unwrap();
     let child = Command::new(env!("CARGO_BIN_EXE_cladefsd"))
         .arg(&socket)
+        .env("CLADEFSD_ROOTS", &owned)
         .env("CLADEFSD_BUCKET", "memory:///cells")
         .env("CLADEFSD_TOKEN", "1")
         .spawn()
@@ -53,8 +57,8 @@ fn vm_processes_reach_their_daemons_memory_alone() {
     let dir = tempfile::tempdir().unwrap();
     let (one, _one) = daemon(dir.path(), "one");
     let (two, _two) = daemon(dir.path(), "two");
-    let ours = CellClient::connect(&one, dir.path().join("ours"), 1 << 24).unwrap();
-    let theirs = CellClient::connect(&two, dir.path().join("theirs"), 1 << 24).unwrap();
+    let ours = CellClient::connect_new(&one, 0, 1 << 24).unwrap();
+    let theirs = CellClient::connect_new(&two, 0, 1 << 24).unwrap();
     let (our_bytes, their_bytes) = (pattern(1), pattern(2));
     cache(&ours, &our_bytes);
     cache(&theirs, &their_bytes);

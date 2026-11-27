@@ -54,7 +54,7 @@ while [[ $# -gt 0 ]]; do
 done
 dir="{target_dir}/$target/release"
 mkdir -p "$dir"
-for b in cladefsd cladefsctl cladefs-mount cladefs-gc; do
+for b in cladefsd cladefsctl cladefs-gc; do
     printf '#!/bin/sh\\n' > "$dir/$b"
     chmod +x "$dir/$b"
 done
@@ -99,8 +99,8 @@ fi
         self.assertIn("CFLAGS_x86_64_unknown_linux_musl=-idirafter /usr/include -idirafter /usr/include/x86_64-linux-gnu", log)
         self.assertIn("--release --locked", log)
         self.assertIn("--target x86_64-unknown-linux-musl", log)
-        self.assertIn("-p cladefs --bin cladefsd --bin cladefsctl --bin cladefs-mount -p bucket_cell --bin cladefs-gc", log)
-        for name in ("cladefsd", "cladefsctl", "cladefs-mount", "cladefs-gc"):
+        self.assertIn("-p cladefs --bin cladefsd --bin cladefsctl -p bucket_cell --bin cladefs-gc", log)
+        for name in ("cladefsd", "cladefsctl", "cladefs-gc"):
             self.assertTrue((out_dir / name).is_file(), name)
 
     def test_cross_build_uses_arch_musl_gcc_and_sets_linker(self):

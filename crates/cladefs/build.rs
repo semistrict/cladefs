@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 //! Refuses release builds without frame pointers and compresses debug sections in Linux release
-//! binaries (`cladefsd`, `cladefsctl`, `cladefs-mount`), as bucket_cell's `cladefs-gc` does too
+//! binaries (`cladefsd`, `cladefsctl`), as bucket_cell's `cladefs-gc` does too
 //! ([`release_link`], board 10269, board 12766).
 
 #[path = "build/stamp.rs"]

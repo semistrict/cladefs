@@ -3,7 +3,7 @@
 # found in the LICENSE file.
 
 # Shared musl build and verification helpers for cladefs's static Linux binaries (cladefsd,
-# cladefsctl, cladefs-mount, cladefs-gc). Sourced by scripts/build-musl.sh, scripts/test-e2e.sh,
+# cladefsctl, cladefs-gc). Sourced by scripts/build-musl.sh, scripts/test-e2e.sh,
 # scripts/gc-sweep.sh, scripts/lib/fork-time-linux-host.sh, and scripts/test.sh.
 
 # musl_setup [TARGET]

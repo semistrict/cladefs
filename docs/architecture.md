@@ -136,8 +136,8 @@ another tenant's, but fork the versions of others' its VM manager gives it. Revo
 goes, and once its VM processes do, its arena and cached pages.
 The daemon's own VM socket is the default tenant's, ID 0, which is granted
 nothing and has no limits of its own, only every tenant's: its connections name
-cell directories in the daemon's roots alone (`CLADEFSD_ROOTS`), or anywhere without
-any. It is the daemon's user's alone, mode 0600, so that a jailed VM process, of
+cell directories in the daemon's roots alone (`CLADEFSD_ROOTS` or `[[disks]]`), which it
+owns, and boots owning one at least (board 14305). It is the daemon's user's alone, mode 0600, so that a jailed VM process, of
 another user, reaches a tenant's socket and no other, whatever is mounted
 (TASK-155). Below a tenant, a VM process's user does not matter: nothing there
 is separated.

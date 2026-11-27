@@ -21,7 +21,6 @@ filegroup(
     name = "release_bins",
     srcs = [
         "//crates/bucket_cell:cladefs-gc",
-        "//crates/cladefs:cladefs-mount",
         "//crates/cladefs:cladefsctl",
         "//crates/cladefs:cladefsd",
     ],

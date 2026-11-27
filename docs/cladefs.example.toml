@@ -1,5 +1,5 @@
 # Example cladefs.toml — unified TOML configuration for cladefsd, cladefsctl,
-# cladefs-mount, and cladefs-gc.
+# and cladefs-gc.
 #
 # Run with:
 #   cladefsd --config /etc/cladefs/cladefs.toml
