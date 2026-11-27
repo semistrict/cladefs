@@ -483,6 +483,16 @@ impl SecondStage for HvfSecondStage {
         if state.released {
             return;
         }
+        // What the window mapped there before is taken away first, as `dax::uffd` takes it away:
+        // a map names the range anew, whatever it named. A private unit stays the guest's copy.
+        let replaced: Vec<u64> = (state.units.range(offset..offset + len))
+            .filter(|(_, unit)| matches!(unit, Unit::Named { .. }))
+            .map(|(&at, _)| at)
+            .collect();
+        self.unmap_units(&replaced);
+        for at in &replaced {
+            state.units.remove(at);
+        }
         let (run, host) = self.host_run(phys, len);
         // The units mapped anew, in runs: a private unit there stays the guest's copy.
         let mut mapping: Option<(u64, u64)> = None;
@@ -500,7 +510,6 @@ impl SecondStage for HvfSecondStage {
                 flush(&mut mapping);
                 continue;
             }
-            assert!(!state.units.contains_key(&at), "a map at {at:#x}, mapped already");
             let unit_phys = PhysLocation { arena: phys.arena, offset: phys.offset + (at - offset) };
             state.units.insert(at, Unit::Named { _run: run.clone(), phys: unit_phys });
             match &mut mapping {
@@ -560,5 +569,88 @@ fn read_at(fd: RawFd, bytes: &mut [u8], offset: u64) {
         }
         assert!(read > 0, "read {offset:#x}: past the memory's end");
         done += read as usize;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write as _;
+
+    /// A guest's memory as a test has it: the maps and unmaps made, in order.
+    #[derive(Default)]
+    struct Recorded(Mutex<Vec<String>>);
+
+    impl GuestMemory for Recorded {
+        unsafe fn map(&self, offset: u64, _host: NonNull<u8>, len: u64, write: bool) {
+            let kind = if write { "map rw" } else { "map ro" };
+            self.0.lock().unwrap().push(format!("{kind} {offset:#x} {len:#x}"));
+        }
+
+        fn unmap(&self, offset: u64, len: u64) {
+            self.0.lock().unwrap().push(format!("unmap {offset:#x} {len:#x}"));
+        }
+    }
+
+    /// A stage of a 1 MiB window over an arena of 256 KiB of 7s, its guest's memory recorded.
+    fn stage() -> (Arc<HvfSecondStage>, Arc<Recorded>) {
+        let mut arena = tempfile::tempfile().unwrap();
+        arena.write_all(&[7; 256 << 10]).unwrap();
+        let guest = Arc::new(Recorded::default());
+        let memories = vec![(ArenaId::DEFAULT, OwnedFd::from(arena))];
+        let stage = HvfSecondStage::new(1 << 20, memories, guest.clone()).unwrap();
+        (stage, guest)
+    }
+
+    fn at(offset: u64) -> PhysLocation {
+        PhysLocation { arena: ArenaId::DEFAULT, offset }
+    }
+
+    /// A map over units mapped already names them anew, as `dax::uffd`'s does: what was there is
+    /// unmapped from the guest first (board 14362, which panicked).
+    #[test]
+    fn a_map_over_mapped_units_replaces_them() {
+        let (stage, guest) = stage();
+        let unit = map_unit();
+        stage.map(0, at(0), 2 * unit);
+        stage.map(unit, at(4 * unit), 2 * unit);
+        assert_eq!(stage.installed(), 3);
+        assert_eq!(
+            *guest.0.lock().unwrap(),
+            [
+                format!("map ro 0x0 {:#x}", 2 * unit),
+                format!("unmap {unit:#x} {unit:#x}"),
+                format!("map ro {unit:#x} {:#x}", 2 * unit),
+            ]
+        );
+    }
+
+    /// A unit made private stays the guest's copy through a map over it and a host's unmap
+    /// (`Private::Keep`); the guest's unmap (`Private::End`) ends it.
+    #[test]
+    fn private_units_stay_through_maps_until_the_guest_unmaps_them() {
+        let (stage, guest) = stage();
+        stage.copy_on_write(4).unwrap();
+        let unit = map_unit();
+        stage.map(0, at(0), unit);
+        let mut state = stage.state.lock().unwrap();
+        stage.privatize(&mut state, 0..unit).unwrap();
+        drop(state);
+        stage.map(0, at(unit), 2 * unit);
+        stage.unmap(0, 2 * unit, Private::Keep);
+        assert_eq!(stage.private_pages(), 1);
+        stage.unmap(0, 2 * unit, Private::End);
+        assert_eq!((stage.private_pages(), stage.installed()), (0, 0));
+        assert_eq!(
+            *guest.0.lock().unwrap(),
+            [
+                format!("map ro 0x0 {unit:#x}"),
+                format!("unmap 0x0 {unit:#x}"),
+                format!("map rw 0x0 {unit:#x}"),
+                format!("map ro {unit:#x} {unit:#x}"),
+                format!("unmap {unit:#x} {unit:#x}"),
+                format!("unmap 0x0 {unit:#x}"),
+            ]
+        );
     }
 }
