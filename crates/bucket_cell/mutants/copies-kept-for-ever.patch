@@ -4,12 +4,12 @@
 # Killer: sim::versions_mirrored_across_regions
 --- a/crates/bucket_cell/src/collector.rs
 +++ b/crates/bucket_cell/src/collector.rs
-@@ -524,7 +524,7 @@ impl Collector {
+@@ -550,7 +550,7 @@
              }
              bucket::delete_all(own, stale_pins).await?;
          }
 -        if !whole {
 +        if !whole || true {
+             self.observe_copy(own, cell, &listed, false, &[]);
              return Ok(report);
          }
-         bucket::delete_all(bucket, &holds).await?;
