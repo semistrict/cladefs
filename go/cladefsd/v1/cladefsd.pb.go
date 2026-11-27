@@ -322,7 +322,8 @@ func (CellKind) EnumDescriptor() ([]byte, []int) {
 	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{3}
 }
 
-// A live migration of a cell to begin. The target daemon chooses its own managed JBOD disk.
+// A live migration of an ephemeral cell to begin. The target daemon chooses its own managed JBOD
+// disk.
 type MigrateCellRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The peer address of the daemon it goes to.
@@ -435,9 +436,10 @@ func (x *MigrateCellResponse) GetMigration() uint64 {
 // A migration's hand-over.
 type HandOverCellRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// For a bucket-backed cell: the fencing token to place the cell at on the target before taking
-	// its head in the bucket (board 11369). Unset keeps the cell's existing placement token (or the
-	// target's daemon token). Refused (INVALID_ARGUMENT, EINVAL) if 0 or set on an ephemeral cell.
+	// Deprecated: HandOverCell serves ephemeral cells only and takes no fencing token. Setting this
+	// field is refused (INVALID_ARGUMENT, EINVAL).
+	//
+	// Deprecated: Marked as deprecated in cladefs/cladefsd/v1/cladefsd.proto.
 	Token *uint64 `protobuf:"varint,2,opt,name=token,proto3,oneof" json:"token,omitempty"`
 	// The cell's tenant.
 	Tenant uint64 `protobuf:"varint,3,opt,name=tenant,proto3" json:"tenant,omitempty"`
@@ -477,6 +479,7 @@ func (*HandOverCellRequest) Descriptor() ([]byte, []int) {
 	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{2}
 }
 
+// Deprecated: Marked as deprecated in cladefs/cladefsd/v1/cladefsd.proto.
 func (x *HandOverCellRequest) GetToken() uint64 {
 	if x != nil && x.Token != nil {
 		return *x.Token
@@ -6080,9 +6083,9 @@ const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\x06tenant\x18\x04 \x01(\x04R\x06tenant\x12\x12\n" +
 	"\x04cell\x18\x05 \x01(\x04R\x04cellJ\x04\b\x01\x10\x02J\x04\b\x03\x10\x04\"3\n" +
 	"\x13MigrateCellResponse\x12\x1c\n" +
-	"\tmigration\x18\x01 \x01(\x04R\tmigration\"l\n" +
-	"\x13HandOverCellRequest\x12\x19\n" +
-	"\x05token\x18\x02 \x01(\x04H\x00R\x05token\x88\x01\x01\x12\x16\n" +
+	"\tmigration\x18\x01 \x01(\x04R\tmigration\"p\n" +
+	"\x13HandOverCellRequest\x12\x1d\n" +
+	"\x05token\x18\x02 \x01(\x04B\x02\x18\x01H\x00R\x05token\x88\x01\x01\x12\x16\n" +
 	"\x06tenant\x18\x03 \x01(\x04R\x06tenant\x12\x12\n" +
 	"\x04cell\x18\x04 \x01(\x04R\x04cellB\b\n" +
 	"\x06_tokenJ\x04\b\x01\x10\x02\"\x16\n" +

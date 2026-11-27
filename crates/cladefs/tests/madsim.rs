@@ -1915,7 +1915,7 @@ async fn hand_overs_to_wedged_targets_end_within_their_bound() {
     // The rounds' first request of the kept segment sent, and unanswered.
     madsim::time::sleep(Duration::from_secs(2)).await;
     let hand_over = move || {
-        let request = HandOverCellRequest { tenant: 0, cell: child, token: None };
+        let request = HandOverCellRequest { tenant: 0, cell: child, ..Default::default() };
         async move { connect(1).await.hand_over_cell(request).await.map(drop) }
     };
     let timed = manager.spawn(async move {
@@ -2056,7 +2056,8 @@ async fn ephemeral_attrition(disk: bool, aborts: bool) -> Result<(), String> {
                 let tried = match tried {
                     false => None,
                     true => {
-                        let request = HandOverCellRequest { tenant: 0, cell: child, token: None };
+                        let request =
+                            HandOverCellRequest { tenant: 0, cell: child, ..Default::default() };
                         let answered = connect(source).await.hand_over_cell(request).await;
                         Some(
                             answered
@@ -2096,7 +2097,7 @@ async fn ephemeral_attrition(disk: bool, aborts: bool) -> Result<(), String> {
         }
         let handing = manager.spawn(async move {
             calling(source, || {
-                let request = HandOverCellRequest { tenant: 0, cell: child, token: None };
+                let request = HandOverCellRequest { tenant: 0, cell: child, ..Default::default() };
                 async move { connect(source).await.hand_over_cell(request).await }
             })
             .await
@@ -2133,7 +2134,7 @@ async fn ephemeral_attrition(disk: bool, aborts: bool) -> Result<(), String> {
         })
         .await?;
         calling(source, || {
-            let request = HandOverCellRequest { tenant: 0, cell: child, token: None };
+            let request = HandOverCellRequest { tenant: 0, cell: child, ..Default::default() };
             async move { connect(source).await.hand_over_cell(request).await }
         })
         .await

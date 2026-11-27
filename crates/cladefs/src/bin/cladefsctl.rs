@@ -36,7 +36,7 @@
 //!     [--dirty-budget BYTES|none] [--placement read_write|drain|read_only]
 //! cladefsctl set-peers [--bucket URL] [ADDRESS...]
 //! cladefsctl migrate TENANT/CELL PEER
-//! cladefsctl hand-over [--token TOKEN] TENANT/CELL
+//! cladefsctl hand-over TENANT/CELL
 //! cladefsctl wait-hand-over [--migration ID] TENANT/CELL
 //! cladefsctl abort-migration TENANT/CELL
 //! cladefsctl memory-limit [--tenant TENANT] BYTES|none
@@ -181,12 +181,12 @@
 //! ADDRESSes, each `HOST:PORT`, none without any (`SetPeers`); with `--bucket URL`, with or without
 //! the daemon, it publishes them to the bucket at URL instead, for every daemon on it to take, and
 //! prints `generation N`, the peer list's new generation. `migrate` begins the live migration of
-//! the cell TENANT/CELL, ephemeral or of the bucket, to the daemon whose peer address is PEER, and
-//! prints `migration ID` (`MigrateCell`); `hand-over` hands the cell over to its migration's
-//! target, a cell of the bucket placed there at the fencing token TOKEN if given
-//! (`HandOverCell`); `wait-hand-over` waits on the target daemon until an incoming hand-over of
-//! TENANT/CELL is accepted or fails (`WaitHandOver`); `abort-migration` ends its
-//! migration, the cell then free to migrate again (`AbortMigration`). `memory-limit` limits the memory the daemon holds extents' pages in
+//! the ephemeral cell TENANT/CELL to the daemon whose peer address is PEER, and prints
+//! `migration ID` (`MigrateCell`); `hand-over` hands the ephemeral cell over to its migration's
+//! target (`HandOverCell`); `wait-hand-over` waits on the target daemon until an incoming ephemeral
+//! hand-over of TENANT/CELL is accepted or fails (`WaitHandOver`); `abort-migration` ends its
+//! migration, the cell then free to migrate again (`AbortMigration`). Bucket-backed cells move
+//! through the bucket instead (`sync`, `take`/`place`, `drop`). `memory-limit` limits the memory the daemon holds extents' pages in
 //! to BYTES, or lifts the limit with `none` (`SetMemoryLimit`); `memory-weight` weighs a tenant's
 //! memory against the others' (`SetMemoryWeight`); `in-flight` sets the bytes in flight a tenant's
 //! connections share, or the default with `default` (`SetTenantInFlight`); `shrink-memory` evicts
@@ -520,7 +520,7 @@ mod cli {
          [--placement read_write|drain|read_only] | \
          cladefsctl set-peers [--bucket URL] [ADDRESS...] | \
          cladefsctl migrate TENANT/CELL PEER | \
-         cladefsctl hand-over [--token TOKEN] TENANT/CELL | \
+         cladefsctl hand-over TENANT/CELL | \
          cladefsctl wait-hand-over [--migration ID] TENANT/CELL | \
          cladefsctl abort-migration TENANT/CELL | \
          cladefsctl memory-limit [--tenant TENANT] BYTES|none | \
@@ -691,17 +691,15 @@ mod cli {
             bucket: Option<String>,
             addresses: Vec<String>,
         },
-        /// cladefs: a cell's live migration begun, to `peer` (board 8585, board 11369, hotbed
+        /// cladefs: an ephemeral cell's live migration begun, to `peer` (board 8585, hotbed
         /// question 547).
         Migrate {
             cell: cladefs::CellId,
             peer: String,
         },
-        /// cladefs: a cell migrating handed over to its target, placing a bucket-backed cell at
-        /// `token` if given (board 8585, board 11369).
+        /// cladefs: an ephemeral cell migrating handed over to its target (board 8585).
         HandOver {
             cell: cladefs::CellId,
-            token: Option<u64>,
         },
         /// cladefs: waits on the target daemon until an incoming hand-over of `cell` is accepted
         /// or fails (`WaitHandOver`).
@@ -1116,10 +1114,7 @@ mod cli {
                 ["migrate", cell, peer] => {
                     Self::Migrate { cell: parse_cell(cell)?, peer: peer.to_owned() }
                 }
-                ["hand-over", cell] => Self::HandOver { cell: parse_cell(cell)?, token: None },
-                ["hand-over", "--token", token, cell] => {
-                    Self::HandOver { cell: parse_cell(cell)?, token: Some(number("TOKEN", token)?) }
-                }
+                ["hand-over", cell] => Self::HandOver { cell: parse_cell(cell)? },
                 ["wait-hand-over", cell] => {
                     Self::WaitHandOver { cell: parse_cell(cell)?, migration: 0 }
                 }
@@ -1524,8 +1519,12 @@ mod cli {
                     let request = MigrateCellRequest { peer, tenant: cell.tenant, cell: cell.id };
                     println!("migration {}", call!(what, migrate_cell, request).migration);
                 }
-                Self::HandOver { cell, token } => {
-                    let request = HandOverCellRequest { tenant: cell.tenant, cell: cell.id, token };
+                Self::HandOver { cell } => {
+                    let request = HandOverCellRequest {
+                        tenant: cell.tenant,
+                        cell: cell.id,
+                        ..Default::default()
+                    };
                     call!(format!("handing cell {cell} over"), hand_over_cell, request);
                 }
                 Self::WaitHandOver { cell, migration } => {

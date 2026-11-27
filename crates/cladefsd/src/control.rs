@@ -1096,23 +1096,31 @@ impl Cladefsd for Control {
     ) -> Result<Response<MigrateCellResponse>, Status> {
         let MigrateCellRequest { peer, tenant, cell } = request.into_inner();
         let (_, cell_dir) = self.resolve_cell(tenant, cell).await?;
-        let migrating = crate::migration::migrate_on(&self.daemon, cell_dir, peer).await;
-        reply(migrating.map(|migration| MigrateCellResponse { migration }))
+        let migration = crate::migration::migrate_on(&self.daemon, cell_dir, peer).await?;
+        Ok(Response::new(MigrateCellResponse { migration }))
     }
 
     async fn hand_over_cell(
         &self,
         request: Request<HandOverCellRequest>,
     ) -> Result<Response<HandOverCellResponse>, Status> {
+        #[allow(deprecated)]
         let HandOverCellRequest { token, tenant, cell } = request.into_inner();
+        if token.is_some() {
+            return Err(saying(
+                Errno::EINVAL,
+                "HandOverCell serves ephemeral cells only and takes no fencing token; move \
+                 bucket-backed cells through the bucket: SyncCell on source, CreateCell + \
+                 PlaceCell on target, PUT /snapshot/load, then DropCell on source"
+                    .to_owned(),
+            ));
+        }
         let (id, cell_dir) = self.resolve_migrating_cell(tenant, cell).await?;
-        let done = crate::migration::hand_over_on(&self.daemon, cell_dir, token).await;
-        if done.is_ok()
-            && let Some(pool) = self.daemon.disk_pool()
-        {
+        crate::migration::hand_over_on(&self.daemon, cell_dir).await?;
+        if let Some(pool) = self.daemon.disk_pool() {
             pool.forget_cell(id);
         }
-        reply(done.map(|()| HandOverCellResponse {}))
+        Ok(Response::new(HandOverCellResponse {}))
     }
 
     async fn abort_migration(
@@ -1122,12 +1130,13 @@ impl Cladefsd for Control {
         let AbortMigrationRequest { tenant, cell } = request.into_inner();
         let (id, cell_dir) = self.resolve_migrating_cell(tenant, cell).await?;
         let done = crate::migration::abort_on(&self.daemon, cell_dir).await;
-        if done == Err(Errno::EEXIST)
+        if let Err(ref err) = done
+            && errno(err) == Some(Errno::EEXIST)
             && let Some(pool) = self.daemon.disk_pool()
         {
             pool.forget_cell(id);
         }
-        reply(done.map(|()| AbortMigrationResponse {}))
+        done.map(|()| Response::new(AbortMigrationResponse {}))
     }
 
     async fn wait_hand_over(

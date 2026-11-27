@@ -102,13 +102,9 @@ pub(super) async fn boot_daemon(
     // says (doc-22, TASK-539.9).
     let disks = crate::disk::DiskConfig::from_env().map_err(anyhow::Error::msg)?;
     crate::disk::start_on(daemon, disks).map_err(anyhow::Error::msg)?;
-    // cladefs: how long a migration to this host is kept, heard nothing of (board 5734, board
-    // 11369): validated whether or not CLADEFSD_EPHEMERAL is set, as bucket-backed cells migrate
-    // too.
+    // cladefs: how long an ephemeral migration to this host is kept, heard nothing of (board 5734).
     crate::migration::idle().map_err(anyhow::Error::msg)?;
-    // cladefs: where ephemeral cells migrated to it go (board 8447), also used as fallback root
-    // for bucket-backed migrations when CLADEFSD_ROOTS is unset (board 11530): validate at boot
-    // whether or not CLADEFSD_EPHEMERAL is set.
+    // cladefs: where ephemeral cells migrated to it go (board 8447).
     if set_os("CLADEFSD_EPHEMERAL_CELLS").is_some() {
         let roots = local_cell::upload::blocking(crate::migration::target::cells_roots)
             .map_err(anyhow::Error::msg)?;
@@ -126,13 +122,6 @@ pub(super) async fn boot_daemon(
         log::info!("cladefsd: let go of {let_go} ephemeral cells handed over");
         let retired = ephemeral.retire_stale().await?;
         log::info!("cladefsd: retired {retired} references of ephemeral cells held no more");
-    }
-    // cladefs: drop any orphaned bucket-backed migration staging directories left by a prior crash
-    // before serving (board 11530).
-    let reaped_staging =
-        local_cell::upload::blocking(|| crate::migration::target::reap_orphaned_staging_on(daemon));
-    if reaped_staging > 0 {
-        log::info!("cladefsd: removed {reaped_staging} orphaned migration staging directories");
     }
     // cladefs: the hosts sharing its bucket, which it serves parts and asks for theirs
     // (TASK-406.2).
@@ -297,12 +286,6 @@ pub(super) async fn boot_embedded(
         log::info!("cladefsd: let go of {let_go} ephemeral cells handed over");
         let retired = ephemeral.retire_stale().await?;
         log::info!("cladefsd: retired {retired} references of ephemeral cells held no more");
-    }
-
-    let reaped_staging =
-        local_cell::upload::blocking(|| crate::migration::target::reap_orphaned_staging_on(daemon));
-    if reaped_staging > 0 {
-        log::info!("cladefsd: removed {reaped_staging} orphaned migration staging directories");
     }
 
     if let Some(address) = &config.peers.address {

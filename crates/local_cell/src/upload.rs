@@ -1406,13 +1406,6 @@ impl<D: Dir> Uploader<D> {
             shared.wake.notify_one();
         }
     }
-
-    /// Has the uploader, stopping, upload all its cell made durable first, as it does unless
-    /// cut short ([`Uploader::cut_short`]): for a cell another writer took over, as it was, its
-    /// uploader going on, whose going later no writer waits for.
-    pub fn drain_on_stop(&self) {
-        self.shared.progress().cut = false;
-    }
 }
 
 impl<D: Dir> Uploader<D> {

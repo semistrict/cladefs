@@ -18,18 +18,22 @@
 //!    - Host releases the cell via `PATCH /cladefs/extents` (`{"state": "Released"}`), verifies
 //!      `Resume` and `CreateSnapshot` are refused while released, then aborts by reopening via
 //!      `PATCH /cladefs/extents` (`{"state": "Open"}`) and resumes `src` on daemon A.
-//! 4. **Live hand-over + `WaitHandOver` + `memory_cell.diff_files`:**
+//! 4. **Live migration through the bucket (`SyncCell` -> `CreateCell` + `PlaceCell` ->
+//!    `PUT /snapshot/load` -> `DropCell`) + `memory_cell.diff_files`:**
 //!    - `src` verifies DAX mappings survived reopen, writes `/mnt/fxfs/after_abort`, mutates 32
 //!      pages of `buf_r1`, 16 new pages of `buf_a`, and zeroes 8 pages of `buf_a`, then syncs
 //!      (still without `FIFREEZE`).
-//!    - Host starts `MigrateCell` (daemon A -> daemon B) and `WaitHandOver` on daemon B, pauses
-//!      `src`, takes a second `Diff` snapshot with `for_migration: true` into `diff2.mem` (still
-//!      0 versions), releases `extents` on paused `src` (without killing it), and calls
-//!      `HandOverCell(token=2)`.
-//!    - `WaitHandOver` wakes with `(migration, tenant, cell)`. Host loads `dst` on daemon B from
-//!      `v1` + `diff_files: [diff1, diff2]` and the handed-over `store-dst`, kills paused `src`,
-//!      and verifies `dst` resumes with all disk files, all RAM pages (shared base, diff1, diff2,
-//!      zeroed), `own < 128 MiB` on `mem-dst`, and 0 versions on `store-dst`.
+//!    - Host pauses `src`, takes a second `Diff` snapshot with `for_migration: true` into
+//!      `diff2.mem` (still 0 versions), and releases `extents` on paused `src` (without killing
+//!      it).
+//!    - Source daemon runs `SyncCell` to upload every commit to the bucket.
+//!    - Target daemon runs `CreateCell` (for the existing cell in the bucket) + `PlaceCell` with
+//!      the new fencing token (`2`), then loads `dst` on daemon B from `v1` +
+//!      `diff_files: [diff1, diff2]` and `store_src` (which opens the cell directly and fences the
+//!      source), and resumes `dst`.
+//!    - Source daemon runs `DropCell` on the fenced cell, kills paused `src`, and verifies `dst`
+//!      resumes with all disk files, all RAM pages (shared base, diff1, diff2, zeroed),
+//!      `own < 128 MiB` on `mem-dst`, and 0 versions on `store-dst`.
 
 use macros::{guest, host};
 
@@ -89,13 +93,12 @@ mod host {
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
     use anyhow::{Context, ensure};
     use cladefs::cladefsd::control::proto::{
-        HandOverCellRequest, ListCellsRequest, ListVersionsRequest, MigrateCellRequest,
-        ShrinkMemoryRequest, StatCellRequest, SyncCellRequest, WaitHandOverRequest,
+        CreateCellRequest, DropCellRequest, ListCellsRequest, ListVersionsRequest,
+        PlaceCellRequest, ShrinkMemoryRequest, StatCellRequest, SyncCellRequest,
     };
     use std::collections::BTreeSet;
     use std::ffi::OsStr;
     use std::io::{BufRead, BufReader, Write};
-    use std::net::TcpListener;
     use std::os::unix::net::UnixListener;
     use std::path::{Path, PathBuf};
 
@@ -117,12 +120,6 @@ mod host {
         UnixListener::bind(&path).with_context(|| format!("binding {path}"))
     }
 
-    fn peer_addresses() -> anyhow::Result<[String; 2]> {
-        let a = TcpListener::bind("127.0.0.1:0")?;
-        let b = TcpListener::bind("127.0.0.1:0")?;
-        Ok([a.local_addr()?.to_string(), b.local_addr()?.to_string()])
-    }
-
     impl TestFxfsGuestLiveMigration {
         fn run(&self, test_setup: &TestSetup) -> anyhow::Result<()> {
             let root = setup_rootfs(test_setup)?;
@@ -131,18 +128,11 @@ mod host {
             let bucket = dir.join("shared.bucket");
             std::fs::create_dir_all(&bucket)?;
             let bucket_url = format!("file://{}/", bucket.display());
-            let [src_peer, dst_peer] = peer_addresses()?;
-            let peers_csv = format!("{src_peer},{dst_peer}");
             let src_roots = dir.join("src-cells");
             let dst_roots = dir.join("dst-cells");
             std::fs::create_dir_all(&src_roots)?;
             std::fs::create_dir_all(&dst_roots)?;
 
-            let peer_tls =
-                std::env::var_os("CLADEFSD_PEER_TLS").map(PathBuf::from).unwrap_or_else(|| {
-                    Path::new(env!("CARGO_MANIFEST_DIR"))
-                        .join("../../../crates/cladefs/tests/peer-tls")
-                });
             // Short, as a Unix socket's path is (SUN_LEN, board 14393): the case's directory
             // may not be.
             let sockets = tempfile::Builder::new().prefix("cladefs-mig").tempdir()?;
@@ -155,9 +145,6 @@ mod host {
                 &[
                     ("CLADEFSD_BUCKET", OsStr::new(&bucket_url)),
                     ("CLADEFSD_TOKEN", OsStr::new("1")),
-                    ("CLADEFSD_PEER_ADDRESS", OsStr::new(&src_peer)),
-                    ("CLADEFSD_PEERS", OsStr::new(&peers_csv)),
-                    ("CLADEFSD_PEER_TLS", peer_tls.as_os_str()),
                     ("CLADEFSD_ROOTS", src_roots.as_os_str()),
                     ("CLADEFSD_UPLOAD_INTERVAL", OsStr::new("3600")),
                 ],
@@ -170,9 +157,6 @@ mod host {
                 &[
                     ("CLADEFSD_BUCKET", OsStr::new(&bucket_url)),
                     ("CLADEFSD_TOKEN", OsStr::new("1")),
-                    ("CLADEFSD_PEER_ADDRESS", OsStr::new(&dst_peer)),
-                    ("CLADEFSD_PEERS", OsStr::new(&peers_csv)),
-                    ("CLADEFSD_PEER_TLS", peer_tls.as_os_str()),
                     ("CLADEFSD_ROOTS", dst_roots.as_os_str()),
                 ],
                 Some(1 << 30),
@@ -366,32 +350,22 @@ mod host {
             reader.read_line(&mut line)?;
             ensure!(line.trim() == "round2-ready", "src guest said {line:?}");
 
-            // 4. Full hand-over + WaitHandOver + destination load with memory_cell.diff_files.
-            let mig_id = src_ctrl
-                .call(async |c| {
-                    c.migrate_cell(MigrateCellRequest {
-                        tenant: store_src.0,
-                        cell: store_src.1,
-                        peer: dst_peer.clone(),
-                    })
-                    .await
-                })?
-                .migration;
-
-            let dst_sock_wait = dst_sock.clone();
-            let waiter = std::thread::spawn(move || {
-                let ctrl = control(&dst_sock_wait)?;
-                ctrl.call(async |c| {
-                    c.wait_hand_over(WaitHandOverRequest {
-                        tenant: store_src.0,
-                        cell: store_src.1,
-                        migration: mig_id,
-                    })
-                    .await
-                })
-                .map_err(anyhow::Error::from)
+            // 4. Live migration through the bucket:
+            //    (1) pause + for_migration diff snapshot + release cell on source VM,
+            //    (2) SyncCell on source daemon,
+            //    (3) CreateCell + PlaceCell(token=2) on target daemon + PUT /snapshot/load + resume,
+            //    (4) DropCell on source daemon.
+            let uds_dst = uds("dst");
+            let listen_dst = listen(&uds_dst)?;
+            let dst_fc = Firecracker::spawn(dir, "dst", &Vm::api_socket("dst"), None, &[])?;
+            std::thread::spawn(move || -> std::io::Result<()> {
+                for stream in listen_dst.incoming() {
+                    writeln!(stream?, "dst")?;
+                }
+                Ok(())
             });
 
+            let pause_start = std::time::Instant::now();
             src_fc.request("PATCH", "/vm", &serde_json::json!({ "state": "Paused" }))?;
             let snap_mig2 = dir.join("mig2.state");
             let diff2 = dir.join("diff2.mem");
@@ -405,41 +379,44 @@ mod host {
                     "for_migration": true,
                 }),
             )?;
-            // Release cell while `src_fc` stays alive, then hand over!
+            // Release cell while `src_fc` stays alive, then upload every commit to the bucket.
             src_fc.request(
                 "PATCH",
                 "/cladefs/extents",
                 &serde_json::json!({ "state": "Released" }),
             )?;
+            let t_snap_release = pause_start.elapsed();
+
             src_ctrl.call(async |c| {
-                c.hand_over_cell(HandOverCellRequest {
+                c.sync_cell(SyncCellRequest { tenant: store_src.0, cell: store_src.1 }).await
+            })?;
+            let t_sync = pause_start.elapsed();
+
+            // Target takes the cell from the bucket and places it at fencing token 2.
+            dst_ctrl.call(async |c| {
+                c.create_cell(CreateCellRequest {
+                    capacity: CAPACITY,
                     tenant: store_src.0,
                     cell: store_src.1,
-                    token: Some(2),
+                    ..Default::default()
                 })
                 .await
             })?;
-
-            let handed = waiter.join().expect("waiter panicked")?;
-            ensure!(handed.migration == mig_id, "WaitHandOver migration mismatch: {handed:?}");
-            ensure!(
-                (handed.tenant, handed.cell) == store_src,
-                "WaitHandOver cell mismatch: {handed:?} vs {store_src:?}"
-            );
+            dst_ctrl.call(async |c| {
+                c.place_cell(PlaceCellRequest {
+                    tenant: store_src.0,
+                    cell: store_src.1,
+                    token: 2,
+                    force: false,
+                })
+                .await
+            })?;
+            let t_take_place = pause_start.elapsed();
 
             // Load on destination daemon B from base memory cell `v1` + `[diff1, diff2]` and
-            // handed-over cell `store_src`.
-            let uds_dst = uds("dst");
-            let listen_dst = listen(&uds_dst)?;
-            let dst_fc = Firecracker::spawn(dir, "dst", &Vm::api_socket("dst"), None, &[])?;
-            std::thread::spawn(move || -> std::io::Result<()> {
-                for stream in listen_dst.incoming() {
-                    writeln!(stream?, "dst")?;
-                }
-                Ok(())
-            });
+            // taken cell `store_src`.
             let store_dst_ref =
-                cladefs::CellId { tenant: handed.tenant, id: handed.cell }.to_string();
+                cladefs::CellId { tenant: store_src.0, id: store_src.1 }.to_string();
             dst_fc.request(
                 "PUT",
                 "/snapshot/load",
@@ -475,7 +452,22 @@ mod host {
                 .map(|c| (c.tenant, c.cell))
                 .context("finding dst memory cell")?;
             dst_fc.request("PATCH", "/vm", &serde_json::json!({ "state": "Resumed" }))?;
-            // Source VM can now exit after destination is loaded & running.
+            let pause_total = pause_start.elapsed();
+            eprintln!(
+                "bucket live migration pause: total={:.1}ms (snap+release={:.1}ms, \
+                 sync={:.1}ms, create+place={:.1}ms, load+resume={:.1}ms)",
+                pause_total.as_secs_f64() * 1e3,
+                t_snap_release.as_secs_f64() * 1e3,
+                (t_sync - t_snap_release).as_secs_f64() * 1e3,
+                (t_take_place - t_sync).as_secs_f64() * 1e3,
+                (pause_total - t_take_place).as_secs_f64() * 1e3,
+            );
+
+            // Step 4: DropCell on the fenced source (while `src_fc` is still alive/paused with
+            // `extents` released), then kill `src_fc`.
+            src_ctrl.call(async |c| {
+                c.drop_cell(DropCellRequest { tenant: store_src.0, cell: store_src.1 }).await
+            })?;
             drop(reader);
             drop(stream);
             src_fc.kill()?;

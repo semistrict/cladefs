@@ -334,24 +334,23 @@ type CladefsdClient interface {
 	// registry records, or that was decommissioned there, with its count of references (board
 	// 8521): for an operator to find a lost host's incarnation without its disk or its log.
 	ListEphemeralHosts(ctx context.Context, in *ListEphemeralHostsRequest, opts ...grpc.CallOption) (*ListEphemeralHostsResponse, error)
-	// Begins the live migration of the cell at `path` (ephemeral or bucket-backed) to the daemon
-	// whose peer address is `peer`, where it goes at `to` (backlog doc-25, TASK-698.4, board 11369):
-	// for an ephemeral cell, that daemon refers to the cell's origin first, then takes its kept
-	// segments as they come while its guest runs; for a bucket-backed cell, its uploader keeps
-	// uploading to the bucket in parallel while rounds stream only unacknowledged finalized segments
-	// and extents over peer mTLS. Returns the migration's ID. HandOverCell ends it, or
-	// AbortMigration. EBUSY while another migration of the cell is under way.
+	// Begins the live migration of an ephemeral cell to the daemon whose peer address is `peer`
+	// (backlog doc-25, TASK-698.4): that daemon refers to the cell's origin first, then takes its
+	// kept segments as they come while its guest runs. Returns the migration's ID. HandOverCell ends
+	// it, or AbortMigration. EBUSY while another migration of the cell is under way. Serves ephemeral
+	// cells only; bucket-backed cells are refused (FAILED_PRECONDITION, ENOTSUP) and move through the
+	// bucket instead (SyncCell on source, CreateCell + PlaceCell on target, PUT /snapshot/load, then
+	// DropCell on source).
 	MigrateCell(ctx context.Context, in *MigrateCellRequest, opts ...grpc.CallOption) (*MigrateCellResponse, error)
-	// Hands the cell at `path` over to the daemon its migration names, once nothing has it open
-	// (EBUSY otherwise: its guest paused, its VM process gone): for a bucket-backed cell, the source
-	// cuts its uploader short without waiting on pending bucket uploads, gives the cell up durably,
-	// sends only the remaining unuploaded tail, and asks the target to take it over (placing it at
-	// `token` first if given, taking its head in the bucket with one CAS to fence the source).
-	// Accepted, the cell directory here goes (leaving a bucket-backed cell intact in the bucket, and
-	// retiring an ephemeral cell's reference); refused, it serves the cell again (EAGAIN). Asked
-	// again after a failure or a restart, it asks the other again, which answers as it did.
+	// Hands an ephemeral cell over to the daemon its migration names, once nothing has it open
+	// (EBUSY otherwise: its guest paused, its VM process gone or cell released). Accepted, the cell
+	// directory here goes and its reference is retired; refused, it serves the cell again (EAGAIN).
+	// Asked again after a failure or a restart, it asks the other again, which answers as it did.
+	// Serves ephemeral cells only; bucket-backed cells are refused (FAILED_PRECONDITION, ENOTSUP) and
+	// move through the bucket instead.
 	HandOverCell(ctx context.Context, in *HandOverCellRequest, opts ...grpc.CallOption) (*HandOverCellResponse, error)
-	// Ends the live migration of a cell (board 8577, board 11369).
+	// Ends the live migration of an ephemeral cell (board 8577). Serves ephemeral cells only;
+	// bucket-backed cells are refused (FAILED_PRECONDITION, ENOTSUP).
 	AbortMigration(ctx context.Context, in *AbortMigrationRequest, opts ...grpc.CallOption) (*AbortMigrationResponse, error)
 	// Lists all managed host disks and their live per-disk governance state (caps, headroom,
 	// allowance, usage, spare, pressure, health, placement; hotbed question 547).
@@ -359,11 +358,13 @@ type CladefsdClient interface {
 	// Updates per-disk governance (hard cap, part-cache cap, headroom, dirty budget, placement mode)
 	// live at runtime for one managed disk identified by its configured `id` (hotbed question 547).
 	SetDiskGovernance(ctx context.Context, in *SetDiskGovernanceRequest, opts ...grpc.CallOption) (*SetDiskGovernanceResponse, error)
-	// Waits on the target daemon until an incoming live migration hand-over for `(tenant, cell)` is
-	// accepted and ready to open, or fails (refused, aborted, idle-reaped, or superseded). Returns at
-	// once if `(tenant, cell)` is already present locally with no migration for it under way, or if
-	// the named migration has already reached a terminal outcome. Respects caller cancellation and
-	// deadlines, and returns UNAVAILABLE if the daemon begins draining.
+	// Waits on the target daemon until an incoming ephemeral live migration hand-over for
+	// `(tenant, cell)` is accepted and ready to open, or fails (refused, aborted, idle-reaped, or
+	// superseded). Returns at once if `(tenant, cell)` is already present locally as an ephemeral
+	// cell with no migration for it under way, or if the named migration has already reached a
+	// terminal outcome. Respects caller cancellation and deadlines, and returns UNAVAILABLE if the
+	// daemon begins draining. Serves ephemeral cells only; bucket-backed cells are refused
+	// (FAILED_PRECONDITION, ENOTSUP).
 	WaitHandOver(ctx context.Context, in *WaitHandOverRequest, opts ...grpc.CallOption) (*WaitHandOverResponse, error)
 }
 
@@ -982,24 +983,23 @@ type CladefsdServer interface {
 	// registry records, or that was decommissioned there, with its count of references (board
 	// 8521): for an operator to find a lost host's incarnation without its disk or its log.
 	ListEphemeralHosts(context.Context, *ListEphemeralHostsRequest) (*ListEphemeralHostsResponse, error)
-	// Begins the live migration of the cell at `path` (ephemeral or bucket-backed) to the daemon
-	// whose peer address is `peer`, where it goes at `to` (backlog doc-25, TASK-698.4, board 11369):
-	// for an ephemeral cell, that daemon refers to the cell's origin first, then takes its kept
-	// segments as they come while its guest runs; for a bucket-backed cell, its uploader keeps
-	// uploading to the bucket in parallel while rounds stream only unacknowledged finalized segments
-	// and extents over peer mTLS. Returns the migration's ID. HandOverCell ends it, or
-	// AbortMigration. EBUSY while another migration of the cell is under way.
+	// Begins the live migration of an ephemeral cell to the daemon whose peer address is `peer`
+	// (backlog doc-25, TASK-698.4): that daemon refers to the cell's origin first, then takes its
+	// kept segments as they come while its guest runs. Returns the migration's ID. HandOverCell ends
+	// it, or AbortMigration. EBUSY while another migration of the cell is under way. Serves ephemeral
+	// cells only; bucket-backed cells are refused (FAILED_PRECONDITION, ENOTSUP) and move through the
+	// bucket instead (SyncCell on source, CreateCell + PlaceCell on target, PUT /snapshot/load, then
+	// DropCell on source).
 	MigrateCell(context.Context, *MigrateCellRequest) (*MigrateCellResponse, error)
-	// Hands the cell at `path` over to the daemon its migration names, once nothing has it open
-	// (EBUSY otherwise: its guest paused, its VM process gone): for a bucket-backed cell, the source
-	// cuts its uploader short without waiting on pending bucket uploads, gives the cell up durably,
-	// sends only the remaining unuploaded tail, and asks the target to take it over (placing it at
-	// `token` first if given, taking its head in the bucket with one CAS to fence the source).
-	// Accepted, the cell directory here goes (leaving a bucket-backed cell intact in the bucket, and
-	// retiring an ephemeral cell's reference); refused, it serves the cell again (EAGAIN). Asked
-	// again after a failure or a restart, it asks the other again, which answers as it did.
+	// Hands an ephemeral cell over to the daemon its migration names, once nothing has it open
+	// (EBUSY otherwise: its guest paused, its VM process gone or cell released). Accepted, the cell
+	// directory here goes and its reference is retired; refused, it serves the cell again (EAGAIN).
+	// Asked again after a failure or a restart, it asks the other again, which answers as it did.
+	// Serves ephemeral cells only; bucket-backed cells are refused (FAILED_PRECONDITION, ENOTSUP) and
+	// move through the bucket instead.
 	HandOverCell(context.Context, *HandOverCellRequest) (*HandOverCellResponse, error)
-	// Ends the live migration of a cell (board 8577, board 11369).
+	// Ends the live migration of an ephemeral cell (board 8577). Serves ephemeral cells only;
+	// bucket-backed cells are refused (FAILED_PRECONDITION, ENOTSUP).
 	AbortMigration(context.Context, *AbortMigrationRequest) (*AbortMigrationResponse, error)
 	// Lists all managed host disks and their live per-disk governance state (caps, headroom,
 	// allowance, usage, spare, pressure, health, placement; hotbed question 547).
@@ -1007,11 +1007,13 @@ type CladefsdServer interface {
 	// Updates per-disk governance (hard cap, part-cache cap, headroom, dirty budget, placement mode)
 	// live at runtime for one managed disk identified by its configured `id` (hotbed question 547).
 	SetDiskGovernance(context.Context, *SetDiskGovernanceRequest) (*SetDiskGovernanceResponse, error)
-	// Waits on the target daemon until an incoming live migration hand-over for `(tenant, cell)` is
-	// accepted and ready to open, or fails (refused, aborted, idle-reaped, or superseded). Returns at
-	// once if `(tenant, cell)` is already present locally with no migration for it under way, or if
-	// the named migration has already reached a terminal outcome. Respects caller cancellation and
-	// deadlines, and returns UNAVAILABLE if the daemon begins draining.
+	// Waits on the target daemon until an incoming ephemeral live migration hand-over for
+	// `(tenant, cell)` is accepted and ready to open, or fails (refused, aborted, idle-reaped, or
+	// superseded). Returns at once if `(tenant, cell)` is already present locally as an ephemeral
+	// cell with no migration for it under way, or if the named migration has already reached a
+	// terminal outcome. Respects caller cancellation and deadlines, and returns UNAVAILABLE if the
+	// daemon begins draining. Serves ephemeral cells only; bucket-backed cells are refused
+	// (FAILED_PRECONDITION, ENOTSUP).
 	WaitHandOver(context.Context, *WaitHandOverRequest) (*WaitHandOverResponse, error)
 	mustEmbedUnimplementedCladefsdServer()
 }

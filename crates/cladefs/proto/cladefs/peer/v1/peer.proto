@@ -187,10 +187,9 @@ message MigratePrepareRequest {
   // The source's format family versions (doc-28, board 10054): each checked against the target's
   // readable range, refused (FAILED_PRECONDITION) if absent or outside range.
   Formats versions = 12;
-  // True for a bucket-backed cell migration (board 11369): no ephemeral host journal or origin
-  // reference is used, `parent_*` and `at` are ignored, and `to` must lie within one of the
-  // target's allowed roots (`CLADEFSD_ROOTS`, falling back to `CLADEFSD_EPHEMERAL_CELLS`).
-  bool bucket_backed = 13;
+  // Deprecated: peer live migration serves ephemeral cells only. Bucket-backed requests are
+  // refused (FAILED_PRECONDITION); move bucket-backed cells through the bucket instead.
+  bool bucket_backed = 13 [deprecated = true];
 }
 
 // A migration prepared.
@@ -249,12 +248,10 @@ message MigrateHandOverRequest {
   repeated FileDigest files = 3;
   // The token its preparation answered.
   uint64 token = 4;
-  // For a bucket-backed cell migration (board 11369): optional fencing token to place the cell at
-  // before taking its head in the bucket. Unset keeps the cell's existing placement token (or the
-  // target's CLADEFSD_TOKEN). Refused (INVALID_ARGUMENT) if 0.
-  optional uint64 placement_token = 5;
-  // True for a bucket-backed cell migration (board 11530): routes explicitly on dual-mode hosts.
-  bool bucket_backed = 6;
+  // Deprecated: peer live migration serves ephemeral cells only and takes no fencing token.
+  optional uint64 placement_token = 5 [deprecated = true];
+  // Deprecated: peer live migration serves ephemeral cells only. Refused (FAILED_PRECONDITION).
+  bool bucket_backed = 6 [deprecated = true];
 }
 
 // A hand-over's answer.

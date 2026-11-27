@@ -631,15 +631,6 @@ impl OpenCell {
         Some(std::sync::Arc::new(uploader.cut_short()))
     }
 
-    /// cladefs: undoes [`OpenCell::cut_short`] so the uploader drains pending uploads when it
-    /// stops (board 11369): called when a bucket-backed live migration is aborted while the cell
-    /// stays open on its source host.
-    pub fn drain_on_stop(&self) {
-        if let Some(uploader) = &self.uploader {
-            uploader.drain_on_stop();
-        }
-    }
-
     /// The number of the open cell's latest commit.
     pub fn committed(&self) -> Result<u64> {
         self.local.last_commit().map_err(errno)

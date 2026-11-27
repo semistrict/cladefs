@@ -3632,13 +3632,28 @@ fn the_daemons_metrics_parse_as_a_scraper_parses_them() {
     client.commit(None).unwrap();
     client.map(extent, 0, ps as u64, 0).unwrap();
     assert_eq!(read(&client, extent, 0, ps).unwrap(), pattern(6, ps));
-    // Another cell, closed, to migrate.
-    let moving = root.join("moving");
-    let (closed, closed_served) = connect(&moving, 1 << 24);
-    write(&closed, ExtentId { cell: closed.cell(), sequence: 1 }, 0, &pattern(7, ps)).unwrap();
+    // An ephemeral cell, closed, to migrate (peer migration serves ephemeral cells only).
+    cladefs_core::ephemeral_host::open_on(&crate::Daemon::process().host, &root.join("ephemeral"))
+        .unwrap();
+    let base = root.join("base");
+    let (closed, closed_served) = connect(&base, 1 << 24);
+    let base_cell = cladefs_core::CellId { tenant: 0, id: closed.cell() };
+    write(&closed, ExtentId { cell: base_cell.id, sequence: 1 }, 0, &pattern(7, ps)).unwrap();
     closed.commit(None).unwrap();
     drop(closed);
     closed_served.join().unwrap();
+    let version =
+        control(crate::cells::make_version(crate::Daemon::process(), base.clone(), None)).unwrap();
+    control(crate::cells::sync(crate::Daemon::process(), base)).unwrap();
+    let moving = root.join("moving");
+    control(crate::cells::fork_ephemeral_of_version(
+        crate::Daemon::process(),
+        base_cell,
+        version,
+        moving.clone(),
+        None,
+    ))
+    .unwrap();
 
     let control_socket = root.join("control.sock");
     let listener = UnixListener::bind(&control_socket).unwrap();
@@ -3669,7 +3684,10 @@ fn the_daemons_metrics_parse_as_a_scraper_parses_them() {
     // As `MigrateCell` begins it, which finds the cell in the daemon's disks, that this one has
     // none of.
     let migrated = control(crate::migration::migrate_on(crate::Daemon::process(), moving, address));
-    assert_eq!(migrated, Err(Errno::ENOTCONN));
+    assert_eq!(
+        migrated.err().and_then(|status| crate::control::errno(&status)),
+        Some(Errno::ENOTCONN)
+    );
 
     let page = crate::metrics::render();
     let value = |series: &str| {
@@ -8245,6 +8263,7 @@ fn targets_take_a_cells_migrations_by_its_epoch() {
         #[allow(deprecated)]
         formats: String::new(),
         versions: Some(crate::peers::current_formats()),
+        #[allow(deprecated)]
         bucket_backed: false,
     };
     let bucket = crate::cells::daemon_bucket().unwrap();
@@ -8279,7 +8298,9 @@ fn targets_take_a_cells_migrations_by_its_epoch() {
         incarnation,
         token,
         files: vec![FileDigest { path: "description".into(), len: 1, crc: None }],
+        #[allow(deprecated)]
         placement_token: None,
+        #[allow(deprecated)]
         bucket_backed: false,
     };
     let unknown =
