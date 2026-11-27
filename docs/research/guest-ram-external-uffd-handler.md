@@ -11,6 +11,9 @@ Sources: upstream Firecracker v1.18.0 (`eaf83bb7`, the series base in `vendor/fi
 fork at `cladefs-v1.18.0-r8` (`cdd1d886d`); Linux v7.1.2 (`~/src/linux-7.1.2`); e2b-infra at
 `75d4fae` (`~/src/e2b-infra`). **Derived** marks what follows from the code without having been run.
 
+**Superseded (2026-11-27):** the plan is now `guest-ram-mapping-list.md`, which replaces option C below.
+This note stays for its analysis of upstream's `Uffd` backend, E2B and the options.
+
 ## Answer
 
 1. **Upstream's `Uffd` backend can't carry a memory cell's window.** Its handler only *fills* memory
