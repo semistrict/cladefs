@@ -47,6 +47,18 @@ pub fn cladefs_guest_should_run() -> ShouldRun {
     ShouldRun::Yes
 }
 
+/// cladefs: whether a test of Fxfs under the guest kernel's fault injection runs: on the debug
+/// kernel alone, CLADEFS_GUEST_KERNEL_BUILD=debug, whose fault injection it uses (failslab,
+/// fail_page_alloc), and where [`cladefs_guest_should_run`]'s do.
+pub fn fault_injection_should_run() -> ShouldRun {
+    if std::env::var("CLADEFS_GUEST_KERNEL_BUILD").as_deref() != Ok("debug") {
+        return ShouldRun::No(
+            "fault injection is the debug kernel's: CLADEFS_GUEST_KERNEL_BUILD=debug",
+        );
+    }
+    cladefs_guest_should_run()
+}
+
 /// cladefs: how many times slower than a release one the guest kernel is, by its kind,
 /// CLADEFS_GUEST_KERNEL_BUILD's, as scripts/lib/test-linux-host.sh built it (a release one if
 /// unset): what a test's time limits scale by (TASK-168). The debug kernel's measured: its checks

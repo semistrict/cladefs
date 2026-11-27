@@ -234,15 +234,11 @@ mod host {
     }
 
     impl Test for TestFxfsGuestFsx {
-        /// Not -faults-dax but on the debug kernel, whose fault injection it uses.
         fn should_run(&self) -> ShouldRun {
-            let build = std::env::var("CLADEFS_GUEST_KERNEL_BUILD").unwrap_or_default();
-            if self.faults && build != "debug" {
-                return ShouldRun::No(
-                    "fault injection is the debug kernel's: CLADEFS_GUEST_KERNEL_BUILD=debug",
-                );
+            match self.faults {
+                true => crate::common::fault_injection_should_run(),
+                false => cladefs_guest_should_run(),
             }
-            cladefs_guest_should_run()
         }
 
         /// Its scripts' time, the shrink's, and a script's and a boot's past them, as the guest

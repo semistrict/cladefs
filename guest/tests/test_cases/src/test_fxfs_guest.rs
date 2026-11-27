@@ -399,7 +399,10 @@ mod host {
 
     impl Test for TestFxfsGuest {
         fn should_run(&self) -> ShouldRun {
-            cladefs_guest_should_run()
+            match self.mode {
+                Mode::Faults => crate::common::fault_injection_should_run(),
+                _ => cladefs_guest_should_run(),
+            }
         }
 
         fn timeout_secs(&self) -> u64 {
