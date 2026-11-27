@@ -530,13 +530,18 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
 
         /// A daemon of its own for iteration `i`'s fork, and its socket in `dir`, once it serves
         /// there.
+        /// A daemon of the fork's own, on the run's bucket (CLADEFS_E2E_BUCKET), where the version
+        /// it forks is: on a bucket of its own it found none, and waited for ever on a bucket its
+        /// root doesn't record (board 14542).
         fn daemon(test_setup: &TestSetup, dir: &Path, i: u32) -> anyhow::Result<(PathBuf, Child)> {
             let socket = dir.join("cladefsd.sock");
+            let bucket = std::env::var_os("CLADEFS_E2E_BUCKET")
+                .context("CLADEFS_E2E_BUCKET, the run's bucket (scripts/test-e2e.sh)")?;
             let daemon = crate::common::spawn_daemon(
                 test_setup,
                 &socket,
                 &format!("cladefsd-{i}"),
-                &[],
+                &[("CLADEFSD_BUCKET", &bucket)],
                 None,
             )?;
             Ok((socket, daemon))
