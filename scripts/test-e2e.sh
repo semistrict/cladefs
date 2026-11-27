@@ -612,6 +612,9 @@ for test in "${tests[@]}"; do
             "--$repeat_word" "$repeat" || passed=0
         if (( passed && repeats > 1 )); then
             find "$base" -name log.txt -exec cp {} "$results/$test/repeat-$repeat.log" \;
+            # Writable first: a root filesystem extracted keeps its read-only directories, which
+            # a user not root, as on a Mac, can't empty (/root, /etc/pki's), failing the run.
+            chmod -R u+w "$base"
             rm -r "$base"
         fi
         "$root/scripts/guest_results.py" ended "$results" "$test"
