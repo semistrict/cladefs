@@ -346,7 +346,9 @@ mod tests {
             Some(tree::reservation_amount_from_layer_size(size))
         );
         assert_eq!(
-            objects.metadata_reservation().amount() + objects.borrowed_metadata_space(),
+            objects.metadata_reservation().amount()
+                + objects.borrowed_metadata_space()
+                + objects.journal_borrowed(),
             objects.required_reservation()
         );
         std::mem::drop((store, root));

@@ -324,7 +324,9 @@ mod tests {
         drop(full);
         let objects = fs.object_manager();
         assert_eq!(
-            objects.metadata_reservation().amount() + objects.borrowed_metadata_space(),
+            objects.metadata_reservation().amount()
+                + objects.borrowed_metadata_space()
+                + objects.journal_borrowed(),
             objects.required_reservation()
         );
         fs.journal().resume_compactions();

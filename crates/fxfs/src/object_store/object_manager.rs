@@ -111,6 +111,15 @@ struct Inner {
     // room the reserved space (`reserved_space`) is for, taken already (board 14491).
     journal_held: u64,
 
+    // cladefs: what the reservation lacks of the room for the journal's blocks (the reserved
+    // space, less `journal_held`), which the allocator had no room for as the journal freed
+    // blocks (`follow_journal`), or as a mount reserved: borrowed, in memory alone, and repaid
+    // first as the journal's blocks take the room again. Never more than that room, which a mount
+    // may borrow too, so that a mount always fits what the filesystem running held, whatever of
+    // it was this (board 14491, hotbed review 186). The invariant is: reservation-size +
+    // borrowed-space + journal_borrowed = required.
+    journal_borrowed: u64,
+
     // A running counter that tracks metadata space that has been borrowed on the understanding that
     // eventually it will be recovered (potentially after a full compaction).
     borrowed_metadata_space: u64,
@@ -223,6 +232,7 @@ impl ObjectManager {
                 last_end_offset: 0,
                 last_journal_usage: 0,
                 journal_held: 0,
+                journal_borrowed: 0,
                 borrowed_metadata_space: 0,
                 borrowed_as_replayed: 0,
                 reserved_space: journal::RESERVED_SPACE,
@@ -804,8 +814,9 @@ impl ObjectManager {
 
                 // This transaction borrowed metadata space, but it might have returned space to the
                 // transaction that we can now give back to the allocator.
-                let to_give_back = (reservation.amount() + inner.borrowed_metadata_space)
-                    .saturating_sub(inner.required_reservation());
+                let to_give_back =
+                    (reservation.amount() + inner.borrowed_metadata_space + inner.journal_borrowed)
+                        .saturating_sub(inner.required_reservation());
                 if to_give_back > 0 {
                     reservation.give_back(to_give_back);
                 }
@@ -870,35 +881,49 @@ impl ObjectManager {
         Self::follow_journal(&mut inner, reservation, journal_held);
         // Check that our invariant holds true.
         debug_assert_eq!(
-            reservation.amount() + inner.borrowed_metadata_space,
+            reservation.amount() + inner.borrowed_metadata_space + inner.journal_borrowed,
             inner.required_reservation(),
-            "txn_space: {}, reservation_amount: {}, borrowed: {}, required: {}",
+            "txn_space: {}, reservation_amount: {}, borrowed: {}, journal_borrowed: {}, \
+             required: {}",
             txn_space,
             reservation.amount(),
             inner.borrowed_metadata_space,
+            inner.journal_borrowed,
             inner.required_reservation(),
         );
     }
 
     /// cladefs: sets what the journal's blocks take, `journal_held`, and brings `reservation`, the
-    /// metadata reservation, to what is then required of it: the excess given back to the
-    /// allocator, which the journal's blocks took (its system bytes); what is short, as the
-    /// journal freed blocks, reserved again, or borrowed if the allocator has no room for it.
+    /// metadata reservation, to what is then required of it: an excess repays `journal_borrowed`
+    /// first, then goes back to the allocator, as the journal's blocks took it (its system bytes);
+    /// what is short, as the journal freed blocks, is reserved again as far as the allocator has
+    /// room, and the rest borrowed (`journal_borrowed`), never journaled, and never more than the
+    /// room for the journal's blocks, which a mount may borrow as much of (hotbed review 186).
     fn follow_journal(inner: &mut Inner, reservation: &Reservation, journal_held: u64) {
         inner.journal_held = journal_held;
-        let (held, required) =
-            (reservation.amount() + inner.borrowed_metadata_space, inner.required_reservation());
+        let held = reservation.amount() + inner.borrowed_metadata_space + inner.journal_borrowed;
+        let required = inner.required_reservation();
         if held > required {
-            let given = (held - required).min(reservation.amount());
+            let excess = held - required;
+            let repaid = excess.min(inner.journal_borrowed);
+            inner.journal_borrowed -= repaid;
+            let given = (excess - repaid).min(reservation.amount());
             reservation.give_back(given);
-            inner.borrowed_metadata_space -= held - required - given;
+            // What neither covers was borrowed past what is required: it stays borrowed, as the
+            // journal says, until compacting repays it.
         } else if held < required {
             let short = required - held;
-            match inner.allocator.as_ref().unwrap().clone().reserve(None, short) {
-                Some(more) => more.move_to(reservation, short),
-                None => inner.borrowed_metadata_space += short,
-            }
+            let allocator = inner.allocator.as_ref().unwrap().clone();
+            let more = allocator.reserve_with(None, |limit| limit.min(short));
+            let got = more.amount();
+            more.move_to(reservation, got);
+            inner.journal_borrowed += short - got;
         }
+        debug_assert!(
+            inner.journal_borrowed <= inner.reserved_space.saturating_sub(inner.journal_held),
+            "journal_borrowed {} past the room for the journal's blocks",
+            inner.journal_borrowed
+        );
     }
 
     /// Drops a transaction.  This is called automatically when a transaction is dropped.  If the
@@ -999,16 +1024,22 @@ impl ObjectManager {
         ensure!(required >= inner.borrowed_metadata_space, FxfsError::Inconsistent);
         let allocator = inner.allocator.as_ref().cloned().unwrap();
         let wanted = required - inner.borrowed_metadata_space;
-        // cladefs: what the objects the journal holds updates of take to flush (board 14243) is
-        // borrowed if the filesystem has no room for it: a journal an earlier build wrote, which
-        // charged nothing for it, may have filled it. Refused, its mount would fail where that
-        // build's didn't; borrowed, compacting it is no worse off than that build's (hotbed
-        // question 586).
+        // cladefs: what the filesystem has no room for is borrowed, as far as the filesystem running
+        // may have lacked it too, which compacting repays:
+        // - the room for the journal's blocks (the reserved space, less those it holds), which the
+        //   filesystem running borrows as the journal frees blocks the allocator then has no room
+        //   to give back, journaling nothing (`journal_borrowed`, hotbed review 186);
+        // - what the objects the journal holds updates of take to flush (board 14243), which a
+        //   journal an earlier build wrote, charging nothing for it, may have filled the
+        //   filesystem without (hotbed question 586).
+        // Refused, the mount fails where the filesystem was sound.
+        inner.journal_borrowed = 0;
         let reservation = match allocator.clone().reserve(None, wanted) {
             Some(reservation) => reservation,
             None => {
                 let free = (Saturating(allocator.get_disk_bytes()) - allocator.get_used_bytes()).0;
-                let charges = inner.flush_charges();
+                let room = inner.reserved_space.saturating_sub(inner.journal_held);
+                let charges = room + inner.flush_charges();
                 let borrowed = wanted.saturating_sub(free);
                 let reservation = (borrowed <= charges)
                     .then(|| allocator.clone().reserve(None, wanted - borrowed))
@@ -1028,7 +1059,8 @@ impl ObjectManager {
                         )
                     })?;
                 warn!(borrowed; "No room for the whole metadata reservation: borrowed");
-                inner.borrowed_metadata_space += borrowed;
+                inner.journal_borrowed = borrowed.min(room);
+                inner.borrowed_metadata_space += borrowed - inner.journal_borrowed;
                 reservation
             }
         };
@@ -1089,6 +1121,12 @@ impl ObjectManager {
     /// what the filesystem had borrowed when it stopped, unless a crash lost some of what it did.
     pub fn borrowed_as_replayed(&self) -> u64 {
         self.inner.read().borrowed_as_replayed
+    }
+
+    /// cladefs: what the reservation lacks of the room for the journal's blocks, borrowed in memory
+    /// alone (see `Inner::journal_borrowed`).
+    pub fn journal_borrowed(&self) -> u64 {
+        self.inner.read().journal_borrowed
     }
 
     pub fn set_borrowed_metadata_space(&self, v: u64) {
@@ -1163,10 +1201,11 @@ mod tests {
         let objects = fs.object_manager();
         let (amount, borrowed) =
             (objects.metadata_reservation().amount(), objects.borrowed_metadata_space());
+        let journal_borrowed = objects.journal_borrowed();
         assert_eq!(
-            amount + borrowed,
+            amount + borrowed + journal_borrowed,
             objects.required_reservation(),
-            "{when}: reservation {amount} + borrowed {borrowed}"
+            "{when}: reservation {amount} + borrowed {borrowed} + journal {journal_borrowed}"
         );
     }
 
@@ -1263,15 +1302,62 @@ mod tests {
         }
         let held = fs.journal().journal_bytes();
         assert!(held > 400_000, "the journal holds {held} bytes");
-        let crashed = fs.device().snapshot().expect("snapshot failed");
-        let mounted = FxFilesystemBuilder::new()
-            .journal_options(journal())
-            .open(crashed)
-            .await
-            .expect("mount failed");
-        fsck(mounted.clone()).await.expect("fsck failed");
-        mounted.close().await.expect("close failed");
+        assert_balanced(&fs, "the journal grown");
+        // A crash of each moment: the mount fits what the filesystem held, and borrows what it
+        // borrowed, as the journal says (TASK-218).
+        let crash_mounts = async |when: &str| {
+            let crashed = fs.device().snapshot().expect("snapshot failed");
+            let mounted = FxFilesystemBuilder::new()
+                .journal_options(journal())
+                .open(crashed)
+                .await
+                .unwrap_or_else(|e| panic!("{when}: mount failed: {e:?}"));
+            assert_eq!(
+                mounted.object_manager().borrowed_as_replayed(),
+                fs.object_manager().borrowed_metadata_space(),
+                "{when}: borrowed as replayed, and as the filesystem had it"
+            );
+            fsck(mounted.clone()).await.unwrap_or_else(|e| panic!("{when}: fsck failed: {e:?}"));
+            mounted.close().await.expect("close failed");
+        };
+        crash_mounts("the journal grown").await;
+        // Compacted, the journal frees its blocks, whose room the reservation takes again at its
+        // next commit, as far as the allocator has it: what it has taken meanwhile, as
+        // transactions in flight hold it, the reservation borrows that room in memory alone
+        // (hotbed review 186). Data then fills the rest, and a crash mounts, borrowing as much.
         fs.journal().resume_compactions();
+        fs.journal().force_compact().await.expect("compact failed");
+        let in_flight = fs.allocator().reserve_with(None, |limit| limit);
+        let mut transaction = store
+            .new_transaction(
+                lock_keys![LockKey::object(store.store_object_id(), dir.object_id())],
+                Options { borrow_metadata_space: true, ..Default::default() },
+            )
+            .await
+            .expect("new_transaction failed");
+        dir.create_child_file(&mut transaction, "after-compaction")
+            .await
+            .expect("create_child_file failed");
+        transaction.commit().await.expect("commit failed");
+        let lacking = fs.object_manager().journal_borrowed();
+        assert!(lacking > 0, "the reservation took again all the room the journal freed");
+        assert_balanced(&fs, "the journal compacted");
+        std::mem::drop(in_flight);
+        let mut buffer = file.allocate_buffer(block_size).await;
+        buffer.as_mut_slice().fill(0xf2);
+        loop {
+            match file.write_or_append(None, buffer.as_ref()).await {
+                Ok(_) => {}
+                Err(e) if full(&e) => break,
+                Err(e) => panic!("write failed: {e:?}"),
+            }
+        }
+        fs.sync(SyncOptions { flush_device: true, ..Default::default() })
+            .await
+            .expect("sync failed");
+        assert_balanced(&fs, "filled again");
+        crash_mounts("compacted and filled again").await;
+        std::mem::drop(buffer);
         std::mem::drop((file, dir, store));
         fs.close().await.expect("close failed");
     }

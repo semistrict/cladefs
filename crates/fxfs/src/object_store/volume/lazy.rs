@@ -56,7 +56,9 @@ async fn test_lazy_volumes() {
 
     let objects = filesystem.object_manager();
     assert_eq!(
-        objects.metadata_reservation().amount() + objects.borrowed_metadata_space(),
+        objects.metadata_reservation().amount()
+            + objects.borrowed_metadata_space()
+            + objects.journal_borrowed(),
         objects.required_reservation()
     );
     write_file(&filesystem, &a, "more", &[0xcc; 4096]).await;
