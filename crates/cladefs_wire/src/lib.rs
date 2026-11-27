@@ -10,8 +10,8 @@ pub mod client;
 pub mod codec;
 pub mod device;
 pub mod in_flight;
-// cladefs: a VM's memory as a cell, restored as the cell's window: userfaultfd's, Linux's.
-#[cfg(target_os = "linux")]
+// cladefs: a VM's memory as a cell, restored as the cell's window: userfaultfd's on Linux, a
+// guest's RAM on Hypervisor.framework on macOS.
 pub mod memory_cell;
 pub mod wire;
 

@@ -39,18 +39,42 @@
 //! as 16 KiB arm64), the daemon composes unaligned or mixed runs into budgeted host pages and
 //! shares aligned runs directly, while the mapper rounds its lazy-mapped node chunks up to whole
 //! host pages so adjacent chunks never straddle a host page boundary.
+//!
+//! cladefs: on macOS (board 13994, board 14343), a window is a guest's RAM on Hypervisor.framework
+//! ([`MemoryCell::window_in_ram`], `dax::hvf::ram`), which the VMM's devices read and write as
+//! the guest does, with no userfaultfd to fault in what isn't there: its whole image is mapped as
+//! the window is made, each data page the daemon's, mapped copy-on-write, each hole the RAM's
+//! zeros, and a write of the guest's or the VMM's makes a page private, the kernel's copy. Its
+//! private pages, the RAM's anonymous ones, are what a snapshot writes, as here; a reclaim maps
+//! the image's pages anew as it does here, in whole host pages.
 
-use crate::{CellClient, DaemonConnection, DaemonDevice, Unmapped};
+use crate::{CellClient, DaemonConnection, DaemonDevice};
 use block_device::{BlockDevice, Contents, Options};
+#[cfg(target_os = "macos")]
+use cladefs_core::dax::hvf::{GuestRam, HvfRamStage};
 use cladefs_core::error::{Errno, Error};
-use cladefs_core::{CellVersion, MappingContents, Prefault, WindowMapping};
-use futures::channel::oneshot;
-use futures::future::BoxFuture;
-use std::collections::HashMap;
+use cladefs_core::{CellVersion, MappingContents, WindowMapping};
 use std::path::Path;
 use std::ptr::NonNull;
-use std::sync::{Arc, Mutex, Weak, mpsc};
+use std::sync::{Arc, Mutex};
 use storage_device::DeviceHolder;
+#[cfg(target_os = "linux")]
+use {
+    crate::Unmapped,
+    cladefs_core::Prefault,
+    futures::channel::oneshot,
+    futures::future::BoxFuture,
+    std::collections::HashMap,
+    std::sync::{Weak, mpsc},
+};
+
+/// A memory cell's window, once it has one: on Linux its tree nodes, which faults map as they
+/// reach them ([`MemoryCell::window`]); on macOS the guest's RAM it is
+/// ([`MemoryCell::window_in_ram`]).
+#[cfg(target_os = "linux")]
+type Window = Arc<Nodes>;
+#[cfg(target_os = "macos")]
+type Window = Arc<HvfRamStage>;
 
 /// The cell capacity a memory of `size` bytes takes at most: its pages, the tree naming them (a
 /// node of 170 refs a page) and their owners (8 bytes a page), and room for a commit's worth of
@@ -64,8 +88,8 @@ pub struct MemoryCell {
     client: Arc<CellClient>,
     blocks: Arc<BlockDevice>,
     size: u64,
-    /// Its window's tree nodes, once it has one ([`MemoryCell::window`]).
-    window: Mutex<Option<Arc<Nodes>>>,
+    /// Its window, once it has one.
+    window: Mutex<Option<Window>>,
 }
 
 impl MemoryCell {
@@ -250,6 +274,66 @@ impl MemoryCell {
         self.commit()
     }
 
+    /// Writes the memory's `size` bytes at `base`, a VM's that nothing changes meanwhile, as a
+    /// cold-booted VM's snapshot into a memory cell does (TASK-456.4): the pages this process
+    /// holds of it (`mincore`: resident, or on macOS compressed), all-zero ones discarded as
+    /// holes; those it holds none of, untouched, which read as zeros, left as the holes they are.
+    /// To be committed by [`MemoryCell::commit`].
+    ///
+    /// # Safety
+    ///
+    /// `base` is a page-aligned mapping of this process's of the memory's size, which nothing
+    /// writes while this runs.
+    pub unsafe fn write_resident(&self, base: NonNull<u8>) -> Result<(), Error> {
+        let host = cladefs_core::pages::page_size();
+        // A chunk's bits at a time, a byte a host page: 64 MiB of memory, 16 KiB of bits at most.
+        const CHUNK: u64 = 64 << 20;
+        // Resident, or (macOS's MINCORE_PAGED_OUT) compressed or paged out.
+        #[cfg(target_os = "macos")]
+        const HELD: u8 = 0x1 | 0x20;
+        #[cfg(target_os = "linux")]
+        const HELD: u8 = 0x1;
+        let mut bits = vec![0u8; (CHUNK / host) as usize];
+        let mut chunk = 0;
+        while chunk < self.size {
+            let len = (self.size - chunk).min(CHUNK);
+            let bits = &mut bits[..(len / host) as usize];
+            // SAFETY: Whole host pages of the mapping the caller gives, a byte for each.
+            let ret = unsafe {
+                libc::mincore(
+                    base.as_ptr().add(chunk as usize).cast(),
+                    len as usize,
+                    bits.as_mut_ptr().cast(),
+                )
+            };
+            if ret != 0 {
+                return Err(Error::new(std::io::Error::last_os_error())
+                    .context("asking which of the memory's pages are held"));
+            }
+            let mut page = 0;
+            while page < bits.len() {
+                if bits[page] & HELD == 0 {
+                    page += 1;
+                    continue;
+                }
+                let start = page;
+                while page < bits.len() && bits[page] & HELD != 0 {
+                    page += 1;
+                }
+                let at = chunk + start as u64 * host;
+                let run = (page - start) as u64 * host;
+                // SAFETY: Within the mapping, which nothing writes meanwhile, as the caller
+                // promises.
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(base.as_ptr().add(at as usize), run as usize)
+                };
+                self.write_sparse(at, bytes)?;
+            }
+            chunk += len;
+        }
+        Ok(())
+    }
+
     /// Applies sparse diff memory files (as produced by Firecracker's `PUT /snapshot/create` with
     /// `snapshot_type: "Diff"`) on top of this memory cell in order (oldest to newest), committing
     /// them once. Must be called before [`MemoryCell::window`].
@@ -422,6 +506,7 @@ impl MemoryCell {
     ///
     /// The memory must be a page-aligned mapping that nothing else in the process uses, and that
     /// outlives the cell.
+    #[cfg(target_os = "linux")]
     pub unsafe fn window(
         &self,
         base: NonNull<u8>,
@@ -476,6 +561,7 @@ impl MemoryCell {
     /// in the tree nodes the window has mapped: a node it hasn't, no fault reached yet, so the
     /// guest holds no private page there, and the mapper maps it whole as a fault first reaches
     /// it. `EINVAL` without a window, or for a range not whole pages within the memory.
+    #[cfg(target_os = "linux")]
     pub fn reclaim(&self, offset: u64, len: u64) -> Result<(), Error> {
         self.whole(offset, len)?;
         let nodes = self.window.lock().unwrap().clone().ok_or_else(|| {
@@ -510,6 +596,101 @@ impl MemoryCell {
         result
     }
 
+    /// cladefs: makes `ram`, the memory's own size, the cell's window, a guest's RAM on
+    /// Hypervisor.framework, whose VMM's devices access it as the guest does (see the module
+    /// docs): the image mapped there whole, as its last commit has it, before this returns, the
+    /// guest's RAM not mapped yet. `EINVAL` for RAM of another size, or with a window already.
+    #[cfg(target_os = "macos")]
+    pub fn window_in_ram(&self, ram: Arc<dyn GuestRam>) -> Result<(), Error> {
+        if ram.size() != self.size {
+            return Err(Error::new(Errno::EINVAL).context(format!(
+                "RAM of {} bytes over a memory of {}",
+                ram.size(),
+                self.size
+            )));
+        }
+        cladefs_core::pages::window_fits_host(self.page_size(), cladefs_core::pages::page_size())?;
+        let mut window = self.window.lock().unwrap();
+        if window.is_some() {
+            return Err(Error::new(Errno::EINVAL).context("the memory cell has a window already"));
+        }
+        let stage = self.client.create_memory_window_in_guest_ram(ram)?;
+        self.map_image(&stage, 0, self.size, true)?;
+        *window = Some(stage);
+        Ok(())
+    }
+
+    /// cladefs: [`MemoryCell::reclaim`] on macOS: the image's pages mapped anew over the whole
+    /// host pages of the `len` bytes at `offset` (those a host page straddles stay as they are),
+    /// their private pages ended, their memory the host's again.
+    #[cfg(target_os = "macos")]
+    pub fn reclaim(&self, offset: u64, len: u64) -> Result<(), Error> {
+        self.whole(offset, len)?;
+        let stage = self.window.lock().unwrap().clone().ok_or_else(|| {
+            Error::new(Errno::EINVAL).context("reclaiming memory of a memory cell with no window")
+        })?;
+        let host = cladefs_core::pages::page_size();
+        let (start, end) = (offset.next_multiple_of(host), (offset + len) / host * host);
+        if start >= end {
+            return Ok(());
+        }
+        self.map_image(&stage, start, end - start, false)
+    }
+
+    /// Maps the image's `len` bytes at `start`, whole host pages, into the RAM `stage` is, as its
+    /// last commit has them: what was there let go of first, the daemon's mappings and the RAM's
+    /// private pages alike, unless the RAM is `fresh` from its window's making, its zeros, which
+    /// the daemon maps nothing of; then the host pages of its holes alone left the RAM's zeros,
+    /// the rest mapped by the daemon, each faulted in that it didn't map as it mapped them, so
+    /// that every page is there as this returns.
+    #[cfg(target_os = "macos")]
+    fn map_image(
+        &self,
+        stage: &HvfRamStage,
+        start: u64,
+        len: u64,
+        fresh: bool,
+    ) -> Result<(), Error> {
+        let host = cladefs_core::pages::page_size();
+        if !fresh {
+            // The daemon's mappings there go, ending the private pages it mapped over; then the
+            // rest of them, those of holes it mapped nothing at, which a map there would keep.
+            self.client.unmap(start, len).map_err(Error::new)?;
+            stage.discard(start, len);
+        }
+        let mut mapped = Vec::new();
+        for mapping in image_mappings(&self.blocks, start, len)? {
+            let (from, to) = (mapping.window_offset, mapping.window_offset + mapping.len);
+            // The host pages a hole covers whole are the RAM's zeros; its pieces of the others
+            // the daemon composes with what is beside them.
+            let (inner, outer) = (from.next_multiple_of(host), to / host * host);
+            if !matches!(mapping.contents, MappingContents::Zeros) || inner >= outer {
+                mapped.push(mapping);
+                continue;
+            }
+            if from < inner {
+                mapped.push(WindowMapping { window_offset: from, len: inner - from, ..mapping });
+            }
+            if outer < to {
+                mapped.push(WindowMapping { window_offset: outer, len: to - outer, ..mapping });
+            }
+        }
+        self.client.map_many_warm(&mapped).map_err(Error::new)?;
+        let ranges: Vec<std::ops::Range<u64>> = (mapped.iter())
+            .map(|mapping| mapping.window_offset..mapping.window_offset + mapping.len)
+            .collect();
+        for at in stage.unnamed(&ranges) {
+            self.client.fault_in(at).map_err(|errno| {
+                Error::new(errno).context(format!("faulting in the memory's page at {at:#x}"))
+            })?;
+        }
+        match stage.unnamed(&ranges).first() {
+            None => Ok(()),
+            Some(at) => Err(Error::new(Errno::EIO)
+                .context(format!("the daemon mapped nothing of the memory's page at {at:#x}"))),
+        }
+    }
+
     /// Fails with `EINVAL` unless `len` bytes at `offset` are whole pages within the memory.
     fn whole(&self, offset: u64, len: u64) -> Result<(), Error> {
         let page = self.page_size();
@@ -526,6 +707,7 @@ impl MemoryCell {
 
 /// The tree nodes of a memory's window, by the bytes each names: which the daemon has mapped, and
 /// the faults waiting for those being mapped.
+#[cfg(target_os = "linux")]
 struct Nodes {
     node_bytes: u64,
     size: u64,
@@ -535,6 +717,7 @@ struct Nodes {
     state: Mutex<NodesState>,
 }
 
+#[cfg(target_os = "linux")]
 struct NodesState {
     /// A bit a node: whether its runs are mapped.
     mapped: Vec<u64>,
@@ -542,6 +725,7 @@ struct NodesState {
     waiting: HashMap<u64, Vec<oneshot::Sender<Result<(), Errno>>>>,
 }
 
+#[cfg(target_os = "linux")]
 impl NodesState {
     fn is_mapped(&self, node: u64) -> bool {
         self.mapped[(node / 64) as usize] & (1 << (node % 64)) != 0
@@ -550,11 +734,13 @@ impl NodesState {
 
 /// What a memory's window's faults reach first ([`Unmapped`]): a node mapped, at once; one not,
 /// asked of the [`Mapper`], once however many faults wait for it.
+#[cfg(target_os = "linux")]
 struct Reach {
     nodes: Arc<Nodes>,
     asks: Mutex<mpsc::Sender<u64>>,
 }
 
+#[cfg(target_os = "linux")]
 impl Unmapped for Reach {
     fn reach(&self, offset: u64) -> BoxFuture<'static, cladefs_core::Result<()>> {
         let node = offset / self.nodes.node_bytes;
@@ -577,12 +763,14 @@ impl Unmapped for Reach {
 
 /// Maps the nodes faults ask for, on a thread of its own, as reading the cell's tree blocks:
 /// until the window's faults, and with them the [`Reach`], go.
+#[cfg(target_os = "linux")]
 struct Mapper {
     nodes: Arc<Nodes>,
     blocks: Weak<BlockDevice>,
     client: Weak<CellClient>,
 }
 
+#[cfg(target_os = "linux")]
 impl Mapper {
     fn serve(self, asked: mpsc::Receiver<u64>) {
         for node in asked {
@@ -632,6 +820,7 @@ impl Mapper {
 /// 9414): the faults waiting for the nodes it was to map fail (`EIO`), as those after it do,
 /// finding it gone ([`Reach`]). Before, a panic left them waiting for ever, and every fault after
 /// on a node one waited for, their guest's vCPUs with them.
+#[cfg(target_os = "linux")]
 impl Drop for Mapper {
     fn drop(&mut self) {
         // What a panic holding it left: the faults waiting, which go, and nodes mapped, as they
@@ -720,11 +909,14 @@ fn image_mappings(blocks: &BlockDevice, start: u64, len: u64) -> Result<Vec<Wind
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
     use super::*;
+    #[cfg(target_os = "linux")]
     use cladefs_core::pages::page_size;
 
     /// board 9414: the faults waiting for a memory's window's mapper that panicked fail (`EIO`),
     /// and those after it: before, they waited for ever, their senders kept in the nodes' state.
+    #[cfg(target_os = "linux")]
     #[test]
     fn faults_waiting_for_a_mapper_that_panicked_fail() {
         let scenario = fail::FailScenario::setup();

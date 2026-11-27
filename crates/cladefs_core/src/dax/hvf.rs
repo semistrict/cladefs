@@ -25,7 +25,11 @@
 //! a VMM gives its VM 4 KiB stage 2 pages (`HV_IPA_GRANULE_4KB`), so that each unit maps on its
 //! own, from wherever its bytes are in its arena.
 
-use super::{Access, Faults, Private, SecondStage, map_unit};
+mod ram;
+
+pub use ram::{GuestRam, HvfRamStage};
+
+use super::{Access, Anew, Faults, Private, SecondStage, map_unit};
 use crate::error::{Errno, Error, Result};
 use crate::pages::{ArenaId, PhysLocation, page_size};
 use std::collections::BTreeMap;
@@ -33,6 +37,122 @@ use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+
+/// A window's second stage on Hypervisor.framework: a DAX window's, which maps pages into the
+/// guest alone ([`HvfSecondStage`]), or a memory cell's as the guest's RAM, which the VMM's
+/// devices access too ([`HvfRamStage`]).
+#[derive(Debug)]
+pub enum HvfStage {
+    Window(Arc<HvfSecondStage>),
+    Ram(Arc<HvfRamStage>),
+}
+
+impl HvfStage {
+    /// The window's size in bytes.
+    pub fn size(&self) -> u64 {
+        match self {
+            Self::Window(stage) => stage.size(),
+            Self::Ram(stage) => stage.size(),
+        }
+    }
+
+    /// [`HvfSecondStage::make_private`]; `EINVAL` of RAM, whose writes copy in the kernel.
+    pub async fn make_private(
+        &self,
+        window: &dyn Faults,
+        offset: u64,
+        len: u64,
+    ) -> Result<(), Errno> {
+        match self {
+            Self::Window(stage) => stage.make_private(window, offset, len).await,
+            Self::Ram(_) => Err(Errno::EINVAL),
+        }
+    }
+
+    /// The private pages' runs, by window offset.
+    pub fn private_runs(&self) -> Result<Vec<std::ops::Range<u64>>> {
+        match self {
+            Self::Window(stage) => stage.private_runs(),
+            Self::Ram(stage) => stage.private_runs(),
+        }
+    }
+
+    /// How many units are private.
+    pub fn private_pages(&self) -> u64 {
+        match self {
+            Self::Window(stage) => stage.private_pages(),
+            Self::Ram(stage) => stage.private_pages(),
+        }
+    }
+
+    /// What making units private cost: runs, units and nanoseconds; of RAM, the kernel's copies,
+    /// nothing counted.
+    pub fn private_costs(&self) -> [u64; 3] {
+        match self {
+            Self::Window(stage) => stage.private_costs(),
+            Self::Ram(_) => [0; 3],
+        }
+    }
+
+    /// The guest's ask to map pages ahead of its reads: nothing to do, either's pages mapped as
+    /// the window maps them.
+    pub fn prefault(&self, _offset: u64, _len: u64) {}
+
+    /// The runs of pages it may keep mapped: every unit.
+    pub fn budget(&self) -> usize {
+        match self {
+            Self::Window(stage) => stage.budget(),
+            Self::Ram(stage) => stage.budget(),
+        }
+    }
+
+    /// Tells `told` as the stage's share of its process's budget changes: never.
+    pub fn on_shared(&self, _told: impl Fn() + Send + Sync + 'static) {}
+
+    /// How many units are mapped.
+    pub fn installed(&self) -> u64 {
+        match self {
+            Self::Window(stage) => stage.installed(),
+            Self::Ram(stage) => stage.installed(),
+        }
+    }
+
+    /// Runs overwritten and left out to keep within a budget: none.
+    pub fn taken(&self) -> [u64; 2] {
+        [0; 2]
+    }
+
+    /// Lets go of every page, as the cell's connection goes.
+    pub fn release(&self) {
+        match self {
+            Self::Window(stage) => stage.release(),
+            Self::Ram(stage) => stage.release(),
+        }
+    }
+}
+
+impl SecondStage for HvfStage {
+    fn map(&self, offset: u64, phys: PhysLocation, len: u64) {
+        match self {
+            Self::Window(stage) => stage.map(offset, phys, len),
+            Self::Ram(stage) => stage.map(offset, phys, len),
+        }
+    }
+
+    fn unmap(&self, offset: u64, len: u64, private: Private) {
+        match self {
+            Self::Window(stage) => stage.unmap(offset, len, private),
+            Self::Ram(stage) => stage.unmap(offset, len, private),
+        }
+    }
+
+    fn remap(&self, offset: u64, len: u64, private: Private, anew: &[Anew]) {
+        match self {
+            Self::Window(stage) => stage.remap(offset, len, private, anew),
+            Self::Ram(stage) => stage.remap(offset, len, private, anew),
+        }
+    }
+}
 
 /// What only the VMM can do for the window: map host memory into its guest at the window's
 /// offsets, and unmap it, as Hypervisor.framework's `hv_vm_map` and `hv_vm_unmap` do.

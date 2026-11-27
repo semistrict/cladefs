@@ -16,7 +16,9 @@ use bucket_cell::cell::Kind;
 use cladefs_core::Prefault;
 use cladefs_core::dax::Faults;
 #[cfg(target_os = "macos")]
-use cladefs_core::dax::hvf::{FaultThread, GuestMemory, HvfSecondStage as WindowStage};
+use cladefs_core::dax::hvf::{
+    FaultThread, GuestMemory, GuestRam, HvfRamStage, HvfSecondStage, HvfStage as WindowStage,
+};
 #[cfg(target_os = "linux")]
 use cladefs_core::dax::uffd::{FaultThread, UffdSecondStage as WindowStage};
 use cladefs_core::error::{Errno, Error, Result};
@@ -791,20 +793,61 @@ impl CellClient {
         size: u64,
         guest: Arc<dyn GuestMemory>,
         private_max: u64,
-    ) -> Result<Arc<WindowStage>, Error> {
+    ) -> Result<Arc<HvfSecondStage>, Error> {
         if private_max == 0 {
             return Err(Error::new(Errno::EINVAL));
         }
+        let stage = HvfSecondStage::new(size, self.memories()?, guest)?;
+        stage.copy_on_write(private_max)?;
+        self.serve_window(WindowStage::Window(stage.clone()))?;
+        Ok(stage)
+    }
+
+    /// cladefs: creates the cell's window as the guest's RAM, `ram`, whose host memory the VMM's
+    /// devices access as the guest does (`dax::hvf::ram`, board 13994): the daemon's pages mapped
+    /// copy-on-write there as the window maps them, every write of the guest's or the VMM's a
+    /// private copy, the kernel's. A memory cell's (TASK-456.3), whose window nothing else maps.
+    pub fn create_memory_window_in_guest_ram(
+        &self,
+        ram: Arc<dyn GuestRam>,
+    ) -> Result<Arc<HvfRamStage>, Error> {
+        let stage = HvfRamStage::new(ram, self.memories()?)?;
+        self.serve_window(WindowStage::Ram(stage.clone()))?;
+        Ok(stage)
+    }
+
+    /// cladefs: the window's stage as the guest's RAM, once it is
+    /// ([`Self::create_memory_window_in_guest_ram`]).
+    pub fn guest_ram_stage(&self) -> Option<&Arc<HvfRamStage>> {
+        match self.client.stage.get().map(|stage| &**stage) {
+            Some(WindowStage::Ram(stage)) => Some(stage),
+            _ => None,
+        }
+    }
+
+    /// Faults the window's page at `offset` in through the daemon, as a guest's access would:
+    /// its mapping comes back before the reply. `EINVAL` without a window.
+    pub fn fault_in(&self, offset: u64) -> Result<()> {
+        let faults = self.window_faults.get().ok_or(Errno::EINVAL)?;
+        blocking(cladefs_core::dax::Faults::fault_page(faults.as_ref(), offset))
+    }
+
+    /// The daemon's memory objects, which the window maps pages of, for a stage of its own.
+    fn memories(&self) -> Result<Vec<(cladefs_core::pages::ArenaId, OwnedFd)>, Error> {
+        (self.memories.iter())
+            .map(|(arena, fd)| Ok((*arena, fd.as_fd().try_clone_to_owned()?)))
+            .collect::<std::io::Result<_>>()
+            .map_err(Error::new)
+    }
+
+    /// Makes `stage` the cell's window, which the daemon is told of, its faults served.
+    fn serve_window(&self, stage: WindowStage) -> Result<(), Error> {
         let mut faults = self.faults.lock().unwrap();
         if faults.is_some() {
             return Err(Error::new(Errno::EEXIST));
         }
-        let memories = (self.memories.iter())
-            .map(|(arena, fd)| Ok((*arena, fd.as_fd().try_clone_to_owned()?)))
-            .collect::<std::io::Result<_>>()
-            .map_err(Error::new)?;
-        let stage = WindowStage::new(size, memories, guest)?;
-        stage.copy_on_write(private_max)?;
+        let stage = Arc::new(stage);
+        let size = stage.size();
         self.client.stage.set(stage.clone()).map_err(|_| Error::new(Errno::EEXIST))?;
         let budget = stage.budget() as u64;
         self.client.request_blocking(&Request::Window { size, copying: true, budget })?;
@@ -813,8 +856,12 @@ impl CellClient {
         let faults_of =
             Arc::new(DaemonFaults { client: self.client.clone(), size, unmapped: None });
         self.window_faults.set(faults_of.clone()).map_err(|_| Error::new(Errno::EEXIST))?;
-        *faults = Some(stage.serve(faults_of)?);
-        Ok(stage)
+        *faults = Some(match &*stage {
+            WindowStage::Window(window) => window.serve(faults_of)?,
+            // Its faults are the VMM's to serve, every page there before the guest runs.
+            WindowStage::Ram(_) => FaultThread,
+        });
+        Ok(())
     }
 }
 
