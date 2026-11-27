@@ -39,7 +39,10 @@ source "$repo/scripts/lib/host.sh"
 iterations=${CLADEFS_BENCH_ITERATIONS:-3}
 [[ "$iterations" =~ ^[1-9][0-9]*$ ]] || { echo 'CLADEFS_BENCH_ITERATIONS is a count' >&2; exit 2; }
 limit=6h
-host_bench=1
+# A measurement, alone on the node's measurement CPUs (hotbed run --bench); with
+# CLADEFS_TEST_HOST_BENCH=0, a run of work beside others, whose numbers are indicative only, which
+# its note says.
+host_bench=${CLADEFS_TEST_HOST_BENCH:-1}
 
 # finish STATUS writes what the run was for, brings the history up to date, and says how the run
 # went: STATUS, unless the history failed.

@@ -386,10 +386,14 @@ host_launch() {
     # would stop as idle (`--keep-idle`); and reserves its peak, CLADEFS_TEST_HOST_PEAK, where work,
     # its builds, reserves CLADEFS_TEST_HOST_BUILD_PEAK (default 8G): hotbed also stops a command
     # holding much more than its CPU use warrants.
+    # A run of work that holds guests, unisolated, keeps them as a measurement does, if asked
+    # (CLADEFS_TEST_HOST_KEEP_IDLE=1).
     local peak=${CLADEFS_TEST_HOST_BUILD_PEAK:-8G}
     if (( host_bench )); then
         flags+=(--bench --keep-idle)
         peak=${CLADEFS_TEST_HOST_PEAK:-12G}
+    elif [[ ${CLADEFS_TEST_HOST_KEEP_IDLE:-} == 1 ]]; then
+        flags+=(--keep-idle)
     fi
     if [[ -n ${CLADEFS_TEST_HOST_MEM:-} ]]; then flags+=(--mem-high "$CLADEFS_TEST_HOST_MEM"); fi
     for assignment in ${host_environment[@]+"${host_environment[@]}"}; do
