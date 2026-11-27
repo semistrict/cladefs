@@ -42,8 +42,9 @@ pub(crate) const MAX_BACKLOG: usize = 128;
 const MAX_PENDING_RESETS: usize = 1024;
 /// Host ports of host-initiated connections come from here up.
 const EPHEMERAL_START: u32 = 0x8000_0000;
-/// VMADDR_PORT_ANY: never a port.
-const PORT_ANY: u32 = u32::MAX;
+/// VMADDR_PORT_ANY: never a port; a host listener there takes the guest's connections to every
+/// port no other listener holds ([`Vsock::listen_any`](super::Vsock::listen_any)).
+pub(crate) const PORT_ANY: u32 = u32::MAX;
 
 /// A connection's ports: the host's end, the guest's end.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -664,7 +665,12 @@ impl State {
         if self.conns.len() >= MAX_CONNECTIONS || self.resetting {
             return false;
         }
-        let Some(backlog) = self.listeners.get_mut(&key.host_port) else {
+        // The port's own listener, or the listener of every port none holds.
+        let port = match self.listeners.contains_key(&key.host_port) {
+            true => key.host_port,
+            false => PORT_ANY,
+        };
+        let Some(backlog) = self.listeners.get_mut(&port) else {
             return false;
         };
         if backlog.len() >= MAX_BACKLOG {
@@ -927,8 +933,8 @@ impl State {
             return Err(error(io::ErrorKind::NotConnected));
         }
         // A listener may be set up while the guest is stopped, for when it
-        // runs again.
-        if port == PORT_ANY || self.listeners.contains_key(&port) {
+        // runs again. PORT_ANY's takes the connections to every port no other holds.
+        if self.listeners.contains_key(&port) {
             return Err(io::Error::new(
                 io::ErrorKind::AddrInUse,
                 format!("host vsock port {port} is taken"),

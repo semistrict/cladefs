@@ -6,6 +6,7 @@
 //! transport (doc-30), and the thread that runs their queues.
 
 pub(crate) mod balloon;
+pub(crate) mod blk;
 pub(crate) mod extent;
 pub(crate) mod net;
 pub(crate) mod pci;

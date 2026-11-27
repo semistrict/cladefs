@@ -66,6 +66,9 @@ pub struct MachineConfig {
     /// reported and given back to the host, and a target the host sets. A machine with one is
     /// neither snapshotted nor suspended yet (board 13994).
     pub balloon: bool,
+    /// The machine's disks (virtio-blk, [`crate::Disk`]): `/dev/vda` on, in their order, after
+    /// its extent store devices. A machine with any is neither snapshotted nor suspended.
+    pub disks: Vec<crate::Disk>,
 }
 
 impl MachineConfig {
@@ -90,6 +93,7 @@ impl Default for MachineConfig {
             extent_stores: Vec::new(),
             nested_virtualization: false,
             balloon: false,
+            disks: Vec::new(),
         }
     }
 }
@@ -572,6 +576,18 @@ fn extent_daemon(config: &MachineConfig) -> Result<Option<&Arc<crate::ExtentDaem
     Ok(Some(daemon))
 }
 
+/// The disks of `config`'s ([`MachineConfig::disks`]), a virtio-blk device each.
+fn disk_devices(
+    config: &MachineConfig,
+) -> Result<Vec<Box<dyn crate::devices::virtio::VirtioDevice>>> {
+    (config.disks.iter())
+        .map(|disk| {
+            let device = crate::devices::virtio::blk::Block::new(disk)?;
+            Ok(Box::new(device) as Box<dyn crate::devices::virtio::VirtioDevice>)
+        })
+        .collect()
+}
+
 /// The balloon of `config`'s, if it asks for one ([`MachineConfig::balloon`]), added to `devices`,
 /// and its host handle.
 fn balloon_device(
@@ -880,6 +896,7 @@ impl Machine {
         // any transport's.
         let mut bars = crate::devices::pci::BarAllocator::new();
         let mut all = extent_devices(&config, &vm, &mut bars, &stop)?;
+        all.extend(disk_devices(&config)?);
         let balloon = balloon_device(&config, &vm, &mut all)?;
         all.extend(devices);
         let pc = PcDevices::new(&vm, card, all, None, doorbell, bars)?;
@@ -972,6 +989,7 @@ impl Machine {
         // The extent store devices first, as on the PC.
         let mut bars = crate::devices::pci::BarAllocator::new();
         let mut devices = extent_devices(&config, &vm, &mut bars, &stop)?;
+        devices.extend(disk_devices(&config)?);
         let balloon = balloon_device(&config, &vm, &mut devices)?;
         let (vsock_device, vsock) = VsockDevice::new(GUEST_CID)?;
         devices.extend([Box::new(Rng) as Box<dyn VirtioDevice>, Box::new(vsock_device)]);
@@ -1370,6 +1388,7 @@ impl Machine {
             extent_stores: Vec::new(),
             nested_virtualization: false,
             balloon: false,
+            disks: Vec::new(),
         };
         let network = self.network.as_ref().map(|n| {
             NetCard::Adopt(

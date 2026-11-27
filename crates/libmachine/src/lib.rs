@@ -82,6 +82,7 @@ mod stop;
 mod suspend;
 mod sys;
 mod vcpus;
+pub mod vsock_unix;
 
 #[cfg(target_os = "linux")]
 pub use backend::{HostMemory, MemorySlot, MemorySlots};
@@ -89,6 +90,7 @@ pub use cpu::CpuModel;
 #[cfg(target_arch = "x86_64")]
 pub use cpu::CpuidEntry;
 pub use devices::virtio::balloon::Balloon;
+pub use devices::virtio::blk::Disk;
 pub use devices::virtio::vsock::{
     GuestStopped, Vsock, VsockListener, VsockStream, is_guest_stopped,
 };

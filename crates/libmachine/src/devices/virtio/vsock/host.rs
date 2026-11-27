@@ -219,6 +219,14 @@ impl Vsock {
         Ok(VsockListener { shared: self.shared.clone(), port })
     }
 
+    /// Listens on every host port no other listener holds, as Firecracker passes the guest's
+    /// connections to any port on (its `uds_path` + `_PORT`): each connection accepted says the
+    /// port it was to ([`VsockStream::local_port`]). Fails with `AddrInUse` if one listens so
+    /// already.
+    pub fn listen_any(&self) -> io::Result<VsockListener> {
+        self.listen(super::state::PORT_ANY)
+    }
+
     /// Which restore of a snapshot the machine is (0: it booted), for the
     /// agent's reseed (`agent`; `Agent::over_unix_socket` of another process).
     pub fn generation(&self) -> u64 {

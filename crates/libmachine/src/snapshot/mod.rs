@@ -334,6 +334,7 @@ impl Snapshot {
             extent_stores: Vec::new(),
             nested_virtualization: false,
             balloon: false,
+            disks: Vec::new(),
         }
     }
 
