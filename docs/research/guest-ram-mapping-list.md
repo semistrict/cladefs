@@ -184,14 +184,14 @@ No change.
 
 ## Steps
 
-1. **Firecracker: the `Mappings` backend** at boot and load: start (list, `MISSING | MINOR`
+1. **Firecracker: the `Mappings` backend** (board 14628) at boot and load: start (list, `MISSING | MINOR`
    registration through `/dev/userfaultfd`, virtio-mem slots), persist on `snapshot/create` after
    device state, exit when the handler goes, the vhost-user memory table, seccomp. On top of board
    14609's boot-time backend field.
-2. **cladefsd: fixed arena offsets for memory cells' parts**: eviction by punching, offsets
+2. **cladefsd: fixed arena offsets for memory cells' parts** (board 14629): eviction by punching, offsets
    released when no live list names them, `specs/part-slabs` and the governor updated.
-3. **cladefsd: the backend's handler**: binding by the control plane, pidfds, per-VM threads, lists
+3. **cladefsd: the backend's handler** (board 14630): binding by the control plane, pidfds, per-VM threads, lists
    from images, `MISSING`/`MINOR` faults filled and installed a node at a time, persist by
    `PAGEMAP_SCAN` and `process_vm_readv` with the remap reply, the mapping budget.
-4. **Remove the fork's memory-cell code**, guest tests through `Mappings`, measured against plan
+4. **Remove the fork's memory-cell code** (board 14631), guest tests through `Mappings`, measured against plan
    v3's step 0 baseline (a fresh boot, a restore, the bench's first touch of 1 GiB, `b73e6d1ab`).
