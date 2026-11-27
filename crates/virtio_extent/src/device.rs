@@ -177,10 +177,32 @@ impl Device {
         vm: Arc<dyn WindowVm>,
         on_lost: OnLost,
     ) -> Result<Self, Error> {
+        Self::restoring(state, Daemon::Socket, queues, vm, on_lost)
+    }
+
+    /// [`Device::restore`], over `daemon`, as [`Device::connected`]: libmachine's, restoring a
+    /// machine's extent store devices on its process's daemon (board 13139).
+    pub fn restore_connected(
+        state: &State,
+        daemon: DaemonConnection,
+        queues: u16,
+        vm: Arc<dyn WindowVm>,
+        on_lost: OnLost,
+    ) -> Result<Self, Error> {
+        Self::restoring(state, Daemon::Connected(daemon), queues, vm, on_lost)
+    }
+
+    fn restoring(
+        state: &State,
+        daemon: Daemon,
+        queues: u16,
+        vm: Arc<dyn WindowVm>,
+        on_lost: OnLost,
+    ) -> Result<Self, Error> {
         let snapshot = Snapshot::from(state);
         let making = Making::Restore { snapshot: &snapshot, window_addr: state.window_addr };
         let config = Config::from(&state.config);
-        let mut device = Self::make(config, Daemon::Socket, queues, making, vm, on_lost)?;
+        let mut device = Self::make(config, daemon, queues, making, vm, on_lost)?;
         device.notices.set_frozen(state.frozen);
         device.mappings.clone_from(&snapshot.mappings);
         device.snapshot = Some(snapshot);
