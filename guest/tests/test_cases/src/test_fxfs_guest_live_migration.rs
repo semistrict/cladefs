@@ -143,8 +143,11 @@ mod host {
                     Path::new(env!("CARGO_MANIFEST_DIR"))
                         .join("../../../crates/cladefs/tests/peer-tls")
                 });
-            let src_sock = dir.join("src.sock");
-            let dst_sock = dir.join("dst.sock");
+            // Short, as a Unix socket's path is (SUN_LEN, board 14393): the case's directory
+            // may not be.
+            let sockets = tempfile::Builder::new().prefix("cladefs-mig").tempdir()?;
+            let src_sock = sockets.path().join("src.sock");
+            let dst_sock = sockets.path().join("dst.sock");
             let _src_daemon = spawn_daemon(
                 test_setup,
                 &src_sock,

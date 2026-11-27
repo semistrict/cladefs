@@ -189,7 +189,6 @@ fn clock_ticks() -> f64 {
 /// cladefs: a version of a new memory cell of the default tenant's, on the extent daemon at
 /// `socket`, holding the memory file `memory` of a VM's snapshot, imported (TASK-456.2): what VMs
 /// restore their memory from, sharing its pages.
-#[cfg(target_os = "linux")]
 pub fn memory_version(socket: &Path, memory: &Path) -> anyhow::Result<cladefs::CellVersion> {
     let size = fs::metadata(memory)?.len();
     let cell = cladefs::memory_cell::MemoryCell::create_cell(socket, 0, size)?;
@@ -197,13 +196,6 @@ pub fn memory_version(socket: &Path, memory: &Path) -> anyhow::Result<cladefs::C
     let version = cell.make_version()?;
     cell.close()?;
     Ok(version)
-}
-
-/// As Linux's, where cladefs's memory cells are not yet: `cladefs_wire::memory_cell` is Linux's
-/// (board 14343).
-#[cfg(not(target_os = "linux"))]
-pub fn memory_version(_socket: &Path, _memory: &Path) -> anyhow::Result<cladefs::CellVersion> {
-    anyhow::bail!("memory cells are Linux's yet: cladefs_wire::memory_cell (board 14343)")
 }
 
 /// cladefs: the memory limit nearest this process in its cgroups (memory.max, its own cgroup's or

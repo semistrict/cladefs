@@ -258,6 +258,7 @@ mod host {
     /// The bytes of host memory the private pages of the VM process `pid` hold, of its memory of
     /// `size` bytes, restored from a memory cell: its window's private memory's blocks, the one
     /// memory object of the process so named of that size (the DAX window's is of another).
+    #[cfg(target_os = "linux")]
     fn private_memory_held(pid: u32, size: u64) -> anyhow::Result<u64> {
         use std::os::unix::fs::MetadataExt as _;
         let mut held = Vec::new();
@@ -275,6 +276,15 @@ mod host {
         }
         anyhow::ensure!(held.len() == 1, "the memory's private memory: {held:?}");
         Ok(held[0])
+    }
+
+    /// macOS's: the VM process's footprint (`ri_phys_footprint`), which holds the private pages of
+    /// its memory, restored from a memory cell: the guest's RAM's anonymous ones, the guest's
+    /// writes and the kernel's copies of the daemon's pages there (`dax::hvf::ram`, board 13994),
+    /// with the rest of what the process holds of its own.
+    #[cfg(target_os = "macos")]
+    fn private_memory_held(pid: u32, _size: u64) -> anyhow::Result<u64> {
+        Ok(crate::common::usage(pid)?.ri_phys_footprint)
     }
 
     /// The guest of `firecracker`, restored from a memory cell, of `size` bytes of memory, gives
