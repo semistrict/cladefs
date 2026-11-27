@@ -9,6 +9,7 @@
 //! 0x00_0800_0000  GIC distributor (64 KiB)
 //! 0x00_0801_0000  GIC MSI frame (GICv2m's, 64 KiB): where devices' MSIs go
 //! 0x00_0802_0000  UART: a 16550, its registers a byte apart
+//! 0x00_0803_0000  RTC: an ARM PL031
 //! 0x00_0900_0000  GIC redistributors, 128 KiB a vCPU: 32 MiB, for the 256 vCPUs the framework
 //!                 places them for whatever a VM has
 //! 0x00_1000_0000  PCI ECAM: room for buses 0-255 (256 MiB), bus 0 alone described
@@ -32,6 +33,9 @@ pub(crate) const GIC_MSI_ADDR: u64 = 0x0801_0000;
 /// The 16550's registers.
 pub(crate) const UART_ADDR: u64 = 0x0802_0000;
 pub(crate) const UART_SIZE: u64 = 0x1000;
+/// The real-time clock, a PL031: one page of 32-bit registers.
+pub(crate) const RTC_ADDR: u64 = 0x0803_0000;
+pub(crate) const RTC_SIZE: u64 = 0x1000;
 pub(crate) const GIC_REDIST_ADDR: u64 = 0x0900_0000;
 /// Each vCPU's redistributor: its two 64 KiB frames (RD_base and SGI_base).
 pub(crate) const GIC_REDIST_SIZE: u64 = 0x2_0000;
@@ -45,6 +49,8 @@ pub(crate) const MAX_VCPUS: u32 = (GIC_REDIST_REGION_SIZE / GIC_REDIST_SIZE) as 
 /// number from 0). The UART's is the first; MSIs take the range after the platform's.
 pub(crate) const SPI_BASE: u32 = 32;
 pub(crate) const UART_SPI: u32 = SPI_BASE;
+/// The RTC's alarm interrupt, described but never raised.
+pub(crate) const RTC_SPI: u32 = SPI_BASE + 1;
 /// The SPIs the MSI frame raises: devices' MSI-X vectors.
 pub(crate) const MSI_SPI_BASE: u32 = SPI_BASE + 32;
 pub(crate) const MSI_SPI_COUNT: u32 = 256;
@@ -81,7 +87,8 @@ pub(crate) const MAX_RAM: u64 = PCI_MMIO64_ADDR - RAM_ADDR;
 const _: () = {
     assert!(GIC_MSI_ADDR >= GIC_DIST_ADDR + 0x1_0000);
     assert!(UART_ADDR >= GIC_MSI_ADDR + 0x1_0000);
-    assert!(GIC_REDIST_ADDR >= UART_ADDR + 0x1_0000);
+    assert!(RTC_ADDR >= UART_ADDR + 0x1_0000);
+    assert!(GIC_REDIST_ADDR >= RTC_ADDR + 0x1_0000);
     assert!(GIC_REDIST_ADDR + GIC_REDIST_REGION_SIZE <= PCI_ECAM_ADDR);
     // A gap between them: an address past the ECAM is nobody's.
     assert!(PCI_ECAM_ADDR + PCI_ECAM_SIZE < PCI_MMIO32_ADDR);

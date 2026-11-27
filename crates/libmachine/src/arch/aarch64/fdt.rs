@@ -13,13 +13,17 @@ use vm_fdt::FdtWriter;
 use super::layout::{
     GIC_DIST_ADDR, GIC_MSI_ADDR, GIC_REDIST_ADDR, GIC_REDIST_SIZE, MSI_SPI_BASE, MSI_SPI_COUNT,
     PCI_ECAM_ADDR, PCI_ECAM_LAST_BUS, PCI_MMIO32_ADDR, PCI_MMIO32_SIZE, PCI_MMIO64_ADDR,
-    PCI_MMIO64_SIZE, RAM_ADDR, SPI_BASE, TIMER_PPI_HYP, TIMER_PPI_PHYS, TIMER_PPI_SECURE_PHYS,
-    TIMER_PPI_VIRT, UART_ADDR, UART_SIZE, UART_SPI,
+    PCI_MMIO64_SIZE, RAM_ADDR, RTC_ADDR, RTC_SIZE, RTC_SPI, SPI_BASE, TIMER_PPI_HYP,
+    TIMER_PPI_PHYS, TIMER_PPI_SECURE_PHYS, TIMER_PPI_VIRT, UART_ADDR, UART_SIZE, UART_SPI,
 };
 use crate::error::{Error, Result};
 
 const GIC_PHANDLE: u32 = 1;
 const MSI_PHANDLE: u32 = 2;
+/// The fixed clock AMBA devices (the RTC) name as their bus clock.
+const APB_PCLK_PHANDLE: u32 = 3;
+/// What that clock says it runs at: AMBA asks for one, the RTC uses none.
+const APB_PCLK_HZ: u32 = 24_000_000;
 
 /// The interrupt specifier's first cell: an SPI or a PPI.
 const GIC_SPI: u32 = 0;
@@ -149,6 +153,22 @@ fn build(b: &Board<'_>) -> std::result::Result<Vec<u8>, vm_fdt::Error> {
     fdt.property_u32("clock-frequency", UART_CLOCK_HZ)?;
     fdt.property_array_u32("interrupts", &[GIC_SPI, UART_SPI - SPI_BASE, IRQ_TYPE_EDGE_RISING])?;
     fdt.end_node(uart)?;
+
+    let clock = fdt.begin_node("apb-pclk")?;
+    fdt.property_string("compatible", "fixed-clock")?;
+    fdt.property_u32("#clock-cells", 0)?;
+    fdt.property_u32("clock-frequency", APB_PCLK_HZ)?;
+    fdt.property_string("clock-output-names", "clk24mhz")?;
+    fdt.property_u32("phandle", APB_PCLK_PHANDLE)?;
+    fdt.end_node(clock)?;
+
+    let rtc = fdt.begin_node(&format!("rtc@{RTC_ADDR:x}"))?;
+    fdt.property_string_list("compatible", vec!["arm,pl031".into(), "arm,primecell".into()])?;
+    fdt.property_array_u64("reg", &[RTC_ADDR, RTC_SIZE])?;
+    fdt.property_array_u32("interrupts", &[GIC_SPI, RTC_SPI - SPI_BASE, IRQ_TYPE_LEVEL_HIGH])?;
+    fdt.property_u32("clocks", APB_PCLK_PHANDLE)?;
+    fdt.property_string("clock-names", "apb_pclk")?;
+    fdt.end_node(rtc)?;
 
     let pci = fdt.begin_node(&format!("pcie@{PCI_ECAM_ADDR:x}"))?;
     fdt.property_string("compatible", "pci-host-ecam-generic")?;

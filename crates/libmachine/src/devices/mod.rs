@@ -8,6 +8,8 @@ pub(crate) mod bus;
 #[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
 pub(crate) mod guest_tests;
 pub(crate) mod pci;
+#[cfg(target_arch = "aarch64")]
+pub(crate) mod rtc;
 pub(crate) mod serial;
 pub(crate) mod virtio;
 

@@ -38,23 +38,44 @@ const UART: std::ops::Range<u64> = {
     use crate::arch::aarch64::layout::UART_ADDR;
     UART_ADDR..UART_ADDR + 8
 };
+/// The RTC's page.
+#[cfg(target_arch = "aarch64")]
+const RTC: std::ops::Range<u64> = {
+    use crate::arch::aarch64::layout::{RTC_ADDR, RTC_SIZE};
+    RTC_ADDR..RTC_ADDR + RTC_SIZE
+};
 
 /// Every device a vCPU exit can reach.
 pub(crate) struct Bus {
     platform: Platform,
     serial: Mutex<Serial>,
     pci: Option<Arc<crate::devices::Pci>>,
+    /// The arm64 board's real-time clock.
+    #[cfg(target_arch = "aarch64")]
+    rtc: crate::devices::rtc::Rtc,
 }
 
 impl Bus {
     /// A bare machine's bus: the UART alone, every other access reported.
     pub(crate) fn bare(serial: Serial) -> Self {
-        Self { platform: Platform::Bare, serial: Mutex::new(serial), pci: None }
+        Self {
+            platform: Platform::Bare,
+            serial: Mutex::new(serial),
+            pci: None,
+            #[cfg(target_arch = "aarch64")]
+            rtc: Default::default(),
+        }
     }
 
     /// The board's bus: the UART, the PCI bus, and on a PC the ACPI registers.
     pub(crate) fn board(serial: Serial, pci: Arc<crate::devices::Pci>) -> Self {
-        Self { platform: Platform::Board, serial: Mutex::new(serial), pci: Some(pci) }
+        Self {
+            platform: Platform::Board,
+            serial: Mutex::new(serial),
+            pci: Some(pci),
+            #[cfg(target_arch = "aarch64")]
+            rtc: Default::default(),
+        }
     }
 
     /// The UART.
@@ -169,6 +190,22 @@ impl Bus {
                 counts.count(ExitKind::Serial);
                 data.fill(0);
                 data[0] = self.serial().read((addr - UART.start) as u8);
+            }
+            #[cfg(target_arch = "aarch64")]
+            Exit::MmioWrite { addr, data } if pc && RTC.contains(&addr) => {
+                counts.count(ExitKind::Rtc);
+                let mut word = [0u8; 4];
+                let len = data.len().min(4);
+                word[..len].copy_from_slice(&data[..len]);
+                self.rtc.write(addr - RTC.start, u32::from_le_bytes(word));
+            }
+            #[cfg(target_arch = "aarch64")]
+            Exit::MmioRead { addr, data } if pc && RTC.contains(&addr) => {
+                counts.count(ExitKind::Rtc);
+                let word = self.rtc.read(addr - RTC.start).to_le_bytes();
+                data.fill(0);
+                let len = data.len().min(4);
+                data[..len].copy_from_slice(&word[..len]);
             }
             Exit::MmioWrite { addr, data } => {
                 if let Some(pci) = &self.pci {

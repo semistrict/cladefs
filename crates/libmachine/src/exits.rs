@@ -29,6 +29,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub struct ExitCounts {
     /// Accesses to the UART: port I/O to COM1 on a PC, MMIO on the arm64 board.
     pub serial: u64,
+    /// MMIO to the arm64 board's real-time clock (a PL031).
+    pub rtc: u64,
     /// Port I/O to the ACPI registers (sleep control and status, reset).
     pub acpi: u64,
     /// Port I/O that no device claims.
@@ -71,6 +73,7 @@ pub struct ExitCounts {
 /// The kinds, in [`ExitCounts`]' field order (and [`ExitKind`]'s).
 const NAMES: [&str; KINDS] = [
     "serial",
+    "rtc",
     "acpi",
     "unclaimed_io",
     "pci_config",
@@ -85,7 +88,7 @@ const NAMES: [&str; KINDS] = [
     "access_retried",
     "other",
 ];
-const KINDS: usize = 14;
+const KINDS: usize = 15;
 
 impl ExitCounts {
     /// Every kind's name (the field's) and count, in a fixed order.
@@ -102,6 +105,7 @@ impl ExitCounts {
     fn to_array(self) -> [u64; KINDS] {
         [
             self.serial,
+            self.rtc,
             self.acpi,
             self.unclaimed_io,
             self.pci_config,
@@ -121,6 +125,7 @@ impl ExitCounts {
     fn from_array(v: [u64; KINDS]) -> Self {
         let [
             serial,
+            rtc,
             acpi,
             unclaimed_io,
             pci_config,
@@ -137,6 +142,7 @@ impl ExitCounts {
         ] = v;
         Self {
             serial,
+            rtc,
             acpi,
             unclaimed_io,
             pci_config,
@@ -202,6 +208,8 @@ impl std::fmt::Display for ExitCounts {
 #[repr(usize)]
 pub(crate) enum ExitKind {
     Serial,
+    #[cfg_attr(not(target_arch = "aarch64"), allow(dead_code, reason = "the arm64 board's"))]
+    Rtc,
     Acpi,
     UnclaimedIo,
     PciConfig,
@@ -246,6 +254,7 @@ mod tests {
 
     const ALL: [ExitKind; KINDS] = [
         ExitKind::Serial,
+        ExitKind::Rtc,
         ExitKind::Acpi,
         ExitKind::UnclaimedIo,
         ExitKind::PciConfig,
@@ -278,6 +287,7 @@ mod tests {
         let named: Vec<(&str, u64)> = counts.kinds().to_vec();
         let expected: Vec<(&str, u64)> = [
             ("serial", counts.serial),
+            ("rtc", counts.rtc),
             ("acpi", counts.acpi),
             ("unclaimed_io", counts.unclaimed_io),
             ("pci_config", counts.pci_config),
