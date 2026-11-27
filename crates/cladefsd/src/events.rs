@@ -81,19 +81,48 @@ async fn run(
     }
 }
 
-/// Stateful runner for the background `events` polling loop.
+/// Stateful runner for the background `events` and home-bucket `formats` ratchet polling loop.
 struct EventsRunner {
     poller: Poller,
+    gates_poller: bucket_cell::gates::Poller,
     state: Applied,
     resolved: Option<(Arc<bucket_cell::object_bucket::ObjectBucket>, u32)>,
 }
 
 impl EventsRunner {
     fn new() -> Self {
-        Self { poller: Poller::new(), state: Applied::default(), resolved: None }
+        Self {
+            poller: Poller::new(),
+            gates_poller: bucket_cell::gates::Poller::new(),
+            state: Applied::default(),
+            resolved: None,
+        }
     }
 
     async fn tick(&mut self, daemon: &Daemon, bucket: &bucket_cell::object_bucket::RoutedBucket) {
+        // cladefs: poll the home bucket's `formats` ratchet via `If-None-Match` so live ratchets
+        // take effect without daemon restarts (doc-28).
+        match self.gates_poller.poll(&*bucket.own()).await {
+            Ok(Some(gates)) => match daemon.host.bucket_host().ratchet().advance(gates) {
+                Ok(true) => {
+                    log::info!(
+                        "cladefsd: advanced storage-version ratchet (storage={}, fxfs={})",
+                        gates.storage,
+                        gates.fxfs
+                    );
+                }
+                Ok(false) => {}
+                Err(err) => {
+                    log::error!(
+                        "cladefsd: home bucket format gates incompatible with this build: {err}"
+                    );
+                }
+            },
+            Ok(None) => {}
+            Err(err) => {
+                log::warn!("cladefsd: polling home bucket format gates: {err}");
+            }
+        }
         // board 11661: an unformatted bucket reports `my_bucket == 0`. Never permanently cache
         // `0`; re-resolve until the bucket has a formatted non-zero identity number, and reset the
         // conditional poller on the `0 -> non-zero` transition so `PeersUpdated` entries already
@@ -463,6 +492,44 @@ mod tests {
             .unwrap();
             runner.tick(&daemon, &routed).await;
             assert_eq!(peers.addresses(), vec!["10.0.0.1:9000", "10.0.0.3:9000"]);
+        });
+    }
+
+    #[test]
+    fn poller_loads_home_bucket_format_gates_and_ignores_future_gates() {
+        let daemon = Daemon::new();
+        daemon.block_on(async {
+            let routed = Arc::new(
+                ObjectBucket::new(
+                    Arc::new(object_store::memory::InMemory::new()),
+                    "events-format-gates-home",
+                )
+                .unrouted(),
+            );
+            let home = routed.own();
+            bucket_cell::identity::format(&*home, &bucket_cell::identity::Details::default())
+                .await
+                .unwrap();
+
+            let mut runner = EventsRunner::new();
+            runner.tick(&daemon, &routed).await;
+            assert_eq!(daemon.host.bucket_host().ratchet().snapshot(), formats::Gates::current());
+
+            // Overwriting `formats` with an unsupported future version logs a warning/error
+            // without panicking or corrupting the daemon's active ratchet.
+            let future = formats::Gates {
+                storage: formats::gates::CURRENT_STORAGE + 1,
+                fxfs: formats::gates::CURRENT_FXFS,
+            };
+            bucket_cell::bucket::overwrite(
+                &*home,
+                bucket_cell::layout::FORMATS,
+                future.encode().into(),
+            )
+            .await
+            .unwrap();
+            runner.tick(&daemon, &routed).await;
+            assert_eq!(daemon.host.bucket_host().ratchet().snapshot(), formats::Gates::current());
         });
     }
 }

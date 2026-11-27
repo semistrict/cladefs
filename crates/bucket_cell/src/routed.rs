@@ -333,6 +333,10 @@ impl<B: Bucket> Bucket for RoutedBucket<B> {
         self.home.random_u64()
     }
 
+    fn ratchet(&self) -> &formats::Ratchet {
+        self.home.ratchet()
+    }
+
     async fn get(&self, key: &str) -> Result<Object, Error> {
         // cladefs: the cell's bucket asked only where the mirror copied not what is asked, never
         // as this bucket fails (board 8547): its failure is the read's, asked again as it is.

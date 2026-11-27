@@ -172,6 +172,10 @@ pub const BUCKETS: &str = "buckets";
 /// ([`crate::events`]): a single protobuf object polled via `If-None-Match` by extent daemons and
 /// read by the collector. No cell's, and no candidate of any pass.
 pub const EVENTS: &str = "events";
+/// cladefs: the bucket's monotonic storage-version upgrade ratchet ([`crate::gates`], doc-28):
+/// written at format time in each bucket (`identity::format`, `identity::add`) and advanced
+/// monotonically by `cladefsctl ratchet`. No cell's, and no candidate of any pass.
+pub const FORMATS: &str = "formats";
 
 pub fn segments(cell: CellId) -> String {
     format!("{}segments/", cell.prefix())

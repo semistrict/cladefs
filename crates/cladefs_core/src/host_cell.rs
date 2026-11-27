@@ -143,14 +143,17 @@ pub struct State {
     registered: std::sync::OnceLock<Arc<bucket_cell::object_bucket::Registered>>,
     /// cladefs: the cells this host made versions of, by the version (cell and ID).
     versions_made: Mutex<BTreeMap<(CellId, u64), PathBuf>>,
+    /// cladefs: shared per-host storage-version ratchet attached to every opened bucket (doc-28).
+    ratchet: Arc<formats::Ratchet>,
 }
 
 impl State {
-    pub fn new() -> Self {
+    pub fn new(ratchet: Arc<formats::Ratchet>) -> Self {
         Self {
             buckets: Mutex::new(BTreeMap::new()),
             registered: std::sync::OnceLock::new(),
             versions_made: Mutex::new(BTreeMap::new()),
+            ratchet,
         }
     }
 
@@ -209,7 +212,10 @@ fn bucket_opened_in(
     // Its requests of other buckets' cells go there, by the registry of buckets (TASK-633.4).
     // One filtered snapshot shared across every bucket opened on this host (board 9684).
     let resolve = state.registered();
-    let bucket = open(&resolve, url).map_err(anyhow::Error::msg)?.routed(resolve);
+    let bucket = open(&resolve, url)
+        .map_err(anyhow::Error::msg)?
+        .with_ratchet(state.ratchet.clone())
+        .routed(resolve);
     let bucket = Arc::new(bucket);
     buckets.insert(url.to_owned(), bucket.clone());
     Ok(bucket)

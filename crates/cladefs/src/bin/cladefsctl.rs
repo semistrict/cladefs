@@ -73,6 +73,8 @@
 //! cladefsctl format-bucket URL [DETAILS]
 //! cladefsctl add-bucket ROOT URL [DETAILS]
 //! cladefsctl buckets URL
+//! cladefsctl formats URL
+//! cladefsctl ratchet URL [--storage N] [--fxfs N]
 //!
 //! cladefsctl --version
 //! ```
@@ -546,7 +548,8 @@ mod cli {
          cladefsctl mount create TENANT CAPACITY [TOKEN] | \
          cladefsctl mount detach [--force] TENANT CELL | cladefsctl mount list | \
          cladefsctl format-bucket URL [DETAILS] | cladefsctl add-bucket ROOT URL [DETAILS] | \
-         cladefsctl buckets URL | cladefsctl --version; \
+         cladefsctl buckets URL | cladefsctl formats URL | \
+         cladefsctl ratchet URL [--storage N] [--fxfs N] | cladefsctl --version; \
          offline (no daemon): take/create/import/fork/stat/delete/drop/resize take DIR; \
          global flags: [--config PATH] [--timeout SECONDS]"
         )
@@ -846,6 +849,16 @@ mod cli {
         /// cladefs: the record of every bucket in a bucket's root (TASK-633.9).
         Buckets {
             url: String,
+        },
+        /// cladefs: the storage-version ratchet gates in a bucket's root (doc-28).
+        Formats {
+            url: String,
+        },
+        /// cladefs: monotonically advance a bucket's storage-version ratchet (doc-28).
+        Ratchet {
+            url: String,
+            storage: Option<u32>,
+            fxfs: Option<u32>,
         },
     }
 
@@ -1299,6 +1312,11 @@ mod cli {
                     Self::AddBucket { root: root.to_owned(), url: url.to_owned(), details }
                 }
                 ["buckets", url] => Self::Buckets { url: url.to_owned() },
+                ["formats", url] => Self::Formats { url: url.to_owned() },
+                ["ratchet", url, ref rest @ ..] => {
+                    let (storage, fxfs) = parse_ratchet(rest)?;
+                    Self::Ratchet { url: url.to_owned(), storage, fxfs }
+                }
                 _ => bail!(usage()),
             })
         }
@@ -1786,7 +1804,9 @@ mod cli {
                 Self::Mount(_)
                 | Self::FormatBucket { .. }
                 | Self::AddBucket { .. }
-                | Self::Buckets { .. } => unreachable!("served above"),
+                | Self::Buckets { .. }
+                | Self::Formats { .. }
+                | Self::Ratchet { .. } => unreachable!("served above"),
             }
             Ok(())
         }
@@ -1807,6 +1827,8 @@ mod cli {
                 Self::FormatBucket { .. }
                     | Self::AddBucket { .. }
                     | Self::Buckets { .. }
+                    | Self::Formats { .. }
+                    | Self::Ratchet { .. }
                     | Self::ShredTenant { bucket: Some(_), .. }
                     | Self::ShredCell { bucket: Some(_), .. }
                     | Self::SetPeers { bucket: Some(_), .. }
@@ -1833,6 +1855,26 @@ mod cli {
                     let registry = registry.with_context(|| format!("reading {url}'s buckets"))?;
                     let registry = registry.with_context(|| format!("{url} records no buckets"))?;
                     print!("{}", buckets_lines(&registry));
+                }
+                Self::Formats { url } => {
+                    let gates = cladefs::bucket::bucket_formats(&url).map_err(printable);
+                    let gates = gates.with_context(|| format!("reading {url}'s format gates"))?;
+                    let gates = gates.with_context(|| format!("{url} records no format gates"))?;
+                    print!("{}", formats_lines(gates));
+                }
+                Self::Ratchet { url, storage, fxfs } => {
+                    let (storage, fxfs) = match (storage, fxfs) {
+                        (None, None) => (
+                            Some(formats::gates::CURRENT_STORAGE),
+                            Some(formats::gates::CURRENT_FXFS),
+                        ),
+                        explicit => explicit,
+                    };
+                    let (gates, changed) = cladefs::bucket::ratchet_bucket(&url, storage, fxfs)
+                        .map_err(printable)
+                        .with_context(|| format!("ratcheting {url}'s format gates"))?;
+                    print!("{}", formats_lines(gates));
+                    println!("changed {}", u8::from(changed));
                 }
                 Self::ShredTenant { bucket: Some(url), tenant } => {
                     let destroyed =
@@ -1968,7 +2010,9 @@ mod cli {
                         | Self::Stat { .. }
                         | Self::FormatBucket { .. }
                         | Self::AddBucket { .. }
-                        | Self::Buckets { .. } => unreachable!("handled above"),
+                        | Self::Buckets { .. }
+                        | Self::Formats { .. }
+                        | Self::Ratchet { .. } => unreachable!("handled above"),
                     };
                     bail!(
                         "{what} the extent daemon's: name its control socket (CLADEFSD_GRPC), or pass --config"
@@ -1995,6 +2039,36 @@ mod cli {
             }
         }
         Ok(details)
+    }
+
+    /// cladefs: parses `[--storage N] [--fxfs N]` for `cladefsctl ratchet` (doc-28).
+    fn parse_ratchet(args: &[&str]) -> anyhow::Result<(Option<u32>, Option<u32>)> {
+        let (mut storage, mut fxfs) = (None, None);
+        let mut iter = args.iter();
+        while let Some(&flag) = iter.next() {
+            let raw = iter.next().with_context(|| format!("{flag} takes a version number"))?;
+            let val: u32 =
+                raw.parse().with_context(|| format!("bad version {raw:?} for {flag}"))?;
+            match flag {
+                "--storage" => storage = Some(val),
+                "--fxfs" => fxfs = Some(val),
+                _ => bail!(usage()),
+            }
+        }
+        Ok((storage, fxfs))
+    }
+
+    /// cladefs: what `formats` and `ratchet` print of a bucket's ratchet gates (doc-28).
+    fn formats_lines(gates: formats::Gates) -> String {
+        format!(
+            "storage {} (build {}..={})\nfxfs {} (build {}..={})\n",
+            gates.storage,
+            formats::gates::OLDEST_STORAGE,
+            formats::gates::CURRENT_STORAGE,
+            gates.fxfs,
+            formats::gates::OLDEST_FXFS,
+            formats::gates::CURRENT_FXFS,
+        )
     }
 
     /// cladefs: what `buckets` prints of `registry`: `version VERSION`, then each bucket, a line each,

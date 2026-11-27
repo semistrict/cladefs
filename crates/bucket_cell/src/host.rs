@@ -16,12 +16,17 @@ use std::sync::OnceLock;
 pub struct Host {
     pub(crate) disks: Disks,
     parts: Arc<PartMemory>,
+    ratchet: Arc<formats::Ratchet>,
 }
 
 impl Host {
     /// Creates a fresh, isolated `bucket_cell` host context.
     pub fn new() -> Arc<Self> {
-        Arc::new(Self { disks: Disks::new(), parts: PartMemory::new(RECENT) })
+        Arc::new(Self {
+            disks: Disks::new(),
+            parts: PartMemory::new(RECENT),
+            ratchet: Arc::new(formats::Ratchet::current()),
+        })
     }
 
     /// The process's default `bucket_cell` host context outside `madsim`.
@@ -35,5 +40,11 @@ impl Host {
     /// This host's unified recent/unpacked part cache (`PartMemory`).
     pub fn parts(&self) -> &Arc<PartMemory> {
         &self.parts
+    }
+
+    /// This host's active storage-version ratchet (loaded from the home bucket's `formats` object
+    /// at boot and updated monotonically on ratchet polls; doc-28).
+    pub fn ratchet(&self) -> &Arc<formats::Ratchet> {
+        &self.ratchet
     }
 }

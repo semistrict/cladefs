@@ -150,6 +150,39 @@ pub fn bucket_registry(url: &str) -> Result<Option<Registry>, crate::Error> {
     on_buckets(bucket_cell::identity::registry(&*bucket))
 }
 
+/// cladefs: the storage-version ratchet gates in the root of the bucket at `url`, if any
+/// (`cladefsctl formats`, doc-28).
+#[cfg(not(madsim))]
+pub fn bucket_formats(url: &str) -> Result<Option<formats::Gates>, crate::Error> {
+    let bucket = crate::host_cell::bucket(url).map_err(crate::Error::new)?;
+    on_buckets(bucket_cell::gates::get(&*bucket))
+}
+
+/// cladefs: monotonically advances the storage-version ratchet gates in the bucket at `url`
+/// (`cladefsctl ratchet`, doc-28). When `url` is the root bucket of a multi-bucket registry,
+/// spreads the updated gates to every member bucket as well.
+#[cfg(not(madsim))]
+pub fn ratchet_bucket(
+    url: &str,
+    storage: Option<u32>,
+    fxfs: Option<u32>,
+) -> Result<(formats::Gates, bool), crate::Error> {
+    let bucket = crate::host_cell::bucket(url).map_err(crate::Error::new)?;
+    let (gates, changed) = on_buckets(bucket_cell::gates::ratchet(&*bucket, storage, fxfs))?;
+    if let Some(registry) = on_buckets(bucket_cell::identity::registry(&*bucket))? {
+        for entry in &registry.buckets {
+            if let Some(member_url) = &entry.details.url
+                && member_url != url
+            {
+                let member = crate::host_cell::bucket_of(member_url, entry.number)
+                    .map_err(crate::Error::new)?;
+                on_buckets(bucket_cell::gates::spread(gates, &*member))?;
+            }
+        }
+    }
+    Ok((gates, changed))
+}
+
 /// cladefs: the bucket numbered `number`, as this host reaches it from its own (`CLADEFSD_BUCKET`):
 /// by the registry of buckets in its root, or the root bucket's, opened with its own options and
 /// checked to be the one recorded (TASK-633.3). `ENOENT` if no registry records it, `ESTALE` if the
@@ -200,8 +233,19 @@ pub fn errno(failure: &Failure) -> Option<crate::Errno> {
         // (doc-11).
         // cladefs: read evidence of another format, which its reader skips (TASK-702.2).
         Failure::Bucket(
-            Error::Format { .. } | Error::BucketFormat(_) | Error::EvidenceFormat(_),
+            Error::Format { .. }
+            | Error::BucketFormat(_)
+            | Error::EvidenceFormat(_)
+            | Error::FormatGated { .. },
         ) => Some(Errno::ENOTSUP),
+        Failure::Bucket(Error::Gates(err)) => Some(match err {
+            formats::GateError::UnsupportedHeader(_)
+            | formats::GateError::IncompatibleGate { .. }
+            | formats::GateError::BeyondBuild { .. } => Errno::ENOTSUP,
+            formats::GateError::CannotDowngrade { .. }
+            | formats::GateError::Corrupt(_)
+            | formats::GateError::TooLarge { .. } => Errno::EINVAL,
+        }),
         // cladefs: a bucket to add that is a bucket already, buckets added to one not the root,
         // and no bucket number left (TASK-633.9).
         Failure::Bucket(Error::Formatted(_)) => Some(Errno::EEXIST),

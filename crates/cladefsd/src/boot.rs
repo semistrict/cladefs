@@ -43,6 +43,10 @@ pub(super) async fn boot_daemon(
     // cladefs: its KMS, which every cell is encrypted under: none chosen, it refuses to start,
     // naming CLADEFS_KMS and CLADEFS_MASTER_KEY (TASK-411.28).
     cladefs_core::bucket::require_kms_on(&daemon.host).map_err(anyhow::Error::msg)?;
+    // cladefs: load and validate the home bucket's storage-version ratchet (`formats`, doc-28)
+    // before opening ephemeral host state, peers, or serving any cell so a host never writes a
+    // format newer than the bucket's gate and refuses to boot against a bucket ratcheted past it.
+    load_format_gates(daemon).await?;
     // cladefs: the host checked by its doctor, every limit and kernel feature at once, refusing
     // what running without would make wrong (board 14217), outside the simulation, whose hosts
     // share its process's; then roots it can't resolve, and a part cache it can't open, missing,
@@ -230,6 +234,7 @@ pub(super) async fn boot_embedded(
     let socket = config.daemon.vm_socket.clone();
     let host = cladefs_core::bucket::Host::from_env().map_err(anyhow::Error::msg)?;
     cladefs_core::bucket::require_kms_on(&daemon.host).map_err(anyhow::Error::msg)?;
+    load_format_gates(daemon).await?;
     // cladefs: the host checked by its doctor (board 14217), as `boot_daemon` has it.
     #[cfg(not(madsim))]
     crate::doctor::at_boot(crate::doctor::Needs { governed: config.memory.bytes.is_none() })?;
@@ -358,6 +363,29 @@ pub(super) async fn boot_embedded(
         }
     }
     Ok(())
+}
+
+/// Loads and validates the home bucket's `formats` ratchet (doc-28) before serving any cells.
+async fn load_format_gates(daemon: &Arc<Daemon>) -> anyhow::Result<()> {
+    let home_bucket = crate::storage::daemon_bucket_on(daemon)
+        .map_err(|errno| anyhow::anyhow!("opening home bucket for format gates: {errno}"))?;
+    match bucket_cell::gates::load_for_host(
+        &*home_bucket.own(),
+        daemon.host.bucket_host().ratchet(),
+    )
+    .await
+    {
+        Ok(Some(gates)) => {
+            log::info!(
+                "cladefsd: loaded home bucket format gates (storage={}, fxfs={})",
+                gates.storage,
+                gates.fxfs
+            );
+            Ok(())
+        }
+        Ok(None) => Ok(()),
+        Err(err) => anyhow::bail!("loading home bucket format gates: {err}"),
+    }
 }
 
 /// cladefs: what serves at `address`: a TCP listener bound there; under madsim, the address itself,

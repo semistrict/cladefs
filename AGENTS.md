@@ -192,7 +192,7 @@ it, says more.
 
 ## Don't wait on the user: decide, and record both decisions and questions in hotbed
 
-Never ask the user anything directly: not in a reply, not with a question tool, not as a choice at the end of a message. The user doesn't read through output for questions. **Exception: on-disk format changes** (see **Frozen formats**, below) always require explicit user approval directly in conversation — never decide them on your own and never use a hotbed question for them.
+Never ask the user anything directly: not in a reply, not with a question tool, not as a choice at the end of a message. The user doesn't read through output for questions. **Exception: new storage format versions** (see **Frozen formats and storage-version ratchets**, below) — if a new storage version is the best design, propose it and ask the user directly for confirmation in conversation rather than deciding it on your own or using a hotbed question.
 
 A decision doesn't wait for the user. Make your best guess, act on it, and record it in hotbed as a question already answered: `hotbed question add --answered` (AskUserQuestion JSON on stdin or `--file`, under project `cladefs`). Its question is the choice; its options are what you decided, marked `"implemented": true`, and what else was possible; its `body` says why, what you measured, and what undoing it would take. The user reads them at leisure, reopens what they disagree with and answers it again, which reaches `hotbed question outbox` like any answer. Code and docs cite a decision as `hotbed question N`. There is no OPEN_QUESTIONS.md: git history keeps the file as it was before its decisions moved to hotbed (board 7033).
 
@@ -210,32 +210,41 @@ hotbed memory add --slug SHORT-SLUG --summary "1-line trigger" --body-file - <<'
 
 Omitting `--mode` defaults to `always` when `--body` is empty and `on_demand` when `--body` is given. Use `--supersede ID` or `hotbed memory edit ID` to update existing memories. Run plain `hotbed session start` without piping to `jq` so active memories stay visible.
 
-## Frozen formats: every later build reads every frozen version
+## Frozen formats and storage-version ratchets: old versions stay readable, new versions wait for the ratchet
 
-The user's rule (2026-11-23, updated 2026-11-24; doc-28, board 10033): **the on-disk format is now
-frozen.** Every persistent on-disk and bucket format family (bucket layout, cell directories, cell
-records, replica directories, ephemeral hosts, extent frames, block devices, Fxfs, all KMS
-backends, and Firecracker snapshot extent state) is frozen with its golden corpus under
-`formats/<family>/`. From now on:
+The user's rule (2026-11-23, updated 2026-11-26; doc-28, board 10033): every persistent on-disk and
+bucket format family (bucket layout, bucket events, format gates, cell directories, cell records,
+replica directories, ephemeral hosts, extent frames, fast WAL, block devices, Fxfs, all KMS
+backends, and Firecracker snapshot extent state) is pinned by its golden corpus under
+`formats/<family>/`, while upgrade gating is collapsed to **two linear monotonic ratchet numbers**
+stored in each bucket's `formats` object (`storage` for the host binary release train via
+`formats::PROFILES`, and `fxfs` for guest Linux kernels).
 
-- **Any change needs explicit user approval directly — not a hotbed question.** Do not change any
-  frozen format on your own (not even an additive new version or extension-point change), do not
-  record it as an answered decision with `hotbed question add --answered`, and do not ask for
-  approval via `hotbed question add`. Stop and get explicit approval from the user directly before
-  making any format change.
-- **Backwards compatibility with all stored data is required.** Every later build must read every
-  version from each family's frozen `oldest` through `current` (`oldest..=current` of its
-  `formats::Format`, through `Format::check`) and refuse any other by name. No backwards
-  incompatible changes: stored data from every frozen version must remain readable indefinitely.
-- **An approved change is a new version, never an edit of an old one.** The old version's decoder
-  and types stay as they are; the reader converts what it reads into the current types (Fxfs's
-  `versioned_type!` model: `From<V27> for V28`). Or the change goes through an extension point the
-  format already has (a key kind the collector keeps, a protobuf field). Nothing is rewritten in
-  place to convert it; writers write the current version.
-- **The corpus is append-only.** An approved change adds the new version's cases
-  (`CLADEFS_FORMATS_WRITE=1` on the family's corpus test writes the missing ones) and never edits,
-  deletes or moves one, nor raises `oldest`. `scripts/format-freeze.py` refuses corpus edits,
-  deletions, and raised `oldest` bounds in the commit-msg hook and in CI.
+- **Do not discourage new storage versions when they are the best design — just ask the user for
+  confirmation.** If bumping a storage version is the cleanest way to solve a problem, recommend it
+  and ask the user directly in conversation for confirmation before making the change (never decide
+  it on your own, never record it via `hotbed question add --answered`, and never ask via
+  `hotbed question add`).
+- **Old versions are ALWAYS readable.** Every later build must read every version from each
+  family's frozen `oldest` through `current` (`oldest..=current` of its `formats::Format`, through
+  `Format::check`) and refuse any other by name. Never make backwards-incompatible changes: stored
+  data from every frozen version must remain readable indefinitely, with old types and decoders
+  preserved and converted on read (Fxfs's `versioned_type!` model: `From<V27> for V28`). Nothing is
+  rewritten in place to convert it.
+- **New versions are not written until ungated by the home bucket's ratchet.** Each bucket stores
+  its `formats` object (`formats::Gates`: `storage` + `fxfs`) at format time (`format-bucket`
+  initializes both to this build's current versions; `add-bucket` copies the root bucket's gates).
+  Host writers consult `formats::Ratchet` (`storage` -> `formats::StorageProfile`) and only branch
+  where a format actually differs between `V` and `V+1`. During partial/rolling upgrades and
+  potential rollbacks, new builds read `oldest..=current` while continuing to write the gated
+  profile until an operator explicitly ratchets forward (`cladefsctl ratchet`), so mixed old/new
+  nodes interoperate and rollbacks stay safe. When adding a new `storage` profile `N+1` (or `fxfs`
+  version), keep the `N` encoder working and fail hard (`ENOTSUP` / format-gated error) if a caller
+  explicitly requests an `N+1`-only feature before the bucket is ratcheted.
+- **The corpus is append-only.** An approved new version adds its cases (`CLADEFS_FORMATS_WRITE=1`
+  on the family's corpus test writes the missing ones) and never edits, deletes or moves an old
+  case, nor raises `oldest`. `scripts/format-freeze.py` refuses corpus edits, deletions, and raised
+  `oldest` bounds in the commit-msg hook and in CI.
 
 Only what doc-28 explicitly leaves unfrozen (the VM process and daemon's intra-build wire,
 rebuildable caches, and diagnostics) stays unfrozen and exact (refused unless it is this build's).

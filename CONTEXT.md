@@ -241,7 +241,10 @@ _Avoid_: bucket 0, home bucket (a host's own)
 The record of every bucket, its number and details, in the root of every bucket: the root bucket's, and copies of it.
 
 **Formatting** (a bucket):
-Making a bucket never formatted the root of buckets of its own, number 1 (`cladefsctl format-bucket`, or its first allocator).
+Making a bucket never formatted the root of buckets of its own, number 1 (`cladefsctl format-bucket`, or its first allocator), writing its identity, registry, and initial format gates.
+
+**Format gate** / **Ratchet**:
+The two monotonic write-version numbers (`storage` for the host binary release train via `formats::PROFILES`, and `fxfs` for guest Linux kernels) stored in a bucket's `formats` object at format time (`formats::Gates`, `formats::Ratchet`, doc-28). Writers never emit a version above the home bucket's gate; operators advance it monotonically (`cladefsctl ratchet`) once all nodes run the new build, keeping partial upgrades and rollbacks safe.
 
 **Adding** (a bucket):
 Giving a bucket never formatted the next number, by a conditional write of the root bucket's registry, then copying the registry to every bucket (`cladefsctl add-bucket`).

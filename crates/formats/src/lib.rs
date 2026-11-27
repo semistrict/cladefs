@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs's own: frozen formats (doc-28, board 10033).
+//! cladefs's own: frozen formats and storage-version ratchets (doc-28, board 10033).
 //!
 //! A family is the formats one writer writes together: a bucket's objects, a cell directory's
 //! files, an ephemeral host's. It has one version number, which every object of it says; a type
@@ -16,10 +16,18 @@
 //! Once its golden corpus is under `formats/` at the repo's root ([`golden`]), the family is
 //! frozen: every later build reads every version from `oldest` to `current`, `oldest` never
 //! rises, `current` never falls, and no case of the corpus changes.
+//!
+//! Upgrade ratchets ([`gates::Gates`], [`gates::Ratchet`]) are kept separate from golden-corpus
+//! pinning: each bucket stores just two linear monotonic versions — `storage` (mapping to a
+//! well-defined [`StorageProfile`] for all host binaries) and `fxfs` (for guest Linux kernels) —
+//! so partial upgrades and rollbacks remain safe without a combinatorial gate matrix.
 
 use std::ops::RangeInclusive;
 
+pub mod gates;
 pub mod golden;
+
+pub use gates::{GateError, Gates, Ratchet, StorageProfile};
 
 /// A family of formats, and the versions of it this build reads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,7 +36,7 @@ pub struct Format {
     pub name: &'static str,
     /// The oldest version read: the family's version when it froze, for good.
     pub oldest: u32,
-    /// The version this build writes, and the newest it reads.
+    /// The newest version this build reads, and the newest it may write once ungated.
     pub current: u32,
 }
 

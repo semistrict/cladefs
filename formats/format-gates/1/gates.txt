@@ -1,0 +1,4 @@
+Gates {
+    storage: 1,
+    fxfs: 66,
+}

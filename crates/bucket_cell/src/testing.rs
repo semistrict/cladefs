@@ -99,7 +99,6 @@ pub enum Fault {
 /// tests name, to the bucket of the host asking ([`SimBucket::at`]); bucket 0 the one bucket of a
 /// simulation of one, which routes nothing, its requests and journal as before regions. A region's
 /// bucket may be down ([`SimBucket::down`]).
-#[derive(Default)]
 pub struct SimBucket {
     inner: Arc<Mutex<Inner>>,
     /// cladefs: the bucket of the host asking through it: where keys of no cell go.
@@ -107,6 +106,19 @@ pub struct SimBucket {
     /// cladefs: whether every request goes to `home`, whatever cell its key is of: the bucket's own
     /// twin ([`SimBucket::own`], TASK-633.8).
     pinned: bool,
+    /// cladefs: per-host storage-version ratchet (doc-28).
+    ratchet: Arc<formats::Ratchet>,
+}
+
+impl Default for SimBucket {
+    fn default() -> Self {
+        Self {
+            inner: Arc::default(),
+            home: 0,
+            pinned: false,
+            ratchet: Arc::new(formats::Ratchet::current()),
+        }
+    }
 }
 
 impl SimBucket {
@@ -114,15 +126,30 @@ impl SimBucket {
         Arc::default()
     }
 
+    /// cladefs: the same buckets, with a custom storage-version ratchet (doc-28).
+    pub fn with_ratchet(&self, ratchet: Arc<formats::Ratchet>) -> Arc<Self> {
+        Arc::new(Self { inner: self.inner.clone(), home: self.home, pinned: self.pinned, ratchet })
+    }
+
     /// cladefs: the same buckets, as a host whose bucket is `home`'s asks them (TASK-633.10).
     pub fn at(&self, home: u16) -> Arc<Self> {
-        Arc::new(Self { inner: self.inner.clone(), home, pinned: false })
+        Arc::new(Self {
+            inner: self.inner.clone(),
+            home,
+            pinned: false,
+            ratchet: self.ratchet.clone(),
+        })
     }
 
     /// cladefs: its host's bucket's own twin, every request there whatever cell its key is of, as
     /// `RoutedBucket::own` is (TASK-633.8).
     pub fn own(&self) -> Arc<Self> {
-        Arc::new(Self { inner: self.inner.clone(), home: self.home, pinned: true })
+        Arc::new(Self {
+            inner: self.inner.clone(),
+            home: self.home,
+            pinned: true,
+            ratchet: self.ratchet.clone(),
+        })
     }
 
     /// cladefs: its host's bucket's number.
@@ -664,6 +691,10 @@ impl Bucket for SimBucket {
         let root = self.at(crate::identity::ROOT);
         Some(Box::pin(async move { Ok(crate::bucket::get(&*root, layout::EVENTS).await?) }))
     }
+
+    fn ratchet(&self) -> &formats::Ratchet {
+        &self.ratchet
+    }
 }
 
 /// cladefs: the mirrors in its host's bucket, in its own bucket (TASK-633.8), as
@@ -1110,7 +1141,7 @@ pub async fn uncollected(bucket: &impl Bucket) -> Vec<String> {
             // cladefs: fast WAL objects are managed by fast-WAL tombstones, never cold GC (doc-29).
             Kind::Wal { .. } => true,
             Kind::Reference { .. } => !retirable.contains(key) && !unnamed.contains(key),
-            Kind::Unknown => key == layout::EVENTS,
+            Kind::Unknown => key == layout::EVENTS || key == layout::FORMATS,
             _ => false,
         };
         if !kept && !needed.contains(key) {

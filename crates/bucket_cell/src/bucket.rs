@@ -422,6 +422,12 @@ pub trait Bucket: BucketSend + BucketSync + 'static {
     fn events_object(&self) -> Option<BucketFuture<'_, Result<Option<Object>, crate::Error>>> {
         None
     }
+
+    /// cladefs: the active storage-version ratchet for writes through this bucket (doc-28).
+    /// Defaults to `Format::current` for standalone buckets without a host ratchet.
+    fn ratchet(&self) -> &formats::Ratchet {
+        formats::Ratchet::default_current()
+    }
 }
 
 /// The object at `key`, if any, its reads retried while they fail; refused, [`Refused`].

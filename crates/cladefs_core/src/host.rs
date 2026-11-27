@@ -42,12 +42,13 @@ impl Host {
         let bucket = crate::bucket::HostState::new(local.bucket().parts().clone());
         let slabs = crate::slabs::HostSlabs::new();
         let cache = crate::cache::ExtentCache::new(slabs.clone());
+        let ratchet = local.bucket().ratchet().clone();
         Arc::new_cyclic(|weak| Self {
             weak: weak.clone(),
             local,
             ephemeral: crate::ephemeral_host::State::new(),
             bucket,
-            host_cells: Arc::new(crate::host_cell::State::new()),
+            host_cells: Arc::new(crate::host_cell::State::new(ratchet)),
             halts: crate::halt::Registry::new(),
             evidence: crate::evidence::HostEvidence::new(),
             slabs,

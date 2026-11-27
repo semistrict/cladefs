@@ -3,7 +3,7 @@ id: doc-28
 title: 'Frozen formats: every later build reads every frozen version'
 type: specification
 created_date: '2026-11-23 12:00'
-updated_date: '2026-11-23 12:00'
+updated_date: '2026-11-26 18:30'
 ---
 # Frozen formats: every later build reads every frozen version
 
@@ -30,12 +30,18 @@ So, once a format is **frozen**:
    the current types (Fxfs's `versioned_type!` model: `From<V27> for V28`). Or the change goes
    through an extension point the format already has (an unknown key kind the collector keeps, a
    protobuf field), which needs no version.
-3. **Nothing frozen is rewritten to convert it.** Old versions are read as they are, for as long
-   as they exist. A writer writes the current version only.
+3. **Nothing frozen is rewritten to convert it, and new versions wait for the ratchet.** Old
+   versions are read as they are, for as long as they exist. A writer writes at the home bucket's
+   gated version (`formats` object, [`formats::Ratchet`]) rather than jumping straight to
+   `current`, so partial/rolling upgrades and rollbacks remain safe while mixed old and new nodes
+   run side by side. New buckets initialize every family's gate to `current` at format time.
 4. **What proves it: a golden corpus.** Each frozen format keeps, in the repo, objects of every
    version it reads, written by the build that froze or changed it, and what each decodes to.
    Those files are append-only (`scripts/format-freeze.py`, in CI and the commit-msg hook): a
    change that stops reading one fails its test, and deleting or editing one fails the push.
+5. **New versions are welcome when they are the best design — confirm with the user first.** Do not
+   bend designs around an awkward old format to avoid a version bump; propose the new version and
+   get direct confirmation from the user.
 
 What isn't frozen keeps the old rule: refused unless it is this build's.
 
@@ -133,11 +139,61 @@ incompatible change, where it lacks the means to grow (board 10033's subtasks):
 
 Each family freezes when its corpus lands, with `oldest` its version then.
 
+## Version ratchets (partial upgrades and rollbacks)
+
+Reading `oldest..=current` alone makes an upgrade forward-compatible once every node runs the new
+build, but it does not protect a **partial/rolling upgrade** or a **rollback**: as soon as the first
+upgraded node writes version `V+1`, any node still on version `V` (or rolled back to `V`) refuses
+it.
+
+Golden-corpus pinning (`formats/<family>/` + `Format::check`) stays per format, while upgrade
+ratchets collapse to **two linear monotonic numbers** stored at the bucket root key `formats`
+(itself a frozen family, `format-gates` v1, under `formats/format-gates/1/`):
+
+```text
+cladefs format 1
+storage 1
+fxfs 66
+```
+
+- **`storage`** (`1..=CURRENT_STORAGE`): maps via `formats::PROFILES` (`StorageProfile`) to the
+  exact per-format versions for the host binary release train (`cladefsd`, `cladefs-gc`,
+  `cladefsctl`, VMM). Keeping this a single linear number eliminates the combinatorial matrix of
+  independent per-format knobs (`storage = 1` is today's baseline; add `storage = 2` when the next
+  host storage format bump ships).
+- **`fxfs`** (`OLDEST_FXFS..=CURRENT_FXFS`): the guest Linux kernel's Fxfs version, kept separate
+  so a slower guest-kernel rollout never blocks ratcheting a host-only storage bump.
+- **Format time:** `cladefsctl format-bucket` (and automatic `identity::format`) creates `formats`
+  with this build's current `storage` and `fxfs` versions, so freshly formatted buckets immediately
+  use the latest formats without a separate step.
+- **Multi-bucket `add-bucket`:** copies the root bucket's `formats` object into the newly added
+  bucket so adding a bucket to an existing cluster never jumps ahead of existing hosts.
+- **Boot & live polling:** `cladefsd` loads and validates `formats` from its home bucket at boot
+  (refusing to start if either knob is outside this build's supported range) and polls it via
+  `If-None-Match` alongside `events` so ratchets take effect live without restarts.
+- **Writers & peers:** host writers branch on `ratchet.storage()` / `ratchet.profile()` only where
+  a format actually differs between `storage = N` and `N+1` (failing hard with `ENOTSUP` /
+  `Error::FormatGated` if a caller explicitly asks for an `N+1`-only feature while gated at `N`).
+  Peer RPCs (`cladefsd::peers`) advertise the active `StorageProfile`'s write versions so upgraded
+  hosts gated at `N` replicate cleanly with older peers on `N`.
+- **Advancing the ratchet:** once all nodes run the new build and rollback is no longer needed, an
+  operator runs `cladefsctl ratchet URL` (or `--storage N` / `--fxfs N`), which conditionally
+  updates `formats` via CAS (strictly monotonic: never lowers a version) and spreads it to every
+  bucket in the registry.
+- **Guest Fxfs note:** `fxfs` is tracked in `formats` (`fxfs 66`) and validated on the host. When a
+  future `fxfs` v67+ bump ships, the host/VMM will pass the gated `fxfs` version into the guest
+  over `virtio_extent` before the guest writes v67.
+
 ## Upgrading, once frozen
 
-A host's upgrade is still its drain (doc-11, `docs/upgrading-a-host.md`), but a newer build reads
-what the older wrote: its cell directories, replica directory and ephemeral cells stay, and are
-read in place. A rollback is refused past any version change, by rule 1, as before.
+A host's upgrade is still its drain (doc-11, `docs/upgrading-a-host.md`), and with ratchets a
+rolling upgrade across a format version bump is two-phase:
+
+1. Roll out the new build across all hosts (daemons, `cladefs-gc`, VMMs, and guest kernels when
+   Fxfs changes). While mixed builds run or during bake, writers stay at the bucket's gated version
+   so old and new hosts interoperate and any host can roll back cleanly.
+2. Once the fleet is upgraded and rollback is no longer needed, run `cladefsctl ratchet` to ungate
+   the new version(s). After ratcheting, older builds refuse the bucket on boot.
 
 ## Undoing it
 

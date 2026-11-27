@@ -76,6 +76,7 @@ pub mod evidence;
 pub mod faults;
 #[cfg(feature = "full")]
 pub mod fetch;
+pub mod gates;
 #[cfg(all(test, feature = "full"))]
 mod golden;
 pub mod head;
@@ -309,6 +310,17 @@ pub enum Error {
     /// ([`layout::FORMAT`], TASK-633.9, doc-28).
     #[error("the bucket: {}", formats::Refused { format: layout::FORMAT, found: *.0 })]
     BucketFormat(u32),
+    /// cladefs: a requested feature requires a newer storage format version than this bucket's
+    /// active ratchet gate allows (doc-28): ratchet the bucket to enable it.
+    #[error(
+        "{family} feature requires version {needed}, but this bucket is gated at version {gated}; \
+         ratchet the bucket with `cladefsctl ratchet` once all nodes are upgraded"
+    )]
+    FormatGated { family: &'static str, needed: u32, gated: u32 },
+    /// cladefs: the bucket's `formats` ratchet object is corrupt, incompatible with this build, or
+    /// rejected a requested ratchet update (doc-28).
+    #[error(transparent)]
+    Gates(#[from] formats::GateError),
     /// cladefs: a bucket to add is a bucket already, of this number ([`identity::add`],
     /// TASK-633.9).
     #[error("the bucket is bucket {0} already")]

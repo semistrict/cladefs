@@ -38,6 +38,8 @@ const FORMAT: formats::Format = formats::Format::new("fxfs", 66, 66);
 const _: () = {
     assert!(FORMAT.oldest == EARLIEST_SUPPORTED_VERSION.major);
     assert!(FORMAT.current == LATEST_VERSION.major);
+    assert!(formats::gates::OLDEST_FXFS == EARLIEST_SUPPORTED_VERSION.major);
+    assert!(formats::gates::CURRENT_FXFS == LATEST_VERSION.major);
     assert!(EARLIEST_SUPPORTED_VERSION.minor == 0);
     assert!(LATEST_VERSION.minor == 0);
 };

@@ -74,6 +74,8 @@ pub struct ObjectBucket {
     /// whether [`ObjectBucket::probed_append`] already verified offset enforcement.
     appends: Appends,
     appends_honoured: std::sync::atomic::AtomicBool,
+    /// cladefs: active storage-version ratchet shared with the owning host (doc-28).
+    ratchet: Arc<formats::Ratchet>,
 }
 
 /// cladefs: how a bucket performs offset-checked appends ([`Bucket::append`], doc-29).
@@ -666,7 +668,13 @@ impl ObjectBucket {
             clock: Clock::Host,
             appends,
             appends_honoured: std::sync::atomic::AtomicBool::new(false),
+            ratchet: Arc::new(formats::Ratchet::current()),
         }
+    }
+
+    /// Attaches a shared host [`formats::Ratchet`] to this bucket (doc-28).
+    pub fn with_ratchet(self, ratchet: Arc<formats::Ratchet>) -> Self {
+        Self { ratchet, ..self }
     }
 
     /// cladefs: the bucket `reached` reaches ([`reach`]), spacing its writes of a key as its
@@ -1996,6 +2004,10 @@ impl Bucket for ObjectBucket {
 
     fn pause(&self, failures: u32) -> impl Future<Output = ()> + Send {
         tokio::time::sleep(backoff(failures))
+    }
+
+    fn ratchet(&self) -> &formats::Ratchet {
+        &self.ratchet
     }
 }
 
