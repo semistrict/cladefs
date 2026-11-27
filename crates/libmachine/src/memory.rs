@@ -35,6 +35,9 @@ pub enum RegionKind {
     /// Host memory a device has mapped into the guest at runtime, inside an
     /// MMIO window.
     DeviceMemory,
+    /// Persistent memory devices' (virtio-pmem) host files, mapped for the guest (the arm64
+    /// board's).
+    Pmem,
 }
 
 impl RegionKind {

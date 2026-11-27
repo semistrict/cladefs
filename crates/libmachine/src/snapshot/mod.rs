@@ -100,6 +100,7 @@ fn kind_code(kind: RegionKind) -> u8 {
         RegionKind::Platform => 2,
         RegionKind::Mmio64 => 3,
         RegionKind::DeviceMemory => 4,
+        RegionKind::Pmem => 5,
     }
 }
 
@@ -110,6 +111,7 @@ fn kind_of(code: u8) -> Result<RegionKind> {
         2 => RegionKind::Platform,
         3 => RegionKind::Mmio64,
         4 => RegionKind::DeviceMemory,
+        5 => RegionKind::Pmem,
         _ => return Err(Error::Snapshot(format!("unknown region kind {code}"))),
     })
 }
@@ -515,6 +517,7 @@ impl Snapshot {
             nested_virtualization: false,
             balloon: self.machine.balloon,
             disks: self.machine.disks.clone(),
+            pmems: Vec::new(),
         }
     }
 

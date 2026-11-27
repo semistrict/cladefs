@@ -15,7 +15,8 @@
 //! 0x00_1000_0000  PCI ECAM: room for buses 0-255 (256 MiB), bus 0 alone described
 //! 0x00_4000_0000  32-bit BAR window, 512 MiB
 //! 0x00_8000_0000  RAM (2 GiB up)
-//! 0x80_0000_0000  64-bit BAR window (512 GiB up), 512 GiB: the extent device's DAX window
+//! 0x80_0000_0000  64-bit BAR window (512 GiB up), 256 GiB: the extent device's DAX window
+//! 0xC0_0000_0000  persistent memory (virtio-pmem), 256 GiB: host files mapped for the guest
 //! ```
 //!
 //! The map fits a 40-bit IPA space, which Apple's hosts give with 4 KiB stage 2 pages
@@ -74,7 +75,11 @@ pub(crate) const PCI_MMIO32_SIZE: u64 = 0x2000_0000;
 /// The window 64-bit memory BARs (shared memory regions, such as cladefs's DAX window) are
 /// allocated from.
 pub(crate) const PCI_MMIO64_ADDR: u64 = 0x80_0000_0000;
-pub(crate) const PCI_MMIO64_SIZE: u64 = 0x80_0000_0000;
+pub(crate) const PCI_MMIO64_SIZE: u64 = 0x40_0000_0000;
+/// Where virtio-pmem devices' memory goes, past the 64-bit window, as Firecracker places it: no
+/// BAR of the PCI host's, which the guest would reassign.
+pub(crate) const PMEM_ADDR: u64 = PCI_MMIO64_ADDR + PCI_MMIO64_SIZE;
+pub(crate) const PMEM_SIZE: u64 = 0x40_0000_0000;
 /// The first GSI given to MSI-X vectors: a GSI here is only the key of an MSI route, which the
 /// HVF backend keeps itself.
 pub(crate) const PCI_MSI_GSI_BASE: u32 = 0;
@@ -93,7 +98,8 @@ const _: () = {
     // A gap between them: an address past the ECAM is nobody's.
     assert!(PCI_ECAM_ADDR + PCI_ECAM_SIZE < PCI_MMIO32_ADDR);
     assert!(PCI_MMIO32_ADDR + PCI_MMIO32_SIZE <= RAM_ADDR);
-    assert!(PCI_MMIO64_ADDR + PCI_MMIO64_SIZE <= 1 << IPA_BITS);
+    assert!(PCI_MMIO64_ADDR + PCI_MMIO64_SIZE <= PMEM_ADDR);
+    assert!(PMEM_ADDR + PMEM_SIZE <= 1 << IPA_BITS);
     assert!(PCI_ECAM_SIZE >= (PCI_ECAM_LAST_BUS as u64 + 1) << 20);
 };
 
@@ -115,6 +121,7 @@ pub(crate) fn memory_layout(mem_size: u64) -> MemoryLayout {
         ),
         MemoryRegion::new(PCI_MMIO32_ADDR, PCI_MMIO32_SIZE, RegionKind::Mmio32),
         MemoryRegion::new(PCI_MMIO64_ADDR, PCI_MMIO64_SIZE, RegionKind::Mmio64),
+        MemoryRegion::new(PMEM_ADDR, PMEM_SIZE, RegionKind::Pmem),
     ];
     regions.extend(
         ram_regions(mem_size)

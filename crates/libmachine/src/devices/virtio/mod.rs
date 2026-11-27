@@ -10,6 +10,11 @@ pub(crate) mod blk;
 pub(crate) mod extent;
 pub(crate) mod net;
 pub(crate) mod pci;
+#[cfg_attr(
+    not(all(target_os = "macos", target_arch = "aarch64")),
+    allow(dead_code, reason = "the arm64 board's: on Linux Firecracker serves pmem")
+)]
+pub(crate) mod pmem;
 pub(crate) mod queue;
 pub(crate) mod rng;
 #[cfg(test)]

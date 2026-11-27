@@ -91,6 +91,7 @@ pub use cpu::CpuModel;
 pub use cpu::CpuidEntry;
 pub use devices::virtio::balloon::Balloon;
 pub use devices::virtio::blk::Disk;
+pub use devices::virtio::pmem::Pmem;
 pub use devices::virtio::vsock::{
     GuestStopped, Vsock, VsockListener, VsockStream, is_guest_stopped,
 };

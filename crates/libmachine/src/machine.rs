@@ -88,6 +88,10 @@ pub struct MachineConfig {
     /// The machine's disks (virtio-blk, [`crate::Disk`]): `/dev/vda` on, in their order, after
     /// its extent store devices. A machine with any is neither snapshotted nor suspended.
     pub disks: Vec<crate::Disk>,
+    /// The machine's persistent memory devices (virtio-pmem, [`crate::Pmem`]): `/dev/pmem0` on,
+    /// in their order, each its file mapped into the guest's memory. The arm64 board's (on Linux
+    /// Firecracker serves them); a machine with any is neither snapshotted nor suspended.
+    pub pmems: Vec<crate::Pmem>,
 }
 
 impl MachineConfig {
@@ -113,6 +117,7 @@ impl Default for MachineConfig {
             nested_virtualization: false,
             balloon: false,
             disks: Vec::new(),
+            pmems: Vec::new(),
         }
     }
 }
@@ -620,6 +625,31 @@ fn disk_devices(
         .collect()
 }
 
+/// The persistent memory devices of `config`'s ([`MachineConfig::pmems`]), a virtio-pmem device
+/// each, their memory mapped into `vm`'s guest one after another from the board's pmem region.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn pmem_devices(
+    config: &MachineConfig,
+    vm: &backend::Vm,
+) -> Result<Vec<Box<dyn crate::devices::virtio::VirtioDevice>>> {
+    use crate::arch::aarch64::layout::{PMEM_ADDR, PMEM_SIZE};
+    use crate::devices::virtio::pmem::PmemDevice;
+
+    let mut next = PMEM_ADDR;
+    let mut devices: Vec<Box<dyn crate::devices::virtio::VirtioDevice>> = Vec::new();
+    for pmem in &config.pmems {
+        let device = PmemDevice::new(pmem, vm, next)?;
+        next += device.size();
+        if next > PMEM_ADDR + PMEM_SIZE {
+            return Err(Error::InvalidConfig(format!(
+                "pmem devices past the board's {PMEM_SIZE:#x} bytes of persistent memory"
+            )));
+        }
+        devices.push(Box::new(device));
+    }
+    Ok(devices)
+}
+
 /// The balloon of `config`'s, if it asks for one ([`MachineConfig::balloon`]), added to `devices`,
 /// and its host handle.
 fn balloon_device(
@@ -953,6 +983,13 @@ impl Machine {
         // The extent store devices first, before the caller's: their DAX windows' BARs before
         // any transport's.
         let mut bars = crate::devices::pci::BarAllocator::new();
+        if !config.pmems.is_empty() {
+            return Err(Error::InvalidConfig(
+                "pmem devices are the arm64 board's (on Linux, Firecracker serves them); pmems \
+                 must be empty"
+                    .into(),
+            ));
+        }
         let mut all = extent_devices(&config, &vm, &mut bars, &stop)?;
         all.extend(disk_devices(&config)?);
         let balloon = balloon_device(&config, &vm, &mut all)?;
@@ -1050,6 +1087,7 @@ impl Machine {
         let mut bars = crate::devices::pci::BarAllocator::new();
         let mut devices = extent_devices(&config, &vm, &mut bars, &stop, &[])?;
         devices.extend(disk_devices(&config)?);
+        devices.extend(pmem_devices(&config, &vm)?);
         let balloon = balloon_device(&config, &vm, &mut devices)?;
         let (vsock_device, vsock) = VsockDevice::new(GUEST_CID)?;
         devices.extend([Box::new(Rng) as Box<dyn VirtioDevice>, Box::new(vsock_device)]);
@@ -1209,6 +1247,9 @@ impl Machine {
         let doorbell: Arc<Doorbell> = Arc::default();
         let stop = Arc::new(StopShared::with_doorbell(doorbell.clone()));
         let mut bars = crate::devices::pci::BarAllocator::new();
+        if !config.pmems.is_empty() {
+            return Err(Error::Snapshot("a machine with pmem devices is never snapshotted".into()));
+        }
         let mut devices = extent_devices(&config, &vm, &mut bars, &stop, snapshot.extent_states())?;
         devices.extend(disk_devices(&config)?);
         let balloon = balloon_device(&config, &vm, &mut devices)?;
@@ -1667,6 +1708,7 @@ impl Machine {
             nested_virtualization: false,
             balloon: false,
             disks: Vec::new(),
+            pmems: Vec::new(),
         };
         let network = self.network.as_ref().map(|n| {
             NetCard::Adopt(

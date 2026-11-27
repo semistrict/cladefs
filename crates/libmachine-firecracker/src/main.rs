@@ -38,8 +38,8 @@
 //!   resumed if `resume_vm`, else paused;
 //! - `PATCH /balloon`, the balloon's target.
 //!
-//! What it doesn't do it refuses, saying so on standard error: `pmem` devices and network
-//! interfaces as it starts; Diff snapshots and memory cells (macOS machines keep anonymous RAM
+//! What it doesn't do it refuses, saying so on standard error: network interfaces and pmem root
+//! devices as it starts (pmem data devices it maps into the guest, as Firecracker does); Diff snapshots and memory cells (macOS machines keep anonymous RAM
 //! until a macOS design of memory cells is chosen, board 13994), `PATCH /cladefs/extents` and every
 //! other request of the API's.
 //!

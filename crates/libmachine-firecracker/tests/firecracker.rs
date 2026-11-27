@@ -313,3 +313,32 @@ fn snapshots_load_in_new_processes() {
         let _ = std::fs::remove_file(path);
     }
 }
+
+/// A pmem device's file is the guest's /dev/pmem0, its size its file's rounded up to 2 MiB, as
+/// Firecracker has it.
+#[test]
+fn a_pmem_device_is_the_guests_pmem0() {
+    let Some((kernel, initrd)) = guest() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let image = dir.path().join("pmem.img");
+    std::fs::File::create(&image).unwrap().set_len(3 << 20).unwrap();
+    let config = serde_json::json!({
+        "boot-source": {
+            "kernel_image_path": kernel,
+            "initrd_path": initrd,
+            "boot_args": "console=ttyS0 libmachine_cat=/sys/block/pmem0/size",
+        },
+        "machine-config": { "vcpu_count": 1, "mem_size_mib": 256 },
+        "pmem": [{ "id": "data", "path_on_host": image }],
+    });
+    let status = spawn(dir.path(), &config).wait().unwrap();
+    let console = std::fs::read_to_string(dir.path().join("console.txt")).unwrap();
+    assert!(status.success(), "{status}; console:\n{console}");
+    // 4 MiB in 512-byte sectors.
+    assert!(
+        console.replace("\r\n", "\n").contains("libmachine-init: /sys/block/pmem0/size:\n8192\n"),
+        "console:\n{console}"
+    );
+}

@@ -365,8 +365,14 @@ fn plan(config: &Value) -> Result<Plan, String> {
             return Err(format!("the configuration's {key:?} isn't supported"));
         }
     }
-    if !array(config, "pmem")?.is_empty() {
-        return Err("pmem devices aren't supported on Hypervisor.framework yet".into());
+    let mut pmems = Vec::new();
+    for device in array(config, "pmem")? {
+        if device["root_device"].as_bool().unwrap_or(false) {
+            return Err("a pmem root device isn't supported".into());
+        }
+        let mut pmem = libmachine::Pmem::new(string(device, "path_on_host")?);
+        pmem.read_only = device["read_only"].as_bool().unwrap_or(false);
+        pmems.push(pmem);
     }
     let machine = &config["machine-config"];
     let vcpus = number(machine, "vcpu_count")?;
@@ -427,6 +433,7 @@ fn plan(config: &Value) -> Result<Plan, String> {
         extent_stores: stores,
         balloon: config.get("balloon").is_some(),
         disks,
+        pmems,
         ..Default::default()
     };
     let boot = LinuxBoot { kernel: kernel.into(), initrd, cmdline };
