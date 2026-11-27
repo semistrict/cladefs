@@ -194,19 +194,6 @@ if [[ $arch == x86_64 ]]; then
     grep -q '^CONFIG_KVM_AMD=y' "$src/.config"
     grep -q '^CONFIG_KVM_INTEL=y' "$src/.config"
 fi
-# libmachine's platform (doc-30, board 13061), which Firecracker's configuration sets but for
-# CPU_FREQ: on x86-64 an ELF vmlinux entered through PVH, hardware-reduced ACPI (which needs PCI to
-# load its DSDT), the console a 16550 that only the DSDT describes (PNP0501), every device on
-# virtio-PCI with MSI-X, the agent's vsock and the network's card configured by ip=, and the VM
-# generation ID a restored clone reseeds its RNG from.
-if [[ $arch == x86_64 ]]; then
-    for option in PVH ACPI PCI PNPACPI SERIAL_8250_PNP PCI_MSI VIRTIO_PCI VIRTIO_VSOCKETS IP_PNP \
-        VIRTIO_NET VMGENID; do
-        grep -q "^CONFIG_$option=y" "$src/.config" ||
-            { echo "libmachine's platform needs CONFIG_$option" >&2; exit 1; }
-    done
-    ! grep -q '^CONFIG_CPU_FREQ=y' "$src/.config"
-fi
 # cladefs: compressed in-RAM swap (/dev/zram0) inside guests.
 grep -q '^CONFIG_ZRAM=y' "$src/.config"
 grep -q '^CONFIG_ZRAM_BACKEND_ZSTD=y' "$src/.config"

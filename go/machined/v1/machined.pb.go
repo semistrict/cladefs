@@ -3,10 +3,10 @@
 // found in the LICENSE file.
 
 // machined's API (board 13467): what a host's VM manager asks of machined, the server that runs
-// many machines, each a Linux guest, in one process with libmachine (crates/libmachine, doc-30).
-// It is to embed cladefs's extent daemon, shared by them all, and serve that daemon's own API
+// many machines, each a Linux guest on Hypervisor.framework, with libmachine (crates/libmachine,
+// doc-30). It embeds cladefs's extent daemon, shared by them all, and serves that daemon's own API
 // (cladefs.cladefsd.v1.Cladefsd) on the same endpoint, through which the caller makes the cells
-// machines' roots are on (board 13471): until then a call of it fails with UNIMPLEMENTED.
+// machines' roots are on (board 13471).
 //
 // It is served over a Unix socket, its user's alone (mode 0600, whatever the umask), whose callers
 // are checked by their peer credentials too (machined's own user or root); and, if asked, over TCP
@@ -15,42 +15,34 @@
 //
 // Machines are named by their caller, and outlive the caller's connection: a VM manager that
 // restarts lists what runs (ListMachines), and takes up or stops what it finds. They do not
-// outlive machined: its machines are its process's (on macOS, each in a helper process of its
-// own, board 13460).
+// outlive machined: each runs in a helper process of its own that machined starts (board 13460).
 //
 // A machine's life:
 //
-//   CreateMachine -> CREATED -StartMachine-> STARTING -> RUNNING -(guest stops, StopMachine)->
-//   STOPPED -StartMachine-> STARTING ...  and DeleteMachine at any time with `force`, or while
-//   CREATED or STOPPED without.
+//   CreateMachine -> CREATED -StartMachine-> STARTING -> RUNNING -(guest stops)-> STOPPED
+//   -StartMachine-> STARTING ...  and DeleteMachine at any time with `force`, or while CREATED or
+//   STOPPED without. A start boots the machine's kernel again, from scratch.
 //
-// A RUNNING machine may be SUSPENDED (SuspendMachine, ResumeMachine) and snapshotted
-// (SnapshotMachine), where its platform can: KVM today. Elsewhere those calls fail with
-// UNIMPLEMENTED, saying so. A start boots the machine's kernel again, from scratch.
-//
-// Exec, ReadFile, WriteFile and StopMachine's `sync_filesystems` reach the guest through
-// libmachine's agent (crates/libmachine-agent), which a guest runs as `libmachine_action=agent` on
-// the test initramfs's command line, or of its own init's choosing. A guest without it fails them
-// with DEADLINE_EXCEEDED once its agent hasn't answered in 30 s. Each machine has at most 64 such
-// calls under way (an Exec until its command ends): past that they fail with RESOURCE_EXHAUSTED.
-// A file's read or write waits at most 60 s for any one answer of the guest's.
-//
-// A guest with an agent of its own (a VM manager's) reaches it through the machine's vsock socket
+// A guest's agent (a VM manager's) reaches the host through the machine's vsock socket
 // (Machine.vsock_socket), which speaks Firecracker's vsock protocol: connect, send
 // "CONNECT <port>\n", read "OK <port>\n", then the stream is the guest's port's; and a guest's
 // connection to a port the spec lists in `vsock_listen_ports` is passed to the Unix socket
 // "<vsock_socket>_<port>", if one listens there.
 //
-// Errors are gRPC statuses: NOT_FOUND for a machine or snapshot not there, ALREADY_EXISTS for a
-// name taken, INVALID_ARGUMENT for a request that means nothing (a name or path out of bounds, a
-// size not a multiple of 4096), FAILED_PRECONDITION for a call the machine's state refuses (a
-// start of a running machine, an exec in a stopped one), RESOURCE_EXHAUSTED for a limit reached
-// (on macOS before board 13460, a second machine running), UNIMPLEMENTED for what this platform or
-// build can't do yet, saying which board task brings it, and INTERNAL for the hypervisor's errors.
+// Errors are gRPC statuses: NOT_FOUND for a machine not there, ALREADY_EXISTS for a name taken,
+// INVALID_ARGUMENT for a request that means nothing (a name or path out of bounds, a size not a
+// multiple of 4096), FAILED_PRECONDITION for a call the machine's state refuses (a start of a
+// running machine), RESOURCE_EXHAUSTED for a limit reached, UNIMPLEMENTED for what this platform
+// or build can't do yet, saying which board task brings it, and INTERNAL for the hypervisor's
+// errors.
 //
-// Compatibility: v1 only grows. Calls and fields are added; none is removed, renamed, renumbered
-// or given another meaning or type. A field a server doesn't know of is zero, empty or false, which
-// each says it means. A call an older machined lacks fails with UNIMPLEMENTED.
+// Compatibility: v1 only grows, but for what the user dropped on 2026-11-27 (board 14519): the
+// calls of machines' stops, watches, execs, file transfers, snapshots, suspensions and balloon
+// targets, which hotbed, the one VM manager, never called (it calls CreateMachine, StartMachine,
+// GetMachine, ListMachines, DeleteMachine and StreamConsole). Calls and fields are added; none
+// else is removed, renamed, renumbered or given another meaning or type. A field a server doesn't
+// know of is zero, empty or false, which each says it means. A call an older machined lacks fails
+// with UNIMPLEMENTED.
 
 // Code generated by protoc-gen-go. DO NOT EDIT.
 // versions:
@@ -140,9 +132,9 @@ const (
 	MachineState_MACHINE_STATE_STARTING MachineState = 2
 	// Its vCPUs run.
 	MachineState_MACHINE_STATE_RUNNING MachineState = 3
-	// Its RAM is in a file, its threads stopped, until something wakes it.
+	// Never a machine's: no machine is suspended now. Kept for the clients that name it.
 	MachineState_MACHINE_STATE_SUSPENDED MachineState = 4
-	// Asked to stop, its guest's filesystems syncing.
+	// Asked to stop, its VM ending.
 	MachineState_MACHINE_STATE_STOPPING MachineState = 5
 	// Ended, and freed: how, its last exit says.
 	MachineState_MACHINE_STATE_STOPPED MachineState = 6
@@ -203,7 +195,7 @@ type ExitReason int32
 const (
 	// Never a machine's.
 	ExitReason_EXIT_REASON_UNSPECIFIED ExitReason = 0
-	// StopMachine, or DeleteMachine with `force`, stopped it.
+	// DeleteMachine with `force` stopped it.
 	ExitReason_EXIT_REASON_STOPPED ExitReason = 1
 	// Its guest powered it off.
 	ExitReason_EXIT_REASON_POWEROFF ExitReason = 2
@@ -296,8 +288,7 @@ type MachineSpec struct {
 	// every read and write then a request to the daemon.
 	RootDaxWindowBytes uint64 `protobuf:"varint,8,opt,name=root_dax_window_bytes,json=rootDaxWindowBytes,proto3" json:"root_dax_window_bytes,omitempty"`
 	// Gives the guest a virtio-balloon: its free memory reported and given back to the host as it
-	// frees it (free page reporting), and a target the host sets (Balloon). A machine with one is
-	// not snapshotted or suspended yet.
+	// frees it (free page reporting).
 	Balloon       bool `protobuf:"varint,9,opt,name=balloon,proto3" json:"balloon,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -399,9 +390,8 @@ func (x *MachineSpec) GetBalloon() bool {
 // A Linux kernel and how it boots.
 type Boot struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The kernel: on x86_64 an ELF vmlinux with a PVH entry point or a bzImage, on arm64 an
-	// Image. A path relative to machined's images directory (its --images flag), which it must not
-	// leave: no "..", no absolute path.
+	// The kernel, an arm64 Image. A path relative to machined's images directory (its --images
+	// flag), which it must not leave: no "..", no absolute path.
 	Kernel string `protobuf:"bytes,1,opt,name=kernel,proto3" json:"kernel,omitempty"`
 	// The initramfs, a path as `kernel`'s: none if empty.
 	Initramfs string `protobuf:"bytes,2,opt,name=initramfs,proto3" json:"initramfs,omitempty"`
@@ -1098,123 +1088,12 @@ func (x *StartMachineResponse) GetMachine() *Machine {
 	return nil
 }
 
-// StopMachine's request.
-type StopMachineRequest struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// The machine's name.
-	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	// Syncs its guest's filesystems through its agent before it stops: if the sync fails, or its
-	// agent doesn't answer within `timeout_ms`, the machine is left running and the call fails.
-	SyncFilesystems bool `protobuf:"varint,2,opt,name=sync_filesystems,json=syncFilesystems,proto3" json:"sync_filesystems,omitempty"`
-	// How long the sync may take, in milliseconds: 0 means 3 minutes.
-	TimeoutMs     uint64 `protobuf:"varint,3,opt,name=timeout_ms,json=timeoutMs,proto3" json:"timeout_ms,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *StopMachineRequest) Reset() {
-	*x = StopMachineRequest{}
-	mi := &file_machined_v1_machined_proto_msgTypes[13]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *StopMachineRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*StopMachineRequest) ProtoMessage() {}
-
-func (x *StopMachineRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_machined_v1_machined_proto_msgTypes[13]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use StopMachineRequest.ProtoReflect.Descriptor instead.
-func (*StopMachineRequest) Descriptor() ([]byte, []int) {
-	return file_machined_v1_machined_proto_rawDescGZIP(), []int{13}
-}
-
-func (x *StopMachineRequest) GetName() string {
-	if x != nil {
-		return x.Name
-	}
-	return ""
-}
-
-func (x *StopMachineRequest) GetSyncFilesystems() bool {
-	if x != nil {
-		return x.SyncFilesystems
-	}
-	return false
-}
-
-func (x *StopMachineRequest) GetTimeoutMs() uint64 {
-	if x != nil {
-		return x.TimeoutMs
-	}
-	return 0
-}
-
-// StopMachine's answer.
-type StopMachineResponse struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// The machine, STOPPED.
-	Machine       *Machine `protobuf:"bytes,1,opt,name=machine,proto3" json:"machine,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *StopMachineResponse) Reset() {
-	*x = StopMachineResponse{}
-	mi := &file_machined_v1_machined_proto_msgTypes[14]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *StopMachineResponse) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*StopMachineResponse) ProtoMessage() {}
-
-func (x *StopMachineResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_machined_v1_machined_proto_msgTypes[14]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use StopMachineResponse.ProtoReflect.Descriptor instead.
-func (*StopMachineResponse) Descriptor() ([]byte, []int) {
-	return file_machined_v1_machined_proto_rawDescGZIP(), []int{14}
-}
-
-func (x *StopMachineResponse) GetMachine() *Machine {
-	if x != nil {
-		return x.Machine
-	}
-	return nil
-}
-
 // DeleteMachine's request.
 type DeleteMachineRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The machine's name.
 	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	// Stops it first if it runs, or is suspended, without syncing anything.
+	// Stops it first if it runs, without syncing anything.
 	Force         bool `protobuf:"varint,2,opt,name=force,proto3" json:"force,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1222,7 +1101,7 @@ type DeleteMachineRequest struct {
 
 func (x *DeleteMachineRequest) Reset() {
 	*x = DeleteMachineRequest{}
-	mi := &file_machined_v1_machined_proto_msgTypes[15]
+	mi := &file_machined_v1_machined_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1234,7 +1113,7 @@ func (x *DeleteMachineRequest) String() string {
 func (*DeleteMachineRequest) ProtoMessage() {}
 
 func (x *DeleteMachineRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_machined_v1_machined_proto_msgTypes[15]
+	mi := &file_machined_v1_machined_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1247,7 +1126,7 @@ func (x *DeleteMachineRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteMachineRequest.ProtoReflect.Descriptor instead.
 func (*DeleteMachineRequest) Descriptor() ([]byte, []int) {
-	return file_machined_v1_machined_proto_rawDescGZIP(), []int{15}
+	return file_machined_v1_machined_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *DeleteMachineRequest) GetName() string {
@@ -1273,7 +1152,7 @@ type DeleteMachineResponse struct {
 
 func (x *DeleteMachineResponse) Reset() {
 	*x = DeleteMachineResponse{}
-	mi := &file_machined_v1_machined_proto_msgTypes[16]
+	mi := &file_machined_v1_machined_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1285,7 +1164,7 @@ func (x *DeleteMachineResponse) String() string {
 func (*DeleteMachineResponse) ProtoMessage() {}
 
 func (x *DeleteMachineResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_machined_v1_machined_proto_msgTypes[16]
+	mi := &file_machined_v1_machined_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1298,7 +1177,7 @@ func (x *DeleteMachineResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteMachineResponse.ProtoReflect.Descriptor instead.
 func (*DeleteMachineResponse) Descriptor() ([]byte, []int) {
-	return file_machined_v1_machined_proto_rawDescGZIP(), []int{16}
+	return file_machined_v1_machined_proto_rawDescGZIP(), []int{14}
 }
 
 // GetMachine's request.
@@ -1312,7 +1191,7 @@ type GetMachineRequest struct {
 
 func (x *GetMachineRequest) Reset() {
 	*x = GetMachineRequest{}
-	mi := &file_machined_v1_machined_proto_msgTypes[17]
+	mi := &file_machined_v1_machined_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1324,7 +1203,7 @@ func (x *GetMachineRequest) String() string {
 func (*GetMachineRequest) ProtoMessage() {}
 
 func (x *GetMachineRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_machined_v1_machined_proto_msgTypes[17]
+	mi := &file_machined_v1_machined_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1337,7 +1216,7 @@ func (x *GetMachineRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetMachineRequest.ProtoReflect.Descriptor instead.
 func (*GetMachineRequest) Descriptor() ([]byte, []int) {
-	return file_machined_v1_machined_proto_rawDescGZIP(), []int{17}
+	return file_machined_v1_machined_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *GetMachineRequest) GetName() string {
@@ -1358,7 +1237,7 @@ type GetMachineResponse struct {
 
 func (x *GetMachineResponse) Reset() {
 	*x = GetMachineResponse{}
-	mi := &file_machined_v1_machined_proto_msgTypes[18]
+	mi := &file_machined_v1_machined_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1370,7 +1249,7 @@ func (x *GetMachineResponse) String() string {
 func (*GetMachineResponse) ProtoMessage() {}
 
 func (x *GetMachineResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_machined_v1_machined_proto_msgTypes[18]
+	mi := &file_machined_v1_machined_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1383,7 +1262,7 @@ func (x *GetMachineResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetMachineResponse.ProtoReflect.Descriptor instead.
 func (*GetMachineResponse) Descriptor() ([]byte, []int) {
-	return file_machined_v1_machined_proto_rawDescGZIP(), []int{18}
+	return file_machined_v1_machined_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *GetMachineResponse) GetMachine() *Machine {
@@ -1402,7 +1281,7 @@ type ListMachinesRequest struct {
 
 func (x *ListMachinesRequest) Reset() {
 	*x = ListMachinesRequest{}
-	mi := &file_machined_v1_machined_proto_msgTypes[19]
+	mi := &file_machined_v1_machined_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1414,7 +1293,7 @@ func (x *ListMachinesRequest) String() string {
 func (*ListMachinesRequest) ProtoMessage() {}
 
 func (x *ListMachinesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_machined_v1_machined_proto_msgTypes[19]
+	mi := &file_machined_v1_machined_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1427,7 +1306,7 @@ func (x *ListMachinesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListMachinesRequest.ProtoReflect.Descriptor instead.
 func (*ListMachinesRequest) Descriptor() ([]byte, []int) {
-	return file_machined_v1_machined_proto_rawDescGZIP(), []int{19}
+	return file_machined_v1_machined_proto_rawDescGZIP(), []int{17}
 }
 
 // ListMachines's answer.
@@ -1441,7 +1320,7 @@ type ListMachinesResponse struct {
 
 func (x *ListMachinesResponse) Reset() {
 	*x = ListMachinesResponse{}
-	mi := &file_machined_v1_machined_proto_msgTypes[20]
+	mi := &file_machined_v1_machined_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1453,7 +1332,7 @@ func (x *ListMachinesResponse) String() string {
 func (*ListMachinesResponse) ProtoMessage() {}
 
 func (x *ListMachinesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_machined_v1_machined_proto_msgTypes[20]
+	mi := &file_machined_v1_machined_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1466,104 +1345,12 @@ func (x *ListMachinesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListMachinesResponse.ProtoReflect.Descriptor instead.
 func (*ListMachinesResponse) Descriptor() ([]byte, []int) {
-	return file_machined_v1_machined_proto_rawDescGZIP(), []int{20}
+	return file_machined_v1_machined_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *ListMachinesResponse) GetMachines() []*Machine {
 	if x != nil {
 		return x.Machines
-	}
-	return nil
-}
-
-// WatchMachine's request.
-type WatchMachineRequest struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// The machine's name.
-	Name          string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *WatchMachineRequest) Reset() {
-	*x = WatchMachineRequest{}
-	mi := &file_machined_v1_machined_proto_msgTypes[21]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *WatchMachineRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*WatchMachineRequest) ProtoMessage() {}
-
-func (x *WatchMachineRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_machined_v1_machined_proto_msgTypes[21]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use WatchMachineRequest.ProtoReflect.Descriptor instead.
-func (*WatchMachineRequest) Descriptor() ([]byte, []int) {
-	return file_machined_v1_machined_proto_rawDescGZIP(), []int{21}
-}
-
-func (x *WatchMachineRequest) GetName() string {
-	if x != nil {
-		return x.Name
-	}
-	return ""
-}
-
-// One of WatchMachine's answers.
-type WatchMachineResponse struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// Its status, now or after a change. Changes in quick succession may come as their last alone.
-	Status        *MachineStatus `protobuf:"bytes,1,opt,name=status,proto3" json:"status,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *WatchMachineResponse) Reset() {
-	*x = WatchMachineResponse{}
-	mi := &file_machined_v1_machined_proto_msgTypes[22]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *WatchMachineResponse) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*WatchMachineResponse) ProtoMessage() {}
-
-func (x *WatchMachineResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_machined_v1_machined_proto_msgTypes[22]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use WatchMachineResponse.ProtoReflect.Descriptor instead.
-func (*WatchMachineResponse) Descriptor() ([]byte, []int) {
-	return file_machined_v1_machined_proto_rawDescGZIP(), []int{22}
-}
-
-func (x *WatchMachineResponse) GetStatus() *MachineStatus {
-	if x != nil {
-		return x.Status
 	}
 	return nil
 }
@@ -1585,7 +1372,7 @@ type StreamConsoleRequest struct {
 
 func (x *StreamConsoleRequest) Reset() {
 	*x = StreamConsoleRequest{}
-	mi := &file_machined_v1_machined_proto_msgTypes[23]
+	mi := &file_machined_v1_machined_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1597,7 +1384,7 @@ func (x *StreamConsoleRequest) String() string {
 func (*StreamConsoleRequest) ProtoMessage() {}
 
 func (x *StreamConsoleRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_machined_v1_machined_proto_msgTypes[23]
+	mi := &file_machined_v1_machined_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1610,7 +1397,7 @@ func (x *StreamConsoleRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StreamConsoleRequest.ProtoReflect.Descriptor instead.
 func (*StreamConsoleRequest) Descriptor() ([]byte, []int) {
-	return file_machined_v1_machined_proto_rawDescGZIP(), []int{23}
+	return file_machined_v1_machined_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *StreamConsoleRequest) GetName() string {
@@ -1647,7 +1434,7 @@ type StreamConsoleResponse struct {
 
 func (x *StreamConsoleResponse) Reset() {
 	*x = StreamConsoleResponse{}
-	mi := &file_machined_v1_machined_proto_msgTypes[24]
+	mi := &file_machined_v1_machined_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1659,7 +1446,7 @@ func (x *StreamConsoleResponse) String() string {
 func (*StreamConsoleResponse) ProtoMessage() {}
 
 func (x *StreamConsoleResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_machined_v1_machined_proto_msgTypes[24]
+	mi := &file_machined_v1_machined_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1672,7 +1459,7 @@ func (x *StreamConsoleResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StreamConsoleResponse.ProtoReflect.Descriptor instead.
 func (*StreamConsoleResponse) Descriptor() ([]byte, []int) {
-	return file_machined_v1_machined_proto_rawDescGZIP(), []int{24}
+	return file_machined_v1_machined_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *StreamConsoleResponse) GetOffset() uint64 {
@@ -1687,1341 +1474,6 @@ func (x *StreamConsoleResponse) GetData() []byte {
 		return x.Data
 	}
 	return nil
-}
-
-// One of Exec's requests: the first starts the command, the others feed or signal it.
-type ExecRequest struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// What this one does.
-	//
-	// Types that are valid to be assigned to Request:
-	//
-	//	*ExecRequest_Start
-	//	*ExecRequest_Stdin
-	//	*ExecRequest_CloseStdin
-	//	*ExecRequest_Signal
-	Request       isExecRequest_Request `protobuf_oneof:"request"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ExecRequest) Reset() {
-	*x = ExecRequest{}
-	mi := &file_machined_v1_machined_proto_msgTypes[25]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ExecRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ExecRequest) ProtoMessage() {}
-
-func (x *ExecRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_machined_v1_machined_proto_msgTypes[25]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ExecRequest.ProtoReflect.Descriptor instead.
-func (*ExecRequest) Descriptor() ([]byte, []int) {
-	return file_machined_v1_machined_proto_rawDescGZIP(), []int{25}
-}
-
-func (x *ExecRequest) GetRequest() isExecRequest_Request {
-	if x != nil {
-		return x.Request
-	}
-	return nil
-}
-
-func (x *ExecRequest) GetStart() *ExecStart {
-	if x != nil {
-		if x, ok := x.Request.(*ExecRequest_Start); ok {
-			return x.Start
-		}
-	}
-	return nil
-}
-
-func (x *ExecRequest) GetStdin() []byte {
-	if x != nil {
-		if x, ok := x.Request.(*ExecRequest_Stdin); ok {
-			return x.Stdin
-		}
-	}
-	return nil
-}
-
-func (x *ExecRequest) GetCloseStdin() *ExecCloseStdin {
-	if x != nil {
-		if x, ok := x.Request.(*ExecRequest_CloseStdin); ok {
-			return x.CloseStdin
-		}
-	}
-	return nil
-}
-
-func (x *ExecRequest) GetSignal() int32 {
-	if x != nil {
-		if x, ok := x.Request.(*ExecRequest_Signal); ok {
-			return x.Signal
-		}
-	}
-	return 0
-}
-
-type isExecRequest_Request interface {
-	isExecRequest_Request()
-}
-
-type ExecRequest_Start struct {
-	// Starts the command: the first request, and only it.
-	Start *ExecStart `protobuf:"bytes,1,opt,name=start,proto3,oneof"`
-}
-
-type ExecRequest_Stdin struct {
-	// Bytes for its stdin, at most 1 MiB a request.
-	Stdin []byte `protobuf:"bytes,2,opt,name=stdin,proto3,oneof"`
-}
-
-type ExecRequest_CloseStdin struct {
-	// Closes its stdin, once what was sent before reached it.
-	CloseStdin *ExecCloseStdin `protobuf:"bytes,3,opt,name=close_stdin,json=closeStdin,proto3,oneof"`
-}
-
-type ExecRequest_Signal struct {
-	// A signal for its process group, a Linux signal number (1 to 64).
-	Signal int32 `protobuf:"varint,4,opt,name=signal,proto3,oneof"`
-}
-
-func (*ExecRequest_Start) isExecRequest_Request() {}
-
-func (*ExecRequest_Stdin) isExecRequest_Request() {}
-
-func (*ExecRequest_CloseStdin) isExecRequest_Request() {}
-
-func (*ExecRequest_Signal) isExecRequest_Request() {}
-
-// The command an Exec runs.
-type ExecStart struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// The machine's name.
-	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	// The program, then its arguments: at least the program. A program without a slash is looked
-	// up in PATH. At most 4096 of them, 128 KiB in all.
-	Argv []string `protobuf:"bytes,2,rep,name=argv,proto3" json:"argv,omitempty"`
-	// Its environment, whole: if empty, PATH alone, libmachine's default
-	// (/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin).
-	Env map[string]string `protobuf:"bytes,3,rep,name=env,proto3" json:"env,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	// Its working directory: the agent's (/) if empty.
-	WorkingDirectory string `protobuf:"bytes,4,opt,name=working_directory,json=workingDirectory,proto3" json:"working_directory,omitempty"`
-	// Gives it a stdin fed by the requests that follow; otherwise its stdin is closed at once.
-	Stdin         bool `protobuf:"varint,5,opt,name=stdin,proto3" json:"stdin,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ExecStart) Reset() {
-	*x = ExecStart{}
-	mi := &file_machined_v1_machined_proto_msgTypes[26]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ExecStart) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ExecStart) ProtoMessage() {}
-
-func (x *ExecStart) ProtoReflect() protoreflect.Message {
-	mi := &file_machined_v1_machined_proto_msgTypes[26]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ExecStart.ProtoReflect.Descriptor instead.
-func (*ExecStart) Descriptor() ([]byte, []int) {
-	return file_machined_v1_machined_proto_rawDescGZIP(), []int{26}
-}
-
-func (x *ExecStart) GetName() string {
-	if x != nil {
-		return x.Name
-	}
-	return ""
-}
-
-func (x *ExecStart) GetArgv() []string {
-	if x != nil {
-		return x.Argv
-	}
-	return nil
-}
-
-func (x *ExecStart) GetEnv() map[string]string {
-	if x != nil {
-		return x.Env
-	}
-	return nil
-}
-
-func (x *ExecStart) GetWorkingDirectory() string {
-	if x != nil {
-		return x.WorkingDirectory
-	}
-	return ""
-}
-
-func (x *ExecStart) GetStdin() bool {
-	if x != nil {
-		return x.Stdin
-	}
-	return false
-}
-
-// Closes an Exec's stdin.
-type ExecCloseStdin struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ExecCloseStdin) Reset() {
-	*x = ExecCloseStdin{}
-	mi := &file_machined_v1_machined_proto_msgTypes[27]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ExecCloseStdin) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ExecCloseStdin) ProtoMessage() {}
-
-func (x *ExecCloseStdin) ProtoReflect() protoreflect.Message {
-	mi := &file_machined_v1_machined_proto_msgTypes[27]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ExecCloseStdin.ProtoReflect.Descriptor instead.
-func (*ExecCloseStdin) Descriptor() ([]byte, []int) {
-	return file_machined_v1_machined_proto_rawDescGZIP(), []int{27}
-}
-
-// One of Exec's answers.
-type ExecResponse struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// What this one says.
-	//
-	// Types that are valid to be assigned to Response:
-	//
-	//	*ExecResponse_Started
-	//	*ExecResponse_Stdout
-	//	*ExecResponse_Stderr
-	//	*ExecResponse_Exit
-	Response      isExecResponse_Response `protobuf_oneof:"response"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ExecResponse) Reset() {
-	*x = ExecResponse{}
-	mi := &file_machined_v1_machined_proto_msgTypes[28]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ExecResponse) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ExecResponse) ProtoMessage() {}
-
-func (x *ExecResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_machined_v1_machined_proto_msgTypes[28]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ExecResponse.ProtoReflect.Descriptor instead.
-func (*ExecResponse) Descriptor() ([]byte, []int) {
-	return file_machined_v1_machined_proto_rawDescGZIP(), []int{28}
-}
-
-func (x *ExecResponse) GetResponse() isExecResponse_Response {
-	if x != nil {
-		return x.Response
-	}
-	return nil
-}
-
-func (x *ExecResponse) GetStarted() *ExecStarted {
-	if x != nil {
-		if x, ok := x.Response.(*ExecResponse_Started); ok {
-			return x.Started
-		}
-	}
-	return nil
-}
-
-func (x *ExecResponse) GetStdout() []byte {
-	if x != nil {
-		if x, ok := x.Response.(*ExecResponse_Stdout); ok {
-			return x.Stdout
-		}
-	}
-	return nil
-}
-
-func (x *ExecResponse) GetStderr() []byte {
-	if x != nil {
-		if x, ok := x.Response.(*ExecResponse_Stderr); ok {
-			return x.Stderr
-		}
-	}
-	return nil
-}
-
-func (x *ExecResponse) GetExit() *ExecExit {
-	if x != nil {
-		if x, ok := x.Response.(*ExecResponse_Exit); ok {
-			return x.Exit
-		}
-	}
-	return nil
-}
-
-type isExecResponse_Response interface {
-	isExecResponse_Response()
-}
-
-type ExecResponse_Started struct {
-	// It started: the first answer.
-	Started *ExecStarted `protobuf:"bytes,1,opt,name=started,proto3,oneof"`
-}
-
-type ExecResponse_Stdout struct {
-	// Bytes it wrote to its stdout.
-	Stdout []byte `protobuf:"bytes,2,opt,name=stdout,proto3,oneof"`
-}
-
-type ExecResponse_Stderr struct {
-	// Bytes it wrote to its stderr.
-	Stderr []byte `protobuf:"bytes,3,opt,name=stderr,proto3,oneof"`
-}
-
-type ExecResponse_Exit struct {
-	// How it ended, after all its output: the last answer.
-	Exit *ExecExit `protobuf:"bytes,4,opt,name=exit,proto3,oneof"`
-}
-
-func (*ExecResponse_Started) isExecResponse_Response() {}
-
-func (*ExecResponse_Stdout) isExecResponse_Response() {}
-
-func (*ExecResponse_Stderr) isExecResponse_Response() {}
-
-func (*ExecResponse_Exit) isExecResponse_Response() {}
-
-// An Exec's command started.
-type ExecStarted struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// Its process ID in the guest, also its process group's.
-	Pid           uint32 `protobuf:"varint,1,opt,name=pid,proto3" json:"pid,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ExecStarted) Reset() {
-	*x = ExecStarted{}
-	mi := &file_machined_v1_machined_proto_msgTypes[29]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ExecStarted) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ExecStarted) ProtoMessage() {}
-
-func (x *ExecStarted) ProtoReflect() protoreflect.Message {
-	mi := &file_machined_v1_machined_proto_msgTypes[29]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ExecStarted.ProtoReflect.Descriptor instead.
-func (*ExecStarted) Descriptor() ([]byte, []int) {
-	return file_machined_v1_machined_proto_rawDescGZIP(), []int{29}
-}
-
-func (x *ExecStarted) GetPid() uint32 {
-	if x != nil {
-		return x.Pid
-	}
-	return 0
-}
-
-// How an Exec's command ended.
-type ExecExit struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// Its exit status, or the signal that killed it.
-	//
-	// Types that are valid to be assigned to Status:
-	//
-	//	*ExecExit_Code
-	//	*ExecExit_Signal
-	Status        isExecExit_Status `protobuf_oneof:"status"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ExecExit) Reset() {
-	*x = ExecExit{}
-	mi := &file_machined_v1_machined_proto_msgTypes[30]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ExecExit) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ExecExit) ProtoMessage() {}
-
-func (x *ExecExit) ProtoReflect() protoreflect.Message {
-	mi := &file_machined_v1_machined_proto_msgTypes[30]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ExecExit.ProtoReflect.Descriptor instead.
-func (*ExecExit) Descriptor() ([]byte, []int) {
-	return file_machined_v1_machined_proto_rawDescGZIP(), []int{30}
-}
-
-func (x *ExecExit) GetStatus() isExecExit_Status {
-	if x != nil {
-		return x.Status
-	}
-	return nil
-}
-
-func (x *ExecExit) GetCode() int32 {
-	if x != nil {
-		if x, ok := x.Status.(*ExecExit_Code); ok {
-			return x.Code
-		}
-	}
-	return 0
-}
-
-func (x *ExecExit) GetSignal() int32 {
-	if x != nil {
-		if x, ok := x.Status.(*ExecExit_Signal); ok {
-			return x.Signal
-		}
-	}
-	return 0
-}
-
-type isExecExit_Status interface {
-	isExecExit_Status()
-}
-
-type ExecExit_Code struct {
-	// It exited, with this status.
-	Code int32 `protobuf:"varint,1,opt,name=code,proto3,oneof"`
-}
-
-type ExecExit_Signal struct {
-	// A signal killed it, this one.
-	Signal int32 `protobuf:"varint,2,opt,name=signal,proto3,oneof"`
-}
-
-func (*ExecExit_Code) isExecExit_Status() {}
-
-func (*ExecExit_Signal) isExecExit_Status() {}
-
-// ReadFile's request.
-type ReadFileRequest struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// The machine's name.
-	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	// The guest's file, an absolute path of at most 4096 bytes.
-	Path          string `protobuf:"bytes,2,opt,name=path,proto3" json:"path,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ReadFileRequest) Reset() {
-	*x = ReadFileRequest{}
-	mi := &file_machined_v1_machined_proto_msgTypes[31]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ReadFileRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ReadFileRequest) ProtoMessage() {}
-
-func (x *ReadFileRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_machined_v1_machined_proto_msgTypes[31]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ReadFileRequest.ProtoReflect.Descriptor instead.
-func (*ReadFileRequest) Descriptor() ([]byte, []int) {
-	return file_machined_v1_machined_proto_rawDescGZIP(), []int{31}
-}
-
-func (x *ReadFileRequest) GetName() string {
-	if x != nil {
-		return x.Name
-	}
-	return ""
-}
-
-func (x *ReadFileRequest) GetPath() string {
-	if x != nil {
-		return x.Path
-	}
-	return ""
-}
-
-// One of ReadFile's answers.
-type ReadFileResponse struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// The next chunk of the file, at most 1 MiB. An empty file is one empty answer.
-	Data          []byte `protobuf:"bytes,1,opt,name=data,proto3" json:"data,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ReadFileResponse) Reset() {
-	*x = ReadFileResponse{}
-	mi := &file_machined_v1_machined_proto_msgTypes[32]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ReadFileResponse) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ReadFileResponse) ProtoMessage() {}
-
-func (x *ReadFileResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_machined_v1_machined_proto_msgTypes[32]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ReadFileResponse.ProtoReflect.Descriptor instead.
-func (*ReadFileResponse) Descriptor() ([]byte, []int) {
-	return file_machined_v1_machined_proto_rawDescGZIP(), []int{32}
-}
-
-func (x *ReadFileResponse) GetData() []byte {
-	if x != nil {
-		return x.Data
-	}
-	return nil
-}
-
-// One of WriteFile's requests: the first names the file, each carries a chunk of it.
-type WriteFileRequest struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// The machine's name: the first request's, and only its.
-	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	// The guest's file, an absolute path of at most 4096 bytes: the first request's, and only its.
-	Path string `protobuf:"bytes,2,opt,name=path,proto3" json:"path,omitempty"`
-	// Its permissions (07777 at most): the first request's, and only its.
-	Mode uint32 `protobuf:"varint,3,opt,name=mode,proto3" json:"mode,omitempty"`
-	// The next chunk of what it is to hold, at most 1 MiB a request.
-	Data          []byte `protobuf:"bytes,4,opt,name=data,proto3" json:"data,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *WriteFileRequest) Reset() {
-	*x = WriteFileRequest{}
-	mi := &file_machined_v1_machined_proto_msgTypes[33]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *WriteFileRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*WriteFileRequest) ProtoMessage() {}
-
-func (x *WriteFileRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_machined_v1_machined_proto_msgTypes[33]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use WriteFileRequest.ProtoReflect.Descriptor instead.
-func (*WriteFileRequest) Descriptor() ([]byte, []int) {
-	return file_machined_v1_machined_proto_rawDescGZIP(), []int{33}
-}
-
-func (x *WriteFileRequest) GetName() string {
-	if x != nil {
-		return x.Name
-	}
-	return ""
-}
-
-func (x *WriteFileRequest) GetPath() string {
-	if x != nil {
-		return x.Path
-	}
-	return ""
-}
-
-func (x *WriteFileRequest) GetMode() uint32 {
-	if x != nil {
-		return x.Mode
-	}
-	return 0
-}
-
-func (x *WriteFileRequest) GetData() []byte {
-	if x != nil {
-		return x.Data
-	}
-	return nil
-}
-
-// WriteFile's answer.
-type WriteFileResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *WriteFileResponse) Reset() {
-	*x = WriteFileResponse{}
-	mi := &file_machined_v1_machined_proto_msgTypes[34]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *WriteFileResponse) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*WriteFileResponse) ProtoMessage() {}
-
-func (x *WriteFileResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_machined_v1_machined_proto_msgTypes[34]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use WriteFileResponse.ProtoReflect.Descriptor instead.
-func (*WriteFileResponse) Descriptor() ([]byte, []int) {
-	return file_machined_v1_machined_proto_rawDescGZIP(), []int{34}
-}
-
-// SnapshotMachine's request.
-type SnapshotMachineRequest struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// The machine's name.
-	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	// The snapshot's name, as a machine's is: one there already is replaced.
-	Snapshot      string `protobuf:"bytes,2,opt,name=snapshot,proto3" json:"snapshot,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *SnapshotMachineRequest) Reset() {
-	*x = SnapshotMachineRequest{}
-	mi := &file_machined_v1_machined_proto_msgTypes[35]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *SnapshotMachineRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*SnapshotMachineRequest) ProtoMessage() {}
-
-func (x *SnapshotMachineRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_machined_v1_machined_proto_msgTypes[35]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use SnapshotMachineRequest.ProtoReflect.Descriptor instead.
-func (*SnapshotMachineRequest) Descriptor() ([]byte, []int) {
-	return file_machined_v1_machined_proto_rawDescGZIP(), []int{35}
-}
-
-func (x *SnapshotMachineRequest) GetName() string {
-	if x != nil {
-		return x.Name
-	}
-	return ""
-}
-
-func (x *SnapshotMachineRequest) GetSnapshot() string {
-	if x != nil {
-		return x.Snapshot
-	}
-	return ""
-}
-
-// SnapshotMachine's answer.
-type SnapshotMachineResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *SnapshotMachineResponse) Reset() {
-	*x = SnapshotMachineResponse{}
-	mi := &file_machined_v1_machined_proto_msgTypes[36]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *SnapshotMachineResponse) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*SnapshotMachineResponse) ProtoMessage() {}
-
-func (x *SnapshotMachineResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_machined_v1_machined_proto_msgTypes[36]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use SnapshotMachineResponse.ProtoReflect.Descriptor instead.
-func (*SnapshotMachineResponse) Descriptor() ([]byte, []int) {
-	return file_machined_v1_machined_proto_rawDescGZIP(), []int{36}
-}
-
-// RestoreMachine's request.
-type RestoreMachineRequest struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// The snapshot's name.
-	Snapshot string `protobuf:"bytes,1,opt,name=snapshot,proto3" json:"snapshot,omitempty"`
-	// The new machine's name.
-	Name string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
-	// Its labels, as CreateMachine's.
-	Labels map[string]string `protobuf:"bytes,3,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	// Its vsock listen ports, as CreateMachine's.
-	VsockListenPorts []uint32 `protobuf:"varint,4,rep,packed,name=vsock_listen_ports,json=vsockListenPorts,proto3" json:"vsock_listen_ports,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
-}
-
-func (x *RestoreMachineRequest) Reset() {
-	*x = RestoreMachineRequest{}
-	mi := &file_machined_v1_machined_proto_msgTypes[37]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *RestoreMachineRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*RestoreMachineRequest) ProtoMessage() {}
-
-func (x *RestoreMachineRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_machined_v1_machined_proto_msgTypes[37]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use RestoreMachineRequest.ProtoReflect.Descriptor instead.
-func (*RestoreMachineRequest) Descriptor() ([]byte, []int) {
-	return file_machined_v1_machined_proto_rawDescGZIP(), []int{37}
-}
-
-func (x *RestoreMachineRequest) GetSnapshot() string {
-	if x != nil {
-		return x.Snapshot
-	}
-	return ""
-}
-
-func (x *RestoreMachineRequest) GetName() string {
-	if x != nil {
-		return x.Name
-	}
-	return ""
-}
-
-func (x *RestoreMachineRequest) GetLabels() map[string]string {
-	if x != nil {
-		return x.Labels
-	}
-	return nil
-}
-
-func (x *RestoreMachineRequest) GetVsockListenPorts() []uint32 {
-	if x != nil {
-		return x.VsockListenPorts
-	}
-	return nil
-}
-
-// RestoreMachine's answer.
-type RestoreMachineResponse struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// The new machine, RUNNING. Its spec is the snapshotted machine's.
-	Machine       *Machine `protobuf:"bytes,1,opt,name=machine,proto3" json:"machine,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *RestoreMachineResponse) Reset() {
-	*x = RestoreMachineResponse{}
-	mi := &file_machined_v1_machined_proto_msgTypes[38]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *RestoreMachineResponse) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*RestoreMachineResponse) ProtoMessage() {}
-
-func (x *RestoreMachineResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_machined_v1_machined_proto_msgTypes[38]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use RestoreMachineResponse.ProtoReflect.Descriptor instead.
-func (*RestoreMachineResponse) Descriptor() ([]byte, []int) {
-	return file_machined_v1_machined_proto_rawDescGZIP(), []int{38}
-}
-
-func (x *RestoreMachineResponse) GetMachine() *Machine {
-	if x != nil {
-		return x.Machine
-	}
-	return nil
-}
-
-// DeleteSnapshot's request.
-type DeleteSnapshotRequest struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// The snapshot's name.
-	Snapshot      string `protobuf:"bytes,1,opt,name=snapshot,proto3" json:"snapshot,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *DeleteSnapshotRequest) Reset() {
-	*x = DeleteSnapshotRequest{}
-	mi := &file_machined_v1_machined_proto_msgTypes[39]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *DeleteSnapshotRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*DeleteSnapshotRequest) ProtoMessage() {}
-
-func (x *DeleteSnapshotRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_machined_v1_machined_proto_msgTypes[39]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use DeleteSnapshotRequest.ProtoReflect.Descriptor instead.
-func (*DeleteSnapshotRequest) Descriptor() ([]byte, []int) {
-	return file_machined_v1_machined_proto_rawDescGZIP(), []int{39}
-}
-
-func (x *DeleteSnapshotRequest) GetSnapshot() string {
-	if x != nil {
-		return x.Snapshot
-	}
-	return ""
-}
-
-// DeleteSnapshot's answer.
-type DeleteSnapshotResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *DeleteSnapshotResponse) Reset() {
-	*x = DeleteSnapshotResponse{}
-	mi := &file_machined_v1_machined_proto_msgTypes[40]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *DeleteSnapshotResponse) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*DeleteSnapshotResponse) ProtoMessage() {}
-
-func (x *DeleteSnapshotResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_machined_v1_machined_proto_msgTypes[40]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use DeleteSnapshotResponse.ProtoReflect.Descriptor instead.
-func (*DeleteSnapshotResponse) Descriptor() ([]byte, []int) {
-	return file_machined_v1_machined_proto_rawDescGZIP(), []int{40}
-}
-
-// SuspendMachine's request.
-type SuspendMachineRequest struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// The machine's name.
-	Name          string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *SuspendMachineRequest) Reset() {
-	*x = SuspendMachineRequest{}
-	mi := &file_machined_v1_machined_proto_msgTypes[41]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *SuspendMachineRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*SuspendMachineRequest) ProtoMessage() {}
-
-func (x *SuspendMachineRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_machined_v1_machined_proto_msgTypes[41]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use SuspendMachineRequest.ProtoReflect.Descriptor instead.
-func (*SuspendMachineRequest) Descriptor() ([]byte, []int) {
-	return file_machined_v1_machined_proto_rawDescGZIP(), []int{41}
-}
-
-func (x *SuspendMachineRequest) GetName() string {
-	if x != nil {
-		return x.Name
-	}
-	return ""
-}
-
-// SuspendMachine's answer.
-type SuspendMachineResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *SuspendMachineResponse) Reset() {
-	*x = SuspendMachineResponse{}
-	mi := &file_machined_v1_machined_proto_msgTypes[42]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *SuspendMachineResponse) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*SuspendMachineResponse) ProtoMessage() {}
-
-func (x *SuspendMachineResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_machined_v1_machined_proto_msgTypes[42]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use SuspendMachineResponse.ProtoReflect.Descriptor instead.
-func (*SuspendMachineResponse) Descriptor() ([]byte, []int) {
-	return file_machined_v1_machined_proto_rawDescGZIP(), []int{42}
-}
-
-// ResumeMachine's request.
-type ResumeMachineRequest struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// The machine's name.
-	Name          string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ResumeMachineRequest) Reset() {
-	*x = ResumeMachineRequest{}
-	mi := &file_machined_v1_machined_proto_msgTypes[43]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ResumeMachineRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ResumeMachineRequest) ProtoMessage() {}
-
-func (x *ResumeMachineRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_machined_v1_machined_proto_msgTypes[43]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ResumeMachineRequest.ProtoReflect.Descriptor instead.
-func (*ResumeMachineRequest) Descriptor() ([]byte, []int) {
-	return file_machined_v1_machined_proto_rawDescGZIP(), []int{43}
-}
-
-func (x *ResumeMachineRequest) GetName() string {
-	if x != nil {
-		return x.Name
-	}
-	return ""
-}
-
-// ResumeMachine's answer.
-type ResumeMachineResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ResumeMachineResponse) Reset() {
-	*x = ResumeMachineResponse{}
-	mi := &file_machined_v1_machined_proto_msgTypes[44]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ResumeMachineResponse) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ResumeMachineResponse) ProtoMessage() {}
-
-func (x *ResumeMachineResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_machined_v1_machined_proto_msgTypes[44]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ResumeMachineResponse.ProtoReflect.Descriptor instead.
-func (*ResumeMachineResponse) Descriptor() ([]byte, []int) {
-	return file_machined_v1_machined_proto_rawDescGZIP(), []int{44}
-}
-
-// What a Balloon call asks.
-type BalloonRequest struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// The machine's name.
-	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	// The bytes of its guest's memory the guest is to give back, in 4 KiB pages (rounded down):
-	// its balloon's target, which its driver inflates to, or deflates to as it falls. Unset leaves
-	// the target as it is.
-	TargetBytes   *uint64 `protobuf:"varint,2,opt,name=target_bytes,json=targetBytes,proto3,oneof" json:"target_bytes,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *BalloonRequest) Reset() {
-	*x = BalloonRequest{}
-	mi := &file_machined_v1_machined_proto_msgTypes[45]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *BalloonRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*BalloonRequest) ProtoMessage() {}
-
-func (x *BalloonRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_machined_v1_machined_proto_msgTypes[45]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use BalloonRequest.ProtoReflect.Descriptor instead.
-func (*BalloonRequest) Descriptor() ([]byte, []int) {
-	return file_machined_v1_machined_proto_rawDescGZIP(), []int{45}
-}
-
-func (x *BalloonRequest) GetName() string {
-	if x != nil {
-		return x.Name
-	}
-	return ""
-}
-
-func (x *BalloonRequest) GetTargetBytes() uint64 {
-	if x != nil && x.TargetBytes != nil {
-		return *x.TargetBytes
-	}
-	return 0
-}
-
-// What a Balloon call answers.
-type BalloonResponse struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// Its balloon now.
-	Balloon       *BalloonStatus `protobuf:"bytes,1,opt,name=balloon,proto3" json:"balloon,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *BalloonResponse) Reset() {
-	*x = BalloonResponse{}
-	mi := &file_machined_v1_machined_proto_msgTypes[46]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *BalloonResponse) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*BalloonResponse) ProtoMessage() {}
-
-func (x *BalloonResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_machined_v1_machined_proto_msgTypes[46]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use BalloonResponse.ProtoReflect.Descriptor instead.
-func (*BalloonResponse) Descriptor() ([]byte, []int) {
-	return file_machined_v1_machined_proto_rawDescGZIP(), []int{46}
-}
-
-func (x *BalloonResponse) GetBalloon() *BalloonStatus {
-	if x != nil {
-		return x.Balloon
-	}
-	return nil
-}
-
-// A machine's balloon.
-type BalloonStatus struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// The bytes the guest is to give back.
-	TargetBytes uint64 `protobuf:"varint,1,opt,name=target_bytes,json=targetBytes,proto3" json:"target_bytes,omitempty"`
-	// The bytes its driver says it holds in the balloon.
-	ActualBytes uint64 `protobuf:"varint,2,opt,name=actual_bytes,json=actualBytes,proto3" json:"actual_bytes,omitempty"`
-	// The bytes of guest memory given back to the host since the machine started: inflated, and
-	// reported free by the guest.
-	DiscardedBytes uint64 `protobuf:"varint,3,opt,name=discarded_bytes,json=discardedBytes,proto3" json:"discarded_bytes,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
-}
-
-func (x *BalloonStatus) Reset() {
-	*x = BalloonStatus{}
-	mi := &file_machined_v1_machined_proto_msgTypes[47]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *BalloonStatus) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*BalloonStatus) ProtoMessage() {}
-
-func (x *BalloonStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_machined_v1_machined_proto_msgTypes[47]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use BalloonStatus.ProtoReflect.Descriptor instead.
-func (*BalloonStatus) Descriptor() ([]byte, []int) {
-	return file_machined_v1_machined_proto_rawDescGZIP(), []int{47}
-}
-
-func (x *BalloonStatus) GetTargetBytes() uint64 {
-	if x != nil {
-		return x.TargetBytes
-	}
-	return 0
-}
-
-func (x *BalloonStatus) GetActualBytes() uint64 {
-	if x != nil {
-		return x.ActualBytes
-	}
-	return 0
-}
-
-func (x *BalloonStatus) GetDiscardedBytes() uint64 {
-	if x != nil {
-		return x.DiscardedBytes
-	}
-	return 0
 }
 
 var File_machined_v1_machined_proto protoreflect.FileDescriptor
@@ -3083,13 +1535,6 @@ const file_machined_v1_machined_proto_rawDesc = "" +
 	"\x13StartMachineRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\"F\n" +
 	"\x14StartMachineResponse\x12.\n" +
-	"\amachine\x18\x01 \x01(\v2\x14.machined.v1.MachineR\amachine\"r\n" +
-	"\x12StopMachineRequest\x12\x12\n" +
-	"\x04name\x18\x01 \x01(\tR\x04name\x12)\n" +
-	"\x10sync_filesystems\x18\x02 \x01(\bR\x0fsyncFilesystems\x12\x1d\n" +
-	"\n" +
-	"timeout_ms\x18\x03 \x01(\x04R\ttimeoutMs\"E\n" +
-	"\x13StopMachineResponse\x12.\n" +
 	"\amachine\x18\x01 \x01(\v2\x14.machined.v1.MachineR\amachine\"@\n" +
 	"\x14DeleteMachineRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
@@ -3101,92 +1546,14 @@ const file_machined_v1_machined_proto_rawDesc = "" +
 	"\amachine\x18\x01 \x01(\v2\x14.machined.v1.MachineR\amachine\"\x15\n" +
 	"\x13ListMachinesRequest\"H\n" +
 	"\x14ListMachinesResponse\x120\n" +
-	"\bmachines\x18\x01 \x03(\v2\x14.machined.v1.MachineR\bmachines\")\n" +
-	"\x13WatchMachineRequest\x12\x12\n" +
-	"\x04name\x18\x01 \x01(\tR\x04name\"J\n" +
-	"\x14WatchMachineResponse\x122\n" +
-	"\x06status\x18\x01 \x01(\v2\x1a.machined.v1.MachineStatusR\x06status\"Z\n" +
+	"\bmachines\x18\x01 \x03(\v2\x14.machined.v1.MachineR\bmachines\"Z\n" +
 	"\x14StreamConsoleRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x16\n" +
 	"\x06offset\x18\x02 \x01(\x04R\x06offset\x12\x16\n" +
 	"\x06follow\x18\x03 \x01(\bR\x06follow\"C\n" +
 	"\x15StreamConsoleResponse\x12\x16\n" +
 	"\x06offset\x18\x01 \x01(\x04R\x06offset\x12\x12\n" +
-	"\x04data\x18\x02 \x01(\fR\x04data\"\xba\x01\n" +
-	"\vExecRequest\x12.\n" +
-	"\x05start\x18\x01 \x01(\v2\x16.machined.v1.ExecStartH\x00R\x05start\x12\x16\n" +
-	"\x05stdin\x18\x02 \x01(\fH\x00R\x05stdin\x12>\n" +
-	"\vclose_stdin\x18\x03 \x01(\v2\x1b.machined.v1.ExecCloseStdinH\x00R\n" +
-	"closeStdin\x12\x18\n" +
-	"\x06signal\x18\x04 \x01(\x05H\x00R\x06signalB\t\n" +
-	"\arequest\"\xe1\x01\n" +
-	"\tExecStart\x12\x12\n" +
-	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
-	"\x04argv\x18\x02 \x03(\tR\x04argv\x121\n" +
-	"\x03env\x18\x03 \x03(\v2\x1f.machined.v1.ExecStart.EnvEntryR\x03env\x12+\n" +
-	"\x11working_directory\x18\x04 \x01(\tR\x10workingDirectory\x12\x14\n" +
-	"\x05stdin\x18\x05 \x01(\bR\x05stdin\x1a6\n" +
-	"\bEnvEntry\x12\x10\n" +
-	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x10\n" +
-	"\x0eExecCloseStdin\"\xb1\x01\n" +
-	"\fExecResponse\x124\n" +
-	"\astarted\x18\x01 \x01(\v2\x18.machined.v1.ExecStartedH\x00R\astarted\x12\x18\n" +
-	"\x06stdout\x18\x02 \x01(\fH\x00R\x06stdout\x12\x18\n" +
-	"\x06stderr\x18\x03 \x01(\fH\x00R\x06stderr\x12+\n" +
-	"\x04exit\x18\x04 \x01(\v2\x15.machined.v1.ExecExitH\x00R\x04exitB\n" +
-	"\n" +
-	"\bresponse\"\x1f\n" +
-	"\vExecStarted\x12\x10\n" +
-	"\x03pid\x18\x01 \x01(\rR\x03pid\"D\n" +
-	"\bExecExit\x12\x14\n" +
-	"\x04code\x18\x01 \x01(\x05H\x00R\x04code\x12\x18\n" +
-	"\x06signal\x18\x02 \x01(\x05H\x00R\x06signalB\b\n" +
-	"\x06status\"9\n" +
-	"\x0fReadFileRequest\x12\x12\n" +
-	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
-	"\x04path\x18\x02 \x01(\tR\x04path\"&\n" +
-	"\x10ReadFileResponse\x12\x12\n" +
-	"\x04data\x18\x01 \x01(\fR\x04data\"b\n" +
-	"\x10WriteFileRequest\x12\x12\n" +
-	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
-	"\x04path\x18\x02 \x01(\tR\x04path\x12\x12\n" +
-	"\x04mode\x18\x03 \x01(\rR\x04mode\x12\x12\n" +
-	"\x04data\x18\x04 \x01(\fR\x04data\"\x13\n" +
-	"\x11WriteFileResponse\"H\n" +
-	"\x16SnapshotMachineRequest\x12\x12\n" +
-	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1a\n" +
-	"\bsnapshot\x18\x02 \x01(\tR\bsnapshot\"\x19\n" +
-	"\x17SnapshotMachineResponse\"\xf8\x01\n" +
-	"\x15RestoreMachineRequest\x12\x1a\n" +
-	"\bsnapshot\x18\x01 \x01(\tR\bsnapshot\x12\x12\n" +
-	"\x04name\x18\x02 \x01(\tR\x04name\x12F\n" +
-	"\x06labels\x18\x03 \x03(\v2..machined.v1.RestoreMachineRequest.LabelsEntryR\x06labels\x12,\n" +
-	"\x12vsock_listen_ports\x18\x04 \x03(\rR\x10vsockListenPorts\x1a9\n" +
-	"\vLabelsEntry\x12\x10\n" +
-	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"H\n" +
-	"\x16RestoreMachineResponse\x12.\n" +
-	"\amachine\x18\x01 \x01(\v2\x14.machined.v1.MachineR\amachine\"3\n" +
-	"\x15DeleteSnapshotRequest\x12\x1a\n" +
-	"\bsnapshot\x18\x01 \x01(\tR\bsnapshot\"\x18\n" +
-	"\x16DeleteSnapshotResponse\"+\n" +
-	"\x15SuspendMachineRequest\x12\x12\n" +
-	"\x04name\x18\x01 \x01(\tR\x04name\"\x18\n" +
-	"\x16SuspendMachineResponse\"*\n" +
-	"\x14ResumeMachineRequest\x12\x12\n" +
-	"\x04name\x18\x01 \x01(\tR\x04name\"\x17\n" +
-	"\x15ResumeMachineResponse\"]\n" +
-	"\x0eBalloonRequest\x12\x12\n" +
-	"\x04name\x18\x01 \x01(\tR\x04name\x12&\n" +
-	"\ftarget_bytes\x18\x02 \x01(\x04H\x00R\vtargetBytes\x88\x01\x01B\x0f\n" +
-	"\r_target_bytes\"G\n" +
-	"\x0fBalloonResponse\x124\n" +
-	"\aballoon\x18\x01 \x01(\v2\x1a.machined.v1.BalloonStatusR\aballoon\"~\n" +
-	"\rBalloonStatus\x12!\n" +
-	"\ftarget_bytes\x18\x01 \x01(\x04R\vtargetBytes\x12!\n" +
-	"\factual_bytes\x18\x02 \x01(\x04R\vactualBytes\x12'\n" +
-	"\x0fdiscarded_bytes\x18\x03 \x01(\x04R\x0ediscardedBytes*^\n" +
+	"\x04data\x18\x02 \x01(\fR\x04data*^\n" +
 	"\fEgressAction\x12\x1d\n" +
 	"\x19EGRESS_ACTION_UNSPECIFIED\x10\x00\x12\x17\n" +
 	"\x13EGRESS_ACTION_ALLOW\x10\x01\x12\x16\n" +
@@ -3207,26 +1574,15 @@ const file_machined_v1_machined_proto_rawDesc = "" +
 	"\x11EXIT_REASON_RESET\x10\x03\x12\x18\n" +
 	"\x14EXIT_REASON_SHUTDOWN\x10\x04\x12\x1b\n" +
 	"\x17EXIT_REASON_BOOT_FAILED\x10\x05\x12\x16\n" +
-	"\x12EXIT_REASON_FAILED\x10\x062\x9d\v\n" +
+	"\x12EXIT_REASON_FAILED\x10\x062\x8d\x04\n" +
 	"\bMachined\x12V\n" +
 	"\rCreateMachine\x12!.machined.v1.CreateMachineRequest\x1a\".machined.v1.CreateMachineResponse\x12S\n" +
-	"\fStartMachine\x12 .machined.v1.StartMachineRequest\x1a!.machined.v1.StartMachineResponse\x12P\n" +
-	"\vStopMachine\x12\x1f.machined.v1.StopMachineRequest\x1a .machined.v1.StopMachineResponse\x12V\n" +
+	"\fStartMachine\x12 .machined.v1.StartMachineRequest\x1a!.machined.v1.StartMachineResponse\x12V\n" +
 	"\rDeleteMachine\x12!.machined.v1.DeleteMachineRequest\x1a\".machined.v1.DeleteMachineResponse\x12M\n" +
 	"\n" +
 	"GetMachine\x12\x1e.machined.v1.GetMachineRequest\x1a\x1f.machined.v1.GetMachineResponse\x12S\n" +
-	"\fListMachines\x12 .machined.v1.ListMachinesRequest\x1a!.machined.v1.ListMachinesResponse\x12U\n" +
-	"\fWatchMachine\x12 .machined.v1.WatchMachineRequest\x1a!.machined.v1.WatchMachineResponse0\x01\x12X\n" +
-	"\rStreamConsole\x12!.machined.v1.StreamConsoleRequest\x1a\".machined.v1.StreamConsoleResponse0\x01\x12?\n" +
-	"\x04Exec\x12\x18.machined.v1.ExecRequest\x1a\x19.machined.v1.ExecResponse(\x010\x01\x12I\n" +
-	"\bReadFile\x12\x1c.machined.v1.ReadFileRequest\x1a\x1d.machined.v1.ReadFileResponse0\x01\x12L\n" +
-	"\tWriteFile\x12\x1d.machined.v1.WriteFileRequest\x1a\x1e.machined.v1.WriteFileResponse(\x01\x12\\\n" +
-	"\x0fSnapshotMachine\x12#.machined.v1.SnapshotMachineRequest\x1a$.machined.v1.SnapshotMachineResponse\x12Y\n" +
-	"\x0eRestoreMachine\x12\".machined.v1.RestoreMachineRequest\x1a#.machined.v1.RestoreMachineResponse\x12Y\n" +
-	"\x0eDeleteSnapshot\x12\".machined.v1.DeleteSnapshotRequest\x1a#.machined.v1.DeleteSnapshotResponse\x12Y\n" +
-	"\x0eSuspendMachine\x12\".machined.v1.SuspendMachineRequest\x1a#.machined.v1.SuspendMachineResponse\x12V\n" +
-	"\rResumeMachine\x12!.machined.v1.ResumeMachineRequest\x1a\".machined.v1.ResumeMachineResponse\x12D\n" +
-	"\aBalloon\x12\x1b.machined.v1.BalloonRequest\x1a\x1c.machined.v1.BalloonResponseB9Z7github.com/semistrict/cladefs/go/machined/v1;machinedv1b\x06proto3"
+	"\fListMachines\x12 .machined.v1.ListMachinesRequest\x1a!.machined.v1.ListMachinesResponse\x12X\n" +
+	"\rStreamConsole\x12!.machined.v1.StreamConsoleRequest\x1a\".machined.v1.StreamConsoleResponse0\x01B9Z7github.com/semistrict/cladefs/go/machined/v1;machinedv1b\x06proto3"
 
 var (
 	file_machined_v1_machined_proto_rawDescOnce sync.Once
@@ -3241,68 +1597,39 @@ func file_machined_v1_machined_proto_rawDescGZIP() []byte {
 }
 
 var file_machined_v1_machined_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_machined_v1_machined_proto_msgTypes = make([]protoimpl.MessageInfo, 51)
+var file_machined_v1_machined_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
 var file_machined_v1_machined_proto_goTypes = []any{
-	(EgressAction)(0),               // 0: machined.v1.EgressAction
-	(MachineState)(0),               // 1: machined.v1.MachineState
-	(ExitReason)(0),                 // 2: machined.v1.ExitReason
-	(*MachineSpec)(nil),             // 3: machined.v1.MachineSpec
-	(*Boot)(nil),                    // 4: machined.v1.Boot
-	(*Network)(nil),                 // 5: machined.v1.Network
-	(*EgressRule)(nil),              // 6: machined.v1.EgressRule
-	(*PortForward)(nil),             // 7: machined.v1.PortForward
-	(*Cell)(nil),                    // 8: machined.v1.Cell
-	(*Machine)(nil),                 // 9: machined.v1.Machine
-	(*MachineStatus)(nil),           // 10: machined.v1.MachineStatus
-	(*Exit)(nil),                    // 11: machined.v1.Exit
-	(*CreateMachineRequest)(nil),    // 12: machined.v1.CreateMachineRequest
-	(*CreateMachineResponse)(nil),   // 13: machined.v1.CreateMachineResponse
-	(*StartMachineRequest)(nil),     // 14: machined.v1.StartMachineRequest
-	(*StartMachineResponse)(nil),    // 15: machined.v1.StartMachineResponse
-	(*StopMachineRequest)(nil),      // 16: machined.v1.StopMachineRequest
-	(*StopMachineResponse)(nil),     // 17: machined.v1.StopMachineResponse
-	(*DeleteMachineRequest)(nil),    // 18: machined.v1.DeleteMachineRequest
-	(*DeleteMachineResponse)(nil),   // 19: machined.v1.DeleteMachineResponse
-	(*GetMachineRequest)(nil),       // 20: machined.v1.GetMachineRequest
-	(*GetMachineResponse)(nil),      // 21: machined.v1.GetMachineResponse
-	(*ListMachinesRequest)(nil),     // 22: machined.v1.ListMachinesRequest
-	(*ListMachinesResponse)(nil),    // 23: machined.v1.ListMachinesResponse
-	(*WatchMachineRequest)(nil),     // 24: machined.v1.WatchMachineRequest
-	(*WatchMachineResponse)(nil),    // 25: machined.v1.WatchMachineResponse
-	(*StreamConsoleRequest)(nil),    // 26: machined.v1.StreamConsoleRequest
-	(*StreamConsoleResponse)(nil),   // 27: machined.v1.StreamConsoleResponse
-	(*ExecRequest)(nil),             // 28: machined.v1.ExecRequest
-	(*ExecStart)(nil),               // 29: machined.v1.ExecStart
-	(*ExecCloseStdin)(nil),          // 30: machined.v1.ExecCloseStdin
-	(*ExecResponse)(nil),            // 31: machined.v1.ExecResponse
-	(*ExecStarted)(nil),             // 32: machined.v1.ExecStarted
-	(*ExecExit)(nil),                // 33: machined.v1.ExecExit
-	(*ReadFileRequest)(nil),         // 34: machined.v1.ReadFileRequest
-	(*ReadFileResponse)(nil),        // 35: machined.v1.ReadFileResponse
-	(*WriteFileRequest)(nil),        // 36: machined.v1.WriteFileRequest
-	(*WriteFileResponse)(nil),       // 37: machined.v1.WriteFileResponse
-	(*SnapshotMachineRequest)(nil),  // 38: machined.v1.SnapshotMachineRequest
-	(*SnapshotMachineResponse)(nil), // 39: machined.v1.SnapshotMachineResponse
-	(*RestoreMachineRequest)(nil),   // 40: machined.v1.RestoreMachineRequest
-	(*RestoreMachineResponse)(nil),  // 41: machined.v1.RestoreMachineResponse
-	(*DeleteSnapshotRequest)(nil),   // 42: machined.v1.DeleteSnapshotRequest
-	(*DeleteSnapshotResponse)(nil),  // 43: machined.v1.DeleteSnapshotResponse
-	(*SuspendMachineRequest)(nil),   // 44: machined.v1.SuspendMachineRequest
-	(*SuspendMachineResponse)(nil),  // 45: machined.v1.SuspendMachineResponse
-	(*ResumeMachineRequest)(nil),    // 46: machined.v1.ResumeMachineRequest
-	(*ResumeMachineResponse)(nil),   // 47: machined.v1.ResumeMachineResponse
-	(*BalloonRequest)(nil),          // 48: machined.v1.BalloonRequest
-	(*BalloonResponse)(nil),         // 49: machined.v1.BalloonResponse
-	(*BalloonStatus)(nil),           // 50: machined.v1.BalloonStatus
-	nil,                             // 51: machined.v1.MachineSpec.LabelsEntry
-	nil,                             // 52: machined.v1.ExecStart.EnvEntry
-	nil,                             // 53: machined.v1.RestoreMachineRequest.LabelsEntry
+	(EgressAction)(0),             // 0: machined.v1.EgressAction
+	(MachineState)(0),             // 1: machined.v1.MachineState
+	(ExitReason)(0),               // 2: machined.v1.ExitReason
+	(*MachineSpec)(nil),           // 3: machined.v1.MachineSpec
+	(*Boot)(nil),                  // 4: machined.v1.Boot
+	(*Network)(nil),               // 5: machined.v1.Network
+	(*EgressRule)(nil),            // 6: machined.v1.EgressRule
+	(*PortForward)(nil),           // 7: machined.v1.PortForward
+	(*Cell)(nil),                  // 8: machined.v1.Cell
+	(*Machine)(nil),               // 9: machined.v1.Machine
+	(*MachineStatus)(nil),         // 10: machined.v1.MachineStatus
+	(*Exit)(nil),                  // 11: machined.v1.Exit
+	(*CreateMachineRequest)(nil),  // 12: machined.v1.CreateMachineRequest
+	(*CreateMachineResponse)(nil), // 13: machined.v1.CreateMachineResponse
+	(*StartMachineRequest)(nil),   // 14: machined.v1.StartMachineRequest
+	(*StartMachineResponse)(nil),  // 15: machined.v1.StartMachineResponse
+	(*DeleteMachineRequest)(nil),  // 16: machined.v1.DeleteMachineRequest
+	(*DeleteMachineResponse)(nil), // 17: machined.v1.DeleteMachineResponse
+	(*GetMachineRequest)(nil),     // 18: machined.v1.GetMachineRequest
+	(*GetMachineResponse)(nil),    // 19: machined.v1.GetMachineResponse
+	(*ListMachinesRequest)(nil),   // 20: machined.v1.ListMachinesRequest
+	(*ListMachinesResponse)(nil),  // 21: machined.v1.ListMachinesResponse
+	(*StreamConsoleRequest)(nil),  // 22: machined.v1.StreamConsoleRequest
+	(*StreamConsoleResponse)(nil), // 23: machined.v1.StreamConsoleResponse
+	nil,                           // 24: machined.v1.MachineSpec.LabelsEntry
 }
 var file_machined_v1_machined_proto_depIdxs = []int32{
 	4,  // 0: machined.v1.MachineSpec.boot:type_name -> machined.v1.Boot
 	5,  // 1: machined.v1.MachineSpec.network:type_name -> machined.v1.Network
 	8,  // 2: machined.v1.MachineSpec.root:type_name -> machined.v1.Cell
-	51, // 3: machined.v1.MachineSpec.labels:type_name -> machined.v1.MachineSpec.LabelsEntry
+	24, // 3: machined.v1.MachineSpec.labels:type_name -> machined.v1.MachineSpec.LabelsEntry
 	6,  // 4: machined.v1.Network.egress:type_name -> machined.v1.EgressRule
 	7,  // 5: machined.v1.Network.port_forwards:type_name -> machined.v1.PortForward
 	0,  // 6: machined.v1.EgressRule.action:type_name -> machined.v1.EgressAction
@@ -3314,57 +1641,25 @@ var file_machined_v1_machined_proto_depIdxs = []int32{
 	3,  // 12: machined.v1.CreateMachineRequest.spec:type_name -> machined.v1.MachineSpec
 	9,  // 13: machined.v1.CreateMachineResponse.machine:type_name -> machined.v1.Machine
 	9,  // 14: machined.v1.StartMachineResponse.machine:type_name -> machined.v1.Machine
-	9,  // 15: machined.v1.StopMachineResponse.machine:type_name -> machined.v1.Machine
-	9,  // 16: machined.v1.GetMachineResponse.machine:type_name -> machined.v1.Machine
-	9,  // 17: machined.v1.ListMachinesResponse.machines:type_name -> machined.v1.Machine
-	10, // 18: machined.v1.WatchMachineResponse.status:type_name -> machined.v1.MachineStatus
-	29, // 19: machined.v1.ExecRequest.start:type_name -> machined.v1.ExecStart
-	30, // 20: machined.v1.ExecRequest.close_stdin:type_name -> machined.v1.ExecCloseStdin
-	52, // 21: machined.v1.ExecStart.env:type_name -> machined.v1.ExecStart.EnvEntry
-	32, // 22: machined.v1.ExecResponse.started:type_name -> machined.v1.ExecStarted
-	33, // 23: machined.v1.ExecResponse.exit:type_name -> machined.v1.ExecExit
-	53, // 24: machined.v1.RestoreMachineRequest.labels:type_name -> machined.v1.RestoreMachineRequest.LabelsEntry
-	9,  // 25: machined.v1.RestoreMachineResponse.machine:type_name -> machined.v1.Machine
-	50, // 26: machined.v1.BalloonResponse.balloon:type_name -> machined.v1.BalloonStatus
-	12, // 27: machined.v1.Machined.CreateMachine:input_type -> machined.v1.CreateMachineRequest
-	14, // 28: machined.v1.Machined.StartMachine:input_type -> machined.v1.StartMachineRequest
-	16, // 29: machined.v1.Machined.StopMachine:input_type -> machined.v1.StopMachineRequest
-	18, // 30: machined.v1.Machined.DeleteMachine:input_type -> machined.v1.DeleteMachineRequest
-	20, // 31: machined.v1.Machined.GetMachine:input_type -> machined.v1.GetMachineRequest
-	22, // 32: machined.v1.Machined.ListMachines:input_type -> machined.v1.ListMachinesRequest
-	24, // 33: machined.v1.Machined.WatchMachine:input_type -> machined.v1.WatchMachineRequest
-	26, // 34: machined.v1.Machined.StreamConsole:input_type -> machined.v1.StreamConsoleRequest
-	28, // 35: machined.v1.Machined.Exec:input_type -> machined.v1.ExecRequest
-	34, // 36: machined.v1.Machined.ReadFile:input_type -> machined.v1.ReadFileRequest
-	36, // 37: machined.v1.Machined.WriteFile:input_type -> machined.v1.WriteFileRequest
-	38, // 38: machined.v1.Machined.SnapshotMachine:input_type -> machined.v1.SnapshotMachineRequest
-	40, // 39: machined.v1.Machined.RestoreMachine:input_type -> machined.v1.RestoreMachineRequest
-	42, // 40: machined.v1.Machined.DeleteSnapshot:input_type -> machined.v1.DeleteSnapshotRequest
-	44, // 41: machined.v1.Machined.SuspendMachine:input_type -> machined.v1.SuspendMachineRequest
-	46, // 42: machined.v1.Machined.ResumeMachine:input_type -> machined.v1.ResumeMachineRequest
-	48, // 43: machined.v1.Machined.Balloon:input_type -> machined.v1.BalloonRequest
-	13, // 44: machined.v1.Machined.CreateMachine:output_type -> machined.v1.CreateMachineResponse
-	15, // 45: machined.v1.Machined.StartMachine:output_type -> machined.v1.StartMachineResponse
-	17, // 46: machined.v1.Machined.StopMachine:output_type -> machined.v1.StopMachineResponse
-	19, // 47: machined.v1.Machined.DeleteMachine:output_type -> machined.v1.DeleteMachineResponse
-	21, // 48: machined.v1.Machined.GetMachine:output_type -> machined.v1.GetMachineResponse
-	23, // 49: machined.v1.Machined.ListMachines:output_type -> machined.v1.ListMachinesResponse
-	25, // 50: machined.v1.Machined.WatchMachine:output_type -> machined.v1.WatchMachineResponse
-	27, // 51: machined.v1.Machined.StreamConsole:output_type -> machined.v1.StreamConsoleResponse
-	31, // 52: machined.v1.Machined.Exec:output_type -> machined.v1.ExecResponse
-	35, // 53: machined.v1.Machined.ReadFile:output_type -> machined.v1.ReadFileResponse
-	37, // 54: machined.v1.Machined.WriteFile:output_type -> machined.v1.WriteFileResponse
-	39, // 55: machined.v1.Machined.SnapshotMachine:output_type -> machined.v1.SnapshotMachineResponse
-	41, // 56: machined.v1.Machined.RestoreMachine:output_type -> machined.v1.RestoreMachineResponse
-	43, // 57: machined.v1.Machined.DeleteSnapshot:output_type -> machined.v1.DeleteSnapshotResponse
-	45, // 58: machined.v1.Machined.SuspendMachine:output_type -> machined.v1.SuspendMachineResponse
-	47, // 59: machined.v1.Machined.ResumeMachine:output_type -> machined.v1.ResumeMachineResponse
-	49, // 60: machined.v1.Machined.Balloon:output_type -> machined.v1.BalloonResponse
-	44, // [44:61] is the sub-list for method output_type
-	27, // [27:44] is the sub-list for method input_type
-	27, // [27:27] is the sub-list for extension type_name
-	27, // [27:27] is the sub-list for extension extendee
-	0,  // [0:27] is the sub-list for field type_name
+	9,  // 15: machined.v1.GetMachineResponse.machine:type_name -> machined.v1.Machine
+	9,  // 16: machined.v1.ListMachinesResponse.machines:type_name -> machined.v1.Machine
+	12, // 17: machined.v1.Machined.CreateMachine:input_type -> machined.v1.CreateMachineRequest
+	14, // 18: machined.v1.Machined.StartMachine:input_type -> machined.v1.StartMachineRequest
+	16, // 19: machined.v1.Machined.DeleteMachine:input_type -> machined.v1.DeleteMachineRequest
+	18, // 20: machined.v1.Machined.GetMachine:input_type -> machined.v1.GetMachineRequest
+	20, // 21: machined.v1.Machined.ListMachines:input_type -> machined.v1.ListMachinesRequest
+	22, // 22: machined.v1.Machined.StreamConsole:input_type -> machined.v1.StreamConsoleRequest
+	13, // 23: machined.v1.Machined.CreateMachine:output_type -> machined.v1.CreateMachineResponse
+	15, // 24: machined.v1.Machined.StartMachine:output_type -> machined.v1.StartMachineResponse
+	17, // 25: machined.v1.Machined.DeleteMachine:output_type -> machined.v1.DeleteMachineResponse
+	19, // 26: machined.v1.Machined.GetMachine:output_type -> machined.v1.GetMachineResponse
+	21, // 27: machined.v1.Machined.ListMachines:output_type -> machined.v1.ListMachinesResponse
+	23, // 28: machined.v1.Machined.StreamConsole:output_type -> machined.v1.StreamConsoleResponse
+	23, // [23:29] is the sub-list for method output_type
+	17, // [17:23] is the sub-list for method input_type
+	17, // [17:17] is the sub-list for extension type_name
+	17, // [17:17] is the sub-list for extension extendee
+	0,  // [0:17] is the sub-list for field type_name
 }
 
 func init() { file_machined_v1_machined_proto_init() }
@@ -3372,30 +1667,13 @@ func file_machined_v1_machined_proto_init() {
 	if File_machined_v1_machined_proto != nil {
 		return
 	}
-	file_machined_v1_machined_proto_msgTypes[25].OneofWrappers = []any{
-		(*ExecRequest_Start)(nil),
-		(*ExecRequest_Stdin)(nil),
-		(*ExecRequest_CloseStdin)(nil),
-		(*ExecRequest_Signal)(nil),
-	}
-	file_machined_v1_machined_proto_msgTypes[28].OneofWrappers = []any{
-		(*ExecResponse_Started)(nil),
-		(*ExecResponse_Stdout)(nil),
-		(*ExecResponse_Stderr)(nil),
-		(*ExecResponse_Exit)(nil),
-	}
-	file_machined_v1_machined_proto_msgTypes[30].OneofWrappers = []any{
-		(*ExecExit_Code)(nil),
-		(*ExecExit_Signal)(nil),
-	}
-	file_machined_v1_machined_proto_msgTypes[45].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_machined_v1_machined_proto_rawDesc), len(file_machined_v1_machined_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   51,
+			NumMessages:   22,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

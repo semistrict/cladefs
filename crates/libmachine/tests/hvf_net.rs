@@ -2,46 +2,30 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! The guest's network, end to end: the test guest boots with a network
-//! and its agent, a thread runs the machine, and commands in the guest
-//! (busybox nc, nslookup, dd) connect to listeners the tests open on the
-//! host's loopback, which the guest reaches through its gateway address.
-//! Nothing needs the internet.
+//! The guest's network, end to end, on Hypervisor.framework: the test guest boots with a network
+//! and its agent, a thread runs the machine, and commands in the guest (busybox nc, nslookup,
+//! dd) connect to listeners the tests open on the host's loopback, which the guest reaches
+//! through its gateway. Nothing needs the internet.
 //!
-//! Tests return early with a note when /dev/kvm or the guest is missing.
-#![cfg(all(target_os = "linux", target_arch = "x86_64"))]
+//! The guest is where `hvf_linux` finds it (`crates/libmachine/scripts/arm64-guest.sh`); tests
+//! return early with a note when it is missing. A process has one VM: the tests take turns.
+#![cfg(all(target_os = "macos", target_arch = "aarch64"))]
 
 mod common;
 
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, TcpListener};
-use std::path::PathBuf;
+use std::sync::MutexGuard;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use common::{cladefs_kernel, kvm_available, test_guest_dir};
+use common::{guest, one_machine};
 use libmachine::agent::{Agent, Command, Output};
 use libmachine::net::{
     ConnectionRecord, DecidedBy, Decider, EgressPolicy, GATEWAY_ADDR, HostPattern, Hosts, Network,
     NetworkConfig, Ports, Verdict,
 };
 use libmachine::{ExitReason, LinuxBoot, Machine, MachineConfig, StopHandle};
-
-fn guest_dir() -> Option<PathBuf> {
-    if !kvm_available() {
-        return None;
-    }
-    let dir = test_guest_dir();
-    if ["vmlinux", "initramfs.cpio"].iter().all(|f| dir.join(f).is_file()) {
-        Some(dir)
-    } else {
-        eprintln!(
-            "skipping: no test guest in {} (run crates/libmachine/scripts/build-test-guest.sh)",
-            dir.display()
-        );
-        None
-    }
-}
 
 /// A booted guest with a network and its agent answering, its machine
 /// running on a thread of its own.
@@ -50,6 +34,7 @@ struct Guest {
     network: Network,
     stop: StopHandle,
     runner: Option<JoinHandle<(ExitReason, Machine)>>,
+    _one: MutexGuard<'static, ()>,
 }
 
 impl Guest {
@@ -58,10 +43,11 @@ impl Guest {
     }
 
     fn boot_with(network: NetworkConfig) -> Option<Guest> {
-        let dir = guest_dir()?;
+        let (kernel, initrd) = guest()?;
+        let one = one_machine();
         let boot = LinuxBoot {
-            kernel: dir.join("vmlinux"),
-            initrd: Some(dir.join("initramfs.cpio")),
+            kernel,
+            initrd: Some(initrd),
             cmdline: "quiet libmachine_action=agent".into(),
         };
         let config =
@@ -75,7 +61,7 @@ impl Guest {
             let exit = m.run_for(Duration::from_secs(300)).expect("run");
             (exit, m)
         });
-        let guest = Guest { agent, network, stop, runner: Some(runner) };
+        let guest = Guest { agent, network, stop, runner: Some(runner), _one: one };
         if let Err(e) = guest.agent.wait_ready(Duration::from_secs(60)) {
             let console = guest.finish();
             panic!("agent not ready: {e}; console:\n{console}");
@@ -473,19 +459,10 @@ fn host_entries_name_a_mock_service() {
 /// cladefs's guest kernel, which Firecracker boots too, brings the card up from the command line.
 #[test]
 fn cladefs_kernel_configures_the_network() {
-    if !kvm_available() {
-        return;
-    }
-    let Some(kernel) = cladefs_kernel() else {
+    let Some((kernel, initrd)) = guest() else {
         return;
     };
-    let initrd = test_guest_dir().join("initramfs.cpio");
-    if !initrd.is_file() {
-        eprintln!(
-            "skipping: no test initramfs (run crates/libmachine/scripts/build-test-guest.sh)"
-        );
-        return;
-    }
+    let _one = one_machine();
     let boot = LinuxBoot {
         kernel,
         initrd: Some(initrd),
@@ -509,12 +486,13 @@ fn cladefs_kernel_configures_the_network() {
 /// A machine without a network has no card, and no network handle.
 #[test]
 fn no_network_by_default() {
-    let Some(dir) = guest_dir() else {
+    let Some((kernel, initrd)) = guest() else {
         return;
     };
+    let _one = one_machine();
     let boot = LinuxBoot {
-        kernel: dir.join("vmlinux"),
-        initrd: Some(dir.join("initramfs.cpio")),
+        kernel,
+        initrd: Some(initrd),
         cmdline: "quiet libmachine_cat=/sys/class/net".into(),
     };
     let config = MachineConfig { mem_size: 256 << 20, ..Default::default() };

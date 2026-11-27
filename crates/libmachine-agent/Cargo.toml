@@ -8,7 +8,7 @@ publish = false
 
 # The library is the wire protocol, shared with libmachine's host side; the
 # binary is the agent, built static for the guest
-# (x86_64-unknown-linux-musl) by crates/libmachine/scripts/build-test-guest.sh.
+# (aarch64-unknown-linux-musl) by crates/libmachine/scripts/build-test-guest.sh.
 [lib]
 name = "libmachine_agent"
 

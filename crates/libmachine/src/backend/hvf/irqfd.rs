@@ -2,9 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! KVM's irqfds, in the VMM: a thread per VM waits on every interrupt event a device signals
-//! (an MSI-X vector's), and sends the MSI its GSI's route names to the GIC. The devices are
-//! KVM's devices unchanged: they signal an event, and an interrupt reaches the guest.
+//! irqfds, in the VMM: a thread per VM waits on every interrupt event a device signals (an
+//! MSI-X vector's), and sends the MSI its GSI's route names to the GIC. The devices signal an
+//! event, and an interrupt reaches the guest.
 
 use std::os::fd::{AsRawFd, RawFd};
 use std::sync::{Arc, Mutex, MutexGuard};

@@ -5,7 +5,8 @@
 //! macOS's Hypervisor.framework on Apple Silicon (board 13063): arm64 guests, with the GICv3 the
 //! framework emulates (macOS 15 and later), its MSI frame, and its virtual timers.
 //!
-//! What KVM does in the kernel and the framework doesn't, this backend does in the VMM:
+//! What a kernel hypervisor does in the kernel and the framework doesn't, this backend does in
+//! the VMM:
 //!
 //! - **ioeventfds**: a guest's write to a queue's notify address exits to the vCPU, which
 //!   signals the queue's event itself ([`PciHost::register_ioeventfd`]) and goes back in;
@@ -48,7 +49,6 @@ use self::kick::CpuSlot;
 use super::{Exit, Platform};
 use crate::arch::aarch64::boot::BootCpu;
 use crate::arch::aarch64::layout::{self, GIC_DIST_ADDR, GIC_MSI_ADDR, GIC_REDIST_ADDR};
-use crate::cpu::CpuModel;
 use crate::devices::pci::{MsiMessage, PciHost};
 use crate::error::{Error, Result};
 use crate::exits::ExitKind;
@@ -85,8 +85,8 @@ pub(crate) struct Gic {
     pub(crate) msi_size: u64,
 }
 
-/// A VM: its RAM, mapped once, its GIC, and what stands in for KVM's irqfds, ioeventfds and
-/// memory slots.
+/// A VM: its RAM, mapped once, its GIC, and the irqfds, ioeventfds and memory slots the VMM
+/// keeps itself.
 pub(crate) struct Vm {
     // Field order matters for drop: the irqfd thread stops before the VM goes.
     irqfds: irqfd::Forwarder,
@@ -320,29 +320,22 @@ impl Vm {
     /// power them on (PSCI CPU_ON).
     pub(crate) fn new(
         mem_size: usize,
-        cpu_model: CpuModel,
         platform: Platform,
         vcpu_count: u32,
         ram: Ram<'_>,
     ) -> Result<(Self, Vec<Vcpu>)> {
-        Self::with_el2(mem_size, cpu_model, platform, vcpu_count, ram, false)
+        Self::with_el2(mem_size, platform, vcpu_count, ram, false)
     }
 
     /// [`Vm::new`], its vCPUs given EL2 if `el2` (nested virtualization): they start at EL2, as
     /// a kernel that runs VMs of its own boots, which the host must allow (Apple M3 and later).
     pub(crate) fn with_el2(
         mem_size: usize,
-        cpu_model: CpuModel,
         platform: Platform,
         vcpu_count: u32,
         ram: Ram<'_>,
         el2: bool,
     ) -> Result<(Self, Vec<Vcpu>)> {
-        if cpu_model != CpuModel::Host {
-            return Err(Error::CpuModel(
-                "on Hypervisor.framework the guest's CPU is the host's (CpuModel::Host)".into(),
-            ));
-        }
         // A bare machine is the board without its devices: the GIC is there either way.
         let _ = platform;
         let mut held = lock(&VM_HELD);
@@ -430,10 +423,6 @@ impl Vm {
             .collect();
         let layout = layout::memory_layout(mem_size as u64);
         Ok((Self { irqfds, shared, mem, layout, gic }, vcpus))
-    }
-
-    pub(crate) fn cpu_model(&self) -> CpuModel {
-        CpuModel::Host
     }
 
     /// The host's CPU, as the guest sees it: the framework shows the host's, so the

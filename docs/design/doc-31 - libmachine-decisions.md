@@ -7,6 +7,8 @@ updated_date: '2026-11-26 12:00'
 ---
 # libmachine's decisions, as it made them
 
+**Removed on 2026-11-27 (board 14519).** Most of what these entries decided no longer exists: the KVM and x86-64 backend, the PC platform (ACPI, PVH, the 16550 on I/O ports), suspension, the `Sandbox` layer, the Python bindings, the network stack's save and restore and the patched smoltcp, and machined's calls for stops, watches, execs, files, snapshots, suspensions and balloon targets. The entries stay as the history of why they were made, in the order they were; what is true of the code now is doc-30's.
+
 libmachine's OPEN_QUESTIONS.md at cbff5b1 (semistrict/libmachine), kept as the record of what it
 decided before it came into this repo (board 13054); doc-30 is its architecture. Its rule was to
 decide, act, and record each decision here for the user to overturn; in this repo the board and

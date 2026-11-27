@@ -5,10 +5,7 @@
 //! Emulated devices.
 
 pub(crate) mod bus;
-#[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
-pub(crate) mod guest_tests;
 pub(crate) mod pci;
-#[cfg(target_arch = "aarch64")]
 pub(crate) mod rtc;
 pub(crate) mod serial;
 pub(crate) mod virtio;
@@ -27,7 +24,7 @@ mod pc {
     use crate::arch::layout::PCI_MSI_GSI_BASE;
     use crate::error::{Error, Result};
 
-    /// A PC's PCI bus with its virtio devices, and the thread that runs
+    /// The PCI bus with its virtio devices, and the thread that runs
     /// their queues.
     pub(crate) struct Pci {
         // Field order: the thread stops before the devices it uses drop.
@@ -42,14 +39,6 @@ mod pc {
     }
 
     impl Quiesced<'_> {
-        /// Has every device take what the guest gave it and hand over
-        /// what its host side holds, as the device thread would: the type
-        /// of one that had something for the guest, if any (it rang the
-        /// doorbell, and may have interrupted the guest).
-        pub(crate) fn settle(&mut self) -> Option<u16> {
-            self.transports.iter_mut().find_map(|t| t.settle())
-        }
-
         /// Every function's state, in bus order.
         pub(crate) fn save(&self, e: &mut crate::snapshot::codec::Encoder) -> Result<()> {
             e.count(self.transports.len());
@@ -73,20 +62,12 @@ mod pc {
         /// Has every device let go of what it serves the guest from (`VirtioPci::release_cell`):
         /// a live migration's hand-over of the extent store devices' cells. The first that can't
         /// refuses, those before it released.
-        #[cfg_attr(
-            target_os = "linux",
-            allow(dead_code, reason = "KVM migrates no extent store device yet")
-        )]
         pub(crate) fn release_cells(&mut self) -> Result<()> {
             self.transports.iter_mut().try_for_each(|t| t.release_cell())
         }
 
         /// Has every device take back what [`release_cells`](Self::release_cells) let go of: the
         /// migration aborted. The first that can't refuses, those before it reopened.
-        #[cfg_attr(
-            target_os = "linux",
-            allow(dead_code, reason = "KVM migrates no extent store device yet")
-        )]
         pub(crate) fn reopen_cells(&mut self) -> Result<()> {
             self.transports.iter_mut().try_for_each(|t| t.reopen_cell())
         }
@@ -97,36 +78,6 @@ mod pc {
             for t in &mut self.transports {
                 t.snapshot_done(kept);
             }
-        }
-
-        /// Every function's state for a suspension, in bus order: each
-        /// device hands over what must outlive its machine. On an error,
-        /// what was handed over is taken back.
-        pub(crate) fn hand_over(&mut self, e: &mut crate::snapshot::codec::Encoder) -> Result<()> {
-            e.count(self.transports.len());
-            let handed = self.transports.iter_mut().try_for_each(|t| t.hand_over(e));
-            if let Err(e) = handed {
-                return Err(match self.take_back() {
-                    Ok(()) => e,
-                    Err(back) => Error::Snapshot(format!("{e}; then taking back failed: {back}")),
-                });
-            }
-            Ok(())
-        }
-
-        /// Undoes [`hand_over`](Self::hand_over), the suspension having
-        /// failed: every device carries on as before it. The first error,
-        /// after trying every device.
-        pub(crate) fn take_back(&mut self) -> Result<()> {
-            let mut first = Ok(());
-            for t in &mut self.transports {
-                if let Err(e) = t.take_back()
-                    && first.is_ok()
-                {
-                    first = Err(e);
-                }
-            }
-            first
         }
     }
 
@@ -139,7 +90,6 @@ mod pc {
             devices: Vec<Box<dyn VirtioDevice>>,
             mem: &GuestMemoryMmap,
             host: &dyn PciHost,
-            doorbell: &Arc<crate::suspend::Doorbell>,
             mut bars: BarAllocator,
         ) -> Result<Self> {
             if devices.len() > 31 {
@@ -152,8 +102,7 @@ mod pc {
             let mut bus = PciBus::default();
             let mut transports = Vec::new();
             for (i, device) in devices.into_iter().enumerate() {
-                let mut transport = VirtioPci::new(device, mem.clone(), &mut bars, gsi, host)?;
-                transport.set_doorbell(doorbell.clone());
+                let transport = VirtioPci::new(device, mem.clone(), &mut bars, gsi, host)?;
                 gsi += u32::from(transport.vector_count());
                 let transport = Arc::new(Mutex::new(transport));
                 bus.add(i as u8 + 1, transport.clone());
@@ -219,13 +168,6 @@ mod pc {
             for t in &self.transports {
                 t.lock().unwrap_or_else(|e| e.into_inner()).signal_all_queues();
             }
-        }
-
-        /// The transport counters of the device at device number `device`.
-        #[cfg(test)]
-        pub(crate) fn stats(&self, device: u8) -> super::virtio::pci::Stats {
-            let transport = &self.transports[usize::from(device) - 1];
-            transport.lock().unwrap().stats()
         }
     }
 }

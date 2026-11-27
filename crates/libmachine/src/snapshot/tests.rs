@@ -8,7 +8,7 @@
 use std::os::unix::fs::MetadataExt;
 
 use super::*;
-use crate::arch::x86_64::layout::memory_layout;
+use crate::arch::aarch64::layout::{RAM_ADDR, memory_layout, ram_regions};
 
 /// A directory of the test's own under target/, removed when dropped.
 struct Dir(PathBuf);
@@ -32,7 +32,6 @@ impl Drop for Dir {
 
 fn header(mem_size: u64) -> MachineHeader {
     MachineHeader {
-        cpu_model: CpuModel::Baseline,
         cpu_fingerprint: "f00d".into(),
         vcpus: 2,
         mem_size,
@@ -44,17 +43,18 @@ fn header(mem_size: u64) -> MachineHeader {
     }
 }
 
-/// RAM with a few pages written, the rest zero.
+/// RAM with a few pages written, the rest zero (holes in the file where the filesystem keeps
+/// them: APFS's `SEEK_HOLE` finds none, so nothing here asserts any).
 fn ram(mem_size: u64) -> GuestMemoryMmap {
-    let ranges: Vec<(GuestAddress, usize)> = crate::arch::x86_64::layout::ram_regions(mem_size)
+    let ranges: Vec<(GuestAddress, usize)> = ram_regions(mem_size)
         .into_iter()
         .map(|(start, size)| (GuestAddress(start), size as usize))
         .collect();
     let mem = GuestMemoryMmap::from_ranges(&ranges).unwrap();
     use vm_memory::Bytes;
-    mem.write_slice(b"first page", GuestAddress(0)).unwrap();
-    mem.write_slice(b"in the middle", GuestAddress(mem_size / 2)).unwrap();
-    mem.write_slice(b"last", GuestAddress(mem_size - 4)).unwrap();
+    mem.write_slice(b"first page", GuestAddress(RAM_ADDR)).unwrap();
+    mem.write_slice(b"in the middle", GuestAddress(RAM_ADDR + mem_size / 2)).unwrap();
+    mem.write_slice(b"last", GuestAddress(RAM_ADDR + mem_size - 4)).unwrap();
     mem
 }
 
@@ -67,7 +67,6 @@ fn a_snapshot_reads_back_what_was_written() {
     let s = Snapshot::open(&path).unwrap();
     assert_eq!(s.machine, header(mem_size));
     assert_eq!(s.config().vcpus, 2);
-    assert_eq!(s.config().cpu_model, CpuModel::Baseline);
     assert!(s.config().network.is_none());
     assert_eq!(s.cpu_fingerprint(), "f00d");
     let mut rest = s.state();
@@ -88,22 +87,17 @@ fn a_snapshot_reads_back_what_was_written() {
     assert_eq!(&page[..4], b"last");
     let meta = file.metadata().unwrap();
     assert_eq!(meta.len(), offset + mem_size);
-    assert!(
-        meta.blocks() * 512 < 1 << 20,
-        "8 MiB of RAM with three pages written takes {} bytes",
-        meta.blocks() * 512
-    );
     assert_eq!(meta.mode() & 0o777, 0o400, "read-only: clones map it");
 }
 
-/// RAM above 4 GiB is a region of its own, at its own aligned offset.
+/// RAM is one region, at an aligned offset.
 #[test]
 fn every_ram_region_has_its_place() {
     let layout = memory_layout(5 << 30);
     let offsets = ram_offsets(&layout, 4 << 20);
     assert_eq!(
         offsets.iter().map(|(r, o)| (r.start, r.size, *o)).collect::<Vec<_>>(),
-        [(0, 3 << 30, 4 << 20), (4 << 30, 2 << 30, (3 << 30) + (4 << 20))]
+        [(RAM_ADDR, 5 << 30, 4 << 20)]
     );
 }
 
@@ -209,8 +203,8 @@ fn a_restore_for_another_machine_is_refused() {
         Err(Error::Snapshot(m)) if m.contains("network")
     ));
     assert!(matches!(
-        s.check_cpu(CpuModel::Host, "beef"),
+        s.check_cpu("beef"),
         Err(Error::Snapshot(m)) if m.contains("f00d") && m.contains("beef")
     ));
-    s.check_cpu(CpuModel::Baseline, "f00d").unwrap();
+    s.check_cpu("f00d").unwrap();
 }

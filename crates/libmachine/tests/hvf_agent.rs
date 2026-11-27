@@ -2,23 +2,23 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! The guest agent over virtio-vsock, end to end: the test guest
-//! (`crates/libmachine/scripts/build-test-guest.sh`) boots with `libmachine_action=agent`, a
-//! thread runs the machine, and the tests talk to the agent from others,
-//! as callers do.
+//! The guest agent over virtio-vsock, end to end, on Hypervisor.framework: the test guest
+//! (`crates/libmachine/scripts/arm64-guest.sh`) boots with `libmachine_action=agent`, a thread
+//! runs the machine, and the tests talk to the agent from others, as callers do.
 //!
-//! Tests return early with a note when /dev/kvm or the guest is missing.
-#![cfg(all(target_os = "linux", target_arch = "x86_64"))]
+//! Tests return early with a note when the guest is missing. A process has one VM: the tests
+//! take turns.
+#![cfg(all(target_os = "macos", target_arch = "aarch64"))]
 
 mod common;
 
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::sync::MutexGuard;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use common::kvm_available;
+use common::{guest, one_machine};
 use libmachine::agent::{Agent, Command, Event, ExitStatus};
 use libmachine::{
     Error, ExitReason, LinuxBoot, Machine, MachineConfig, StopHandle, Vsock, is_guest_stopped,
@@ -26,25 +26,6 @@ use libmachine::{
 
 /// Generous bound for "promptly", so that a loaded host does not flake.
 const PROMPT: Duration = Duration::from_secs(2);
-
-fn guest_dir() -> Option<PathBuf> {
-    if !kvm_available() {
-        return None;
-    }
-    let dir = std::env::var_os("LIBMACHINE_GUEST_DIR").map_or_else(
-        || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/guest"),
-        PathBuf::from,
-    );
-    if ["vmlinux", "initramfs.cpio"].iter().all(|f| dir.join(f).is_file()) {
-        Some(dir)
-    } else {
-        eprintln!(
-            "skipping: no test guest in {} (run crates/libmachine/scripts/build-test-guest.sh)",
-            dir.display()
-        );
-        None
-    }
-}
 
 /// A booted guest with its agent answering, its machine running on a
 /// thread of its own.
@@ -55,6 +36,7 @@ struct Guest {
     /// The thread running the machine; it returns the machine when its
     /// run ends.
     runner: Option<JoinHandle<(ExitReason, Machine)>>,
+    _one: MutexGuard<'static, ()>,
 }
 
 impl Guest {
@@ -64,22 +46,23 @@ impl Guest {
 
     /// With `extra` on the kernel's command line.
     fn boot_with(extra: &str) -> Option<Guest> {
-        let dir = guest_dir()?;
+        let (kernel, initrd) = guest()?;
+        let one = one_machine();
         let boot = LinuxBoot {
-            kernel: dir.join("vmlinux"),
-            initrd: Some(dir.join("initramfs.cpio")),
+            kernel,
+            initrd: Some(initrd),
             cmdline: format!("quiet libmachine_action=agent {extra}"),
         };
         let config = MachineConfig { mem_size: 256 << 20, ..Default::default() };
         let mut m = Machine::boot_linux(config, &boot).expect("boot");
-        let agent = m.agent().expect("a PC machine has an agent");
-        let vsock = m.vsock().expect("a PC machine has a vsock");
+        let agent = m.agent().expect("a board machine has an agent");
+        let vsock = m.vsock().expect("a board machine has a vsock");
         let stop = m.stop_handle();
         let runner = std::thread::spawn(move || {
             let exit = m.run_for(Duration::from_secs(300)).expect("run");
             (exit, m)
         });
-        let guest = Guest { agent, vsock, stop, runner: Some(runner) };
+        let guest = Guest { agent, vsock, stop, runner: Some(runner), _one: one };
         let start = Instant::now();
         if let Err(e) = guest.agent.wait_ready(Duration::from_secs(60)) {
             let (exit, console) = guest.finish();
@@ -553,11 +536,9 @@ fn an_agent_that_restarted_is_not_taken_for_the_one_before() {
 /// the machine does not bring it back (libmachine does not reboot it).
 #[test]
 fn a_guest_that_stops_fails_what_waits_on_it_at_once() {
-    for (extra, stopper, expected) in [
-        ("", "poweroff", ExitReason::Poweroff),
-        ("", "reboot", ExitReason::Reset),
-        ("reboot=t", "reboot", ExitReason::Shutdown),
-    ] {
+    for (extra, stopper, expected) in
+        [("", "poweroff", ExitReason::Poweroff), ("", "reboot", ExitReason::Reset)]
+    {
         let Some(mut g) = Guest::boot_with(extra) else {
             return;
         };
@@ -717,16 +698,17 @@ fn a_stopped_or_gone_machine_fails_instead_of_hanging() {
 /// through a `Run` left vsock callers waiting.)
 #[test]
 fn a_guest_that_stops_fails_its_vsock_however_the_run_was_waited_on() {
-    let Some(dir) = guest_dir() else { return };
+    let Some((kernel, initrd)) = guest() else { return };
+    let _one = one_machine();
     let boot = LinuxBoot {
-        kernel: dir.join("vmlinux"),
-        initrd: Some(dir.join("initramfs.cpio")),
+        kernel,
+        initrd: Some(initrd),
         // The test init powers the machine off by itself.
         cmdline: "quiet".into(),
     };
     let config = MachineConfig { mem_size: 256 << 20, ..Default::default() };
     let mut m = Machine::boot_linux(config, &boot).expect("boot");
-    let vsock = m.vsock().expect("a PC machine has a vsock");
+    let vsock = m.vsock().expect("a board machine has a vsock");
     let mut run = m.start_run(Some(Duration::from_secs(60)));
     let exit = loop {
         match run.wait_for(Duration::from_millis(20)) {

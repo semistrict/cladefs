@@ -2,22 +2,16 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! machined end to end, driven over gRPC as a VM manager drives it: a machine made, booted with
-//! cladefs's guest kernel and libmachine's test initramfs, a command run in it with its stdin and
-//! output streamed, files written and read, its console streamed, its vsock reached through its
-//! socket, then stopped (its filesystems synced first) and deleted; snapshots, restores and
-//! suspensions on KVM; what machined refuses; and TCP's mutual TLS.
+//! machined end to end, driven over gRPC as hotbed's Mac worker drives it: a machine made, booted
+//! with cladefs's arm64 guest kernel and libmachine's test initramfs on a cell of its own, with a
+//! network and a balloon, its console streamed (the guest's init runs a script the machine's
+//! command line gives it: `libmachine_action=sh`), its vsock reached through its socket, then
+//! deleted; what machined refuses; and TCP's mutual TLS.
 //!
-//! The guest: on Linux, `CLADEFS_GUEST_KERNEL` (`scripts/guest-kernel.sh`) and the test initramfs
-//! in `LIBMACHINE_GUEST_DIR` (else target/guest; `crates/libmachine/scripts/build-test-guest.sh`),
-//! on /dev/kvm; on macOS, cladefs's arm64 Image and the test initramfs in target/arm64-guest
+//! The guest: cladefs's arm64 Image and the test initramfs in target/arm64-guest
 //! (`crates/libmachine/scripts/arm64-guest.sh`), or where `CLADEFS_GUEST_KERNEL` and
-//! `LIBMACHINE_GUEST_DIR` say. A test that needs one and lacks it returns with a "skipping:" note,
-//! which scripts/test.sh's libmachine and hvf parts fail on.
-#![cfg(any(
-    all(target_os = "linux", target_arch = "x86_64"),
-    all(target_os = "macos", target_arch = "aarch64")
-))]
+//! `LIBMACHINE_GUEST_DIR` say. A test that needs one and lacks it returns with a "skipping:" note.
+#![cfg(all(target_os = "macos", target_arch = "aarch64"))]
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -27,7 +21,7 @@ mod common;
 
 use common::{fork, guest, hypervisor, import_root};
 use machined::client::{MachinedClient, connect_unix};
-use machined::proto::{self, exec_request, exec_response};
+use machined::proto;
 use tokio_stream::StreamExt as _;
 use tonic::Code;
 use tonic::transport::Channel;
@@ -82,13 +76,8 @@ impl Daemon {
         images: &[(&str, &Path)],
         configure: impl FnOnce(&mut machined::Config),
     ) -> Self {
-        // Short, as vsock sockets' paths must be, and on a disk on Linux, as suspensions need.
-        let parent = if cfg!(target_os = "linux") {
-            PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
-        } else {
-            std::env::temp_dir()
-        };
-        let dir = tempfile::tempdir_in(parent).unwrap();
+        // Short, as vsock sockets' paths must be.
+        let dir = tempfile::tempdir_in(std::env::temp_dir()).unwrap();
         let image_dir = dir.path().join("images");
         std::fs::create_dir(&image_dir).unwrap();
         for (name, from) in images {
@@ -127,63 +116,24 @@ fn state_of(machine: &proto::Machine) -> proto::MachineState {
     machine.status.as_ref().unwrap().state()
 }
 
-/// The next status a watch says whose state is `state`.
+/// Polls machine `name` until its state is `state`: its status then.
 async fn wait_for_state(
-    watch: &mut tonic::Streaming<proto::WatchMachineResponse>,
+    client: &mut MachinedClient<Channel>,
+    name: &str,
     state: proto::MachineState,
 ) -> proto::MachineStatus {
     tokio::time::timeout(STATE_WAIT, async {
         loop {
-            let status = watch.message().await.unwrap().expect("the watch ended").status.unwrap();
+            let got = client.get_machine(proto::GetMachineRequest { name: name.into() }).await;
+            let status = got.unwrap().into_inner().machine.unwrap().status.unwrap();
             if status.state() == state {
                 return status;
             }
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
     })
     .await
-    .unwrap_or_else(|_| panic!("no {state:?} within {STATE_WAIT:?}"))
-}
-
-/// Runs `argv` in machine `name`, feeding it `stdin` (closing it after) if given: its stdout,
-/// stderr and exit.
-async fn exec(
-    client: &mut MachinedClient<Channel>,
-    name: &str,
-    argv: &[&str],
-    stdin: Option<&[u8]>,
-) -> Result<(Vec<u8>, Vec<u8>, proto::exec_exit::Status), tonic::Status> {
-    let start = proto::ExecStart {
-        name: name.into(),
-        argv: argv.iter().map(|a| a.to_string()).collect(),
-        stdin: stdin.is_some(),
-        ..Default::default()
-    };
-    let mut requests = vec![exec_request::Request::Start(start)];
-    if let Some(data) = stdin {
-        requests.push(exec_request::Request::Stdin(data.to_vec()));
-        requests.push(exec_request::Request::CloseStdin(proto::ExecCloseStdin {}));
-    }
-    let requests =
-        tokio_stream::iter(requests.into_iter().map(|r| proto::ExecRequest { request: Some(r) }));
-    let mut answers = client.exec(requests).await?.into_inner();
-    let first = answers.message().await?.and_then(|a| a.response);
-    let Some(exec_response::Response::Started(started)) = first else {
-        panic!("an exec's first answer is its start: {first:?}");
-    };
-    assert_ne!(started.pid, 0);
-    let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
-    while let Some(answer) = answers.message().await? {
-        match answer.response.unwrap() {
-            exec_response::Response::Stdout(d) => stdout.extend(d),
-            exec_response::Response::Stderr(d) => stderr.extend(d),
-            exec_response::Response::Exit(exit) => {
-                assert!(answers.message().await?.is_none(), "the exit is the last answer");
-                return Ok((stdout, stderr, exit.status.unwrap()));
-            }
-            other => panic!("unexpected {other:?}"),
-        }
-    }
-    panic!("the exec ended with no exit");
+    .unwrap_or_else(|_| panic!("{name}: no {state:?} within {STATE_WAIT:?}"))
 }
 
 /// What the guest wrote to its console so far.
@@ -203,41 +153,67 @@ async fn console(client: &mut MachinedClient<Channel>, name: &str) -> String {
     String::from_utf8_lossy(&text).replace("\r\n", "\n")
 }
 
+/// Polls machine `name`'s console until it holds `needle`: the console then.
+async fn console_has(client: &mut MachinedClient<Channel>, name: &str, needle: &str) -> String {
+    tokio::time::timeout(STATE_WAIT, async {
+        loop {
+            let text = console(client, name).await;
+            if text.contains(needle) {
+                return text;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{name}: no {needle:?} on its console within {STATE_WAIT:?}"))
+}
+
+/// A command line making the guest's init run `script` and power off.
+fn sh(script: &str) -> String {
+    format!("quiet libmachine_action=sh libmachine_sh=\"{script}\"")
+}
+
+async fn start(client: &mut MachinedClient<Channel>, name: &str) -> proto::Machine {
+    let started = client.start_machine(proto::StartMachineRequest { name: name.into() }).await;
+    started.unwrap().into_inner().machine.unwrap()
+}
+
 /// A machine boots from a cell (board 13992): its root is Fxfs on its extent store device, from
 /// a cell of machined's embedded daemon, its own (forked from a base the daemon imported); what
-/// its guest writes there is the cell's, there again when it starts again, and no other machine's.
+/// its guest writes there is the cell's, there for the next machine on it, and no other machine's.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_machine_boots_from_its_cell() {
     let Some((kernel, initramfs)) = guest() else { return };
     let daemon = Daemon::start_guest(&kernel, &initramfs).await;
     let mut client = daemon.client.clone();
-    for name in ["one", "two"] {
-        create(&mut client, name, daemon.spec("quiet libmachine_action=agent").await).await;
-        client.start_machine(proto::StartMachineRequest { name: name.into() }).await.unwrap();
-    }
-    let (mounts, _, _) = exec(&mut client, "one", &["cat", "/proc/mounts"], None).await.unwrap();
-    let mounts = String::from_utf8(mounts).unwrap();
-    assert!(mounts.lines().any(|l| l.starts_with("root / cladefs rw")), "{mounts}");
-    let write = ["sh", "-c", "echo kept > /kept && sync"];
-    let (_, _, exit) = exec(&mut client, "one", &write, None).await.unwrap();
-    assert_eq!(exit, proto::exec_exit::Status::Code(0));
-    let (_, _, exit) = exec(&mut client, "two", &["test", "-e", "/kept"], None).await.unwrap();
-    assert_eq!(exit, proto::exec_exit::Status::Code(1), "the other machine's root is its own");
+    let write = sh("grep ' / ' /proc/mounts; echo kept > /kept && sync");
+    let one = daemon.spec(&write).await;
+    let root = one.root;
+    create(&mut client, "one", one).await;
+    start(&mut client, "one").await;
+    let stopped = wait_for_state(&mut client, "one", proto::MachineState::Stopped).await;
+    assert_eq!(stopped.last_exit.unwrap().reason(), proto::ExitReason::Poweroff);
+    let text = console_has(&mut client, "one", "sh exited 0").await;
+    assert!(text.contains("root / cladefs rw"), "{text}");
 
-    let stop = proto::StopMachineRequest {
-        name: "one".into(),
-        sync_filesystems: true,
-        ..Default::default()
-    };
-    client.stop_machine(stop).await.unwrap();
-    client.start_machine(proto::StartMachineRequest { name: "one".into() }).await.unwrap();
-    let (kept, _, exit) = exec(&mut client, "one", &["cat", "/kept"], None).await.unwrap();
-    assert_eq!((kept, exit), (b"kept\n".to_vec(), proto::exec_exit::Status::Code(0)));
+    // Another machine's root is its own.
+    create(&mut client, "two", daemon.spec(&sh("test -e /kept; echo kept=$?")).await).await;
+    start(&mut client, "two").await;
+    let text = console_has(&mut client, "two", "sh exited").await;
+    assert!(text.contains("kept=1"), "{text}");
+
+    // The cell the first wrote, under a machine after it.
+    let spec = proto::MachineSpec { root, ..daemon.spec(&sh("cat /kept")).await };
+    create(&mut client, "after", spec).await;
+    start(&mut client, "after").await;
+    let text = console_has(&mut client, "after", "sh exited").await;
+    assert!(text.contains("\nkept\n"), "{text}");
 
     // A cell one machine has open, another can't boot from.
-    let one = client.get_machine(proto::GetMachineRequest { name: "one".into() }).await;
-    let root = one.unwrap().into_inner().machine.unwrap().spec.unwrap().root;
-    let twin = proto::MachineSpec { root, ..daemon.spec("quiet libmachine_action=agent").await };
+    let held = daemon.spec("quiet libmachine_action=hang").await;
+    let twin = proto::MachineSpec { root: held.root, ..daemon.spec("quiet").await };
+    create(&mut client, "held", held).await;
+    start(&mut client, "held").await;
     create(&mut client, "twin", twin).await;
     let started = client.start_machine(proto::StartMachineRequest { name: "twin".into() }).await;
     let refused = started.unwrap_err();
@@ -245,107 +221,46 @@ async fn a_machine_boots_from_its_cell() {
     daemon.shutdown().await;
 }
 
-/// A machine's balloon (board 13490): what its guest frees goes back to the host by itself
-/// (free page reporting), its helper's memory falling with it; and a target the host sets, which
-/// the guest's driver inflates to and deflates from.
+/// A machine's balloon (board 13490), which hotbed asks for: what its guest frees goes back to the
+/// host by itself (free page reporting), its helper's memory falling with it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_balloon_gives_memory_back() {
     let Some((kernel, initramfs)) = guest() else { return };
     let daemon = Daemon::start_guest(&kernel, &initramfs).await;
     let mut client = daemon.client.clone();
+    // 512 MiB used and held for the host to see (the sleep), then freed.
+    let script = "cat /sys/bus/virtio/devices/*/device; \
+        mount -t tmpfs -o size=600m none /tmp && \
+        dd if=/dev/urandom of=/tmp/f bs=1M count=512 2>/dev/null && sync; \
+        echo filled; sleep 15; rm /tmp/f; echo freed; sleep 3600";
     let spec = proto::MachineSpec {
         memory_bytes: 1 << 30,
         balloon: true,
-        ..daemon.spec("quiet libmachine_action=agent").await
+        ..daemon.spec(&sh(script)).await
     };
     create(&mut client, "b", spec).await;
-    let started = client.start_machine(proto::StartMachineRequest { name: "b".into() }).await;
-    let pid = started.unwrap().into_inner().machine.unwrap().pid;
-    let balloon =
-        |target: Option<u64>| proto::BalloonRequest { name: "b".into(), target_bytes: target };
-
-    // 512 MiB used, then freed.
-    let fill = "mount -t tmpfs -o size=600m none /tmp && dd if=/dev/urandom of=/tmp/f bs=1M count=512 2>/dev/null && sync";
-    let (_, err, exit) = exec(&mut client, "b", &["sh", "-c", fill], None).await.unwrap();
-    assert_eq!(exit, proto::exec_exit::Status::Code(0), "{}", String::from_utf8_lossy(&err));
+    let pid = start(&mut client, "b").await.pid;
+    let text = console_has(&mut client, "b", "filled").await;
+    // virtio-balloon's device type is 5.
+    assert!(text.contains("0x0005"), "a balloon device among the guest's: {text}");
     let full = common::footprint(pid);
     assert!(full > 512 << 20, "the helper holds the guest's 512 MiB: {full}");
-    let (_, _, exit) = exec(&mut client, "b", &["rm", "/tmp/f"], None).await.unwrap();
-    assert_eq!(exit, proto::exec_exit::Status::Code(0));
-    let back = tokio::time::timeout(STATE_WAIT, async {
-        loop {
-            let now = common::footprint(pid);
-            if now + (384 << 20) < full {
-                return now;
-            }
+    console_has(&mut client, "b", "freed").await;
+    tokio::time::timeout(STATE_WAIT, async {
+        while common::footprint(pid) + (384 << 20) > full {
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
     })
-    .await;
-    let back = match back {
-        Ok(back) => back,
-        Err(_) => {
-            let now = client.balloon(balloon(None)).await.unwrap().into_inner().balloon.unwrap();
-            let (dmesg, _, _) = exec(&mut client, "b", &["sh", "-c", "dmesg | grep -i -e balloon -e reporting; ls /sys/bus/virtio/drivers/; cat /sys/bus/virtio/devices/*/features"], None).await.unwrap();
-            panic!(
-                "the helper still holds {} of {full} bytes; {now:?}; guest: {}",
-                common::footprint(pid),
-                String::from_utf8_lossy(&dmesg)
-            );
-        }
-    };
-    let reported = client.balloon(balloon(None)).await.unwrap().into_inner().balloon.unwrap();
-    assert!(reported.discarded_bytes >= 384 << 20, "{reported:?}, {back} of {full}");
-    assert_eq!((reported.target_bytes, reported.actual_bytes), (0, 0));
-
-    // Inflated to a target, then deflated.
-    let target = 256 << 20;
-    let set = client.balloon(balloon(Some(target))).await.unwrap().into_inner().balloon.unwrap();
-    assert_eq!(set.target_bytes, target);
-    let inflated = tokio::time::timeout(STATE_WAIT, async {
-        loop {
-            let now = client.balloon(balloon(None)).await.unwrap().into_inner().balloon.unwrap();
-            if now.actual_bytes == target {
-                return now;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    })
     .await
-    .expect("the guest inflated its balloon to the target");
-    assert!(inflated.discarded_bytes > reported.discarded_bytes, "{inflated:?}");
-    client.balloon(balloon(Some(0))).await.unwrap();
-    tokio::time::timeout(STATE_WAIT, async {
-        while client
-            .balloon(balloon(None))
-            .await
-            .unwrap()
-            .into_inner()
-            .balloon
-            .unwrap()
-            .actual_bytes
-            != 0
-        {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    })
-    .await
-    .expect("the guest deflated its balloon");
-    let (_, _, exit) = exec(&mut client, "b", &["true"], None).await.unwrap();
-    assert_eq!(exit, proto::exec_exit::Status::Code(0), "the guest runs on");
-
-    // A machine without one has none.
-    create(&mut client, "plain", daemon.spec("quiet libmachine_action=agent").await).await;
-    client.start_machine(proto::StartMachineRequest { name: "plain".into() }).await.unwrap();
-    let none =
-        client.balloon(proto::BalloonRequest { name: "plain".into(), target_bytes: None }).await;
-    assert_eq!(none.unwrap_err().code(), Code::FailedPrecondition);
+    .unwrap_or_else(|_| {
+        panic!("the helper still holds {} of {full} bytes", common::footprint(pid))
+    });
     daemon.shutdown().await;
 }
 
-/// A machine's network (board 14131, on Hypervisor.framework too): its guest reaches a host
-/// listener its egress rules allow, through its gateway, which stands for the host's loopback,
-/// and is refused one they don't.
+/// A machine's network (board 14131), as hotbed's egress rule gives it, the one rule allowing "*":
+/// its guest reaches a host listener through its gateway, which stands for the host's loopback,
+/// where a rule allows it, and is refused where none does.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_machine_reaches_what_its_network_allows() {
     let Some((kernel, initramfs)) = guest() else { return };
@@ -361,31 +276,31 @@ async fn a_machine_reaches_what_its_network_allows() {
         first_port: u32::from(port),
         last_port: u32::from(port),
     };
+    let script = format!(
+        "echo hello from the guest | nc 10.0.2.1 {port}; echo sent=$?; \
+         nc 10.0.2.1 {denied_port} </dev/null; echo refused=$?"
+    );
     let spec = proto::MachineSpec {
         network: Some(proto::Network { egress: vec![rule], ..Default::default() }),
-        ..daemon.spec("quiet libmachine_action=agent").await
+        ..daemon.spec(&sh(&script)).await
     };
     create(&mut client, "n", spec).await;
-    client.start_machine(proto::StartMachineRequest { name: "n".into() }).await.unwrap();
     let served = std::thread::spawn(move || {
         let (mut conn, _) = allowed.accept().unwrap();
         let mut got = String::new();
         conn.read_to_string(&mut got).unwrap();
         got
     });
-    let send = format!("echo hello from the guest | nc 10.0.2.1 {port}");
-    let (_, err, exit) = exec(&mut client, "n", &["sh", "-c", &send], None).await.unwrap();
-    assert_eq!(exit, proto::exec_exit::Status::Code(0), "{}", String::from_utf8_lossy(&err));
+    start(&mut client, "n").await;
+    let text = console_has(&mut client, "n", "sh exited").await;
     assert_eq!(served.join().unwrap(), "hello from the guest\n");
-    let refused = format!("nc 10.0.2.1 {denied_port} </dev/null");
-    let (_, _, exit) = exec(&mut client, "n", &["sh", "-c", &refused], None).await.unwrap();
-    assert_eq!(exit, proto::exec_exit::Status::Code(1), "a port its rules don't allow");
+    assert!(text.contains("sent=0"), "{text}");
+    assert!(text.contains("refused=1"), "a port its rules don't allow: {text}");
     daemon.shutdown().await;
 }
 
-/// Each machine runs in a helper process of its own (board 13460): several at once, on
-/// Hypervisor.framework too; one whose helper dies ends with that said, while machined and the
-/// others run on.
+/// Each machine runs in a helper process of its own (board 13460): several at once; one whose
+/// helper dies ends with that said, while machined and the others run on.
 #[tokio::test(flavor = "multi_thread")]
 async fn machines_run_in_helpers_of_their_own() {
     let Some((kernel, initramfs)) = guest() else { return };
@@ -393,9 +308,8 @@ async fn machines_run_in_helpers_of_their_own() {
     let mut client = daemon.client.clone();
     let mut pids = Vec::new();
     for name in ["a", "b", "c"] {
-        create(&mut client, name, daemon.spec("quiet libmachine_action=agent").await).await;
-        let started = client.start_machine(proto::StartMachineRequest { name: name.into() }).await;
-        let started = started.unwrap().into_inner().machine.unwrap();
+        create(&mut client, name, daemon.spec("quiet libmachine_action=hang").await).await;
+        let started = start(&mut client, name).await;
         assert_eq!(state_of(&started), proto::MachineState::Running);
         assert_ne!(started.pid, 0);
         assert_ne!(started.pid, std::process::id(), "not machined's own process");
@@ -404,19 +318,12 @@ async fn machines_run_in_helpers_of_their_own() {
     pids.dedup();
     assert_eq!(pids.len(), 3, "a process each: {pids:?}");
     for name in ["a", "b", "c"] {
-        let (stdout, _, exit) = exec(&mut client, name, &["echo", name], None).await.unwrap();
-        assert_eq!(
-            (String::from_utf8_lossy(&stdout).into_owned(), exit),
-            (format!("{name}\n"), proto::exec_exit::Status::Code(0))
-        );
+        console_has(&mut client, name, INIT_MARKER).await;
     }
 
-    let watch = proto::WatchMachineRequest { name: "b".into() };
-    let mut watch = client.watch_machine(watch).await.unwrap().into_inner();
-    wait_for_state(&mut watch, proto::MachineState::Running).await;
     // SAFETY: a plain system call, on the test's own machine's helper.
     assert_eq!(unsafe { libc::kill(pids[1] as libc::pid_t, libc::SIGKILL) }, 0);
-    let stopped = wait_for_state(&mut watch, proto::MachineState::Stopped).await;
+    let stopped = wait_for_state(&mut client, "b", proto::MachineState::Stopped).await;
     let exit = stopped.last_exit.unwrap();
     assert_eq!(exit.reason(), proto::ExitReason::Failed);
     assert_eq!(
@@ -426,15 +333,13 @@ async fn machines_run_in_helpers_of_their_own() {
     let gone = client.get_machine(proto::GetMachineRequest { name: "b".into() }).await;
     assert_eq!(gone.unwrap().into_inner().machine.unwrap().pid, 0);
     for name in ["a", "c"] {
-        let (stdout, _, _) = exec(&mut client, name, &["echo", "on"], None).await.unwrap();
-        assert_eq!(stdout, b"on\n", "{name} runs on");
+        let got = client.get_machine(proto::GetMachineRequest { name: name.into() }).await;
+        let machine = got.unwrap().into_inner().machine.unwrap();
+        assert_eq!(state_of(&machine), proto::MachineState::Running, "{name} runs on");
     }
     // Started again, in a new helper.
-    let again = client.start_machine(proto::StartMachineRequest { name: "b".into() }).await;
-    let again = again.unwrap().into_inner().machine.unwrap();
+    let again = start(&mut client, "b").await;
     assert_ne!(again.pid, pids[1]);
-    let (stdout, _, _) = exec(&mut client, "b", &["echo", "back"], None).await.unwrap();
-    assert_eq!(stdout, b"back\n");
     daemon.shutdown().await;
     for pid in [pids[0], pids[2], again.pid] {
         // SAFETY: signal 0 tests the process alone.
@@ -443,11 +348,10 @@ async fn machines_run_in_helpers_of_their_own() {
     }
 }
 
-/// The whole life of a machine, over gRPC: made, booted, a command run with its stdin and
-/// output streamed, files in and out, its console, its vsock through its socket, stopped with its
-/// filesystems synced, deleted.
+/// The life of a machine, over gRPC: made, booted, its console streamed, its vsock through its
+/// socket, deleted.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_machine_boots_runs_a_command_and_stops() {
+async fn a_machine_is_made_booted_and_deleted() {
     let Some((kernel, initramfs)) = guest() else { return };
     let daemon = Daemon::start_guest(&kernel, &initramfs).await;
     let mut client = daemon.client.clone();
@@ -455,98 +359,73 @@ async fn a_machine_boots_runs_a_command_and_stops() {
     let made = create(&mut client, "m1", daemon.spec("quiet libmachine_action=agent").await).await;
     assert_eq!(state_of(&made), proto::MachineState::Created);
     assert_eq!(made.vsock_socket, "", "no vsock socket before it runs");
-    let watch = proto::WatchMachineRequest { name: "m1".into() };
-    let mut watch = client.watch_machine(watch).await.unwrap().into_inner();
-    wait_for_state(&mut watch, proto::MachineState::Created).await;
+    let listed = client.list_machines(proto::ListMachinesRequest {}).await;
+    assert_eq!(listed.unwrap().into_inner().machines.len(), 1);
 
-    let started = client.start_machine(proto::StartMachineRequest { name: "m1".into() }).await;
-    let started = started.unwrap().into_inner().machine.unwrap();
+    let started = start(&mut client, "m1").await;
     assert_eq!(state_of(&started), proto::MachineState::Running);
-    wait_for_state(&mut watch, proto::MachineState::Running).await;
     let again = client.start_machine(proto::StartMachineRequest { name: "m1".into() }).await;
     assert_eq!(again.unwrap_err().code(), Code::FailedPrecondition, "it runs already");
+    let delete = proto::DeleteMachineRequest { name: "m1".into(), force: false };
+    let refused = client.delete_machine(delete).await.unwrap_err();
+    assert_eq!(refused.code(), Code::FailedPrecondition, "it runs: {refused:?}");
 
-    let script = "echo hi; echo err >&2; read x; echo got $x; exit 3";
-    let (stdout, stderr, exit) =
-        exec(&mut client, "m1", &["sh", "-c", script], Some(b"abc\n")).await.unwrap();
-    assert_eq!(String::from_utf8_lossy(&stdout), "hi\ngot abc\n");
-    assert_eq!(String::from_utf8_lossy(&stderr), "err\n");
-    assert_eq!(exit, proto::exec_exit::Status::Code(3));
-    let (_, _, exit) = exec(&mut client, "m1", &["sh", "-c", "kill -9 $$"], None).await.unwrap();
-    assert_eq!(exit, proto::exec_exit::Status::Signal(9));
-
-    let chunks = [
-        proto::WriteFileRequest {
-            name: "m1".into(),
-            path: "/tmp/f".into(),
-            mode: 0o640,
-            data: b"one ".to_vec(),
-        },
-        proto::WriteFileRequest { data: b"two".to_vec(), ..Default::default() },
-    ];
-    client.write_file(tokio_stream::iter(chunks)).await.unwrap();
-    let read = proto::ReadFileRequest { name: "m1".into(), path: "/tmp/f".into() };
-    let mut answers = client.read_file(read).await.unwrap().into_inner();
-    let mut data = Vec::new();
-    while let Some(answer) = answers.next().await {
-        data.extend(answer.unwrap().data);
-    }
-    assert_eq!(data, b"one two");
-    let (stdout, _, _) =
-        exec(&mut client, "m1", &["stat", "-c", "%a", "/tmp/f"], None).await.unwrap();
-    assert_eq!(String::from_utf8_lossy(&stdout), "640\n");
-    let missing = proto::ReadFileRequest { name: "m1".into(), path: "/nope".into() };
-    let missing = match client.read_file(missing).await {
-        Ok(answers) => answers.into_inner().next().await.unwrap().unwrap_err(),
-        Err(status) => status,
-    };
-    assert_eq!(missing.code(), Code::NotFound, "{missing:?}");
-
-    assert!(console(&mut client, "m1").await.contains(INIT_MARKER));
+    // A console followed, which ends with its machine.
+    let follow = proto::StreamConsoleRequest { name: "m1".into(), offset: 0, follow: true };
+    let mut following = client.stream_console(follow).await.unwrap().into_inner();
+    let first = tokio::time::timeout(STATE_WAIT, following.next()).await.unwrap();
+    assert!(!first.unwrap().unwrap().data.is_empty());
+    console_has(&mut client, "m1", INIT_MARKER).await;
 
     // The vsock socket speaks Firecracker's protocol: here to the agent's port, which answers
     // with its preamble.
     let machine = client.get_machine(proto::GetMachineRequest { name: "m1".into() }).await;
     let socket = machine.unwrap().into_inner().machine.unwrap().vsock_socket;
     let preamble = tokio::task::spawn_blocking(move || {
-        let mut s = std::os::unix::net::UnixStream::connect(&socket).unwrap();
-        s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
-        s.write_all(format!("CONNECT {}\n", libmachine_agent::DEFAULT_PORT).as_bytes()).unwrap();
-        let mut ok = Vec::new();
-        let mut byte = [0u8];
-        while byte != *b"\n" {
-            s.read_exact(&mut byte).unwrap();
-            ok.push(byte[0]);
+        // The guest's agent listens once its init has started it: refused until then.
+        let until = std::time::Instant::now() + STATE_WAIT;
+        loop {
+            let mut s = std::os::unix::net::UnixStream::connect(&socket).unwrap();
+            s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+            let port = libmachine_agent::DEFAULT_PORT;
+            s.write_all(format!("CONNECT {port}\n").as_bytes()).unwrap();
+            let mut ok = Vec::new();
+            let mut byte = [0u8];
+            let answered = loop {
+                match s.read_exact(&mut byte) {
+                    Ok(()) => ok.push(byte[0]),
+                    Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break false,
+                    Err(e) => panic!("the vsock socket: {e}"),
+                }
+                if byte == *b"\n" {
+                    break true;
+                }
+            };
+            if !answered {
+                assert!(std::time::Instant::now() < until, "no agent behind the vsock socket");
+                std::thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+            assert!(ok.starts_with(b"OK "), "{:?}", String::from_utf8_lossy(&ok));
+            s.write_all(&libmachine_agent::preamble()).unwrap();
+            let mut theirs = [0u8; 8];
+            s.read_exact(&mut theirs).unwrap();
+            return theirs;
         }
-        assert!(ok.starts_with(b"OK "), "{:?}", String::from_utf8_lossy(&ok));
-        s.write_all(&libmachine_agent::preamble()).unwrap();
-        let mut theirs = [0u8; 8];
-        s.read_exact(&mut theirs).unwrap();
-        theirs
     })
     .await
     .unwrap();
     assert_eq!(preamble, libmachine_agent::preamble());
 
-    let stop =
-        proto::StopMachineRequest { name: "m1".into(), sync_filesystems: true, timeout_ms: 0 };
-    let stopped = client.stop_machine(stop).await.unwrap().into_inner().machine.unwrap();
-    assert_eq!(state_of(&stopped), proto::MachineState::Stopped);
-    let exit = stopped.status.unwrap().last_exit.unwrap();
-    assert_eq!(exit.reason(), proto::ExitReason::Stopped);
-    assert_eq!(stopped.vsock_socket, "", "no vsock socket once it stopped");
-    wait_for_state(&mut watch, proto::MachineState::Stopped).await;
-    let refused = exec(&mut client, "m1", &["true"], None).await.unwrap_err();
-    assert_eq!(refused.code(), Code::FailedPrecondition, "{refused:?}");
-
     client
-        .delete_machine(proto::DeleteMachineRequest { name: "m1".into(), force: false })
+        .delete_machine(proto::DeleteMachineRequest { name: "m1".into(), force: true })
         .await
         .unwrap();
     let gone = client.get_machine(proto::GetMachineRequest { name: "m1".into() }).await;
     assert_eq!(gone.unwrap_err().code(), Code::NotFound);
-    let ended = tokio::time::timeout(STATE_WAIT, watch.message()).await.unwrap().unwrap();
-    assert!(ended.is_none(), "the watch ends with its machine: {ended:?}");
+    let ended =
+        tokio::time::timeout(STATE_WAIT, async { while following.next().await.is_some() {} }).await;
+    assert!(ended.is_ok(), "the console stream ends with its machine");
     daemon.shutdown().await;
 }
 
@@ -558,122 +437,37 @@ async fn a_guest_that_powers_off_stops_its_machine() {
     let daemon = Daemon::start_guest(&kernel, &initramfs).await;
     let mut client = daemon.client.clone();
     create(&mut client, "off", daemon.spec("quiet").await).await;
-    let watch = proto::WatchMachineRequest { name: "off".into() };
-    let mut watch = client.watch_machine(watch).await.unwrap().into_inner();
     for boot in 1..=2 {
-        client.start_machine(proto::StartMachineRequest { name: "off".into() }).await.unwrap();
-        let stopped = wait_for_state(&mut watch, proto::MachineState::Stopped).await;
+        start(&mut client, "off").await;
+        let stopped = wait_for_state(&mut client, "off", proto::MachineState::Stopped).await;
         assert_eq!(stopped.last_exit.unwrap().reason(), proto::ExitReason::Poweroff);
         let markers = console(&mut client, "off").await.matches(INIT_MARKER).count();
         assert_eq!(markers, boot, "the console is kept across starts");
     }
 
-    create(&mut client, "left", daemon.spec("quiet libmachine_action=agent").await).await;
-    client.start_machine(proto::StartMachineRequest { name: "left".into() }).await.unwrap();
+    create(&mut client, "left", daemon.spec("quiet libmachine_action=hang").await).await;
+    start(&mut client, "left").await;
     daemon.shutdown().await;
 }
 
 /// Callers that go mid-call leave nothing half-done (hotbed review 150): a start whose caller's
-/// deadline passes still finishes, RUNNING, and is stopped whole; an exec whose caller goes has
-/// its command killed.
+/// deadline passes still finishes, RUNNING, and is deleted whole.
 #[tokio::test(flavor = "multi_thread")]
 async fn callers_that_go_leave_nothing_half_done() {
     let Some((kernel, initramfs)) = guest() else { return };
     let daemon = Daemon::start_guest(&kernel, &initramfs).await;
     let mut client = daemon.client.clone();
-    create(&mut client, "c", daemon.spec("quiet libmachine_action=agent").await).await;
-    let watch = proto::WatchMachineRequest { name: "c".into() };
-    let mut watch = client.watch_machine(watch).await.unwrap().into_inner();
+    create(&mut client, "c", daemon.spec("quiet libmachine_action=hang").await).await;
     let mut start = tonic::Request::new(proto::StartMachineRequest { name: "c".into() });
     start.set_timeout(Duration::from_millis(1));
     let gone = client.start_machine(start).await.unwrap_err();
     // tonic's client says its own deadline passing as CANCELLED.
     assert_eq!(gone.code(), Code::Cancelled, "{gone:?}");
-    wait_for_state(&mut watch, proto::MachineState::Running).await;
-
-    // How many processes named `sleep` the guest runs.
-    let sleepers = async |client: &mut MachinedClient<Channel>| {
-        let count = "n=0; for f in /proc/[0-9]*/comm; do read c < $f 2>/dev/null && \
-                     [ \"$c\" = sleep ] && n=$((n+1)); done; echo $n";
-        let (stdout, _, _) = exec(client, "c", &["sh", "-c", count], None).await.unwrap();
-        String::from_utf8_lossy(&stdout).trim().parse::<u32>().unwrap()
-    };
-    // A caller of its own, on a runtime of its own, which dies: its socket closes, as a VM
-    // manager's that crashed.
-    let socket = daemon.server.as_ref().unwrap().socket().unwrap().to_owned();
-    let caller = tokio::runtime::Runtime::new().unwrap();
-    let (started_tx, started) = tokio::sync::oneshot::channel();
-    caller.spawn(async move {
-        let mut caller = connect_unix(&socket).await.unwrap();
-        let start = proto::ExecStart {
-            name: "c".into(),
-            argv: vec!["sleep".into(), "3600".into()],
-            ..Default::default()
-        };
-        let requests = tokio_stream::iter([proto::ExecRequest {
-            request: Some(exec_request::Request::Start(start)),
-        }])
-        .chain(tokio_stream::pending());
-        let mut answers = caller.exec(requests).await.unwrap().into_inner();
-        let first = answers.message().await.unwrap().unwrap().response;
-        started_tx.send(first).unwrap();
-        // The caller and its call kept until the runtime goes.
-        std::future::pending::<()>().await;
-        drop((answers, caller));
-    });
-    let first = started.await.unwrap();
-    assert!(matches!(first, Some(exec_response::Response::Started(_))), "{first:?}");
-    assert_eq!(sleepers(&mut client).await, 1);
-    tokio::task::spawn_blocking(move || caller.shutdown_background()).await.unwrap();
-    tokio::time::timeout(STATE_WAIT, async {
-        while sleepers(&mut client).await != 0 {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .expect("the command of an exec whose caller went is killed");
-    daemon.shutdown().await;
-}
-
-/// A machine booting from a cell, as every machine does, is not snapshotted or suspended yet: on
-/// KVM refused with FAILED_PRECONDITION, its versions waiting on board 13994; on
-/// Hypervisor.framework with UNIMPLEMENTED (board 13399). It runs on, as it was.
-#[tokio::test(flavor = "multi_thread")]
-async fn snapshots_restores_and_suspensions() {
-    let Some((kernel, initramfs)) = guest() else { return };
-    let daemon = Daemon::start_guest(&kernel, &initramfs).await;
-    let mut client = daemon.client.clone();
-    create(&mut client, "tmpl", daemon.spec("quiet libmachine_action=agent").await).await;
-    client.start_machine(proto::StartMachineRequest { name: "tmpl".into() }).await.unwrap();
-    let write = proto::WriteFileRequest {
-        name: "tmpl".into(),
-        path: "/tmp/prepared".into(),
-        mode: 0o644,
-        data: b"yes".to_vec(),
-    };
-    client.write_file(tokio_stream::iter([write])).await.unwrap();
-
-    let snapshot = proto::SnapshotMachineRequest { name: "tmpl".into(), snapshot: "s1".into() };
-    let snapshot = client.snapshot_machine(snapshot).await;
-    let suspend =
-        client.suspend_machine(proto::SuspendMachineRequest { name: "tmpl".into() }).await;
-    // Hypervisor.framework's machines aren't snapshotted (board 13399); KVM's booting from a cell,
-    // as every machine does, not yet: their versions wait on board 13994.
-    let refused =
-        if cfg!(target_os = "macos") { Code::Unimplemented } else { Code::FailedPrecondition };
-    assert_eq!(snapshot.unwrap_err().code(), refused);
-    assert_eq!(suspend.unwrap_err().code(), refused);
-    let restore = proto::RestoreMachineRequest {
-        snapshot: "s1".into(),
-        name: "clone".into(),
-        labels: Default::default(),
-        vsock_listen_ports: vec![],
-    };
-    let restored = client.restore_machine(restore).await;
-    let none = if cfg!(target_os = "macos") { Code::Unimplemented } else { Code::NotFound };
-    assert_eq!(restored.unwrap_err().code(), none, "no snapshot was taken");
-    let (stdout, _, _) = exec(&mut client, "tmpl", &["cat", "/tmp/prepared"], None).await.unwrap();
-    assert_eq!(stdout, b"yes", "it runs on, as it was");
+    wait_for_state(&mut client, "c", proto::MachineState::Running).await;
+    client
+        .delete_machine(proto::DeleteMachineRequest { name: "c".into(), force: true })
+        .await
+        .unwrap();
     daemon.shutdown().await;
 }
 
@@ -760,20 +554,6 @@ async fn requests_that_mean_nothing_are_refused() {
     for (what, got, want) in &refusals {
         assert_eq!(got, want, "{what}");
     }
-
-    let exec_on_created = exec(&mut client, "a", &["true"], None).await.unwrap_err();
-    assert_eq!(exec_on_created.code(), Code::FailedPrecondition);
-    let no_argv = exec(&mut client, "a", &[], None).await.unwrap_err();
-    assert_eq!(no_argv.code(), Code::InvalidArgument);
-    let first_not_start = tokio_stream::iter([proto::ExecRequest {
-        request: Some(exec_request::Request::Signal(9)),
-    }]);
-    let not_start = client.exec(first_not_start).await.unwrap_err();
-    assert_eq!(not_start.code(), Code::InvalidArgument);
-    let write =
-        proto::WriteFileRequest { name: "a".into(), path: "relative".into(), ..Default::default() };
-    let relative = client.write_file(tokio_stream::iter([write])).await.unwrap_err();
-    assert_eq!(relative.code(), Code::InvalidArgument);
 
     // A kernel that won't load: the start fails, the machine STOPPED, saying why; on a host that
     // runs VMs, as the start makes one first.

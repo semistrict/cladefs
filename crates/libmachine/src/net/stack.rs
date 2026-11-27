@@ -26,10 +26,6 @@
 //!
 //! Every connection is logged when it ends (a denied one at once), with
 //! what decided it and the bytes it moved.
-//!
-//! The whole stack can be saved and restored ([`save`](Stack::save),
-//! [`restore`](Stack::restore)): everything the guest can observe goes into
-//! a [`StackState`], and the host sockets are handed out beside it.
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, Read, Write};
@@ -52,9 +48,6 @@ use super::dns::{self, Rcode};
 use super::log::{ConnectionRecord, DecidedBy, bump};
 use super::policy::{Action, Destination, Verdict};
 use super::{GATEWAY_ADDR, GUEST_ADDR, MTU, PREFIX_LEN, Shared};
-
-mod save;
-pub(crate) use save::StackState;
 
 /// The gateway's MAC address, and the guest's (locally administered).
 pub(crate) const GATEWAY_MAC: [u8; 6] = [0x02, 0, 0, 0, 0, 1];
@@ -124,23 +117,6 @@ pub(crate) trait HostNet {
     /// answer (None: the callback panicked or gave none) comes back through
     /// [`Stack::decided`] with `id`, unless its deadline passed first.
     fn decide(&mut self, id: u64, request: ConnectionRequest, decider: Decider);
-    /// Takes on `stream`, a host connection a saved stack handed out, as
-    /// connection `id` (its readiness reported as for [`connect`](Self::connect)'s).
-    /// An error: the stream cannot be used, and the connection is treated
-    /// as one whose stream was not handed back.
-    fn adopt(&mut self, id: u64, stream: &Self::Stream) -> io::Result<()>;
-}
-
-/// What would make the stack act for the guest on a host connection,
-/// while nothing else happens: what a suspended machine's watcher waits for
-/// on its host socket ([`Stack::watch_list`]).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct WakeOn {
-    /// Data or a close from the host: the stack would pass it on.
-    pub(crate) data: bool,
-    /// Room to write, or the connect's end: the stack would write what the
-    /// guest sent (making room in the guest's window), or answer its SYN.
-    pub(crate) room: bool,
 }
 
 /// What a guest frame is, to the stack.
@@ -185,29 +161,12 @@ struct Pending {
     syn: Vec<u8>,
     deadline: Instant,
     default: Verdict,
-    /// The ask rule that matched.
-    rule: usize,
     meta: Meta,
-}
-
-impl Pending {
-    /// The question for the decider.
-    fn request(&self) -> ConnectionRequest {
-        ConnectionRequest {
-            guest_port: self.guest.port(),
-            addr: self.meta.addr,
-            port: self.meta.port,
-            names: self.meta.names.clone(),
-            rule: self.rule,
-        }
-    }
 }
 
 struct Conn<S> {
     meta: Meta,
-    /// None only for a restored connection whose host stream was not
-    /// handed back: it is being reset (`remove` is set).
-    stream: Option<S>,
+    stream: S,
     guest: SocketAddrV4,
     dst: SocketAddrV4,
     phase: Phase,
@@ -359,8 +318,7 @@ pub(crate) struct Stack<H: HostNet> {
     /// Each DNS lookup in flight: who asked, and the query.
     lookups: HashMap<u64, (IpEndpoint, dns::Query)>,
     /// DNS replies to send, in order. The first is in the DNS socket when
-    /// `dns_in_socket`: smoltcp holds at most one at a time, so that what
-    /// it has not sent yet is always known (and saved).
+    /// `dns_in_socket`: smoltcp holds at most one at a time.
     dns_out: VecDeque<(IpEndpoint, Vec<u8>)>,
     dns_in_socket: bool,
     names: Names,
@@ -448,12 +406,6 @@ impl<H: HostNet> Stack<H> {
         self.wall_epoch + (at.total_micros() - self.epoch.total_micros())
     }
 
-    /// The stack's time when the wall clock read `wall` (microseconds since
-    /// the Unix epoch).
-    fn instant_at(&self, wall: i64) -> Instant {
-        Instant::from_micros(self.epoch.total_micros() + (wall - self.wall_epoch))
-    }
-
     /// Sets the stack's clock, for what happens before the next poll
     /// (frames from the guest, answers): the network thread calls it when
     /// it wakes, so that a SYN after a long idle sees the real time.
@@ -497,76 +449,6 @@ impl<H: HostNet> Stack<H> {
     #[cfg(any(test, feature = "fuzzing"))]
     pub(crate) fn connection_id(&self, guest: SocketAddrV4, dst: SocketAddrV4) -> Option<u64> {
         self.tuples.get(&(guest, dst)).copied()
-    }
-
-    /// The IDs of the open connections (relaying through a smoltcp socket).
-    #[cfg(any(test, feature = "fuzzing"))]
-    pub(crate) fn open_ids(&self) -> Vec<u64> {
-        let mut ids: Vec<u64> = self
-            .conns
-            .iter()
-            .filter(|(_, c)| matches!(c.phase, Phase::Open(_)))
-            .map(|(&id, _)| id)
-            .collect();
-        ids.sort_unstable();
-        ids
-    }
-
-    /// Whether the stack will act for the guest by itself, with nothing
-    /// from outside (a suspension waits until it will not: its timers do
-    /// not run while it is saved, and what it waits for from its own
-    /// threads would answer no one): why, if it will. A DNS lookup or a
-    /// decider question in flight, frames for the guest or from it not yet
-    /// handled, a DNS reply not yet out, or anything smoltcp would send now.
-    pub(crate) fn quiet(&mut self) -> Result<(), String> {
-        // A reply smoltcp has sent leaves the queue now, not at the next
-        // poll, which an idle network does not make.
-        self.flow_dns();
-        let busy = if !self.lookups.is_empty() {
-            "a DNS lookup is in flight"
-        } else if !self.deciding.is_empty() {
-            "a connection waits for the decider"
-        } else if !self.phy.tx.is_empty() {
-            "frames wait to go to the guest"
-        } else if !self.phy.rx.is_empty() {
-            "the guest's frames wait for the network stack"
-        } else if !self.dns_out.is_empty() {
-            "a DNS reply waits to go to the guest"
-        } else if self.iface.poll_delay(self.now, &self.sockets) == Some(Duration::ZERO) {
-            "the network stack has something to send now"
-        } else {
-            return Ok(());
-        };
-        Err(busy.into())
-    }
-
-    /// What to watch each host connection for, by ID ([`WakeOn`]): a
-    /// connection being made, for its end; an open one, for data or a close
-    /// if the stack has read all the host sent and has room for more, and
-    /// for room if what the guest sent waits for it. A connection being
-    /// reset waits for nothing from its host.
-    pub(crate) fn watch_list(&self) -> Vec<(u64, WakeOn)> {
-        let mut list: Vec<(u64, WakeOn)> = self
-            .conns
-            .iter()
-            .filter(|(_, c)| c.stream.is_some())
-            .map(|(&id, c)| {
-                let wake_on = match c.phase {
-                    Phase::Connecting { .. } => WakeOn { data: false, room: true },
-                    Phase::Open(_) if c.remove => WakeOn::default(),
-                    Phase::Open(handle) => {
-                        let socket = self.sockets.get::<tcp::Socket>(handle);
-                        WakeOn {
-                            data: !c.readable && !c.host_eof && socket.can_send(),
-                            room: !c.writable && socket.recv_queue() > 0,
-                        }
-                    }
-                };
-                (id, wake_on)
-            })
-            .collect();
-        list.sort_unstable_by_key(|&(id, _)| id);
-        list
     }
 
     /// A frame from the guest.
@@ -713,10 +595,7 @@ impl<H: HostNet> Stack<H> {
         };
         let deadline = self.now + Duration::from_micros(decider.timeout().as_micros() as u64);
         let default = decider.default_verdict();
-        self.deciding.insert(
-            id,
-            Pending { guest, dst, syn: frame, deadline, default, rule: request.rule, meta },
-        );
+        self.deciding.insert(id, Pending { guest, dst, syn: frame, deadline, default, meta });
         self.tuples.insert((guest, dst), id);
         self.host.decide(id, request, decider);
     }
@@ -750,7 +629,7 @@ impl<H: HostNet> Stack<H> {
                     id,
                     Conn {
                         meta,
-                        stream: Some(stream),
+                        stream,
                         guest,
                         dst,
                         phase: Phase::Connecting { syn },
@@ -865,7 +744,7 @@ impl<H: HostNet> Stack<H> {
             return;
         }
         let syn = std::mem::take(syn);
-        let connected = conn.stream.as_ref().is_some_and(|s| s.connect_result().is_ok());
+        let connected = conn.stream.connect_result().is_ok();
         conn.meta.connected = connected;
         let dst = conn.dst;
         // The replayed SYN goes first, before any frame that came after.
@@ -1049,7 +928,7 @@ impl<H: HostNet> Stack<H> {
                 continue;
             };
             let socket = self.sockets.get_mut::<tcp::Socket>(handle);
-            if conn.remove || conn.stream.is_none() {
+            if conn.remove {
                 // Aborted: removed once its RST has gone out (smoltcp then
                 // forgets the remote end), not before: a full queue for the
                 // guest holds the RST back, and removing the socket would
@@ -1085,9 +964,7 @@ impl<H: HostNet> Stack<H> {
                 tcp::State::Closed | tcp::State::TimeWait => {
                     if !(conn.host_eof && conn.host_shut) {
                         // The guest reset the connection: so do we.
-                        if let Some(stream) = &conn.stream {
-                            stream.reset_on_drop();
-                        }
+                        conn.stream.reset_on_drop();
                     }
                     finished.push(id);
                     continue;
@@ -1140,12 +1017,6 @@ impl<H: HostNet> Stack<H> {
         let dns = self.sockets.get::<udp::Socket>(self.dns);
         assert!(!self.dns_in_socket || !self.dns_out.is_empty());
         assert!(dns.send_queue() == 0 || self.dns_in_socket);
-        for conn in self.conns.values() {
-            assert!(conn.stream.is_some() || conn.remove);
-            if conn.stream.is_none() {
-                assert!(matches!(conn.phase, Phase::Open(_)));
-            }
-        }
         let open = self.conns.values().filter(|c| matches!(c.phase, Phase::Open(_))).count();
         // The DNS socket, and one per open connection.
         assert_eq!(self.sockets.iter().count(), open + 1);
@@ -1177,9 +1048,7 @@ fn relay_one<S: HostStream>(
 }
 
 fn relay_data<S: HostStream>(conn: &mut Conn<S>, socket: &mut tcp::Socket<'_>) -> bool {
-    let Some(stream) = conn.stream.as_mut() else {
-        return false;
-    };
+    let stream = &mut conn.stream;
     let mut progress = false;
     // Host to guest.
     while conn.readable && !conn.host_eof && socket.can_send() {
@@ -1669,77 +1538,6 @@ mod tests {
         s.poll(g.tick());
         s.poll(g.tick());
         assert!(s.connection_ids().is_empty());
-        s.check_invariants();
-    }
-
-    /// What a suspension asks of the stack: it is quiet only with nothing
-    /// to do by itself (a DNS lookup in flight, frames for the guest not
-    /// taken, a reply to send all make it busy), and each host connection
-    /// is watched for what would make it act: a connection being made for
-    /// its end; an open one for data once it has read all there was, for
-    /// room only while what the guest sent waits for it.
-    #[test]
-    fn quiet_and_watch_list_say_what_a_suspension_waits_for() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let p = EgressPolicy::deny_all()
-            .allow(Ipv4Addr::LOCALHOST, port)
-            .allow(crate::net::HostPattern::name("pypi.org").unwrap(), 443);
-        let mut g = Guest::new();
-        let mut s = Stack::new(policy(p), RealStreams::default(), 1, Options::default(), g.now);
-        s.guest_frame(arp_request());
-        assert!(s.quiet().is_err(), "a frame from the guest not taken");
-        s.poll(g.tick());
-        assert!(s.quiet().is_err(), "the ARP answer not taken");
-        s.take_frame();
-        assert_eq!(s.quiet(), Ok(()));
-        assert!(s.watch_list().is_empty());
-
-        let dst = SocketAddrV4::new(GATEWAY_ADDR, port);
-        s.guest_frame(syn(40000, GATEWAY_ADDR, port));
-        s.poll(g.tick());
-        let id = s.connection_ids()[0];
-        assert_eq!(s.quiet(), Ok(()), "waiting for the host connection");
-        let room = WakeOn { data: false, room: true };
-        assert_eq!(s.watch_list(), [(id, room)]);
-        let (mut peer, _) = listener.accept().unwrap();
-        let ready = Ready { readable: true, writable: true, closed: false };
-        s.host_event(id, ready);
-        s.poll(g.tick());
-        let synack = tcp_out(&mut s).remove(0).0;
-        let their = synack.seq_number + 1;
-        s.guest_frame(segment(40000, dst, TcpControl::None, 1, their, b""));
-        s.poll(g.tick());
-        assert_eq!(s.quiet(), Ok(()));
-        // It read until the host had no more: watched for data only.
-        let data = WakeOn { data: true, room: false };
-        assert_eq!(s.watch_list(), [(id, data)]);
-        // The guest's bytes wait for room the host socket says it lacks.
-        s.host_event(id, Ready { readable: false, writable: false, closed: false });
-        s.conns.get_mut(&id).unwrap().writable = false;
-        s.guest_frame(segment(40000, dst, TcpControl::Psh, 1, their, b"hello"));
-        s.poll(g.tick());
-        tcp_out(&mut s);
-        assert_eq!(s.watch_list(), [(id, WakeOn { data: true, room: true })]);
-        s.host_event(id, ready);
-        s.poll(g.tick());
-        let mut buf = [0u8; 5];
-        peer.read_exact(&mut buf).unwrap();
-        assert_eq!(s.watch_list(), [(id, data)]);
-
-        // A DNS lookup in flight (RealStreams without threads never
-        // answers it), and the decider's question, are busy.
-        s.guest_frame(frames::udp(
-            GUEST_ADDR,
-            GATEWAY_ADDR,
-            5353,
-            53,
-            &dns::query_bytes(9, "pypi.org", dns::TYPE_A),
-        ));
-        s.poll(g.tick());
-        tcp_out(&mut s);
-        let err = s.quiet().unwrap_err();
-        assert!(err.contains("DNS lookup"), "{err}");
         s.check_invariants();
     }
 

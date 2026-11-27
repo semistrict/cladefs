@@ -36,7 +36,7 @@ const GIC_MAINTENANCE_PPI: u32 = 25;
 /// PCI's address cells' space codes (IEEE 1275 PCI bus binding): 32-bit and 64-bit memory.
 const PCI_SPACE_MEM32: u32 = 0x0200_0000;
 const PCI_SPACE_MEM64: u32 = 0x0300_0000;
-/// What the 16550's divisor counts from: the PC's.
+/// What the 16550's divisor counts from.
 const UART_CLOCK_HZ: u32 = 1_843_200;
 
 /// What the device tree describes of a machine.

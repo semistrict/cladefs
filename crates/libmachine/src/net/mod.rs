@@ -215,7 +215,6 @@ impl Shared {
     }
 
     /// Logs a finished connection.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn record(&self, record: ConnectionRecord) {
         if self.log().push(record) {
             log::bump(&self.counters.log_dropped);
@@ -237,7 +236,6 @@ impl Network {
         Ok(Self { shared: Shared::new(config)? })
     }
 
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn shared(&self) -> Arc<Shared> {
         self.shared.clone()
     }

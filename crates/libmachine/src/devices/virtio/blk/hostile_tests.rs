@@ -85,7 +85,7 @@ fn disk(dir: &std::path::Path, len: u64) -> Block {
     Block::new(&Disk::new(&path)).unwrap()
 }
 
-/// This process's peak resident memory, in bytes (`ru_maxrss`: bytes on macOS, KiB on Linux).
+/// This process's peak resident memory, in bytes (`ru_maxrss`, bytes on macOS).
 fn peak_resident() -> u64 {
     // SAFETY: Fills a struct of this frame's.
     let usage = unsafe {
@@ -93,7 +93,7 @@ fn peak_resident() -> u64 {
         assert_eq!(libc::getrusage(libc::RUSAGE_SELF, &mut usage), 0);
         usage
     };
-    usage.ru_maxrss as u64 * if cfg!(target_os = "macos") { 1 } else { 1024 }
+    usage.ru_maxrss as u64
 }
 
 /// Serves the chain `post` made on a fresh queue over a disk of `disk_len` bytes: what was

@@ -22,10 +22,9 @@ pub struct Config {
     /// The helper binary each machine's VM runs in, a process of its own (`machined-vm`, built
     /// with machined, beside it: `Config::default_helper`).
     pub helper: PathBuf,
-    /// machined's own directory: its machines' vsock sockets, snapshots and suspensions. Made
-    /// mode 0700 if it isn't there; what machined left in it before is removed as it starts.
-    /// On disk, not tmpfs (suspensions refuse tmpfs), and short: its vsock sockets' paths, past
-    /// it, must fit a Unix socket's (about 100 bytes).
+    /// machined's own directory: its machines' vsock sockets. Made mode 0700 if it isn't there;
+    /// what machined left in it before is removed as it starts. Short: its vsock sockets' paths,
+    /// past it, must fit a Unix socket's (about 100 bytes).
     pub state: PathBuf,
     /// cladefs's extent daemon, which machined embeds (libcladefs, one a process): what its
     /// machines' roots are cells of, and whose control API (cladefsd's Cladefsd service) machined

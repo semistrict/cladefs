@@ -8,64 +8,30 @@
 //! is what its failures, its memory and its limits are scoped to, as Firecracker's is; machined,
 //! the long-lived daemon with the API, keeps no VM of its own, and outlives any helper.
 //!
-//! The helper makes its machine from the spec it is given (checked and planned again, as
-//! machined did), serves the machine's vsock socket itself (`vsock`, Firecracker's protocol,
-//! which machined's agent calls go through too), sends its console's bytes, and runs it on a
-//! thread of its own that does between runs what machined asks: snapshots, suspensions. Its end,
-//! or the socket's (machined gone), ends the helper.
+//! The helper makes its machine from the spec it is given (checked and planned again, as machined
+//! did), serves the machine's vsock socket itself (`vsock`, Firecracker's protocol), sends its
+//! console's bytes, and runs it on a thread of its own. machined's stop, or its end (the socket's
+//! gone), ends the machine, and so the helper.
 
 use std::io::{self, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
-#[cfg(target_os = "linux")]
-use std::time::Duration;
+use std::sync::Arc;
 
-use libmachine::{ExitReason, Machine, StopHandle, Woken};
+use libmachine::{ExitReason, Machine};
 use tokio::net::unix::OwnedWriteHalf;
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{mpsc, oneshot};
 use tonic::Status;
 
 use crate::{checks, errors, vsock};
 
 pub(crate) mod wire;
 
-use wire::{Answer, Ended, Event, How, Request, event, request};
+use wire::{Ended, Event, How, event};
 
 /// Events queued for machined: past that, the console's writer waits.
 const QUEUED: usize = 256;
 /// The run thread only waits: its stack needs little.
 const THREAD_STACK: usize = 256 << 10;
-/// How long a suspension waits for the guest to be idle.
-#[cfg(target_os = "linux")]
-const SUSPEND_IDLE_WAIT: Duration = Duration::from_secs(2);
-/// How long the guest runs between looks while a suspension waits for it to be idle.
-#[cfg(target_os = "linux")]
-const IDLE_POLL: Duration = Duration::from_millis(2);
-
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-/// What the run thread is asked to do between runs, each with its answer's sender.
-enum Asked {
-    #[cfg(target_os = "linux")]
-    Snapshot(PathBuf, oneshot::Sender<Result<(), Status>>),
-    #[cfg(target_os = "linux")]
-    Suspend(PathBuf, oneshot::Sender<Result<(), Status>>),
-    #[cfg(target_os = "linux")]
-    Resume(oneshot::Sender<Result<(), Status>>),
-}
-
-/// What the run thread and the helper's tasks share.
-struct Shared {
-    /// Set before the stop that ends the machine, so that the run thread tells it from a request's.
-    closing: AtomicBool,
-    /// What the run thread is asked to do between runs; None once the machine is gone.
-    asked: Mutex<Option<Vec<Asked>>>,
-    /// Whether the guest is suspended, as the run thread last left it.
-    suspended: watch::Sender<bool>,
-}
 
 /// The helper's main: serves machined on its standard input until its machine ends. A failure
 /// to speak to machined at all is the process's error; the machine's are told to machined.
@@ -167,7 +133,8 @@ impl Write for Console {
     }
 }
 
-/// Makes the machine as `start` says and runs it to its end, doing what machined asks.
+/// Makes the machine as `start` says and runs it to its end, stopping it when machined says, or
+/// goes.
 async fn run(
     start: wire::Start,
     from: &mut tokio::net::unix::OwnedReadHalf,
@@ -193,22 +160,14 @@ async fn run(
             return;
         }
     };
-    let generation = machine.vsock().map_or(0, |v| v.generation());
-    let balloon = machine.balloon().cloned();
     let stop = machine.stop_handle();
-    let shared = Arc::new(Shared {
-        closing: AtomicBool::new(false),
-        asked: Mutex::new(Some(Vec::new())),
-        suspended: watch::channel(false).0,
-    });
     let (ended_tx, mut ended_rx) = oneshot::channel();
-    let thread_shared = shared.clone();
     let spawned = std::thread::Builder::new()
         .name("machined-vm-run".into())
         .stack_size(THREAD_STACK)
         .spawn(move || {
             // The helper waits for it: gone, it ends too.
-            let _ = ended_tx.send(run_thread(machine, &thread_shared));
+            let _ = ended_tx.send(run_thread(machine));
         });
     if let Err(e) = spawned {
         tell(
@@ -218,25 +177,17 @@ async fn run(
         .await;
         return;
     }
-    tell(&events, event::Kind::Started(generation)).await;
-    tokio::spawn(follow_suspension(shared.suspended.subscribe(), events.clone()));
-    let (answers, answering) = mpsc::unbounded_channel();
-    tokio::spawn(answer_in_order(answering, events.clone()));
+    tell(&events, event::Kind::Started(wire::Empty {})).await;
     let mut reading = true;
     let how = loop {
         tokio::select! {
             how = &mut ended_rx => break how.unwrap_or_else(|_| ended(How::Failed, "the machine's run thread panicked")),
-            request = wire::read::<_, Request>(from), if reading => match request {
-                Ok(Some(Request { kind: Some(kind) })) => {
-                    take(kind, &shared, &stop, balloon.as_ref(), &answers);
-                }
-                Ok(Some(Request { kind: None })) => log::warn!("an empty request from machined"),
-                // machined gone, or its socket broken: the machine goes too.
-                Ok(None) | Err(_) => {
-                    reading = false;
-                    close(&shared, &stop);
-                }
-            },
+            // machined's stop, which says nothing more than that, or machined gone, or its socket
+            // broken: the machine goes either way.
+            _ = wire::read::<_, wire::Empty>(from), if reading => {
+                reading = false;
+                stop.stop();
+            }
         }
     };
     vsock_server.stop();
@@ -253,11 +204,7 @@ fn make(
     let mut plan = checks::plan(std::path::Path::new(&start.images), &spec)?;
     plan.config.extent_daemon =
         Some(Arc::new(libmachine::ExtentDaemon::at_socket(&start.cladefs_socket)));
-    let mut machine = if start.snapshot.is_empty() {
-        Machine::boot_linux(plan.config, &plan.boot).map_err(errors::status)?
-    } else {
-        restore(&start.snapshot, plan.config)?
-    };
+    let mut machine = Machine::boot_linux(plan.config, &plan.boot).map_err(errors::status)?;
     machine.set_console(Console(events));
     let vsock =
         machine.vsock().ok_or_else(|| Status::internal("a machine booting Linux has a vsock"))?;
@@ -267,239 +214,17 @@ fn make(
     Ok((machine, server))
 }
 
-#[cfg(target_os = "linux")]
-fn restore(snapshot: &str, config: libmachine::MachineConfig) -> Result<Machine, Status> {
-    let snapshot = libmachine::Snapshot::open(snapshot).map_err(errors::status)?;
-    Machine::restore(&snapshot, config).map_err(errors::status)
-}
-
-#[cfg(not(target_os = "linux"))]
-fn restore(_: &str, _: libmachine::MachineConfig) -> Result<Machine, Status> {
-    Err(Status::unimplemented(
-        "machines on Hypervisor.framework can't be restored yet (board 13399)",
-    ))
-}
-
-/// Stops the machine for good.
-fn close(shared: &Shared, stop: &StopHandle) {
-    shared.closing.store(true, Ordering::SeqCst);
-    stop.stop();
-}
-
-/// An answer to machined, to come: a balloon's state for a Balloon request.
-type Answered = Result<Option<crate::proto::BalloonStatus>, Status>;
-type Answering = futures::future::BoxFuture<'static, Answered>;
-
-/// Takes machined's request: a stop at once, a balloon's at once from its handle; what the run
-/// thread does between runs queued for it. Each answer's future is queued to be sent in order.
-fn take(
-    kind: request::Kind,
-    shared: &Shared,
-    stop: &StopHandle,
-    balloon: Option<&libmachine::Balloon>,
-    answers: &mpsc::UnboundedSender<Answering>,
-) {
-    use futures::FutureExt as _;
-    let answer: Answering = match kind {
-        request::Kind::Stop(_) => return close(shared, stop),
-        request::Kind::Balloon(target) => {
-            let state = balloon
-                .map(|balloon| {
-                    if let Some(bytes) = target.bytes {
-                        balloon.set_target(bytes);
-                    }
-                    crate::proto::BalloonStatus {
-                        target_bytes: balloon.target(),
-                        actual_bytes: balloon.actual(),
-                        discarded_bytes: balloon.discarded(),
-                    }
-                })
-                .ok_or_else(|| Status::failed_precondition("the machine has no balloon"));
-            futures::future::ready(state.map(Some)).boxed()
-        }
-        #[cfg(target_os = "linux")]
-        kind @ (request::Kind::Snapshot(_)
-        | request::Kind::Suspend(_)
-        | request::Kind::Resume(_)) => {
-            let (reply, answer) = oneshot::channel();
-            let asked = match kind {
-                request::Kind::Snapshot(path) => Asked::Snapshot(path.into(), reply),
-                request::Kind::Suspend(dir) => Asked::Suspend(dir.into(), reply),
-                _ => Asked::Resume(reply),
-            };
-            // Gone: its sender dropped, which answers it "the machine ended".
-            if let Some(queue) = lock(&shared.asked).as_mut() {
-                queue.push(asked);
-            }
-            // The run thread takes it once its run stops.
-            stop.stop();
-            async move {
-                let done = answer.await;
-                done.unwrap_or_else(|_| Err(Status::failed_precondition("the machine ended")))
-                    .map(|()| None)
-            }
-            .boxed()
-        }
-        #[cfg(not(target_os = "linux"))]
-        request::Kind::Snapshot(_) | request::Kind::Suspend(_) | request::Kind::Resume(_) => {
-            futures::future::ready(Err(Status::unimplemented(
-                "machines on Hypervisor.framework can't be snapshotted or suspended yet (board \
-                 13399)",
-            )))
-            .boxed()
-        }
+/// The run thread: runs the machine until it ends; frees it, then says how it ended.
+fn run_thread(mut machine: Machine) -> event::Kind {
+    let how = match machine.run() {
+        // Only machined's stop stops it.
+        Ok(ExitReason::Stopped) => ended(How::Stopped, ""),
+        Ok(ExitReason::Poweroff) => ended(How::Poweroff, ""),
+        Ok(ExitReason::Reset) => ended(How::Reset, ""),
+        Ok(ExitReason::Shutdown) => ended(How::Shutdown, ""),
+        Ok(other) => ended(How::Failed, format!("{other:?}")),
+        Err(e) => ended(How::Failed, e.to_string()),
     };
-    // The answering task gone: the helper is ending.
-    let _ = answers.send(answer);
-}
-
-/// Sends each request's answer as it comes, in the order they were asked.
-async fn answer_in_order(
-    mut answering: mpsc::UnboundedReceiver<Answering>,
-    events: mpsc::Sender<Event>,
-) {
-    while let Some(answer) = answering.recv().await {
-        if !tell(&events, event::Kind::Answer(Answer::of(answer.await))).await {
-            return;
-        }
-    }
-}
-
-/// Tells machined each change of whether the guest is suspended.
-async fn follow_suspension(mut suspended: watch::Receiver<bool>, events: mpsc::Sender<Event>) {
-    while suspended.changed().await.is_ok() {
-        let now = *suspended.borrow_and_update();
-        if !tell(&events, event::Kind::Suspended(now)).await {
-            return;
-        }
-    }
-}
-
-/// The run thread: runs the machine, doing what is asked between runs, until it ends; frees it,
-/// then says how it ended.
-fn run_thread(mut machine: Machine, shared: &Shared) -> event::Kind {
-    let how = loop {
-        match machine.run() {
-            Ok(ExitReason::Stopped | ExitReason::TimedOut)
-                if shared.closing.load(Ordering::SeqCst) =>
-            {
-                break ended(How::Stopped, "");
-            }
-            // Any other stop is a request's.
-            Ok(ExitReason::Stopped | ExitReason::TimedOut) => {
-                if let Some(how) = between_runs(&mut machine, shared) {
-                    break how;
-                }
-            }
-            Ok(reason) => break guest_ended(reason),
-            Err(e) => break ended(How::Failed, e.to_string()),
-        }
-    };
-    // What is still asked for fails, its senders dropped.
-    lock(&shared.asked).take();
-    shared.suspended.send_replace(false);
     drop(machine);
     how
-}
-
-fn guest_ended(reason: ExitReason) -> event::Kind {
-    match reason {
-        ExitReason::Poweroff => ended(How::Poweroff, ""),
-        ExitReason::Reset => ended(How::Reset, ""),
-        ExitReason::Shutdown => ended(How::Shutdown, ""),
-        other => ended(How::Failed, format!("{other:?}")),
-    }
-}
-
-/// Between runs: does what is asked, and while the guest is suspended waits until something wakes
-/// it. None when the guest is to run again; how the machine ended if it did meanwhile.
-fn between_runs(machine: &mut Machine, shared: &Shared) -> Option<event::Kind> {
-    loop {
-        let asked = lock(&shared.asked).as_mut().map(std::mem::take).unwrap_or_default();
-        #[cfg_attr(not(target_os = "linux"), allow(unused_mut, reason = "no resumes without KVM"))]
-        let mut resumed: Vec<oneshot::Sender<Result<(), Status>>> = Vec::new();
-        #[cfg_attr(
-            not(target_os = "linux"),
-            allow(clippy::never_loop, reason = "requests are KVM's alone (board 13399)")
-        )]
-        for asked in asked {
-            match asked {
-                #[cfg(target_os = "linux")]
-                Asked::Snapshot(path, reply) => {
-                    // The caller may have gone: the snapshot stays, as its file.
-                    let _ = reply.send(machine.snapshot(&path).map_err(errors::status));
-                }
-                #[cfg(target_os = "linux")]
-                Asked::Suspend(dir, reply) => match suspend_when_idle(machine, &dir, shared) {
-                    // A caller gone leaves the guest suspended, as asked.
-                    Ok(done) => drop(reply.send(done)),
-                    Err(how) => return Some(how),
-                },
-                #[cfg(target_os = "linux")]
-                Asked::Resume(reply) => resumed.push(reply),
-            }
-        }
-        if !resumed.is_empty() || !machine.suspended() {
-            shared.suspended.send_replace(false);
-            for reply in resumed {
-                let _ = reply.send(Ok(()));
-            }
-            return None;
-        }
-        // A request that came while this one was taken: take it first (its stop was used up).
-        if lock(&shared.asked).as_ref().is_some_and(|r| !r.is_empty()) {
-            continue;
-        }
-        shared.suspended.send_replace(true);
-        match machine.wait_woken(None) {
-            Woken::Device | Woken::TimedOut => {
-                shared.suspended.send_replace(false);
-                return None;
-            }
-            Woken::Stop if shared.closing.load(Ordering::SeqCst) => {
-                return Some(ended(How::Stopped, ""));
-            }
-            // A request: take it.
-            Woken::Stop => {}
-        }
-    }
-}
-
-/// Suspends the guest into a file in `dir` once it is idle, running it in short slices meanwhile,
-/// for at most [`SUSPEND_IDLE_WAIT`]: the suspension's outcome, or how the machine ended if it did
-/// meanwhile.
-#[cfg(target_os = "linux")]
-fn suspend_when_idle(
-    machine: &mut Machine,
-    dir: &std::path::Path,
-    shared: &Shared,
-) -> Result<Result<(), Status>, event::Kind> {
-    use libmachine::Error;
-    if machine.suspended() {
-        return Ok(Ok(()));
-    }
-    let until = std::time::Instant::now() + SUSPEND_IDLE_WAIT;
-    loop {
-        match machine.suspend(dir) {
-            Ok(()) => {
-                shared.suspended.send_replace(true);
-                return Ok(Ok(()));
-            }
-            Err(Error::Busy(why)) if std::time::Instant::now() >= until => {
-                return Ok(Err(errors::status(Error::Busy(format!(
-                    "the guest was not idle within {SUSPEND_IDLE_WAIT:?}: {why}"
-                )))));
-            }
-            Err(Error::Busy(_)) => match machine.run_for(IDLE_POLL) {
-                Ok(ExitReason::Stopped) if shared.closing.load(Ordering::SeqCst) => {
-                    return Err(ended(How::Stopped, ""));
-                }
-                // Another request's stop: it is still queued, taken after this one.
-                Ok(ExitReason::Stopped | ExitReason::TimedOut) => {}
-                Ok(reason) => return Err(guest_ended(reason)),
-                Err(e) => return Err(ended(How::Failed, e.to_string())),
-            },
-            Err(e) => return Ok(Err(errors::status(e))),
-        }
-    }
 }

@@ -1,14 +1,14 @@
 [package]
 name = "libmachine"
-description = "An embeddable virtual machine monitor for sandboxing untrusted code"
+description = "An embeddable virtual machine monitor: cladefs's guests on macOS, on Hypervisor.framework"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 publish = false
 
-# libmachine runs on x86-64 Linux, with KVM, and on arm64 macOS, with Hypervisor.framework
-# (src/lib.rs); elsewhere it is empty and needs nothing.
-[target.'cfg(any(all(target_os = "linux", target_arch = "x86_64"), all(target_os = "macos", target_arch = "aarch64")))'.dependencies]
+# libmachine runs on arm64 macOS, with Hypervisor.framework (src/lib.rs); elsewhere it is empty and
+# needs nothing.
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
 # cladefs's extent store device (board 13067): the device, the daemon client it opens its cell
 # with, and the daemon itself, embedded in this process (libcladefs, board 13553).
 cladefs = { path = "../cladefs" }
@@ -17,69 +17,29 @@ libc.workspace = true
 libcladefs = { path = "../libcladefs" }
 libmachine-agent.workspace = true
 sha2.workspace = true
-# The network's userspace stack and its host sockets (board 14131: on both platforms).
+# The network's userspace stack and its host sockets (board 14131).
 smoltcp.workspace = true
 socket2.workspace = true
 thiserror.workspace = true
 virtio-queue.workspace = true
 virtio_extent = { path = "../virtio_extent" }
+vm-fdt.workspace = true
 vm-memory.workspace = true
 vm-superio.workspace = true
 zerocopy.workspace = true
 
-# KVM and the PC platform, Linux's.
-[target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
-acpi_tables.workspace = true
-kvm-bindings.workspace = true
-kvm-ioctls.workspace = true
-linux-loader.workspace = true
-# Sandbox's (board 13399 brings it to macOS).
-tokio = { workspace = true, features = ["rt", "sync"], optional = true }
-vmm-sys-util.workspace = true
-
-# The arm64 platform's device tree (board 13063).
-[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
-vm-fdt.workspace = true
-
 [features]
-# The async high-level API (libmachine::sandbox), on tokio. On by default;
-# embedders of the synchronous Machine alone can turn it off.
-default = ["sandbox"]
-sandbox = ["dep:tokio"]
 # The fuzz harness (libmachine::net::fuzz), for the cargo-fuzz targets in
 # fuzz/.
 fuzzing = []
 
-[target.'cfg(any(all(target_os = "linux", target_arch = "x86_64"), all(target_os = "macos", target_arch = "aarch64")))'.dev-dependencies]
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dev-dependencies]
 # The extent tests' daemons' cells encrypt under the tests' KMS (TASK-411.28).
 cladefs_core = { workspace = true, features = ["tests-kms"] }
 tempfile.workspace = true
-
-[target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dev-dependencies]
-# The tests' and examples' guest programs, assembled (AGENTS.md: never raw bytes).
-iced-x86 = { version = "1.22.0", default-features = false, features = ["std", "code_asm"] }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync"] }
-
-[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dev-dependencies]
-# The arm64 tests' guest programs, assembled at compile time (MPL-2.0).
+# The tests' guest programs, assembled at compile time (MPL-2.0).
 dynasm = "5.1.0"
 dynasmrt = "5.1.0"
 
 [lints]
 workspace = true
-
-[[test]]
-name = "kvm_sandbox"
-required-features = ["sandbox"]
-
-[[test]]
-name = "kvm_suspend"
-required-features = ["sandbox"]
-
-[[example]]
-name = "sandbox_scale"
-required-features = ["sandbox"]
-
-[[example]]
-name = "snapshot_clones"
-required-features = ["sandbox"]

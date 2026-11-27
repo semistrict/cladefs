@@ -6,15 +6,14 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
-# machined runs where libmachine does: x86-64 Linux with KVM, arm64 macOS with
-# Hypervisor.framework (src/lib.rs); elsewhere it is empty and needs nothing.
-[target.'cfg(any(all(target_os = "linux", target_arch = "x86_64"), all(target_os = "macos", target_arch = "aarch64")))'.dependencies]
+# machined runs where libmachine does: arm64 macOS with Hypervisor.framework (src/lib.rs);
+# elsewhere it is empty and needs nothing.
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
 clap = { version = "4.6.7", features = ["derive"] }
 futures.workspace = true
 libc.workspace = true
 libcladefs.workspace = true
-# The synchronous Machine alone: machined runs each machine on a thread of its own (src/vmm.rs).
-libmachine = { workspace = true, default-features = false }
+libmachine.workspace = true
 log.workspace = true
 prost.workspace = true
 tokio = { workspace = true, features = ["io-util", "signal"] }
@@ -24,7 +23,7 @@ tokio-stream = { version = "0.1.19", features = ["net"] }
 tonic = { package = "madsim-tonic", version = "=0.6.0", features = ["tls-aws-lc"] }
 tonic-prost = "0.14.6"
 
-[target.'cfg(any(all(target_os = "linux", target_arch = "x86_64"), all(target_os = "macos", target_arch = "aarch64")))'.dev-dependencies]
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dev-dependencies]
 cladefs_core = { workspace = true, features = ["tests-kms"] }
 cladefsd.workspace = true
 libmachine-agent.workspace = true

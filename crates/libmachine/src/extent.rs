@@ -18,8 +18,7 @@
 //! `cladefsd` is.
 //!
 //! The devices are virtio-PCI devices of type 0x4658 with a request queue per vCPU and, given a
-//! size, a DAX window: on KVM (x86-64 Linux) host memory cladefs maps with userfaultfd; on
-//! Hypervisor.framework (arm64 macOS) guest memory libmachine maps as cladefs says (board 13069).
+//! size, a DAX window: guest memory libmachine maps as cladefs says (board 13069).
 
 use std::path::PathBuf;
 

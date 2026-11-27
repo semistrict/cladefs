@@ -23,20 +23,13 @@ pub(crate) struct Shared {
     /// Notified whenever the device thread changed the state.
     changed: Condvar,
     /// Signalled when the host side has packets for the guest: the eventfd
-    /// of the device that serves it. Replaced when a device is restored
-    /// onto it, so that a detached device's thread, which may still run,
-    /// takes none of the new device's wakeups. Taken with the state lock
-    /// held.
-    wake: Mutex<EventFd>,
+    /// of the device that serves it.
+    wake: EventFd,
 }
 
 impl Shared {
     pub(crate) fn new(guest_cid: u64, wake: EventFd) -> Self {
-        Self {
-            state: Mutex::new(State::new(guest_cid)),
-            changed: Condvar::new(),
-            wake: Mutex::new(wake),
-        }
+        Self { state: Mutex::new(State::new(guest_cid)), changed: Condvar::new(), wake }
     }
 
     pub(crate) fn lock(&self) -> MutexGuard<'_, State> {
@@ -53,14 +46,8 @@ impl Shared {
         if std::mem::take(&mut state.wake) {
             // An eventfd write fails only when the counter would overflow,
             // in which case the thread has a wakeup pending anyway.
-            let _ = self.wake.lock().unwrap_or_else(|e| e.into_inner()).write(1);
+            let _ = self.wake.write(1);
         }
-    }
-
-    /// From now on, wakes the device thread through `wake` (a device
-    /// restored onto this host end).
-    pub(crate) fn set_wake(&self, wake: EventFd) {
-        *self.wake.lock().unwrap_or_else(|e| e.into_inner()) = wake;
     }
 
     /// Runs `op` on the state until it is ready, waiting for the device
@@ -114,9 +101,7 @@ impl Shared {
 ///
 /// Every connection is reset when the guest's driver resets the device,
 /// when [`reset_connections`](Vsock::reset_connections) is called (as a
-/// restore onto a new host end does), when the guest stops and when the
-/// machine is dropped, unless the host end was detached from it first, to
-/// be restored onto (`Machine::restore_with`).
+/// restore does), when the guest stops and when the machine is dropped.
 ///
 /// When a run of the machine ends with the guest powering off, resetting or
 /// triple-faulting, every operation, waiting or new, fails at once with
@@ -228,64 +213,9 @@ impl Vsock {
     }
 
     /// Which restore of a snapshot the machine is (0: it booted), for the
-    /// agent's reseed (`agent`; `Agent::over_unix_socket` of another process).
+    /// agent's reseed (`agent`).
     pub fn generation(&self) -> u64 {
         self.shared.lock().generation
-    }
-
-    /// Detaches the host end from its machine's device, to hand it over to
-    /// a machine restored from a snapshot taken after this: the device
-    /// takes nothing from the guest and gives it nothing from now on, and
-    /// dropping its machine leaves every connection and listener as it is.
-    /// Meanwhile host reads wait, writes queue (until the guest's credit
-    /// runs out) and connects wait for an answer, as if the guest were not
-    /// running. Detach before the snapshot: the device would otherwise go
-    /// on serving between the snapshot and the drop, and the restore,
-    /// seeing that, would refuse the host end.
-    ///
-    /// The machine's guest, if it runs on, sees its vsock device stop
-    /// answering.
-    pub(crate) fn detach(&self) {
-        self.shared.with(|s| s.detach());
-    }
-
-    /// Undoes [`detach`](Vsock::detach) (a snapshot failed, say): the same
-    /// device serves the host end again, from where it stopped. False if
-    /// there is nothing to undo, or a device has been restored onto the
-    /// host end since.
-    pub(crate) fn reattach(&self) -> bool {
-        let reattached = self.shared.with(|s| s.reattach());
-        self.shared.notify();
-        reattached
-    }
-
-    /// Has the host side's wakeups signal `wake` (a suspended machine's
-    /// watcher, while no device serves the host end: it is detached), and
-    /// signals it at once if the host end already owes the guest a packet.
-    pub(crate) fn watch(&self, wake: EventFd) {
-        self.shared.set_wake(wake);
-        if self.owes_guest() {
-            let _ = self.shared.wake.lock().unwrap_or_else(|e| e.into_inner()).write(1);
-        }
-    }
-
-    /// Whether the host end has a packet for the guest: what a device
-    /// serving it would put in the guest's queue now.
-    pub(crate) fn owes_guest(&self) -> bool {
-        self.shared.lock().has_packet()
-    }
-
-    /// The machine is gone without a device to say so (a suspended machine
-    /// dropped, or one whose restore failed): every connection and every
-    /// waiting operation fails, as when a serving device's machine drops.
-    pub(crate) fn machine_gone(&self) {
-        self.shared.with(|s| s.machine_gone());
-        self.shared.notify();
-    }
-
-    /// The state the device thread and the host's handles share.
-    pub(crate) fn shared(&self) -> &Arc<Shared> {
-        &self.shared
     }
 
     /// The guest stopped (the machine's run ended with it powering off,

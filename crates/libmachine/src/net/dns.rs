@@ -43,32 +43,6 @@ pub(crate) struct Query {
     question: Vec<u8>,
 }
 
-impl Query {
-    /// The query, for a saved network stack (a lookup in flight).
-    pub(crate) fn save(&self, e: &mut crate::snapshot::codec::Encoder) {
-        e.u16(self.id);
-        e.bool(self.rd);
-        e.str(&self.name);
-        e.u16(self.qtype);
-        e.u16(self.qclass);
-        e.bytes(&self.question);
-    }
-
-    /// Reads what [`save`](Self::save) wrote.
-    pub(crate) fn restore(
-        d: &mut crate::snapshot::codec::Decoder<'_>,
-    ) -> crate::error::Result<Self> {
-        Ok(Self {
-            id: d.u16()?,
-            rd: d.bool()?,
-            name: d.str()?,
-            qtype: d.u16()?,
-            qclass: d.u16()?,
-            question: d.bytes()?.to_vec(),
-        })
-    }
-}
-
 /// Why a message is not a query this server answers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Invalid {

@@ -103,18 +103,6 @@ impl Balloon {
 pub(crate) type FreeRam =
     Box<dyn Fn(u64, std::ptr::NonNull<u8>, u64) -> std::io::Result<()> + Send>;
 
-/// Linux's: `MADV_DONTNEED`, which KVM follows (anonymous memory emptied, a snapshot's private
-/// copies dropped for its pages).
-#[cfg(target_os = "linux")]
-pub(crate) fn madvise_ram() -> FreeRam {
-    Box::new(|_, host, len| {
-        // SAFETY: as `FreeRam` says: guest RAM of this process, whole host pages, given up.
-        let done =
-            unsafe { libc::madvise(host.as_ptr().cast(), len as usize, libc::MADV_DONTNEED) };
-        if done == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
-    })
-}
-
 /// The balloon pages the guest holds in the balloon, by host page: a host page goes back to the
 /// host once every balloon page of it is held (a 16 KiB host page, four 4 KiB balloon pages,
 /// which the guest's driver takes one at a time, from anywhere). The guest's own to take back

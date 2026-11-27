@@ -24,10 +24,6 @@ libmachine = { path = "..", features = ["fuzzing"] }
 # Not part of the parent workspace.
 [workspace]
 
-# The parent workspace's patched smoltcp.
-[patch.crates-io]
-smoltcp = { path = "../../../vendor/smoltcp" }
-
 [[bin]]
 name = "net_frames"
 path = "fuzz_targets/net_frames.rs"

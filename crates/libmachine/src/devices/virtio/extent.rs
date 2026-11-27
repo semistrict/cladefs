@@ -15,18 +15,15 @@
 //!   their vectors, which the workers signal from the threads completing requests (hotbed
 //!   question 572).
 //! - **The DAX window:** a 64-bit BAR of the device's own, allocated before the transports' BARs
-//!   and placed by the device (`PlacedShm`), which virtio_extent reserves ([`ExtentVm`]). On KVM
-//!   it adds its memory slot (`MemorySlots`), into which cladefs maps the window's pages from the
-//!   extent daemon's memory, and prefaults them with `KVM_PRE_FAULT_MEMORY` on a vCPU of its own
-//!   (`virtio_extent::kvm`). On Hypervisor.framework libmachine maps the pages into the guest at
-//!   the BAR itself (`hv_vm_map`) as cladefs's stage says, and the vCPUs hand it the guest's
-//!   aborts on the window (`virtio_extent::window_fault`, board 13069). The BAR never moves
-//!   (hotbed question 571).
+//!   and placed by the device (`PlacedShm`), which virtio_extent reserves ([`ExtentVm`]).
+//!   libmachine maps the pages into the guest at the BAR itself (`hv_vm_map`) as cladefs's stage
+//!   says, and the vCPUs hand it the guest's aborts on the window
+//!   (`virtio_extent::window_fault`, board 13069). The BAR never moves (hotbed question 571).
 //! - **Stopping the machine:** as the extent daemon goes, the machine stops for good with
 //!   `Error::ExtentDaemonLost`, or, as the device can't be activated, `Error::ExtentStore`
 //!   (`StopShared::fail`); the vCPUs stop it with
 //!   `Error::AccessRefused` when a guest's access to the window is refused for good
-//!   (`virtio_extent::vcpu` on KVM, `HvfSecondStage::fault` on macOS; hotbed question 573).
+//!   (`HvfSecondStage::fault`; hotbed question 573).
 //! - **Snapshots** (board 13139), as doc-4 has them and Firecracker's adapter takes them: the
 //!   machine's snapshot pauses the device's workers, their queues back in the transport where
 //!   they left them (`VirtioDevice::pause_queues`), then has virtio_extent take the device's
@@ -41,8 +38,6 @@
 //!   workers start again either way.
 
 use std::os::fd::{AsRawFd, BorrowedFd};
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-use std::ptr::NonNull;
 use std::sync::{Arc, Weak};
 
 use virtio_extent::protocol::{
@@ -55,8 +50,6 @@ use super::queue::DeviceQueue;
 use super::{
     DeviceState, OwnQueues, PlacedShm, VIRTIO_F_VERSION_1, VIRTIO_RING_F_EVENT_IDX, VirtioDevice,
 };
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-use crate::backend::MemorySlots;
 use crate::devices::pci::BarAllocator;
 use crate::error::{Error, Result};
 use crate::extent::{ExtentCache, ExtentDaemon, ExtentStore};
@@ -447,61 +440,9 @@ impl virtio_extent::ConfigInterrupt for Vector {
     }
 }
 
-/// What only libmachine can do for the device's DAX window (`virtio_extent::WindowVm`): its guest
-/// physical addresses, the 64-bit BAR allocated for it ([`ExtentDevice::new`]), and the KVM memory
-/// slot mapping its host memory there.
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-pub(crate) struct ExtentVm {
-    pub(crate) slots: MemorySlots,
-    /// The window's BAR's address.
-    pub(crate) at: Option<u64>,
-}
-
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-impl virtio_extent::WindowVm for ExtentVm {
-    fn reserve(&self, _len: u64, at: Option<u64>) -> std::result::Result<u64, BoxError> {
-        match (at, self.at) {
-            // A snapshot's window, where its BAR was, as it is again (`ExtentDevice::new`).
-            (Some(at), Some(bar)) if at == bar => Ok(bar),
-            (Some(at), bar) => {
-                Err(format!("the snapshot's window at {at:#x}, its BAR at {bar:x?}").into())
-            }
-            (None, Some(bar)) => Ok(bar),
-            (None, None) => Err("a window the device's configuration has none of".into()),
-        }
-    }
-
-    // The BAR is the machine's for its life, as every BAR is: nothing to release.
-    fn release(&self, _start: u64, _len: u64) {}
-
-    fn add_slot(
-        &self,
-        guest_addr: u64,
-        len: u64,
-        host: NonNull<u8>,
-    ) -> std::result::Result<u32, BoxError> {
-        // SAFETY: The window's host memory, which virtio_extent keeps mapped until it removes the
-        // slot (its `WindowMemory`'s fields' drop order).
-        Ok(unsafe { self.slots.map_raw(guest_addr, host.as_ptr(), len) }?)
-    }
-
-    fn remove_slot(&self, slot: u32) {
-        // virtio_extent unmaps the window's host memory once this returns: one KVM still mapped
-        // would let the guest reach whatever the host maps there next. A machine with the window
-        // mapped is never suspended (the suspension refuses device memory), so its VM is live,
-        // and KVM deletes a live slot; if it ever can't, nothing is safe but to stop here.
-        if let Err(err) = self.slots.unmap_raw(slot) {
-            eprintln!("libmachine: cannot remove the DAX window's memory slot {slot}: {err}");
-            std::process::abort();
-        }
-    }
-}
-
-/// What only libmachine can do for the device's DAX window on Hypervisor.framework
-/// (`virtio_extent::WindowVm`): its guest physical addresses, the 64-bit BAR allocated for it
+/// What only libmachine can do for the device's DAX window (`virtio_extent::WindowVm`): its guest physical addresses, the 64-bit BAR allocated for it
 /// ([`ExtentDevice::new`]), into which the window's pages are mapped as cladefs's stage says
 /// (`hv_vm_map`, board 13069).
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub(crate) struct ExtentVm {
     /// The VM, which maps the window's pages.
     pub(crate) vm: Arc<crate::backend::hvf::Shared>,
@@ -509,7 +450,6 @@ pub(crate) struct ExtentVm {
     pub(crate) at: Option<u64>,
 }
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 impl virtio_extent::WindowVm for ExtentVm {
     fn reserve(&self, _len: u64, at: Option<u64>) -> std::result::Result<u64, BoxError> {
         match (at, self.at) {

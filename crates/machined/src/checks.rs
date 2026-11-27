@@ -10,16 +10,15 @@
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Component, Path, PathBuf};
 
-use libmachine::agent::Command;
 use libmachine::net::{EgressPolicy, HostPattern, NetworkConfig, Ports, Rule};
 use libmachine::{CellId, ExtentCell, ExtentStore, LinuxBoot, MachineConfig};
 use tonic::Status;
 
 use crate::proto;
 
-/// The longest name of a machine or snapshot.
+/// The longest name of a machine.
 const MAX_NAME: usize = 63;
-/// The longest path, of the guest's or in the images directory.
+/// The longest path in the images directory.
 const MAX_PATH: usize = 4096;
 /// The longest kernel command line a request gives.
 const MAX_CMDLINE: usize = 2048;
@@ -28,12 +27,6 @@ const MAX_LABEL_KEY: usize = 63;
 const MAX_LABEL_VALUE: usize = 256;
 const MAX_VSOCK_PORTS: usize = 16;
 const MAX_EGRESS_RULES: usize = 256;
-/// The most arguments and environment entries of a command, together.
-const MAX_COMMAND_ITEMS: usize = 4096;
-/// The most bytes of a command's arguments, environment and working directory, together.
-const MAX_COMMAND_BYTES: usize = 128 << 10;
-/// The largest Linux signal number.
-const MAX_SIGNAL: i32 = 64;
 /// Guest RAM unless a spec says otherwise.
 const DEFAULT_MEMORY: u64 = 256 << 20;
 /// The guest's page size, which RAM is a multiple of.
@@ -43,7 +36,7 @@ fn invalid(message: impl Into<String>) -> Status {
     Status::invalid_argument(message)
 }
 
-/// A machine's or snapshot's name: 1 to 63 bytes of a-z, 0-9, '.', '_' and '-', starting with a
+/// A machine's name: 1 to 63 bytes of a-z, 0-9, '.', '_' and '-', starting with a
 /// letter or digit.
 pub(crate) fn name(what: &str, name: &str) -> Result<(), Status> {
     let bytes = name.as_bytes();
@@ -58,29 +51,6 @@ pub(crate) fn name(what: &str, name: &str) -> Result<(), Status> {
              letter or digit"
         )))
     }
-}
-
-/// A path in the guest: absolute, at most [`MAX_PATH`] bytes, no NUL.
-pub(crate) fn guest_path(path: &str) -> Result<(), Status> {
-    if path.starts_with('/') && path.len() <= MAX_PATH && !path.contains('\0') {
-        Ok(())
-    } else {
-        Err(invalid(format!("guest path {path:?}: absolute, at most {MAX_PATH} bytes, no NUL")))
-    }
-}
-
-/// A Linux signal number.
-pub(crate) fn signal(signal: i32) -> Result<i32, Status> {
-    if (1..=MAX_SIGNAL).contains(&signal) {
-        Ok(signal)
-    } else {
-        Err(invalid(format!("signal {signal}: from 1 to {MAX_SIGNAL}")))
-    }
-}
-
-/// A file's permissions.
-pub(crate) fn mode(mode: u32) -> Result<u32, Status> {
-    if mode <= 0o7777 { Ok(mode) } else { Err(invalid(format!("mode {mode:#o}: at most 07777"))) }
 }
 
 /// A file in `images`, named relative to it, which it does not leave, symbolic links followed
@@ -262,50 +232,6 @@ fn network(network: &proto::Network) -> Result<NetworkConfig, Status> {
     let config = NetworkConfig::new(policy);
     config.validate().map_err(|e| invalid(e.to_string()))?;
     Ok(config)
-}
-
-/// The command an Exec starts.
-pub(crate) fn command(start: &proto::ExecStart) -> Result<Command, Status> {
-    let Some((program, args)) = start.argv.split_first() else {
-        return Err(invalid("argv: at least the program"));
-    };
-    let items = start.argv.len().saturating_add(start.env.len());
-    let bytes = start
-        .argv
-        .iter()
-        .chain(start.env.keys())
-        .chain(start.env.values())
-        .chain([&start.working_directory])
-        .map(String::len)
-        .fold(0usize, usize::saturating_add);
-    if items > MAX_COMMAND_ITEMS || bytes > MAX_COMMAND_BYTES {
-        return Err(invalid(format!(
-            "a command of {items} arguments and variables, {bytes} bytes: at most \
-             {MAX_COMMAND_ITEMS}, {MAX_COMMAND_BYTES} bytes"
-        )));
-    }
-    let nul = |s: &String| s.contains('\0');
-    if start.argv.iter().any(nul) || start.env.values().any(nul) || nul(&start.working_directory) {
-        return Err(invalid("a command's arguments, environment and directory hold no NUL"));
-    }
-    if start.env.keys().any(|k| k.is_empty() || k.contains(['=', '\0'])) {
-        return Err(invalid("environment names: not empty, no '=' or NUL"));
-    }
-    if program.is_empty() {
-        return Err(invalid("argv: the program is not empty"));
-    }
-    let mut command = Command::new(program);
-    command.args(args);
-    if !start.env.is_empty() {
-        command.env_clear();
-        for (key, value) in &start.env {
-            command.env(key, value);
-        }
-    }
-    if !start.working_directory.is_empty() {
-        command.current_dir(&start.working_directory);
-    }
-    Ok(command)
 }
 
 #[cfg(test)]

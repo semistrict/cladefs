@@ -8,7 +8,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::backend::kick::Kicker;
-use crate::suspend::Doorbell;
 
 /// Stops a [`Machine`](crate::Machine)'s [`run`](crate::Machine::run) from
 /// any thread: `run` returns [`ExitReason::Stopped`](crate::ExitReason::Stopped)
@@ -29,8 +28,6 @@ pub(crate) struct StopShared {
     /// unregisters under this lock before it exits, so a thread that has
     /// exited is never kicked.
     threads: Mutex<Vec<Kicker>>,
-    /// A suspended machine waits on it: a stop ends that wait too.
-    doorbell: Arc<Doorbell>,
     /// Why a device stopped the machine for good ([`StopShared::fail`]): every run from then on
     /// ends at once with it. Read before every entry into the guest, so without a lock.
     failed: std::sync::OnceLock<Failure>,
@@ -64,16 +61,10 @@ impl StopHandle {
     pub fn stop(&self) {
         self.shared.requested.store(true, Ordering::SeqCst);
         self.shared.kick_all();
-        self.shared.doorbell.stop_requested();
     }
 }
 
 impl StopShared {
-    /// The stop state of a machine whose suspensions wait on `doorbell`.
-    pub(crate) fn with_doorbell(doorbell: Arc<Doorbell>) -> Self {
-        Self { doorbell, ..Self::default() }
-    }
-
     fn lock_threads(&self) -> std::sync::MutexGuard<'_, Vec<Kicker>> {
         self.threads.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -87,7 +78,6 @@ impl StopShared {
         let _ = self.failed.set(why);
         self.requested.store(true, Ordering::SeqCst);
         self.kick_all();
-        self.doorbell.stop_requested();
     }
 
     /// Why a device stopped the machine for good, if one did ([`StopShared::fail`]).

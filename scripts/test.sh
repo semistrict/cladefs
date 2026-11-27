@@ -7,12 +7,12 @@
 # tests under Shuttle and the models of memory orderings under loom, the scripts' tests
 # (scripts/tests) and the mutant runners' checks, the Go client's (go/), and on Linux the guest
 # tests' own tests (guest/tests, both halves) and the VMM's own that cladefs adds to
-# (vendor/firecracker, built as cladefs builds it: scripts/firecracker-cargo.sh), and libmachine's
-# and machined's with their guests (crates/libmachine, crates/machined): what CI runs, a part a job;
-# on an arm64 Mac, libmachine's and machined's on Hypervisor.framework (the part hvf).
+# (vendor/firecracker, built as cladefs builds it: scripts/firecracker-cargo.sh): what CI runs, a
+# part a job; on an arm64 Mac, libmachine's, its Firecracker-compatible VMM's and machined's with
+# their guests on Hypervisor.framework (the part hvf).
 # Arguments are passed to the suite's and the simulation's `cargo nextest run`. CLADEFS_TEST_PARTS
 # names the parts to run, separated by spaces (default: all of clippy, workspace, sim, madsim,
-# shuttle, scripts, go, and guest, firecracker and libmachine on Linux, hvf and guest on an arm64
+# shuttle, scripts, go, and guest and firecracker on Linux, hvf and guest on an arm64
 # Mac). The part unit, in no default, runs the
 # workspace's unit tests alone, about a minute: the workspace part's tests but the slow ones the
 # nextest profile unit leaves out (.config/nextest.toml).
@@ -28,7 +28,7 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 export LIBC_FATAL_STDERR_=1
 
 parts="clippy workspace sim madsim shuttle scripts go"
-[[ $(uname) != Linux ]] || parts+=" guest firecracker libmachine"
+[[ $(uname) != Linux ]] || parts+=" guest firecracker"
 [[ $(uname -sm) != "Darwin arm64" ]] || parts+=" hvf guest"
 parts=${CLADEFS_TEST_PARTS:-$parts}
 part() { # name: whether CLADEFS_TEST_PARTS has it
@@ -86,15 +86,12 @@ if part clippy; then
     cargo clippy --locked --manifest-path "$root/Cargo.toml" --no-deps -p cladefs_core -p virtio_extent \
         --features loom --tests -- "${cladefs_lints[@]}"
     # libmachine's crates (crates/libmachine*, doc-30) and machined's: all of clippy's default lints,
-    # as libmachine kept them before it came into this repo; its fuzz harness's build, and the
-    # synchronous Machine without the async sandbox (and tokio).
-    libmachine_crates=(-p libmachine -p libmachine-agent -p libmachine-py -p machined)
+    # as libmachine kept them before it came into this repo; and its fuzz harness's build.
+    libmachine_crates=(-p libmachine -p libmachine-agent -p libmachine-firecracker -p machined)
     cargo clippy --locked --manifest-path "$root/Cargo.toml" --no-deps "${libmachine_crates[@]}" \
         --all-targets -- -D warnings
     cargo clippy --locked --manifest-path "$root/Cargo.toml" --no-deps -p libmachine \
         --all-targets --features fuzzing -- -D warnings
-    cargo clippy --locked --manifest-path "$root/Cargo.toml" --no-deps -p libmachine \
-        --all-targets --no-default-features -- -D warnings
     # The madsim build's (doc-24): the simulated crates and their tests under madsim, built as the
     # madsim part builds them, whose code no other build compiles either: its warnings, 13 on
     # Linux, went unseen there behind a `cargo check` (board 5652).
@@ -222,40 +219,8 @@ if part guest; then
     fi
     "${harness[@]}" -p runner
 fi
-# libmachine's and machined's tests (crates/libmachine, doc-30; crates/machined), with what the
-# workspace part runs them without,
-# where each that needs KVM or a guest skips itself, saying so: the test guest (its kernels and
-# initramfs, crates/libmachine/scripts/build-test-guest.sh) and cladefs's kernel
-# (scripts/guest-kernel.sh). A test that still skips fails the part. Then the Python bindings'
-# tests, with uv (crates/libmachine-py), which build the extension themselves.
-if part libmachine; then
-    libmachine_guest=${LIBMACHINE_GUEST_DIR:-${CARGO_TARGET_DIR:-$root/target}/guest}
-    LIBMACHINE_GUEST_DIR=$libmachine_guest "$root/crates/libmachine/scripts/build-test-guest.sh"
-    # The kernel's build log in a file: a detached hotbed command can't open /dev/stderr.
-    kernel_log=${CARGO_TARGET_DIR:-$root/target}/libmachine-guest-kernel.log
-    kernel=$(CLADEFS_GUEST_KERNEL_LOG=$kernel_log "$root/scripts/guest-kernel.sh") ||
-        { cat "$kernel_log" >&2; exit 1; }
-    libmachine_env=(env LIBMACHINE_GUEST_DIR="$libmachine_guest" CLADEFS_GUEST_KERNEL="$kernel")
-    libmachine_log=$(mktemp)
-    "${libmachine_env[@]}" cargo nextest run --locked --manifest-path "$root/Cargo.toml" \
-        -p libmachine -p libmachine-agent -p machined --success-output final "$@" 2>&1 |
-        tee "$libmachine_log"
-    if grep -q "skipping:" "$libmachine_log"; then
-        grep "skipping:" "$libmachine_log" | sort | uniq -c >&2
-        echo "scripts/test.sh: libmachine's or machined's tests above skipped themselves" >&2
-        exit 1
-    fi
-    command -v uv > /dev/null ||
-        { echo "scripts/test.sh: the libmachine part needs uv, for the Python bindings' tests" >&2; exit 1; }
-    (cd "$root/crates/libmachine-py" && "${libmachine_env[@]}" uv run --locked pytest -q -rs \
-        --timeout=300) 2>&1 | tee "$libmachine_log"
-    if grep -q "SKIPPED" "$libmachine_log"; then
-        echo "scripts/test.sh: the Python bindings' tests above skipped themselves" >&2
-        exit 1
-    fi
-    rm "$libmachine_log"
-fi
-# On an arm64 Mac, libmachine's and machined's tests on Hypervisor.framework (board 13063), with
+# On an arm64 Mac, libmachine's, libmachine-firecracker's and machined's tests on
+# Hypervisor.framework (board 13063), with
 # cladefs's arm64 kernel and the test initramfs, which are Linux's to build:
 # crates/libmachine/scripts/arm64-guest.sh builds them on hotbed and fetches them into
 # target/arm64-guest. Niced, as the Mac is the user's (AGENTS.md: the one local build). A test that
@@ -266,7 +231,8 @@ if part hvf; then
         { echo "scripts/test.sh: no arm64 guest in $arm64_guest: run crates/libmachine/scripts/arm64-guest.sh" >&2; exit 1; }
     hvf_log=$(mktemp)
     nice -n 19 cargo nextest run --locked --manifest-path "$root/Cargo.toml" \
-        -p libmachine -p machined --success-output final "$@" 2>&1 | tee "$hvf_log"
+        -p libmachine -p libmachine-agent -p libmachine-firecracker -p machined \
+        --success-output final "$@" 2>&1 | tee "$hvf_log"
     if grep -q "skipping:" "$hvf_log"; then
         grep "skipping:" "$hvf_log" | sort | uniq -c >&2
         echo "scripts/test.sh: libmachine's or machined's tests above skipped themselves" >&2

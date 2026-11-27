@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 //! virtio-rng (virtio 1.2, section 5.4): an entropy source, filled from the
-//! host's `getrandom`. Every PC machine has one, so the guest kernel seeds
+//! host's `getrandom`. Every board machine has one, so the guest kernel seeds
 //! its random number generator early instead of waiting for jitter.
 
 use vm_memory::{Address, Bytes, GuestAddress, GuestMemoryMmap};

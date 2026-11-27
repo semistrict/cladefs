@@ -26,7 +26,6 @@
 //! is no INTx on this platform.
 
 use std::ops::Range;
-use std::sync::Arc;
 
 use crate::sys::{EFD_NONBLOCK, EventFd};
 use vm_memory::GuestMemoryMmap;
@@ -38,7 +37,6 @@ use crate::devices::pci::msix::{self, Msix};
 use crate::devices::pci::{BarAllocator, PciFunction, PciHost};
 use crate::error::{Error, Result};
 use crate::snapshot::codec::{Decoder, Encoder};
-use crate::suspend::Doorbell;
 
 const VIRTIO_PCI_VENDOR_ID: u16 = 0x1af4;
 /// A modern device's PCI device ID is this plus its type, for types 0-63.
@@ -214,9 +212,6 @@ pub(crate) struct VirtioPci {
     shm_mapped: Option<u64>,
     shm_slots: Vec<u32>,
     stats: Stats,
-    /// Rung whenever the device puts something in a queue, for a suspended
-    /// machine ([`crate::suspend`]).
-    doorbell: Arc<Doorbell>,
 }
 
 impl VirtioPci {
@@ -387,7 +382,6 @@ impl VirtioPci {
             shm_mapped: None,
             shm_slots: Vec::new(),
             stats: Stats::default(),
-            doorbell: Arc::default(),
         };
         this.sync_bars(host)?;
         Ok(this)
@@ -471,7 +465,6 @@ impl VirtioPci {
     /// bit (virtio 1.2, section 4.1.4.5).
     fn signal_config(&mut self) {
         self.stats.interrupts += 1;
-        self.doorbell.ring();
         if self.msix.enabled() {
             if self.config_vector != NO_VECTOR {
                 self.msix.trigger(self.config_vector);
@@ -486,39 +479,12 @@ impl VirtioPci {
         self.queues.iter().map(|q| q.next_used()).collect()
     }
 
-    /// Lets the device take what the driver made available on every ready
-    /// queue and hand over what its host side has, as notifications and
-    /// wakeups would (a device may look at its queues at any time): the
-    /// device type, if that put something in a queue or its host side still
-    /// holds something for the guest ([`VirtioDevice::pending_for_guest`]).
-    pub(crate) fn settle(&mut self) -> Option<u16> {
-        if !self.activated {
-            return None;
-        }
-        let before = self.used_positions();
-        for index in 0..self.queues.len() {
-            self.process_queue(index);
-        }
-        self.woken();
-        let moved = self.used_positions() != before;
-        (moved || self.device.pending_for_guest()).then(|| self.device.device_type())
-    }
-
-    /// The bell a suspended machine listens to.
-    pub(crate) fn set_doorbell(&mut self, doorbell: Arc<Doorbell>) {
-        self.doorbell = doorbell;
-    }
-
     /// Interrupts for each queue whose used ring moved since `before`.
-    ///
-    /// Each move rings the doorbell, interrupt or not: a driver that turned
-    /// its interrupts off to poll the queue still has the buffer to take.
     fn signal_moved(&mut self, before: &[u16]) {
         for (index, &was) in before.iter().enumerate() {
             if self.queues[index].next_used() == was {
                 continue;
             }
-            self.doorbell.ring();
             if self.queues[index].needs_notification(&self.mem) {
                 self.signal_used(index);
             }
@@ -871,10 +837,6 @@ impl VirtioPci {
     /// Has the device let go of what it serves the guest from, its queues paused meanwhile, the
     /// machine paused: an extent store device's cell, for a live migration's hand-over
     /// (`virtio_extent::Device::release_cell`). Refused, the device going on, if it can't.
-    #[cfg_attr(
-        target_os = "linux",
-        allow(dead_code, reason = "KVM migrates no extent store device yet")
-    )]
     pub(crate) fn release_cell(&mut self) -> Result<()> {
         if self.released {
             return Ok(());
@@ -896,10 +858,6 @@ impl VirtioPci {
 
     /// Takes back what [`release_cell`](Self::release_cell) let go of, its queues started again:
     /// a live migration aborted. Refused, the device still released, if it can't.
-    #[cfg_attr(
-        target_os = "linux",
-        allow(dead_code, reason = "KVM migrates no extent store device yet")
-    )]
     pub(crate) fn reopen_cell(&mut self) -> Result<()> {
         if !self.released {
             return Ok(());
@@ -920,19 +878,6 @@ impl VirtioPci {
         let device = self.device.save()?;
         self.encode(&device, e);
         Ok(())
-    }
-
-    /// [`save`](Self::save), for a suspension: the device hands over what
-    /// must outlive its machine ([`VirtioDevice::hand_over`]).
-    pub(crate) fn hand_over(&mut self, e: &mut Encoder) -> Result<()> {
-        let device = self.device.hand_over()?;
-        self.encode(&device, e);
-        Ok(())
-    }
-
-    /// Undoes [`hand_over`](Self::hand_over).
-    pub(crate) fn take_back(&mut self) -> Result<()> {
-        self.device.take_back()
     }
 
     fn encode(&self, device: &DeviceState, e: &mut Encoder) {
@@ -1493,80 +1438,6 @@ mod tests {
         let mut pba = [0xff; 8];
         t.bar_read(0, MSIX_PBA_OFFSET, &mut pba);
         assert_eq!(pba, [0; 8]);
-    }
-
-    /// A suspended machine wakes when a device uses a buffer, even one the
-    /// driver asked not to be interrupted for: a driver polling its queue
-    /// with interrupts off has the buffer to take all the same.
-    #[test]
-    fn a_used_buffer_rings_the_doorbell_with_interrupts_suppressed() {
-        let host = FakeHost::default();
-        let mut t = rng(&host);
-        let doorbell = Arc::new(Doorbell::default());
-        t.set_doorbell(doorbell.clone());
-        doorbell.arm();
-        let mem = t.mem.clone();
-        let (desc, avail, used, _) = one_buffer(&mem, 64);
-        // With EVENT_IDX, used_event (after the 4-entry avail ring) asks
-        // for an interrupt only past used index 100: none for this one.
-        mem.write_slice(&100u16.to_le_bytes(), GuestAddress(avail + 4 + 2 * 4)).unwrap();
-
-        write(&mut t, &host, 8, &0u32.to_le_bytes());
-        write(&mut t, &host, 12, &(1u32 << VIRTIO_RING_F_EVENT_IDX).to_le_bytes());
-        write(&mut t, &host, 8, &1u32.to_le_bytes());
-        write(&mut t, &host, 12, &1u32.to_le_bytes()); // VERSION_1
-        write(&mut t, &host, 20, &[FEATURES_OK]);
-        write(&mut t, &host, 22, &0u16.to_le_bytes());
-        write(&mut t, &host, 24, &4u16.to_le_bytes());
-        write(&mut t, &host, 32, &desc.to_le_bytes());
-        write(&mut t, &host, 40, &avail.to_le_bytes());
-        write(&mut t, &host, 48, &used.to_le_bytes());
-        write(&mut t, &host, 28, &1u16.to_le_bytes());
-        assert_eq!(
-            doorbell.wait(|| false, Some(std::time::Duration::ZERO)),
-            crate::Woken::TimedOut,
-            "nothing used yet"
-        );
-        write(&mut t, &host, 20, &[ALL_OK]);
-        assert_eq!(status(&mut t), ALL_OK);
-
-        let mut used_idx = [0u8; 4];
-        mem.read_slice(&mut used_idx, GuestAddress(used)).unwrap();
-        assert_eq!(u16::from_le_bytes([used_idx[2], used_idx[3]]), 1, "used");
-        assert_eq!(t.stats().interrupts, 0, "suppressed");
-        assert_eq!(doorbell.wait(|| false, Some(std::time::Duration::ZERO)), crate::Woken::Device);
-    }
-
-    /// Settling takes what the driver made available without notifying, as
-    /// the device thread would at its notification, and says the device had
-    /// something for the guest; with nothing new it says nothing.
-    #[test]
-    fn settling_takes_what_the_driver_left_without_notifying() {
-        let host = FakeHost::default();
-        let mut t = rng(&host);
-        let mem = t.mem.clone();
-        let (desc, avail, used, _) = one_buffer(&mem, 64);
-        // Nothing available yet.
-        mem.write_slice(&[0, 0, 0, 0], GuestAddress(avail)).unwrap();
-        write(&mut t, &host, 8, &1u32.to_le_bytes());
-        write(&mut t, &host, 12, &1u32.to_le_bytes()); // VERSION_1
-        write(&mut t, &host, 20, &[FEATURES_OK]);
-        write(&mut t, &host, 22, &0u16.to_le_bytes());
-        write(&mut t, &host, 24, &4u16.to_le_bytes());
-        write(&mut t, &host, 32, &desc.to_le_bytes());
-        write(&mut t, &host, 40, &avail.to_le_bytes());
-        write(&mut t, &host, 48, &used.to_le_bytes());
-        write(&mut t, &host, 28, &1u16.to_le_bytes());
-        write(&mut t, &host, 20, &[ALL_OK]);
-        assert_eq!(t.settle(), None, "nothing to take");
-
-        // The buffer made available, and no notification.
-        mem.write_slice(&[0, 0, 1, 0], GuestAddress(avail)).unwrap();
-        assert_eq!(t.settle(), Some(4), "virtio-rng filled it");
-        let mut used_idx = [0u8; 4];
-        mem.read_slice(&mut used_idx, GuestAddress(used)).unwrap();
-        assert_eq!(u16::from_le_bytes([used_idx[2], used_idx[3]]), 1);
-        assert_eq!(t.settle(), None);
     }
 
     /// Lays out a split queue in guest memory with one writable buffer of
