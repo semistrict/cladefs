@@ -3,9 +3,9 @@
 Research for board 14602 (2026-11-27); decision recorded as hotbed question 622, reviewed in hotbed
 review 193. The question: can upstream Firecracker's `Uffd` memory backend, with cladefsd (or a
 helper) as its outside handler and extended so a fresh boot uses it as a restore does, replace the
-fork's guest-RAM code (`cladefs_memory.rs`, the `memory-cell` boot configuration, `PUT /memory-
-cell`, the `Cell` memory backend)? Board 14378's plan v3 keeps guest RAM as a fork patch (doc-32
-leaves it out of scope); this covers that gap.
+fork's guest-RAM code (`cladefs_memory.rs`, the `memory-cell` boot configuration, `PUT
+/memory-cell`, the `Cell` memory backend)? Board 14378's plan v3 keeps guest RAM as a fork patch
+(doc-32 leaves it out of scope); this covers that gap.
 
 Sources: upstream Firecracker v1.18.0 (`eaf83bb7`, the series base in `vendor/firecracker.base`); the
 fork at `cladefs-v1.18.0-r8` (`cdd1d886d`); Linux v7.1.2 (`~/src/linux-7.1.2`); e2b-infra at
