@@ -6,22 +6,26 @@
 //! (`vhost_user::front_end`) that plays a stock VMM with memfd guest RAM and the guest's driver:
 //! a guest's reads, writes, commits, frees and info served end to end by a real daemon's cell; a
 //! hostile front-end's and a hostile guest's every malformed message and ring refused, at the
-//! edges, nothing panicking nor hanging, the daemon serving on; and the serving time per request.
+//! edges, nothing panicking nor hanging, the daemon serving on; the serving time per request; and
+//! (board 14603) the cell's capacity changes and the daemon's asks for stats told the guest on the
+//! back-end channel, which a front-end leaving it unread stalls nothing with.
 
 use super::{BLOCK, connect, host};
 use crate::client::CellClient;
 use cladefs_core::Errno;
 use cladefs_core::extent_requests::protocol as doc4;
 use doc4::{
-    CommitArgs, ConfigSpace, ExtentIdLe, Info, IoArgs, MAX_WRITABLE, RequestHeader, Response,
-    RootLen,
+    CommitArgs, ConfigSpace, ExtentIdLe, Info, IoArgs, MAX_WRITABLE, RequestHeader, ResizedArgs,
+    Response, RootLen, StatsArgs,
 };
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use vhost_user::front_end::{
-    FrontEnd, GuestMemory, Queue, QueueLayout, Returned, WAIT, eventfd, mem_table, wait_signal,
+    FrontEnd, GuestMemory, Queue, QueueLayout, Returned, WAIT, backend_request, eventfd, mem_table,
+    wait_signal,
 };
 use vhost_user::protocol::*;
 use zerocopy::{FromBytes, Immutable, IntoBytes};
@@ -34,6 +38,8 @@ const BUFFERS: u64 =
 /// A daemon's connection to a cell, its vhost-user channel, and the front-end of it.
 struct Rig {
     cell: CellClient,
+    /// The cell's directory, which the control API names it by.
+    path: PathBuf,
     served: JoinHandle<()>,
     front: FrontEnd,
     memory: Arc<GuestMemory>,
@@ -46,10 +52,12 @@ impl Rig {
     fn new(queues: u16) -> Self {
         host();
         let dir = tempfile::tempdir().unwrap();
-        let (cell, served) = connect(&dir.path().join("store"), 64 << 20);
+        let path = dir.path().join("store");
+        let (cell, served) = connect(&path, 64 << 20);
         let channel = cell.vhost_user(queues, false, "fxfs").unwrap();
         let memory = GuestMemory::new(u64::from(queues) * ((1 << 20) + BUFFERS)).unwrap();
-        Self { cell, served, front: FrontEnd::new(channel), memory: Arc::new(memory), _dir: dir }
+        let (front, memory) = (FrontEnd::new(channel), Arc::new(memory));
+        Self { cell, path, served, front, memory, _dir: dir }
     }
 
     /// The layouts of `queues` queues.
@@ -60,6 +68,15 @@ impl Rig {
     /// Sets the device up as a stock front-end does: its queues.
     fn set_up(&self, queues: u16) -> Vec<Queue> {
         self.front.set_up(&self.memory, &Self::layouts(queues)).unwrap()
+    }
+
+    /// The device's configuration, as the guest reads it.
+    fn config(&self) -> ConfigSpace {
+        let len = size_of::<ConfigSpace>() as u32;
+        let mut payload = ConfigHeader { offset: 0, size: len, flags: 0 }.as_bytes().to_vec();
+        payload.resize(payload.len() + len as usize, 0);
+        let reply = self.front.get(GET_CONFIG, &payload).unwrap();
+        ConfigSpace::read_from_bytes(&reply[size_of::<ConfigHeader>()..]).unwrap()
     }
 
     /// Ends the connection, and checks the daemon served it to its end: nothing panicked, its
@@ -131,12 +148,7 @@ fn a_guests_requests_are_served_on_its_vhost_user_queues() {
     let rig = Rig::new(2);
     let cell = rig.cell.cell();
     // The configuration a VMM's device has: the protocol's version, its tag, its queues, its cell.
-    let config_len = size_of::<ConfigSpace>() as u32;
-    let read_config = ConfigHeader { offset: 0, size: config_len, flags: 0 };
-    let mut payload = read_config.as_bytes().to_vec();
-    payload.resize(payload.len() + config_len as usize, 0);
-    let reply = rig.front.get(GET_CONFIG, &payload).unwrap();
-    let config = ConfigSpace::read_from_bytes(&reply[size_of::<ConfigHeader>()..]).unwrap();
+    let config = rig.config();
     assert_eq!(u32::from_le(config.version), doc4::VIRTIO_EXTENT_VERSION);
     assert_eq!(&config.tag[..5], b"fxfs\0");
     assert_eq!(u32::from_le(config.num_request_queues), 2);
@@ -560,6 +572,37 @@ fn a_hostile_front_ends_messages_are_refused() {
                 outcome(&rig.front, SET_PROTOCOL_FEATURES, U64 { value: u64::MAX }.as_bytes(), &[])
             }),
         ),
+        // The back-end channel (board 14603).
+        (
+            "a back-end channel that is no socket",
+            Box::new(|rig| {
+                let not_socket = eventfd();
+                outcome(&rig.front, SET_BACKEND_REQ_FD, &[], &[not_socket.as_fd()])
+            }),
+        ),
+        (
+            "a back-end channel of datagrams",
+            Box::new(|rig| {
+                let (datagrams, _) = std::os::unix::net::UnixDatagram::pair().unwrap();
+                outcome(&rig.front, SET_BACKEND_REQ_FD, &[], &[datagrams.as_fd()])
+            }),
+        ),
+        (
+            "a back-end channel of a network socket",
+            Box::new(|rig| {
+                let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                outcome(&rig.front, SET_BACKEND_REQ_FD, &[], &[listener.as_fd()])
+            }),
+        ),
+        (
+            "a back-end channel not negotiated",
+            Box::new(|rig| {
+                let protocol = U64 { value: 1 << PROTOCOL_F_REPLY_ACK };
+                rig.front.request(SET_PROTOCOL_FEATURES, false, protocol.as_bytes(), &[]).unwrap();
+                let (channel, _) = std::os::unix::net::UnixStream::pair().unwrap();
+                outcome(&rig.front, SET_BACKEND_REQ_FD, &[], &[channel.as_fd()])
+            }),
+        ),
         // A GET refused, which no reply-ack answers, and those framed as no request: the channel
         // ends.
         (
@@ -654,6 +697,17 @@ fn a_hostile_front_ends_messages_are_refused() {
             }),
         ),
         (
+            "a back-end channel of no descriptor",
+            Box::new(|rig| outcome(&rig.front, SET_BACKEND_REQ_FD, &[], &[])),
+        ),
+        (
+            "a back-end channel of a payload",
+            Box::new(|rig| {
+                let (channel, _) = std::os::unix::net::UnixStream::pair().unwrap();
+                outcome(&rig.front, SET_BACKEND_REQ_FD, &[0; 8], &[channel.as_fd()])
+            }),
+        ),
+        (
             "half a header, then nothing",
             Box::new(|rig| {
                 let header = Header { request: GET_FEATURES, flags: VERSION, size: 8 };
@@ -703,6 +757,8 @@ fn a_hostile_front_ends_messages_are_refused() {
             "a table shorter than its regions",
             "a GET carrying a descriptor",
             "a message of 9 descriptors",
+            "a back-end channel of no descriptor",
+            "a back-end channel of a payload",
             "half a header, then nothing",
         ]
     );
@@ -959,4 +1015,117 @@ fn a_channel_started_as_its_connection_ends_holds_nothing() {
     fail::remove("cladefsd::vhost-user-start");
     fail::remove("cladefsd::vhost-user-stopped");
     drop(cell);
+}
+
+/// Says it heard a configuration change on the back-end channel `backend`, [`WAIT`] at most.
+fn heard_a_change(backend: &std::os::unix::net::UnixStream) {
+    let (header, payload) = backend_request(backend).expect("a configuration change said");
+    assert_eq!(header, Header { request: BACKEND_CONFIG_CHANGE_MSG, flags: VERSION, size: 0 });
+    assert_eq!(payload, Vec::<u8>::new());
+}
+
+/// Board 14603: the cell's capacity changes and the daemon's asks for its stats reach a guest on
+/// its vhost-user device as configuration changes, which the back-end says on the back-end
+/// channel: a grow; a shrink asked, answered and taken; a shrink refused; and a taking of stats,
+/// the guest's answered with its own.
+#[test]
+fn a_guest_hears_of_its_configurations_changes_on_the_backend_channel() {
+    let rig = Rig::new(1);
+    let mut queues = rig.set_up(1);
+    let backend = rig.front.backend_channel(None).unwrap();
+    let told = |rig: &Rig| {
+        let config = rig.config();
+        (u64::from_le(config.capacity), u64::from_le(config.asked))
+    };
+    let resized = |capacity: u64, took: bool| {
+        let flags = if took { doc4::VIRTIO_EXTENT_RESIZED_TOOK } else { 0 };
+        let args = ResizedArgs { capacity: capacity.to_le() };
+        bytes(doc4::VIRTIO_EXTENT_T_RESIZED, flags, Some(args), &[])
+    };
+
+    super::resize(&rig.path, 128 << 20).unwrap();
+    heard_a_change(&backend);
+    assert_eq!(told(&rig), (128 << 20, 0));
+
+    let path = rig.path.clone();
+    let shrinking = std::thread::spawn(move || super::resize(&path, 32 << 20));
+    heard_a_change(&backend);
+    assert_eq!(told(&rig), (128 << 20, 32 << 20));
+    assert_eq!(request(&mut queues[0], &resized(32 << 20, true), RESPONSE, 4096), (vec![], 0));
+    assert_eq!(shrinking.join().unwrap(), Ok(()));
+    assert_eq!(told(&rig), (32 << 20, 0));
+    assert_eq!(rig.cell.info().unwrap().capacity, 32 << 20);
+
+    let path = rig.path.clone();
+    let refusing = std::thread::spawn(move || super::resize(&path, 16 << 20));
+    heard_a_change(&backend);
+    assert_eq!(told(&rig), (32 << 20, 16 << 20));
+    assert_eq!(request(&mut queues[0], &resized(16 << 20, false), RESPONSE, 4096), (vec![], 0));
+    assert_eq!(refusing.join().unwrap(), Err(Errno::ENOSPC));
+    assert_eq!(told(&rig), (32 << 20, 0));
+
+    let taking = super::take_stats(WAIT);
+    heard_a_change(&backend);
+    let ask = u64::from_le(rig.config().stats_asked);
+    assert_ne!(ask, 0, "no ask in the configuration");
+    let answer = bytes(
+        doc4::VIRTIO_EXTENT_T_STATS,
+        0,
+        Some(StatsArgs { asked: ask.to_le() }),
+        b"seals 3\ncommit abc\n",
+    );
+    assert_eq!(request(&mut queues[0], &answer, RESPONSE, 4096), (vec![], 0));
+    let taken = taking.join().unwrap();
+    let guest = taken.vms[0].guest.as_ref().expect("the guest's stats");
+    assert_eq!(guest.counters.get("seals"), Some(&3));
+    assert_eq!(guest.build.as_deref(), Some("abc"));
+    drop(queues);
+    rig.finish();
+}
+
+/// Board 14603: a guest on a device whose front-end gave no back-end channel, which nothing could
+/// tell of a change, is asked no shrink (`ENOTSUP`, the cell kept as it is), and no stats (its VM
+/// answered at once, without the guest's); a grow it reads as it next reads its configuration.
+#[test]
+fn a_guest_with_no_backend_channel_is_asked_nothing() {
+    let rig = Rig::new(1);
+    let queues = rig.set_up(1);
+    assert_eq!(super::resize(&rig.path, 32 << 20), Err(Errno::ENOTSUP));
+    assert_eq!(rig.cell.info().unwrap().capacity, 64 << 20);
+    super::resize(&rig.path, 128 << 20).unwrap();
+    assert_eq!(u64::from_le(rig.config().capacity), 128 << 20);
+    let taken = super::take_stats(WAIT).join().unwrap();
+    assert!(taken.vms[0].answered.is_some(), "{:?}", taken.vms[0]);
+    assert!(taken.vms[0].guest.is_none(), "{:?}", taken.vms[0]);
+    drop(queues);
+    rig.finish();
+}
+
+/// Board 14603: a front-end that never reads its back-end channel, its socket made as small as it
+/// can be, stalls nothing: the cell's capacity changed hundreds of times, each change said, or
+/// folded into the request waiting for room, the device's requests are served, its configuration
+/// read as it is, and its channel stops; what came on the back-end channel, read at last, fewer
+/// requests than changes.
+#[test]
+fn a_front_end_that_never_reads_its_backend_channel_stalls_nothing() {
+    const CHANGES: usize = 300;
+    let rig = Rig::new(1);
+    let mut queues = rig.set_up(1);
+    let backend = rig.front.backend_channel(Some(1)).unwrap();
+    let mut capacity = 64u64 << 20;
+    for _ in 0..CHANGES {
+        capacity += BLOCK as u64;
+        super::resize(&rig.path, capacity).unwrap();
+    }
+    let info = bytes::<()>(doc4::VIRTIO_EXTENT_T_INFO, 0, None, &[]);
+    assert_eq!(request(&mut queues[0], &info, size_of::<Info>() + RESPONSE, 4096).1, 0);
+    assert_eq!(u64::from_le(rig.config().capacity), capacity);
+    backend.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+    let mut heard = 0;
+    while backend_request(&backend).is_ok() {
+        heard += 1;
+    }
+    assert!((1..CHANGES).contains(&heard), "{heard} requests for {CHANGES} changes");
+    drop(queues);
+    rig.finish();
 }

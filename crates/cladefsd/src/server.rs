@@ -2673,8 +2673,13 @@ impl Connection {
     }
 
     /// Tells the VM process the cell's capacity is `capacity` bytes, or, if `ask`, asks its guest
-    /// to shrink to it ([`CAPACITY`]).
+    /// to shrink to it ([`CAPACITY`]); or, the guest's device served by the connection's vhost-user
+    /// back-end, the guest itself (board 14603).
     fn tell_capacity(&self, capacity: u64, ask: bool) -> Result<(), Errno> {
+        #[cfg(all(target_os = "linux", not(madsim)))]
+        if let Some(guest) = self.vhost_guest() {
+            return guest.tell_capacity(capacity, ask);
+        }
         let (header, payload) = Told::Capacity { capacity, ask }.encode();
         self.peer.sender.send(header, payload, &[]).map_err(|err| {
             log::warn!("cladefsd: telling a VM process its capacity: {err}");

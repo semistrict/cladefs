@@ -11,14 +11,16 @@
 //!   and `pwrite`, only the vrings' pages mapped (plan v3, board 14378).
 //! - [`ring`]: the split ring, its device half checking every descriptor.
 //! - [`Channel`] and [`Device`]: the back-end, a thread a channel, serving the messages, hearing
-//!   the kicks, taking chains for the device to serve ([`Chain`]) and writing the calls.
+//!   the kicks, taking chains for the device to serve ([`Chain`]) and writing the calls; and
+//!   saying the device's configuration changes on the back-end channel ([`Notifier`], board
+//!   14603).
 //! - `front_end` (feature `testing`): a minimal front-end for tests, which plays the VMM and the
 //!   guest's driver over memfd guest RAM.
 //!
-//! What this milestone leaves for later, room kept for each: `DEVICE_STATE` (snapshots),
-//! `BACKEND_REQ` (the back-end channel: configuration changes, doc-32's messages), `SHMEM` and
-//! doc-32's `SHMEM_LAZY` (the DAX window), the memory cell's private store and private map in the
-//! memory table, and dirty logging (`VHOST_F_LOG_ALL`).
+//! What these milestones leave for later, room kept for each: `DEVICE_STATE` (snapshots, board
+//! 14605), doc-32's messages on the back-end channel and `SHMEM_LAZY` (the DAX window, board
+//! 14606), the memory cell's private store and private map in the memory table (board 14604), and
+//! dirty logging (`VHOST_F_LOG_ALL`).
 
 #![cfg(target_os = "linux")]
 // Every unsafe block says why it is sound, other threads included (TASK-444.4).
@@ -28,6 +30,8 @@
 // (`cargo nextest run -p vhost_user --features loom --lib loom::`).
 #[cfg(not(feature = "loom"))]
 mod backend;
+#[cfg(not(feature = "loom"))]
+mod backend_channel;
 #[cfg(not(feature = "loom"))]
 mod eventfd;
 #[cfg(all(any(test, feature = "testing"), not(feature = "loom")))]
@@ -42,6 +46,6 @@ mod socket;
 mod sync;
 
 #[cfg(not(feature = "loom"))]
-pub use backend::{Channel, Device, panics};
+pub use backend::{Channel, Device, Notifier, panics};
 #[cfg(not(feature = "loom"))]
 pub use queue::Chain;

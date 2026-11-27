@@ -20,12 +20,13 @@
 //! `pread` and `pwrite` (plan v3), the copies held in its tenant's bytes in flight while it is
 //! served. A panic serving it halts the cell and returns it with nothing written.
 //!
-//! This first milestone serves a stock front-end whose guest RAM is a plain memfd, every page
-//! private: no DAX window (`F_DAX`), so no `MAP`, `UNMAP` nor `PRIVATE`; and neither `F_RESIZE`
-//! nor `F_STATS`, whose asks a configuration change tells the guest of, which needs the
-//! back-end channel (`BACKEND_REQ`), the next milestone's. A guest's `FREEZE` the back-end keeps,
-//! for the device's state (`DEVICE_STATE`, a later milestone); its `STATS` and `RESIZED` answers,
-//! should it send them, go to the connection's report and shrinking, as the socket's do.
+//! It serves a stock front-end whose guest RAM is a plain memfd, every page private: no DAX
+//! window (`F_DAX`), so no `MAP`, `UNMAP` nor `PRIVATE`. The cell's capacity changes and the
+//! daemon's asks for the guest's stats (`F_RESIZE`, `F_STATS`) reach the guest as the device's
+//! configuration changes, which the back-end says on the back-end channel (`BACKEND_REQ`, board
+//! 14603) rather than the connection telling its VM process ([`GuestState`]); its `STATS` and
+//! `RESIZED` answers go to the connection's report and shrinking, as the socket's do. A guest's
+//! `FREEZE` the back-end keeps, for the device's state (`DEVICE_STATE`, board 14605).
 
 use super::{Connection, Turn, Work, serve_future};
 use crate::reads::Kind;
@@ -34,7 +35,8 @@ use bucket_cell::trace;
 use cladefs_core::extent_requests::protocol::{
     self, Bounds, ConfigSpace, MAX_EXTENT, MAX_READABLE, MAX_ROOT, MAX_TAG_LEN, MAX_TRANSFER,
     MAX_WRITABLE, QUEUE_SIZE, RequestHeader, Response, VIRTIO_EXTENT_F_FREE_MANY,
-    VIRTIO_EXTENT_F_FREEZE, VIRTIO_EXTENT_F_WRITE_COMMIT, VIRTIO_EXTENT_VERSION,
+    VIRTIO_EXTENT_F_FREEZE, VIRTIO_EXTENT_F_RESIZE, VIRTIO_EXTENT_F_STATS,
+    VIRTIO_EXTENT_F_WRITE_COMMIT, VIRTIO_EXTENT_VERSION,
 };
 use cladefs_core::extent_requests::{Backend, Buffers, Guest, GuestBackend, GuestNotices, handle};
 use cladefs_core::{
@@ -43,7 +45,7 @@ use cladefs_core::{
 };
 use std::os::fd::AsFd;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use zerocopy::{FromBytes, FromZeros};
 
 /// `VIRTIO_F_VERSION_1` and `VIRTIO_RING_F_EVENT_IDX`, the transport's features a VMM's extent
@@ -59,25 +61,79 @@ const BOUNDS: Bounds = Bounds {
     window: 0,
 };
 
-/// A connection's vhost-user channel's back-end: none yet; running; or stopped as the connection
-/// ends, after which none starts.
+/// A connection's vhost-user channel's back-end, and its device's guest: none yet; running; or
+/// stopped as the connection ends, after which none starts.
 #[derive(Default)]
 pub(super) enum VhostUser {
     #[default]
     Unstarted,
-    Running(vhost_user::Channel),
+    Running {
+        channel: vhost_user::Channel,
+        guest: Arc<GuestState>,
+    },
     Stopped,
 }
 
-/// What a guest tells its vhost-user device beside its cell's requests: kept for the device's
-/// state, and how its uploaded commits are answered.
+/// What a guest and its vhost-user device tell each other beside its cell's requests: kept for
+/// the device's state and configuration, and how its uploaded commits are answered.
 #[derive(Debug, Default)]
 pub(super) struct GuestState {
     /// cladefs TASK-363: its cache `Unsafe` ([`crate::wire::VHOST_USER_UNSAFE`]).
     ordered_only: bool,
     /// Whether its filesystem is frozen, as it said last (`FREEZE`), which a snapshot's device
-    /// state will carry (`DEVICE_STATE`, a later milestone).
+    /// state will carry (`DEVICE_STATE`, board 14605).
     frozen: AtomicBool,
+    /// What its configuration tells it beside the cell's own.
+    told: Mutex<Told>,
+    /// How the front-end hears its configuration changed, once the back-end runs.
+    notifier: OnceLock<vhost_user::Notifier>,
+}
+
+/// What a vhost-user device's configuration tells its guest beside the cell's own, as a VMM's
+/// device has it (`virtio_extent::Notices`): the cell's capacity, as the guest is told it; the
+/// shrink it is asked to take, 0 if none (`F_RESIZE`); and the latest ask for its stats, 0 before
+/// the first (`F_STATS`). Changed and read under its lock: the configuration is read rarely.
+#[derive(Clone, Copy, Debug, Default)]
+struct Told {
+    capacity: u64,
+    asked: u64,
+    stats_asked: u64,
+}
+
+impl GuestState {
+    fn new(ordered_only: bool, capacity: u64) -> Self {
+        let told = Told { capacity, ..Told::default() };
+        Self { ordered_only, told: Mutex::new(told), ..Self::default() }
+    }
+
+    fn told(&self) -> Told {
+        *self.told.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Tells the front-end the configuration changed: whether it has a back-end channel to hear it
+    /// on.
+    fn config_changed(&self) -> bool {
+        self.notifier.get().is_some_and(vhost_user::Notifier::config_changed)
+    }
+
+    /// Tells the guest the cell's capacity is `capacity` bytes, or, if `ask`, asks it to shrink to
+    /// it, with a configuration change: `ENOTSUP` for an ask the front-end gave no way to tell,
+    /// which nothing would answer.
+    pub(super) fn tell_capacity(&self, capacity: u64, ask: bool) -> Result<(), Errno> {
+        {
+            let mut told = self.told.lock().unwrap_or_else(PoisonError::into_inner);
+            if ask {
+                told.asked = capacity;
+            } else {
+                told.capacity = capacity;
+                told.asked = 0;
+            }
+        }
+        match self.config_changed() || !ask {
+            true => Ok(()),
+            false => Err(Errno::ENOTSUP),
+        }
+    }
 }
 
 impl GuestNotices for GuestState {
@@ -85,8 +141,32 @@ impl GuestNotices for GuestState {
         self.frozen.store(frozen, Ordering::Release);
     }
 
-    // The cell hears of it, its shrinking answered (`GuestBackend::resized`): nothing kept here.
-    fn resize_answered(&self, _: u64, _: bool) {}
+    /// The shrink it answered no longer asked, the daemon having asked another since, or told the
+    /// capacity it kept, changes nothing (TASK-79.41); the cell hears of it either way
+    /// (`GuestBackend::resized`).
+    fn resize_answered(&self, capacity: u64, took: bool) {
+        let mut told = self.told.lock().unwrap_or_else(PoisonError::into_inner);
+        if told.asked != capacity {
+            return;
+        }
+        told.asked = 0;
+        if took {
+            told.capacity = capacity;
+        }
+    }
+}
+
+/// The daemon asks the guest for its stats with a configuration change, while its driver takes
+/// asks (`F_STATS`) and the front-end gave a back-end channel to say it on.
+impl crate::stats::AsksGuest for GuestState {
+    fn ask(&self, ask: u64) -> bool {
+        let acked = self.notifier.get().map_or(0, vhost_user::Notifier::acked);
+        if acked & (1 << VIRTIO_EXTENT_F_STATS) == 0 {
+            return false;
+        }
+        self.told.lock().unwrap_or_else(PoisonError::into_inner).stats_asked = ask;
+        self.config_changed()
+    }
 }
 
 /// A connection's extent device, which its vhost-user channel serves.
@@ -94,22 +174,26 @@ struct ExtentDevice {
     connection: Arc<Connection>,
     guest: Arc<GuestState>,
     queues: u16,
-    /// Its configuration, but the cell's capacity, read as it is.
+    /// Its configuration, but what its guest is told beside ([`Told`]).
     config: ConfigSpace,
 }
 
-/// The device features the back-end offers: doc-4's of a device with no window, whose
-/// configuration changes nothing tells the guest of yet (no `F_RESIZE`, `F_STATS`), and the
+/// The device features the back-end offers: doc-4's of a device with no window, and the
 /// transport's.
 const FEATURES: u64 = (1 << VIRTIO_EXTENT_F_WRITE_COMMIT)
+    | (1 << VIRTIO_EXTENT_F_RESIZE)
     | (1 << VIRTIO_EXTENT_F_FREEZE)
     | (1 << VIRTIO_EXTENT_F_FREE_MANY)
+    | (1 << VIRTIO_EXTENT_F_STATS)
     | (1 << VIRTIO_F_VERSION_1)
     | (1 << VIRTIO_RING_F_EVENT_IDX);
 
 impl ExtentDevice {
     fn new(connection: Arc<Connection>, queues: u16, ordered_only: bool, tag: &str) -> Self {
-        let cell = connection.cell().map_or(0, |open_cell| open_cell.cell().id);
+        let open_cell = connection.cell();
+        let cell = open_cell.map_or(0, |open_cell| open_cell.cell().id);
+        let capacity =
+            open_cell.and_then(|open_cell| open_cell.info().ok()).map_or(0, |info| info.capacity);
         let mut config = ConfigSpace::new_zeroed();
         config.version = VIRTIO_EXTENT_VERSION.to_le();
         config.num_request_queues = u32::from(queues).to_le();
@@ -122,7 +206,7 @@ impl ExtentDevice {
         config.cell = cell.to_le();
         // The wire's decoder took 1 to MAX_TAG_LEN bytes.
         config.tag[..tag.len().min(MAX_TAG_LEN)].copy_from_slice(tag.as_bytes());
-        let guest = Arc::new(GuestState { ordered_only, frozen: AtomicBool::new(false) });
+        let guest = Arc::new(GuestState::new(ordered_only, capacity));
         Self { connection, guest, queues, config }
     }
 }
@@ -146,12 +230,13 @@ impl vhost_user::Device for ExtentDevice {
     }
 
     fn read_config(&self, offset: u32, data: &mut [u8]) {
-        let capacity = self
-            .connection
-            .cell()
-            .and_then(|open_cell| open_cell.info().ok())
-            .map_or(0, |info| info.capacity);
-        let config = ConfigSpace { capacity: capacity.to_le(), ..self.config };
+        let told = self.guest.told();
+        let config = ConfigSpace {
+            capacity: told.capacity.to_le(),
+            asked: told.asked.to_le(),
+            stats_asked: told.stats_asked.to_le(),
+            ..self.config
+        };
         config.read(u64::from(offset), data);
     }
 
@@ -198,10 +283,11 @@ impl Connection {
             let mut state = self.vhost_user.lock().unwrap_or_else(PoisonError::into_inner);
             match *state {
                 VhostUser::Unstarted => {}
-                VhostUser::Running(_) => return Err(Errno::EEXIST),
+                VhostUser::Running { .. } => return Err(Errno::EEXIST),
                 VhostUser::Stopped => return Err(Errno::EBADF),
             }
             let device = Arc::new(ExtentDevice::new(self.clone(), queues, ordered_only, tag));
+            let guest = device.guest.clone();
             let (channel, theirs) =
                 vhost_user::Channel::start(device, "vhost-user").map_err(|err| {
                     log::error!("cladefsd: starting a vhost-user back-end: {err}");
@@ -211,7 +297,12 @@ impl Connection {
                         None => Errno::EIO,
                     }
                 })?;
-            *state = VhostUser::Running(channel);
+            // Set once, the back-end just made.
+            let _ = guest.notifier.set(channel.notifier());
+            // cladefs board 14603: its guest asked for its stats by the back-end, not the VM
+            // process, which may know nothing of the device.
+            self.report.asks_guest(Some(guest.clone()));
+            *state = VhostUser::Running { channel, guest };
             Ok(theirs)
         });
         match started {
@@ -229,9 +320,19 @@ impl Connection {
         };
         // cladefs: where a test learns the connection stopped its channel (failpoints).
         fail::fail_point!("cladefsd::vhost-user-stopped");
-        let VhostUser::Running(channel) = stopped else { return };
+        let VhostUser::Running { channel, .. } = stopped else { return };
+        self.report.asks_guest(None);
         if let Err(panicked) = crate::run::off_the_runtime(move || channel.stop()).await {
             log::error!("cladefsd: stopping a vhost-user back-end: {panicked}");
+        }
+    }
+
+    /// The guest of its vhost-user device, while its back-end runs: who the cell's capacity changes
+    /// are told to, rather than its VM process (board 14603).
+    pub(super) fn vhost_guest(&self) -> Option<Arc<GuestState>> {
+        match &*self.vhost_user.lock().unwrap_or_else(PoisonError::into_inner) {
+            VhostUser::Running { guest, .. } => Some(guest.clone()),
+            VhostUser::Unstarted | VhostUser::Stopped => None,
         }
     }
 

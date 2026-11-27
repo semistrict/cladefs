@@ -244,6 +244,37 @@ impl FrontEnd {
         }
     }
 
+    /// Gives the back-end a back-end channel (`SET_BACKEND_REQ_FD`), as a front-end that negotiated
+    /// `BACKEND_REQ` does: the front-end's end, its reads waited for [`WAIT`] at most. If
+    /// `send_buffer`, the back-end's end's send buffer that small first, as a hostile front-end
+    /// may make it.
+    pub fn backend_channel(&self, send_buffer: Option<libc::c_int>) -> io::Result<UnixStream> {
+        let (ours, theirs) = UnixStream::pair()?;
+        if let Some(size) = send_buffer {
+            // SAFETY: Sets an integer socket option of a socket of this function's.
+            let set = unsafe {
+                libc::setsockopt(
+                    theirs.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_SNDBUF,
+                    (&raw const size).cast(),
+                    size_of::<libc::c_int>() as libc::socklen_t,
+                )
+            };
+            if set != 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        match self.acked(SET_BACKEND_REQ_FD, &[], &[theirs.as_fd()])? {
+            0 => {}
+            failed => {
+                return Err(io::Error::other(format!("the back-end channel refused: {failed}")));
+            }
+        }
+        ours.set_read_timeout(Some(WAIT))?;
+        Ok(ours)
+    }
+
     /// Sets the device up as a stock front-end does, with `memory` its guest RAM and `queues`
     /// request queues: features, protocol features, owner, memory table, and each queue's rings at
     /// `layout`'s addresses, kicks and calls; and enables them. Returns the queues.
@@ -290,6 +321,18 @@ impl FrontEnd {
         }
         Ok(made)
     }
+}
+
+/// The back-end's next request on its back-end channel, `channel`, [`WAIT`] at most: its header,
+/// and its payload.
+pub fn backend_request(channel: &UnixStream) -> io::Result<(Header, Vec<u8>)> {
+    let mut channel = channel;
+    let mut header = [0u8; size_of::<Header>()];
+    channel.read_exact(&mut header)?;
+    let header = Header::read_from_bytes(&header).unwrap();
+    let mut payload = vec![0; header.size as usize];
+    channel.read_exact(&mut payload)?;
+    Ok((header, payload))
 }
 
 /// A `SET_MEM_TABLE`'s payload of `regions`.

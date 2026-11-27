@@ -44,24 +44,32 @@ pub const GET_PROTOCOL_FEATURES: u32 = 15;
 pub const SET_PROTOCOL_FEATURES: u32 = 16;
 pub const GET_QUEUE_NUM: u32 = 17;
 pub const SET_VRING_ENABLE: u32 = 18;
+pub const SET_BACKEND_REQ_FD: u32 = 21;
 pub const GET_CONFIG: u32 = 24;
 pub const RESET_DEVICE: u32 = 34;
+
+/// The back-end's requests on its back-end channel (`SET_BACKEND_REQ_FD`): the device's
+/// configuration changed, for the front-end to tell the guest (its configuration change
+/// interrupt), which reads it again (`GET_CONFIG`).
+pub const BACKEND_CONFIG_CHANGE_MSG: u32 = 2;
 
 /// `VHOST_USER_F_PROTOCOL_FEATURES`: a device feature bit, saying the back-end has protocol
 /// features; negotiated, rings start disabled until `SET_VRING_ENABLE`.
 pub const F_PROTOCOL_FEATURES: u32 = 30;
 
-/// Protocol features (`VHOST_USER_PROTOCOL_F_*`) this back-end offers. cladefs board 14537: the
-/// first milestone's; `BACKEND_REQ` (5), `DEVICE_STATE` (19), `SHMEM` (22) and doc-32's
-/// `SHMEM_LAZY` come with the next ones.
+/// Protocol features (`VHOST_USER_PROTOCOL_F_*`) this back-end offers. cladefs: board 14537's,
+/// and the back-end channel (board 14603); `DEVICE_STATE` (19), `SHMEM` (22) and doc-32's
+/// `SHMEM_LAZY` come with the next milestones.
 pub const PROTOCOL_F_MQ: u32 = 0;
 pub const PROTOCOL_F_REPLY_ACK: u32 = 3;
+pub const PROTOCOL_F_BACKEND_REQ: u32 = 5;
 pub const PROTOCOL_F_CONFIG: u32 = 9;
 pub const PROTOCOL_F_RESET_DEVICE: u32 = 13;
 
 /// The protocol features offered, as a mask.
 pub const PROTOCOL_FEATURES: u64 = (1 << PROTOCOL_F_MQ)
     | (1 << PROTOCOL_F_REPLY_ACK)
+    | (1 << PROTOCOL_F_BACKEND_REQ)
     | (1 << PROTOCOL_F_CONFIG)
     | (1 << PROTOCOL_F_RESET_DEVICE);
 
@@ -185,7 +193,8 @@ pub struct Region {
 }
 
 /// A front-end's request, decoded: every field within what the protocol allows, a queue's index
-/// among them within the device's queues, and every descriptor where the request carries one.
+/// among them within the device's queues, and every descriptor where the request carries one
+/// (a back-end channel's, `SetBackendReqFd`, checked a Unix stream socket's as it is served).
 #[derive(Debug)]
 pub enum Request {
     GetFeatures,
@@ -205,6 +214,7 @@ pub enum Request {
     SetVringEnable { index: u16, enable: bool },
     GetConfig { offset: u32, size: u32 },
     ResetDevice,
+    SetBackendReqFd(OwnedFd),
 }
 
 /// A message received whole: its header, payload and descriptors.
@@ -462,6 +472,11 @@ impl Request {
                     return Err(value("a configuration read past a u32"));
                 }
                 Request::GetConfig { offset, size }
+            }
+            SET_BACKEND_REQ_FD => {
+                empty(&payload)?;
+                let fd = one_fd(request, fds, false)?.expect("one descriptor");
+                Request::SetBackendReqFd(fd)
             }
             _ => return Err(Refused::Unknown(request)),
         })

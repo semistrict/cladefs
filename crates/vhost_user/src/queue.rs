@@ -15,7 +15,8 @@ use crate::memory::{Mapping, MemoryError, MemoryTable};
 use crate::protocol::VringAddr;
 use crate::ring::{self, Device, RingError, RingMemory, Rings, Segment};
 
-/// What the channel's thread and the threads returning chains share.
+/// What the channel's thread shares with the threads returning chains, and with the device's
+/// ([`crate::Notifier`]).
 #[derive(Debug)]
 pub(crate) struct Shared {
     pub(crate) wake: Wake,
@@ -25,6 +26,14 @@ pub(crate) struct Shared {
     pub(crate) thread: OnceLock<std::thread::ThreadId>,
     /// Whether the channel stops ([`crate::Channel::stop`]).
     pub(crate) stop: AtomicBool,
+    /// Whether the device's configuration changed since the back-end channel last said so, which
+    /// the channel's thread says: released by the device once its configuration reads the change.
+    pub(crate) config_changed: AtomicBool,
+    /// Whether the front-end gave the back-end a back-end channel, which the channel's thread
+    /// keeps: a hint, as a change said as it goes is said to no one either way.
+    pub(crate) backend_channel: AtomicBool,
+    /// The virtio features the driver acked, 0 until it did, which the channel's thread keeps.
+    pub(crate) acked: AtomicU64,
 }
 
 impl Shared {

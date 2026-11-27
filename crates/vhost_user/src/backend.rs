@@ -20,7 +20,11 @@
 //! `GET_VRING_BASE` and `RESET_DEVICE` wait for the chains taken off the queues they stop: their
 //! reply deferred, the thread goes on returning chains and writing calls, reading no message
 //! until it is sent, as the front-end sends none before. So nothing a chain's serving waits for
-//! waits on the thread (the later milestones' back-end channel among it, doc-32 section 7).
+//! waits on the thread (the later milestones' back-end requests among it, doc-32 section 7).
+//!
+//! The device tells the front-end of its configuration's changes from any thread
+//! ([`Notifier`]); the channel's thread says each on the back-end channel, never waiting
+//! ([`crate::backend_channel`], cladefs board 14603).
 
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
@@ -31,6 +35,7 @@ use std::time::Duration;
 
 use zerocopy::IntoBytes;
 
+use crate::backend_channel::BackendChannel;
 use crate::eventfd::{Call, Kick, Wake};
 use crate::memory::MemoryTable;
 use crate::protocol::*;
@@ -52,6 +57,29 @@ pub trait Device: Send + Sync + 'static {
     fn read_config(&self, offset: u32, data: &mut [u8]);
     /// Serves `chain`, taken off a queue on the channel's thread, returning it once served.
     fn serve(&self, chain: Chain);
+}
+
+/// What a device tells its front-end beside its queues, from any thread: that its configuration
+/// changed, which the channel's thread says on the back-end channel (cladefs board 14603); and
+/// the features its driver acked.
+#[derive(Clone, Debug)]
+pub struct Notifier(Arc<Shared>);
+
+impl Notifier {
+    /// The device's configuration changed, as it reads now: the front-end is told, on the back-end
+    /// channel, for its guest to read it again. Whether the front-end gave one: without, the guest
+    /// reads the change only as it next reads its configuration of its own accord.
+    pub fn config_changed(&self) -> bool {
+        // Released after the configuration changed, which the front-end reads after it hears.
+        self.0.config_changed.store(true, Ordering::Release);
+        self.0.wake();
+        self.0.backend_channel.load(Ordering::Relaxed)
+    }
+
+    /// The virtio features the device's driver acked, 0 until it did.
+    pub fn acked(&self) -> u64 {
+        self.0.acked.load(Ordering::Relaxed)
+    }
 }
 
 /// The signal [`Channel::stop`] interrupts the channel's thread with, out of a call's write the
@@ -130,6 +158,9 @@ impl Channel {
             calls: AtomicU64::new(0),
             thread: OnceLock::new(),
             stop: AtomicBool::new(false),
+            config_changed: AtomicBool::new(false),
+            backend_channel: AtomicBool::new(false),
+            acked: AtomicU64::new(0),
         });
         let backend = Backend::new(device, shared.clone(), Socket::new(ours)?)?;
         let (exits, exited) = mpsc::channel();
@@ -143,6 +174,11 @@ impl Channel {
             let _ = exits.send(());
         })?;
         Ok((Self { shared, thread: Some(thread), exited }, theirs))
+    }
+
+    /// What its device tells the front-end with beside its queues.
+    pub fn notifier(&self) -> Notifier {
+        Notifier(self.shared.clone())
     }
 
     /// Whether its thread has ended: the front-end closed or broke the channel.
@@ -196,10 +232,12 @@ impl Drop for Channel {
 /// again: the socket, level-triggered, is ready again at once if more came.
 const MESSAGES_A_TURN: usize = 16;
 
-/// The epoll tokens of the socket, the wake, and each queue's kick (from [`KICK`]).
+/// The epoll tokens of the socket, the wake, the back-end channel, and each queue's kick (from
+/// [`KICK`]).
 const SOCKET: u64 = 0;
 const WAKE: u64 = 1;
-const KICK: u64 = 2;
+const BACKEND: u64 = 2;
+const KICK: u64 = 3;
 
 /// A queue as the front-end set it up.
 #[derive(Debug, Default)]
@@ -251,6 +289,8 @@ struct Backend<D: Device> {
     memory: Option<Arc<MemoryTable>>,
     queues: Vec<Queue>,
     deferred: Option<Deferred>,
+    /// The back-end channel, once the front-end gave one.
+    backend: Option<BackendChannel>,
 }
 
 fn epoll_ctl(epoll: BorrowedFd<'_>, op: libc::c_int, fd: BorrowedFd<'_>, events: u32, token: u64) {
@@ -284,6 +324,7 @@ impl<D: Device> Backend<D> {
             memory: None,
             queues,
             deferred: None,
+            backend: None,
         })
     }
 
@@ -314,6 +355,7 @@ impl<D: Device> Backend<D> {
                 return Ok(());
             }
             self.write_calls();
+            self.say_config_changed();
             self.finish_deferred()?;
             if self.shared.stop.load(Ordering::Acquire) {
                 return Ok(());
@@ -334,6 +376,7 @@ impl<D: Device> Backend<D> {
                 match token {
                     SOCKET => self.receive(flags)?,
                     WAKE => self.shared.wake.clear(),
+                    BACKEND => self.backend_ready(flags),
                     kick => self.kicked(u16::try_from(kick - KICK).expect("a queue's token")),
                 }
             }
@@ -350,6 +393,53 @@ impl<D: Device> Backend<D> {
                 call.signal();
             }
         }
+    }
+
+    /// Says the device's configuration changed on the back-end channel, if it did since it last
+    /// said so, and there is one.
+    fn say_config_changed(&mut self) {
+        // Acquiring the change the device released ([`Notifier::config_changed`]).
+        if !self.shared.config_changed.swap(false, Ordering::Acquire) {
+            return;
+        }
+        if let Some(backend) = &mut self.backend {
+            backend.config_changed();
+            self.flush_backend();
+        }
+    }
+
+    /// Sends what the back-end channel has yet to, hearing when it has room again if it is full;
+    /// or lets go of it, gone.
+    fn flush_backend(&mut self) {
+        let Some(backend) = &mut self.backend else { return };
+        match backend.flush() {
+            Ok(done) => {
+                let events = if done { 0 } else { libc::EPOLLOUT as u32 };
+                epoll_ctl(self.epoll.as_fd(), libc::EPOLL_CTL_MOD, backend.fd(), events, BACKEND);
+            }
+            Err(err) => {
+                log::warn!("vhost-user: the back-end channel failed: {err}");
+                self.drop_backend();
+            }
+        }
+    }
+
+    /// The back-end channel has room, or the front-end closed it.
+    fn backend_ready(&mut self, flags: u32) {
+        if flags & (libc::EPOLLHUP | libc::EPOLLERR) as u32 != 0 {
+            log::info!("vhost-user: the front-end closed its back-end channel");
+            self.drop_backend();
+        } else {
+            self.flush_backend();
+        }
+    }
+
+    /// Lets go of the back-end channel, if there is one.
+    fn drop_backend(&mut self) {
+        if let Some(backend) = self.backend.take() {
+            epoll_ctl(self.epoll.as_fd(), libc::EPOLL_CTL_DEL, backend.fd(), 0, 0);
+        }
+        self.shared.backend_channel.store(false, Ordering::Relaxed);
     }
 
     /// Receives and serves the messages that came, until one defers its reply.
@@ -447,6 +537,7 @@ impl<D: Device> Backend<D> {
                     return Err("features the device refuses");
                 }
                 self.acked = Some(features);
+                self.shared.acked.store(features, Ordering::Relaxed);
                 Ok(None)
             }
             Request::SetOwner => {
@@ -553,6 +644,18 @@ impl<D: Device> Backend<D> {
                 self.device.read_config(offset, &mut data);
                 reply.extend_from_slice(&data);
                 Ok(Some(reply))
+            }
+            Request::SetBackendReqFd(fd) => {
+                if self.protocol & (1 << PROTOCOL_F_BACKEND_REQ) == 0 {
+                    return Err("a back-end channel, which the front-end didn't negotiate");
+                }
+                let backend = BackendChannel::new(fd)
+                    .ok_or("a back-end channel that is no Unix stream socket")?;
+                self.drop_backend();
+                epoll_ctl(self.epoll.as_fd(), libc::EPOLL_CTL_ADD, backend.fd(), 0, BACKEND);
+                self.backend = Some(backend);
+                self.shared.backend_channel.store(true, Ordering::Relaxed);
+                Ok(None)
             }
             Request::ResetDevice => {
                 for index in 0..self.device.queues() {
@@ -683,7 +786,9 @@ impl<D: Device> Backend<D> {
                     return Ok(());
                 }
                 self.acked = None;
+                self.shared.acked.store(0, Ordering::Relaxed);
                 self.protocol = 0;
+                self.drop_backend();
                 self.memory = None;
                 self.queues.iter_mut().for_each(|queue| *queue = Queue::default());
                 self.deferred = None;
