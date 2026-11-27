@@ -185,6 +185,43 @@ def session(argv):
     return 0
 
 
+def board(argv):
+    state = Path(os.environ["BOARD_STATE"])
+    tasks = json.loads(state.read_text()) if state.exists() else []
+
+    def option(name):
+        return argv[argv.index(name) + 1]
+
+    def options(name):
+        return [argv[at + 1] for at, arg in enumerate(argv) if arg == name]
+
+    assert "--json" in argv, argv
+    profile = option("--as")
+    if argv[:2] == ["task", "create"] and "-" in argv:
+        assert option("-p") == "cladefs", argv
+        task = {"id": str(900 + len(tasks)), "text": sys.stdin.read(), "state": "ready",
+                "as": profile,
+                "labels": dict(label.split("=", 1) for label in options("--label")),
+                "replies": []}
+        tasks.append(task)
+        envelope("board task create", {"task": {"id": task["id"]}, "outcome": "created"})
+    elif argv[:2] == ["task", "ls"]:
+        assert option("-p") == "cladefs", argv
+        key, value = option("--label").split("=", 1)
+        listed = [t for t in tasks if t["labels"].get(key) == value and t["state"] != "completed"]
+        envelope("board task ls",
+                 {"tasks": [{"message": {"id": t["id"], "text": t["text"]}} for t in listed],
+                  "cursor": "0"})
+    elif argv[0] == "reply" and argv[2] == "-":
+        task = next(t for t in tasks if t["id"] == argv[1])
+        task["replies"].append({"text": sys.stdin.read(), "as": profile})
+        envelope("board reply", {"message": {"id": "1"}, "outcome": "posted"})
+    else:
+        sys.exit(f"fake_hotbed board: no such call: {argv}")
+    state.write_text(json.dumps(tasks))
+    return 0
+
+
 def main(argv):
     command, rest = argv[0], argv[1:]
     if command == "run":
@@ -195,6 +232,8 @@ def main(argv):
         return stop(rest)
     if command == "session":
         return session(rest)
+    if command == "board":
+        return board(rest)
     sys.exit(f"fake_hotbed: no such command: {command}")
 
 

@@ -63,8 +63,8 @@ HISTORY = "nightly-history.md"
 BAD = ("could not run", "no result")
 # How many bad nights in a row file a task.
 BAD_NIGHTS = 3
-# The board's channel of tasks, the labels of what the nightly files, and the profile it writes as.
-CHANNEL = "tasks"
+# The board's project, the labels of what the nightly files, and the profile it writes as.
+PROJECT = "cladefs"
 LABELS = ["priority=high", "tag.perf=yes", "tag.nightly=yes"]
 PROFILE = "nightly"
 PUSH_TRIES = 3
@@ -213,25 +213,27 @@ def judge(results, base, head, status, environ=os.environ):
 
 
 class Board:
-    """The task board, through its CLI (`vb`, at the BOARD_URL the cron entry sets): the open tasks
-    the nightly filed, and filing them, as the profile `nightly`. A task is cited as `board ID`."""
+    """Hotbed's native task board (`hotbed board`): the open tasks the nightly filed, and filing
+    them, as the profile `nightly`. A task is cited as `board ID`."""
 
     def run(self, *args, text=None):
-        done = subprocess.run(["vb", *args, "--json", "--as", PROFILE], input=text,
+        done = subprocess.run(["hotbed", "board", *args, "--json", "--as", PROFILE], input=text,
                               capture_output=True, text=True)
         if done.returncode:
-            raise RuntimeError(f"vb {' '.join(args[:2])} failed: {done.stderr.strip()}")
-        return json.loads(done.stdout)
+            raise RuntimeError(f"hotbed board {' '.join(args[:2])} failed: {done.stderr.strip()}")
+        return json.loads(done.stdout)["data"]
 
     def open_task(self, marker):
         """The open nightly task whose title carries `marker`, its ID; None if none."""
         after = []
         while True:
-            page = self.run("tasks", CHANNEL, "--label", "tag.nightly=yes", "-n", "500", *after)
-            for task in page["tasks"]:
+            page = self.run("task", "ls", "-p", PROJECT, "--label", "tag.nightly=yes",
+                            "--limit", "500", *after)
+            tasks = page.get("tasks", [])
+            for task in tasks:
                 if marker in task["message"]["text"].split("\n", 1)[0]:
                     return task["message"]["id"]
-            if len(page["tasks"]) < 500:
+            if len(tasks) < 500:
                 return None
             after = ["--after", page["cursor"]]
 
@@ -243,7 +245,7 @@ class Board:
             self.run("reply", found, "-", text=note)
             return f"board {found}", "noted"
         labels = [arg for label in LABELS for arg in ("--label", label)]
-        made = self.run("tasks", "create", CHANNEL, "-", *labels,
+        made = self.run("task", "create", "-p", PROJECT, "-", *labels,
                         text=f"# {title} {marker}\n\n## Description\n\n{description}\n")
         return f"board {made['task']['id']}", "filed"
 

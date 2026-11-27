@@ -101,24 +101,25 @@ class CheckExclusionsTest(unittest.TestCase):
         def task(id_, state, **labels):
             return {"message": {"id": id_, "labels": labels, "task": {"state": state}}}
 
-        pages = {(): {"tasks": [task("2", "completed", task="TASK-3")] * (check.PAGE - 1)
-                      + [task("4", "ready", task="TASK-4")], "cursor": "4"},
-                 ("--after", "4"): {"tasks": [task("812", "claimed")], "cursor": "812"}}
+        pages = {(): {"tasks": [task("2", "BOARD_TASK_STATE_COMPLETED", task="TASK-3")] * (check.PAGE - 1)
+                      + [task("4", "BOARD_TASK_STATE_READY", task="TASK-4")], "cursor": "4"},
+                 ("--after", "4"): {"tasks": [task("812", "BOARD_TASK_STATE_CLAIMED")], "cursor": "812"}}
         asked = []
 
         def ask(*args):
             asked.append(args)
-            return pages[args[6:]]
+            return pages[args[7:]]
 
         self.assertEqual(
-            check.task_states({"BOARD_URL": "http://127.0.0.1:4100/api/board"}, ask),
+            check.task_states({"HOTBED_CONTROLLER": "https://hotbed.example"}, ask),
             {"board 2": "completed", "TASK-3": "completed", "board 4": "ready", "TASK-4": "ready",
              "board 812": "claimed"},
         )
-        self.assertEqual(asked, [("tasks", "tasks", "--state", "all", "-n", "500"),
-                                 ("tasks", "tasks", "--state", "all", "-n", "500", "--after", "4")])
-        # Without BOARD_URL (CI), nothing is asked, and states go unchecked.
+        self.assertEqual(asked, [("task", "ls", "-p", "cladefs", "--all", "--limit", "500"),
+                                 ("task", "ls", "-p", "cladefs", "--all", "--limit", "500", "--after", "4")])
+        # Without hotbed or on CI, nothing is asked, and states go unchecked.
         self.assertIsNone(check.task_states({}, ask))
+        self.assertIsNone(check.task_states({"CI": "true", "HOTBED_CONTROLLER": "https://hotbed.example"}, ask))
         self.assertEqual(len(asked), 2)
 
     def test_the_tree_says_why_of_everything_it_leaves_out(self):

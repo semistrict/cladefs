@@ -23,9 +23,10 @@ check covering a data loss bug had been switched off on DAX). So each of these s
 
 A task is cited as `board 812`, or, for a task from Backlog.md, as its TASK-N (its label `task` on
 the board). It is open while the board has it waiting, ready, claimed or blocked: completed,
-canceled and failed tasks aren't. The states are the board's, read with `vb` where BOARD_URL is set,
-on the user's machines; CI's runners can't reach the board, so there only that each names a task is
-checked (the user's call, 2026-11-21). A BOARD_URL set and a board that can't be read fail it.
+canceled and failed tasks aren't. The states are Hotbed's board's, read with `hotbed board` where
+`hotbed` is installed and configured on the user's machines; CI's runners can't reach the board, so
+there only that each names a task is checked (the user's call, 2026-11-21). A configured board that
+can't be read fails it.
 scripts/test.sh's scripts part runs this, as CI does. Exits 1, saying each, if anything breaks these.
 
 Usage: scripts/check-exclusions.py
@@ -34,6 +35,7 @@ Usage: scripts/check-exclusions.py
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -54,7 +56,8 @@ NEXTEST = ".config/nextest.toml"
 RUST = ["crates", "guest/tests", "guest/rust"]
 
 TASK = re.compile(r"\b(?:TASK-\d+(?:\.\d+)*|board \d+)\b")
-# The board's states of a task that is no longer open.
+# The board's project and the states of a task that is no longer open.
+PROJECT = "cladefs"
 CLOSED = ("completed", "canceled", "failed")
 PAGE = 500
 BARE_IGNORE = re.compile(r"#\[ignore\]|#\[cfg_attr\([^]]*,\s*ignore\s*\)\]")
@@ -63,28 +66,56 @@ NEXTEST_TEST = re.compile(r"test\(=([\w:]+)\)")
 TEST_FN = re.compile(r"\bfn (\w+)")
 
 
-def vb(*args):
-    """What the board's CLI answers ARGS, as JSON; a failure ends the check."""
-    done = subprocess.run(["vb", *args, "--json"], capture_output=True, text=True)
+class BoardNotInitialized(Exception):
+    """Raised when `hotbed` is installed on a host with no controller configured."""
+
+
+def hotbed_board(*args, environ=os.environ):
+    """What `hotbed board` answers ARGS, as JSON `data`; a failure ends the check."""
+    done = subprocess.run(["hotbed", "board", *args, "--json"], capture_output=True, text=True,
+                          env=environ)
     if done.returncode:
-        sys.exit(f"vb {' '.join(args)} failed, with BOARD_URL set: {done.stderr.strip()}")
-    return json.loads(done.stdout)
+        if not environ.get("HOTBED_CONTROLLER"):
+            try:
+                err = json.loads(done.stdout).get("error", {})
+            except ValueError:
+                err = {}
+            if err.get("code") == "NOT_INITIALIZED":
+                raise BoardNotInitialized()
+        detail = (done.stderr or done.stdout).strip()
+        sys.exit(f"hotbed board {' '.join(args)} failed: {detail}")
+    return json.loads(done.stdout)["data"]
 
 
-def task_states(environ=os.environ, ask=vb):
+def _task_state(raw):
+    return raw.removeprefix("BOARD_TASK_STATE_").lower()
+
+
+def task_states(environ=os.environ, ask=None):
     """Each task's state on the board, by how it is cited (`board 812`, and a task from Backlog.md
-    by its TASK-N too); None where BOARD_URL isn't set, so that states go unchecked."""
-    if not environ.get("BOARD_URL"):
+    by its TASK-N too); None on CI or where hotbed isn't configured, so that states go unchecked."""
+    if environ.get("CI"):
         return None
+    if not environ.get("HOTBED_CONTROLLER") and not shutil.which("hotbed",
+                                                               path=environ.get("PATH", "")):
+        return None
+    if ask is None:
+        ask = lambda *args: hotbed_board(*args, environ=environ)
     states, after = {}, []
     while True:
-        page = ask("tasks", "tasks", "--state", "all", "-n", str(PAGE), *after)
-        for each in page["tasks"]:
+        try:
+            page = ask("task", "ls", "-p", PROJECT, "--all", "--limit", str(PAGE), *after)
+        except BoardNotInitialized:
+            return None
+        tasks = page.get("tasks") or []
+        for each in tasks:
             message = each["message"]
-            states[f"board {message['id']}"] = message["task"]["state"]
-            if "task" in message["labels"]:
-                states[message["labels"]["task"]] = message["task"]["state"]
-        if len(page["tasks"]) < PAGE:
+            state = _task_state(message["task"]["state"])
+            states[f"board {message['id']}"] = state
+            labels = message.get("labels") or {}
+            if "task" in labels:
+                states[labels["task"]] = state
+        if len(tasks) < PAGE:
             return states
         after = ["--after", page["cursor"]]
 
@@ -206,7 +237,7 @@ def check(root, states):
 def main():
     states = task_states()
     if states is None:
-        print("exclusions: BOARD_URL isn't set, so whether each task named is open goes unchecked")
+        print("exclusions: hotbed isn't configured here, so whether each task named is open goes unchecked")
     problems = check(ROOT, states)
     for problem in problems:
         print(problem, file=sys.stderr)

@@ -3,10 +3,10 @@
 # found in the LICENSE file.
 
 """Tests of the nightly (TASK-441.1, TASK-441.2), end to end: scripts/nightly-host.sh as cron runs
-it, in the nightly's clone of an origin, its runs in fake_hotbed.py's workspace (scripts/lib/host.sh),
-with flock (fake_flock.py), a board CLI of its own (FAKE_VB) and a host script in the
-bench-ab-linux-host.sh's place (FAKE_AB) whose rounds are fixtures shaped as the test host's
-(test_ab_rounds.write_round). And scripts/nightly-install.sh's cron entry."""
+it, in the nightly's clone of an origin, its runs and board calls in fake_hotbed.py
+(scripts/lib/host.sh), with flock (fake_flock.py) and a host script in bench-ab-linux-host.sh's
+place (FAKE_AB) whose rounds are fixtures shaped as the test host's (test_ab_rounds.write_round).
+And scripts/nightly-install.sh's cron entry."""
 
 import datetime
 import json
@@ -46,40 +46,6 @@ fi
 cp -R "$CLADEFS_FAKE_ROUNDS/." "$results/"
 """
 
-# The board's CLI, as the nightly calls it, its tasks in $BOARD_STATE: `tasks CHANNEL --label L
-# -n N`, its open tasks with the label; `tasks create CHANNEL - --label L...`, a task of stdin's
-# text; `reply ID -`, a reply of stdin's; each with --json and --as, whose profile it keeps.
-FAKE_VB = r"""
-import json, os, sys
-from pathlib import Path
-state = Path(os.environ["BOARD_STATE"])
-tasks = json.loads(state.read_text()) if state.exists() else []
-args = sys.argv[1:]
-def option(name):
-    return args[args.index(name) + 1]
-def options(name):
-    return [args[at + 1] for at, arg in enumerate(args) if arg == name]
-assert "--json" in args, args
-profile = option("--as")
-if args[:3] == ["tasks", "create", "tasks"] and args[3] == "-":
-    task = {"id": str(900 + len(tasks)), "text": sys.stdin.read(), "state": "ready", "as": profile,
-            "labels": dict(label.split("=", 1) for label in options("--label")), "replies": []}
-    tasks.append(task)
-    print(json.dumps({"task": {"id": task["id"]}, "outcome": "created"}))
-elif args[:2] == ["tasks", "tasks"]:
-    key, value = option("--label").split("=", 1)
-    listed = [t for t in tasks if t["labels"].get(key) == value and t["state"] != "completed"]
-    print(json.dumps({"tasks": [{"message": {"id": t["id"], "text": t["text"]}} for t in listed],
-                      "cursor": "0"}))
-elif args[0] == "reply" and args[2] == "-":
-    task = next(t for t in tasks if t["id"] == args[1])
-    task["replies"].append({"text": sys.stdin.read(), "as": profile})
-    print(json.dumps({"message": {"id": "1"}, "outcome": "posted"}))
-else:
-    sys.exit(f"vb: no such call: {args}")
-state.write_text(json.dumps(tasks))
-"""
-
 # The scripts the nightly runs, linked into the origin; the host script of the A/B is FAKE_AB.
 LINKED = ["nightly-host.sh", "nightly.py", "ab-rounds.py", "bench-ab.py", "contamination.py",
           "bench-ab-host.sh", "build-commit.sh", "lib/host.sh", "lib/host-workspace.sh",
@@ -109,10 +75,6 @@ class NightlyHost:
         self.hotbed = self.dir / "hotbed"
         self.hotbed.mkdir()
         (self.hotbed / "calls").write_text("")
-        (bin_ / "fake_vb.py").write_text(FAKE_VB)
-        (bin_ / "vb").write_text(
-            f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "{bin_}/fake_vb.py" "$@"\n')
-        (bin_ / "vb").chmod(0o755)
         self.state = self.home / ".local" / "state" / "cladefs" / "nightly"
         self.board = self.dir / "board.json"
         self.environment = {
@@ -121,7 +83,6 @@ class NightlyHost:
             "FAKE_HOTBED": str(self.hotbed),
             "CLADEFS_HOTBED_WORK": str(self.hotbed / "work"),
             "BOARD_STATE": str(self.board),
-            "BOARD_URL": "http://127.0.0.1:4100/api/board",
             **IDENTITY,
         }
         firecracker = self.dir / "firecracker"
@@ -505,7 +466,6 @@ class Install(unittest.TestCase):
         self.assertEqual(crontab.read_text().splitlines(), [
             "5 * * * * other job",
             f"0 2 * * * PATH={bin_}:/usr/local/bin:/usr/bin:/bin "
-            "BOARD_URL=http://127.0.0.1:4100/api/board "
             f"CLADEFS_TEST_HOST={node} HOTBED_CONTROLLER= "
             f"{host1.dir / 'installed'}/scripts/nightly-host.sh >> {state}/cron.log 2>&1 "
             "# cladefs nightly (scripts/nightly-install.sh)"])
@@ -521,9 +481,9 @@ class Install(unittest.TestCase):
             (path / tool).symlink_to(shutil.which(tool))
         done = subprocess.run(["/bin/bash", str(SCRIPTS / "nightly-install.sh"), str(host1.origin)],
                               capture_output=True, text=True,
-                              env={**host1.environment, "PATH": str(path), "BOARD_URL": ""})
+                              env={**host1.environment, "PATH": str(path)})
         self.assertEqual((done.returncode, done.stderr),
-                         (1, "The nightly can't run here: missing hotbed flock vb BOARD_URL\n"))
+                         (1, "The nightly can't run here: missing hotbed flock\n"))
 
 
 if __name__ == "__main__":

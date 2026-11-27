@@ -58,7 +58,7 @@ of a repo whose `main` is already built and syncs uncommitted changes automatica
 `cargo nextest`, `scripts/test.sh`, simulations, mutants, benches, `make check-tla`, guest kernel
 and Firecracker builds; long ones with `--detach`. The workstation (macOS) compiles no Rust at all,
 macOS-only code included: CI's `macos` job compiles and tests that, so push and read its result.
-Local commands stay cheap: editing, `git`, `rg`, `cargo fmt -p CRATE`, `vb`, and fast Python
+Local commands stay cheap: editing, `git`, `rg`, `cargo fmt -p CRATE`, `hotbed board`, and fast Python
 checks.
 
 The one exception (the user, 2026-11-26): libmachine's macOS backend, on Hypervisor.framework
@@ -128,58 +128,58 @@ commit but leaves the submodule checkout on disk at its old commit—so `git sta
 
 ## Tasks: the board
 
-Tasks live on the team board, channel `tasks`: a Vercel Board (`@vercel/board`, Apache-2.0) that
-the user runs with `vb serve` on a host of their tailnet, reachable from the tailnet only. Backlog.md
-is retired (2026-11-21): its 1484 tasks, Done ones included, are on the board, and `backlog/` is
-gone. Its design docs are `docs/design/`, its decisions `docs/decisions/`.
+Tasks live on Hotbed's native board (`hotbed board`), project `cladefs` (inferred from this
+checkout's git remote; `-p cladefs` passes it explicitly). Backlog.md is retired (2026-11-21) and
+the standalone Vercel Board is retired (2026-11-27): their tasks and threads are on Hotbed's board
+with their original IDs preserved, and `backlog/` is gone. Its design docs are `docs/design/`, its
+decisions `docs/decisions/`.
 
-Setup: `BOARD_URL` is set in the user's shells (if it isn't, stop and say so; never guess a URL),
-and `vb` is the board's CLI (`npm i -g @vercel/board`). Tailscale says who you are: no login, no
-token. `vb <command> --help` before a command you haven't used; the `board` skill, where you have
-it, says more.
+Setup: `hotbed` is on `PATH` and logged into the controller (`hotbed skills get hotbed` for the
+full reference; `hotbed board <command> --help` before a command you haven't used).
 
 - **Write as your worktree's name.** First thing in a session, `scripts/agent-name.py` prints
   your name: two words, adjective-noun (`amber-heron`), picked at random the first time and kept
   in the worktree's `.agent-name` (git ignores it). Never a generic `claude` or `codex`:
   sessions in other worktrees would share it. Every write takes `--as <you>` with that name, or
-  `BOARD_PROFILE=<you>`. Without it, you write as the user. A claim is held by the profile that
-  made it, so settle a task as the same one, from the same worktree; tell a delegate in another
-  worktree to run the script there.
+  `HOTBED_BOARD_PROFILE=<you>`. A claim is held by the session/profile that made it (and its claim
+  token is stored locally with mode `0600`), so settle a task as the same one, from the same
+  worktree; tell a delegate in another worktree to run the script there.
 - **IDs.** A task is cited by its board ID, in commits, comments, docs and other tasks: `board
   3012` (never `#3012`: GitHub links that to a pull request). A task from Backlog.md keeps its
   `TASK-N`, which the code cites everywhere, as its label `task`:
-  `vb tasks tasks --state all --label task=TASK-633` prints its board ID. Never make up a new
+  `hotbed board task ls --all --label task=TASK-633` prints its board ID. Never make up a new
   `TASK-N` (no `TASK-725`, no `TASK-685.20`), not for a task, subtask, label, commit or comment:
   a task made since is its board ID alone, `board N`, and only the migrated ones have a `TASK-N`.
 - **A task's thread is the task.** Its root is the task itself, in Markdown: `# <title>`, then
   `## Description` and `## Acceptance Criteria` (`- [ ] #1 ...`). Its replies are the work log:
-  plan, notes, findings, what was verified. `vb read <id>` prints all of it.
-- **Find.** `vb tasks tasks` lists open tasks, oldest first, 50 a page (`-n`, and the `--after`
-  it prints); `--state ready|claimed|blocked|completed|all` and `--label k=v` narrow it. Labels:
-  `priority=high|medium|low`, `type=bug|feature|...`, `parent=<ID>`, `tag.<area>=yes`
-  (`tag.bucket=yes`, `tag.nightly=yes`), `status=in-progress` (In Progress when it left
-  Backlog.md). The board has no full-text search: past bugs are found by label, or in
-  `dead-ends/` and `git log`.
+  plan, notes, findings, what was verified. `hotbed board read <id>` prints all of it.
+- **Find.** `hotbed board task ls` lists open tasks, oldest first, 50 a page (`--limit N`, and the
+  `--after` cursor it prints); `--all` includes closed states, `--state ready|claimed|blocked|completed|failed|canceled`
+  and `--label k=v` narrow it. Labels: `priority=high|medium|low`, `type=bug|feature|...`,
+  `parent=<ID>`, `tag.<area>=yes` (`tag.bucket=yes`, `tag.nightly=yes`), `status=in-progress`
+  (In Progress when it left Backlog.md). Past bugs are found by label, or in `dead-ends/` and
+  `git log`.
 - **File** every error or bug you find, at once, without asking:
-  `vb tasks create tasks - --as <you> --label priority=high --label type=bug --label tag.<area>=yes < task.md`,
+  `hotbed board task create - --as <you> --label priority=high --label type=bug --label tag.<area>=yes < task.md`,
   with `--needs <ID>` for each task it waits for and `--label parent=<ID>` for a subtask (the
   parent's ID as it is cited: `TASK-149` if it was migrated, else its board ID). It prints the
   new task's ID, the only ID it has; give it no `task=TASK-N` label. Add
   `--claim --lease 1h` to start it in the same write.
-- **Start: claim before you work.** `vb tasks claim <ID> --lease 1h --as <you>`. The claim is
-  what tells the other sessions a task is taken, at once, with nothing to commit. A lease ends:
-  `vb tasks renew <ID>` within the hour on long work. `claim_lost` means it ended or the task
+- **Start: claim before you work.** `hotbed board task claim <ID> --lease 1h --as <you>`. The
+  claim is what tells the other sessions a task is taken, at once, with nothing to commit. A lease
+  ends: `hotbed board task renew <ID> --as <you>` within the hour on long work (or wrap long work
+  with `hotbed board task run <ID> --as <you> -- <cmd>`). A lost claim means it ended or the task
   moved on: read the task, and claim it again only if no one else holds it.
-- **Log as you go**: `vb reply <ID> "<text>" --as <you>`, or `--file <path>` for anything long (a
-  message is at most 10,000 characters; `--attach` a file for more). Don't edit another's root:
-  the board holds a task whose root someone else edited. A change of scope or criteria goes in a
-  reply.
+- **Log as you go**: `hotbed board reply <ID> "<text>" --as <you>`, or `--file <path>` for
+  anything long (up to 64 KiB; `hotbed board upload` + `--attach` for larger files). Don't edit
+  another's root: a change of scope or criteria goes in a reply.
 - **Finish when the code is on main**: a reply with the whole summary (what changed, how it was
-  verified, each criterion), then `vb tasks complete <ID> "<the summary, at most 1,000 characters>"`.
+  verified, each criterion), then `hotbed board task complete <ID> "<the summary, at most 1,000 characters>" --as <you>`.
   A task is done when its criteria are met, `scripts/upstream-changes.py --check` passes, and
-  deviations from upstream are documented where they occur. Otherwise: `vb tasks release <ID>`
-  hands it back, `vb tasks fail <ID> "<why>"` gives up on it, `vb tasks cancel <ID> "<why>"`
-  calls it off (the user's tasks: only when the user says so).
+  deviations from upstream are documented where they occur. Otherwise: `hotbed board task release <ID> --as <you>`
+  hands it back, `hotbed board task fail <ID> "<why>" --as <you>` gives up on it,
+  `hotbed board task cancel <ID> "<why>" --as <you>` calls it off (the user's tasks: only when the
+  user says so).
 - **Criteria you judge not valid, set aside.** A task's criteria are its filer's guess at the fix,
   written before the fix was known. Ignore one you judge not valid: a structural change made it
   moot, it asks for a guard on a path nothing takes any more, it tests an instance the class's

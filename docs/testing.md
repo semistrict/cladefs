@@ -197,11 +197,11 @@ A night by hand, on the test host (it skips if a night measured main's code alre
 ```
 
 The nightly host's setup installs it: it runs `scripts/nightly-install.sh` as the user (the clone,
-its git identity, the cron entry; it checks first that hotbed, flock, the board's
-`vb`, `BOARD_URL` (which the cron entry keeps) and a fetch without a prompt are there):
+its git identity, the cron entry; it checks first that hotbed, flock, hostname and a fetch without
+a prompt are there):
 
 ```sh
-BOARD_URL=<the board, as the host reaches it> scripts/nightly-install.sh
+scripts/nightly-install.sh
 ```
 
 ## Benchmarks

@@ -2,7 +2,7 @@
 # Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
-"""Prints this worktree's agent name, the board profile its sessions write as (`vb ... --as NAME`).
+"""Prints this worktree's agent name, the board profile its sessions write as (`hotbed board ... --as NAME`).
 
 The name is two words, adjective-noun (`amber-heron`), kept in `.agent-name` at the worktree's
 root (git ignores it). The first run picks one at random, from about 200,000, and writes it; every
