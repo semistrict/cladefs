@@ -22,7 +22,10 @@ use cladefs_core::Errno;
 use proto::cladefsd_client::CladefsdClient;
 use proto::cladefsd_server::{Cladefsd, CladefsdServer};
 use proto::*;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+// The real channels' sockets' (`unix_channel`, `channel`, `connect`), which madsim's has none of.
+#[cfg(not(madsim))]
+use std::path::Path;
 use std::sync::Arc;
 use tonic::codegen::http;
 use tonic::{Code, Request, Response, Status};
