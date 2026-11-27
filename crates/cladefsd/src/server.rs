@@ -66,7 +66,9 @@ pub fn serve(listener: UnixListener) {
     serve_on(Daemon::process(), listener);
 }
 
-#[cfg(all(test, not(madsim)))]
+/// The default tenant's socket served as [`serve_on`] serves it, with a stop made beforehand: for
+/// the test of accepting on through EMFILE (Linux's).
+#[cfg(all(test, not(madsim), target_os = "linux"))]
 pub(super) fn serve_with_stop(listener: UnixListener, stop: Arc<StopAccepting>) {
     let daemon = Daemon::process();
     let _serving = crate::Serving::begin(daemon);
