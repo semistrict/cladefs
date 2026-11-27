@@ -105,13 +105,28 @@ mod host {
         let failed = |kind: &str, what: String| {
             Some(Failure { op: Some(kill), kind: kind.to_owned(), what })
         };
+        let image = image_path(dir);
         let fs = block_on(async {
-            let storage = Storage::open(image_path(dir)).await?;
+            let storage = Storage::open(&image).await?;
             anyhow::Ok(Filesystem::mount(storage.check().await?).await?)
         });
         let fs = match fs {
             Ok(fs) => fs,
-            Err(err) => return failed(kind::FSCK, format!("{err:#}")),
+            Err(err) => {
+                // cladefs: the cell kept beside the run, which goes with its daemon's disk, for its
+                // replay and check to be run again on the host alone (crates/cladefs's check_cell
+                // example, board 14491).
+                let kept = dir.join("killed-cell");
+                let copied =
+                    std::process::Command::new("cp").arg("-R").arg(&image).arg(&kept).status();
+                let what = match copied {
+                    Ok(status) if status.success() => {
+                        format!("{err:#} (the cell: {})", kept.display())
+                    }
+                    _ => format!("{err:#} (the cell not kept: {copied:?})"),
+                };
+                return failed(kind::FSCK, what);
+            }
         };
         for (n, survivals) in survivals.iter().enumerate() {
             let got = block_on(async {

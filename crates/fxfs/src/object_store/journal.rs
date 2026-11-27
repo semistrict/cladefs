@@ -531,6 +531,12 @@ impl Journal {
         self.super_block_manager.system_bytes(self.writer_end_block.load(Ordering::Relaxed))
     }
 
+    /// cladefs: the bytes of the journal's blocks unfreed, of `system_bytes`, which the allocator
+    /// counts used.
+    pub fn journal_bytes(&self) -> u64 {
+        self.super_block_manager.journal_bytes(self.writer_end_block.load(Ordering::Relaxed))
+    }
+
     /// cladefs: physical system bytes plus headroom for upcoming journal blocks and a super-block
     /// write, so `Allocator::needs_sync` frees dead extents before a commit or compaction fills
     /// the device (boards 6923, 6926).

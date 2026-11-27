@@ -50,6 +50,9 @@ pub const fn reserved_space_from_journal_usage(journal_usage: u64) -> u64 {
 /// filesystem. Upstream reserves nothing for it: its stores are few. (hotbed question 585)
 const FLUSH_COST_BLOCKS: u64 = 4;
 
+/// cladefs: what each of `Inner::required_parts` is for.
+const REQUIRED_PARTS: [&str; 4] = ["compaction", "journal", "reserved", "flush charges"];
+
 /// ObjectManager is a global loading cache for object stores and other special objects.
 pub struct ObjectManager {
     inner: RwLock<Inner>,
@@ -103,6 +106,10 @@ struct Inner {
     // cladefs: what the last transaction applied took of the journal, as it was charged: from the
     // last's end, past the padding before it that the journal's own transaction accounted for.
     last_journal_usage: u64,
+
+    // cladefs: the journal's blocks unfreed, as of the last commit (`Journal::journal_bytes`): the
+    // room the reserved space (`reserved_space`) is for, taken already (board 14491).
+    journal_held: u64,
 
     // A running counter that tracks metadata space that has been borrowed on the understanding that
     // eventually it will be recovered (potentially after a full compaction).
@@ -158,22 +165,34 @@ impl Inner {
     // Returns the required size of the metadata reservation assuming that no space has been
     // borrowed.  The invariant is: reservation-size + borrowed-space = required.
     fn required_reservation(&self) -> u64 {
-        // Start with the maximum amount of temporary space we might need during compactions.
-        self.reservations.values().max().unwrap_or(&0)
+        self.required_parts().iter().sum()
+    }
 
-        // Account for data that has been written to the journal that will need to be written
-        // to layer files when flushed. cladefs: there is none if the earliest is ahead of what's been
-        // accounted for, as a mount's renewal of the journal's tail, its first transaction, is of
-        // a journal compacted clean, with what a replay discarded behind it.
-            + self.earliest_journal_offset()
-            .map(|min| reserved_space_from_journal_usage(self.last_end_offset.saturating_sub(min)))
-            .unwrap_or(0)
-
-        // Extra reserved space
-            + self.reserved_space
-
-        // cladefs: and flushing each object, whatever it holds.
-            + self.flush_charges()
+    /// cladefs: the parts of [`Self::required_reservation`], in the order [`REQUIRED_PARTS`] names
+    /// them, which a mount that can't reserve them says (board 14491).
+    fn required_parts(&self) -> [u64; 4] {
+        [
+            // Start with the maximum amount of temporary space we might need during compactions.
+            *self.reservations.values().max().unwrap_or(&0),
+            // Account for data that has been written to the journal that will need to be written
+            // to layer files when flushed. cladefs: there is none if the earliest is ahead of
+            // what's been accounted for, as a mount's renewal of the journal's tail, its first
+            // transaction, is of a journal compacted clean, with what a replay discarded behind
+            // it.
+            self.earliest_journal_offset()
+                .map(|min| {
+                    reserved_space_from_journal_usage(self.last_end_offset.saturating_sub(min))
+                })
+                .unwrap_or(0),
+            // Extra reserved space. cladefs: room for the journal's blocks, which upstream's journal
+            // allocated from the metadata reservation; cladefs's are system extents beside it, which
+            // the allocator counts used themselves: what they take already the reservation holds
+            // no more, or a filesystem running holds the room twice, and its mount, counting both,
+            // finds it short (board 14491).
+            self.reserved_space.saturating_sub(self.journal_held),
+            // cladefs: and flushing each object, whatever it holds.
+            self.flush_charges(),
+        ]
     }
 
     fn journaling_object(&self, object_id: u64) -> Option<Arc<dyn JournalingObject>> {
@@ -203,6 +222,7 @@ impl ObjectManager {
                 reservations: HashMap::default(),
                 last_end_offset: 0,
                 last_journal_usage: 0,
+                journal_held: 0,
                 borrowed_metadata_space: 0,
                 borrowed_as_replayed: 0,
                 reserved_space: journal::RESERVED_SPACE,
@@ -759,6 +779,8 @@ impl ObjectManager {
         end_offset: u64,
     ) {
         let reservation = self.metadata_reservation();
+        // Before the lock, as `init_metadata_reservation` reads it.
+        let journal_held = self.root_parent_store().filesystem().journal().journal_bytes();
         let mut inner = self.inner.write();
         let journal_usage = end_offset - std::mem::replace(&mut inner.last_end_offset, end_offset);
         inner.last_journal_usage = journal_usage;
@@ -842,6 +864,10 @@ impl ObjectManager {
                 }
             }
         }
+        // cladefs: and the reservation follows the journal's blocks (`journal_held`), which the
+        // reserved space is room for: what they took it gives back, what they freed it takes
+        // again, as far as the allocator has room for it, and borrows the rest (board 14491).
+        Self::follow_journal(&mut inner, reservation, journal_held);
         // Check that our invariant holds true.
         debug_assert_eq!(
             reservation.amount() + inner.borrowed_metadata_space,
@@ -852,6 +878,27 @@ impl ObjectManager {
             inner.borrowed_metadata_space,
             inner.required_reservation(),
         );
+    }
+
+    /// cladefs: sets what the journal's blocks take, `journal_held`, and brings `reservation`, the
+    /// metadata reservation, to what is then required of it: the excess given back to the
+    /// allocator, which the journal's blocks took (its system bytes); what is short, as the
+    /// journal freed blocks, reserved again, or borrowed if the allocator has no room for it.
+    fn follow_journal(inner: &mut Inner, reservation: &Reservation, journal_held: u64) {
+        inner.journal_held = journal_held;
+        let (held, required) =
+            (reservation.amount() + inner.borrowed_metadata_space, inner.required_reservation());
+        if held > required {
+            let given = (held - required).min(reservation.amount());
+            reservation.give_back(given);
+            inner.borrowed_metadata_space -= held - required - given;
+        } else if held < required {
+            let short = required - held;
+            match inner.allocator.as_ref().unwrap().clone().reserve(None, short) {
+                Some(more) => more.move_to(reservation, short),
+                None => inner.borrowed_metadata_space += short,
+            }
+        }
     }
 
     /// Drops a transaction.  This is called automatically when a transaction is dropped.  If the
@@ -943,7 +990,11 @@ impl ObjectManager {
             // We don't need metadata reservations in read-only mode.
             return Ok(());
         }
+        // Before the lock: the journal asks nothing of the object manager, but its filesystem is
+        // reached through a store, which is.
+        let journal_bytes = self.root_parent_store().filesystem().journal().journal_bytes();
         let mut inner = self.inner.write();
+        inner.journal_held = journal_bytes;
         let required = inner.required_reservation();
         ensure!(required >= inner.borrowed_metadata_space, FxfsError::Inconsistent);
         let allocator = inner.allocator.as_ref().cloned().unwrap();
@@ -956,21 +1007,28 @@ impl ObjectManager {
         let reservation = match allocator.clone().reserve(None, wanted) {
             Some(reservation) => reservation,
             None => {
-                let charges = inner.flush_charges().min(wanted);
-                let reservation =
-                    allocator.clone().reserve(None, wanted - charges).with_context(|| {
+                let free = (Saturating(allocator.get_disk_bytes()) - allocator.get_used_bytes()).0;
+                let charges = inner.flush_charges();
+                let borrowed = wanted.saturating_sub(free);
+                let reservation = (borrowed <= charges)
+                    .then(|| allocator.clone().reserve(None, wanted - borrowed))
+                    .flatten()
+                    .with_context(|| {
+                        let parts = (REQUIRED_PARTS.iter().zip(inner.required_parts()))
+                            .map(|(name, bytes)| format!("{name} {bytes}"))
+                            .collect::<Vec<_>>()
+                            .join(", ");
                         format!(
-                            "Failed to reserve {} - {} = {} bytes ({charges} of them borrowable), \
-                             free={}, owner_bytes={}",
+                            "Failed to reserve {} ({parts}) - {} = {} bytes ({charges} of them \
+                             borrowable), free={free}, owner_bytes={}",
                             required,
                             inner.borrowed_metadata_space,
                             wanted,
-                            Saturating(allocator.get_disk_bytes()) - allocator.get_used_bytes(),
                             allocator.owner_bytes_debug(),
                         )
                     })?;
-                warn!(charges; "No room to reserve flushing the dirty objects: borrowed");
-                inner.borrowed_metadata_space += charges;
+                warn!(borrowed; "No room for the whole metadata reservation: borrowed");
+                inner.borrowed_metadata_space += borrowed;
                 reservation
             }
         };
@@ -1125,6 +1183,97 @@ mod tests {
             .expect("new_transaction failed");
         dir.create_child_file(&mut transaction, name).await.expect("create_child_file failed");
         transaction.commit().await.expect("commit failed");
+    }
+
+    /// cladefs: a nearly full filesystem whose journal grew while it was full, its compactions
+    /// waiting, mounts after a crash. The journal's own blocks, which the allocator counts used,
+    /// are what the metadata reservation's reserved space is room for: the filesystem running
+    /// reserved that once, as it formatted, and a mount counted those blocks twice, refusing to
+    /// mount (board 14491: fxfs-guest-script-killed-full's fsck, 50 KB short).
+    #[fuchsia_async::run_singlethreaded(test)]
+    async fn test_a_full_filesystem_with_a_grown_journal_mounts() {
+        use crate::errors::FxfsError;
+        use crate::filesystem::SyncOptions;
+        use crate::object_handle::{ObjectHandle, WriteObjectHandle};
+        use crate::object_store::journal::JournalOptions;
+        // A journal as large as the guest's on its 64 MiB volume (guest/rust/cladefs-linux's
+        // `Fs::open`), which grows to half a megabyte here, its compactions waiting.
+        let journal = || JournalOptions { reclaim_size: 2 << 20, ..Default::default() };
+        let device = DeviceHolder::new(FakeDevice::new(16384, 4096));
+        let fs = FxFilesystemBuilder::new()
+            .journal_options(journal())
+            .format(true)
+            .open(device)
+            .await
+            .expect("open failed");
+        let store = root_volume(fs.clone())
+            .await
+            .expect("root_volume failed")
+            .new_volume("vol", NewChildStoreOptions::default())
+            .await
+            .expect("new_volume failed");
+        let dir =
+            Directory::open(&store, store.root_directory_object_id()).await.expect("open failed");
+        let full = |e: &anyhow::Error| {
+            e.root_cause().downcast_ref::<FxfsError>() == Some(&FxfsError::NoSpace)
+        };
+        // Filled: a file appended to, in large pieces and then in blocks, until nothing fits.
+        let mut transaction = store
+            .new_transaction(
+                lock_keys![LockKey::object(store.store_object_id(), dir.object_id())],
+                Options::default(),
+            )
+            .await
+            .expect("new_transaction failed");
+        let file = dir
+            .create_child_file(&mut transaction, "fill")
+            .await
+            .expect("create_child_file failed");
+        transaction.commit().await.expect("commit failed");
+        let block_size = fs.block_size().get() as usize;
+        for piece in [64 * block_size, block_size] {
+            let mut buffer = file.allocate_buffer(piece).await;
+            buffer.as_mut_slice().fill(0xf1);
+            loop {
+                match file.write_or_append(None, buffer.as_ref()).await {
+                    Ok(_) => {}
+                    Err(e) if full(&e) => break,
+                    Err(e) => panic!("write failed: {e:?}"),
+                }
+            }
+        }
+        // The journal grown while full: files created, borrowing, each synced, which pads the
+        // journal to its next block.
+        fs.journal().pause_compactions().await;
+        for i in 0..100 {
+            let mut transaction = store
+                .new_transaction(
+                    lock_keys![LockKey::object(store.store_object_id(), dir.object_id())],
+                    Options { borrow_metadata_space: true, ..Default::default() },
+                )
+                .await
+                .expect("new_transaction failed");
+            dir.create_child_file(&mut transaction, &format!("f{i}"))
+                .await
+                .expect("create_child_file failed");
+            transaction.commit().await.expect("commit failed");
+            fs.sync(SyncOptions { flush_device: true, ..Default::default() })
+                .await
+                .expect("sync failed");
+        }
+        let held = fs.journal().journal_bytes();
+        assert!(held > 400_000, "the journal holds {held} bytes");
+        let crashed = fs.device().snapshot().expect("snapshot failed");
+        let mounted = FxFilesystemBuilder::new()
+            .journal_options(journal())
+            .open(crashed)
+            .await
+            .expect("mount failed");
+        fsck(mounted.clone()).await.expect("fsck failed");
+        mounted.close().await.expect("close failed");
+        fs.journal().resume_compactions();
+        std::mem::drop((file, dir, store));
+        fs.close().await.expect("close failed");
     }
 
     /// cladefs: hundreds of stores, each dirtied by a few hundred bytes of the journal, compact all

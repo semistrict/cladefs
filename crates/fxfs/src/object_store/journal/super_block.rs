@@ -605,6 +605,12 @@ impl SuperBlockManager {
         total.saturating_add(journal_written_end.saturating_sub(known.journal_freed_to))
     }
 
+    /// cladefs: the journal's blocks unfreed, up to `journal_written_end`: those of `system_bytes`
+    /// that the journal holds, not a super-block.
+    pub fn journal_bytes(&self, journal_written_end: u64) -> u64 {
+        journal_written_end.saturating_sub(self.known.lock().journal_freed_to)
+    }
+
     /// Resets unsealed state after mount replay has already freed & sealed all retired extents.
     pub async fn reset_after_mount_commit(
         &self,
