@@ -8736,3 +8736,38 @@ fn recent_limit_scales_for_fuse_and_stays_bounded_for_vms() {
     assert_eq!(crate::memory::recent_limit_for(256 << 20, true), 128 << 20);
     assert_eq!(crate::memory::recent_limit_for(4 << 30, true), 2 << 30);
 }
+
+/// cladefs board 14449: an embedded cell keeps its pages in its tenant's arena, as a cell its VM
+/// processes open does: a granted tenant's own; for a tenant with no arena on the daemon, one of
+/// the cell's own; never the default tenant's, which every VM process of the daemon's own socket
+/// maps, and which held every embedded cell's pages before. The default tenant's cells keep theirs
+/// in its arena.
+#[cfg(not(madsim))]
+#[test]
+fn embedded_cells_pages_are_of_their_tenants_arenas() {
+    use crate::cells::CellWriter as _;
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let daemon = crate::Daemon::process();
+    daemon.configure_disks(&[dir.path().join("disk0")]).unwrap();
+    let granted = dir.path().join("tenant-5");
+    std::fs::create_dir(&granted).unwrap();
+    let tenant = crate::server::Tenant::new(5, &granted).unwrap();
+    let default = default_tenant().unwrap().arena();
+    let arena_of = |tenant: u64| {
+        let embedded =
+            futures::executor::block_on(daemon.create_embedded(tenant, 1 << 26, Kind::Sqlite))
+                .unwrap();
+        assert_eq!(embedded.id().tenant, tenant);
+        let arena = embedded.cell().unwrap().arena();
+        (embedded, arena)
+    };
+    let (_five, five) = arena_of(5);
+    let (_nine, nine) = arena_of(9);
+    let (_zero, zero) = arena_of(cladefs_core::host_cell::DEFAULT_TENANT);
+    assert_eq!((five, zero), (tenant.arena(), default));
+    assert!(
+        ![default, tenant.arena(), cladefs_core::pages::ArenaId::DEFAULT].contains(&nine),
+        "{nine:?}"
+    );
+}

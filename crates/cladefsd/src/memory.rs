@@ -116,6 +116,14 @@ pub(super) fn alive_on(
     registry.alive().find(|tenant| tenant.id() == id && tenant.dirs() == Some(dirs))
 }
 
+/// cladefs: the tenant of the ID `id` alive on `daemon`, granted or still serving VM processes, if
+/// there is one.
+#[cfg(not(madsim))]
+pub(super) fn tenant_on(daemon: &Daemon, id: u64) -> Option<Arc<Tenant>> {
+    let registry = daemon.memory.registry.lock().unwrap();
+    registry.alive().find(|tenant| tenant.id() == id)
+}
+
 /// Counts `tenant`, new, among those alive on `daemon`, limited as its ID is.
 pub(super) fn register_on(daemon: &Daemon, tenant: &Arc<Tenant>) {
     let mut registry = daemon.memory.registry.lock().unwrap();

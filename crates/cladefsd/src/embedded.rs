@@ -31,6 +31,7 @@ use crate::cells::{self, CellWriter, Hold};
 /// What a cell holds, which an embedded cell's making names.
 pub use bucket_cell::cell::Kind;
 use cladefs_core::cell_table::Writer;
+use cladefs_core::pages::Arena;
 use cladefs_core::{CellId, Errno, OpenCell};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
@@ -118,7 +119,7 @@ impl Drop for EmbeddedCell {
 impl Daemon {
     /// cladefs: a new cell of `kind`, `tenant`'s, of `capacity` bytes, on a disk of the daemon's
     /// the daemon picks, its ID the bucket's to give, open in this process (board 13909). Its
-    /// pages are the default tenant's, as an in-process connection's are.
+    /// pages are of its tenant's arena ([`arena_of`]).
     pub async fn create_embedded(
         self: &Arc<Self>,
         tenant: u64,
@@ -151,6 +152,25 @@ impl Daemon {
     }
 }
 
+/// The arena an embedded cell of `tenant` keeps its pages in, as a VM process of `tenant`'s would
+/// (TASK-43): the tenant's own, alive on `daemon`, its limits counting them; the default tenant's
+/// for the default tenant; otherwise, a tenant with no arena on the daemon, an arena of the
+/// cell's own, which goes with it. Never another tenant's: the default tenant's arena is the
+/// memory every VM process of the daemon's own socket maps, and a tenant's cell's pages there
+/// were theirs to read (board 14449).
+fn arena_of(daemon: &Arc<Daemon>, tenant: u64) -> Result<Arc<Arena>, Errno> {
+    if tenant == cladefs_core::host_cell::DEFAULT_TENANT {
+        return Ok(crate::server::default_tenant_on(daemon)?.memory_arena().clone());
+    }
+    if let Some(tenant) = crate::memory::tenant_on(daemon, tenant) {
+        return Ok(tenant.memory_arena().clone());
+    }
+    Arena::new_on(&daemon.host).map_err(|err| {
+        log::error!("cladefsd: an embedded cell's arena, tenant {tenant}'s: {err}");
+        Errno::EIO
+    })
+}
+
 /// The cell `id` at `path` on `daemon`, made as `new` says if given, open in this process: held
 /// to write, as a connection's opening holds it (`server::Connection::open`), opened, and the
 /// hold given it, or let go of, with the cell closed, if anything fails.
@@ -172,7 +192,7 @@ async fn embed(
     });
     let writer: std::sync::Weak<dyn CellWriter> = Arc::downgrade(&embedded) as _;
     let hold = cells::hold_to_write(daemon, &cells::cell_dir_key(path), writer).await?;
-    let arena = crate::server::default_tenant_on(daemon)?.memory_arena().clone();
+    let arena = arena_of(daemon, id.tenant)?;
     // Closed before its hold lets its path go, if it fails here.
     let open_cell = Arc::new(cells::open_cell_at(daemon, path, new, Some(&arena)).await?);
     if let Err(err) = open_cell.access().may_write().and_then(|()| hold.open(&open_cell)) {
