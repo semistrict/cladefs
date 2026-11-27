@@ -32,7 +32,7 @@ def test_serial_output_and_halt():
 def test_exit_counts():
     m = machine_with(serial_print("four"))
     assert m.exit_counts() == dict.fromkeys(
-        ["serial", "acpi", "unclaimed_io", "pci_config", "pci_bar", "unclaimed_mmio",
+        ["serial", "rtc", "acpi", "unclaimed_io", "pci_config", "pci_bar", "unclaimed_mmio",
          "halt", "interrupted", "startup", "hypercall", "wait",
          "system_register", "access_retried", "other"],
         0,

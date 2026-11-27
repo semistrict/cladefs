@@ -54,6 +54,7 @@ fn every_exit_is_counted_by_its_kind() {
     let c = m.exit_counts();
     let expected = [
         ("serial", 4),
+        ("rtc", 0),
         ("acpi", 0),
         ("unclaimed_io", 2),
         ("pci_config", 0),
