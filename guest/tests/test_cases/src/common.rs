@@ -755,3 +755,12 @@ mod tests {
         assert_eq!(stats_file(true, dir, "cladefsd"), None);
     }
 }
+
+/// Copies the image `from` to `to`, its holes kept: GNU cp's `--sparse=always` on Linux; on macOS a
+/// clone of it (`cp -c`), which shares its blocks until either is written.
+pub fn copy_sparse(from: &Path, to: &Path) -> anyhow::Result<()> {
+    let sparse = if cfg!(target_os = "macos") { "-c" } else { "--sparse=always" };
+    let status = std::process::Command::new("cp").arg(sparse).arg(from).arg(to).status()?;
+    anyhow::ensure!(status.success(), "copying {} to {}: {status}", from.display(), to.display());
+    Ok(())
+}

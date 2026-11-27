@@ -578,9 +578,7 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
             wait(boot(test_setup, root, "base", machine("base", on.device(&base), 512)?)?)?;
             for vm in 0..vms() {
                 let image = images.join(format!("{}.img", nth("load", vm)));
-                let status =
-                    Command::new("cp").arg("--sparse=always").arg(&base).arg(&image).status()?;
-                anyhow::ensure!(status.success(), "copying the base's image: {status}");
+                crate::common::copy_sparse(&base, &image)?;
                 let machine = machine("load", on.device(&image), load_memory()?)?;
                 let loaded = wait(boot(test_setup, root, &nth("load", vm), machine)?);
                 std::fs::remove_file(&image)?;
