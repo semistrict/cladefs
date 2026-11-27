@@ -123,7 +123,8 @@ impl fmt::Display for Report {
 }
 
 /// Checks the host at a boot needing `needs`: every finding logged, and the boot refused if a
-/// requirement failed.
+/// requirement failed. Outside the simulation, whose hosts share its process's (`boot_daemon`).
+#[cfg(not(madsim))]
 pub(super) fn at_boot(needs: Needs) -> anyhow::Result<()> {
     let report = examine(needs);
     report.log();
@@ -208,6 +209,7 @@ fn governed_floor() -> Result<u64, String> {
 /// governor goes by, or guesses from watermarks without, as VM reclaim passes VMs over.
 #[cfg(all(target_os = "linux", not(madsim), not(feature = "tests-kms")))]
 fn psi() -> Result<String, String> {
+    // The real kernel's /proc, outside the simulation, as the cfg above says.
     match std::fs::read_to_string("/proc/pressure/memory") {
         Ok(_) => Ok("/proc/pressure/memory".into()),
         Err(err) => Err(format!(
