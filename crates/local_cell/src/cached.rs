@@ -169,25 +169,7 @@ impl<D: Dir> Dir for CachedDir<D> {
         Ok(found)
     }
 
-    fn sync_dir(&self, path: &str) -> io::Result<()> {
-        self.shared.dir.sync_dir(path)
-    }
-
-    fn barrier(&self) -> io::Result<()> {
-        self.shared.dir.barrier()
-    }
-
-    fn defers(&self) -> bool {
-        self.shared.dir.defers()
-    }
-
-    fn made_deferred(&self) -> bool {
-        self.shared.dir.made_deferred()
-    }
-
-    fn settle(&self) -> io::Result<()> {
-        self.shared.dir.settle()
-    }
+    crate::dir::delegate_dir_passthrough!();
 
     fn take(&self) -> io::Result<()> {
         self.shared.dir.take()
@@ -195,18 +177,6 @@ impl<D: Dir> Dir for CachedDir<D> {
 
     fn let_go(&self) {
         self.shared.dir.let_go()
-    }
-
-    fn claim(&self) -> io::Result<()> {
-        self.shared.dir.claim()
-    }
-
-    fn closing(&self) {
-        self.shared.dir.closing()
-    }
-
-    fn unclaim(&self) {
-        self.shared.dir.unclaim()
     }
 
     /// A file given to the host by its path, as the host's cache of objects takes one by renaming

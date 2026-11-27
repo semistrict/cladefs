@@ -29,10 +29,12 @@
 //! fail the call rather than make a key no unwrap gives back. What it keeps of a wrapped key is
 //! [`real`]'s: a header naming the backend and the key's resource name, then the KMS's ciphertext.
 
+#[cfg(test)]
+use super::Kms;
 use super::background::Background;
 use super::http::{self, Unread};
 use super::retry::{self, Failed};
-use super::{Error, KeyNames, Kms, Origin, OverrideFiles, Vars, real};
+use super::{Error, KeyNames, Origin, OverrideFiles, Vars, real};
 use crate::{KEY_LEN, Secret, Unauthentic, Wrapped};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -40,7 +42,6 @@ use bytes::Bytes;
 use object_store::StaticCredentialProvider;
 use object_store::gcp::{GcpCredential, GcpCredentialProvider, GoogleCloudStorageBuilder};
 use serde::Deserialize;
-use std::future::Future;
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
@@ -500,29 +501,7 @@ impl Inner {
     }
 }
 
-impl Kms for GcpKms {
-    fn wrap(
-        &self,
-        tenant: u64,
-        key: &Secret,
-    ) -> impl Future<Output = Result<Wrapped, Error>> + Send {
-        let (inner, key) = (self.inner.clone(), Secret::from_bytes(key.expose()));
-        self.runtime.run(tenant, async move { inner.wrap_now(tenant, &key).await })
-    }
-
-    fn unwrap(
-        &self,
-        tenant: u64,
-        wrapped: &Wrapped,
-    ) -> impl Future<Output = Result<Secret, Error>> + Send {
-        let (inner, wrapped) = (self.inner.clone(), wrapped.clone());
-        self.runtime.run(tenant, async move { inner.unwrap_now(tenant, &wrapped).await })
-    }
-
-    fn names(&self) -> Option<&KeyNames> {
-        Some(&self.inner.names)
-    }
-}
+impl_runtime_kms!(GcpKms);
 
 /// `google.rpc.Status`, as the KMS answers a call it refuses, what of it is read.
 #[derive(Default, Deserialize)]

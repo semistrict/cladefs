@@ -1444,10 +1444,6 @@ impl Mirror {
         matches!(self.state, MirrorState::Marked)
     }
 
-    pub const fn is_copying(&self) -> bool {
-        matches!(self.state, MirrorState::Copying { .. })
-    }
-
     /// Decodes a mirror object, checking its format version against [`FORMAT`] (doc-28,
     /// board 10038, board 9498).
     pub fn decode(bytes: &[u8]) -> Result<Self, crate::Error> {

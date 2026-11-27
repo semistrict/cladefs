@@ -1742,7 +1742,7 @@ mod tests {
     const IDLE_FORK_BYTES: u64 = 64 << 10;
 
     /// What the open cells' maps of their extents hold now, as the extent daemon counts it
-    /// (`cladefsd::process::extents_held`, Linux's): what the open cells hold of their own, and the
+    /// (`cladefsd::process::extents_held_on`, Linux's): what the open cells hold of their own, and the
     /// decoded states they share, each once.
     fn extents_counted() -> (local_cell::Own, bucket_cell::recovery::Held) {
         (local_cell::own_held(), crate::host_cell::decoded_held())

@@ -47,7 +47,7 @@ pub fn open(
 }
 
 /// The database on `cell`, a SQLite cell already open on the daemon (as a caller that made it by
-/// ID, `DaemonConnection::create_sqlite_cell`, has it), mapped as [`open`] maps it.
+/// ID, `libcladefs::Daemon::create_embedded`, has it), mapped as [`open`] maps it.
 pub fn over(cell: Arc<CellClient>, window: u64, options: Options) -> Result<Arc<Database>, Error> {
     let block = u64::from(cladefs::Storage::BLOCK_SIZE);
     if let Err(error) = cladefs::pages::window_fits_host(block, cladefs::pages::page_size()) {

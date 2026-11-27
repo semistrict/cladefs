@@ -211,3 +211,36 @@ _patch_out() {
 _patch_touch() {
     sed -n 's|^+++ b/||p' "$1" | xargs touch
 }
+
+# mutants_names DIR [NAME...]: populates the caller's `names` array with NAME..., or all *.patch
+# basenames under DIR when no names were given.
+mutants_names() {
+    local dir=$1 patch
+    shift
+    names=("$@")
+    if [[ ${#names[@]} == 0 ]]; then
+        for patch in "$dir"/*.patch; do
+            names+=("$(basename "$patch" .patch)")
+        done
+    fi
+}
+
+# mutants_check DIR [--require-killer] NAME...: validates every patch in DIR (round-trip with zero
+# fuzz, and optional `# Killer:` header), printing the summary and exiting non-zero if any broke.
+mutants_check() {
+    local dir=$1 require_killer=0 broken=0 name patch
+    shift
+    if [[ ${1:-} == --require-killer ]]; then
+        require_killer=1
+        shift
+    fi
+    for name in "$@"; do
+        patch=$dir/$name.patch
+        patch_round_trip "$patch" || broken=$((broken + 1))
+        if [[ $require_killer == 1 ]]; then
+            [[ -n $(sed -n 's/^# Killer: //p' "$patch") ]] || { echo "$patch names no killer" >&2; broken=$((broken + 1)); }
+        fi
+    done
+    echo "mutants: $# checked, $broken broken"
+    exit $((broken > 0))
+}

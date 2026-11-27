@@ -89,3 +89,82 @@ pub fn cow_base_file(path: &str, len: usize, byte: u8) -> Vec<u8> {
     read_in_sealed(path);
     data
 }
+
+/// Standard guest mount point for the virtio-extent `extents` cladefs filesystem.
+pub const MNT: &str = "/mnt/fxfs";
+/// Linux `FIFREEZE` ioctl number.
+pub const FIFREEZE: libc::c_ulong = 0xc004_5877;
+/// Linux `FITHAW` ioctl number.
+pub const FITHAW: libc::c_ulong = 0xc004_5878;
+
+/// Mounts the virtio-extent `extents` device as `cladefs` at `MNT`.
+pub fn mount_extents() {
+    let (source, target, fstype) = (
+        CString::new("extents").unwrap(),
+        CString::new(MNT).unwrap(),
+        CString::new("cladefs").unwrap(),
+    );
+    // SAFETY: valid C strings for mount(2).
+    let ret = unsafe {
+        libc::mount(source.as_ptr(), target.as_ptr(), fstype.as_ptr(), 0, std::ptr::null())
+    };
+    assert_eq!(ret, 0, "mount: {}", std::io::Error::last_os_error());
+}
+
+/// Runs `FIFREEZE` or `FITHAW` on `MNT`.
+pub fn freeze_mnt(request: libc::c_ulong) {
+    let dir = fs::File::open(MNT).unwrap();
+    // SAFETY: FIFREEZE / FITHAW ioctl on mounted directory fd.
+    let ret = unsafe { libc::ioctl(dir.as_raw_fd(), request as _, 0) };
+    assert_eq!(ret, 0, "ioctl {request:#x}: {}", std::io::Error::last_os_error());
+}
+
+/// Connects to host CID 2 on `port` over AF_VSOCK and returns the socket as a `File`.
+pub fn try_vsock_connect(port: u32) -> std::io::Result<fs::File> {
+    use nix::sys::socket::{AddressFamily, SockFlag, SockType, VsockAddr, connect, socket};
+    use std::os::fd::{FromRawFd as _, IntoRawFd as _};
+    let fd = socket(AddressFamily::Vsock, SockType::Stream, SockFlag::empty(), None)
+        .expect("a vsock socket");
+    connect(fd.as_raw_fd(), &VsockAddr::new(2, port))?;
+    // SAFETY: `fd` is an open socket owned by the returned File.
+    Ok(unsafe { fs::File::from_raw_fd(fd.into_raw_fd()) })
+}
+
+/// Reconnects to host vsock `port` until the host sends a role line, returning `(role, conn)`.
+pub fn role_from_host(port: u32) -> (String, fs::File) {
+    use std::io::{BufRead as _, BufReader};
+    let mut conn = None;
+    let role = fxfs_automount::reconnect::exchange(
+        || try_vsock_connect(port),
+        |host| {
+            let mut line = String::new();
+            match BufReader::new(host.try_clone()?).read_line(&mut line)? {
+                0 => Err(std::io::ErrorKind::UnexpectedEof.into()),
+                _ => {
+                    conn = Some(host.try_clone()?);
+                    Ok(line)
+                }
+            }
+        },
+    )
+    .expect("reading role from host");
+    (role.trim_end().to_owned(), conn.unwrap())
+}
+
+/// Allocates a `len`-byte private anonymous mapping owned for the guest's lifetime.
+pub fn alloc_anon_buf(len: usize) -> &'static mut [u8] {
+    // SAFETY: private anonymous mapping owned for the guest's lifetime.
+    let ptr = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            len,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+            -1,
+            0,
+        )
+    };
+    assert_ne!(ptr, libc::MAP_FAILED, "mmap: {}", std::io::Error::last_os_error());
+    // SAFETY: `ptr` is valid for `len` bytes and never unmapped.
+    unsafe { std::slice::from_raw_parts_mut(ptr.cast::<u8>(), len) }
+}

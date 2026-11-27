@@ -2257,6 +2257,26 @@ mod tests {
     use super::*;
     use futures::executor::block_on;
 
+    fn fuse_send(server: &Server, unique: u64, opcode: u32, nodeid: u64, body: &[u8]) -> Vec<u8> {
+        use zerocopy::{FromBytes, IntoBytes};
+        let header = InHeader {
+            len: (size_of::<InHeader>() + body.len()) as u32,
+            opcode,
+            unique,
+            nodeid,
+            uid: 0,
+            gid: 0,
+            pid: 1,
+            padding: 0,
+        };
+        let mut req = header.as_bytes().to_vec();
+        req.extend_from_slice(body);
+        let raw = block_on(server.handle(&req)).unwrap().unwrap();
+        let (out, payload) = OutHeader::read_from_prefix(&raw).unwrap();
+        assert_eq!(out.error, 0, "opcode {opcode} failed with errno {}", -out.error);
+        payload.to_vec()
+    }
+
     /// The root's object ID and FUSE's root ID swap places as node IDs, and each other object ID
     /// is its own: whatever Fxfs numbers 1 has the root's object ID for its node ID, so no two
     /// nodes share one.
@@ -2334,24 +2354,8 @@ mod tests {
 
         let fs = block_on(Filesystem::mount(crate::Storage::from_device(device))).unwrap();
         let server = Server::new(fs, Box::new(|_| Ok(())));
-
         let send = |unique: u64, opcode: u32, nodeid: u64, body: &[u8]| -> Vec<u8> {
-            let header = InHeader {
-                len: (size_of::<InHeader>() + body.len()) as u32,
-                opcode,
-                unique,
-                nodeid,
-                uid: 0,
-                gid: 0,
-                pid: 1,
-                padding: 0,
-            };
-            let mut req = header.as_bytes().to_vec();
-            req.extend_from_slice(body);
-            let raw = block_on(server.handle(&req)).unwrap().unwrap();
-            let (out, payload) = OutHeader::read_from_prefix(&raw).unwrap();
-            assert_eq!(out.error, 0, "opcode {opcode} failed with errno {}", -out.error);
-            payload.to_vec()
+            fuse_send(&server, unique, opcode, nodeid, body)
         };
 
         // 1. OPENDIR reads zero entries from Fxfs.
@@ -2499,22 +2503,7 @@ mod tests {
         }
         let server = Server::new(fs, Box::new(|_| Ok(())));
         let send = |unique: u64, opcode: u32, nodeid: u64, body: &[u8]| -> Vec<u8> {
-            let header = InHeader {
-                len: (size_of::<InHeader>() + body.len()) as u32,
-                opcode,
-                unique,
-                nodeid,
-                uid: 0,
-                gid: 0,
-                pid: 1,
-                padding: 0,
-            };
-            let mut req = header.as_bytes().to_vec();
-            req.extend_from_slice(body);
-            let raw = block_on(server.handle(&req)).unwrap().unwrap();
-            let (out, payload) = OutHeader::read_from_prefix(&raw).unwrap();
-            assert_eq!(out.error, 0, "opcode {opcode} failed with errno {}", -out.error);
-            payload.to_vec()
+            fuse_send(&server, unique, opcode, nodeid, body)
         };
 
         // 1. Mid-reply READDIR resume after unlinking earlier entries.

@@ -476,78 +476,23 @@ mod host {
 mod guest {
     use super::*;
     use crate::Test;
-    use nix::libc;
-    use std::ffi::CString;
+    use crate::guest_fxfs::{
+        FIFREEZE, FITHAW, MNT, alloc_anon_buf, freeze_mnt as freeze, mount_extents as mount,
+        role_from_host as role_on, try_vsock_connect,
+    };
     use std::fs;
     use std::io::{BufRead, BufReader, Write};
-    use std::os::fd::AsRawFd;
-
-    const MNT: &str = "/mnt/fxfs";
-    const FIFREEZE: libc::c_ulong = 0xc004_5877;
-    const FITHAW: libc::c_ulong = 0xc004_5878;
-
-    fn mount() {
-        let (source, target, fstype) = (
-            CString::new("extents").unwrap(),
-            CString::new(MNT).unwrap(),
-            CString::new("cladefs").unwrap(),
-        );
-        // SAFETY: valid C strings for mount(2).
-        let ret = unsafe {
-            libc::mount(source.as_ptr(), target.as_ptr(), fstype.as_ptr(), 0, std::ptr::null())
-        };
-        assert_eq!(ret, 0, "mount: {}", std::io::Error::last_os_error());
-    }
-
-    fn freeze(request: libc::c_ulong) {
-        let dir = fs::File::open(MNT).unwrap();
-        // SAFETY: FIFREEZE / FITHAW ioctl on mounted directory fd.
-        let ret = unsafe { libc::ioctl(dir.as_raw_fd(), request as _, 0) };
-        assert_eq!(ret, 0, "ioctl {request:#x}: {}", std::io::Error::last_os_error());
-    }
 
     fn try_connect() -> std::io::Result<fs::File> {
-        use nix::sys::socket::{AddressFamily, SockFlag, SockType, VsockAddr, connect, socket};
-        use std::os::fd::{FromRawFd as _, IntoRawFd as _};
-        let fd = socket(AddressFamily::Vsock, SockType::Stream, SockFlag::empty(), None)
-            .expect("a vsock socket");
-        connect(fd.as_raw_fd(), &VsockAddr::new(2, PORT))?;
-        // SAFETY: `fd` is an open socket owned by the returned File.
-        Ok(unsafe { fs::File::from_raw_fd(fd.into_raw_fd()) })
+        try_vsock_connect(PORT)
     }
 
     fn role_from_host() -> (String, fs::File) {
-        let mut conn = None;
-        let role = fxfs_automount::reconnect::exchange(try_connect, |host| {
-            let mut line = String::new();
-            match BufReader::new(host.try_clone()?).read_line(&mut line)? {
-                0 => Err(std::io::ErrorKind::UnexpectedEof.into()),
-                _ => {
-                    conn = Some(host.try_clone()?);
-                    Ok(line)
-                }
-            }
-        })
-        .expect("reading role from host");
-        (role.trim_end().to_owned(), conn.unwrap())
+        role_on(PORT)
     }
 
     fn alloc_buf() -> &'static mut [u8] {
-        let len = BUF_PAGES * PAGE;
-        // SAFETY: private anonymous mapping owned for the guest's lifetime.
-        let ptr = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                len,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-                -1,
-                0,
-            )
-        };
-        assert_ne!(ptr, libc::MAP_FAILED, "mmap: {}", std::io::Error::last_os_error());
-        // SAFETY: `ptr` is valid for `len` bytes and never unmapped.
-        unsafe { std::slice::from_raw_parts_mut(ptr.cast::<u8>(), len) }
+        alloc_anon_buf(BUF_PAGES * PAGE)
     }
 
     impl Test for TestFxfsGuestEphemeralSuspend {

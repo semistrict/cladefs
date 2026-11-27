@@ -806,7 +806,7 @@ pub(super) fn errno_of(what: std::fmt::Arguments<'_>, err: cladefs_core::Error) 
 /// Makes an empty cell at `path`, which must not exist (`EEXIST`), of `capacity` bytes, and
 /// returns its cell: a new one, or `cell`, if given, kept in the daemon's bucket, which the
 /// daemon takes once it opens it (`cladefsctl take`); placed at `token` if given ([`place`]).
-/// cladefs: made as [`OpenCell::create_placed`] makes it, its head taken with `token`, not the
+/// cladefs: made as [`OpenCell::create_placed_on`] makes it, its head taken with `token`, not the
 /// daemon's, so that a kept cell placed later than the one on another host that took the cell last
 /// takes it over (TASK-266: `ESTALE`, its head taken with the daemon's token before it was
 /// placed).
@@ -1175,7 +1175,6 @@ pub(super) async fn fork_ephemeral_of_version_in(
 /// cladefs: forks the version `version` of `cell` on `daemon` to `to`, an ephemeral cell kept on
 /// this host alone (doc-25, TASK-698.3; `ForkCell`'s `ephemeral`).
 #[cfg(test)]
-#[allow(dead_code)]
 pub(super) async fn fork_ephemeral_of_version(
     daemon: &Arc<Daemon>,
     cell: CellId,

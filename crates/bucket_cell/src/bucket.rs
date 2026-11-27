@@ -44,12 +44,6 @@ pub type BucketFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 #[cfg(target_arch = "wasm32")]
 pub type BucketFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 
-/// Boxed stream with [`BucketSend`].
-#[cfg(not(target_arch = "wasm32"))]
-pub type BucketStream<'a, T> = Pin<Box<dyn futures::Stream<Item = T> + Send + 'a>>;
-#[cfg(target_arch = "wasm32")]
-pub type BucketStream<'a, T> = Pin<Box<dyn futures::Stream<Item = T> + 'a>>;
-
 /// An object's version, which a conditional update names: S3 names it by its ETag, GCS by its
 /// generation.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
@@ -965,6 +959,115 @@ async fn probe_append_once(bucket: &impl Bucket, key: &str) -> Result<(), ProbeA
 /// cladefs: what every bucket must do, which cells rely on (TASK-165.1), with objects under
 /// `root`, which it leaves as it found them: a bucket in memory, on the host's filesystem, the
 /// simulation's, and S3's and Azure's servers alike run it.
+/// Delegates pass-through [`Bucket`] methods to `self.$inner` for test wrapper buckets that
+/// intercept only `get` or `put`.
+#[cfg(test)]
+macro_rules! delegate_bucket_methods {
+    (except_get $inner:tt) => {
+        fn get_range(
+            &self,
+            key: &str,
+            range: crate::bucket::ByteRange,
+        ) -> impl std::future::Future<Output = Result<Vec<u8>, crate::bucket::Error>> + Send {
+            self.$inner.get_range(key, range)
+        }
+
+        fn head(
+            &self,
+            key: &str,
+        ) -> impl std::future::Future<Output = Result<crate::bucket::Meta, crate::bucket::Error>> + Send {
+            self.$inner.head(key)
+        }
+
+        fn list(
+            &self,
+            prefix: &str,
+        ) -> impl std::future::Future<Output = Result<Vec<crate::bucket::Meta>, crate::bucket::Error>> + Send {
+            self.$inner.list(prefix)
+        }
+
+        fn list_delimited(
+            &self,
+            prefix: &str,
+            page: crate::bucket::Page<'_>,
+        ) -> impl std::future::Future<Output = Result<crate::bucket::Listing, crate::bucket::Error>> + Send {
+            self.$inner.list_delimited(prefix, page)
+        }
+
+        fn put(
+            &self,
+            key: &str,
+            bytes: bytes::Bytes,
+            mode: crate::bucket::PutMode,
+        ) -> impl std::future::Future<Output = Result<crate::bucket::Version, crate::bucket::Error>> + Send {
+            self.$inner.put(key, bytes, mode)
+        }
+
+        fn delete(
+            &self,
+            key: &str,
+        ) -> impl std::future::Future<Output = Result<(), crate::bucket::Error>> + Send {
+            self.$inner.delete(key)
+        }
+
+        fn now(&self) -> u64 {
+            self.$inner.now()
+        }
+    };
+    (except_put $inner:tt) => {
+        fn get(
+            &self,
+            key: &str,
+        ) -> impl std::future::Future<Output = Result<crate::bucket::Object, crate::bucket::Error>> + Send {
+            self.$inner.get(key)
+        }
+
+        fn get_range(
+            &self,
+            key: &str,
+            range: crate::bucket::ByteRange,
+        ) -> impl std::future::Future<Output = Result<Vec<u8>, crate::bucket::Error>> + Send {
+            self.$inner.get_range(key, range)
+        }
+
+        fn head(
+            &self,
+            key: &str,
+        ) -> impl std::future::Future<Output = Result<crate::bucket::Meta, crate::bucket::Error>> + Send {
+            self.$inner.head(key)
+        }
+
+        fn list(
+            &self,
+            prefix: &str,
+        ) -> impl std::future::Future<Output = Result<Vec<crate::bucket::Meta>, crate::bucket::Error>> + Send {
+            self.$inner.list(prefix)
+        }
+
+        fn list_delimited(
+            &self,
+            prefix: &str,
+            page: crate::bucket::Page<'_>,
+        ) -> impl std::future::Future<Output = Result<crate::bucket::Listing, crate::bucket::Error>> + Send {
+            self.$inner.list_delimited(prefix, page)
+        }
+
+        fn delete(
+            &self,
+            key: &str,
+        ) -> impl std::future::Future<Output = Result<(), crate::bucket::Error>> + Send {
+            self.$inner.delete(key)
+        }
+
+        fn now(&self) -> u64 {
+            self.$inner.now()
+        }
+    };
+}
+
+#[cfg(test)]
+pub(crate) use delegate_bucket_methods;
+
 #[cfg(all(test, feature = "full"))]
 pub(crate) async fn conformance(bucket: &impl Bucket, root: &str) {
     let key = &format!("{root}/object");

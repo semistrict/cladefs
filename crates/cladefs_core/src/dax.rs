@@ -38,6 +38,25 @@ mod shuttle_tests;
 #[cfg(target_os = "linux")]
 pub mod uffd;
 
+/// Reads `bytes.len()` bytes of `fd`'s memory object at `offset` into `bytes`, retrying `EINTR`.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn read_at(fd: std::os::fd::RawFd, bytes: &mut [u8], offset: u64) {
+    let mut done = 0;
+    while done < bytes.len() {
+        let rest = &mut bytes[done..];
+        let at = (offset + done as u64) as libc::off_t;
+        // SAFETY: Reads into `rest`, which is as long as asked.
+        let read = unsafe { libc::pread(fd, rest.as_mut_ptr().cast(), rest.len(), at) };
+        if read < 0 {
+            let err = std::io::Error::last_os_error();
+            assert_eq!(err.kind(), std::io::ErrorKind::Interrupted, "read {offset:#x}: {err}");
+            continue;
+        }
+        assert!(read > 0, "read {offset:#x}: past the memory's end");
+        done += read as usize;
+    }
+}
+
 use crate::error::{Errno, Result};
 use crate::open_cell::{MappingContents, WindowMapping};
 use crate::pages::{ArenaId, PhysLocation, page_size};

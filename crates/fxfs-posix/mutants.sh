@@ -35,25 +35,16 @@ done
 shift $((OPTIND - 1))
 
 mutants=crates/fxfs-posix/mutants
-names=("$@")
-if [[ ${#names[@]} == 0 ]]; then
-    for patch in "$mutants"/*.patch; do
-        names+=("$(basename "$patch" .patch)")
-    done
-fi
-
 # patch_round_trip (scripts/lib/patches.sh): whether a patch is well formed, applies and reverses;
 # patch_run, a command run with it in the tree.
 source scripts/lib/patches.sh
+mutants_names "$mutants" "$@"
+
+if [[ -n $check ]]; then
+    mutants_check "$mutants" "${names[@]}"
+fi
 
 broken=0
-if [[ -n $check ]]; then
-    for name in "${names[@]}"; do
-        patch_round_trip "$mutants/$name.patch" || broken=$((broken + 1))
-    done
-    echo "mutants: ${#names[@]} checked, $broken broken"
-    exit $((broken > 0))
-fi
 
 printf '%-42s %-8s %s\n' mutant time 'found by'
 for name in "${names[@]}"; do

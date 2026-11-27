@@ -16,8 +16,6 @@ anyhow.workspace = true
 async-task = "4.7.1"
 async-trait.workspace = true
 base32_id.workspace = true
-bitflags.workspace = true
-block_device.workspace = true
 bucket_cell.workspace = true
 cladefs_core.workspace = true
 cladefs_fs.workspace = true
@@ -43,19 +41,13 @@ pin-project-lite.workspace = true
 pprof = { version = "0.15.0", default-features = false, features = ["prost-codec", "flamegraph", "frame-pointer"] }
 prost = "0.14.4"
 rand.workspace = true
-serde.workspace = true
 serde_json = "1.0.154"
-sha2.workspace = true
-siphasher.workspace = true
-smallvec.workspace = true
 storage_device.workspace = true
-thiserror.workspace = true
 tokio.workspace = true
 tokio-stream = { version = "0.1.19", features = ["net"] }
 toml.workspace = true
 tonic = { package = "madsim-tonic", version = "=0.6.0", features = ["tls-aws-lc"] }
 tonic-health = "0.14.6"
-tonic-prost = "0.14.6"
 tower = "0.5.3"
 url.workspace = true
 zerocopy.workspace = true

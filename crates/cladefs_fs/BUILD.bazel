@@ -23,7 +23,6 @@ _BASE_DEPS = [
     "//crates/fxfs",
     "//crates/fxfs-posix:fxfs_posix",
     "//crates/host_fs",
-    "//crates/node_local",
     "//crates/storage_device",
 ]
 

@@ -348,7 +348,7 @@ impl OpenCell {
 
     /// cladefs: `make`'s making of a new cell directory at `path`, in a span of its own,
     /// `store.create` (`bucket_cell::trace`, TASK-258), which it names the cell in once it knows
-    /// it: an open cell made, opened, or made closed ([`OpenCell::create_placed`]).
+    /// it: an open cell made, opened, or made closed ([`OpenCell::create_placed_on`]).
     async fn creating<T>(
         path: &Path,
         make: impl AsyncFnOnce(&trace::Span) -> Result<T, Error>,
@@ -369,17 +369,6 @@ impl OpenCell {
     /// ([`Opening::open`]).
     pub async fn open_with(path: impl AsRef<Path>, opening: Opening) -> Result<Self, Error> {
         opening.open(path).await
-    }
-
-    /// cladefs: the cell directory at `path`, a fork attached to other open cells, its uploader as
-    /// `keeping` says ([`Opening::open_base`]).
-    #[cfg(not(madsim))]
-    pub async fn open_base_with(
-        path: impl AsRef<Path>,
-        arena: Option<Arc<Arena>>,
-        keeping: local_cell::upload::Options,
-    ) -> Result<Self, Error> {
-        Opening::keeping(keeping).arena(arena).open_base(path).await
     }
 
     /// The open cell `opened` at `path`, opened as `opening` says, of whose cell and those it was
@@ -483,20 +472,6 @@ impl OpenCell {
         let cell = opened.local.description().cell;
         opened.close().await;
         Ok(cell)
-    }
-
-    /// cladefs: makes a new cell directory at `path`, which must not exist, of `capacity` bytes and
-    /// the cell `of` says, a cell of `kind` (TASK-364), its uploader as `keeping`
-    /// says, placed at `token`'s placement if given, closes it, and returns its cell.
-    #[cfg(not(madsim))]
-    pub async fn create_placed(
-        path: impl AsRef<Path>,
-        (capacity, of, token): (u64, CellOf, Option<u64>),
-        kind: Kind,
-        keeping: local_cell::upload::Options,
-    ) -> Result<CellId, Error> {
-        Self::create_placed_on(crate::Host::process(), path, (capacity, of, token), kind, keeping)
-            .await
     }
 
     /// cladefs: makes a new cell directory at `path` on `host` as [`OpenCell::create_placed_on`]

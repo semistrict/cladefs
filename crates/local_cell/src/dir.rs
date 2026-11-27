@@ -638,6 +638,34 @@ fn closed_in<'a>(
     Ok(claimed)
 }
 
+async fn wait_dir_claim_on(
+    host: &crate::Host,
+    path: &Path,
+    still_claimed: impl Fn(Option<&bool>) -> bool,
+    timeout_msg: &'static str,
+) -> io::Result<()> {
+    use host_fs::MetadataExt as _;
+    let metadata = match crate::upload::blocking(|| host_fs::metadata(path)) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err),
+    };
+    let id = (metadata.dev(), metadata.ino());
+    let wait = async {
+        loop {
+            let notified = host.dirs.unclaimed_event.listen();
+            if !still_claimed(host.dirs.claimed.lock().unwrap().get(&id)) {
+                return;
+            }
+            fail::fail_point!("dir::claim_waits");
+            notified.await;
+        }
+    };
+    tokio::time::timeout(CLOSING_WAIT, wait)
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::WouldBlock, timeout_msg))
+}
+
 /// cladefs: returns once no cell of the directory at `path` is closing on `host`, waiting
 /// for one that is a while, as an opening of it does ([`Dir::claim`]), holding no thread:
 /// `WouldBlock` if it still is. What reads in the bucket what a cell's close uploads, a fork of a
@@ -645,26 +673,13 @@ fn closed_in<'a>(
 /// cell, first, so that its claim finds none closing (doc-24). Nothing at `path`, nothing closes
 /// there.
 pub async fn closed_on(host: &crate::Host, path: &Path) -> io::Result<()> {
-    use host_fs::MetadataExt as _;
-    let metadata = match crate::upload::blocking(|| host_fs::metadata(path)) {
-        Ok(metadata) => metadata,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(err) => return Err(err),
-    };
-    let id = (metadata.dev(), metadata.ino());
-    let closing = async {
-        loop {
-            let unclaimed = host.dirs.unclaimed_event.listen();
-            if host.dirs.claimed.lock().unwrap().get(&id) != Some(&true) {
-                return;
-            }
-            fail::fail_point!("dir::claim_waits");
-            unclaimed.await;
-        }
-    };
-    tokio::time::timeout(CLOSING_WAIT, closing).await.map_err(|_| {
-        io::Error::new(io::ErrorKind::WouldBlock, "this process is still closing the cell")
-    })
+    wait_dir_claim_on(
+        host,
+        path,
+        |entry| entry == Some(&true),
+        "this process is still closing the cell",
+    )
+    .await
 }
 
 /// cladefs: returns once no cell of the directory at `path` is claimed on `host` (neither open nor
@@ -672,26 +687,8 @@ pub async fn closed_on(host: &crate::Host, path: &Path) -> io::Result<()> {
 /// (board 11530): closes the window between `Arc::into_inner` dropping the handle and
 /// `LocalCell::close` calling `closing()`. Nothing at `path`, nothing claimed there.
 pub async fn unclaimed_on(host: &crate::Host, path: &Path) -> io::Result<()> {
-    use host_fs::MetadataExt as _;
-    let metadata = match crate::upload::blocking(|| host_fs::metadata(path)) {
-        Ok(metadata) => metadata,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(err) => return Err(err),
-    };
-    let id = (metadata.dev(), metadata.ino());
-    let unclaimed = async {
-        loop {
-            let notified = host.dirs.unclaimed_event.listen();
-            if !host.dirs.claimed.lock().unwrap().contains_key(&id) {
-                return;
-            }
-            fail::fail_point!("dir::claim_waits");
-            notified.await;
-        }
-    };
-    tokio::time::timeout(CLOSING_WAIT, unclaimed)
+    wait_dir_claim_on(host, path, |entry| entry.is_some(), "this process still holds the cell")
         .await
-        .map_err(|_| io::Error::new(io::ErrorKind::WouldBlock, "this process still holds the cell"))
 }
 
 /// cladefs: [`closed_on`] on the process's default host outside `madsim`.
@@ -699,6 +696,46 @@ pub async fn unclaimed_on(host: &crate::Host, path: &Path) -> io::Result<()> {
 pub async fn closed(path: &Path) -> io::Result<()> {
     closed_on(crate::Host::process(), path).await
 }
+
+/// Delegates pass-through [`Dir`] methods to `self.shared.dir` in directory wrappers (`CachedDir`,
+/// `MeteredDir`).
+macro_rules! delegate_dir_passthrough {
+    () => {
+        fn sync_dir(&self, path: &str) -> io::Result<()> {
+            self.shared.dir.sync_dir(path)
+        }
+
+        fn barrier(&self) -> io::Result<()> {
+            self.shared.dir.barrier()
+        }
+
+        fn defers(&self) -> bool {
+            self.shared.dir.defers()
+        }
+
+        fn made_deferred(&self) -> bool {
+            self.shared.dir.made_deferred()
+        }
+
+        fn settle(&self) -> io::Result<()> {
+            self.shared.dir.settle()
+        }
+
+        fn claim(&self) -> io::Result<()> {
+            self.shared.dir.claim()
+        }
+
+        fn closing(&self) {
+            self.shared.dir.closing()
+        }
+
+        fn unclaim(&self) {
+            self.shared.dir.unclaim()
+        }
+    };
+}
+
+pub(crate) use delegate_dir_passthrough;
 
 /// cladefs: how long an opening waits for a cell of its directory closing in this process
 /// (TASK-648): a close makes its last commits durable, seconds on a busy disk.

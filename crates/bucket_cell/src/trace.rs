@@ -47,8 +47,6 @@ pub const COMMIT: &str = "cladefs.commit";
 pub const LEVEL: &str = "cladefs.level";
 /// The attribute of the cell a fork makes.
 pub const CHILD: &str = "cladefs.child";
-/// The attribute of whether a fork makes a version (`doc-7`, Versions).
-pub const POINT: &str = "cladefs.version";
 /// The attribute of a cell's path.
 pub const STORE: &str = "cladefs.store";
 /// The attribute of the arena of physical memory an operation is of.

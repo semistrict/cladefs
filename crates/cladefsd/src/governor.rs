@@ -1368,21 +1368,20 @@ async fn govern_every(daemon: Arc<Daemon>, headroom: u64, floor: u64) {
     }
 }
 
-/// Runs one non-overlapping budgeted `cachestat(2)` cold-part harvest pass on a blocking worker
-/// thread so syscalls never stall the eviction thread.
+/// Runs one non-overlapping background blocking task guarded by an `AtomicBool` on `daemon`,
+/// ensuring concurrent triggers skip rather than pile up and the flag always clears on exit/panic.
 #[cfg(all(target_os = "linux", not(madsim)))]
-fn spawn_cold_harvest(daemon: &Arc<Daemon>) {
-    if daemon
-        .governor
-        .cold_harvest_busy
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
+fn spawn_non_overlapping(
+    daemon: &Arc<Daemon>,
+    busy: fn(&Daemon) -> &AtomicBool,
+    work: impl FnOnce(&Daemon) + Send + 'static,
+) {
+    if busy(daemon).compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
         return;
     }
     let daemon = Arc::clone(daemon);
     let runtime = daemon.runtime().handle().clone();
-    // Real Linux cachestat(2) slab harvesting on a background worker, outside the simulation.
+    // Background Linux blocking pass (cachestat(2) / cgroup memory.reclaim), outside the simulation.
     runtime.spawn_blocking(move || {
         struct Clear<'a>(&'a AtomicBool);
         impl Drop for Clear<'_> {
@@ -1390,13 +1389,28 @@ fn spawn_cold_harvest(daemon: &Arc<Daemon>) {
                 self.0.store(false, Ordering::Release);
             }
         }
-        let _clear = Clear(&daemon.governor.cold_harvest_busy);
-        let harvested =
-            daemon.host.cache().evict_kernel_cold(COLD_HARVEST_SCAN_BUDGET, COLD_HARVEST_MAX_BYTES);
-        if harvested > 0 {
-            daemon.governor.kernel_cold_harvested_bytes.fetch_add(harvested, Ordering::Relaxed);
-        }
+        let _clear = Clear(busy(&daemon));
+        work(&daemon);
     });
+}
+
+/// Runs one non-overlapping budgeted `cachestat(2)` cold-part harvest pass on a blocking worker
+/// thread so syscalls never stall the eviction thread.
+#[cfg(all(target_os = "linux", not(madsim)))]
+fn spawn_cold_harvest(daemon: &Arc<Daemon>) {
+    spawn_non_overlapping(
+        daemon,
+        |d| &d.governor.cold_harvest_busy,
+        |daemon| {
+            let harvested = daemon
+                .host
+                .cache()
+                .evict_kernel_cold(COLD_HARVEST_SCAN_BUDGET, COLD_HARVEST_MAX_BYTES);
+            if harvested > 0 {
+                daemon.governor.kernel_cold_harvested_bytes.fetch_add(harvested, Ordering::Relaxed);
+            }
+        },
+    );
 }
 
 #[cfg(all(target_os = "linux", not(madsim)))]
@@ -1419,27 +1433,13 @@ fn spawn_vm_reclaim(
     host_swap_total: u64,
     pass_budget: u64,
 ) {
-    if daemon
-        .governor
-        .vm_reclaim_busy
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
-        return;
-    }
-    let daemon = Arc::clone(daemon);
-    let runtime = daemon.runtime().handle().clone();
-    // Real Linux cgroup v2 memory.reclaim write on a blocking worker, outside the simulation.
-    runtime.spawn_blocking(move || {
-        struct Clear<'a>(&'a AtomicBool);
-        impl Drop for Clear<'_> {
-            fn drop(&mut self) {
-                self.0.store(false, Ordering::Release);
-            }
-        }
-        let _clear = Clear(&daemon.governor.vm_reclaim_busy);
-        reclaim_connected_vms(&daemon, host_swap_free, host_swap_total, pass_budget);
-    });
+    spawn_non_overlapping(
+        daemon,
+        |d| &d.governor.vm_reclaim_busy,
+        move |daemon| {
+            reclaim_connected_vms(daemon, host_swap_free, host_swap_total, pass_budget);
+        },
+    );
 }
 
 #[cfg(all(target_os = "linux", not(madsim)))]

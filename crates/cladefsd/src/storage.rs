@@ -535,13 +535,6 @@ pub(super) fn fast_wal_config(daemon: &Daemon) -> Result<Option<(FastWalConfig, 
     Ok(slot.get_or_insert(Some((config, large_extent))).clone())
 }
 
-/// Injects `config` as `daemon`'s fast WAL bucket before any cell opens (tests and `madsim`).
-#[cfg(any(test, madsim))]
-pub(super) fn use_fast_wal_on(daemon: &Daemon, config: FastWalConfig, large_extent: u64) {
-    let mut slot = daemon.fast_wal.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    *slot = Some(Some((config, large_extent)));
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

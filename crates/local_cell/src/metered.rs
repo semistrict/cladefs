@@ -123,25 +123,7 @@ impl<D: Dir> Dir for Metered<D> {
         self.shared.dir.entries()
     }
 
-    fn sync_dir(&self, path: &str) -> io::Result<()> {
-        self.shared.dir.sync_dir(path)
-    }
-
-    fn barrier(&self) -> io::Result<()> {
-        self.shared.dir.barrier()
-    }
-
-    fn defers(&self) -> bool {
-        self.shared.dir.defers()
-    }
-
-    fn made_deferred(&self) -> bool {
-        self.shared.dir.made_deferred()
-    }
-
-    fn settle(&self) -> io::Result<()> {
-        self.shared.dir.settle()
-    }
+    crate::dir::delegate_dir_passthrough!();
 
     /// The first taking in this process lists it anew ([`Footprint::taken`]): other processes may
     /// have changed it while they had it.
@@ -153,18 +135,6 @@ impl<D: Dir> Dir for Metered<D> {
     fn let_go(&self) {
         self.shared.footprint.let_go();
         self.shared.dir.let_go()
-    }
-
-    fn claim(&self) -> io::Result<()> {
-        self.shared.dir.claim()
-    }
-
-    fn closing(&self) {
-        self.shared.dir.closing()
-    }
-
-    fn unclaim(&self) {
-        self.shared.dir.unclaim()
     }
 
     /// Taken, it goes from the cell, as a removal takes it.

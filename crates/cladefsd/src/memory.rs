@@ -504,6 +504,32 @@ fn govern_with_sync_on_wait(
     }
 }
 
+/// Tenants currently over their weighted share of `target`, ordered most over-share first with a
+/// deterministic tenant-ID tie-break.
+fn weighted_over_share(daemon: &Daemon, weighted: &[(u64, u64)], target: u64) -> Vec<(u64, u64)> {
+    let mut over: Vec<(u64, u64, u64)> = crate::governor::shares(target, weighted)
+        .into_iter()
+        .filter_map(|(id, share)| {
+            let held = held_by(daemon, id);
+            held.checked_sub(share).filter(|&over| over > 0).map(|over| (over, id, share))
+        })
+        .collect();
+    // Most over-share tenant yields first; tie-break deterministically by tenant ID.
+    over.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    over.into_iter().map(|(_, id, share)| (id, share)).collect()
+}
+
+/// Computes the capped shrink target for `id` (whose weighted share is `share`) given the remaining
+/// global excess above `target`, returning `None` if `id` needs no shrink or global `target` is met.
+fn tenant_shrink_target(daemon: &Daemon, id: u64, share: u64, target: u64) -> Option<u64> {
+    let excess = daemon.host.slabs().arenas_bytes().saturating_sub(target);
+    if excess == 0 {
+        return None;
+    }
+    let held = held_by(daemon, id);
+    (held > share).then(|| share.max(held.saturating_sub(excess)))
+}
+
 #[cfg(not(madsim))]
 fn shrink_weighted_sync(
     daemon: &Daemon,
@@ -513,29 +539,16 @@ fn shrink_weighted_sync(
     deadline: std::time::Instant,
     wait: &mut SyncWait<'_>,
 ) {
-    let mut over: Vec<(u64, u64, u64)> = crate::governor::shares(target, weighted)
-        .into_iter()
-        .filter_map(|(id, share)| {
-            let held = held_by(daemon, id);
-            held.checked_sub(share).filter(|&over| over > 0).map(|over| (over, id, share))
-        })
-        .collect();
-    over.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-    for (_, id, share) in over {
-        let current_total = daemon.host.slabs().arenas_bytes();
-        let excess = current_total.saturating_sub(target);
-        if excess == 0 {
+    for (id, share) in weighted_over_share(daemon, weighted, target) {
+        if daemon.host.slabs().arenas_bytes() <= target {
             break;
         }
-        let held = held_by(daemon, id);
-        if held > share {
-            let tenant_target = share.max(held.saturating_sub(excess));
-            if let Err(err) =
+        if let Some(tenant_target) = tenant_shrink_target(daemon, id, share, target)
+            && let Err(err) =
                 shrink_scoped_by_sync(daemon, Some(id), tenant_target, scope, deadline, wait)
-                && err != Errno::ENOENT
-            {
-                log::error!("cladefsd: shrinking a tenant's memory to its share: {err}");
-            }
+            && err != Errno::ENOENT
+        {
+            log::error!("cladefsd: shrinking a tenant's memory to its share: {err}");
         }
         wait.service_relief();
     }
@@ -670,30 +683,16 @@ async fn shrink_weighted(
     scope: cladefs_core::cache::EvictScope,
     deadline: std::time::Instant,
 ) {
-    let mut over: Vec<(u64, u64, u64)> = crate::governor::shares(target, weighted)
-        .into_iter()
-        .filter_map(|(id, share)| {
-            let held = held_by(daemon, id);
-            held.checked_sub(share).filter(|&over| over > 0).map(|over| (over, id, share))
-        })
-        .collect();
-    // Most over-share tenant yields first; tie-break deterministically by tenant ID.
-    over.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-    for (_, id, share) in over {
-        let current_total = daemon.host.slabs().arenas_bytes();
-        let excess = current_total.saturating_sub(target);
-        if excess == 0 {
+    for (id, share) in weighted_over_share(daemon, weighted, target) {
+        if daemon.host.slabs().arenas_bytes() <= target {
             break;
         }
-        let held = held_by(daemon, id);
-        if held > share {
-            let tenant_target = share.max(held.saturating_sub(excess));
-            if let Err(err) =
+        if let Some(tenant_target) = tenant_shrink_target(daemon, id, share, target)
+            && let Err(err) =
                 shrink_scoped_by(daemon, Some(id), tenant_target, scope, deadline).await
-                && err != Errno::ENOENT
-            {
-                log::error!("cladefsd: shrinking a tenant's memory to its share: {err}");
-            }
+            && err != Errno::ENOENT
+        {
+            log::error!("cladefsd: shrinking a tenant's memory to its share: {err}");
         }
     }
     if daemon.host.slabs().arenas_bytes() > target
@@ -1135,31 +1134,34 @@ mod tests {
 
     /// `govern_with_on` in `IdleOnly` mode evicts idle (unmapped) extents and stops growth by
     /// capping `total_cap` at the remaining mapped working set without evicting mapped extents;
+    #[cfg(target_os = "linux")]
+    struct TestZeroFill;
+
+    #[cfg(target_os = "linux")]
+    impl cladefs_core::cache::Contents for TestZeroFill {
+        fn read<'a>(
+            &'a self,
+            _offset: u64,
+            buf: &'a mut [u8],
+        ) -> futures::future::BoxFuture<'a, Result<(), anyhow::Error>> {
+            buf.fill(0x5a);
+            Box::pin(std::future::ready(Ok(())))
+        }
+    }
+
     /// `Mapped { max_shrink_bytes }` steps down mapped extents by at most `max_shrink_bytes` per
     /// pass; and `GetStats` (`stats::take_on`) exposes all governor gauges and counters.
     #[cfg(target_os = "linux")]
     #[test]
     fn govern_with_idle_only_holds_mapped_working_set_and_mapped_mode_rate_limits() {
         use crate::governor::ReclaimMode;
-        use cladefs_core::cache::{CachedExtent, Contents};
+        use TestZeroFill as ZeroFill;
+        use cladefs_core::cache::CachedExtent;
         use cladefs_core::dax::{Dax, Source};
         use cladefs_core::pages::ArenaId;
         use cladefs_core::slabs::SLAB;
-        use futures::future::BoxFuture;
         use std::sync::Arc;
         use storage_device::ExtentId;
-
-        struct ZeroFill;
-        impl Contents for ZeroFill {
-            fn read<'a>(
-                &'a self,
-                _offset: u64,
-                buf: &'a mut [u8],
-            ) -> BoxFuture<'a, Result<(), anyhow::Error>> {
-                buf.fill(0x5a);
-                Box::pin(std::future::ready(Ok(())))
-            }
-        }
 
         let daemon = crate::Daemon::new();
         daemon.block_on(async {
@@ -1268,24 +1270,12 @@ mod tests {
     #[test]
     fn govern_with_weighted_tenants_respects_mapped_rate_limit() {
         use crate::governor::ReclaimMode;
-        use cladefs_core::cache::{CachedExtent, Contents};
+        use TestZeroFill as ZeroFill;
+        use cladefs_core::cache::CachedExtent;
         use cladefs_core::dax::{Dax, Source};
         use cladefs_core::slabs::SLAB;
-        use futures::future::BoxFuture;
         use std::sync::Arc;
         use storage_device::ExtentId;
-
-        struct ZeroFill;
-        impl Contents for ZeroFill {
-            fn read<'a>(
-                &'a self,
-                _offset: u64,
-                buf: &'a mut [u8],
-            ) -> BoxFuture<'a, Result<(), anyhow::Error>> {
-                buf.fill(0x5a);
-                Box::pin(std::future::ready(Ok(())))
-            }
-        }
 
         let dir = tempfile::tempdir().unwrap();
         let daemon = crate::Daemon::new();

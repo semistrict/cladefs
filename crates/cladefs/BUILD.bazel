@@ -26,7 +26,6 @@ _CLADEFS_ALIASES = select({
 exports_files([
     "Cargo.toml",
     "build/release_link.rs",
-    "build/stamp.rs",
 ])
 
 filegroup(
@@ -49,7 +48,7 @@ cargo_build_script(
     srcs = [
         "build.rs",
         "build/release_link.rs",
-        "build/stamp.rs",
+        "//crates/cladefs_core:build/stamp.rs",
     ],
     build_script_env = {
         "CARGO_ENCODED_RUSTFLAGS": "-Cforce-frame-pointers=yes",
@@ -63,14 +62,8 @@ cargo_build_script(
 _BASE_INTERNAL_DEPS = [
     ":cladefs_build_script",
     "//crates/base32_id",
-    "//crates/block_device",
     "//crates/formats",
-    "//crates/fuchsia-async:fuchsia_async",
     "//crates/fxfs",
-    "//crates/fxfs-posix:fxfs_posix",
-    "//crates/host_fs",
-    "//crates/node_local",
-    "//crates/storage_device",
 ]
 
 _PROD_DAEMON_DEP = select({
@@ -229,10 +222,16 @@ cladefs_rust_test(
         "//conditions:default": ["@platforms//:incompatible"],
     }),
     timeout = "long",
-    deps = _TEST_BIN_DEPS + all_crate_deps(normal_dev = True),
+    deps = _TEST_BIN_DEPS + [
+        "//crates/host_fs",
+        "//crates/node_local",
+    ] + all_crate_deps(normal_dev = True),
 )
 
-_INTEGRATION_TEST_DEPS = _TEST_BIN_DEPS + all_crate_deps(normal_dev = True)
+_INTEGRATION_TEST_DEPS = _TEST_BIN_DEPS + [
+    "//crates/host_fs",
+    "//crates/node_local",
+] + all_crate_deps(normal_dev = True)
 _INTEGRATION_TEST_PROC_MACRO_DEPS = all_crate_deps(proc_macro = True, proc_macro_dev = True)
 _COMMON_TEST_SRCS = glob(["tests/common/**/*.rs"])
 

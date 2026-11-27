@@ -1309,14 +1309,7 @@ impl Collector {
         trimmed: &[&Meta],
     ) {
         let Some(observer) = &self.observer else { return };
-        let deleted_keys: BTreeSet<&str> = trimmed.iter().map(|m| m.key.as_str()).collect();
-        let kept: Vec<ObjectSample> = listed
-            .objects
-            .values()
-            .filter(|m| !deleted_keys.contains(m.key.as_str()))
-            .map(object_sample)
-            .collect();
-        let deleted: Vec<ObjectSample> = trimmed.iter().copied().map(object_sample).collect();
+        let (kept, deleted) = split_samples(listed.objects.values(), trimmed, false);
         observer.observe(&CellSample {
             cell,
             foreign_copy: false,
@@ -1408,17 +1401,7 @@ impl Collector {
         deleted_metas: &[&Meta],
     ) {
         let Some(observer) = &self.observer else { return };
-        let deleted_keys: BTreeSet<&str> = deleted_metas.iter().map(|m| m.key.as_str()).collect();
-        let kept: Vec<ObjectSample> = if removed {
-            Vec::new()
-        } else {
-            listed
-                .iter()
-                .filter(|m| !deleted_keys.contains(m.key.as_str()))
-                .map(object_sample)
-                .collect()
-        };
-        let deleted: Vec<ObjectSample> = deleted_metas.iter().copied().map(object_sample).collect();
+        let (kept, deleted) = split_samples(listed.iter(), deleted_metas, removed);
         observer.observe(&CellSample {
             cell,
             foreign_copy: true,
@@ -1436,6 +1419,24 @@ impl Collector {
             deleted: &deleted,
         });
     }
+}
+
+fn split_samples<'a>(
+    all: impl IntoIterator<Item = &'a Meta>,
+    deleted_metas: &[&Meta],
+    removed: bool,
+) -> (Vec<ObjectSample>, Vec<ObjectSample>) {
+    let deleted_keys: BTreeSet<&str> = deleted_metas.iter().map(|m| m.key.as_str()).collect();
+    let kept = if removed {
+        Vec::new()
+    } else {
+        all.into_iter()
+            .filter(|m| !deleted_keys.contains(m.key.as_str()))
+            .map(object_sample)
+            .collect()
+    };
+    let deleted = deleted_metas.iter().copied().map(object_sample).collect();
+    (kept, deleted)
 }
 
 fn object_sample(meta: &Meta) -> ObjectSample {
@@ -2760,49 +2761,7 @@ mod tests {
             self.bucket.get(key)
         }
 
-        fn get_range(
-            &self,
-            key: &str,
-            range: ByteRange,
-        ) -> impl Future<Output = Result<Vec<u8>, BucketError>> + Send {
-            self.bucket.get_range(key, range)
-        }
-
-        fn head(&self, key: &str) -> impl Future<Output = Result<Meta, BucketError>> + Send {
-            self.bucket.head(key)
-        }
-
-        fn list(
-            &self,
-            prefix: &str,
-        ) -> impl Future<Output = Result<Vec<Meta>, BucketError>> + Send {
-            self.bucket.list(prefix)
-        }
-
-        fn list_delimited(
-            &self,
-            prefix: &str,
-            page: crate::bucket::Page<'_>,
-        ) -> impl Future<Output = Result<crate::bucket::Listing, BucketError>> + Send {
-            self.bucket.list_delimited(prefix, page)
-        }
-
-        fn put(
-            &self,
-            key: &str,
-            bytes: bytes::Bytes,
-            mode: PutMode,
-        ) -> impl Future<Output = Result<Version, BucketError>> + Send {
-            self.bucket.put(key, bytes, mode)
-        }
-
-        fn delete(&self, key: &str) -> impl Future<Output = Result<(), BucketError>> + Send {
-            self.bucket.delete(key)
-        }
-
-        fn now(&self) -> u64 {
-            self.bucket.now()
-        }
+        crate::bucket::delegate_bucket_methods!(except_get bucket);
     }
 
     /// A bucket that runs `meanwhile` once, as a pass first reads the head of `cell`: having
@@ -2824,50 +2783,7 @@ mod tests {
             self.bucket.get(key)
         }
 
-        fn get_range(
-            &self,
-            key: &str,
-            range: ByteRange,
-        ) -> impl Future<Output = Result<Vec<u8>, BucketError>> + Send {
-            self.bucket.get_range(key, range)
-        }
-
-        fn head(&self, key: &str) -> impl Future<Output = Result<Meta, BucketError>> + Send {
-            self.bucket.head(key)
-        }
-
-        fn list(
-            &self,
-            prefix: &str,
-        ) -> impl Future<Output = Result<Vec<Meta>, BucketError>> + Send {
-            self.bucket.list(prefix)
-        }
-
-        fn list_delimited(
-            &self,
-            prefix: &str,
-            page: crate::bucket::Page<'_>,
-        ) -> impl Future<Output = Result<crate::bucket::Listing, crate::bucket::Error>> + Send
-        {
-            self.bucket.list_delimited(prefix, page)
-        }
-
-        fn put(
-            &self,
-            key: &str,
-            bytes: bytes::Bytes,
-            mode: PutMode,
-        ) -> impl Future<Output = Result<Version, BucketError>> + Send {
-            self.bucket.put(key, bytes, mode)
-        }
-
-        fn delete(&self, key: &str) -> impl Future<Output = Result<(), BucketError>> + Send {
-            self.bucket.delete(key)
-        }
-
-        fn now(&self) -> u64 {
-            self.bucket.now()
-        }
+        crate::bucket::delegate_bucket_methods!(except_get bucket);
     }
 
     /// TASK-158: everything between a pass's listing the records and its reading a cell's state:

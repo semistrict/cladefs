@@ -534,14 +534,6 @@ impl Config {
         Self::from_toml_str(&content).map_err(|err| format!("in config {}: {err}", path.display()))
     }
 
-    /// Resolves the default config path from `--config` or `CLADEFS_CONFIG`, if present.
-    pub fn from_env_path() -> Result<Option<Self>, String> {
-        let Some(path) = std::env::var_os(CONFIG_ENV).filter(|v| !v.is_empty()) else {
-            return Ok(None);
-        };
-        Self::from_toml_file(Path::new(&path)).map(Some)
-    }
-
     /// Validates cross-field invariants (distinct disk IDs and paths, positive caps, non-zero
     /// placement token when specified, valid log format, etc.).
     pub fn validate(&self) -> Result<(), String> {
@@ -625,11 +617,6 @@ impl Config {
     /// Returns the effective control socket path for `cladefsctl`.
     pub fn control_socket(&self) -> Option<&Path> {
         self.ctl.control_socket.as_deref().or(self.daemon.control_socket.as_deref())
-    }
-
-    /// Returns the effective bucket URL for `cladefs-gc`.
-    pub fn gc_bucket_url(&self) -> Option<&str> {
-        self.gc.bucket.as_deref().or(self.bucket.url.as_deref())
     }
 
     /// cladefs: the environment-backed process settings this configuration gives (bucket URL,

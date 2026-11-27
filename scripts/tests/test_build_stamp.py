@@ -2,8 +2,8 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-"""Tests of what crates/cladefs/build.rs stamps a build with and checks of it
-(crates/cladefs/build/stamp.rs), as cargo runs it: in a workspace of its own, a git checkout, whose
+"""Tests of what crates/cladefs_core/build.rs stamps a build with and checks of it
+(crates/cladefs_core/build/stamp.rs), as cargo runs it: in a workspace of its own, a git checkout, whose
 crate `stamped` builds with the module as cladefs's build script does and prints its stamp, and
 depends on a crate `dep`, as cladefs does on local_cell and bucket_cell.
 
@@ -24,7 +24,7 @@ from pathlib import Path
 
 from script import SCRIPTS
 
-STAMP = SCRIPTS.parent / "crates" / "cladefs" / "build" / "stamp.rs"
+STAMP = SCRIPTS.parent / "crates" / "cladefs_core" / "build" / "stamp.rs"
 FILES = {
     "Cargo.toml": '[workspace]\nresolver = "3"\nmembers = ["crates/*"]\n',
     "crates/dep/Cargo.toml": '[package]\nname = "dep"\nedition = "2024"\n',

@@ -37,11 +37,6 @@ pub trait BlockSizeSpec: Copy + Clone + Debug + Eq + PartialEq {
 pub struct GenericBlockSize<T: BlockSizeSpec>(T);
 
 impl<T: BlockSizeSpec> GenericBlockSize<T> {
-    #[inline(always)]
-    pub fn from_spec(spec: T) -> Self {
-        Self(spec)
-    }
-
     /// Returns the block size in bytes.
     #[inline(always)]
     pub fn get(self) -> u64 {

@@ -52,7 +52,7 @@ pub struct AnonBudget {
     pub uploads: u64,
     /// Its framings': [`FRAMING`] for each cell written at once, the most so far.
     pub framings: u64,
-    /// Its fetches': [`FETCHES`].
+    /// Its fetches': [`FETCHES_FIXED`] plus `PartMemory`'s peak (`RECENT` at least).
     pub fetches: u64,
     /// Its tenants' bytes in flight: the most their requests' stream data and what the daemon
     /// queued for their VM processes held at once, so far (`super::memory::InFlight`), each
@@ -119,13 +119,6 @@ pub const FRAMING: u64 = {
 /// (`crate::bucket::BUDGET`, 64 MiB) and the objects' tails kept (`bucket_cell::fetch`'s `TAILS`,
 /// 64 MiB).
 const FETCHES_FIXED: u64 = 2 * (64 << 20);
-
-/// What the host's fetches hold at once, at most, under the default `RECENT` bound: GETs in flight
-/// (64 MiB), objects' tails kept (64 MiB), and parts fetched last (`RECENT`, 64 MiB), each bounded
-/// for the host, however many of its cells read (TASK-92.21, TASK-92.22). When the governor scales
-/// `PartMemory` above `RECENT` for FUSE mounts (board 12313), [`AnonBudget::fetches`] counts
-/// `recent_peak().max(RECENT)` alongside `FETCHES_FIXED`, as `held` and `pages` count their peaks.
-pub const FETCHES: u64 = FETCHES_FIXED + bucket_cell::fetch::RECENT;
 
 /// What the page-ins' buffers hold at once, at most: a part's (a slab, 1 MiB) for each of the
 /// pager's threads reading a part from a cell, and as many kept for the next (`cache::buffers`);
@@ -195,13 +188,6 @@ fn budget(daemon: &Daemon, state: &mut State) -> AnonBudget {
 /// What the cells' maps of their extents on `daemon` hold now, at their entries' bounds.
 pub(super) fn extents_held_on(daemon: &Daemon) -> u64 {
     local_cell::own_held().bytes() + cladefs_core::host_cell::decoded_held_on(&daemon.host).bytes()
-}
-
-/// What the cells' maps of their extents hold now, at their entries' bounds ([`AnonBudget`]'s
-/// `extents`): the decoded states they share, each once, and what each holds of its own.
-#[cfg(not(madsim))]
-pub fn extents_held() -> u64 {
-    extents_held_on(Daemon::process())
 }
 
 /// Samples what `daemon` holds and spent now, against its budget now; and returns the sample.

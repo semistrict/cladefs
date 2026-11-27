@@ -31,16 +31,12 @@ host_fs.workspace = true
 libc.workspace = true
 local_cell.workspace = true
 log.workspace = true
-node_local.workspace = true
 rand.workspace = true
 serde.workspace = true
 serde_json = "1.0.154"
 sha2.workspace = true
-siphasher.workspace = true
-smallvec.workspace = true
 storage_device.workspace = true
 tar = { version = "0.4.46", default-features = false }
-thiserror.workspace = true
 tokio.workspace = true
 url.workspace = true
 zerocopy.workspace = true

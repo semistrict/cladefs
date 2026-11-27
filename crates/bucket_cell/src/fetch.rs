@@ -520,12 +520,6 @@ impl Memory {
         self.recent.size_to(limit)
     }
 
-    /// Evicts cached parts least-recently-used first down to `target` bytes, returning the bytes
-    /// still held.
-    pub fn evict_recent_to(&self, target: u64) -> u64 {
-        self.recent.evict_to(target)
-    }
-
     /// cladefs: the keys of the cells the host serves, which its cells hold theirs in as they open
     /// (`local_cell::upload`, TASK-411.3).
     pub fn keys(&self) -> &Arc<HostRing> {

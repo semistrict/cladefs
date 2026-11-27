@@ -756,15 +756,6 @@ impl ObjectBucket {
         Ok(Self::reached(reach(url, options, &Client::DEFAULT)?))
     }
 
-    /// cladefs: the bucket numbered `number` at `url`, as [`ObjectBucket::from_url`] reaches it,
-    /// but configured by the environment's variables for that bucket over the others
-    /// ([`numbered_options`], TASK-633.3): its credentials, cloud region or endpoint, which the
-    /// registry of buckets never holds.
-    pub fn from_url_numbered(url: &str, number: u16) -> Result<Self, String> {
-        let options = resolve_option_values(numbered_option_values(env_bucket_options(), number))?;
-        Ok(Self::reached(reach(url, options, &Client::DEFAULT)?))
-    }
-
     fn path(&self, key: &str) -> Path {
         if self.prefix.is_empty() {
             Path::from(key)
@@ -3868,33 +3859,7 @@ pub(crate) mod tests {
     struct Careless(crate::testing::Direct);
 
     impl Bucket for Careless {
-        fn get(&self, key: &str) -> impl Future<Output = Result<Object, Error>> + Send {
-            self.0.get(key)
-        }
-
-        fn get_range(
-            &self,
-            key: &str,
-            range: ByteRange,
-        ) -> impl Future<Output = Result<Vec<u8>, Error>> + Send {
-            self.0.get_range(key, range)
-        }
-
-        fn head(&self, key: &str) -> impl Future<Output = Result<Meta, Error>> + Send {
-            self.0.head(key)
-        }
-
-        fn list(&self, prefix: &str) -> impl Future<Output = Result<Vec<Meta>, Error>> + Send {
-            self.0.list(prefix)
-        }
-
-        fn list_delimited(
-            &self,
-            prefix: &str,
-            page: crate::bucket::Page<'_>,
-        ) -> impl Future<Output = Result<Listing, crate::bucket::Error>> + Send {
-            self.0.list_delimited(prefix, page)
-        }
+        crate::bucket::delegate_bucket_methods!(except_put 0);
 
         fn put(
             &self,
@@ -3903,14 +3868,6 @@ pub(crate) mod tests {
             _mode: PutMode,
         ) -> impl Future<Output = Result<Version, Error>> + Send {
             self.0.put(key, bytes, PutMode::Overwrite)
-        }
-
-        fn delete(&self, key: &str) -> impl Future<Output = Result<(), Error>> + Send {
-            self.0.delete(key)
-        }
-
-        fn now(&self) -> u64 {
-            self.0.now()
         }
     }
 
@@ -3935,33 +3892,7 @@ pub(crate) mod tests {
     );
 
     impl Bucket for OutOfReach {
-        fn get(&self, key: &str) -> impl Future<Output = Result<Object, Error>> + Send {
-            self.0.get(key)
-        }
-
-        fn get_range(
-            &self,
-            key: &str,
-            range: ByteRange,
-        ) -> impl Future<Output = Result<Vec<u8>, Error>> + Send {
-            self.0.get_range(key, range)
-        }
-
-        fn head(&self, key: &str) -> impl Future<Output = Result<Meta, Error>> + Send {
-            self.0.head(key)
-        }
-
-        fn list(&self, prefix: &str) -> impl Future<Output = Result<Vec<Meta>, Error>> + Send {
-            self.0.list(prefix)
-        }
-
-        fn list_delimited(
-            &self,
-            prefix: &str,
-            page: crate::bucket::Page<'_>,
-        ) -> impl Future<Output = Result<Listing, crate::bucket::Error>> + Send {
-            self.0.list_delimited(prefix, page)
-        }
+        crate::bucket::delegate_bucket_methods!(except_put 0);
 
         fn put(
             &self,
@@ -3978,14 +3909,6 @@ pub(crate) mod tests {
                     Some(true) => put.await.and(Err(Error::Unavailable)),
                 }
             }
-        }
-
-        fn delete(&self, key: &str) -> impl Future<Output = Result<(), Error>> + Send {
-            self.0.delete(key)
-        }
-
-        fn now(&self) -> u64 {
-            self.0.now()
         }
     }
 

@@ -11,8 +11,6 @@ publish = false
 [target.'cfg(any(all(target_os = "linux", target_arch = "x86_64"), all(target_os = "macos", target_arch = "aarch64")))'.dependencies]
 clap = { version = "4.6.7", features = ["derive"] }
 futures.workspace = true
-# The client's connector to a Unix socket (src/client.rs), as cladefsd's control client's.
-hyper-util = { version = "0.1.21", features = ["tokio"] }
 libc.workspace = true
 libcladefs.workspace = true
 # The synchronous Machine alone: machined runs each machine on a thread of its own (src/vmm.rs).
@@ -25,7 +23,6 @@ tokio-stream = { version = "0.1.19", features = ["net"] }
 # with TLS (rustls over aws-lc-rs) for TCP's mutual authentication, as cladefsd's peers'.
 tonic = { package = "madsim-tonic", version = "=0.6.0", features = ["tls-aws-lc"] }
 tonic-prost = "0.14.6"
-tower = "0.5.3"
 
 [target.'cfg(any(all(target_os = "linux", target_arch = "x86_64"), all(target_os = "macos", target_arch = "aarch64")))'.dev-dependencies]
 cladefs_core = { workspace = true, features = ["tests-kms"] }

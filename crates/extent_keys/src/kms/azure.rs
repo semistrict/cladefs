@@ -36,10 +36,12 @@
 //! vault's ciphertext. The service's documentation names no status for each refusal: they are
 //! mapped as its error codes say ([`refusal`]), not yet checked against the service itself.
 
+#[cfg(test)]
+use super::Kms;
 use super::background::Background;
 use super::http::{self, Unread};
 use super::retry::{self, Failed};
-use super::{Error, KeyNames, Kms, Origin, OverrideFiles, Vars, real};
+use super::{Error, KeyNames, Origin, OverrideFiles, Vars, real};
 use crate::{KEY_LEN, Secret, Unauthentic, Wrapped};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64URL;
@@ -48,7 +50,6 @@ use futures::FutureExt as _;
 use futures::future::{BoxFuture, Shared};
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::future::Future;
 use std::io;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -741,29 +742,7 @@ impl Fetcher {
 /// The content type of a form.
 const FORM: &str = "application/x-www-form-urlencoded";
 
-impl Kms for AzureKms {
-    fn wrap(
-        &self,
-        tenant: u64,
-        key: &Secret,
-    ) -> impl Future<Output = Result<Wrapped, Error>> + Send {
-        let (inner, key) = (self.inner.clone(), Secret::from_bytes(key.expose()));
-        self.runtime.run(tenant, async move { inner.wrap_now(tenant, &key).await })
-    }
-
-    fn unwrap(
-        &self,
-        tenant: u64,
-        wrapped: &Wrapped,
-    ) -> impl Future<Output = Result<Secret, Error>> + Send {
-        let (inner, wrapped) = (self.inner.clone(), wrapped.clone());
-        self.runtime.run(tenant, async move { inner.unwrap_now(tenant, &wrapped).await })
-    }
-
-    fn names(&self) -> Option<&KeyNames> {
-        Some(&self.inner.names)
-    }
-}
+impl_runtime_kms!(AzureKms);
 
 /// `KeyVaultError`'s `error`, what of it is read: its code, message, and inner error, whose code
 /// says more (`ForbiddenByFirewall`), and so on.

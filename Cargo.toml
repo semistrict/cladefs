@@ -102,7 +102,6 @@ bitflags = { version = "2.13.0", features = ["serde", "std"] }
 flate2 = { version = "1.1.9", default-features = false, features = ["rust_backend"] }
 futures = "=0.3.34"
 futures-lite = "2.6.1"
-futures-test = "=0.3.34"
 lock_api = "0.4.14"
 pin-project-lite = "0.2.17"
 proc-macro2 = { version = "1.0.107", features = ["span-locations"] }

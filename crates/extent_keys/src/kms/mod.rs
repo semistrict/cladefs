@@ -18,6 +18,37 @@ use crate::{Secret, Unauthentic, Wrapped};
 use std::future::Future;
 use std::io;
 
+/// Implements [`Kms`] for a backend that runs `inner.wrap_now` / `inner.unwrap_now` on
+/// `self.runtime` and exposes `&self.inner.names`.
+macro_rules! impl_runtime_kms {
+    ($ty:ty) => {
+        impl super::Kms for $ty {
+            fn wrap(
+                &self,
+                tenant: u64,
+                key: &crate::Secret,
+            ) -> impl std::future::Future<Output = Result<crate::Wrapped, super::Error>> + Send
+            {
+                let (inner, key) = (self.inner.clone(), crate::Secret::from_bytes(key.expose()));
+                self.runtime.run(tenant, async move { inner.wrap_now(tenant, &key).await })
+            }
+
+            fn unwrap(
+                &self,
+                tenant: u64,
+                wrapped: &crate::Wrapped,
+            ) -> impl std::future::Future<Output = Result<crate::Secret, super::Error>> + Send {
+                let (inner, wrapped) = (self.inner.clone(), wrapped.clone());
+                self.runtime.run(tenant, async move { inner.unwrap_now(tenant, &wrapped).await })
+            }
+
+            fn names(&self) -> Option<&super::KeyNames> {
+                Some(&self.inner.names)
+            }
+        }
+    };
+}
+
 mod aws;
 mod azure;
 mod background;

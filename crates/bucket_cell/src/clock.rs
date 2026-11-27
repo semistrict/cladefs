@@ -21,6 +21,51 @@
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+/// Formats `time` as UTC RFC 3339 (`YYYY-MM-DDTHH:MM:SS.<frac>Z`) with millisecond (`millis = true`)
+/// or microsecond (`millis = false`) precision.
+pub fn write_rfc3339_utc(
+    f: &mut std::fmt::Formatter<'_>,
+    time: SystemTime,
+    millis: bool,
+) -> std::fmt::Result {
+    let since = time.duration_since(UNIX_EPOCH).unwrap_or_default();
+    let secs = since.as_secs();
+    let days = (secs / 86_400) as i64;
+    let sod = secs % 86_400;
+    let hour = sod / 3_600;
+    let min = (sod % 3_600) / 60;
+    let sec = sod % 60;
+    // Howard Hinnant's civil_from_days: proleptic Gregorian date from days since 1970-01-01.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097) as u64;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = y + i64::from(month <= 2);
+    if millis {
+        let ms = since.subsec_millis();
+        write!(f, "{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}.{ms:03}Z")
+    } else {
+        let us = since.subsec_micros();
+        write!(f, "{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}.{us:06}Z")
+    }
+}
+
+/// Formats `time` as UTC RFC 3339 with millisecond precision (`YYYY-MM-DDTHH:MM:SS.mmmZ`).
+pub fn rfc3339_millis(time: SystemTime) -> String {
+    struct Fmt(SystemTime);
+    impl std::fmt::Display for Fmt {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write_rfc3339_utc(f, self.0, true)
+        }
+    }
+    Fmt(time).to_string()
+}
+
 /// The most a host's monotonic clock may run fast of a backend's, in millionths: what NTP slews a
 /// clock by at most, ten times a crystal's usual error. A clock that runs faster reads ahead of the
 /// backend's by that much of the time since a response last dated it.

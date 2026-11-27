@@ -478,21 +478,30 @@ mod wire {
         Ok(tombstone)
     }
 
-    pub(super) fn derive_aead(header: &WalHeader, keys: &Ring) -> Result<Aead, Error> {
+    fn derive_aead_with(
+        header: &WalHeader,
+        keys: &Ring,
+        label: &[u8],
+        extra: Option<&[u8]>,
+    ) -> Result<Aead, Error> {
         let key_id = KeyId { cell: header.cell.id, generation: header.key_generation };
         let cell_keys = keys.of(header.cell.id);
         let dek = cell_keys.dek(key_id).ok_or(Error::NoKey(key_id))?;
-        let subkey = dek.derive(
-            &header.salt,
-            &[
-                b"cladefs-fast-wal".as_slice(),
-                &header.cell.tenant.to_le_bytes(),
-                &header.cell.id.to_le_bytes(),
-                &header.epoch.to_le_bytes(),
-                &header.segment.to_le_bytes(),
-            ],
-        );
+        let tenant = header.cell.tenant.to_le_bytes();
+        let cell_id = header.cell.id.to_le_bytes();
+        let epoch = header.epoch.to_le_bytes();
+        let segment = header.segment.to_le_bytes();
+        let subkey = match extra {
+            Some(extra) => {
+                dek.derive(&header.salt, &[label, &tenant, &cell_id, &epoch, &segment, extra])
+            }
+            None => dek.derive(&header.salt, &[label, &tenant, &cell_id, &epoch, &segment]),
+        };
         Ok(Aead::new(&subkey))
+    }
+
+    pub(super) fn derive_aead(header: &WalHeader, keys: &Ring) -> Result<Aead, Error> {
+        derive_aead_with(header, keys, b"cladefs-fast-wal", None)
     }
 
     /// Derives a domain-separated AEAD key for a taker's `Fence` record at `by_epoch`, guaranteeing
@@ -502,21 +511,8 @@ mod wire {
         keys: &Ring,
         by_epoch: u64,
     ) -> Result<Aead, Error> {
-        let key_id = KeyId { cell: header.cell.id, generation: header.key_generation };
-        let cell_keys = keys.of(header.cell.id);
-        let dek = cell_keys.dek(key_id).ok_or(Error::NoKey(key_id))?;
-        let subkey = dek.derive(
-            &header.salt,
-            &[
-                b"cladefs-fast-wal-fence".as_slice(),
-                &header.cell.tenant.to_le_bytes(),
-                &header.cell.id.to_le_bytes(),
-                &header.epoch.to_le_bytes(),
-                &header.segment.to_le_bytes(),
-                &by_epoch.to_le_bytes(),
-            ],
-        );
-        Ok(Aead::new(&subkey))
+        let by = by_epoch.to_le_bytes();
+        derive_aead_with(header, keys, b"cladefs-fast-wal-fence", Some(&by))
     }
 
     fn record_aad(header_bytes: &[u8; HEADER_LEN], seq: u64, payload_len: u32) -> [u8; 92] {

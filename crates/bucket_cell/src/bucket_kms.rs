@@ -369,18 +369,6 @@ pub async fn destroy(bucket: &impl Bucket, tenant: u64) -> Result<Destroyed, buc
     }
 }
 
-/// cladefs: whether `tenant`'s KEK object in `bucket` is a tombstone (shredded under the bucket
-/// KMS). Needs no master key.
-pub async fn is_tombstoned(bucket: &impl Bucket, tenant: u64) -> Result<bool, bucket::Refused> {
-    if tenant == layout::DEFAULT_TENANT {
-        return Ok(false);
-    }
-    let Some(object) = bucket::get(bucket, &layout::kek(tenant)).await? else {
-        return Ok(false);
-    };
-    Ok(matches!(KekObject::decode(tenant, &object.bytes), Ok(KekObject::Tombstone { .. })))
-}
-
 /// cladefs: shreds `tenant` across `home` and every other bucket recorded in its registry (and the
 /// root bucket's registry), needing **no master key**: replaces `tenants/<tenant>/kek` with a
 /// tombstone in every bucket under a bucket KMS, records any bucket under a named external KMS in

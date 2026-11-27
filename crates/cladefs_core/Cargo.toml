@@ -17,7 +17,6 @@ tests-kms = ["testing", "bucket_cell/testing", "local_cell/testing"]
 anyhow.workspace = true
 async-trait.workspace = true
 base32_id.workspace = true
-bitflags.workspace = true
 bucket_cell.workspace = true
 event-listener.workspace = true
 extent_frame.workspace = true
@@ -36,7 +35,6 @@ pin-project-lite.workspace = true
 rand.workspace = true
 serde.workspace = true
 serde_json = "1.0.154"
-sha2.workspace = true
 shuttle = { workspace = true, optional = true }
 siphasher.workspace = true
 smallvec.workspace = true
@@ -45,10 +43,8 @@ thiserror.workspace = true
 tokio.workspace = true
 toml.workspace = true
 url.workspace = true
-zerocopy.workspace = true
 
 [target.'cfg(target_env = "musl")'.dependencies]
-libmimalloc-sys.workspace = true
 mimalloc = { workspace = true, features = ["extended"] }
 
 [dev-dependencies]
@@ -56,7 +52,6 @@ cladefs_core = { path = ".", features = ["failpoints", "testing", "tests-kms"] }
 bucket_cell = { workspace = true, features = ["testing"] }
 extent_keys = { workspace = true, features = ["testing"] }
 local_cell = { workspace = true, features = ["testing"] }
-memchr.workspace = true
 object_store.workspace = true
 proptest.workspace = true
 tempfile.workspace = true

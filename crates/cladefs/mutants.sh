@@ -44,26 +44,13 @@ done
 shift $((OPTIND - 1))
 
 mutants=crates/cladefs/mutants
-names=("$@")
-if [[ ${#names[@]} == 0 ]]; then
-    for patch in "$mutants"/*.patch; do
-        names+=("$(basename "$patch" .patch)")
-    done
-fi
-
 # patch_round_trip (scripts/lib/patches.sh): whether a patch is well formed, applies and reverses;
 # patch_run, a command run with it in the tree.
 source scripts/lib/patches.sh
+mutants_names "$mutants" "$@"
 
-broken=0
 if [[ -n $check ]]; then
-    for name in "${names[@]}"; do
-        patch=$mutants/$name.patch
-        patch_round_trip "$patch" || broken=$((broken + 1))
-        [[ -n $(sed -n 's/^# Killer: //p' "$patch") ]] || { echo "$patch names no killer" >&2; broken=$((broken + 1)); }
-    done
-    echo "mutants: ${#names[@]} checked, $broken broken"
-    exit $((broken > 0))
+    mutants_check "$mutants" --require-killer "${names[@]}"
 fi
 
 failed=0

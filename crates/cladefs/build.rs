@@ -6,7 +6,7 @@
 //! binaries (`cladefsd`, `cladefsctl`), as bucket_cell's `cladefs-gc` does too
 //! ([`release_link`], board 10269, board 12766).
 
-#[path = "build/stamp.rs"]
+#[path = "../cladefs_core/build/stamp.rs"]
 #[allow(dead_code)]
 mod stamp;
 
@@ -14,6 +14,7 @@ mod stamp;
 mod release_link;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    println!("cargo:rerun-if-changed=../cladefs_core/build/stamp.rs");
     stamp::require_frame_pointers()?;
     release_link::compress_debug_sections()
 }

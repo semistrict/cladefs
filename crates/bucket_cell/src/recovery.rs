@@ -561,23 +561,34 @@ async fn recover_layers_from<B: Bucket>(
 /// to there, or its origin's state, then its segments to there, starting again where it finds one
 /// gone that a newer checkpoint covers: [`Error::Lost`] once it keeps going, or what it needs is
 /// gone.
+/// Retries a recovery walk up to [`RESTARTS`] times when `Attempt::Restart` signals a concurrently
+/// deleted checkpoint/segment, returning `(value, touched)` or [`Error::Lost`].
+macro_rules! retry_recovery {
+    ($attempt:expr, $lost:expr) => {{
+        for _ in 0..RESTARTS {
+            let mut touched = BTreeSet::new();
+            match ($attempt)(&mut touched).await {
+                Ok(value) => return Ok((value, touched)),
+                Err(Attempt::Restart) => {}
+                Err(Attempt::Failed(error)) => return Err(error),
+            }
+        }
+        Err(Error::Lost($lost))
+    }};
+}
+
 pub(crate) async fn recover_at<B: Bucket>(
     checkpoints: &Checkpoints<'_, B>,
     cell: CellId,
     at: u64,
 ) -> Result<(Arc<State>, BTreeSet<String>), Error> {
-    for _ in 0..RESTARTS {
-        let mut touched = BTreeSet::new();
-        match state_at(checkpoints, cell, at, &mut touched, true).await {
-            Ok(state) => return Ok((state, touched)),
-            Err(Attempt::Restart) => {}
-            Err(Attempt::Failed(error)) => return Err(error),
-        }
-    }
-    Err(Error::Lost(format!(
-        "cell {cell} at {at}: what its recovery starts from keeps going",
-        at = base32_id::Short(at)
-    )))
+    retry_recovery!(
+        |touched| state_at(checkpoints, cell, at, touched, true),
+        format!(
+            "cell {cell} at {at}: what its recovery starts from keeps going",
+            at = base32_id::Short(at)
+        )
+    )
 }
 
 /// cladefs: the states of `cell` as of each of its segments `ats`, which its head names, as
@@ -589,15 +600,10 @@ pub(crate) async fn recover_ats<B: Bucket>(
     cell: CellId,
     ats: &BTreeSet<u64>,
 ) -> Result<(Walked, BTreeSet<String>), Error> {
-    for _ in 0..RESTARTS {
-        let mut touched = BTreeSet::new();
-        match states_at(checkpoints, cell, ats, &mut touched, true).await {
-            Ok(walked) => return Ok((walked, touched)),
-            Err(Attempt::Restart) => {}
-            Err(Attempt::Failed(error)) => return Err(error),
-        }
-    }
-    Err(Error::Lost(format!("cell {cell} at {ats:x?}: what its recovery starts from keeps going")))
+    retry_recovery!(
+        |touched| states_at(checkpoints, cell, ats, touched, true),
+        format!("cell {cell} at {ats:x?}: what its recovery starts from keeps going")
+    )
 }
 
 /// cladefs: the state of `cell` as of its segment `at`, a version's (doc-18, TASK-476), as a copy
@@ -1947,15 +1953,10 @@ pub(crate) async fn recover_ats_keys<B: Bucket>(
     cell: CellId,
     ats: &BTreeSet<u64>,
 ) -> Result<(FxHashSet<String>, BTreeSet<String>), Error> {
-    for _ in 0..RESTARTS {
-        let mut touched = BTreeSet::new();
-        match states_at_keys(checkpoints, cell, ats, &mut touched).await {
-            Ok(named) => return Ok((named, touched)),
-            Err(Attempt::Restart) => {}
-            Err(Attempt::Failed(error)) => return Err(error),
-        }
-    }
-    Err(Error::Lost(format!("cell {cell} at {ats:x?}: what its recovery starts from keeps going")))
+    retry_recovery!(
+        |touched| states_at_keys(checkpoints, cell, ats, touched),
+        format!("cell {cell} at {ats:x?}: what its recovery starts from keeps going")
+    )
 }
 
 async fn states_at_keys<B: Bucket>(

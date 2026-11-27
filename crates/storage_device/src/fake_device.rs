@@ -755,18 +755,6 @@ impl FakeDevice {
         self.operation_closure = Box::new(cb);
     }
 
-    /// Creates a fake device from an image (which can be anything that implements
-    /// std::io::Read), which becomes the contents of extent 0 of cell 0. The device holds as
-    /// much as is read.
-    pub fn from_image(
-        mut reader: impl std::io::Read,
-        block_size: u32,
-    ) -> Result<Self, std::io::Error> {
-        let mut data = Vec::new();
-        reader.read_to_end(&mut data)?;
-        Ok(Self::from_vec(data, block_size))
-    }
-
     /// Creates a fake device from a `Vec`, which becomes the contents of extent 0 of cell 0. The
     /// device holds as much as the `Vec`.
     pub fn from_vec(data: Vec<u8>, block_size: u32) -> Self {

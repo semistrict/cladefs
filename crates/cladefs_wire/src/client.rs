@@ -109,15 +109,6 @@ impl CellClient {
         DaemonConnection::connect(socket)?.open_forked_cell(tenant, from, capacity)
     }
 
-    /// The cell at `cell_dir` that the daemon listening at `socket` serves, if it already exists
-    /// (`ENOENT` otherwise; [`DaemonConnection::open_existing`]).
-    pub fn connect_existing(
-        socket: impl AsRef<Path>,
-        cell_dir: impl AsRef<Path>,
-    ) -> Result<Self, Error> {
-        DaemonConnection::connect(socket)?.open_existing(cell_dir)
-    }
-
     /// The cell at `cell_dir` that the daemon listening at `socket` serves, forked from the version
     /// `from` if it doesn't exist ([`DaemonConnection::open_forked`]).
     pub fn connect_forked(
@@ -902,13 +893,6 @@ impl DaemonConnection {
     pub fn create_cell(self, tenant: u64, capacity: u64) -> Result<CellClient, Error> {
         let target = cladefs_core::CellId { tenant, id: 0 }.to_string();
         self.opening(Path::new(&target), Opening::Create(capacity, Kind::Fxfs))
-    }
-
-    /// Creates and opens a new managed SQLite cell for `tenant` with `capacity` bytes on a disk
-    /// chosen automatically by the daemon (hotbed question 547).
-    pub fn create_sqlite_cell(self, tenant: u64, capacity: u64) -> Result<CellClient, Error> {
-        let target = cladefs_core::CellId { tenant, id: 0 }.to_string();
-        self.opening(Path::new(&target), Opening::Create(capacity, Kind::Sqlite))
     }
 
     /// Creates and opens a new managed memory cell for `tenant` with `capacity` bytes on a disk

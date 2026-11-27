@@ -552,11 +552,6 @@ impl HostDisk {
         self.meta.lock().unwrap().id.clone()
     }
 
-    /// Sets the configured disk ID.
-    pub fn set_id(&self, id: String) {
-        self.meta.lock().unwrap().id = Some(id);
-    }
-
     /// Configured per-disk hard byte cap, or `None` when uncapped.
     pub fn cap(&self) -> Option<u64> {
         match self.cap.load(Ordering::Relaxed) {
@@ -623,11 +618,6 @@ impl HostDisk {
     /// Current health state ([`DiskHealthState`]).
     pub fn health(&self) -> DiskHealthState {
         DiskHealthState::from_u8(self.health.load(Ordering::Relaxed))
-    }
-
-    /// Updates the health state explicitly (used by part-cache probes and recovery).
-    pub fn set_health(&self, state: DiskHealthState) {
-        self.health.store(state.as_u8(), Ordering::Relaxed);
     }
 
     /// Records a successful `fstatvfs` sample on this disk, clearing sample error streaks and
@@ -735,12 +725,6 @@ pub fn wait_for_governor_on(host: &crate::Host, most: Duration) {
     let (woken, wake) = &*host.disks.woken;
     let waited = wake.wait_timeout_while(woken.lock().unwrap(), most, |woken| !*woken);
     *waited.unwrap().0 = false;
-}
-
-/// Waits, the process's default host's governor, until woken or `most` has passed outside `madsim`.
-#[cfg(not(madsim))]
-pub fn wait_for_governor(most: Duration) {
-    wait_for_governor_on(crate::Host::process(), most);
 }
 
 #[cfg(test)]

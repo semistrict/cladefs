@@ -465,20 +465,9 @@ impl Daemon {
         crate::http::serve_http_on(self, listener, pages)
     }
 
-    /// Renders Prometheus metrics for this daemon.
-    pub fn render_metrics(&self) -> String {
-        crate::metrics::render_on(self)
-    }
-
     /// Injects `bucket` as this daemon's bucket before any cell opens (tests and `madsim`).
     #[cfg(any(test, madsim))]
     pub fn use_bucket(self: &Arc<Self>, bucket: Arc<RoutedBucket>) {
         crate::storage::use_bucket_on(self, bucket);
-    }
-
-    /// Injects a fast WAL configuration for this daemon before any cell opens (tests and `madsim`).
-    #[cfg(any(test, madsim))]
-    pub fn use_fast_wal(&self, config: local_cell::fast_wal::FastWalConfig, large_extent: u64) {
-        crate::storage::use_fast_wal_on(self, config, large_extent);
     }
 }

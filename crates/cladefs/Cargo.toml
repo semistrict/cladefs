@@ -16,60 +16,32 @@ tests-kms = ["testing", "cladefs_core/tests-kms", "cladefs_fs/tests-kms", "clade
 
 [dependencies]
 anyhow.workspace = true
-async-trait.workspace = true
 base32_id.workspace = true
-bitflags.workspace = true
-block_device.workspace = true
 bucket_cell.workspace = true
 cladefs_core.workspace = true
 cladefs_fs.workspace = true
 cladefs_wire.workspace = true
-event-listener.workspace = true
 extent_frame.workspace = true
 extent_keys.workspace = true
 fail = "0.5.1"
-flate2.workspace = true
 formats.workspace = true
-fuchsia-async.workspace = true
 futures.workspace = true
 fxfs.workspace = true
-fxfs-posix.workspace = true
-host_fs.workspace = true
 libc.workspace = true
 # cladefs: the daemon cladefsd is a thin binary over (board 13471).
 libcladefs.workspace = true
 local_cell.workspace = true
 log.workspace = true
-node_local.workspace = true
-opentelemetry = { version = "0.33.1", default-features = false, features = ["trace"] }
-opentelemetry-otlp = { version = "0.33.1", default-features = false, features = ["http-proto", "reqwest-blocking-client", "reqwest-rustls", "trace"] }
-opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["trace"] }
-pin-project-lite.workspace = true
 rand.workspace = true
-serde.workspace = true
 serde_json = "1.0.154"
-sha2.workspace = true
-siphasher.workspace = true
-smallvec.workspace = true
-storage_device.workspace = true
 tar = { version = "0.4.46", default-features = false }
-thiserror.workspace = true
 tokio.workspace = true
 toml.workspace = true
 url.workspace = true
-zerocopy.workspace = true
 cladefsd.workspace = true
-prost = "0.14.4"
 tonic = { package = "madsim-tonic", version = "=0.6.0", features = ["tls-aws-lc"] }
-tonic-health = "0.14.6"
-tonic-prost = "0.14.6"
-tower = "0.5.3"
-http-body = "1.1.0"
-hyper-util = { version = "0.1.21", features = ["tokio"] }
-tokio-stream = { version = "0.1.19", features = ["net"] }
 
 [target.'cfg(target_env = "musl")'.dependencies]
-libmimalloc-sys.workspace = true
 mimalloc = { workspace = true, features = ["extended"] }
 
 [dev-dependencies]
@@ -80,15 +52,19 @@ cladefs_core = { workspace = true, features = ["failpoints", "testing", "tests-k
 cladefs_fs = { workspace = true, features = ["failpoints", "testing", "tests-kms"] }
 cladefs_wire = { workspace = true, features = ["failpoints", "testing", "tests-kms"] }
 extent_keys = { workspace = true, features = ["testing"] }
+host_fs.workspace = true
 local_cell = { workspace = true, features = ["testing"] }
 madsim = "=0.2.34"
-memchr.workspace = true
+node_local.workspace = true
 object_store.workspace = true
-openmetrics-parser = "0.5.1"
 opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["trace", "testing"] }
 proptest.workspace = true
+prost = "0.14.4"
 rustls = { version = "0.23.46", default-features = false, features = ["aws-lc-rs", "std"] }
+sha2.workspace = true
 tempfile.workspace = true
+tokio-stream = { version = "0.1.19", features = ["net"] }
+tonic-health = "0.14.6"
 cladefsd = { workspace = true, features = ["failpoints", "testing", "tests-kms"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]

@@ -312,11 +312,6 @@ impl<'a> MutableBufferRef<'a> {
         BufferRef(self.0)
     }
 
-    /// The view, read-only, for as long as the buffer is borrowed.
-    pub fn into_ref(self) -> BufferRef<'a> {
-        BufferRef(self.0)
-    }
-
     /// The view, borrowed again.
     pub fn reborrow(&mut self) -> MutableBufferRef<'_> {
         MutableBufferRef(self.0)
@@ -329,11 +324,6 @@ impl<'a> MutableBufferRef<'a> {
 
     /// The view's bytes.
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
-        self.0
-    }
-
-    /// The view's bytes, for as long as the buffer is borrowed.
-    pub fn into_mut_slice(self) -> &'a mut [u8] {
         self.0
     }
 

@@ -326,7 +326,7 @@ impl HvfSecondStage {
                     self.unit as usize,
                 )
             };
-            read_at(fd, bytes, phys.offset);
+            super::read_at(fd, bytes, phys.offset);
             self.guest.unmap(at, self.unit);
             // SAFETY: The private memory, mapped as long as the stage, which unmaps every unit
             // from the guest before it goes.
@@ -551,24 +551,6 @@ impl SecondStage for HvfSecondStage {
 impl Drop for HvfSecondStage {
     fn drop(&mut self) {
         self.release();
-    }
-}
-
-/// Reads `bytes.len()` bytes of `fd`'s object at `offset` into `bytes`.
-fn read_at(fd: RawFd, bytes: &mut [u8], offset: u64) {
-    let mut done = 0;
-    while done < bytes.len() {
-        let rest = &mut bytes[done..];
-        let at = (offset + done as u64) as libc::off_t;
-        // SAFETY: Reads into `rest`, which is as long as asked.
-        let read = unsafe { libc::pread(fd, rest.as_mut_ptr().cast(), rest.len(), at) };
-        if read < 0 {
-            let err = std::io::Error::last_os_error();
-            assert_eq!(err.kind(), std::io::ErrorKind::Interrupted, "read {offset:#x}: {err}");
-            continue;
-        }
-        assert!(read > 0, "read {offset:#x}: past the memory's end");
-        done += read as usize;
     }
 }
 

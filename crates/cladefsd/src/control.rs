@@ -390,15 +390,15 @@ async fn report_health(
     daemon.reported.send_replace(serving);
 }
 
-/// A channel to the control API of the daemon listening at `socket`: for its clients, the API's
-/// and its health service's.
+/// A tonic channel over Unix domain socket `socket`, using dummy endpoint URI `uri`.
 #[cfg(not(madsim))]
-pub async fn channel(
+pub async fn unix_channel(
     socket: impl AsRef<Path>,
+    uri: &'static str,
 ) -> Result<tonic::transport::Channel, tonic::transport::Error> {
     let socket = socket.as_ref().to_owned();
     // The URI names no host: the connector connects to the socket, whatever it asks for.
-    tonic::transport::Endpoint::from_static("http://cladefsd")
+    tonic::transport::Endpoint::from_static(uri)
         .connect_with_connector(tower::service_fn(move |_: tonic::transport::Uri| {
             let socket = socket.clone();
             async move {
@@ -407,6 +407,15 @@ pub async fn channel(
             }
         }))
         .await
+}
+
+/// A channel to the control API of the daemon listening at `socket`: for its clients, the API's
+/// and its health service's.
+#[cfg(not(madsim))]
+pub async fn channel(
+    socket: impl AsRef<Path>,
+) -> Result<tonic::transport::Channel, tonic::transport::Error> {
+    unix_channel(socket, "http://cladefsd").await
 }
 
 /// cladefs: a channel to the control API of the daemon serving it at `address` on the simulated
@@ -688,6 +697,27 @@ impl Control {
             .await
             .map_err(status)?;
         Ok((id, path))
+    }
+
+    async fn remove_cell<R>(
+        &self,
+        tenant: u64,
+        cell: u64,
+        drop_only: bool,
+        response: R,
+    ) -> Result<Response<R>, Status> {
+        let (id, cell_dir) = self.resolve_cell(tenant, cell).await?;
+        let done = if drop_only {
+            cells::drop_here(&self.daemon, cell_dir).await
+        } else {
+            cells::delete(&self.daemon, cell_dir).await
+        };
+        if done.is_ok()
+            && let Some(pool) = self.daemon.disk_pool()
+        {
+            pool.forget_cell(id);
+        }
+        reply(done.map(|()| response))
     }
 
     /// Resolves `(tenant, cell)` for migration hand-over / abort, falling back to the ephemeral
@@ -1192,14 +1222,7 @@ impl Cladefsd for Control {
         request: Request<DeleteCellRequest>,
     ) -> Result<Response<DeleteCellResponse>, Status> {
         let DeleteCellRequest { tenant, cell } = request.into_inner();
-        let (id, cell_dir) = self.resolve_cell(tenant, cell).await?;
-        let done = cells::delete(&self.daemon, cell_dir).await;
-        if done.is_ok()
-            && let Some(pool) = self.daemon.disk_pool()
-        {
-            pool.forget_cell(id);
-        }
-        reply(done.map(|()| DeleteCellResponse {}))
+        self.remove_cell(tenant, cell, false, DeleteCellResponse {}).await
     }
 
     async fn drop_cell(
@@ -1207,14 +1230,7 @@ impl Cladefsd for Control {
         request: Request<DropCellRequest>,
     ) -> Result<Response<DropCellResponse>, Status> {
         let DropCellRequest { tenant, cell } = request.into_inner();
-        let (id, cell_dir) = self.resolve_cell(tenant, cell).await?;
-        let done = cells::drop_here(&self.daemon, cell_dir).await;
-        if done.is_ok()
-            && let Some(pool) = self.daemon.disk_pool()
-        {
-            pool.forget_cell(id);
-        }
-        reply(done.map(|()| DropCellResponse {}))
+        self.remove_cell(tenant, cell, true, DropCellResponse {}).await
     }
 
     async fn resize_cell(

@@ -25,9 +25,5 @@ madsim = "=0.2.34"
 [target.'cfg(target_os = "none")'.dependencies]
 linux-rt = { path = "../../guest/rust/linux-rt" }
 
-[dev-dependencies]
-assert_matches.workspace = true
-futures-test.workspace = true
-
 [lints]
 workspace = true

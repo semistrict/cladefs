@@ -275,26 +275,7 @@ struct Rfc3339Micros(SystemTime);
 
 impl fmt::Display for Rfc3339Micros {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let since = self.0.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default();
-        let secs = since.as_secs();
-        let micros = since.subsec_micros();
-        let days = (secs / 86_400) as i64;
-        let sod = secs % 86_400;
-        let hour = sod / 3_600;
-        let min = (sod % 3_600) / 60;
-        let sec = sod % 60;
-        // Howard Hinnant's civil_from_days: proleptic Gregorian date from days since 1970-01-01.
-        let z = days + 719_468;
-        let era = z.div_euclid(146_097);
-        let doe = z.rem_euclid(146_097) as u64;
-        let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-        let y = yoe as i64 + era * 400;
-        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-        let mp = (5 * doy + 2) / 153;
-        let day = doy - (153 * mp + 2) / 5 + 1;
-        let month = if mp < 10 { mp + 3 } else { mp - 9 };
-        let year = y + i64::from(month <= 2);
-        write!(f, "{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}.{micros:06}Z")
+        bucket_cell::clock::write_rfc3339_utc(f, self.0, false)
     }
 }
 

@@ -854,12 +854,6 @@ pub fn set_total_limit_on(host: &crate::Host, bytes: Option<u64>) {
     host.footprints.total.limit.store(bytes.unwrap_or(NONE), Ordering::Relaxed);
 }
 
-/// Limits every allotment on the process's default host outside `madsim`.
-#[cfg(not(madsim))]
-pub fn set_total_limit(bytes: Option<u64>) {
-    set_total_limit_on(crate::Host::process(), bytes);
-}
-
 /// `own`, a footprint's tally, counted in `tally`, or no longer, if not `more`.
 fn moved(own: &Tally, tally: &Tally, more: bool) {
     let (bytes, unframed) = (own.bytes(), own.unframed());

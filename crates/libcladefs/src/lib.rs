@@ -46,6 +46,7 @@ use std::time::Duration;
 
 pub use cladefs_core::{CellId, CellVersion, Error, Result};
 pub use cladefs_wire::{CellClient, DaemonConnection};
+pub use cladefsd::control::unix_channel;
 pub use cladefsd::embedded::{EmbeddedCell, Kind};
 /// The gRPC crate [`Daemon::control_service`]'s routes are of, for the process's server.
 pub use tonic;

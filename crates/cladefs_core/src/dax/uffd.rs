@@ -3354,23 +3354,7 @@ impl<H: HostMemory> SecondStage for UffdSecondStage<H> {
     }
 }
 
-/// cladefs: reads `bytes.len()` bytes of `fd`'s memory at `offset` into `bytes`.
-fn read_at(fd: RawFd, bytes: &mut [u8], offset: u64) {
-    let mut done = 0;
-    while done < bytes.len() {
-        let rest = &mut bytes[done..];
-        let at = (offset + done as u64) as libc::off_t;
-        // SAFETY: Reads into `rest`, which is as long as asked.
-        let read = unsafe { libc::pread(fd, rest.as_mut_ptr().cast(), rest.len(), at) };
-        if read < 0 {
-            let err = std::io::Error::last_os_error();
-            assert_eq!(err.kind(), std::io::ErrorKind::Interrupted, "read {offset:#x}: {err}");
-            continue;
-        }
-        assert!(read > 0, "read {offset:#x}: past the memory's end");
-        done += read as usize;
-    }
-}
+use super::read_at;
 
 impl<H: HostMemory> UffdSecondStage<H> {
     /// The memory of the page at `phys`, which the window maps read-only. Not mapped for the guest
@@ -5555,16 +5539,22 @@ mod tests {
 
     /// Review 100 finding 344: creating many non-adjacent stale partially-private host pages under
     /// a small VMA budget (`Mappings::new(BUDGET)`) must keep the process's actual `/proc/self/maps`
-    /// VMA count within `2 * BUDGET + 1` by coalescing disjoint anonymous VMAs, without losing
-    /// private sub-page data.
-    #[test]
-    fn sub_host_page_stale_vmas_stay_within_mapping_budget() {
-        const PAGES: usize = 32;
-        const BUDGET: usize = 4;
+    fn sub_host_page_counted_stage(
+        pages: usize,
+        budget: usize,
+    ) -> (
+        usize,
+        usize,
+        usize,
+        Arc<CountedWindows>,
+        Arc<UffdSecondStage<Counted>>,
+        Dax,
+        crate::dax::DaxWindow,
+    ) {
         let ps = page_size() as usize;
         let unit = ps / 4;
-        let size = (PAGES * ps) as u64;
-        let memory = window_memory(PAGES);
+        let size = (pages * ps) as u64;
+        let memory = window_memory(pages);
         let windows = Arc::new(CountedWindows {
             memory: std::sync::Mutex::new(
                 std::iter::once(memory..memory + size as usize).collect(),
@@ -5582,12 +5572,12 @@ mod tests {
                 counted,
                 Memories::InProcess,
                 None,
-                Mappings::new(BUDGET),
+                Mappings::new(budget),
             )
         }
         .unwrap();
-        stage.copy_on_write(PAGES as u64).unwrap();
-        let (mut dax, window) = Dax::with_stage_and_unit_on(
+        stage.copy_on_write(pages as u64).unwrap();
+        let (dax, window) = Dax::with_stage_and_unit_on(
             crate::Host::process(),
             crate::pages::ArenaId::DEFAULT,
             size,
@@ -5596,6 +5586,18 @@ mod tests {
             true,
         )
         .unwrap();
+        (ps, unit, memory, windows, stage, dax, window)
+    }
+
+    /// VMA count within `2 * BUDGET + 1` by coalescing disjoint anonymous VMAs, without losing
+    /// private sub-page data.
+    #[test]
+    fn sub_host_page_stale_vmas_stay_within_mapping_budget() {
+        const PAGES: usize = 32;
+        const BUDGET: usize = 4;
+        let (ps, unit, memory, windows, stage, mut dax, window) =
+            sub_host_page_counted_stage(PAGES, BUDGET);
+        let size = (PAGES * ps) as u64;
         // Map every host page with slot 0 = A (present) and slot 1 = B (uncached/anonymous so
         // remapping slot 1 leaves the page stale until faulted).
         let src_a = TestSource::filled(1, 0x11).source();
@@ -5764,41 +5766,9 @@ mod tests {
     fn sub_host_page_post_coalesce_faults_stay_within_mapping_budget() {
         const PAGES: usize = 32;
         const BUDGET: usize = 4;
-        let ps = page_size() as usize;
-        let unit = ps / 4;
+        let (ps, unit, memory, windows, stage, mut dax, window) =
+            sub_host_page_counted_stage(PAGES, BUDGET);
         let size = (PAGES * ps) as u64;
-        let memory = window_memory(PAGES);
-        let windows = Arc::new(CountedWindows {
-            memory: std::sync::Mutex::new(
-                std::iter::once(memory..memory + size as usize).collect(),
-            ),
-            most: AtomicUsize::new(0),
-        });
-        let syscalls = Syscalls::open().unwrap();
-        let counted = Counted { syscalls, windows: windows.clone() };
-        // SAFETY: Only the test uses `memory`, which outlives the stage.
-        let stage = unsafe {
-            UffdSecondStage::with_host_and_unit(
-                memory,
-                size,
-                unit,
-                counted,
-                Memories::InProcess,
-                None,
-                Mappings::new(BUDGET),
-            )
-        }
-        .unwrap();
-        stage.copy_on_write(PAGES as u64).unwrap();
-        let (mut dax, window) = Dax::with_stage_and_unit_on(
-            crate::Host::process(),
-            crate::pages::ArenaId::DEFAULT,
-            size,
-            unit as u64,
-            Some(stage.clone()),
-            true,
-        )
-        .unwrap();
         let src = TestSource::filled(1, 0x33).source();
         let src_cold = TestSource::anonymous(1).source();
         for p in 0..PAGES {
