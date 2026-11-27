@@ -857,6 +857,45 @@ pub async fn overwrite(bucket: &impl Bucket, key: &str, bytes: Bytes) -> Result<
     }
 }
 
+/// cladefs: what the key of every probe's own object begins with
+/// ([`crate::object_bucket::probe`], [`probe_append`]).
+pub const PROBES: &str = "probe/";
+
+/// cladefs: how long a probe's object stands, by its bucket's time, in milliseconds, before a
+/// sweep takes it for left behind ([`reap_probes`]): an hour. A probe ends within seconds, or
+/// begins again with an object of its own anew.
+pub const PROBE_KEPT: u64 = 60 * 60 * 1000;
+
+/// cladefs: whether `key` is a probe's own object's: under [`PROBES`], its nonce alone, as
+/// `base32_id::Padded` spells it, an append's probe's after `append-`.
+pub fn probe(key: &str) -> bool {
+    let Some(name) = key.strip_prefix(PROBES) else { return false };
+    let nonce = name.strip_prefix("append-").unwrap_or(name);
+    !nonce.is_empty() && nonce.bytes().all(|byte| byte.is_ascii_alphanumeric())
+}
+
+/// cladefs: whether the object `meta` lists is a probe's left behind, as of `now` by its bucket's
+/// time ([`PROBE_KEPT`]).
+pub fn probe_left(meta: &Meta, now: u64) -> bool {
+    probe(&meta.key) && meta.modified.saturating_add(PROBE_KEPT) < now
+}
+
+/// cladefs: deletes the probes' objects left behind in `bucket` (board 14544): how many. A probe
+/// removes its own object as it ends, but one stopped short, its host killed, or its bucket out of
+/// reach as it removed it, leaves it there, where no cell names it and no pass over a cell lists
+/// it: for good, but for this, which `cladefs-gc` does after a sweep of every cell.
+pub async fn reap_probes(bucket: &impl Bucket) -> Result<usize, Refused> {
+    let listed = list(bucket, PROBES).await?;
+    // Read once the bucket answered, as its clock reads none before.
+    let now = bucket.now();
+    let left: Vec<&str> = (listed.iter())
+        .filter(|meta| probe_left(meta, now))
+        .map(|meta| meta.key.as_str())
+        .collect();
+    delete_all(bucket, &left).await?;
+    Ok(left.len())
+}
+
 /// cladefs: verifies that `bucket` enforces offset-checked appends (`Bucket::append`) before a
 /// daemon relies on it as a fast WAL store (doc-29). Fails hard if the backend rejects appends as
 /// unsupported or ignores offset preconditions (no silent fallback).
@@ -864,7 +903,7 @@ pub async fn probe_append(bucket: &impl Bucket, nonce: u64) -> Result<(), String
     let mut failures = 0u32;
     loop {
         let key =
-            format!("probe/append-{}", base32_id::Padded(nonce.wrapping_add(failures.into())));
+            format!("{PROBES}append-{}", base32_id::Padded(nonce.wrapping_add(failures.into())));
         let result = probe_append_once(bucket, &key).await;
         // Best-effort cleanup of probe object regardless of outcome.
         let _ = bucket.delete(&key).await;

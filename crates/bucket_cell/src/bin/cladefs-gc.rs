@@ -621,6 +621,16 @@ async fn collect(
                     .map_err(|err| format!("{}: {err}", file.display()))?;
             }
         }
+        // cladefs: and the probes' objects left behind, which no cell's pass lists (board 14544):
+        // once a sweep of every cell did all it was to, so never past its bounds, nor counted
+        // among its passes' requests (TASK-455).
+        if named.is_none() && swept.complete() {
+            let reaped = bucket_cell::bucket::reap_probes(&*own).await;
+            match reaped.map_err(|refused| format!("the probes' objects left behind: {refused}"))? {
+                0 => {}
+                reaped => eprintln!("cladefs-gc: {reaped} probes' objects left behind deleted"),
+            }
+        }
         let ended = ended(&swept);
         let Some(every) = every else { return ended };
         if stop.asked() {

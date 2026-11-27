@@ -2037,7 +2037,8 @@ pub async fn probe(bucket: &impl Bucket, nonce: u64) -> Result<(), String> {
             Probed::Unavailable(key) => {
                 failures += 1;
                 log::info!("object storage: probing conditional writes: out of reach, again");
-                // Best effort: what is left of a probe is its own object, which no cell names.
+                // Best effort: what is left of a probe is its own object, which no cell names, and
+                // `cladefs-gc` deletes (`bucket::reap_probes`, board 14544).
                 let _ = bucket.delete(&key).await;
                 tokio::time::sleep(backoff(failures)).await;
             }
@@ -2055,7 +2056,7 @@ enum Probed {
 
 /// A probe of conditional writes, once, as [`probe`] makes it.
 async fn probe_once(bucket: &impl Bucket, nonce: u64) -> Probed {
-    let key = format!("probe/{}", base32_id::Padded(nonce));
+    let key = format!("{}{}", crate::bucket::PROBES, base32_id::Padded(nonce));
     let refused = |what: &str, result: &dyn std::fmt::Debug| {
         Probed::Answered(Err(format!(
             "the store does not honour conditional writes: {what} gave {result:?}"
