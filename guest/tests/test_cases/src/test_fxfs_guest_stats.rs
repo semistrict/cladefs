@@ -85,9 +85,12 @@ mod host {
         ensure!(is_commit(build), "the daemon's build: {build:?}");
         ensure!(json["cladefsd"]["counters"]["maps"].as_u64().is_some(), "the daemon's counters");
         let vms = json["vms"].as_array().context("vms")?;
+        // Its tenant and cell in base 32, as the stats name them.
+        let (tenant, id) = (base32_id::Short(cell.tenant), base32_id::Short(cell.id));
         let vm = (vms.iter())
             .find(|vm| {
-                vm["tenant"].as_u64() == Some(cell.tenant) && vm["cell"].as_u64() == Some(cell.id)
+                vm["tenant"].as_str() == Some(&tenant.to_string())
+                    && vm["cell"].as_str() == Some(&id.to_string())
             })
             .with_context(|| format!("no VM of {cell}"))?;
         ensure!(vm["answered"] == true, "it answered: {vm}");
