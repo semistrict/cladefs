@@ -31,9 +31,6 @@ anyhow = "1.0.95"
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 tempfile = "3.2"
-# cladefs's automounter of shared volumes, which the guest runs and whose asks the host answers
-# (TASK-136.6).
-fxfs-automount = { path = "../../../crates/fxfs-automount" }
 # The cladefs repository whose guest tests these are.
 cladefs = { path = "../../../crates/cladefs", optional = true, features = ["testing"] }
 futures = { version = "0.3.34", optional = true }

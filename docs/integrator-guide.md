@@ -36,7 +36,7 @@ follows from that.
 Callers never choose host directories or paths. Every control RPC (`CreateCell`, `ForkCell`,
 `ImportImage`, `ImportMemory`, `StatCell`, `SyncCell`, `ResizeCell`, `DeleteCell`, `DropCell`,
 `PlaceCell`, `MakePublic`, `MakeVersion`, `ListVersions`, `DropVersions`, `ShareVersion`,
-`AttachBase`, `MigrateEphemeralCell`, `HandOverEphemeralCell`, `AbortEphemeralMigration`) addresses cells by `(tenant, cell)`
+`MigrateEphemeralCell`, `HandOverEphemeralCell`, `AbortEphemeralMigration`) addresses cells by `(tenant, cell)`
 alone. On the VM socket (`OPEN`), Firecracker passes `"TENANT/CELL"` (in Crockford base 32) to open
 an existing cell, or `"TENANT/0"` / `"0/0"` to let the daemon create or fork a new cell on the best
 managed disk. On a granted tenant's socket, `"0/0"` is a new cell of that tenant's, and any other
@@ -266,9 +266,8 @@ right after (TASK-277). So in every agent of yours that connects from the guest 
 - **Only resend what the host can safely see twice.** The host may have read the ask before the
   reset. Make the host's side idempotent, or give each ask an ID the host deduplicates on.
 
-`crates/fxfs-automount/src/reconnect.rs` does this for cladefs's own guest agent (`fxfs-automount`,
-`git-remote-fxfs`), whose asks to the sandbox manager are idempotent: `AttachBase` of a base that is
-already attached does nothing. Copy its rules, or call it from Rust.
+`guest/tests/test_cases/src/reconnect.rs` does this for cladefs's own guest tests, whose asks to the
+host are idempotent. Copy its rules, or call it from Rust.
 
 This needs cladefs's Firecracker series `fxdax-v1.16.1-r3` or later (from r8 on, `cladefs-v1.16.1-rN`). When it takes a snapshot, it
 queues an RST behind any response still in the guest's receive queue. On older series, the guest

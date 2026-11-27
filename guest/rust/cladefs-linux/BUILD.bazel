@@ -31,7 +31,6 @@ _RUST_KERNEL_INPUTS = [
     "//crates/fuchsia-async-macro:crate_files",
     "//crates/fuchsia-sync:crate_files",
     "//crates/fxfs:crate_files",
-    "//crates/fxfs-automount:Cargo.toml",
     "//crates/fxfs-posix:crate_files",
     "//crates/fxfs-sim-diff:Cargo.toml",
     "//crates/fxfs_macros:crate_files",

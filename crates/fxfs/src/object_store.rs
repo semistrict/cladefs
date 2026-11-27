@@ -6,8 +6,10 @@
 // files (no `install`, `extent_mapping_iterator`): such an image is a block device's, which
 // cladefs's extent store has none of (backlog doc-4). `dirty_reservation` reserves room for the data a page cache
 // holds dirty as it dirties it, as Fuchsia's pager-backed files do in its platform crate, for the
-// guest kernel's page cache (TASK-80). A store may have layers of a base, a volume another
-// filesystem wrote, below its own (`StoreInfo::base_layers`, `ObjectStore::manifest`, backlog doc-10). What stops
+// guest kernel's page cache (TASK-80). A store's information still has the fields of the layers
+// of a base, a volume another filesystem wrote, below its own (`StoreInfo::base_layers`), which a
+// frozen format keeps: shared volumes are removed (board 14527), and a store naming base layers
+// is refused on opening. What stops
 // a transaction is what it takes of the journal (`Transaction::room`), not the number of mutations
 // upstream's TRANSACTION_MUTATION_THRESHOLD stood for it with. An unlinked object is tombstoned in
 // a transaction of its caller's by `ObjectStore::txn_tombstone_unlinked` alone, which the
@@ -53,10 +55,10 @@ use crate::filesystem::{
 };
 use crate::lsm_tree::cache::ObjectCache;
 use crate::lsm_tree::types::{ItemRef, LayerIterator};
-use crate::lsm_tree::{LSMTree, Query, layers_from_handles};
+use crate::lsm_tree::{LSMTree, Query};
 use crate::object_handle::{INVALID_OBJECT_ID, ObjectHandle, ObjectProperties, ReadObjectHandle};
 use crate::object_store::allocator::Allocator;
-use crate::object_store::base_layer::{BaseExtent, BaseLayer, BaseLayerObject, BaseLayerV61};
+use crate::object_store::base_layer::BaseLayerV61;
 use crate::object_store::graveyard::Graveyard;
 use crate::object_store::transaction::{
     AssocObj, AssociatedObject, LockKey, LockKeys, ObjectStoreMutation, Operation, Options,
@@ -122,12 +124,12 @@ pub struct StoreInfoV65 {
     /// when the directory doesn't yet exist.
     internal_directory_object_id: u64,
 
-    /// cladefs: the store's layers below `layers`, newest first: those of a volume another filesystem
-    /// wrote, which the store merges over and never rewrites (backlog doc-10).
+    /// cladefs: the store's layers below `layers`, newest first, which a store over a base had
+    /// (shared volumes, removed, board 14527). Stored stores' information keeps decoding with them;
+    /// a store that names any is refused on opening ([`ObjectStore::open`]).
     pub base_layers: Vec<BaseLayerV61>,
 
-    /// cladefs: the cells of the extents the base layers, and the data they name, are in. The
-    /// allocator holds none of them.
+    /// cladefs: the cells of the extents the base layers, and the data they name, are in.
     pub base_cells: Vec<u64>,
 }
 
@@ -138,26 +140,11 @@ impl StoreInfo {
         // volume directory.
         self.layers.to_vec()
     }
-
-    /// cladefs: fails unless this describes a volume to make over a base (backlog doc-10): an
-    /// argument, which a caller gives, wrong (`InvalidArgs`), not the filesystem inconsistent.
-    fn check_manifest(&self) -> Result<(), Error> {
-        ensure!(self.layers.is_empty() && !self.base_layers.is_empty(), FxfsError::InvalidArgs);
-        Ok(())
-    }
-
-    /// cladefs: gives the store a new identifier, as a new store from then on.
-    fn set_new_guid(&mut self) {
-        self.guid = *Uuid::new_v4().as_bytes();
-    }
 }
 
 // TODO(https://fxbug.dev/42178037): We should test or put checks in place to ensure this limit isn't exceeded.
 // It will likely involve placing limits on the maximum number of layers.
 pub const MAX_STORE_INFO_SERIALIZED_SIZE: usize = 131072;
-
-// cladefs: the most a manifest may take of a store's information, leaving room for layers of its own.
-pub const MAX_MANIFEST_SIZE: usize = MAX_STORE_INFO_SERIALIZED_SIZE / 2;
 
 #[derive(Default)]
 pub struct HandleOptions {
@@ -1149,12 +1136,20 @@ impl ObjectStore {
             anyhow!(FxfsError::Inconsistent).context("A store with no graveyard")
         );
 
+        // cladefs: a store over a base, once made by shared volumes (removed, board 14527), has
+        // no bottom layers any more: opened as a plain volume, it would show a tree without them.
+        ensure!(
+            info.base_layers.is_empty(),
+            anyhow!(FxfsError::NotSupported).context(format!(
+                "Object store {store_object_id} has layers of a base: the filesystem's shared \
+                 volumes were removed, and a volume over one is not opened"
+            ))
+        );
+
         // TODO(https://fxbug.dev/42178043): the layer size here could be bad and cause overflow.
 
         let last_object_id = info.last_object_id;
         let object_tree_layer_object_ids = info.layers.clone();
-        let base_layers = info.base_layers.clone();
-        let base_cells = info.base_cells.clone();
 
         let fs = parent_store.filesystem();
 
@@ -1174,13 +1169,6 @@ impl ObjectStore {
             .append_layers(&parent_store, object_tree_layer_object_ids)
             .await
             .context("Failed to read object store layers")?;
-        // cladefs: below them, what the store has of a base, which is no part of the size above:
-        // no compaction rewrites it, so no reservation pays for that.
-        fs.allocator().add_base_cells(&base_cells);
-        let base_layers =
-            Self::open_base_layers(fs.device(), store.block_size(), &base_layers).await?;
-        store.tree.append_open_layers(base_layers);
-
         fs.object_manager().update_reservation(
             store_object_id,
             tree::reservation_amount_from_layer_size(total_layer_size),
@@ -1189,102 +1177,9 @@ impl ObjectStore {
         Ok(store)
     }
 
-    /// cladefs: validates and opens `base_layers` (alignment, bounds, device reads, layer version)
-    /// without mutating filesystem state, so `new_volume_over_base` fails before committing a
-    /// broken volume (TASK-597, board 2590).
-    pub(crate) async fn open_base_layers(
-        device: Arc<dyn storage_device::Device>,
-        block_size: storage_units::BlockSize,
-        base_layers: &[crate::object_store::base_layer::BaseLayer],
-    ) -> Result<Vec<Arc<dyn crate::lsm_tree::types::Layer<ObjectKey, ObjectValue>>>, Error> {
-        let handles = base_layers
-            .iter()
-            .cloned()
-            .map(|layer| BaseLayerObject::new(device.clone(), block_size, layer))
-            .collect::<Result<Vec<_>, _>>()?;
-        layers_from_handles(handles).await.context("Failed to read base layers")
-    }
-
-    /// cladefs: constructs and attaches a newly committed volume over already-opened `base_layers`
-    /// (`new_volume_over_base`, TASK-597). Infallible once the volume's commit succeeds.
-    pub(crate) fn open_new_over_base(
-        parent_store: &Arc<ObjectStore>,
-        handle: DataObjectHandle<ObjectStore>,
-        info: StoreInfo,
-        base_layers: Vec<Arc<dyn crate::lsm_tree::types::Layer<ObjectKey, ObjectValue>>>,
-        object_cache: Option<Box<dyn ObjectCache<ObjectKey, ObjectValue>>>,
-    ) -> Arc<ObjectStore> {
-        debug_assert!(info.layers.is_empty());
-        let store_object_id = handle.object_id();
-        let last_object_id = info.last_object_id;
-        let base_cells = info.base_cells.clone();
-        let fs = parent_store.filesystem();
-        let store = ObjectStore::new(
-            Some(parent_store.clone()),
-            store_object_id,
-            fs.clone(),
-            info,
-            object_cache,
-            last_object_id,
-        );
-        assert!(store.store_info_handle.set(handle).is_ok(), "Failed to set store_info_handle!");
-        fs.allocator().add_base_cells(&base_cells);
-        store.tree.append_open_layers(base_layers);
-        fs.object_manager().update_reservation(store_object_id, 0);
-        store
-    }
-
     #[cfg(test)]
     async fn load_store_info(&self) -> Result<StoreInfo, Error> {
         load_store_info_from_handle(self.store_info_handle.get().unwrap()).await
-    }
-
-    /// cladefs: what describes the store to a filesystem that reads its extents (backlog doc-10): a
-    /// `StoreInfo` with no layers of its own, as its layers are base layers there. `Unavailable` if
-    /// the journal holds anything of the store, which layers alone wouldn't say. The caller keeps
-    /// compactions off it, with the flush lock or by freezing the filesystem, so that its layers
-    /// stay what this says.
-    pub async fn manifest(&self) -> Result<Vec<u8>, Error> {
-        let filesystem = self.filesystem();
-        ensure!(
-            !filesystem.object_manager().needs_flush(self.store_object_id),
-            FxfsError::Unavailable
-        );
-        let mut info = self.store_info.lock().clone();
-        info.last_object_id = *self.last_object_id.lock();
-        info.guid = *Uuid::new_v4().as_bytes();
-        let allocator = self.allocator();
-        let mut cells = allocator.cells_of(&[self.store_object_id]);
-        cells.append(&mut info.base_cells);
-
-        let parent_store = self.parent_store.as_ref().ok_or(FxfsError::NotSupported)?;
-        let mut layers = Vec::with_capacity(info.layers.len() + info.base_layers.len());
-        for object_id in std::mem::take(&mut info.layers) {
-            let handle =
-                ObjectStore::open_object(parent_store, object_id, HandleOptions::default()).await?;
-            let mut extents = Vec::new();
-            for extent in handle.device_extents().await? {
-                let range = extent.device_range();
-                cells.push(range.extent.cell);
-                extents.push(BaseExtent {
-                    offset: extent.logical_offset(),
-                    length: extent.length(),
-                    extent: range.extent,
-                    extent_offset: range.range.start,
-                });
-            }
-            layers.push(BaseLayer { size: handle.get_size(), extents });
-        }
-        layers.append(&mut info.base_layers);
-        info.base_layers = layers;
-        cells.sort_unstable();
-        cells.dedup();
-        info.base_cells = cells;
-
-        let mut manifest = Vec::new();
-        info.serialize_with_version(&mut manifest)?;
-        ensure!(manifest.len() <= MAX_MANIFEST_SIZE, FxfsError::TooBig);
-        Ok(manifest)
     }
 
     /// Returns a new object ID that can be used.

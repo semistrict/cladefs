@@ -403,12 +403,8 @@ mod host {
                 .await
             })?;
             dst_ctrl.call(async |c| {
-                c.place_cell(PlaceCellRequest {
-                    tenant: store_src.0,
-                    cell: store_src.1,
-                    token: 2,
-                })
-                .await
+                c.place_cell(PlaceCellRequest { tenant: store_src.0, cell: store_src.1, token: 2 })
+                    .await
             })?;
             let t_take_place = pause_start.elapsed();
 

@@ -141,8 +141,6 @@ See [docs/architecture.md](docs/architecture.md) for the full mechanics.
 - **Ephemeral cells with live hand-over:** host-local forks over a bucket version for disposable
   sandbox writes that never touch the bucket, with pre-copy live migration to another host
   ([doc-25](<docs/design/doc-25 - Ephemeral-cells-host-local-children-of-a-version-migrated-live.md>)).
-- **Shared volumes:** attach a read-only base—such as a Git checkout kept current—to a running VM
-  under a writable layer of its own ([doc-10](<docs/design/doc-10 - Shared-volumes-Fxfs-volumes-over-read-only-bases.md>)).
 - **Container images as bases:** `cladefsctl import` turns an OCI image layout or `docker export`
   tarball into a base cell for VMs to boot forks of.
 
@@ -220,7 +218,9 @@ candidate for the next pin is qualified against the current one under their load
   the bucket may be a directory (`file:///DIR`).
 - **No live followers:** read-only mounts tailing a disk another VM writes were built, frozen and
   removed (2026-11-22, board 8237; [doc-8](<docs/design/doc-8 - Live-read-only-followers-of-a-mounted-Fxfs.md>)).
-  A cell reads through to attached bases, frozen forks ([doc-10](<docs/design/doc-10 - Shared-volumes-Fxfs-volumes-over-read-only-bases.md>)).
+- **No shared volumes:** attaching a read-only base to a running VM's cell, as an Fxfs volume over a
+  base, was removed (2026-11-27, board 14527; [doc-10](<docs/design/doc-10 - Shared-volumes-Fxfs-volumes-over-read-only-bases.md>)):
+  cells, versions and forks serve.
 
 ## Try it
 

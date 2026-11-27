@@ -601,9 +601,6 @@ pub struct FakeDevice {
     /// cladefs: what the filesystem may take for open, as a guest's device has it, which `Inner`'s
     /// `open`, what this device would refuse, isn't: a write opens nothing here.
     known_open: OpenExtents,
-    /// cladefs: the devices reads of extents this one doesn't hold fall through to, which forks of it
-    /// fall through to too (`FakeDevice::attach`), each with what counts the reads that reach it.
-    attached: Vec<(Arc<DeviceHolder>, Arc<AtomicU64>)>,
     /// cladefs: whether commits on this device are atomic across all prior writes (board 7537):
     /// coupled with `Device::atomic_commits()` and all-or-nothing crash discard so the contract
     /// and the crash model can never drift apart.
@@ -645,7 +642,6 @@ impl FakeDevice {
             round_trips: None,
             awkward: None,
             known_open: OpenExtents::default(),
-            attached: Vec::new(),
             atomic_commits: false,
             pre_barriers: Arc::default(),
         }
@@ -695,14 +691,6 @@ impl FakeDevice {
     pub fn with_cell(mut self, cell: u64) -> Self {
         self.cell = cell;
         self
-    }
-
-    /// cladefs: makes reads of extents the device doesn't hold fall through to `device`, as a VM's
-    /// reads do to a fork attached to it (backlog doc-10). Returns what counts those that reach it.
-    pub fn attach(&mut self, device: DeviceHolder) -> Arc<AtomicU64> {
-        let reads = Arc::new(AtomicU64::new(0));
-        self.attached.push((Arc::new(device), reads.clone()));
-        reads
     }
 
     /// cladefs: makes `floor` the device's sequence floor (`Device::sequence_floor`), as it is when
@@ -943,15 +931,6 @@ impl Device for FakeDevice {
                 return Ok(());
             }
         }
-        for (device, reads) in &self.attached {
-            match device.read(extent, offset, buffer.reborrow()).await {
-                Err(error) if error.is::<NoExtent>() => {}
-                result => {
-                    reads.fetch_add(1, Ordering::Relaxed);
-                    return result;
-                }
-            }
-        }
         Err(NoExtent(extent).into())
     }
 
@@ -1062,17 +1041,6 @@ impl Device for FakeDevice {
             drop(held.lock().await);
         }
         self.answer().await;
-        // cladefs: what reads fall through to is a filesystem's never to free.
-        for &extent in extents {
-            let holds = self.inner.lock().extents.contains_key(&extent);
-            if !holds {
-                for (device, _) in &self.attached {
-                    let mut buffer = self.allocate_buffer(self.block_size() as usize).await;
-                    let read = device.read(extent, 0, buffer.as_mut()).await;
-                    assert!(read.is_err(), "freeing {extent:?}, which is attached");
-                }
-            }
-        }
         let mut inner = self.inner.lock();
         for (extent, result) in extents.iter().zip(&results) {
             if result.is_ok() {
@@ -1156,8 +1124,7 @@ impl Device for FakeDevice {
 
     /// The snapshot is of a device that crashed, and recovered with what it held sealed.
     fn fork(&self, cell: u64) -> Result<DeviceHolder, Error> {
-        let mut fork = self.copy_of_cell(cell);
-        fork.attached = self.attached.clone();
+        let fork = self.copy_of_cell(cell);
         let fork = match &self.awkward {
             Some(awkward) => {
                 let seed = awkward.rng.lock().random();

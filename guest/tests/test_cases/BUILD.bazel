@@ -17,7 +17,6 @@ _COMPILE_DATA = glob(["python-sandbox/**/*"]) + [
 # Share crates already in @crates with //crates/* to avoid duplicate crate SVHs across the boundary;
 # only guest/tests-only crates (nix, tempdir) come from @guest_tests_crates.
 _BASE_DEPS = [
-    "//crates/fxfs-automount:fxfs_automount",
     "@crates//:anyhow",
     "@crates//:tempfile",
     "@guest_tests_crates//:nix",

@@ -8,11 +8,15 @@
 use crate::errors::FxfsError;
 use crate::filesystem::{FxFilesystem, FxFilesystemBuilder, SyncOptions};
 use crate::object_handle::ObjectHandle;
+use crate::object_store::base_layer::BaseLayerV61;
 use crate::object_store::transaction::{Options, lock_keys};
 use crate::object_store::volume::root_volume;
 use crate::object_store::volume::testing::{lazily, open_store, read_file, write_file};
 use crate::object_store::volume::tests::do_fsck;
-use crate::object_store::{HandleOptions, NewChildStoreOptions, ObjectKey, ObjectStore};
+use crate::object_store::{
+    HandleOptions, LockKey, NewChildStoreOptions, ObjectKey, ObjectStore, StoreInfo,
+};
+use crate::serialized_types::VersionedLatest as _;
 use std::sync::Arc;
 use storage_device::DeviceHolder;
 use storage_device::fake_device::FakeDevice;
@@ -255,5 +259,83 @@ async fn test_volumes_in_use_stay_open() {
     drop(b);
     objects.close_volume(volume_id(&root, "b").await).await.expect("close_volume failed");
     assert!(!open_store(&filesystem, &root, "b").await);
+    filesystem.close().await.expect("Close failed");
+}
+
+/// Makes the volume `name` as shared volumes did (removed, board 14527): a store whose information
+/// names layers of a base, which still decodes, as every stored store's does.
+async fn volume_over_a_base(filesystem: &Arc<FxFilesystem>, name: &str) {
+    let root = root_volume(filesystem.clone()).await.expect("root_volume failed");
+    let root_store = filesystem.root_store();
+    let directory_key =
+        LockKey::object(root_store.store_object_id(), root.volume_directory().object_id());
+    // Declared first, as the transaction writes it.
+    let handle;
+    let mut transaction = root_store
+        .new_transaction(lock_keys![directory_key], Options::default())
+        .await
+        .expect("new_transaction failed");
+    handle = ObjectStore::create_object(&root_store, &mut transaction, HandleOptions::default())
+        .await
+        .expect("create_object failed");
+    let info = StoreInfo {
+        graveyard_directory_object_id: 1,
+        base_layers: vec![BaseLayerV61 { size: 4096, extents: Vec::new() }],
+        base_cells: vec![9],
+        ..Default::default()
+    };
+    let mut serialized = Vec::new();
+    info.serialize_with_version(&mut serialized).expect("serializing");
+    let mut buf = handle.allocate_buffer(serialized.len()).await;
+    buf.as_mut().copy_from_slice(&serialized);
+    handle.txn_write(&mut transaction, 0u64, buf.as_ref()).await.expect("txn_write failed");
+    root.volume_directory()
+        .add_child_volume(&mut transaction, name, handle.object_id())
+        .await
+        .expect("add_child_volume failed");
+    transaction.commit().await.expect("commit failed");
+}
+
+/// cladefs: a volume over a base, which shared volumes made (removed, board 14527), is refused
+/// where it opens, never opened as a plain volume, which would show a tree missing its bottom
+/// layers: a mount that opens every volume fails; a lazy one opens the others, and fails for it
+/// alone. Fsck reports it, and stops, repairing nothing.
+#[fuchsia_async::run_singlethreaded(test)]
+async fn test_volume_over_a_base_is_refused() {
+    let filesystem = two_flushed_volumes().await;
+    volume_over_a_base(&filesystem, "over").await;
+    filesystem.journal().force_compact().await.expect("compact failed");
+    filesystem.sync(SyncOptions { flush_device: true, ..Default::default() }).await.unwrap();
+    filesystem.close().await.expect("Close failed");
+    let device = filesystem.take_device().await;
+    device.reopen(false);
+
+    let error = FxFilesystem::open(device.snapshot().expect("snapshot failed"))
+        .await
+        .map(drop)
+        .expect_err("opened a filesystem with a volume over a base");
+    assert!(FxfsError::NotSupported.matches(&error), "{error:#}");
+
+    let filesystem = lazily(device).await;
+    let root = root_volume(filesystem.clone()).await.expect("root_volume failed");
+    let error = root.volume("over").await.map(drop).expect_err("opened a volume over a base");
+    assert!(FxfsError::NotSupported.matches(&error), "{error:#}");
+    assert!(!open_store(&filesystem, &root, "over").await);
+    let a = root.volume("a").await.expect("volume failed");
+    assert_eq!(read_file(&a, "file").await, vec![0xaa; 8192]);
+
+    let issues = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = issues.clone();
+    let options = crate::fsck::FsckOptions {
+        on_error: Box::new(move |issue| seen.lock().unwrap().push(format!("{issue:?}"))),
+        ..Default::default()
+    };
+    crate::fsck::fsck_with_options(filesystem.clone(), &options)
+        .await
+        .map(drop)
+        .expect_err("fsck passed a volume over a base");
+    let issues = issues.lock().unwrap();
+    assert!(issues.iter().any(|issue| issue.contains("StoreOverBase")), "{issues:?}");
+    drop((a, root));
     filesystem.close().await.expect("Close failed");
 }

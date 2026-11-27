@@ -19,7 +19,6 @@ use crate::object_store::{
 };
 use crate::range::RangeExt;
 use anyhow::Error;
-use rustc_hash::FxHashSet as HashSet;
 use std::cell::UnsafeCell;
 use std::collections::BTreeMap;
 use std::ops::Range;
@@ -120,8 +119,6 @@ struct ScannedStore<'a> {
     objects: BTreeMap<u64, ScannedObject>,
     root_objects: Vec<u64>,
     store_id: u64,
-    // cladefs: the cells of the extents of the store's base, if it has one (backlog doc-10).
-    base_cells: HashSet<u64>,
     is_root_store: bool,
 }
 
@@ -137,7 +134,6 @@ impl<'a> ScannedStore<'a> {
             objects: BTreeMap::new(),
             root_objects: root_objects.as_ref().into(),
             store_id,
-            base_cells: HashSet::default(),
             is_root_store,
         }
     }
@@ -541,10 +537,7 @@ impl<'a> ScannedStore<'a> {
                 device_offset,
             ))?;
         }
-        // cladefs: a base's extents are not held by this allocator.
-        if !self.base_cells.contains(&store_extent.cell) {
-            self.fsck.reference(store_extent, device_offset..device_offset + len, self.store_id);
-        }
+        self.fsck.reference(store_extent, device_offset..device_offset + len, self.store_id);
         Ok(())
     }
 
@@ -767,7 +760,6 @@ pub(super) async fn scan_store(
     let next_object_id = store.query_next_object_id();
 
     let mut scanned = ScannedStore::new(fsck, root_objects, store_id, store.is_root());
-    scanned.base_cells = store.store_info().base_cells.iter().copied().collect();
 
     // Scan the store for objects, attributes, and parent/child relationships.
     let layer_set = store.tree().layer_set();

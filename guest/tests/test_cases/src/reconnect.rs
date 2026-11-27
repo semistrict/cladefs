@@ -12,8 +12,7 @@
 //! (`EPIPE`, `ENOTCONN`, `ECONNRESET`), or a read ends with nothing of the host's answer read, or
 //! part of it. The guest makes such an exchange again, on a new connection, which reaches the
 //! restored VM's host. Only an exchange the host may see twice is made again: an ask it answers
-//! the same however often it is asked, as the sandbox manager's are (the automounter's `attach`,
-//! `git-remote-fxfs`'s `newest`).
+//! the same however often it is asked.
 
 use std::io;
 use std::time::Duration;
@@ -53,7 +52,7 @@ pub fn exchange<S, T>(
     loop {
         match connect().and_then(|mut stream| exchange(&mut stream)) {
             Err(error) if reset_by_restore(&error) && attempt < ATTEMPTS => {
-                eprintln!("fxfs-automount: the host's connection was reset ({error}): again");
+                eprintln!("the host's connection was reset ({error}): again");
                 attempt += 1;
                 std::thread::sleep(PAUSE);
             }

@@ -67,7 +67,7 @@ if part clippy; then
     cladefs_crates=(
         -p base32_id -p block_device -p bucket_cell -p cladefs -p cladefs_core -p cladefs_fs
         -p cladefs_proto -p cladefs_wire -p cladefsd -p cladefs-examples
-        -p extent_frame -p extent_keys -p formats -p fxfs-automount -p fxfs-posix
+        -p extent_frame -p extent_keys -p formats -p fxfs-posix
         -p fxfs-sim-diff -p gc_wasm -p host_fs -p libcladefs -p local_cell -p node_local
         -p sqlite_cladefs -p virtio_extent
     )

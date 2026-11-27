@@ -167,7 +167,6 @@ Each crate's `Cargo.toml` says in its first lines what it is. cladefs's own, bes
 | `virtio_extent` | The extent store device but its virtio transport (backlog doc-4), which every VMM hosting it shares; its `README.md` says what a VMM's adapter does. |
 | `block_device` | A block device kept straight on an extent device, with no filesystem between: one array of blocks a cell, what SQLite and memory cells hold. |
 | `sqlite_cladefs` | A SQLite cell's one database kept on its block device, each transaction one commit of the device. |
-| `fxfs-automount` | A guest's automounter of shared volumes (backlog doc-10), and `git-remote-fxfs`. |
 | `fxfs-sim-diff` | `guest/sim`'s model of Fxfs run beside Fxfs on the same operations, each file compared after each. |
 | `cladefs-examples` | cladefs's examples, benches and tools, in a package of their own so that a release build measures cladefs as its daemon has it. |
 

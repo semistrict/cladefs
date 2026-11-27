@@ -107,7 +107,6 @@ const (
 	Cladefsd_ListVersions_FullMethodName            = "/cladefs.cladefsd.v1.Cladefsd/ListVersions"
 	Cladefsd_DropVersions_FullMethodName            = "/cladefs.cladefsd.v1.Cladefsd/DropVersions"
 	Cladefsd_ShareVersion_FullMethodName            = "/cladefs.cladefsd.v1.Cladefsd/ShareVersion"
-	Cladefsd_AttachBase_FullMethodName              = "/cladefs.cladefsd.v1.Cladefsd/AttachBase"
 	Cladefsd_SyncCell_FullMethodName                = "/cladefs.cladefsd.v1.Cladefsd/SyncCell"
 	Cladefsd_StatCell_FullMethodName                = "/cladefs.cladefsd.v1.Cladefsd/StatCell"
 	Cladefsd_ListCells_FullMethodName               = "/cladefs.cladefsd.v1.Cladefsd/ListCells"
@@ -195,13 +194,8 @@ type CladefsdClient interface {
 	// than its own, as a base image many tenants fork; unshared, such forks fail
 	// (PERMISSION_DENIED, EACCES), and those made live on.
 	ShareVersion(ctx context.Context, in *ShareVersionRequest, opts ...grpc.CallOption) (*ShareVersionResponse, error)
-	// Attaches a fork of a cell to a cell, a VM's or stopped, and so to its forks and the VMs
-	// restored from them: reads and maps of the fork's extents the cell doesn't hold read through
-	// to it, read-only. Everything the fork holds is readable to the guest, which names extents, so
-	// that a cell that isn't public attaches only to a cell of its tenant (PERMISSION_DENIED
-	// otherwise). The fork stays until the caller deletes it: a VM with it open keeps it from going
-	// (FAILED_PRECONDITION), but a stopped cell doesn't. No guest can ask for this.
-	AttachBase(ctx context.Context, in *AttachBaseRequest, opts ...grpc.CallOption) (*AttachBaseResponse, error)
+	// (AttachBase, which attached a fork of a cell to a cell, retired with shared volumes, board
+	// 14527.)
 	// Returns once every commit of a cell, as of the call, is uploaded: in the daemon's bucket,
 	// as before a clean stop.
 	SyncCell(ctx context.Context, in *SyncCellRequest, opts ...grpc.CallOption) (*SyncCellResponse, error)
@@ -209,8 +203,8 @@ type CladefsdClient interface {
 	// many extents it holds; of one none has, the daemon opens it to say, as a VM's would, taking its
 	// branch's head, and closes it again: time, and memory till then, as its extents (TASK-454).
 	StatCell(ctx context.Context, in *StatCellRequest, opts ...grpc.CallOption) (*StatCellResponse, error)
-	// Lists the cells the daemon serves: those VM processes write, and those open for others, such
-	// as bases attached, with what StatCell says of each (TASK-50.5).
+	// Lists the cells the daemon serves: those VM processes write, and those it has open for its own
+	// work, with what StatCell says of each (TASK-50.5).
 	ListCells(ctx context.Context, in *ListCellsRequest, opts ...grpc.CallOption) (*ListCellsResponse, error)
 	// What the daemon did since it started: counters, which only grow.
 	GetCounters(ctx context.Context, in *GetCountersRequest, opts ...grpc.CallOption) (*GetCountersResponse, error)
@@ -500,16 +494,6 @@ func (c *cladefsdClient) ShareVersion(ctx context.Context, in *ShareVersionReque
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ShareVersionResponse)
 	err := c.cc.Invoke(ctx, Cladefsd_ShareVersion_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *cladefsdClient) AttachBase(ctx context.Context, in *AttachBaseRequest, opts ...grpc.CallOption) (*AttachBaseResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(AttachBaseResponse)
-	err := c.cc.Invoke(ctx, Cladefsd_AttachBase_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -844,13 +828,8 @@ type CladefsdServer interface {
 	// than its own, as a base image many tenants fork; unshared, such forks fail
 	// (PERMISSION_DENIED, EACCES), and those made live on.
 	ShareVersion(context.Context, *ShareVersionRequest) (*ShareVersionResponse, error)
-	// Attaches a fork of a cell to a cell, a VM's or stopped, and so to its forks and the VMs
-	// restored from them: reads and maps of the fork's extents the cell doesn't hold read through
-	// to it, read-only. Everything the fork holds is readable to the guest, which names extents, so
-	// that a cell that isn't public attaches only to a cell of its tenant (PERMISSION_DENIED
-	// otherwise). The fork stays until the caller deletes it: a VM with it open keeps it from going
-	// (FAILED_PRECONDITION), but a stopped cell doesn't. No guest can ask for this.
-	AttachBase(context.Context, *AttachBaseRequest) (*AttachBaseResponse, error)
+	// (AttachBase, which attached a fork of a cell to a cell, retired with shared volumes, board
+	// 14527.)
 	// Returns once every commit of a cell, as of the call, is uploaded: in the daemon's bucket,
 	// as before a clean stop.
 	SyncCell(context.Context, *SyncCellRequest) (*SyncCellResponse, error)
@@ -858,8 +837,8 @@ type CladefsdServer interface {
 	// many extents it holds; of one none has, the daemon opens it to say, as a VM's would, taking its
 	// branch's head, and closes it again: time, and memory till then, as its extents (TASK-454).
 	StatCell(context.Context, *StatCellRequest) (*StatCellResponse, error)
-	// Lists the cells the daemon serves: those VM processes write, and those open for others, such
-	// as bases attached, with what StatCell says of each (TASK-50.5).
+	// Lists the cells the daemon serves: those VM processes write, and those it has open for its own
+	// work, with what StatCell says of each (TASK-50.5).
 	ListCells(context.Context, *ListCellsRequest) (*ListCellsResponse, error)
 	// What the daemon did since it started: counters, which only grow.
 	GetCounters(context.Context, *GetCountersRequest) (*GetCountersResponse, error)
@@ -1063,9 +1042,6 @@ func (UnimplementedCladefsdServer) DropVersions(context.Context, *DropVersionsRe
 }
 func (UnimplementedCladefsdServer) ShareVersion(context.Context, *ShareVersionRequest) (*ShareVersionResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ShareVersion not implemented")
-}
-func (UnimplementedCladefsdServer) AttachBase(context.Context, *AttachBaseRequest) (*AttachBaseResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method AttachBase not implemented")
 }
 func (UnimplementedCladefsdServer) SyncCell(context.Context, *SyncCellRequest) (*SyncCellResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SyncCell not implemented")
@@ -1399,24 +1375,6 @@ func _Cladefsd_ShareVersion_Handler(srv interface{}, ctx context.Context, dec fu
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(CladefsdServer).ShareVersion(ctx, req.(*ShareVersionRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _Cladefsd_AttachBase_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(AttachBaseRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(CladefsdServer).AttachBase(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: Cladefsd_AttachBase_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(CladefsdServer).AttachBase(ctx, req.(*AttachBaseRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1965,10 +1923,6 @@ var Cladefsd_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ShareVersion",
 			Handler:    _Cladefsd_ShareVersion_Handler,
-		},
-		{
-			MethodName: "AttachBase",
-			Handler:    _Cladefsd_AttachBase_Handler,
 		},
 		{
 			MethodName: "SyncCell",

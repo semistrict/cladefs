@@ -18,8 +18,7 @@
 // from upstream too: allocations are recorded under a store's current data owner, which a snapshot
 // changes; a snapshot freezes the source's owner, whose extents the stores sharing them never
 // deallocate one by one, and which is deleted once no store shares it (AllocatorInfoV60, the
-// Snapshot mutation, `deallocate`, `is_shared`, `frozen_ranges`). A base's extents, which a store
-// reads and the allocator never holds, are treated likewise (`add_base_cells`, backlog doc-10).
+// Snapshot mutation, `deallocate`, `is_shared`, `frozen_ranges`).
 
 //! # The Allocator
 //!
@@ -793,10 +792,6 @@ struct Inner {
     /// cladefs: the extents, from their minting to the seal of their frees.
     extents: ExtentTable,
 
-    /// cladefs: the cells of the bases of the stores opened (backlog doc-10), whose extents the
-    /// tree never holds, nor does `extents`. In memory: only their stores touch those extents.
-    base_cells: HashSet<u64>,
-
     /// cladefs: the ranges of shared extents that allocations which dropped took, with their owners,
     /// which the journal doesn't yet record (`record_reaches`, TASK-213).
     unrecorded_reaches: Vec<(ExtentRange, u64)>,
@@ -945,7 +940,6 @@ impl Allocator {
                 owner_bytes: BTreeMap::new(),
                 unattributed_reserved_bytes: 0,
                 extents: ExtentTable::default(),
-                base_cells: HashSet::new(),
                 unrecorded_reaches: Vec::new(),
             }),
             freeing: futures::lock::Mutex::new(None),
@@ -1595,80 +1589,34 @@ impl Allocator {
     ) -> Result<u64, Error> {
         debug!(device_range:? = dealloc_range; "deallocate");
         ensure!(dealloc_range.range.is_valid(), FxfsError::InvalidArgs);
-        // cladefs: a base's extents are not held here at all; only the store's own are
-        // deallocated. Of those, the parts referenced more than once lose a reference
-        // (see "References").
+        // cladefs: the parts referenced more than once lose a reference (see "References").
         let deallocated = dealloc_range.len();
-        if !self.is_held_beyond_the_store(&dealloc_range) {
-            let mutation = AllocatorMutation::Deallocate {
-                device_range: dealloc_range.clone(),
-                owner_object_id,
-            };
-            // A range a file's extents reference twice (a reflink within it) may be deallocated
-            // twice in a transaction, which holds the mutation once: the second is a reference
-            // fewer.
-            if transaction.add(self.object_id(), Mutation::Allocator(mutation)).is_some() {
-                transaction.add_reference(self.object_id(), dealloc_range, owner_object_id, -1);
-            }
+        let mutation =
+            AllocatorMutation::Deallocate { device_range: dealloc_range.clone(), owner_object_id };
+        // A range a file's extents reference twice (a reflink within it) may be deallocated
+        // twice in a transaction, which holds the mutation once: the second is a reference
+        // fewer.
+        if transaction.add(self.object_id(), Mutation::Allocator(mutation)).is_some() {
+            transaction.add_reference(self.object_id(), dealloc_range, owner_object_id, -1);
         }
         Ok(deallocated)
     }
 
-    /// cladefs: whether `range`'s extent is a base's, not held by this allocator (backlog doc-10).
-    fn is_held_beyond_the_store(&self, range: &ExtentRange) -> bool {
-        self.inner.lock().base_cells.contains(&range.extent.cell)
-    }
-
-    /// cladefs: notes that a store opened has a base whose extents are in `cells`.
-    pub fn add_base_cells(&self, cells: &[u64]) {
-        self.inner.lock().base_cells.extend(cells);
-    }
-
-    /// cladefs: fails unless a store may have a base whose extents are in `cells`: none may be
-    /// the device's own, or one the allocator holds extents of, as if they were a base's the
-    /// allocator would lose count of those.
-    pub fn check_base_cells(&self, cells: &[u64]) -> Result<(), Error> {
-        let cells: HashSet<u64> = cells.iter().copied().collect();
-        ensure!(
-            !cells.contains(&self.cell()) && !self.inner.lock().extents.holds_any_of(&cells),
-            FxfsError::InvalidArgs
-        );
-        Ok(())
-    }
-
-    /// cladefs: the cells of the extents `owners` hold.
-    pub fn cells_of(&self, owners: &[u64]) -> Vec<u64> {
-        let inner = self.inner.lock();
-        let cells: HashSet<u64> = inner
-            .extents
-            .alive()
-            .filter(|(_, owner, _)| owners.contains(owner))
-            .map(|(extent, ..)| extent.cell)
-            .collect();
-        cells.into_iter().collect()
-    }
-
-    /// cladefs: whether `range` is shared, and must not be overwritten in place: its extent is a
-    /// base's, or some of it is referenced more than once (see "References").
+    /// cladefs: whether `range` is shared, and must not be overwritten in place: some of it is
+    /// referenced more than once (see "References").
     pub async fn is_shared(&self, range: ExtentRange) -> Result<bool, Error> {
-        if self.is_held_beyond_the_store(&range) {
-            return Ok(true);
-        }
         Ok(self.inner.lock().extents.is_referenced_more_than_once(&range))
     }
 
     /// cladefs: references `range`, which `owner_object_id`'s store has allocated, once more: for
-    /// another extent of a file to share it (a reflink, `DataObjectHandle::txn_clone_range`). A
-    /// base's is never freed.
+    /// another extent of a file to share it (a reflink, `DataObjectHandle::txn_clone_range`).
     pub fn reference(
         &self,
         transaction: &mut Transaction<'_>,
         owner_object_id: u64,
         range: ExtentRange,
     ) {
-        if !self.is_held_beyond_the_store(&range) {
-            transaction.add_reference(self.object_id(), range, owner_object_id, 1);
-        }
+        transaction.add_reference(self.object_id(), range, owner_object_id, 1);
     }
 
     /// cladefs: the sequence numbers of this allocator's cell the mount sought orphans among, for
@@ -2225,7 +2173,7 @@ impl<'a> Flusher<'a> {
         let full_compaction =
             reason == FlushReason::Journal(ForceMajor::True) || !freed_owners.is_empty();
         let (layer_set, layers_to_keep) =
-            tree::layers_to_merge(&self.allocator.tree, full_compaction, 0);
+            tree::layers_to_merge(&self.allocator.tree, full_compaction);
         let total_len = layer_set.sum_len();
         // cladefs: box each compaction branch directly so `Flusher::finish` does not carry an
         // extra 2.8 KiB wrapper frame on top of `compact_with_iterator` (TASK-26.9).

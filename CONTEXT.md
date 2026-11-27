@@ -313,9 +313,6 @@ _Avoid_: template, golden image
 **Public base**:
 A base whose pages every tenant's forks share, in the default arena.
 
-**Attached base**:
-A fork of another cell attached to a cell, for an Fxfs volume over a read-only base.
-
 **Read evidence**:
 What forks of a version read of it as they opened, each tenant's apart: a **recording** is one fork's, every MiB of the version's extents its guest read in its first 10 s and when it first did, an object written once beside the version (TASK-702.2). The collector deletes it with the version, and past its tenant's newest 8.
 _Avoid_: working set, boot profile (TASK-38's per-host file, which it replaces)
@@ -566,7 +563,7 @@ code does not have yet are said so.
   env vars too (`CLADEFSD_PART_CACHE`, `CLADEFSD_PART_CACHE_BYTES`).
 - **region**: the guest's; virtio's is a **shared memory region**.
 - **format**: a format's version alone (**Format**); making a bucket a root is **formatting** it, and making a filesystem is Fxfs's mkfs.
-- **base**: a cell VMs fork. The WAL's is its **start**; **generation** is keys' alone (MakePublic's flag is `attach_only`).
+- **base**: a cell VMs fork. The WAL's is its **start**; **generation** is keys' alone.
 - **super-block**: Fxfs's on-disk record; **superblock** is the kernel's.
 - **Fxfs** / **cladefs** in the guest: Fxfs is Fuchsia's filesystem, its crates and its format; the guest
   kernel's module that runs it is `cladefs` (`fs/cladefs`, `mount -t cladefs`, `cladefs.*` parameters,

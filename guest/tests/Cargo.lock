@@ -1803,14 +1803,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fxfs-automount"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "libc",
-]
-
-[[package]]
 name = "fxfs-posix"
 version = "0.1.0"
 dependencies = [
@@ -1892,7 +1884,6 @@ name = "guest-agent"
 version = "0.0.0"
 dependencies = [
  "anyhow",
- "fxfs-automount",
  "test_cases",
 ]
 
@@ -4211,7 +4202,6 @@ dependencies = [
  "extent_frame",
  "extent_keys",
  "futures",
- "fxfs-automount",
  "http-body-util",
  "hyper",
  "hyper-util",

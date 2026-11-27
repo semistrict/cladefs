@@ -45,8 +45,8 @@ pub use cladefs_core::dax::hvf::{GuestMemory, GuestRam, HvfSecondStage};
 pub use cladefs_core::{
     Access, AccessFailures, CellAccess, CellHolding, CellId, CellOf, CellRole, CellSnapshot,
     CellVersion, Commit, DaxWindow, Errno, Error, ExtentId, ExtentInfo, FailingRun, Failure, Host,
-    MappingContents, OpenBase, OpenCell, Opening, Private, Result, SecondStage, VersionInfo,
-    VolatileSlice, VolatileSliceMut, Whose, WindowMapping, WriteBarriers,
+    MappingContents, OpenCell, Opening, Private, Result, SecondStage, VersionInfo, VolatileSlice,
+    VolatileSliceMut, Whose, WindowMapping, WriteBarriers,
 };
 #[cfg(target_os = "linux")]
 pub use cladefs_core::{

@@ -40,9 +40,9 @@ kind, and nothing inside it is named apart. Supersedes doc-19 and doc-18's whole
 - **A cell's ID is unique in its bucket**, given by the bucket's allocator, and is its branch's ID
   too: no caller names a new cell (`CreateCell` with a cell of 0, the FUSE mount's `Attach` of a
   cell of 0).
-- **An extent ID** names the cell that wrote the extent and the sequence number it gave it: an
-  Fxfs volume over a read-only base reads extents of another cell, which only the first half tells
-  apart (doc-10). The first half is the cell's branch's ID, so unique in the bucket.
+- **An extent ID** names the cell that wrote the extent and the sequence number it gave it: a fork
+  reads extents of the cells it was forked from, which only the first half tells apart. The first
+  half is the cell's branch's ID, so unique in the bucket.
 
 ## Why
 

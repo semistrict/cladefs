@@ -3,9 +3,8 @@
 // found in the LICENSE file.
 
 // Fuchsia's `src/storage/fxfs/src/object_store/volume.rs`. cladefs's additions are in child modules,
-// impl blocks of their own, so that this file keeps upstream's shape (TASK-160.24): `base`
-// (`RootVolume::publish_volume` and `new_volume_over_base`, a volume of one another filesystem
-// wrote, backlog doc-10). Deleting a volume releases its layers by reference count, and locks them.
+// impl blocks of their own, so that this file keeps upstream's shape (TASK-160.24). Deleting a
+// volume releases its layers by reference count, and locks them.
 // There is no `install_volume` (nor `replace_volume`, which it used): an image within a file is a
 // block device's, which cladefs's extent store has none of (backlog doc-4). `RootVolume::volume`
 // opens a volume left closed (`Options::lazy_volumes`).
@@ -29,7 +28,6 @@ use std::sync::Arc;
 // For now, this hierarchy is only one deep.
 
 // cladefs: its additions (TASK-160.24).
-mod base;
 #[cfg(test)]
 mod lazy;
 #[cfg(test)]
@@ -128,8 +126,7 @@ impl RootVolume {
             .ok_or(FxfsError::NotFound)
             .context("Missing volume store")?;
         // cladefs: do not kick off background `UpgradeVersion` compactions for older frozen layers
-        // (doc-28 rule 3, board 10050): older layers — including immutable `base_layers` — stay
-        // readable in place without rewriting.
+        // (doc-28 rule 3, board 10050): older layers stay readable in place without rewriting.
         Ok(store)
     }
 

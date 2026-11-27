@@ -15,9 +15,7 @@ use crate::device::{
 };
 use anyhow::{Error, anyhow, ensure};
 use fxfs::errors::FxfsError;
-use fxfs::filesystem::{
-    FlushReason, ForceMajor, FxFilesystem, FxFilesystemBuilder, OpenFxFilesystem, SyncOptions,
-};
+use fxfs::filesystem::{FxFilesystem, FxFilesystemBuilder, OpenFxFilesystem, SyncOptions};
 use fxfs::object_store::NewChildStoreOptions;
 use fxfs::object_store::journal::{DEFAULT_RECLAIM_SIZE, JournalOptions, LazyFlush};
 use fxfs::object_store::volume::root_volume;
@@ -66,7 +64,7 @@ const GRAVEYARD_BATCH_DELAY: Duration = Duration::from_millis(5);
 /// transactions' reservations, which removing a file takes too.
 const SHRINK_HEADROOM: u64 = 16 << 20;
 
-/// The filesystem on a device, which its mounted volumes share (backlog doc-10).
+/// The filesystem on a device, which its mounted volumes share.
 pub struct Filesystem {
     /// The filesystem, which `close` closes, after the last unmount.
     filesystem: OpenFxFilesystem,
@@ -258,25 +256,6 @@ impl Filesystem {
     /// This is the single authoritative freeze state queried by `super.c`, `dax.c`, and ioctls.
     pub fn is_frozen(&self) -> bool {
         !matches!(*self.freeze_state.lock().unwrap(), FreezeState::Active)
-    }
-
-    /// cladefs: whether the filesystem and its extent device are both frozen (no thaw in progress
-    /// or partially completed). Required to read a consistent volume manifest.
-    pub fn is_device_frozen(&self) -> bool {
-        matches!(
-            *self.freeze_state.lock().unwrap(),
-            FreezeState::Frozen(Frozen::DeviceFrozen { .. })
-        )
-    }
-
-    /// cladefs: makes the volume `name`, over the base `manifest` describes (backlog doc-10), which
-    /// the device must read: one the host attached.
-    pub async fn import(&self, name: &str, manifest: &[u8]) -> Result<(), Error> {
-        ensure!(!self.is_frozen(), FxfsError::Unavailable);
-        ensure!(!self.read_only(), FxfsError::ReadOnlyFilesystem);
-        let root_volume = root_volume((*self.filesystem).clone()).await?;
-        root_volume.new_volume_over_base(name, manifest).await?;
-        Ok(())
     }
 
     /// cladefs: freezes the filesystem, each of whose volumes the VFS has synced and stopped the
@@ -522,17 +501,8 @@ impl Filesystem {
 /// What a mounted volume does that Fxfs's POSIX layer doesn't.
 pub(crate) trait GuestFxfs: Sized {
     /// Unmounts the volume, applying what it queued, and closes it, so that what it holds in
-    /// memory goes (backlog doc-10, an idle repo's mount expiring, TASK-136.6). Its filesystem
-    /// stays open.
+    /// memory goes (TASK-136.6). Its filesystem stays open.
     async fn unmount(self);
-
-    /// cladefs: puts all the volume holds in one layer, so that the journal holds nothing of it,
-    /// but for what comes after (backlog doc-10, Publishing).
-    async fn flush_volume(&self) -> Result<(), Error>;
-
-    /// cladefs: the volume's manifest, with its filesystem frozen: no compaction frees what it
-    /// names before a fork of the cell holds it. `Unavailable` if the journal holds anything of it.
-    async fn manifest(&self) -> Result<Vec<u8>, Error>;
 }
 
 impl GuestFxfs for Fxfs {
@@ -549,24 +519,6 @@ impl GuestFxfs for Fxfs {
         if let Err(error) = filesystem.object_manager().close_volume(volume).await {
             log::info!("volume {volume} stays open as it unmounts: {error:#}");
         }
-    }
-
-    async fn flush_volume(&self) -> Result<(), Error> {
-        ensure!(!self.platform().filesystem.is_frozen(), FxfsError::Unavailable);
-        // The volume's, which a mount -o ro of a writable filesystem's has too.
-        ensure!(!self.read_only(), FxfsError::ReadOnlyFilesystem);
-        let filesystem = self.filesystem();
-        filesystem.graveyard().flush().await;
-        let objects = filesystem.object_manager();
-        let store = objects.store(self.volume_id()).ok_or(FxfsError::NotFound)?;
-        store.flush_with_reason(FlushReason::Journal(ForceMajor::True)).await?;
-        Ok(())
-    }
-
-    async fn manifest(&self) -> Result<Vec<u8>, Error> {
-        ensure!(self.platform().filesystem.is_device_frozen(), FxfsError::InvalidArgs);
-        let objects = self.filesystem().object_manager();
-        objects.store(self.volume_id()).ok_or(FxfsError::NotFound)?.manifest().await
     }
 }
 

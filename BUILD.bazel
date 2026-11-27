@@ -64,7 +64,6 @@ filegroup(
         "//crates/fuchsia-async-macro:crate_files",
         "//crates/fuchsia-sync:crate_files",
         "//crates/fxfs:crate_files",
-        "//crates/fxfs-automount:crate_files",
         "//crates/fxfs-posix:crate_files",
         "//crates/fxfs-sim-diff:crate_files",
         "//crates/fxfs_macros:crate_files",

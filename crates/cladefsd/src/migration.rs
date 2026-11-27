@@ -2246,6 +2246,7 @@ pub(super) mod target {
         } else if path == local_cell::DESCRIPTION
             || path == "start"
             || path == "unmade"
+            // Written by builds before shared volumes went (board 14527), which none reads.
             || path == "attached-bases"
             || path == "ancestry"
             || path.starts_with("public-")

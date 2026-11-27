@@ -416,6 +416,11 @@ impl<'a> Fsck<'a> {
             load_store_info(&root_store, store_id).await,
             FsckFatal::MalformedStore(store_id),
         )?;
+        // cladefs: not opened, nor repaired: a store over a base, once made by shared volumes
+        // (removed, board 14527), is reported.
+        if !info.base_layers.is_empty() {
+            self.fatal(FsckFatal::StoreOverBase(store_id))?;
+        }
         root_store_root_objects.append(&mut info.parent_objects());
         Ok(())
     }

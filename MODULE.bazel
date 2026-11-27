@@ -139,7 +139,6 @@ _MEMBER_MANIFESTS = [
     "//crates/fuchsia-sync:Cargo.toml",
     "//crates/fxfs:Cargo.toml",
     "//crates/fxfs_macros:Cargo.toml",
-    "//crates/fxfs-automount:Cargo.toml",
     "//crates/fxfs-posix:Cargo.toml",
     "//crates/fxfs-sim-diff:Cargo.toml",
     "//crates/gc_wasm:Cargo.toml",

@@ -5,7 +5,7 @@
 
 """Tables, in Markdown, of what the linux-checkout cases measured (TASK-136.1,
 guest/tests/test_cases/src/test_linux_checkout.rs): a checkout the size of Linux's on ext4 and on
-the guest's Fxfs, with and without DAX, and shared as a volume over a read-only base.
+the guest's Fxfs, with and without DAX.
 
     scripts/linux-checkout-report.py RESULTS
 
@@ -26,20 +26,10 @@ MEASURE = re.compile(r"^measure (\S+) (\S+) (\S+) (\S+)$")
 
 # The timings of the VM that checks Linux out and of the one that opens it fresh, in order.
 CHECKOUT = ["mkfs", "default-mount", "mount", "clone", "checkout", "sync", "status-cold",
-            "status-warm", "status-synced", "status-warm-again", "read-cold", "read-warm",
-            "publish"]
-# A sandbox's timings, over a shared volume.
-SANDBOX = ["attach", "import", "mount", "status-cold", "status-warm", "status-synced",
-           "status-warm-again", "read-cold", "read-warm", "first-overwrite", "first-create",
-           "status-after-writes"]
-HUNDREDS = ["import-median", "import-max", "mount-median", "mount-max", "status-cold",
-            "status-warm", "status-synced", "first-overwrite", "first-create", "unmount-all"]
-REBOOTED = ["default-mount", "mount", "status-cold", "status-warm", "mount-others-median",
-            "mount-others-max", "unmount-all"]
+            "status-warm", "status-synced", "status-warm-again", "read-cold", "read-warm"]
 # What the host's disk holds that the checkout puts there: cells, buckets and the daemon's part
 # cache, not logs nor the root filesystem.
-DISK = re.compile(r"^(bucket|cladefsd-cache|generation|publisher|publisher\.bucket|sandbox-\d+|"
-                  r"hundreds|ext4\.img)$")
+DISK = re.compile(r"^(bucket|cladefsd-cache|publisher|publisher\.bucket|ext4\.img)$")
 
 
 def parse(stdout, log):
@@ -108,31 +98,11 @@ def timings(cases, roles):
     return table(header, rows)
 
 
-def sandboxes(cases):
-    """The shared volume's timings, a column for each case over a base: the sandboxes' alone,
-    their least and most; then with hundreds mounted, and those closed after a reboot."""
-    shared = [case for case in cases if not case.startswith("ext4")]
-    rows = []
-    for name in SANDBOX:
-        row = []
-        for case in shared:
-            measured = cases[case][0]
-            values = [named[name][0] for role, named in sorted(measured.items())
-                      if role.startswith("sandbox-") and name in named]
-            row.append(spread(values, seconds))
-        rows.append([f"sandbox {name}"] + row)
-    for role, names in (("hundreds", HUNDREDS), ("rebooted", REBOOTED)):
-        for name in names:
-            rows.append([f"{role} {name}"] + [time_of(cases[case][0], role, name)
-                                             for case in shared])
-    return table([""] + shared, rows)
-
-
 def facts(cases):
     """The checkout and its volume: sizes and counts, a column each case."""
     names = [("checkout", "tracked-files"), ("checkout", "volume-files"),
              ("checkout", "volume-directories"), ("checkout", "volume-bytes"),
-             ("checkout", "git-bytes"), ("checkout", "read-bytes"), ("checkout", "manifest"),
+             ("checkout", "git-bytes"), ("checkout", "read-bytes"),
              ("host", "volume-layers"), ("host", "volume-allocator-records")]
     rows = []
     for role, name in names:
@@ -187,8 +157,6 @@ def report(cases):
     parts = ["## The checkout", facts(cases),
              "## Checking it out, and opening it in a fresh VM", timings(cases, ["checkout",
                                                                                 "reopened"])]
-    if any(not case.startswith("ext4") for case in cases):
-        parts += ["## Shared, a volume over the published base", sandboxes(cases)]
     parts.append("## Memory, MiB")
     parts += [memory(case, lines) for case, (_, lines) in cases.items()]
     parts.append("## The host's disk, MiB")

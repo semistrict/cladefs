@@ -556,6 +556,9 @@ pub enum FsckFatal {
     MalformedGraveyard,
     MalformedLayerFile(u64, u64),
     MalformedStore(u64),
+    /// cladefs: the store's information names layers of a base (shared volumes, removed, board
+    /// 14527), which nothing opens or repairs: it is reported, and the check stops.
+    StoreOverBase(u64),
     MisOrderedLayerFile(u64, u64),
     MisOrderedObjectStore(u64),
     OverlappingKeysInLayerFile(u64, u64, Key, Key),
@@ -573,6 +576,13 @@ impl FsckFatal {
             }
             FsckFatal::MalformedStore(id) => {
                 format!("Object store {} is malformed; root store is inconsistent", id)
+            }
+            FsckFatal::StoreOverBase(id) => {
+                format!(
+                    "Object store {} has layers of a base (shared volumes, removed); it is not \
+                    repaired",
+                    id
+                )
             }
             FsckFatal::MisOrderedLayerFile(store_id, layer_file_id) => {
                 format!(
@@ -609,6 +619,9 @@ impl FsckFatal {
             }
             FsckFatal::MalformedStore(id) => {
                 error!(id; "Malformed store; root store is inconsistent");
+            }
+            FsckFatal::StoreOverBase(id) => {
+                error!(id; "Store has layers of a base (shared volumes, removed); not repaired");
             }
             FsckFatal::MisOrderedLayerFile(store_id, layer_file_id) => {
                 // This can be for stores or the allocator.

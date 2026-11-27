@@ -15,21 +15,7 @@ fn run_guest_agent(test_name: &str) -> anyhow::Result<()> {
 }
 
 fn main() -> anyhow::Result<()> {
-    let mut cli_args = args();
-    let exec_name = cli_args.next().unwrap_or_default();
-    // cladefs: Git's remote helper for repos kept as shared volumes, by that name, as the tests of it
-    // link it (TASK-136.7).
-    #[cfg(target_os = "linux")]
-    if exec_name.rsplit('/').next() == Some("git-remote-fxfs") {
-        return fxfs_automount::git_main(cli_args);
-    }
-    let test_name = cli_args.next().context("Missing test name argument")?;
-    // cladefs: the automounter of shared volumes, a process of its own, as the tests of it start it
-    // (`/proc/self/exe automount ...`, TASK-136.6).
-    #[cfg(target_os = "linux")]
-    if test_name == "automount" {
-        return fxfs_automount::main(cli_args);
-    }
+    let test_name = args().nth(1).context("Missing test name argument")?;
     // The guest's init, under cladefs's Firecracker, which runs the test and resets the VM, whatever
     // becomes of the test.
     #[cfg(target_os = "linux")]

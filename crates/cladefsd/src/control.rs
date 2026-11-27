@@ -1209,13 +1209,9 @@ impl Cladefsd for Control {
         &self,
         request: Request<MakePublicRequest>,
     ) -> Result<Response<MakePublicResponse>, Status> {
-        let MakePublicRequest { attach_only, tenant, cell } = request.into_inner();
+        let MakePublicRequest { tenant, cell } = request.into_inner();
         let (_, cell_dir) = self.resolve_cell(tenant, cell).await?;
-        reply(
-            cells::make_public(&self.daemon, cell_dir, attach_only)
-                .await
-                .map(|()| MakePublicResponse {}),
-        )
+        reply(cells::make_public(&self.daemon, cell_dir).await.map(|()| MakePublicResponse {}))
     }
 
     async fn make_version(
@@ -1267,21 +1263,6 @@ impl Cladefsd for Control {
         let (_, cell_dir) = self.resolve_cell(tenant, cell).await?;
         let shared = cells::share_version(&self.daemon, cell_dir, version, shared).await;
         reply(shared.map(|()| ShareVersionResponse {}))
-    }
-
-    async fn attach_base(
-        &self,
-        request: Request<AttachBaseRequest>,
-    ) -> Result<Response<AttachBaseResponse>, Status> {
-        let AttachBaseRequest { tenant, cell, base_tenant, base_cell } = request.into_inner();
-        let (id, cell_dir) = self.resolve_cell(tenant, cell).await?;
-        let (base_id, base_dir) = self.resolve_cell(base_tenant, base_cell).await?;
-        let allowed = move |_: &Path, _: &Path| id.tenant == base_id.tenant;
-        reply(
-            cells::attach(&self.daemon, cell_dir, base_dir, allowed)
-                .await
-                .map(|()| AttachBaseResponse {}),
-        )
     }
 
     async fn sync_cell(

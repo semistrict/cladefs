@@ -134,13 +134,8 @@ service Cladefsd {
   // than its own, as a base image many tenants fork; unshared, such forks fail
   // (PERMISSION_DENIED, EACCES), and those made live on.
   rpc ShareVersion(ShareVersionRequest) returns (ShareVersionResponse);
-  // Attaches a fork of a cell to a cell, a VM's or stopped, and so to its forks and the VMs
-  // restored from them: reads and maps of the fork's extents the cell doesn't hold read through
-  // to it, read-only. Everything the fork holds is readable to the guest, which names extents, so
-  // that a cell that isn't public attaches only to a cell of its tenant (PERMISSION_DENIED
-  // otherwise). The fork stays until the caller deletes it: a VM with it open keeps it from going
-  // (FAILED_PRECONDITION), but a stopped cell doesn't. No guest can ask for this.
-  rpc AttachBase(AttachBaseRequest) returns (AttachBaseResponse);
+  // (AttachBase, which attached a fork of a cell to a cell, retired with shared volumes, board
+  // 14527.)
   // Returns once every commit of a cell, as of the call, is uploaded: in the daemon's bucket,
   // as before a clean stop.
   rpc SyncCell(SyncCellRequest) returns (SyncCellResponse);
@@ -148,8 +143,8 @@ service Cladefsd {
   // many extents it holds; of one none has, the daemon opens it to say, as a VM's would, taking its
   // branch's head, and closes it again: time, and memory till then, as its extents (TASK-454).
   rpc StatCell(StatCellRequest) returns (StatCellResponse);
-  // Lists the cells the daemon serves: those VM processes write, and those open for others, such
-  // as bases attached, with what StatCell says of each (TASK-50.5).
+  // Lists the cells the daemon serves: those VM processes write, and those it has open for its own
+  // work, with what StatCell says of each (TASK-50.5).
   rpc ListCells(ListCellsRequest) returns (ListCellsResponse);
   // What the daemon did since it started: counters, which only grow.
   rpc GetCounters(GetCountersRequest) returns (GetCountersResponse);
@@ -787,10 +782,9 @@ message ShareVersionResponse {}
 
 // Makes a cell a public base.
 message MakePublicRequest {
-  reserved 1;
-  // Its branch alone, not those it inherited: a fork pinning a state of a cell that goes on being
-  // written, to attach to cells (AttachBase), not to fork.
-  bool attach_only = 2;
+  // 2 (`attach_only`): retired with shared volumes (board 14527).
+  reserved 1, 2;
+  reserved "attach_only";
   // The cell's tenant.
   uint64 tenant = 3;
   // The cell's ID.
@@ -799,22 +793,6 @@ message MakePublicRequest {
 
 // The cell made public.
 message MakePublicResponse {}
-
-// Attaches a fork to a cell.
-message AttachBaseRequest {
-  reserved 1, 2;
-  // The cell's tenant.
-  uint64 tenant = 3;
-  // The cell's ID.
-  uint64 cell = 4;
-  // The attached base fork's tenant.
-  uint64 base_tenant = 5;
-  // The attached base fork's cell ID.
-  uint64 base_cell = 6;
-}
-
-// Attached, durably.
-message AttachBaseResponse {}
 
 // Waits for a cell's commits to be in object storage.
 message SyncCellRequest {

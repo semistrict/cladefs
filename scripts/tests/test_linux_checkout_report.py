@@ -37,15 +37,9 @@ measure reopened read-warm 300.0 ms
 FXFS_STDOUT = """\
 measure checkout clone 11790.0 ms
 measure checkout status-cold 696.3 ms
-measure checkout manifest 600 bytes
 measure host volume-allocator-records 1557 records
-measure sandbox-0 mount 1.5 ms
-measure sandbox-0 first-overwrite 2.9 ms
-measure sandbox-1 mount 1.8 ms
-measure sandbox-1 first-overwrite 2.5 ms
-measure hundreds mount-median 0.4 ms
-measure host sandbox-0-disk-bucket 1703936 bytes
-measure host sandbox-0-disk-log.txt 16384 bytes
+measure host checkout-disk-bucket 1703936 bytes
+measure host checkout-disk-log.txt 16384 bytes
 """
 
 
@@ -95,14 +89,6 @@ class Report(unittest.TestCase):
             "| read-warm |  |  |  |  | 300.0 ms |  |",
         ]))
 
-    def test_sandboxes_spread_from_least_to_most(self):
-        table = report.sandboxes(self.cases()).splitlines()
-        self.assertEqual(table[0], "|  | fxfs-dax |")
-        self.assertIn("| sandbox mount | 1.5 ms - 1.8 ms |", table)
-        self.assertIn("| sandbox first-overwrite | 2.5 ms - 2.9 ms |", table)
-        self.assertIn("| sandbox import |  |", table)
-        self.assertIn("| hundreds mount-median | 0.4 ms |", table)
-
     def test_memory_is_in_mib(self):
         _, lines = self.cases()["fxfs-dax"]
         self.assertEqual(report.memory("fxfs-dax", lines), "\n".join([
@@ -124,7 +110,6 @@ class Report(unittest.TestCase):
             "|  | ext4 | ext4-pmem | fxfs-dax |",
             "|---|---|---|---|",
             "| tracked-files | 91,166 files |  |  |",
-            "| manifest |  |  | 600 bytes |",
             "| volume-allocator-records |  |  | 1,557 records |",
         ]))
 
@@ -140,7 +125,6 @@ class Main(unittest.TestCase):
                                    results], capture_output=True, text=True, check=True)
         self.assertTrue(done.stdout.startswith("## The checkout\n"))
         self.assertIn("| checkout-read | 340 | 2,925 | 2,925 | 0 | 8 | 1 |", done.stdout)
-        self.assertNotIn("## Shared", done.stdout)
 
     def test_says_when_there_is_nothing(self):
         with tempfile.TemporaryDirectory() as results:

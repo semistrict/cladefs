@@ -77,7 +77,7 @@ pub use host_cell::CellOf;
 pub use memory::{VolatileSlice, VolatileSliceMut};
 pub use open_cell::{
     CellAccess, CellHolding, CellRole, CellSnapshot, CellVersion, Commit, ExtentInfo,
-    MappingContents, OpenBase, OpenCell, Opening, VersionInfo, Whose, WindowMapping, WriteBarriers,
+    MappingContents, OpenCell, Opening, VersionInfo, Whose, WindowMapping, WriteBarriers,
 };
 pub use storage_device::ExtentId;
 

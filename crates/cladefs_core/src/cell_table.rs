@@ -6,17 +6,17 @@
 //! (`cladefsd::cells::cell_dir_key`): one table, whose entry for a key says all there is of its
 //! cell (TASK-160.8). Who holds it: a connection writing it, or the daemon working on it. And what
 //! is open of it for others: the cell its writer's connection has open, which the daemon's work
-//! through it shares, or the cells a base is attached to share (backlog doc-10), or a kept cell the
-//! daemon keeps open for forks. Five owners said so before, kept in step by hand, which TASK-79.34,
-//! 150.5, 54, 79.84, 79.95, 92.5, 79.103 and 79.36 came of.
+//! through it shares, or a kept cell the daemon keeps open for forks. Five owners said so before,
+//! kept in step by hand, which TASK-79.34, 150.5, 54, 79.84, 79.95, 92.5, 79.103 and 79.36 came of.
 //!
 //! A cell has one holder at a time, whose hold ([`Hold`]) is a value that lets the cell go as it
 //! is dropped: a connection's, from its `OPEN` until it is gone and its cell closed; the daemon's,
 //! while it forks, syncs or resizes a cell no connection writes. A connection whose VM process is
 //! gone, still holding its cell, lets it go to the next that asks, as a VM restored from a
 //! snapshot at once opens its VM's cell (TASK-39.1). What is open of a cell outlives its holder:
-//! a cell others share, the bases attached to cells, as long as one has it, which no writer, nor
-//! the mount, holds meanwhile (`EBUSY`), as one cell is open once at a time, and writes go to no
+//! a cell others share, as long as one has it (none is made since shared volumes went, board 14527;
+//! board 14535 removes the rest), which no writer, nor the mount, holds meanwhile (`EBUSY`), as one
+//! cell is open once at a time, and writes go to no
 //! cell others read; a writer's that went, which the daemon's work through it has still, closing,
 //! which writers and the mount wait for to close ([`CellTable::closed`]), the daemon working
 //! through it meanwhile; a kept
@@ -178,7 +178,7 @@ struct Inner<C: ?Sized, S, P> {
 /// A key's entry: who holds its cell, and what is open of it meanwhile.
 enum Entry<C: ?Sized, S, P> {
     /// A connection writes it, from its `OPEN` on: its cell, once open, which the daemon's work
-    /// through it, and the cells it is attached to as a base, may share; and what to call as a
+    /// through it may share; and what to call as a
     /// writer waits for it, going ([`Hold::when_wanted`]).
     Writer { connection: Weak<C>, cell: Weak<S>, wanted: Option<Wanted> },
     /// The daemon holds it, to work on it, over what is open of it, which stays.
@@ -194,8 +194,8 @@ enum Entry<C: ?Sized, S, P> {
 /// What is open of a cell, for others than its holder.
 enum Open<S, P> {
     Nothing,
-    /// The cell others have open, while one has it: the cells it is attached to as a base (backlog
-    /// doc-10), which no writer holds meanwhile (`EBUSY`).
+    /// The cell others have open, while one has it, which no writer holds meanwhile (`EBUSY`): none
+    /// is made since shared volumes went (board 14527, board 14535).
     Shared(Weak<S>),
     /// A writer's cell its connection let go of, which the daemon's work through it, a fork's or
     /// a sync's, has still: closing, which writers wait for to close ([`CellTable::closed`]), with

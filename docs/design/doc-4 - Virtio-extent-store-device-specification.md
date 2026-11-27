@@ -274,7 +274,7 @@ extent's data, then commits the transaction that refers to it, so this holds.
 
 Reads `len` bytes at `offset` in extent `id`. Both are multiples of `block_size`, and the range lies
 within the extent's length. The extent is the guest's, one its branch inherited from the branch
-it was forked from, or one a fork attached to the cell holds (Branches and forks). A `READ` sees
+it was forked from (Branches and forks). A `READ` sees
 every `WRITE` completed before it was submitted. Writes to the window reach no extent: they are in
 private pages until the guest writes them.
 
@@ -470,12 +470,9 @@ Each VM's filesystem is a branch, with its own ID and root.
   freed it.
 - **Reads** of inherited extents, and mappings of them, are as of the fork. Extents never change, so
   this needs no copying.
-- **Attached forks.** The host's control API may attach a fork of another cell to a branch
-  (`AttachBase`, doc-10). `READ`, and `MAP`, of an extent of a branch in that fork's ancestry,
-  and not in the attached-to branch's, read through to the fork: as of it, whatever its cell did
-  since. `FREE` of one does nothing, as of any extent the cell doesn't hold. An extent no attached fork holds fails with
-  `ENOENT`. What a branch has attached stays attached to its forks. The guest cannot ask for this,
-  and everything an attached fork holds is readable to it.
+- **No attached forks.** The host's control API once attached a fork of another cell to a branch
+  (`AttachBase`, doc-10, removed 2026-11-27, board 14527), whose extents `READ` and `MAP` read
+  through to. None does now: an extent no branch of the cell's ancestry holds fails with `ENOENT`.
 
 The guest sees none of this except a different `branch` in its configuration after a fork.
 

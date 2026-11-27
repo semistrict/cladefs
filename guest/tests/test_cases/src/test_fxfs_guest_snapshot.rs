@@ -1005,9 +1005,9 @@ mod guest {
     /// guest's vsock connections, which its kernel learns of from an event it may take only after
     /// the old connection has ended, and a new one is made (TASK-50.1.2): one made as the snapshot
     /// was taken connects, as its response was in the RX queue, and then ends, its RST behind it,
-    /// nothing read (TASK-277). Each so reset is made again ([`fxfs_automount::reconnect`]).
+    /// nothing read (TASK-277). Each so reset is made again ([`crate::reconnect`]).
     fn name_from_host() -> String {
-        let name = fxfs_automount::reconnect::exchange(try_connect, |host| {
+        let name = crate::reconnect::exchange(try_connect, |host| {
             let mut name = String::new();
             match BufReader::new(host).read_line(&mut name)? {
                 0 => Err(std::io::ErrorKind::UnexpectedEof.into()),

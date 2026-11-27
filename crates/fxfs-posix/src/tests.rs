@@ -944,45 +944,39 @@ async fn a_removed_fill_gives_back_all_its_data() {
 }
 
 /// TASK-596 (board 2588): `Fxfs::cached` and `Fxfs::free_cached` count and purge persistent layer
-/// read chunks across store layers, base layers, and the allocator's layers, leaving zero cached
-/// chunks (`Present` or `Expired`) after the shrinker runs.
+/// read chunks across store layers and the allocator's layers, leaving zero cached chunks
+/// (`Present` or `Expired`) after the shrinker runs.
 #[fuchsia_async::run_singlethreaded(test)]
-async fn shrinker_purges_persistent_base_and_allocator_layer_chunks() {
+async fn shrinker_purges_persistent_store_and_allocator_layer_chunks() {
     use fxfs::filesystem::{FxFilesystem, SyncOptions};
     use fxfs::lsm_tree::types::LayerIterator as _;
     use fxfs::object_store::directory::Directory;
     use fxfs::object_store::transaction::{LockKey, Options};
 
-    // 1. Build a published base volume with enough files that its persistent layer has cached
-    // chunks when scanned.
-    let base_dev = DeviceHolder::new(FakeDevice::new(32768, 512).with_cell(10));
-    let base_fs = FxFilesystem::new_empty(base_dev).await.unwrap();
-    let base_root = root_volume((*base_fs).clone()).await.unwrap();
-    let base_vol = base_root.new_volume("base", NewChildStoreOptions::default()).await.unwrap();
-    let base_dir = Directory::open(&base_vol, base_vol.root_directory_object_id()).await.unwrap();
+    // 1. Build a volume with enough files that its persistent layer has cached chunks when
+    // scanned, and flush it.
+    let device = DeviceHolder::new(FakeDevice::new(32768, 512).with_cell(10));
+    let child_fs = FxFilesystem::new_empty(device).await.unwrap();
+    let child_root = root_volume((*child_fs).clone()).await.unwrap();
+    let over = child_root.new_volume("over", NewChildStoreOptions::default()).await.unwrap();
+    let root_ino = over.root_directory_object_id();
+    let dir = Directory::open(&over, root_ino).await.unwrap();
     for i in 0..300u32 {
-        let mut txn = base_vol
+        let mut txn = over
             .new_transaction(
-                lock_keys![LockKey::object(base_vol.store_object_id(), base_dir.object_id())],
+                lock_keys![LockKey::object(over.store_object_id(), dir.object_id())],
                 Options::default(),
             )
             .await
             .unwrap();
-        base_dir.create_child_file(&mut txn, &format!("base-file-{i:04}")).await.unwrap();
+        dir.create_child_file(&mut txn, &format!("base-file-{i:04}")).await.unwrap();
         txn.commit().await.unwrap();
     }
-    let manifest = base_root.publish_volume("base").await.unwrap();
-    base_fs.sync(SyncOptions { flush_device: true, ..Default::default() }).await.unwrap();
+    over.flush().await.unwrap();
+    child_fs.sync(SyncOptions { flush_device: true, ..Default::default() }).await.unwrap();
 
-    // 2. Mount a child filesystem over the base volume, add its own files, and flush both the
-    // volume store and the allocator so store layers, base layers, and allocator layers are all
-    // persistent.
-    let mut child_dev = FakeDevice::new(32768, 512).with_cell(20);
-    let _reads = child_dev.attach(base_fs.device().fork(11).unwrap());
-    let child_fs = FxFilesystem::new_empty(DeviceHolder::new(child_dev)).await.unwrap();
-    let child_root = root_volume((*child_fs).clone()).await.unwrap();
-    let over = child_root.new_volume_over_base("over", &manifest).await.unwrap();
-    let root_ino = over.root_directory_object_id();
+    // 2. Add more files, and flush both the volume store and the allocator so that the store's
+    // layers and the allocator's layers are all persistent.
     let posix = Fxfs::new((*child_fs).clone(), over.clone(), false, Tested);
     for i in 0..200u32 {
         let ino = posix.new_file(root_ino, format!("own-file-{i:04}").as_bytes()).await;
@@ -1023,7 +1017,7 @@ async fn shrinker_purges_persistent_base_and_allocator_layer_chunks() {
 
     assert!(
         over.tree().cached_layer_bytes() > 0,
-        "store + base persistent layers should have cached chunks after scan"
+        "the store's persistent layers should have cached chunks after scan"
     );
     assert!(
         child_fs.allocator().tree().cached_layer_bytes() > 0,
@@ -1050,8 +1044,6 @@ async fn shrinker_purges_persistent_base_and_allocator_layer_chunks() {
     let _ = posix.attr(attr.ino).await.unwrap();
 
     posix.stop_delayed().await.unwrap();
-    drop((posix, over, child_root));
+    drop((posix, dir, over, child_root));
     child_fs.close().await.unwrap();
-    drop((base_dir, base_vol, base_root));
-    base_fs.close().await.unwrap();
 }

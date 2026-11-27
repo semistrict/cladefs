@@ -2066,15 +2066,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fxfs-automount"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "libc",
- "tempfile",
-]
-
-[[package]]
 name = "fxfs-posix"
 version = "0.1.0"
 dependencies = [

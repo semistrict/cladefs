@@ -13,7 +13,6 @@ cladefs_rust_binary(
     srcs = glob(["src/**/*.rs"]),
     target_compatible_with = ["@platforms//os:linux"],
     deps = [
-        "//crates/fxfs-automount:fxfs_automount",
         "//guest/tests/test_cases:test_cases_guest",
         "@crates//:anyhow",
     ],

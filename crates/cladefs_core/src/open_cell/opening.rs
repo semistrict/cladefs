@@ -130,20 +130,6 @@ impl Opening {
         span.run_async(opened).await
     }
 
-    /// Opens the cell directory at `path`, a fork attached to other open cells (backlog doc-10),
-    /// to read through to: no guest boots from it ([`Opening::guest`]). Its pages are of `arena`,
-    /// or the default arena if it is public, as a public base's are, which every tenant's VM
-    /// processes hold read-only.
-    pub async fn open_base(mut self, path: impl AsRef<Path>) -> Result<OpenCell, Error> {
-        let path = path.as_ref();
-        let (public, cell) = local_cell::upload::blocking(|| -> Result<_, Error> {
-            Ok((cell_dir::public_cells(path)?, local_cell::host_cell(path).map_err(Error::new)?))
-        })?;
-        self.arena = self.arena.filter(|_| !public.contains(&cell.id));
-        self.guest = false;
-        self.open(path).await
-    }
-
     /// Creates a new Fxfs cell directory at `path`, of `capacity` bytes and the cell `of` says,
     /// opened as this [`Opening`] configures (TASK-364, doc-20).
     pub async fn create(
@@ -424,7 +410,6 @@ impl OpenCell {
             local,
             bucket,
             path: path.to_owned(),
-            bases: Default::default(),
             dax: CellMutex::new("dax", None),
             uploader,
             keys: None,

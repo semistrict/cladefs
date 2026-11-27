@@ -73,16 +73,10 @@ mod test_fxfs_guest_daemon_lost;
 use test_fxfs_guest_daemon_lost::TestFxfsGuestDaemonLost;
 mod test_fxfs_guest_import;
 use test_fxfs_guest_import::TestFxfsGuestImport;
-mod test_fxfs_guest_automount;
 // cladefs: the guest Fxfs's tracepoints under bpftrace (TASK-44.16).
 mod test_fxfs_guest_bpftrace;
 use test_fxfs_guest_bpftrace::TestFxfsGuestBpftrace;
-mod test_fxfs_guest_git_fetch;
-mod test_fxfs_guest_shared_volumes;
-use test_fxfs_guest_automount::TestFxfsGuestAutomount;
-use test_fxfs_guest_git_fetch::TestFxfsGuestGitFetch;
-use test_fxfs_guest_shared_volumes::TestFxfsGuestSharedVolumes;
-// cladefs: what a checkout the size of Linux's costs, shared and not (TASK-136.1).
+// cladefs: what a checkout the size of Linux's costs (TASK-136.1).
 mod test_linux_checkout;
 use test_linux_checkout::{Checkout, TestLinuxCheckout};
 mod test_fxfs_guest_volumes;
@@ -402,34 +396,9 @@ pub fn test_cases() -> Vec<TestCase> {
             Box::new(TestFxfsGuestVolumes { dax: true }),
         ),
         TestCase::new(
-            "fxfs-guest-shared-volumes",
-            &[Tag::Kernel, Tag::Nightly],
-            Box::new(TestFxfsGuestSharedVolumes { dax: false }),
-        ),
-        TestCase::new(
-            "fxfs-guest-shared-volumes-dax",
-            &[Tag::Kernel, Tag::Nightly],
-            Box::new(TestFxfsGuestSharedVolumes { dax: true }),
-        ),
-        TestCase::new(
-            "fxfs-guest-automount",
-            &[Tag::Kernel, Tag::Nightly],
-            Box::new(TestFxfsGuestAutomount { dax: false }),
-        ),
-        TestCase::new(
-            "fxfs-guest-automount-dax",
-            &[Tag::Kernel, Tag::Nightly],
-            Box::new(TestFxfsGuestAutomount { dax: true }),
-        ),
-        TestCase::new(
             "fxfs-guest-bpftrace-dax",
             &[Tag::Kernel, Tag::Nightly],
             Box::new(TestFxfsGuestBpftrace),
-        ),
-        TestCase::new(
-            "fxfs-guest-git-fetch",
-            &[Tag::Kernel, Tag::Nightly],
-            Box::new(TestFxfsGuestGitFetch),
         ),
         TestCase::new(
             "linux-checkout-ext4",
@@ -1073,7 +1042,8 @@ mod faulty_s3;
 #[cfg(feature = "host")]
 pub mod rootfs;
 
-mod shared_volumes;
+mod checkout_vms;
+pub mod reconnect;
 
 #[cfg(feature = "host")]
 pub mod loop_device;

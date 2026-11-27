@@ -186,7 +186,7 @@ impl Daemon {
     }
 
     pub fn make_public(&mut self, cell: CellId) -> Result<(), tonic::Status> {
-        let request = MakePublicRequest { tenant: cell.tenant, cell: cell.id, attach_only: false };
+        let request = MakePublicRequest { tenant: cell.tenant, cell: cell.id };
         self.runtime.block_on(self.client.make_public(request)).map(drop)
     }
 

@@ -696,8 +696,6 @@ fn cell_commands_need_the_daemon() {
         &["drop", "0/1"],
         &["resize", "0/1", "33554432"],
         &["public", "0/1"],
-        &["public-attach-only", "0/1"],
-        &["attach", "0/1", "0/2"],
     ] {
         let paths: Vec<&Path> = args.iter().map(Path::new).collect();
         let error = cladefsctl.run(&paths).expect_err("ran a cell's command without the daemon");

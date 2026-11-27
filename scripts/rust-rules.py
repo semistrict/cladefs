@@ -296,7 +296,7 @@ def off_host_fs(path, text):
 # cladefs: the crates whose code falls back silently at its peril: the daemon's, and what it is
 # built of, cladefs's own. Fuchsia's crates are upstream's; the simulations and examples are tests.
 FALLBACK_CRATES = (
-    "block_device", "bucket_cell", "cladefs", "extent_frame", "extent_keys", "fxfs-automount",
+    "block_device", "bucket_cell", "cladefs", "extent_frame", "extent_keys",
     "fxfs-posix", "host_fs", "local_cell", "node_local", "sqlite_cladefs", "virtio_extent",
 )
 # An error dropped: a pattern of any `Err`, its error unnamed; a `Result` made an `Option`; a

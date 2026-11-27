@@ -237,7 +237,6 @@ _COMMON_TEST_SRCS = glob(["tests/common/**/*.rs"])
 
 _INTEGRATION_TESTS = {
     "arenas": {"linux": False, "common": False, "bins": [], "data": []},
-    "bases": {"linux": True, "common": True, "bins": [], "data": []},
     "bucket_logging": {"linux": True, "common": False, "bins": [], "data": []},
     "cells": {"linux": True, "common": False, "bins": ["cladefsctl", "cladefsd"], "data": []},
     "cladefsctl": {"linux": True, "common": True, "bins": ["cladefsctl", "cladefsd"], "data": []},

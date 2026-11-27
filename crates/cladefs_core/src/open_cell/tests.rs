@@ -7,7 +7,6 @@ use crate::cache;
 use crate::dax::{Access, SecondStage};
 use crate::pages::{PhysLocation, page_size};
 use futures::executor::block_on;
-use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::atomic::Ordering;
 
@@ -1566,119 +1565,12 @@ async fn failed_page_ins_say_why() {
     );
 }
 
-/// An open cell holding `data` in one sealed extent, and the generation at `path` that pins it:
-/// the extent, and the open cell's ancestry as the generation has it.
-async fn generation(path: &Path, data: &[u8]) -> (ExtentId, Vec<u64>) {
-    let publisher = made(&path.with_extension("publisher"), 1 << 20).await;
-    let extent = id(&publisher, 1);
-    write(&publisher, extent, 0, data).await.unwrap();
-    publisher.commit(None).await.unwrap();
-    // A cell of its own, as a cell has one cell (doc-20).
-    publisher.fork_to(path, crate::host_cell::fork_child(publisher.cell())).await.unwrap();
-    let ancestry = OpenCell::open(path).await.unwrap().ancestry();
-    (extent, ancestry)
-}
-
-/// What opens what open cells attach, one instance of each, as the extent daemon does.
-fn one_instance_each() -> OpenBase {
-    let open: Arc<tokio::sync::Mutex<HashMap<std::path::PathBuf, Arc<OpenCell>>>> = Arc::default();
-    Arc::new(move |path| {
-        let (open, path) = (open.clone(), path.to_owned());
-        Box::pin(async move {
-            let mut open = open.lock().await;
-            if let Some(cell) = open.get(&path) {
-                return Ok(cell.clone());
-            }
-            let cell = Arc::new(Opening::here().unwrap().open_base(&path).await.unwrap());
-            open.insert(path, cell.clone());
-            Ok(cell)
-        })
-    })
-}
-
-/// doc-10: a base attached reads and maps through, read-only, and nothing else does: not an
-/// extent of a base not attached, nor one a base doesn't hold.
+/// TASK-234: an extent of a public base its publisher's open cell, open in its tenant's arena, has
+/// cached is read into the default arena, which a public base's pages are of, from those pages,
+/// not paged in again, and they go: one copy, the default arena's, which the publisher's open cell
+/// reads from then on.
 #[tokio::test(flavor = "multi_thread")]
-async fn bases_attached_read_and_map_through() {
-    let (cell, dir) = cell(1 << 20).await;
-    let ps = page_size();
-    let (base, other) = (dir.path().join("base"), dir.path().join("other"));
-    let data = pattern(3, ps as usize);
-    let (extent, ancestry) = generation(&base, &data).await;
-    let (not_attached, _) = generation(&other, &data).await;
-    let window = cell.create_dax_window(4 * ps, None).unwrap();
-
-    assert_eq!(read(&cell, extent, 0, BLOCK).await, Err(Errno::ENOENT));
-    assert_eq!(cell.map(extent, 0, ps, 0).await, Err(Errno::ENOENT));
-
-    host_fs::may_block(|| cell.attach_base(&base, &ancestry).unwrap());
-    assert_eq!(read(&cell, extent, 0, ps as usize).await, Ok(data.clone()));
-    cell.map(extent, 0, ps, 0).await.unwrap();
-    block_on(window.fault(0, Access::Read)).unwrap();
-    // SAFETY: The test faulted the page in, and nothing writes it.
-    let mapped = unsafe { std::slice::from_raw_parts(window.host_base(), ps as usize) };
-    assert!(mapped == data, "the window maps other data");
-
-    assert_eq!(read(&cell, not_attached, 0, BLOCK).await, Err(Errno::ENOENT));
-    assert_eq!(cell.map(not_attached, 0, ps, ps).await, Err(Errno::ENOENT));
-    let beyond = ExtentId { sequence: extent.sequence + 1, ..extent };
-    assert_eq!(read(&cell, beyond, 0, BLOCK).await, Err(Errno::ENOENT));
-    // A base's extent maps read-only anywhere, as every MAP does; it is never written.
-    cell.map(extent, 0, ps, ps).await.unwrap();
-    assert_eq!(write(&cell, extent, 0, &[0; BLOCK]).await, Err(Errno::EPERM));
-    // Attaching it again changes nothing.
-    host_fs::may_block(|| {
-        cell.attach_base(&base, &ancestry).unwrap();
-        assert_eq!(cell_dir::attached(&dir.path().join("store")).unwrap().len(), 1);
-    });
-}
-
-/// doc-10: VMs mapping a base share its pages: the cache's one copy, for the attached and for
-/// an open cell that holds the extent itself.
-#[tokio::test(flavor = "multi_thread")]
-async fn windows_share_bases_pages() {
-    let dir = tempfile::tempdir().unwrap();
-    let ps = page_size();
-    let base = dir.path().join("base");
-    let (extent, ancestry) = generation(&base, &pattern(4, ps as usize)).await;
-    let mut cells: Vec<OpenCell> = Vec::new();
-    for at in 0..2 {
-        cells.push(OpenCell::create(dir.path().join(format!("{at}")), 1 << 20).await.unwrap());
-    }
-    let windows: Vec<DaxWindow> =
-        cells.iter().map(|cell| cell.create_dax_window(ps, None).unwrap()).collect();
-    let open = one_instance_each();
-    for cell in &cells {
-        host_fs::may_block(|| {
-            cell.open_bases(open.clone()).unwrap();
-            cell.attach_base(&base, &ancestry).unwrap();
-        });
-        cell.map(extent, 0, ps, 0).await.unwrap();
-    }
-    // Counted before anything pages in: a page-in holds the extent too, a while after the
-    // fault it serves returns (TASK-157), as `windows_share_extents_pages` counts.
-    let extent_cached = cached(extent).expect("the extent is cached");
-    // The cache's, the test's, and each window's mapping.
-    assert_eq!(Arc::strong_count(&extent_cached), 4);
-    for window in &windows {
-        block_on(window.fault(0, Access::Read)).unwrap();
-        // SAFETY: The test faulted the page in, and nothing writes it.
-        let mapped = unsafe { std::slice::from_raw_parts(window.host_base(), ps as usize) };
-        assert!(mapped == pattern(4, ps as usize), "a window maps other data");
-    }
-    assert!(Arc::ptr_eq(&cached(extent).unwrap(), &extent_cached), "cached anew");
-    let mut held = vec![0; ps as usize];
-    extent_cached.read(0, &mut held).await.unwrap();
-    assert!(held == pattern(4, ps as usize), "the cache holds other data");
-}
-
-/// TASK-234: an extent of a base its publisher's open cell, open in its tenant's arena, has
-/// cached is read into the default arena, which a base's pages are of, from those pages, not
-/// paged in again, and they go: one copy, the default arena's, which the publisher's open cell
-/// reads from then on. The first sandbox on a generation of the Linux tree paged 1.8 GB in,
-/// 14.5 s, the daemon holding it as the publisher's open cell's (GCE r941).
-#[tokio::test(flavor = "multi_thread")]
-async fn a_bases_extent_its_publisher_has_cached_moves_to_the_default_arena() {
+async fn a_public_bases_extent_its_publisher_has_cached_moves_to_the_default_arena() {
     let dir = tempfile::tempdir().unwrap();
     let ps = page_size();
     let len = 4 * extent_frame::PART as usize;
@@ -1691,7 +1583,7 @@ async fn a_bases_extent_its_publisher_has_cached_moves_to_the_default_arena() {
     publisher.fork_to(&base, crate::host_cell::fork_child(publisher.cell())).await.unwrap();
     drop(publisher);
     let opened = OpenCell::open(&base).await.unwrap();
-    host_fs::may_block(|| opened.make_public_attach_only().unwrap());
+    host_fs::may_block(|| opened.make_public().unwrap());
     drop(opened);
     let tenant = Arena::new().unwrap();
     let publisher =
@@ -1705,21 +1597,16 @@ async fn a_bases_extent_its_publisher_has_cached_moves_to_the_default_arena() {
     let held = |arena| cache::find(arena, extent).map(|cached| cached.held());
     assert_eq!(held(tenant.id()), Some(pages));
 
-    let ancestry = OpenCell::open(&base).await.unwrap().ancestry();
-    let sandbox = made(&dir.path().join("sandbox"), 1 << 20).await;
-    host_fs::may_block(|| {
-        sandbox.open_bases(one_instance_each()).unwrap();
-        sandbox.attach_base(&base, &ancestry).unwrap();
-    });
-    let sandbox_window = sandbox.create_dax_window(len as u64, None).unwrap();
+    let public = OpenCell::open(&base).await.unwrap();
+    let public_window = public.create_dax_window(len as u64, None).unwrap();
     let page_ins = stats::stats().page_ins;
-    // Moved as the sandbox maps it, so that its MAP maps every page, none faulted on: moved
-    // as asked for, the first sandbox on the Linux tree took 4,422 faults (GCE r991).
-    sandbox.map(extent, 0, len as u64, 0).await.unwrap();
+    // Moved as the base maps it, so that its MAP maps every page, none faulted on: moved as
+    // asked for, the first sandbox on the Linux tree took 4,422 faults (GCE r991).
+    public.map(extent, 0, len as u64, 0).await.unwrap();
     assert_eq!((held(ArenaId::DEFAULT), held(tenant.id())), (Some(pages), None));
-    assert_eq!(read(&sandbox, extent, 0, len).await, Ok(data.clone()));
+    assert_eq!(read(&public, extent, 0, len).await, Ok(data.clone()));
     assert_eq!(stats::stats().page_ins - page_ins, 0, "paged in again");
-    drop(sandbox_window);
+    drop(public_window);
 
     assert_eq!(read(&publisher, extent, 0, len).await, Ok(data.clone()));
     // Its window, the tenant's page evicted from it, faults onto the default arena's.
@@ -1732,12 +1619,11 @@ async fn a_bases_extent_its_publisher_has_cached_moves_to_the_default_arena() {
     assert_eq!(copies, 1);
 }
 
-/// TASK-234: a tenant's copy of an extent moves to the default arena only for a read through a
-/// published generation: one not published, read without an arena as a base is, takes nothing
-/// of the tenant's, which keeps its copy, and pages in its own, as every VM process maps the
-/// default arena.
+/// TASK-234: a tenant's copy of an extent moves to the default arena only for a read of a public
+/// base: a fork not public, read without an arena, takes nothing of the tenant's, which keeps its
+/// copy, and pages in its own, as every VM process maps the default arena.
 #[tokio::test(flavor = "multi_thread")]
-async fn an_extent_of_no_published_generation_stays_its_tenants() {
+async fn an_extent_of_no_public_base_stays_its_tenants() {
     let dir = tempfile::tempdir().unwrap();
     let ps = page_size();
     let len = 4 * extent_frame::PART as usize;
@@ -1756,14 +1642,9 @@ async fn an_extent_of_no_published_generation_stays_its_tenants() {
     let pages = len as u64 / ps;
     let held = |arena| cache::find(arena, extent).map(|cached| cached.held());
 
-    let ancestry = OpenCell::open(&base).await.unwrap().ancestry();
-    let sandbox = made(&dir.path().join("sandbox"), 1 << 20).await;
-    host_fs::may_block(|| {
-        sandbox.open_bases(one_instance_each()).unwrap();
-        sandbox.attach_base(&base, &ancestry).unwrap();
-    });
+    let private = OpenCell::open(&base).await.unwrap();
     let page_ins = stats::stats().page_ins;
-    assert_eq!(read(&sandbox, extent, 0, len).await, Ok(data));
+    assert_eq!(read(&private, extent, 0, len).await, Ok(data));
     assert_eq!(stats::stats().page_ins - page_ins, 4, "one page-in a part");
     assert_eq!((held(tenant.id()), held(ArenaId::DEFAULT)), (Some(pages), Some(pages)));
 }
@@ -1782,101 +1663,6 @@ async fn a_public_reach_moves_its_own_extent_alone() {
     drop(cached.await);
 }
 
-/// doc-10: what a generation pins stays, whatever its open cell does next.
-#[tokio::test(flavor = "multi_thread")]
-async fn bases_outlast_what_their_cells_free() {
-    let (cell, dir) = cell(1 << 20).await;
-    let (publisher_path, base) = (dir.path().join("publisher"), dir.path().join("base"));
-    let publisher = made(&publisher_path, 1 << 20).await;
-    let extent = id(&publisher, 1);
-    write(&publisher, extent, 0, &pattern(5, BLOCK)).await.unwrap();
-    publisher.commit(None).await.unwrap();
-    publisher.fork_to(&base, crate::host_cell::fork_child(publisher.cell())).await.unwrap();
-    publisher.free(extent).unwrap();
-    publisher.commit(None).await.unwrap();
-    assert_eq!(read(&publisher, extent, 0, BLOCK).await, Err(Errno::ENOENT));
-
-    let ancestry = OpenCell::open(&base).await.unwrap().ancestry();
-    host_fs::may_block(|| cell.attach_base(&base, &ancestry).unwrap());
-    assert_eq!(read(&cell, extent, 0, BLOCK).await, Ok(pattern(5, BLOCK)));
-}
-
-/// doc-10: what is attached stays attached to forks, which a restored VM's open cell is, and
-/// through reopening, and doesn't reach back to the open cell a fork came from.
-#[tokio::test(flavor = "multi_thread")]
-async fn bases_stay_attached_through_forks_and_reopening() {
-    let (cell, dir) = cell(1 << 20).await;
-    let path = dir.path().join("store");
-    let (base, later) = (dir.path().join("base"), dir.path().join("later"));
-    let (extent, ancestry) = generation(&base, &pattern(6, BLOCK)).await;
-    let (only_the_fork, later_ancestry) = generation(&later, &pattern(7, BLOCK)).await;
-    let open = one_instance_each();
-    host_fs::may_block(|| {
-        cell.open_bases(open.clone()).unwrap();
-        cell.attach_base(&base, &ancestry).unwrap();
-    });
-    cell.commit(None).await.unwrap();
-
-    let fork = dir.path().join("fork");
-    cell.fork_to(&fork, crate::host_cell::fork_child(cell.cell())).await.unwrap();
-    let forked = OpenCell::open(&fork).await.unwrap();
-    host_fs::may_block(|| forked.open_bases(open.clone()).unwrap());
-    assert_eq!(read(&forked, extent, 0, BLOCK).await, Ok(pattern(6, BLOCK)));
-
-    host_fs::may_block(|| forked.attach_base(&later, &later_ancestry).unwrap());
-    assert_eq!(read(&forked, only_the_fork, 0, BLOCK).await, Ok(pattern(7, BLOCK)));
-    assert_eq!(read(&cell, only_the_fork, 0, BLOCK).await, Err(Errno::ENOENT));
-
-    drop(cell);
-    let cell = OpenCell::open(&path).await.unwrap();
-    assert_eq!(read(&cell, extent, 0, BLOCK).await, Err(Errno::ENOENT), "not routed yet");
-    host_fs::may_block(|| cell.open_bases(open).unwrap());
-    assert_eq!(read(&cell, extent, 0, BLOCK).await, Ok(pattern(6, BLOCK)));
-}
-
-/// doc-10: hundreds attached cost nothing until read: what reads one opens that one alone, and
-/// finding it takes a lookup of its cell.
-#[tokio::test(flavor = "multi_thread")]
-async fn bases_attached_open_when_read() {
-    const ATTACHED: usize = 300;
-    let (cell, dir) = cell(1 << 20).await;
-    let mut bases: Vec<(ExtentId, Vec<u64>, std::path::PathBuf)> = Vec::new();
-    for at in 0..ATTACHED {
-        let path = dir.path().join(format!("base-{at}"));
-        let (extent, ancestry) = generation(&path, &pattern(at as u8, BLOCK)).await;
-        host_fs::may_block(|| cell.attach_base(&path, &ancestry).unwrap());
-        bases.push((extent, ancestry, path));
-    }
-    assert_eq!(cell.bases_opened(), 0);
-    assert_eq!(cell.bases.routed_cells(), 2 * ATTACHED);
-
-    let (extent, ..) = &bases[ATTACHED / 2];
-    assert_eq!(read(&cell, *extent, 0, BLOCK).await, Ok(pattern((ATTACHED / 2) as u8, BLOCK)));
-    assert_eq!(cell.bases_opened(), 1);
-    drop(bases);
-}
-
-/// doc-10: an open cell's ancestors are never routed: what it inherited it holds, or freed.
-#[tokio::test(flavor = "multi_thread")]
-async fn bases_are_not_routed_for_what_a_cell_inherited() {
-    let (cell, dir) = cell(1 << 20).await;
-    let inherited = id(&cell, 1);
-    write(&cell, inherited, 0, &pattern(9, BLOCK)).await.unwrap();
-    cell.commit(None).await.unwrap();
-    let (fork, base) = (dir.path().join("fork"), dir.path().join("base"));
-    cell.fork_to(&fork, crate::host_cell::fork_child(cell.cell())).await.unwrap();
-    let base_cell = crate::host_cell::fork_child(cell.cell());
-    cell.fork_to(&base, base_cell).await.unwrap();
-    let forked = OpenCell::open(&fork).await.unwrap();
-    let ancestry = OpenCell::open(&base).await.unwrap().ancestry();
-    host_fs::may_block(|| forked.attach_base(&base, &ancestry).unwrap());
-    assert!(!forked.bases.routes(inherited.cell));
-    assert!(forked.bases.routes(base_cell.id));
-    forked.free(inherited).unwrap();
-    forked.commit(None).await.unwrap();
-    assert_eq!(read(&forked, inherited, 0, BLOCK).await, Err(Errno::ENOENT));
-}
-
 /// TASK-160.10: an open cell whose directory can't be listed for its public markers, as with as
 /// many files open as the process may (`EMFILE`), fails to open, whichever way, with `EIO`:
 /// read as none, a public base opened private, its writer's, which a VM process opened to
@@ -1890,7 +1676,6 @@ async fn cells_whose_public_markers_go_unread_fail_to_open() {
     fail::cfg("extents::public_cells", "return").unwrap();
     let opened = [
         OpenCell::open(&path).await.map(|cell| cell.is_public()),
-        Opening::here().unwrap().open_base(&path).await.map(|cell| cell.is_public()),
         Opening::here().unwrap().for_host().open(&path).await.map(|cell| cell.is_public()),
     ];
     fail::remove("extents::public_cells");
@@ -2105,7 +1890,6 @@ async fn standing_gate_refuses_every_mutation_when_halted_shredded_fenced_or_rea
         expected_cell: Option<Errno>,
     ) {
         let ext = id(cell, 99);
-        let base_dir = dir.join("dummy-base");
         let fork_dir = dir.join(format!("fork-{label}"));
         let child = crate::host_cell::fork_child(cell.cell());
         let barriers =
@@ -2161,18 +1945,8 @@ async fn standing_gate_refuses_every_mutation_when_halted_shredded_fenced_or_rea
                     expected,
                 ),
                 (
-                    "attach_base",
-                    local_cell::upload::blocking(|| cell.attach_base(&base_dir, &[1])).err(),
-                    expected,
-                ),
-                (
                     "make_public",
                     local_cell::upload::blocking(|| cell.make_public()).err(),
-                    expected,
-                ),
-                (
-                    "make_public_attach_only",
-                    local_cell::upload::blocking(|| cell.make_public_attach_only()).err(),
                     expected,
                 ),
             ]);

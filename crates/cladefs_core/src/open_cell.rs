@@ -25,12 +25,10 @@
 //! write: a write to a page gives the window a private copy of it (`crate::dax`), which no extent
 //! names, so that no commit changes anything in a window.
 
-mod bases;
 mod opening;
 #[cfg(test)]
 mod tests;
 
-pub use bases::OpenBase;
 pub use opening::Opening;
 
 use crate::cache::{CachedExtent, CachedIn};
@@ -47,7 +45,6 @@ use crate::host_cell::CellOf;
 use crate::memory::{VolatileSlice, VolatileSliceMut, gather, scatter};
 use crate::pages::{Arena, ArenaId};
 use crate::stats::{self, Counter};
-use bases::Bases;
 use bucket_cell::cell::Kind;
 use bucket_cell::layout::CellId;
 use bucket_cell::trace;
@@ -174,8 +171,8 @@ impl CellAccess {
         }
     }
 
-    /// `Ok` if the open cell may be forked, made public or have a base attached, which changes none
-    /// of its extents, as a version and a public base may.
+    /// `Ok` if the open cell may be forked or made public, which changes none of its extents, as a
+    /// version and a public base may.
     pub fn may_manage(self) -> Result<()> {
         match self.role {
             CellRole::Writer | CellRole::Version => Ok(()),
@@ -190,7 +187,7 @@ pub(super) enum Changing {
     Contents,
     /// Its capacity ([`CellAccess::may_resize`]).
     Capacity,
-    /// Its cell, not what it holds: its versions, forks, publicity and bases
+    /// Its cell, not what it holds: its versions, forks and publicity
     /// ([`CellAccess::may_manage`]).
     Cell,
 }
@@ -218,11 +215,8 @@ pub struct OpenCell {
     /// cladefs: the bucket the open cell's description names, which its cell is kept in
     /// (`host_cell::Opened`, TASK-165.6).
     bucket: Arc<bucket_cell::object_bucket::RoutedBucket>,
-    /// cladefs: where it was opened: its directory, which keeps what is attached to it (backlog
-    /// doc-10), and what it was forked from.
+    /// cladefs: where it was opened: its directory, which keeps what it was forked from.
     path: std::path::PathBuf,
-    /// cladefs: the forks of other open cells attached to it, whose extents it reads through to.
-    bases: Arc<Bases>,
     dax: CellMutex<Option<Dax>>,
     /// cladefs: the arenas of physical memory its extents' pages are of (TASK-43).
     arenas: Arenas,
@@ -419,15 +413,14 @@ fn fetch_errno(error: anyhow::Error) -> Errno {
 
 /// cladefs: lets `cell` go, and, if this was its last reference, closes it ([`OpenCell::close`]),
 /// holding no thread as it waits: as every holder of the daemon's open cells lets one go (doc-24,
-/// step 9), so that whichever holds it last, a connection's teardown, a request, a fork or the open
-/// cell a base is attached to, closes it, awaited, and none closes it in its drop, which blocks.
+/// step 9), so that whichever holds it last, a connection's teardown, a request or a fork, closes it,
+/// awaited, and none closes it in its drop, which blocks.
 pub async fn release(cell: Arc<OpenCell>) {
     if let Some(cell) = Arc::into_inner(cell) {
         // Mark closing synchronously before awaiting close so a concurrent opener waits for close
         // instead of observing `claimed[id] == false` and failing with `EBUSY` (board 11340).
         cell.mark_closing();
-        // Boxed: an open cell's close releases its writer and bases, which release theirs.
-        Box::pin(cell.close()).await;
+        cell.close().await;
     }
 }
 
@@ -547,9 +540,6 @@ impl OpenCell {
             log::error!("cladefs: closing an extent store: {err:#}");
         }
         self.closed = true;
-        // cladefs: then what it held open: the bases attached to it, each closed if this was its
-        // last (doc-24, step 9).
-        std::mem::take(&mut self.bases).close().await;
     }
 
     /// The size of the blocks extents are read and written in.
@@ -1001,8 +991,8 @@ impl OpenCell {
     }
 
     /// Reads the bytes at `offset` in `extent` into `buffers`, in order (`READ`). Blocks never
-    /// written read as zeros. cladefs: what it reads in, from the bucket, a base opened, or the
-    /// cache's page-ins, awaited, holding no thread (doc-24, step 5).
+    /// written read as zeros. cladefs: what it reads in, from the bucket or the cache's page-ins,
+    /// awaited, holding no thread (doc-24, step 5).
     pub async fn read(
         &self,
         extent: ExtentId,
@@ -1014,7 +1004,6 @@ impl OpenCell {
         stats::add(Counter::ReadBytes, len as u64);
         // cladefs: nothing a panic went through is read (`crate::halt`).
         self.halt.check()?;
-        let base = self.base_holding(extent).await?;
         // cladefs: a piece at a time, as the extent daemon's memory holds no more of a request
         // (TASK-149.17); once at least, as a read of nothing finds whether the extent is there.
         let mut piece = vec![0; len.min(Self::PIECE)];
@@ -1022,23 +1011,15 @@ impl OpenCell {
         loop {
             let data = &mut piece[..(len - done).min(Self::PIECE)];
             let at = offset.checked_add(done as u64).ok_or(Errno::EINVAL)?;
-            let (from, through_base) = match &base {
-                Some((base, _)) => (&**base, true),
-                None => (self, false),
-            };
             // cladefs: re-check halt on each piece and before publishing plaintext into the
             // caller's buffers so a concurrent `forget` cannot slip data out (board 5542,
             // board 2704).
             self.halt.check()?;
-            from.halt.check()?;
-            if !from.read_cached(extent, at, data).await? {
+            if !self.read_cached(extent, at, data).await? {
                 self.halt.check()?;
-                from.halt.check()?;
-                from.read_stored(extent, at, data).await?;
+                self.read_stored(extent, at, data).await?;
             }
             self.halt.check()?;
-            from.halt.check()?;
-            let _ = through_base;
             scatter(buffers, done, data);
             done += data.len();
             if done == len {
@@ -1061,18 +1042,8 @@ impl OpenCell {
         stats::add(Counter::Reads, 1);
         stats::add(Counter::ReadBytes, data.len() as u64);
         self.halt.check()?;
-        match self.base_holding(extent).await? {
-            Some((base, _)) => {
-                base.halt.check()?;
-                base.read_stored(extent, offset, data).await?;
-                self.halt.check()?;
-                base.halt.check()
-            }
-            None => {
-                self.read_stored(extent, offset, data).await?;
-                self.halt.check()
-            }
-        }
+        self.read_stored(extent, offset, data).await?;
+        self.halt.check()
     }
 
     /// cladefs: reads `extent`'s bytes at `offset` from the extent cache, if it is sealed: which
@@ -1549,27 +1520,19 @@ impl OpenCell {
         window_offset: u64,
     ) -> Result<(Arc<CachedExtent>, u64)> {
         self.dax_range_checked(window_offset, len)?;
-        // cladefs: a base's is of the cache's one copy of it.
-        let base = self.base_holding(extent).await?;
-        let extent_len = match &base {
-            Some((_, len)) => *len,
-            // cladefs: an open extent maps nowhere: a guest's bug, counted, as a tripwire
-            // (`open_maps_refused`).
-            None => match self.local.extent(extent).map_err(errno)? {
-                Some((_, true)) => return Err(refuse_open_map(extent)),
-                Some((len, false)) => len,
-                None => return Err(Errno::ENOENT),
-            },
+        // cladefs: an open extent maps nowhere: a guest's bug, counted, as a tripwire
+        // (`open_maps_refused`).
+        let extent_len = match self.local.extent(extent).map_err(errno)? {
+            Some((_, true)) => return Err(refuse_open_map(extent)),
+            Some((len, false)) => len,
+            None => return Err(Errno::ENOENT),
         };
         let unit = crate::dax::map_unit();
         let end = offset.checked_add(len).ok_or(Errno::EINVAL)?;
         if !offset.is_multiple_of(unit) {
             return Err(Errno::EINVAL);
         }
-        let cached = match &base {
-            Some((base, _)) => base.cached(extent, extent_len).await?,
-            None => self.cached(extent, extent_len).await?,
-        };
+        let cached = self.cached(extent, extent_len).await?;
         let within = end.min(extent_len.next_multiple_of(unit)).max(offset);
         Ok((cached, within - offset))
     }
@@ -2007,20 +1970,7 @@ impl OpenCell {
     /// it.
     pub fn make_public(&self) -> Result<()> {
         let admitted = self.admit(Changing::Cell)?;
-        self.mark_public(&admitted, &self.ancestry())
-    }
-
-    /// cladefs: makes the cell public, but not those it inherited from: a fork pinning a
-    /// state of an open cell that goes on being written, which attaches to tenants' open cells
-    /// rather than being forked by them (backlog doc-10). Its pages are of the default arena
-    /// through it ([`Opening::open_base`]).
-    pub fn make_public_attach_only(&self) -> Result<()> {
-        let admitted = self.admit(Changing::Cell)?;
-        self.mark_public(&admitted, &[self.cell().id])
-    }
-
-    fn mark_public(&self, admitted: &Admitted<'_>, cells: &[u64]) -> Result<()> {
-        cell_dir::mark_public_on(self.host.local(), admitted.local().dir().path(), cells)
+        cell_dir::mark_public_on(self.host.local(), admitted.local().dir().path(), &self.ancestry())
     }
 
     /// cladefs: the cell, and those it inherited from, nearest first.

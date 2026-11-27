@@ -2,26 +2,18 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! What a checkout the size of Linux's costs (cladefs's TASK-136.1, backlog doc-10): on the guest's
-//! Fxfs, with a DAX window and without, against ext4 on a virtio-blk disk, and on virtio-pmem with
-//! DAX, which TASK-227 takes Fxfs's DAX to match; and as a shared volume, a sandbox's volume over a
-//! read-only base.
+//! What a checkout the size of Linux's costs (cladefs's TASK-136.1): on the guest's Fxfs, with a
+//! DAX window and without, against ext4 on a virtio-blk disk, and on virtio-pmem with DAX, which
+//! TASK-227 takes Fxfs's DAX to match.
 //!
 //! A first VM checks Linux out: it clones it, without a checkout, from the bare repo the root
 //! filesystem holds, then checks it out, and syncs. Then, its caches dropped, it runs `git status`
 //! cold and warm, and once `sync` has written what that left, such as directories' access times;
 //! and reads the tree whole, every file of the checkout but `.git`'s, cold and warm. A second VM,
-//! booted on the same disk or cell, does the same, a guest that has seen nothing of it. On ext4,
-//! that is all.
-//!
-//! On Fxfs, the first VM checks Linux out into a volume and publishes it. Then, in fresh VMs, each
-//! on a cell of its own, the guest measures what a sandbox pays for the shared volume:
-//! `SANDBOXES` VMs in turn attach the generation and mount it alone, run the same statuses and
-//! reads, the first `git status` lstatting every tracked file and hashing none, and write to a file
-//! of the base and a new one; and a last one mounts it `REPOS` times over, as volumes of its own,
-//! and boots again with them closed. The host measures the bytes of the volume's layers and its
-//! records in the allocator's tree, which are what baking the checkout into a cell would cost
-//! every mount (doc-10), and what each cell and bucket takes on its disk after each VM.
+//! booted on the same disk or cell, does the same, a guest that has seen nothing of it. On Fxfs,
+//! the first VM checks Linux out into a volume, and the host measures the bytes of the volume's
+//! layers and its records in the allocator's tree, and what each cell and bucket takes on its disk
+//! after each VM.
 //!
 //! Every VM is measured as its guest asks ([`crate::measure`]): the host's memory, the VM process's
 //! and the extent daemon's, which the case starts for itself, and the guest's, on the log's
@@ -55,8 +47,8 @@ pub enum Checkout {
 }
 
 impl Checkout {
-    /// Whether it is ext4's, on an image file: one VM checks it out, another opens it, and no
-    /// volume is shared.
+    /// Whether it is ext4's, on an image file: one VM checks it out, another opens it.
+    #[cfg_attr(feature = "host", allow(dead_code))]
     fn ext4(self) -> bool {
         matches!(self, Checkout::Ext4 | Checkout::Ext4Pmem)
     }
@@ -74,11 +66,9 @@ const DEVICE: &str = "CLADEFS_LINUX_CHECKOUT_DEVICE";
 #[host]
 mod host {
     use super::*;
-    use crate::common::{
-        Window, cladefs_guest_should_run, control, dax_window, setup_rootfs, spawn_daemon,
-    };
+    use crate::checkout_vms::host::{Vms, format};
+    use crate::common::{Window, cladefs_guest_should_run, dax_window, setup_rootfs, spawn_daemon};
     use crate::measure::{HostMemory, metrics_address};
-    use crate::shared_volumes::host::{Vms, format, next_generation};
     use crate::vm::{Vm, without_kernel_lines};
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
     use anyhow::Context;
@@ -95,10 +85,7 @@ mod host {
 RUN dnf install -y git strace e2fsprogs && dnf clean all
 RUN git clone --bare --depth 1 --branch v6.18 https://github.com/torvalds/linux /linux.git
 ";
-    /// The VMs that mount the shared checkout alone, one after the other.
-    const SANDBOXES: usize = 3;
     const CPUS: u8 = 4;
-    /// Enough for what `REPOS` volumes take, which the test measures.
     const MEMORY_MIB: u32 = 4096;
     const CAPACITY: u64 = 8 << 30;
 
@@ -200,37 +187,20 @@ RUN git clone --bare --depth 1 --branch v6.18 https://github.com/torvalds/linux 
             vm.env(&CString::new(format!("{DEVICE}={device}"))?);
             Ok(())
         };
-        vms.boot("checkout", false, disk)?.0.wait()?;
+        vms.boot("checkout", disk)?.wait()?;
         measure_disk(dir, "checkout")?;
-        vms.boot("reopened", false, disk)?.0.wait()?;
+        vms.boot("reopened", disk)?.wait()?;
         measure_disk(dir, "reopened")
     }
 
-    /// The checkout on Fxfs: in the first VM's cell, which a second VM opens, and published, which
-    /// sandboxes attach.
+    /// The checkout on Fxfs: in the first VM's cell, which a second VM opens.
     fn fxfs(vms: &Vms, dir: &Path) -> anyhow::Result<()> {
-        let control = control(&vms.cladefsd)?;
         let disk_root = crate::common::disk_root_for(dir, "cladefsd");
-        let publisher = format(&vms.cladefsd, &disk_root, CAPACITY)?;
-        let (vm, stream) = vms.run("checkout", publisher, true)?;
-        let mut stream = stream.context("the first VM's connection")?;
-        let generation = next_generation(&mut stream, &control, publisher)?;
-        vm.wait()?;
-        measure_metadata(&crate::common::cell_disk_path(&disk_root, publisher))?;
+        let cell = format(&vms.cladefsd, &disk_root, CAPACITY)?;
+        vms.run("checkout", cell)?.wait()?;
+        measure_metadata(&crate::common::cell_disk_path(&disk_root, cell))?;
         measure_disk(dir, "checkout")?;
-        vms.run("reopened", publisher, false)?.0.wait()?;
-
-        let generations = [generation];
-        for sandbox in 0..SANDBOXES {
-            let role = format!("sandbox-{sandbox}");
-            let cell = crate::common::create_cell(&vms.cladefsd, CAPACITY)?;
-            vms.run_consumer(&role, cell, &control, &generations)?;
-            measure_disk(dir, &role)?;
-        }
-        let hundreds = crate::common::create_cell(&vms.cladefsd, CAPACITY)?;
-        vms.run_consumer("hundreds", hundreds, &control, &generations)?;
-        measure_disk(dir, "hundreds")?;
-        vms.run("rebooted", hundreds, false)?.0.wait()
+        vms.run("reopened", cell)?.wait()
     }
 
     impl Test for TestLinuxCheckout {
@@ -258,17 +228,7 @@ RUN git clone --bare --depth 1 --branch v6.18 https://github.com/torvalds/linux 
         fn check(self: Box<Self>, stdout: Vec<u8>, _test_setup: TestSetup) -> TestOutcome {
             let output = without_kernel_lines(&String::from_utf8(stdout).unwrap());
             let said: Vec<_> = output.lines().filter(|line| line.starts_with("OK ")).collect();
-            let roles: Vec<String> = if self.on.ext4() {
-                vec!["checkout".into(), "reopened".into()]
-            } else {
-                ["checkout", "reopened"]
-                    .into_iter()
-                    .map(str::to_owned)
-                    .chain((0..SANDBOXES).map(|sandbox| format!("sandbox-{sandbox}")))
-                    .chain(["hundreds".to_owned(), "rebooted".to_owned()])
-                    .collect()
-            };
-            let expected: Vec<_> = roles.iter().map(|role| format!("OK {role}")).collect();
+            let expected = ["OK checkout", "OK reopened"];
             if said == expected {
                 TestOutcome::Pass
             } else {
@@ -283,27 +243,19 @@ mod guest {
     use super::*;
     use crate::Test;
 
-    use crate::shared_volumes::guest::{
-        HOME, MNT, REPO, attach_generation, check_first_status, connect, drop_caches, git, give,
-        mount, mount_repo, publish, settle_index, sync, tracked_files, try_import, unmount,
+    use crate::checkout_vms::guest::{
+        HOME, MNT, REPO, drop_caches, git, give, mount, mount_repo, settle_index, sync,
+        tracked_files, unmount,
     };
-    use std::fs::{self, OpenOptions};
+    use std::fs;
     use std::io::Read as _;
-    use std::os::unix::fs::{FileExt as _, MetadataExt as _};
+    use std::os::unix::fs::MetadataExt as _;
     use std::path::Path;
     use std::process::Command;
     use std::time::{Duration, Instant};
 
     /// Linux's bare clone, which the root filesystem's image holds.
     const UPSTREAM: &str = "/linux.git";
-    /// How many volumes the last VM mounts at once.
-    const REPOS: usize = 256;
-    /// A file of the base, which the first write changes.
-    const OVERWRITTEN: &str = "MAINTAINERS";
-    /// A file the first write makes.
-    const CREATED: &str = "new-file";
-    /// What `git status` finds after those writes.
-    const WRITTEN: &str = " M MAINTAINERS\n?? new-file\n";
 
     /// Says what the guest of a role measures.
     struct Measure {
@@ -327,16 +279,6 @@ mod guest {
             output
         }
 
-        /// Says how long `durations` took: each of many of one thing.
-        fn spread(&self, name: &str, durations: &[Duration]) {
-            let mut sorted = durations.to_vec();
-            sorted.sort_unstable();
-            self.duration(&format!("{name}-first"), durations[0]);
-            self.duration(&format!("{name}-median"), sorted[sorted.len() / 2]);
-            self.duration(&format!("{name}-max"), sorted[sorted.len() - 1]);
-            self.duration(&format!("{name}-total"), durations.iter().sum());
-        }
-
         /// Has the host measure its memory and the guest's as of `stage` ([`crate::measure`]).
         fn memory(&self, stage: &str) {
             crate::measure::measure(&format!("{}-{stage}", self.role));
@@ -347,13 +289,6 @@ mod guest {
             drop_caches();
             self.memory(&format!("{stage}-pinned"));
         }
-    }
-
-    /// How long `f` takes.
-    fn elapsed(f: impl FnOnce()) -> Duration {
-        let start = Instant::now();
-        f();
-        start.elapsed()
     }
 
     /// Runs `program` with `args`, as root, which must succeed.
@@ -435,7 +370,7 @@ mod guest {
         assert_eq!(measure.time("status-warm-again", || git(path, &status)), "");
     }
 
-    /// Checks Linux out at `REPO`, measures it, and publishes it if it is a volume.
+    /// Checks Linux out at `REPO`, and measures it.
     fn checkout(measure: &Measure, on: Checkout) {
         if !on.ext4() {
             mount_repo();
@@ -460,11 +395,6 @@ mod guest {
         reads(measure, REPO);
         measure.memory("read");
         measure.pinned("read");
-        if !on.ext4() {
-            let mut host = connect();
-            let manifest = measure.time("publish", || publish(&mut host));
-            measure.say("manifest", manifest, "bytes");
-        }
         unmount(REPO);
     }
 
@@ -483,105 +413,9 @@ mod guest {
         unmount(REPO);
     }
 
-    /// The first write to the repo at `path`, each to the device: to a file of the base, and a new
-    /// file.
-    fn write(measure: &Measure, path: &str) {
-        let overwritten = format!("{path}/{OVERWRITTEN}");
-        measure.time("first-overwrite", || {
-            let file = OpenOptions::new().write(true).open(&overwritten).unwrap();
-            file.write_all_at(b"#", 0).unwrap();
-            file.sync_all().unwrap();
-        });
-        let created = format!("{path}/{CREATED}");
-        measure.time("first-create", || {
-            let file = fs::File::create_new(&created).unwrap();
-            file.write_all_at(b"the sandbox's\n", 0).unwrap();
-            file.sync_all().unwrap();
-        });
-    }
-
-    fn sandbox(measure: &Measure) {
-        measure.pinned("booted");
-        let mut host = connect();
-        let manifest = measure.time("attach", || attach_generation(&mut host, 0));
-        measure.time("import", || try_import("linux", &manifest).unwrap());
-        let path = format!("{MNT}/linux");
-        fs::create_dir(&path).unwrap();
-        measure.time("mount", || mount(Some("linux"), &path));
-        measure.memory("mounted");
-
-        statuses(measure, &path);
-        check_first_status(&path);
-        reads(measure, &path);
-        measure.memory("read");
-        measure.pinned("read");
-
-        write(measure, &path);
-        assert_eq!(
-            measure.time("status-after-writes", || git(&path, &["status", "--porcelain"])),
-            WRITTEN
-        );
-        measure.pinned("written");
-        unmount(&path);
-    }
-
-    fn repo(number: usize) -> String {
-        format!("{MNT}/repo-{number}")
-    }
-
-    fn volume(number: usize) -> String {
-        format!("linux-{number}")
-    }
-
-    /// Unmounts the `REPOS` volumes.
-    fn unmount_all(measure: &Measure) {
-        measure.time("unmount-all", || {
-            for number in 0..REPOS {
-                unmount(&repo(number));
-            }
-        });
-    }
-
-    fn hundreds(measure: &Measure) {
-        measure.pinned("booted");
-        let mut host = connect();
-        let manifest = attach_generation(&mut host, 0);
-        let (mut imports, mut mounts) = (Vec::new(), Vec::new());
-        for number in 0..REPOS {
-            let (path, name) = (repo(number), volume(number));
-            fs::create_dir(&path).unwrap();
-            imports.push(elapsed(|| try_import(&name, &manifest).unwrap()));
-            mounts.push(elapsed(|| mount(Some(&name), &path)));
-        }
-        measure.spread("import", &imports);
-        measure.spread("mount", &mounts);
-        measure.pinned("mounted");
-
-        statuses(measure, &repo(0));
-        write(measure, &repo(0));
-        measure.pinned("written");
-        unmount_all(measure);
-    }
-
-    /// `hundreds`, booted again, with the volumes closed: what opens is only what mounts.
-    fn rebooted(measure: &Measure) {
-        measure.pinned("booted");
-        measure.time("mount", || mount(Some(&volume(1)), &repo(1)));
-        measure.memory("mounted");
-        statuses(measure, &repo(1));
-        measure.pinned("status");
-
-        let others = (0..REPOS).filter(|number| *number != 1);
-        let mounts: Vec<_> =
-            others.map(|number| elapsed(|| mount(Some(&volume(number)), &repo(number)))).collect();
-        measure.spread("mount-others", &mounts);
-        measure.pinned("mounted-all");
-        unmount_all(measure);
-    }
-
     impl Test for TestLinuxCheckout {
         fn in_guest(self: Box<Self>) {
-            let role = std::env::var("CLADEFS_SHARED_VOLUMES").unwrap();
+            let role = std::env::var("CLADEFS_LINUX_CHECKOUT_ROLE").unwrap();
             let measure = Measure { role: role.clone() };
             fs::create_dir_all(MNT).unwrap();
             if self.on.ext4() {
@@ -609,12 +443,9 @@ mod guest {
                 measure.time("default-mount", || mount(None, MNT));
             }
             give(HOME);
-            match (self.on, role.split('-').next().unwrap()) {
+            match (self.on, role.as_str()) {
                 (on, "checkout") => checkout(&measure, on),
                 (on, "reopened") => reopened(&measure, on),
-                (on, "sandbox") if !on.ext4() => sandbox(&measure),
-                (on, "hundreds") if !on.ext4() => hundreds(&measure),
-                (on, "rebooted") if !on.ext4() => rebooted(&measure),
                 (on, role) => panic!("no role {role} on {on:?}"),
             }
             if !self.on.ext4() {

@@ -2744,72 +2744,6 @@ static void cladefs_vfs_changed(void *arg)
 	schedule_work(&filesystem->resize);
 }
 
-/* cladefs: CLADEFS_IOC_FLUSH (vfs.h). The lock keeps the filesystem from freezing under the flush. */
-static long cladefs_vfs_ioc_flush(struct super_block *sb)
-{
-	struct cladefs_vfs_filesystem *filesystem = cladefs_vfs_info(sb)->filesystem;
-	long err;
-
-	mutex_lock(&filesystem->lock);
-	err = cladefs_nofs(cladefs_flush_volume(cladefs_vfs_fs(sb)));
-	mutex_unlock(&filesystem->lock);
-	return err;
-}
-
-/* cladefs: CLADEFS_IOC_MANIFEST (vfs.h). The lock keeps the filesystem frozen. */
-static long cladefs_vfs_ioc_manifest(struct super_block *sb, struct cladefs_manifest __user *arg)
-{
-	struct cladefs_vfs_filesystem *filesystem = cladefs_vfs_info(sb)->filesystem;
-	struct cladefs_manifest request;
-	ssize_t size;
-	void *manifest;
-
-	if (copy_from_user(&request, arg, sizeof(request)))
-		return -EFAULT;
-	manifest = kvmalloc(CLADEFS_MANIFEST_MAX, GFP_KERNEL);
-	if (!manifest)
-		return -ENOMEM;
-	mutex_lock(&filesystem->lock);
-	size = cladefs_nofs(cladefs_manifest(cladefs_vfs_fs(sb), manifest, CLADEFS_MANIFEST_MAX));
-	mutex_unlock(&filesystem->lock);
-	if (size >= 0 && size > request.size)
-		size = -ERANGE;
-	if (size >= 0 && (copy_to_user(u64_to_user_ptr(request.data), manifest, size) ||
-			  put_user((__u64)size, &arg->size)))
-		size = -EFAULT;
-	kvfree(manifest);
-	return size < 0 ? size : 0;
-}
-
-/* cladefs: CLADEFS_IOC_IMPORT (vfs.h). */
-static long cladefs_vfs_ioc_import(struct super_block *sb, struct cladefs_import __user *arg)
-{
-	struct cladefs_vfs_filesystem *filesystem = cladefs_vfs_info(sb)->filesystem;
-	struct cladefs_import request;
-	void *name, *manifest;
-	long err;
-
-	if (copy_from_user(&request, arg, sizeof(request)))
-		return -EFAULT;
-	if (request.name_size > NAME_MAX || request.manifest_size > CLADEFS_MANIFEST_MAX)
-		return -EINVAL;
-	name = memdup_user(u64_to_user_ptr(request.name), request.name_size);
-	if (IS_ERR(name))
-		return PTR_ERR(name);
-	manifest = vmemdup_user(u64_to_user_ptr(request.manifest), request.manifest_size);
-	if (IS_ERR(manifest)) {
-		kfree(name);
-		return PTR_ERR(manifest);
-	}
-	mutex_lock(&filesystem->lock);
-	err = cladefs_nofs(cladefs_import(filesystem->filesystem, name, request.name_size,
-					  manifest, request.manifest_size));
-	mutex_unlock(&filesystem->lock);
-	kvfree(manifest);
-	kfree(name);
-	return err;
-}
-
 /* cladefs: a directory's ioctls (vfs.h). */
 static long cladefs_vfs_dir_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
@@ -2820,16 +2754,6 @@ static long cladefs_vfs_dir_ioctl(struct file *file, unsigned int cmd, unsigned 
 	case CLADEFS_IOC_CACHED_OBJECTS:
 		cached = cladefs_cached_objects(cladefs_vfs_fs(sb));
 		return copy_to_user((void __user *)arg, &cached, sizeof(cached)) ? -EFAULT : 0;
-	case CLADEFS_IOC_FLUSH:
-	case CLADEFS_IOC_MANIFEST:
-	case CLADEFS_IOC_IMPORT:
-		if (!capable(CAP_SYS_ADMIN))
-			return -EPERM;
-		if (cmd == CLADEFS_IOC_FLUSH)
-			return cladefs_vfs_ioc_flush(sb);
-		if (cmd == CLADEFS_IOC_MANIFEST)
-			return cladefs_vfs_ioc_manifest(sb, (void __user *)arg);
-		return cladefs_vfs_ioc_import(sb, (void __user *)arg);
 	default:
 		return -ENOTTY;
 	}

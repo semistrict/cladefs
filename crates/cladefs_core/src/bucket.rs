@@ -4681,54 +4681,6 @@ mod tests {
         );
     }
 
-    /// board 5542: shredding an attached public base refuses subsequent reads of its extents
-    /// through a child `OpenCell` with `EACCES`.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn shredding_attached_base_refuses_reads_through_child() {
-        let keys = tempfile::tempdir().unwrap();
-        let kms = Arc::new(extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap());
-        for tenant in [0, 1] {
-            kms.create(tenant).unwrap();
-        }
-        crate::bucket::set_kms(kms).unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "").unrouted());
-        let base_path = dir.path().join("base");
-        let base =
-            kept_in(&base_path, (1 << 30, Some(crate::host_cell::named(0))), &bucket, idle())
-                .await
-                .unwrap();
-        let base_cell = base.cell();
-        let data = noise(7, 4 * BLOCK);
-        let extent = write(&base, 1, &data).await;
-        base.commit(None).await.unwrap();
-        base.wait_uploaded().await.unwrap();
-        local_cell::upload::blocking(|| base.make_public_attach_only()).unwrap();
-        base.close().await;
-
-        let child = kept_in(
-            dir.path().join("child"),
-            (1 << 30, Some(crate::host_cell::named(1))),
-            &bucket,
-            idle(),
-        )
-        .await
-        .unwrap();
-        local_cell::upload::blocking(|| child.attach_base(&base_path, &[base_cell.id])).unwrap();
-        let mut buf = vec![0u8; data.len()];
-        child.read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut buf[..])]).await.unwrap();
-        assert_eq!(buf, data);
-
-        // Shred the base cell: child reads of the attached base's extent must now return EACCES.
-        crate::bucket::shred_cell(&*bucket, base_cell).await.unwrap();
-        let err = child
-            .read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut buf[..])])
-            .await
-            .unwrap_err();
-        assert_eq!(err, crate::Errno::EACCES);
-        child.close().await;
-    }
-
     /// board 5552: `shred_tenant` when no bucket destroyed the tenant's KEK (`destroyed` empty)
     /// must return an error without calling `forget`, leaving live stores serving and the KMS
     /// cache unpoisoned.

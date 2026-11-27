@@ -7,6 +7,8 @@ updated_date: '2026-11-17 01:09'
 ---
 # Shared volumes: Fxfs volumes over read-only bases
 
+> **Removed (2026-11-27, board 14527, hotbed question 598):** Shared volumes (`AttachBase`, volumes over base layers in Fxfs, the guest's `CLADEFS_IOC_FLUSH`/`MANIFEST`/`IMPORT` ioctls, `fxfs-automount` and `git-remote-fxfs`, and the tests that stood in for the sandbox manager) were removed from cladefs: the sandbox manager's part was never built, and the user decided that normal cells and forking serve ("we can just rely on normal cells and forking"). Plain Fxfs volumes (`-o volume=NAME`, `Options::lazy_volumes`), cells, versions and forks stay. Fxfs stays frozen at version 66: a store's information still decodes with its `base_layers` and `base_cells`, and a store that names base layers is refused on open (`NotSupported`) and reported by fsck (`FsckFatal::StoreOverBase`), never opened as a plain volume. The cell records' `attached-bases` stays in the frozen corpus, which no build reads or writes. This document is kept as a historical record of the removed design.
+
 Status, 2026-11-08. Built: the guest's mounts of volumes (TASK-136.2), volumes over base layers in
 Fxfs (TASK-136.3), attaching a base to a cell (TASK-136.5), and publishing from a sandbox and
 importing in another (TASK-136.4), which the test `fxfs-guest-shared-volumes` runs with Git; lookups

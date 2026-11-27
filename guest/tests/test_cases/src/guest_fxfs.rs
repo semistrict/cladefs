@@ -134,7 +134,7 @@ pub fn try_vsock_connect(port: u32) -> std::io::Result<fs::File> {
 pub fn role_from_host(port: u32) -> (String, fs::File) {
     use std::io::{BufRead as _, BufReader};
     let mut conn = None;
-    let role = fxfs_automount::reconnect::exchange(
+    let role = crate::reconnect::exchange(
         || try_vsock_connect(port),
         |host| {
             let mut line = String::new();

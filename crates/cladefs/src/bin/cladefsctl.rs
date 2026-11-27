@@ -25,8 +25,6 @@
 //! cladefsctl drop TENANT/CELL
 //! cladefsctl resize TENANT/CELL CAPACITY
 //! cladefsctl public TENANT/CELL
-//! cladefsctl public-attach-only TENANT/CELL
-//! cladefsctl attach TENANT/CELL BASE_TENANT/BASE_CELL
 //! cladefsctl stat TENANT/CELL
 //! cladefsctl stats [--json] [--wait SECONDS] [--leave-out histograms|guests|vms]...
 //! cladefsctl cells [--json]
@@ -136,10 +134,7 @@
 //! daemon, a cell its VM has open grows at once, the guest seeing the new size while mounted, and
 //! shrinks if the guest's filesystem agrees, no lower than what it holds; otherwise, it grows, and
 //! does not shrink. `public` makes the cell at DIR a public base, whose pages every tenant's forks
-//! of it share (TASK-43); `public-attach-only` makes its branch alone public, not those it
-//! inherited, a base to attach to cells, not to fork (`MakePublic`'s `attach_only`). `attach` attaches the cell BASE_TENANT/BASE_CELL (BASE_DIR without the daemon)
-//! to the cell at DIR, its extents the cell doesn't hold read through to it, read-only
-//! (`AttachBase`). `stat` prints what the cell at DIR is and holds, one `name value` a line:
+//! of it share (TASK-43). `stat` prints what the cell at DIR is and holds, one `name value` a line:
 //! its cell (base 32), capacity, used and available bytes, and of those used, its own (its cell
 //! wrote them) and inherited (from the cells it was forked from), what billing it alone charges it
 //! and what it shares (TASK-49); how many extents it holds, own and inherited (`own_extents`,
@@ -506,8 +501,7 @@ mod cli {
          cladefsctl share TENANT/CELL VERSION | cladefsctl unshare TENANT/CELL VERSION | \
          cladefsctl delete TENANT/CELL | cladefsctl drop TENANT/CELL | \
          cladefsctl resize TENANT/CELL CAPACITY | \
-         cladefsctl public TENANT/CELL | cladefsctl public-attach-only TENANT/CELL | \
-         cladefsctl attach TENANT/CELL BASE_TENANT/BASE_CELL | \
+         cladefsctl public TENANT/CELL | \
          cladefsctl stat TENANT/CELL | \
          cladefsctl stats [--json] [--wait SECONDS] [--leave-out histograms|guests|vms]... | \
          cladefsctl cells [--json] | cladefsctl counters [--json] | \
@@ -639,13 +633,6 @@ mod cli {
         },
         Public {
             target: cladefs::CellId,
-        },
-        PublicAttachOnly {
-            target: cladefs::CellId,
-        },
-        Attach {
-            target: cladefs::CellId,
-            base: cladefs::CellId,
         },
         Stat {
             target: cladefs::CellId,
@@ -1073,10 +1060,6 @@ mod cli {
                     Self::Resize { target: target(cell)?, capacity: capacity(size)? }
                 }
                 ["public", cell] => Self::Public { target: target(cell)? },
-                ["public-attach-only", cell] => Self::PublicAttachOnly { target: target(cell)? },
-                ["attach", cell, base] => {
-                    Self::Attach { target: target(cell)?, base: target(base)? }
-                }
                 ["stat", cell] => Self::Stat { target: target(cell)? },
                 ["stats", ref rest @ ..] => stats(rest)?,
                 ["cells"] => Self::Cells { json: false },
@@ -1374,28 +1357,8 @@ mod cli {
                 }
                 Self::Public { target } => {
                     let cell = target;
-                    let request = MakePublicRequest {
-                        tenant: cell.tenant,
-                        cell: cell.id,
-                        attach_only: false,
-                    };
+                    let request = MakePublicRequest { tenant: cell.tenant, cell: cell.id };
                     call!(format!("making cell {cell} public"), make_public, request);
-                }
-                Self::PublicAttachOnly { target } => {
-                    let cell = target;
-                    let request =
-                        MakePublicRequest { tenant: cell.tenant, cell: cell.id, attach_only: true };
-                    call!(format!("making cell {cell} public to attach"), make_public, request);
-                }
-                Self::Attach { target, base } => {
-                    let cell = target;
-                    let request = AttachBaseRequest {
-                        tenant: cell.tenant,
-                        cell: cell.id,
-                        base_tenant: base.tenant,
-                        base_cell: base.id,
-                    };
-                    call!(format!("attaching {base} to {cell}"), attach_base, request);
                 }
                 Self::Stat { target } => {
                     let cell = target;
@@ -1833,9 +1796,7 @@ mod cli {
                 | Self::Delete { .. }
                 | Self::Drop { .. }
                 | Self::Resize { .. }
-                | Self::Public { .. }
-                | Self::PublicAttachOnly { .. }
-                | Self::Attach { .. } => "live cell commands are",
+                | Self::Public { .. } => "live cell commands are",
                 Self::Import { .. } | Self::ImportMemory { .. } => "its imports are",
                 Self::Stat { .. } => "its cells' stats are",
                 Self::FormatBucket { .. }

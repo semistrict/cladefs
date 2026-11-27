@@ -75,14 +75,6 @@ pub(super) async fn hold_to_write(
     Ok(hold)
 }
 
-/// cladefs: `EBUSY` unless `open_cell`'s own pages are of `arena`: the connection's, which its VM
-/// process holds (TASK-79.36). Its window maps no other arena's pages, and the default's read-only
-/// alone, its tenant's being its own.
-fn in_arena(open_cell: &OpenCell, arena: Option<&Arc<Arena>>) -> Result<(), Errno> {
-    let own = arena.map_or(cladefs_core::pages::ArenaId::DEFAULT, |arena| arena.id());
-    if open_cell.arena() == own { Ok(()) } else { Err(Errno::EBUSY) }
-}
-
 /// How long holding a cell waits for a connection whose VM process is gone to let it go: as a VM
 /// restored from a snapshot at once opens the cell its VM had (TASK-39.1).
 pub(super) const CLOSING_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -526,9 +518,8 @@ pub(super) async fn open_cell_at(
     arena: Option<&Arc<Arena>>,
 ) -> Result<OpenCell, Errno> {
     let arena = arena.cloned();
-    let own = arena.clone();
-    let open_cell = attached(daemon, path, async |keeping| {
-        let opening = Opening::keeping_on(daemon.host.clone(), keeping).arena(own);
+    attached(daemon, path, async |keeping| {
+        let opening = Opening::keeping_on(daemon.host.clone(), keeping).arena(arena);
         match new {
             Some(New { capacity, kind, tenant, ephemeral: true, .. })
                 if !local_cell::upload::blocking(|| host_fs::exists(&path)) =>
@@ -546,106 +537,6 @@ pub(super) async fn open_cell_at(
             }
             _ => OpenCell::open_with(path, opening).await,
         }
-    })
-    .await?;
-    // cladefs: a fork attached to it opens when first read through to, awaited (doc-24, step 5).
-    let for_bases = Arc::clone(daemon);
-    let bases = local_cell::upload::blocking(|| {
-        open_cell.open_bases(Arc::new(move |base| {
-            let (daemon, base, arena) = (Arc::clone(&for_bases), base.to_owned(), arena.clone());
-            Box::pin(async move { self::base(&daemon, &base, arena.as_ref()).await })
-        }))
-    });
-    // cladefs: what is attached to it unread, its disk failing, closed again, as every open cell
-    // the daemon lets go of is (board 5748: dropped open, it panicked).
-    if let Err(err) = bases {
-        open_cell.close().await;
-        return Err(err.into());
-    }
-    Ok(open_cell)
-}
-
-/// cladefs: the fork at `path`, attached to cells (backlog doc-10), for a cell whose pages are of
-/// `arena` to read through to.
-async fn base(
-    daemon: &Arc<Daemon>,
-    path: &Path,
-    arena: Option<&Arc<Arena>>,
-) -> Result<Arc<OpenCell>, Errno> {
-    let open = |found: Option<Arc<OpenCell>>| match found {
-        Some(open_cell) if open_cell.is_public() => Ok(Some(open_cell)),
-        Some(open_cell) => in_arena(&open_cell, arena).map(|()| Some(open_cell)),
-        None => Ok(None),
-    };
-    let key = cell_dir_key(path);
-    if let Some(open_cell) = open(daemon.table.instance(&key))? {
-        return Ok(open_cell);
-    }
-    let hold = hold(daemon, &key).await?;
-    if let Some(open_cell) = open(hold.instance())? {
-        return Ok(open_cell);
-    }
-    if !local_cell::upload::blocking(|| host_fs::exists(&path)) {
-        return Err(Errno::ENOENT);
-    }
-    let opened = attached(daemon, path, async |keeping| {
-        Opening::keeping_on(daemon.host.clone(), keeping)
-            .arena(arena.cloned())
-            .open_base(path)
-            .await
-    });
-    let open_cell = Arc::new(opened.await?);
-    hold.open(&open_cell)?;
-    Ok(open_cell)
-}
-
-/// cladefs: attaches the fork at `base` to the cell at `path` on `daemon` (`AttachBase`), a VM's
-/// or stopped: `EACCES` unless `allowed` says its tenant may read a cell that isn't public.
-pub(super) async fn attach(
-    daemon: &Arc<Daemon>,
-    path: PathBuf,
-    base: PathBuf,
-    allowed: impl FnOnce(&Path, &Path) -> bool + Send + 'static,
-) -> Result<(), Errno> {
-    let base = blocking(move || {
-        host_fs::canonicalize(&base).map_err(|err| match err.kind() {
-            std::io::ErrorKind::NotFound => Errno::ENOENT,
-            _ => Errno::EIO,
-        })
-    })
-    .await?;
-    let (public, ancestry) = match daemon.table.instance(&cell_dir_key(&base)) {
-        Some(open_cell) => inspect(daemon, open_cell, |cell| (cell.is_public(), cell.ancestry())),
-        None => {
-            let here = Here::open(daemon, &base, hold(daemon, &base).await?).await?;
-            let what = (here.held().open_cell.is_public(), here.held().open_cell.ancestry());
-            here.close().await;
-            what
-        }
-    };
-    if !public && !allowed(&cell_dir_key(&path), &base) {
-        return Err(Errno::EACCES);
-    }
-    if let Some(open_cell) = open_by_connection(daemon, &path) {
-        // Let go of here, as its connection may let it go meanwhile (board 5764).
-        let attaching = open_cell.clone();
-        let attached = blocking(move || attaching.attach_base(&base, &ancestry)).await;
-        release(open_cell).await;
-        return attached;
-    }
-    let held = hold(daemon, &path).await?;
-    let host = daemon.host.clone();
-    blocking(move || {
-        let _held = held;
-        // An unmade directory is no cell: what its making wrote, plainly, may be torn (board
-        // 7420).
-        if !host_fs::exists(&path) || cladefs_core::host_cell::unmade_on(&host, &path) {
-            return Err(Errno::ENOENT);
-        }
-        if host_fs::exists(path.join(crate::migration::MARKER)) {
-            return Err(Errno::EBUSY);
-        }
-        cladefs_core::cell_dir::attach_on(host.local(), &path, &base, &ancestry)
     })
     .await
 }
@@ -1009,9 +900,9 @@ async fn opened_version(
         let url = cladefs_core::host_cell::bucket_for(&made).map_err(|_| Errno::EIO)?;
         let description =
             local_cell::Description { block_size: OpenCell::BLOCK_SIZE, capacity, cell };
-        // What is attached to the cell the version was made of, if made here, is inherited before
+        // What is public of the cell the version was made of, if made here, is inherited before
         // the version directory is marked made (board 5388), so a failed copy discards the
-        // directory rather than leaving later restores/forks missing attached bases.
+        // directory rather than leaving later restores/forks missing public markers.
         OpenCell::create_at_version_with_on(
             &host,
             &made,
@@ -1019,7 +910,7 @@ async fn opened_version(
             description,
             version,
             || match cladefs_core::host_cell::version_made_of_on(&host, cell, version) {
-                Some(of) => cladefs_core::cell_dir::inherit_attached_on(host.local(), &of, &made)
+                Some(of) => cladefs_core::cell_dir::inherit_public_on(host.local(), &of, &made)
                     .map_err(cladefs_core::Error::new),
                 None => Ok(()),
             },
@@ -1529,19 +1420,11 @@ pub(super) async fn place(daemon: &Arc<Daemon>, path: PathBuf, token: u64) -> Re
 }
 
 /// Makes the cell at `path` on `daemon` a public base.
-pub(super) async fn make_public(
-    daemon: &Arc<Daemon>,
-    path: PathBuf,
-    attach_only: bool,
-) -> Result<(), Errno> {
+pub(super) async fn make_public(daemon: &Arc<Daemon>, path: PathBuf) -> Result<(), Errno> {
     let _held = hold_alone(daemon, &path).await?;
     let open_cell = Arc::new(open_here(daemon, &path).await?);
     let making = open_cell.clone();
-    let made = blocking(move || match attach_only {
-        true => making.make_public_attach_only(),
-        false => making.make_public(),
-    })
-    .await;
+    let made = blocking(move || making.make_public()).await;
     if let Some(open_cell) = Arc::into_inner(open_cell) {
         open_cell.close().await;
     }

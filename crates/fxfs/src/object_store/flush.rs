@@ -163,7 +163,6 @@ impl ObjectStore {
 
         // *Do* the actual compaction.
         let full_compaction = matches!(reason, FlushReason::Journal(ForceMajor::True));
-        let base_layers = new_store_info.base_layers.len();
         // cladefs: box `tree::flush` and `layer_from_written_handle` in non-inlined frames so
         // `flush_layers` fits in 16 KiB guest kernel stacks (TASK-26.9).
         let (layers_to_keep, old_layers) = crate::boxed(|| {
@@ -173,7 +172,6 @@ impl ObjectStore {
                 matches!(reason, FlushReason::Journal(_))
                     .then(|| filesystem.journal().get_compaction_yielder()),
                 full_compaction,
-                base_layers,
             )
         })
         .await
@@ -184,10 +182,8 @@ impl ObjectStore {
             vec![crate::boxed(|| layer_from_written_handle(new_object_tree_layer, &kept)).await?];
         new_layers.extend(layers_to_keep.iter().map(|l| (*l).clone()));
 
-        // cladefs: those of the store's own, above its base layers.
-        let own_layers = &new_layers[..new_layers.len() - base_layers];
         new_store_info.layers = Vec::new();
-        for layer in own_layers {
+        for layer in &new_layers {
             if let Some(handle) = layer.handle() {
                 new_store_info.layers.push(handle.object_id());
             }
@@ -239,7 +235,7 @@ impl ObjectStore {
         // small on 16 KiB guest kernel stacks (TASK-26.9).
         crate::boxed(|| self.write_store_info(&mut end_transaction, &new_store_info)).await?;
 
-        let layer_file_sizes = own_layers
+        let layer_file_sizes = new_layers
             .iter()
             .map(|l| l.handle().map(ReadObjectHandle::get_size).unwrap_or(0))
             .collect::<Vec<u64>>();
