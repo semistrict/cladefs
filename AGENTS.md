@@ -91,11 +91,10 @@ refuses to (`scripts/lib/measurement.sh`, TASK-368). Guest kernels come from the
 keyed by their sources (`scripts/guest-kernel.sh`, `host_kernel`), which `scripts/test-e2e.sh`
 uses too when `CLADEFS_GUEST_KERNEL` names none. A driver stopped mid-run leaves the job running:
 `DRIVER resume RUN RESULTS` fetches it, `DRIVER cancel RUN` ends it. Pass the run number as
-`CLADEFS_TEST_HOST_RUN` (e.g. `r1040`). Nothing in a hotbed test workspace runs as root: a test
-that needs root is skipped there, and what a run needs installed is a hotbed setup step, never part
-of a run. (That limit is for hotbed test workspaces only, not production hosts: on production hosts
-and in architectural design, cladefs has full root / `CAP_SYS_ADMIN` / host-kernel configuration
-access — only guests and jailed VM processes are untrusted.)
+`CLADEFS_TEST_HOST_RUN` (e.g. `r1040`). What a run needs installed is a hotbed setup step, never
+part of a run. On production hosts and in architectural design, cladefs has full root /
+`CAP_SYS_ADMIN` / host-kernel configuration access: only guests and jailed VM processes are
+untrusted.
 
 ## Commit in batches, only what compiled and passed its tests
 
