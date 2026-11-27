@@ -1534,10 +1534,11 @@ impl proto::peer_server::Peer for Server {
         request: Request<GetPartRequest>,
     ) -> Result<Response<GetPartResponse>, Status> {
         let GetPartRequest { bucket, key, part, home, root } = request.into_inner();
-        // A home past a u16: no region's, refused as one of another region.
-        let theirs = (root != 0)
-            .then_some(())
-            .and_then(|()| Some(Region { home: u16::try_from(home).ok()?, root }));
+        // A home is a u16 (`Region`): one past it means nothing, refused as it comes in (board
+        // 14354), never taken for no region's, which the bucket's URL alone would admit.
+        let home = u16::try_from(home)
+            .map_err(|_| Status::invalid_argument(format!("home {home}: past a u16")))?;
+        let theirs = (root != 0).then_some(Region { home, root });
         if let Err(refused) = admits((self.region, &self.bucket), (theirs, &bucket)) {
             return Err(Status::failed_precondition(refused));
         }

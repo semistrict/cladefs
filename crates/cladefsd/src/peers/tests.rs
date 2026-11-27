@@ -172,6 +172,47 @@ fn peers_of_another_region_are_refused_as_foreign() {
     assert!(matches!(refused, Err(Refusal::Foreign(_))), "{refused:?}");
 }
 
+/// A `GetPart` whose home is past a u16, what no region's home can be, is refused as meaningless
+/// (board 14354), whatever its root and bucket's URL: never taken for no region's, which the URL
+/// alone would admit, as it was for homes of this region's root that wrap to this region's home.
+/// Homes at a u16's edge are a region's like any other.
+#[test]
+fn homes_past_a_u16_are_refused() {
+    let (bucket, location) = holding(&noise(layout::PART));
+    let dir = tempfile::tempdir().unwrap();
+    let east = Region { home: 2, root: 7 };
+    let address = serving_in(&bucket, dir.path(), Some(east));
+    let (asked, _) = asked(&bucket, &location, 0);
+    let runtime = cladefs_core::bucket::bucket_runtime().unwrap();
+    let answer = |home: u32, root: u64| {
+        let channel = channel_on_with_prune(Daemon::process(), &address, false).unwrap();
+        let mut client = client(&channel);
+        let Asked { key, part } = asked.clone();
+        let request = GetPartRequest { bucket: URL.to_owned(), key, part, home, root };
+        runtime.block_on(client.get_part(request)).map(drop).map_err(|status| status.code())
+    };
+    let past = u32::from(u16::MAX) + 1;
+    let answers = [
+        answer(2, 7),
+        answer(u32::from(u16::MAX), 7),
+        answer(past, 7),
+        answer(past + 2, 7),
+        answer(u32::MAX, 7),
+        answer(past, 0),
+    ];
+    assert_eq!(
+        answers,
+        [
+            Ok(()),
+            Err(Code::FailedPrecondition),
+            Err(Code::InvalidArgument),
+            Err(Code::InvalidArgument),
+            Err(Code::InvalidArgument),
+            Err(Code::InvalidArgument),
+        ]
+    );
+}
+
 /// A peer out of reach fails within the time to connect, not the request's deadline.
 #[test]
 fn a_peer_out_of_reach_fails_fast() {
