@@ -6,7 +6,7 @@
 //! collector's sweeps over many cells (TASK-395.5; `scripts/gc-sweep.sh`).
 //!
 //! ```sh
-//! cladefs-gc-fill DIR TENANTS CELLS SEGMENTS [LARGEST] [--vm EXTENTS VERSIONS | --deleted | --clones EXTENTS]
+//! cladefs-gc-fill DIR TENANTS CELLS SEGMENTS [LARGEST] [--vm EXTENTS VERSIONS [TAIL] | --deleted | --clones EXTENTS]
 //! ```
 //!
 //! DIR, a directory, made if missing and empty, becomes a bucket of files (`file:///DIR/`) of
@@ -21,6 +21,9 @@
 //! its segments seals EXTENTS extents of 16 to 112 bytes and frees none, a disk filling, its checkpoints
 //! naming every extent sealed before them, and its cell has VERSIONS versions, at segments evenly
 //! apart, the last at its last: what a pass in full over the VM's cell recovers, a state a version.
+//! With TAIL, its checkpoint is written TAIL segments before its last, not after it: a VM writing
+//! since its last checkpoint, whose pass reads that checkpoint's parts, not its tail alone (board
+//! 14523).
 //!
 //! With `--deleted`, every cell is deleted once written, as its host deletes it
 //! (TASK-443.4): cells nothing lives in, which a pass removes whole (TASK-455).
@@ -83,7 +86,7 @@ fn vm_extent_bytes(n: u64, i: u64) -> usize {
 
 fn usage() -> String {
     "usage: cladefs-gc-fill DIR TENANTS CELLS SEGMENTS [LARGEST] \
-     [--vm EXTENTS POINTS | --deleted | --clones EXTENTS]"
+     [--vm EXTENTS POINTS [TAIL] | --deleted | --clones EXTENTS]"
         .into()
 }
 
@@ -95,8 +98,8 @@ enum Kind {
     /// The same, each deleted once written (TASK-443.4).
     Deleted,
     /// The largest a running VM's, of segments of `extents` extents, with `versions` versions
-    /// (TASK-395.12).
-    Vm { extents: u64, versions: u64 },
+    /// (TASK-395.12), its checkpoint `tail` segments before its last.
+    Vm { extents: u64, versions: u64, tail: u64 },
     /// Sandboxes made and deleted, clones of a version of their tenant's base, whose segments hold
     /// `extents` extents (TASK-443.4).
     Clones { extents: u64 },
@@ -133,7 +136,10 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Args, String> {
         [] => Kind::Garbage,
         ["--deleted"] => Kind::Deleted,
         ["--vm", extents, versions] => {
-            Kind::Vm { extents: count(extents)?, versions: count(versions)? }
+            Kind::Vm { extents: count(extents)?, versions: count(versions)?, tail: 0 }
+        }
+        ["--vm", extents, versions, tail] => {
+            Kind::Vm { extents: count(extents)?, versions: count(versions)?, tail: count(tail)? }
         }
         ["--clones", extents] => Kind::Clones { extents: count(extents)? },
         _ => return Err(usage()),
@@ -142,6 +148,11 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Args, String> {
         && versions > largest
     {
         return Err(format!("{largest} segments end in {largest} versions at most"));
+    }
+    if let Kind::Vm { tail, .. } = kind
+        && tail >= largest
+    {
+        return Err(format!("{largest} segments have {} after a checkpoint at most", largest - 1));
     }
     Ok(Args { dir: dir.into(), tenants, cells, segments, largest, kind })
 }
@@ -152,8 +163,9 @@ enum Shape {
     /// `segments` segments of garbage, and then deleted, if `deleted`.
     Garbage { segments: u64, deleted: bool },
     /// A VM's: `segments` segments of `extents` extents each, freeing none, with `versions`
-    /// versions at segments evenly apart, the last at the last.
-    Vm { segments: u64, extents: u64, versions: u64 },
+    /// versions at segments evenly apart, the last at the last, its checkpoint `tail` segments
+    /// before its last.
+    Vm { segments: u64, extents: u64, versions: u64, tail: u64 },
 }
 
 /// What a cell's objects take.
@@ -235,7 +247,7 @@ fn run(args: &Args, kms: &Arc<CachingKms>) -> Result<Filled, String> {
         Filled { cells: 0, total: Sum::default(), largest: Sum::default(), bases: Vec::new() };
     // The bases first, each with its version, which their tenants' sandboxes are clones of.
     if let Kind::Clones { extents } = kind {
-        let base = Shape::Vm { segments: largest, extents, versions: 1 };
+        let base = Shape::Vm { segments: largest, extents, versions: 1, tail: 0 };
         for tenant in 1..=tenants {
             let cell = CellId { tenant, id: 1 };
             let (sum, version) = futures::executor::block_on(fill_base(&files, kms, cell, base))
@@ -258,8 +270,8 @@ fn run(args: &Args, kms: &Arc<CachingKms>) -> Result<Filled, String> {
                     let sandbox = Shape::Garbage { segments, deleted: true };
                     (CellId { tenant, id: id + 1 }, sandbox, Some(&bases[tenant as usize - 1]))
                 }
-                Kind::Vm { extents, versions } if cell == first => {
-                    (cell, Shape::Vm { segments: largest, extents, versions }, None)
+                Kind::Vm { extents, versions, tail } if cell == first => {
+                    (cell, Shape::Vm { segments: largest, extents, versions, tail }, None)
                 }
                 Kind::Garbage | Kind::Deleted | Kind::Vm { .. } => {
                     let segments = if cell == first { largest } else { segments };
@@ -371,9 +383,9 @@ async fn write(
         }
     }
     let writer = Writer::open_under(bucket.clone(), id, WRITER, kms).await.map_err(failed)?;
-    let (segments, per_segment) = match shape {
-        Shape::Garbage { segments, .. } => (segments, EXTENTS),
-        Shape::Vm { segments, extents, .. } => (segments, extents),
+    let (segments, per_segment, tail) = match shape {
+        Shape::Garbage { segments, .. } => (segments, EXTENTS, 0),
+        Shape::Vm { segments, extents, tail, .. } => (segments, extents, tail),
     };
     let mut held: Vec<ExtentId> = Vec::new();
     let mut versioned = None;
@@ -414,8 +426,13 @@ async fn write(
         if let Some(version) = version {
             versioned = Some((version, Origin { parent: id, at: segment, epoch: writer.epoch() }));
         }
+        if n + 1 + tail == segments && tail > 0 {
+            writer.checkpoint().await.map_err(failed)?;
+        }
     }
-    writer.checkpoint().await.map_err(failed)?;
+    if tail == 0 {
+        writer.checkpoint().await.map_err(failed)?;
+    }
     drop(writer);
     if let Shape::Garbage { deleted: true, .. } = shape {
         // As a host deletes a cell (`local_cell::upload::delete_cell`).
@@ -488,7 +505,15 @@ mod tests {
         );
         assert_eq!(
             parsed(&["d", "1", "1", "1", "160", "--vm", "1024", "100"]),
-            Ok(args([1, 1, 1, 160], Kind::Vm { extents: 1024, versions: 100 }))
+            Ok(args([1, 1, 1, 160], Kind::Vm { extents: 1024, versions: 100, tail: 0 }))
+        );
+        assert_eq!(
+            parsed(&["d", "1", "1", "1", "160", "--vm", "1024", "100", "20"]),
+            Ok(args([1, 1, 1, 160], Kind::Vm { extents: 1024, versions: 100, tail: 20 }))
+        );
+        assert_eq!(
+            parsed(&["d", "1", "1", "1", "160", "--vm", "1024", "100", "160"]),
+            Err("160 segments have 159 after a checkpoint at most".into())
         );
         assert_eq!(
             parsed(&["d", "1", "3", "4", "--clones", "16"]),
