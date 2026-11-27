@@ -25,7 +25,9 @@
 //!
 //! Or the RAM is in a file of its own ([`Machine::snapshot_with`]), as a
 //! Firecracker snapshot's memory file is: the guest's RAM regions one after
-//! the other from its start, pages of zeroes left as holes.
+//! the other from its start, pages of zeroes left as holes. Or its caller
+//! keeps it ([`SnapshotRam::Kept`]), as a memory cell's version: the file
+//! holds none, and a restore is given it (`Machine::restore_onto`).
 //!
 //! Version 3 added the devices and the caller's data to what the machine is,
 //! the RAM file of its own, and Hypervisor.framework's state.
@@ -218,13 +220,18 @@ fn flat_offsets(layout: &MemoryLayout) -> Vec<(MemoryRegion, u64)> {
         .collect()
 }
 
-/// Where a snapshot's RAM goes.
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum RamAt<'a> {
-    /// In the snapshot's file, after its state.
+/// Where a snapshot's RAM goes ([`SnapshotOptions::ram`](crate::SnapshotOptions::ram)).
+#[derive(Debug, Clone, Copy, Default)]
+pub enum SnapshotRam<'a> {
+    /// In the snapshot's file, after its state ([`Snapshot::open`]).
+    #[default]
     Inline,
-    /// In a file of its own, at this path.
+    /// In a file of its own, at this path, as a Firecracker snapshot's memory file holds it
+    /// ([`Snapshot::open_split`]).
     File(&'a Path),
+    /// Nowhere: its caller keeps it, as a memory cell's version holds it, and gives it to the
+    /// machines restored ([`Snapshot::open_without_ram`]).
+    Kept,
 }
 
 /// Writes a snapshot of a machine: `machine` and `state` (encoded by the
@@ -235,18 +242,18 @@ pub(crate) fn write(
     machine: &MachineHeader,
     state: &[u8],
     mem: &GuestMemoryMmap,
-    ram: RamAt<'_>,
+    ram: SnapshotRam<'_>,
 ) -> Result<()> {
     let mut head = Encoder::default();
     machine.encode(&mut head);
     let mut all = head.finish();
     all.extend_from_slice(state);
     let (ram_offset, regions) = match ram {
-        RamAt::Inline => {
+        SnapshotRam::Inline => {
             let at = (HEADER_LEN as u64 + all.len() as u64).next_multiple_of(RAM_ALIGN);
             (at, ram_offsets(&machine.layout, at))
         }
-        RamAt::File(_) => (0, flat_offsets(&machine.layout)),
+        SnapshotRam::File(_) | SnapshotRam::Kept => (0, flat_offsets(&machine.layout)),
     };
 
     let mut header = Vec::with_capacity(HEADER_LEN);
@@ -264,15 +271,16 @@ pub(crate) fn write(
         file.write_all(&all)
     };
     match ram {
-        RamAt::Inline => replace(path, |file| {
+        SnapshotRam::Inline => replace(path, |file| {
             write_state(file)?;
             write_ram(file, mem, &regions)
         }),
         // The RAM first: a state file names RAM that is there.
-        RamAt::File(ram_path) => {
+        SnapshotRam::File(ram_path) => {
             replace(ram_path, |file| write_ram(file, mem, &regions))?;
             replace(path, write_state)
         }
+        SnapshotRam::Kept => replace(path, write_state),
     }
 }
 
@@ -367,8 +375,9 @@ fn as_words(bytes: &[u8]) -> (&[u8], &[u64], &[u8]) {
 /// its RAM.
 pub struct Snapshot {
     path: PathBuf,
-    /// The file holding its RAM: the snapshot's own, or its RAM file.
-    ram: Arc<File>,
+    /// The file holding its RAM: the snapshot's own, or its RAM file; none if its caller keeps
+    /// it ([`SnapshotRam::Kept`]).
+    ram: Option<Arc<File>>,
     machine: MachineHeader,
     /// Each RAM region's offset in its file, in the layout's order.
     ram_offsets: Vec<u64>,
@@ -392,17 +401,24 @@ impl Snapshot {
     /// state's checksum, and that the file holds all of its RAM. One whose
     /// RAM is in a file of its own is opened with [`open_split`](Self::open_split).
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        Self::open_parts(path.as_ref(), None)
+        Self::open_parts(path.as_ref(), RamPart::Inline)
     }
 
     /// Opens the snapshot at `path` whose RAM is in the file `ram`
     /// ([`Machine::snapshot_with`](crate::Machine::snapshot_with)), and checks
     /// them as [`open`](Self::open) does.
     pub fn open_split(path: impl AsRef<Path>, ram: impl AsRef<Path>) -> Result<Self> {
-        Self::open_parts(path.as_ref(), Some(ram.as_ref()))
+        Self::open_parts(path.as_ref(), RamPart::File(ram.as_ref()))
     }
 
-    fn open_parts(path: &Path, ram_path: Option<&Path>) -> Result<Self> {
+    /// Opens the snapshot at `path` without its RAM, which its caller keeps ([`SnapshotRam::Kept`])
+    /// or has from its RAM file another way, and checks it as [`open`](Self::open) does: machines
+    /// are restored from it onto RAM given them (`Machine::restore_onto`).
+    pub fn open_without_ram(path: impl AsRef<Path>) -> Result<Self> {
+        Self::open_parts(path.as_ref(), RamPart::Without)
+    }
+
+    fn open_parts(path: &Path, ram_path: RamPart<'_>) -> Result<Self> {
         let io = |source| Error::Io { path: path.to_owned(), source };
         let mut file = File::open(path).map_err(io)?;
         let mut header = [0u8; HEADER_LEN];
@@ -444,19 +460,29 @@ impl Snapshot {
         let machine = MachineHeader::decode(&mut d)?;
         let machine_len = state.len() - d.remaining();
         let (ram, ram_path, regions) = match (inline, ram_path) {
-            (true, None) => (file, path, ram_offsets(&machine.layout, ram_offset)),
-            (false, Some(ram_path)) => {
+            (true, RamPart::Inline) => (file, path, ram_offsets(&machine.layout, ram_offset)),
+            (false, RamPart::File(ram_path)) => {
                 let ram = File::open(ram_path)
                     .map_err(|source| Error::Io { path: ram_path.to_owned(), source })?;
                 (ram, ram_path, flat_offsets(&machine.layout))
             }
-            (false, None) => {
+            (_, RamPart::Without) => {
+                let rest = state.split_off(machine_len);
+                return Ok(Self {
+                    path: path.to_owned(),
+                    ram: None,
+                    machine,
+                    ram_offsets: Vec::new(),
+                    state: rest,
+                });
+            }
+            (false, RamPart::Inline) => {
                 return Err(not_a_snapshot(
                     path,
                     "its RAM is in a file of its own (open it with Snapshot::open_split)",
                 ));
             }
-            (true, Some(ram_path)) => {
+            (true, RamPart::File(ram_path)) => {
                 return Err(not_a_snapshot(
                     path,
                     &format!("its RAM is in its own file, not in {}", ram_path.display()),
@@ -490,7 +516,13 @@ impl Snapshot {
         }
         let ram_offsets = regions.iter().map(|&(_, offset)| offset).collect();
         let rest = state.split_off(machine_len);
-        Ok(Self { path: path.to_owned(), ram: Arc::new(ram), machine, ram_offsets, state: rest })
+        Ok(Self {
+            path: path.to_owned(),
+            ram: Some(Arc::new(ram)),
+            machine,
+            ram_offsets,
+            state: rest,
+        })
     }
 
     /// The file's path.
@@ -539,9 +571,16 @@ impl Snapshot {
         &self.machine.layout
     }
 
-    /// The file the guest's RAM is in.
-    pub(crate) fn file(&self) -> &Arc<File> {
-        &self.ram
+    /// The file the guest's RAM is in: an error if the snapshot was opened without it, whose
+    /// restores are given their RAM.
+    pub(crate) fn file(&self) -> Result<&Arc<File>> {
+        self.ram.as_ref().ok_or_else(|| {
+            Error::Snapshot(format!(
+                "{} was opened without its RAM (Snapshot::open_without_ram): restore it onto RAM \
+                 of its own (Machine::restore_onto)",
+                self.path.display()
+            ))
+        })
     }
 
     pub(crate) fn ram_offsets(&self) -> &[u64] {
@@ -629,6 +668,17 @@ impl Snapshot {
         }
         Ok(())
     }
+}
+
+/// Where [`Snapshot::open_parts`] finds a snapshot's RAM.
+#[derive(Clone, Copy)]
+enum RamPart<'a> {
+    /// In its own file.
+    Inline,
+    /// In a file of its own.
+    File(&'a Path),
+    /// Nowhere: its restores are given it.
+    Without,
 }
 
 /// The extent store device a snapshot's `state` is of, on the cell it had.

@@ -29,10 +29,10 @@ const UART_NO_INTERRUPT: u8 = 1;
 /// How [`Machine::snapshot_with`] takes a snapshot.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SnapshotOptions<'a> {
-    /// Where the guest's RAM goes: a file of its own at this path, as a Firecracker snapshot's
-    /// memory file holds it ([`Snapshot::open_split`](crate::Snapshot::open_split) opens the
-    /// two); None, the snapshot's file, after its state.
-    pub ram: Option<&'a std::path::Path>,
+    /// Where the guest's RAM goes: the snapshot's file, after its state, by default; a file of
+    /// its own, as a Firecracker snapshot's memory file holds it; or nowhere, its caller keeping
+    /// it.
+    pub ram: crate::SnapshotRam<'a>,
     /// A snapshot for a live migration: its extent store devices' cells are handed over whole,
     /// with no version made of them and their guest's filesystem not frozen, refused while a
     /// cell has uncommitted open extents; else each device's cell gets a version, refused unless
@@ -774,12 +774,14 @@ fn snapshot_mode(options: &SnapshotOptions<'_>) -> virtio_extent::SnapshotMode {
     }
 }
 
-/// Where `options` put a snapshot's RAM.
-fn ram_at<'a>(options: &SnapshotOptions<'a>) -> crate::snapshot::RamAt<'a> {
-    match options.ram {
-        Some(path) => crate::snapshot::RamAt::File(path),
-        None => crate::snapshot::RamAt::Inline,
-    }
+/// The host memory of the one region of RAM `mem` is, and its size: Hypervisor.framework's.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn ram_host_of(mem: &vm_memory::GuestMemoryMmap) -> Result<(std::ptr::NonNull<u8>, usize)> {
+    use vm_memory::{GuestMemoryBackend, GuestMemoryRegion};
+    let region = mem.iter().next().ok_or_else(|| Error::MemoryMap("no RAM".into()))?;
+    let host = mem.get_host_address(region.start_addr())?;
+    let host = std::ptr::NonNull::new(host).expect("RAM's host address");
+    Ok((host, region.len() as usize))
 }
 
 /// The error for anything asked of a machine whose wake failed.
@@ -1136,6 +1138,21 @@ impl Machine {
         path: impl AsRef<std::path::Path>,
         options: &SnapshotOptions<'_>,
     ) -> Result<()> {
+        self.snapshot_with_ram(path, options, |_, _| Ok(()))
+    }
+
+    /// [`snapshot_with`](Machine::snapshot_with), and `ram`, given the guest's RAM's host memory
+    /// and size, once the state is written, before any device goes on: what its caller keeps of
+    /// RAM the snapshot holds none of ([`SnapshotRam::Kept`](crate::SnapshotRam::Kept)), a memory
+    /// cell's version or a diff, as of the state's moment. Its failure fails the snapshot, as one
+    /// of the state's would: what the extent store devices took for it dropped.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    pub fn snapshot_with_ram<T>(
+        &mut self,
+        path: impl AsRef<std::path::Path>,
+        options: &SnapshotOptions<'_>,
+        ram: impl FnOnce(std::ptr::NonNull<u8>, usize) -> std::result::Result<T, String>,
+    ) -> Result<T> {
         if self.platform != Platform::Board {
             return Err(Error::Snapshot(
                 "only board machines (Machine::boot_linux) can be snapshotted".into(),
@@ -1167,11 +1184,34 @@ impl Machine {
             let mut header = self.header(live.vm.memory_layout());
             header.extent_stores = extent_stores;
             header.caller_data = options.caller_data.to_vec();
-            let ram = ram_at(options);
-            crate::snapshot::write(path.as_ref(), &header, &e.finish(), live.vm.guest_memory(), ram)
+            let mem = live.vm.guest_memory();
+            crate::snapshot::write(path.as_ref(), &header, &e.finish(), mem, options.ram)?;
+            let (host, size) = ram_host_of(mem)?;
+            ram(host, size).map_err(Error::Snapshot)
         })();
         quiesced.snapshots_done(taken.is_ok());
         taken
+    }
+
+    /// Has the machine's extent store devices let go of their cells, between runs: a live
+    /// migration's hand-over of them to another host (cladefs's `HandOverCell`), the VM process
+    /// and the guest's memory kept. Its devices serve the guest nothing until
+    /// [`reopen_extent_cells`](Machine::reopen_extent_cells) takes the cells back; a snapshot is
+    /// refused meanwhile. Refused while a device's DAX window holds private pages or its cell
+    /// uncommitted open extents. Their daemon must listen at a socket
+    /// ([`ExtentDaemon::at_socket`](crate::ExtentDaemon::at_socket)), where they are opened again.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    pub fn release_extent_cells(&mut self) -> Result<()> {
+        let pci = self.live()?.pci.as_ref().expect("a board machine has a PCI bus");
+        pci.quiesce().release_cells()
+    }
+
+    /// Takes back the cells [`release_extent_cells`](Machine::release_extent_cells) let go of,
+    /// between runs: the migration aborted, the machine goes on.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    pub fn reopen_extent_cells(&mut self) -> Result<()> {
+        let pci = self.live()?.pci.as_ref().expect("a board machine has a PCI bus");
+        pci.quiesce().reopen_cells()
     }
 
     /// The GIC's state and the host's clock, every vCPU's (read on its own thread), the UART's
@@ -1201,15 +1241,34 @@ impl Machine {
     /// counter goes on from where it was, so no time passes for it while it was in the file.
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     pub fn restore(snapshot: &crate::Snapshot, config: MachineConfig) -> Result<Self> {
-        Self::restore_with(snapshot, config, None)
+        Self::restore_with(snapshot, config, None, None)
     }
 
-    /// [`restore`](Machine::restore), onto `vsock` if given: as KVM's.
+    /// [`restore`](Machine::restore), its RAM `ram`, which holds the snapshot's RAM already and
+    /// which its caller keeps as the machine runs (a memory cell's window, cladefs's
+    /// `MemoryCell::window_in_ram`), rather than a mapping of the snapshot's: of the snapshot's
+    /// RAM's size. A snapshot whose RAM its caller kept ([`SnapshotRam::Kept`]) is opened
+    /// without it ([`Snapshot::open_without_ram`]).
+    ///
+    /// [`SnapshotRam::Kept`]: crate::SnapshotRam::Kept
+    /// [`Snapshot::open_without_ram`]: crate::Snapshot::open_without_ram
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    pub fn restore_onto(
+        snapshot: &crate::Snapshot,
+        config: MachineConfig,
+        ram: Arc<crate::GuestRam>,
+    ) -> Result<Self> {
+        Self::restore_with(snapshot, config, None, Some(ram))
+    }
+
+    /// [`restore`](Machine::restore), onto `vsock` if given, as KVM's, and onto `ram` if given
+    /// ([`restore_onto`](Machine::restore_onto)).
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     pub(crate) fn restore_with(
         snapshot: &crate::Snapshot,
         config: MachineConfig,
         vsock: Option<crate::Vsock>,
+        ram: Option<Arc<crate::GuestRam>>,
     ) -> Result<Self> {
         use crate::arch::aarch64::layout;
         use crate::devices::virtio::vsock::{GUEST_CID, VsockDevice};
@@ -1223,12 +1282,18 @@ impl Machine {
             ));
         }
         snapshot.check(&config, &layout::memory_layout(config.mem_size as u64))?;
+        let ram = match &ram {
+            Some(ram) => backend::Ram::Given(ram),
+            None => {
+                backend::Ram::Snapshot { file: snapshot.file()?, offsets: snapshot.ram_offsets() }
+            }
+        };
         let (vm, vcpus) = backend::Vm::new(
             config.mem_size,
             config.cpu_model,
             Platform::Board,
             config.vcpus,
-            backend::Ram::Snapshot { file: snapshot.file(), offsets: snapshot.ram_offsets() },
+            ram,
         )?;
         snapshot.check_cpu(config.cpu_model, vm.cpu_fingerprint())?;
         let mut d = snapshot.state();
@@ -1398,7 +1463,7 @@ impl Machine {
             let mut header = self.header(layout);
             header.extent_stores = extent_stores;
             header.caller_data = options.caller_data.to_vec();
-            let ram = ram_at(options);
+            let ram = options.ram;
             crate::snapshot::write(path, &header, &e.finish(), live.vm.guest_memory(), ram)
         })();
         quiesced.snapshots_done(taken.is_ok());
@@ -1821,7 +1886,7 @@ impl Machine {
         };
         let (live, vsock) = Self::rebuild(
             &config,
-            snapshot.file(),
+            snapshot.file()?,
             snapshot.ram_offsets(),
             &mut snapshot.state(),
             |model, fingerprint| snapshot.check_cpu(model, fingerprint),
@@ -1832,7 +1897,7 @@ impl Machine {
             Self::from_live(live, Platform::Board, config.mem_size, stop, exits, doorbell, output);
         machine.vsock = Some(vsock);
         machine.ram_file = Some(crate::suspend::RamFile {
-            file: snapshot.file().clone(),
+            file: snapshot.file()?.clone(),
             offsets: snapshot.ram_offsets().to_vec(),
             ours: false,
         });
@@ -1962,6 +2027,14 @@ impl Machine {
             #[cfg(target_arch = "x86_64")]
             _ => self.retired_slots.clone().expect("a machine that is not live was suspended"),
         }
+    }
+
+    /// The guest's RAM as this process maps it, on Hypervisor.framework: its one region's host
+    /// memory, which its guest and devices change as the machine runs, a memory cell's snapshot
+    /// reads (cladefs's `MemoryCell::write_resident`) while it doesn't.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    pub fn ram_host(&self) -> Result<(std::ptr::NonNull<u8>, usize)> {
+        ram_host_of(self.live()?.vm.guest_memory())
     }
 
     /// Copies `bytes` into guest RAM at guest physical address `addr` (a

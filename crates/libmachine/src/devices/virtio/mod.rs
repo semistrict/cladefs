@@ -203,6 +203,27 @@ pub(crate) trait VirtioDevice: Send {
     /// after it, and no file names it.
     fn drop_snapshot(&mut self) {}
 
+    /// Lets go of what the device serves the guest from, its queues paused, the machine paused:
+    /// an extent store device's cell, which a live migration hands over to another host. Nothing
+    /// by default.
+    #[cfg_attr(
+        target_os = "linux",
+        allow(dead_code, reason = "KVM migrates no extent store device yet")
+    )]
+    fn release_cell(&mut self) -> crate::error::Result<()> {
+        Ok(())
+    }
+
+    /// Takes back what [`release_cell`](Self::release_cell) let go of: the migration aborted.
+    /// Nothing by default.
+    #[cfg_attr(
+        target_os = "linux",
+        allow(dead_code, reason = "KVM migrates no extent store device yet")
+    )]
+    fn reopen_cell(&mut self) -> crate::error::Result<()> {
+        Ok(())
+    }
+
     /// The device's state for a snapshot, taken with every vCPU stopped
     /// and the device thread held off (guest memory and the queues are the
     /// transport's to save). A device that keeps state the guest relies on

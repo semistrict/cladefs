@@ -19,7 +19,8 @@ use std::time::{Duration, Instant};
 
 use libmachine::agent::{Agent, Command};
 use libmachine::{
-    ExitReason, LinuxBoot, Machine, MachineConfig, Snapshot, SnapshotOptions, StopHandle,
+    ExitReason, LinuxBoot, Machine, MachineConfig, Snapshot, SnapshotOptions, SnapshotRam,
+    StopHandle,
 };
 
 const MEM: usize = 512 << 20;
@@ -163,7 +164,10 @@ fn snapshot_and_clone(split: bool) {
     let (exit, mut m) = running.stop();
     assert_eq!(exit, ExitReason::Stopped);
     let options = SnapshotOptions {
-        ram: split.then_some(ram.as_path()),
+        ram: match split {
+            true => SnapshotRam::File(&ram),
+            false => SnapshotRam::Inline,
+        },
         caller_data: b"ours",
         ..Default::default()
     };
@@ -262,7 +266,7 @@ fn the_files_are_read_only() {
     let running = Running::start(boot(&guest, 1)).ready("booted");
     let (_, mut m) = running.stop();
     let ram = dir.file("memory");
-    let options = SnapshotOptions { ram: Some(&ram), ..Default::default() };
+    let options = SnapshotOptions { ram: SnapshotRam::File(&ram), ..Default::default() };
     m.snapshot_with(dir.file("snapshot"), &options).unwrap();
     for file in [dir.file("snapshot"), ram] {
         use std::os::unix::fs::PermissionsExt;

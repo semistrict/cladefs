@@ -24,10 +24,13 @@
 //! is made, one after the other in their order, and destroyed when that thread exits; its state
 //! is read and set there for a snapshot ([`state`]).
 
+#[cfg(test)]
+mod coherence_tests;
 mod ffi;
 pub(crate) mod irqfd;
 pub(crate) mod kick;
 mod psci;
+pub(crate) mod ram;
 mod state;
 
 pub(crate) use state::{VcpuState, VmState};
@@ -112,6 +115,9 @@ pub(crate) struct Shared {
     /// may make as the machine goes, after its VM: none once it is gone, which mapped nothing
     /// more ([`Shared::map_window`]).
     live: RwLock<bool>,
+    /// Its RAM, if its caller gave it ([`Ram::Given`]): a memory cell's window, which maps its
+    /// pages anew as the machine runs.
+    ram: Option<Arc<ram::GuestRam>>,
 }
 
 impl Shared {
@@ -174,6 +180,15 @@ impl Shared {
     ) {
         let live = self.live.read().unwrap_or_else(|e| e.into_inner());
         if !*live {
+            return;
+        }
+        // RAM its caller gave, which takes what the guest gives back, if it says so: a memory
+        // cell's window maps the cell's pages there again.
+        if let Some(taken) = self.ram.as_ref().and_then(|ram| ram.given_back()) {
+            let offset = guest_addr - layout::RAM_ADDR;
+            taken(offset, len).unwrap_or_else(|why| {
+                panic!("the RAM's {len:#x} bytes at {offset:#x}, given back: {why}")
+            });
             return;
         }
         let len = len as usize;
@@ -246,6 +261,8 @@ pub(crate) enum Ram<'a> {
     /// A private (copy-on-write) mapping of a snapshot's RAM: each RAM region, in address order,
     /// from its offset in `file`. The guest's writes never reach the file.
     Snapshot { file: &'a Arc<std::fs::File>, offsets: &'a [u64] },
+    /// Host memory its caller fills ([`ram::GuestRam`]): one region, the RAM's.
+    Given(&'a Arc<ram::GuestRam>),
 }
 
 /// Guest RAM for `ranges` (guest address, size), from `ram`.
@@ -271,6 +288,28 @@ fn guest_ram(ranges: &[(GuestAddress, usize)], ram: Ram<'_>) -> Result<GuestMemo
                 })
                 .collect::<Result<Vec<_>>>()?;
             GuestMemoryMmap::from_regions(regions).map_err(|e| alloc(&e))
+        }
+        Ram::Given(ram) => {
+            let &[(addr, size)] = ranges else {
+                return Err(alloc(&format!("given RAM is one region, not {}", ranges.len())));
+            };
+            if size != ram.size() {
+                return Err(alloc(&format!("RAM of {size} bytes, given {}", ram.size())));
+            }
+            // SAFETY: The RAM's reservation, of its size, which the VM holds as long as it maps
+            // it (`Shared::ram`); not this region's to unmap.
+            let region = unsafe {
+                vm_memory::MmapRegion::build_raw(
+                    ram.host().as_ptr(),
+                    size,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_PRIVATE | libc::MAP_ANON,
+                )
+            }
+            .map_err(|e| alloc(&e))?;
+            let region = vm_memory::GuestRegionMmap::new(region, addr)
+                .ok_or_else(|| alloc(&"a RAM region past the address space"))?;
+            GuestMemoryMmap::from_regions(vec![region]).map_err(|e| alloc(&e))
         }
     }
 }
@@ -319,6 +358,10 @@ impl Vm {
                  at most {max}"
             )));
         }
+        let given = match ram {
+            Ram::Given(ram) => Some(ram.clone()),
+            _ => None,
+        };
         create_vm(el2)?;
         // From here the VM exists: a failure destroys it.
         let made = (|| {
@@ -328,6 +371,11 @@ impl Vm {
                 .map(|(start, size)| (GuestAddress(start), size as usize))
                 .collect();
             let mem = guest_ram(&regions, ram)?;
+            if let Some(given) = &given {
+                // Mapped as the RAM follows its window's changes: anew as they are made.
+                given.bind(regions[0].0.0)?;
+                return Ok((gic, mem));
+            }
             for &(start, size) in &regions {
                 let host = mem.get_host_address(start)?;
                 // SAFETY: `mem` maps the region and outlives the VM (field order, and vCPUs
@@ -364,6 +412,7 @@ impl Vm {
             slots: Mutex::default(),
             next_slot: AtomicU32::new(0),
             live: RwLock::new(true),
+            ram: given,
             el2,
             redist_size: gic.redist_size,
         });
@@ -421,8 +470,12 @@ impl Vm {
 impl Drop for Vm {
     fn drop(&mut self) {
         self.irqfds.stop();
-        // No DAX window maps anything after: the VM goes with what they mapped.
+        // No DAX window maps anything after: the VM goes with what they mapped. Nor is given RAM
+        // mapped anew in it.
         *self.shared.live.write().unwrap_or_else(|e| e.into_inner()) = false;
+        if let Some(ram) = &self.shared.ram {
+            ram.unbind();
+        }
         for (_, (addr, size)) in std::mem::take(&mut *lock(&self.shared.slots)) {
             // SAFETY: unmaps what map_memory mapped.
             unsafe { hv_vm_unmap(addr, size as usize) };
@@ -896,6 +949,13 @@ impl Vcpu {
         let syndrome = e.syndrome;
         let class = (syndrome >> 26) & 0x3f;
         match class {
+            // An access to given RAM as it was being mapped anew: retried once it is.
+            EC_DATA_ABORT_LOWER | EC_INSTRUCTION_ABORT_LOWER
+                if self.shared.ram.as_ref().is_some_and(|ram| ram.holds(e.physical_address)) =>
+            {
+                self.shared.ram.as_ref().expect("given RAM").wait();
+                Ok(Exit::Handled(ExitKind::AccessRetried))
+            }
             EC_DATA_ABORT_LOWER | EC_INSTRUCTION_ABORT_LOWER => {
                 // A cache maintenance instruction's abort (CM) says it writes (WnR), which it
                 // doesn't: a load's, as far as the window goes.

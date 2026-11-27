@@ -70,6 +70,27 @@ mod pc {
             Ok(states)
         }
 
+        /// Has every device let go of what it serves the guest from (`VirtioPci::release_cell`):
+        /// a live migration's hand-over of the extent store devices' cells. The first that can't
+        /// refuses, those before it released.
+        #[cfg_attr(
+            target_os = "linux",
+            allow(dead_code, reason = "KVM migrates no extent store device yet")
+        )]
+        pub(crate) fn release_cells(&mut self) -> Result<()> {
+            self.transports.iter_mut().try_for_each(|t| t.release_cell())
+        }
+
+        /// Has every device take back what [`release_cells`](Self::release_cells) let go of: the
+        /// migration aborted. The first that can't refuses, those before it reopened.
+        #[cfg_attr(
+            target_os = "linux",
+            allow(dead_code, reason = "KVM migrates no extent store device yet")
+        )]
+        pub(crate) fn reopen_cells(&mut self) -> Result<()> {
+            self.transports.iter_mut().try_for_each(|t| t.reopen_cell())
+        }
+
         /// After a snapshot of the machine, `kept` or failed: every device carries on, what
         /// they took for a failed one dropped.
         pub(crate) fn snapshots_done(&mut self, kept: bool) {

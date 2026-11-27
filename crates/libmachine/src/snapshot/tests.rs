@@ -63,7 +63,7 @@ fn a_snapshot_reads_back_what_was_written() {
     let dir = Dir::new("reads-back");
     let path = dir.0.join("s");
     let mem_size = 8 << 20;
-    write(&path, &header(mem_size), b"the rest", &ram(mem_size), RamAt::Inline).unwrap();
+    write(&path, &header(mem_size), b"the rest", &ram(mem_size), SnapshotRam::Inline).unwrap();
     let s = Snapshot::open(&path).unwrap();
     assert_eq!(s.machine, header(mem_size));
     assert_eq!(s.config().vcpus, 2);
@@ -114,10 +114,10 @@ fn a_new_snapshot_replaces_the_old_file() {
     let dir = Dir::new("replaces");
     let path = dir.0.join("s");
     let mem_size = 4 << 20;
-    write(&path, &header(mem_size), b"", &ram(mem_size), RamAt::Inline).unwrap();
+    write(&path, &header(mem_size), b"", &ram(mem_size), SnapshotRam::Inline).unwrap();
     let old = std::fs::metadata(&path).unwrap().ino();
     let held = std::fs::File::open(&path).unwrap();
-    write(&path, &header(mem_size), b"again", &ram(mem_size), RamAt::Inline).unwrap();
+    write(&path, &header(mem_size), b"again", &ram(mem_size), SnapshotRam::Inline).unwrap();
     assert_ne!(std::fs::metadata(&path).unwrap().ino(), old);
     assert_eq!(held.metadata().unwrap().ino(), old);
     assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 1, "no temporary file left");
@@ -135,7 +135,7 @@ fn other_versions_and_damaged_files_are_refused() {
     let dir = Dir::new("refused");
     let path = dir.0.join("s");
     let mem_size = 4 << 20;
-    write(&path, &header(mem_size), b"state", &ram(mem_size), RamAt::Inline).unwrap();
+    write(&path, &header(mem_size), b"state", &ram(mem_size), SnapshotRam::Inline).unwrap();
     let good = std::fs::read(&path).unwrap();
     let put = |bytes: &[u8]| {
         let p = dir.0.join("bad");
@@ -174,7 +174,7 @@ fn a_restore_for_another_machine_is_refused() {
     let dir = Dir::new("mismatch");
     let path = dir.0.join("s");
     let mem_size = 4 << 20;
-    write(&path, &header(mem_size), b"", &ram(mem_size), RamAt::Inline).unwrap();
+    write(&path, &header(mem_size), b"", &ram(mem_size), SnapshotRam::Inline).unwrap();
     let s = Snapshot::open(&path).unwrap();
     let config = s.config();
     let layout = |c: &MachineConfig| memory_layout(c.mem_size as u64);

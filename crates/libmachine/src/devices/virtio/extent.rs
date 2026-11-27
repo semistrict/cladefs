@@ -122,9 +122,12 @@ impl ExtentDevice {
             capacity: store.capacity,
             dax_window_size: store.dax_window_size,
             dax_private_max_bytes: store.dax_private_max_bytes,
-            // The connection is the daemon's (`ExtentDaemon::connect`), not a socket of the
-            // device's own.
-            cladefsd_socket: String::new(),
+            // The connection is the daemon's (`ExtentDaemon::connect`); its socket, if it listens
+            // at one, is where a cell let go of is opened again (`release_cell`): a daemon in
+            // this process has none, and its devices' cells are never let go of.
+            cladefsd_socket: (daemon.socket())
+                .map(|socket| socket.display().to_string())
+                .unwrap_or_default(),
             cache_type: match store.cache {
                 ExtentCache::Writeback => virtio_extent::CacheType::Writeback,
                 ExtentCache::Unsafe => virtio_extent::CacheType::Unsafe,
@@ -333,6 +336,15 @@ impl VirtioDevice for ExtentDevice {
 
     fn drop_snapshot(&mut self) {
         self.device.drop_snapshot();
+    }
+
+    fn release_cell(&mut self) -> Result<()> {
+        // Its workers are paused already (`pause_queues`): nothing more to quiesce.
+        self.device.release_cell(|| {}).map_err(|err| Error::ExtentStore(err.to_string()))
+    }
+
+    fn reopen_cell(&mut self) -> Result<()> {
+        self.device.reopen_cell().map_err(|err| Error::ExtentStore(err.to_string()))
     }
 
     /// The device's protocol version, which its guest's driver checked as it probed it: the rest

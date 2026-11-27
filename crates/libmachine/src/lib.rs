@@ -84,6 +84,8 @@ mod sys;
 mod vcpus;
 pub mod vsock_unix;
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub use backend::GuestRam;
 #[cfg(target_os = "linux")]
 pub use backend::{HostMemory, MemorySlot, MemorySlots};
 pub use cpu::CpuModel;
@@ -102,6 +104,6 @@ pub use extent::{CellId, ExtentCache, ExtentCell, ExtentDaemon, ExtentDaemonConf
 pub use machine::Registers;
 pub use machine::{ExitReason, LinuxBoot, Machine, MachineConfig, Run, SnapshotOptions, Waited};
 pub use memory::{MemoryLayout, MemoryRegion, RegionKind};
-pub use snapshot::{FORMAT_VERSION as SNAPSHOT_FORMAT_VERSION, Snapshot};
+pub use snapshot::{FORMAT_VERSION as SNAPSHOT_FORMAT_VERSION, Snapshot, SnapshotRam};
 pub use stop::StopHandle;
 pub use suspend::Woken;

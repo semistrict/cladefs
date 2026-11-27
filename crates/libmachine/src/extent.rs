@@ -107,6 +107,14 @@ impl ExtentDaemon {
 
     /// A new connection to the daemon, for a device to open its cell over: the device's one seam
     /// to it.
+    /// The socket the daemon listens at, if it isn't this process's.
+    pub(crate) fn socket(&self) -> Option<&std::path::Path> {
+        match &self.at {
+            DaemonAt::Embedded(_) => None,
+            DaemonAt::Socket(socket) => Some(socket),
+        }
+    }
+
     pub(crate) fn connect(&self) -> Result<cladefs::DaemonConnection, cladefs::Error> {
         match &self.at {
             DaemonAt::Embedded(daemon) => daemon.connect(),

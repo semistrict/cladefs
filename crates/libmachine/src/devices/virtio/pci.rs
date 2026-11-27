@@ -196,6 +196,10 @@ pub(crate) struct VirtioPci {
     /// The device took something of its own for the snapshot being taken, which a failed one
     /// drops.
     took_snapshot: bool,
+    /// Whether its device let go of what it serves the guest from, the machine paused: an extent
+    /// store device's cell, for a live migration's hand-over ([`Self::release_cell`]). Its queues
+    /// are paused until it takes it back ([`Self::reopen_cell`]).
+    released: bool,
     /// Bumped each time the device's configuration changes on its own (the balloon's target), so
     /// that a driver reading it reads it whole (virtio 1.2, section 4.1.4.3).
     config_generation: u8,
@@ -376,6 +380,7 @@ impl VirtioPci {
             activated: false,
             paused: false,
             took_snapshot: false,
+            released: false,
             notify,
             notify_registered: None,
             shm_offsets,
@@ -822,11 +827,8 @@ impl VirtioPci {
         &mut self,
         mode: virtio_extent::SnapshotMode,
     ) -> Result<Option<virtio_extent::persist::State>> {
-        if self.activated && self.device.serves_its_queues() && !self.paused {
+        if !self.released && self.pause_queues() {
             self.paused = true;
-            for (index, queue) in self.device.pause_queues() {
-                self.queues[index] = queue;
-            }
         }
         let taken = self.device.take_snapshot(mode);
         self.took_snapshot = matches!(taken, Ok(Some(_)));
@@ -840,11 +842,74 @@ impl VirtioPci {
         if std::mem::take(&mut self.took_snapshot) && !kept {
             self.device.drop_snapshot();
         }
-        if std::mem::take(&mut self.paused) && !self.start_device() {
-            // As an activation that fails: the device says why, and stops the machine if it
-            // can't go on (the extent store device does).
+        if std::mem::take(&mut self.paused) {
+            self.restart_device();
+        }
+    }
+
+    /// Pauses the device's own queue threads, if it runs any, its queues back in the transport:
+    /// whether it did.
+    fn pause_queues(&mut self) -> bool {
+        if !(self.activated && self.device.serves_its_queues()) || self.paused {
+            return false;
+        }
+        for (index, queue) in self.device.pause_queues() {
+            self.queues[index] = queue;
+        }
+        true
+    }
+
+    /// Starts the device on its queues again where they stopped, as an activation that fails if
+    /// it can't: the device says why, and stops the machine if it can't go on (the extent store
+    /// device does).
+    fn restart_device(&mut self) {
+        if !self.start_device() {
             self.status |= STATUS_DEVICE_NEEDS_RESET;
         }
+    }
+
+    /// Has the device let go of what it serves the guest from, its queues paused meanwhile, the
+    /// machine paused: an extent store device's cell, for a live migration's hand-over
+    /// (`virtio_extent::Device::release_cell`). Refused, the device going on, if it can't.
+    #[cfg_attr(
+        target_os = "linux",
+        allow(dead_code, reason = "KVM migrates no extent store device yet")
+    )]
+    pub(crate) fn release_cell(&mut self) -> Result<()> {
+        if self.released {
+            return Ok(());
+        }
+        let paused = self.pause_queues();
+        match self.device.release_cell() {
+            Ok(()) => {
+                self.released = true;
+                Ok(())
+            }
+            Err(e) => {
+                if paused {
+                    self.restart_device();
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// Takes back what [`release_cell`](Self::release_cell) let go of, its queues started again:
+    /// a live migration aborted. Refused, the device still released, if it can't.
+    #[cfg_attr(
+        target_os = "linux",
+        allow(dead_code, reason = "KVM migrates no extent store device yet")
+    )]
+    pub(crate) fn reopen_cell(&mut self) -> Result<()> {
+        if !self.released {
+            return Ok(());
+        }
+        self.device.reopen_cell()?;
+        self.released = false;
+        if self.activated && self.device.serves_its_queues() {
+            self.restart_device();
+        }
+        Ok(())
     }
 
     /// The function's state for a snapshot, its device's included: the
