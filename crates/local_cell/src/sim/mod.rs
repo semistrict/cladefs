@@ -207,43 +207,7 @@ fn one() {
     for name in
         std::env::var("SIM_OFF").unwrap_or_default().split(',').filter(|name| !name.is_empty())
     {
-        match name {
-            "head_swap" => rules.head_swap = false,
-            "epoch_keys" => rules.epoch_keys = false,
-            "collector_epochs" => rules.collector_epochs = false,
-            "epoch_sequences" => rules.epoch_sequences = false,
-            "candidates_first" => rules.candidates_first = false,
-            "tokens" => rules.tokens = false,
-            "delete_tokens" => rules.delete_tokens = false,
-            "forks_check_versions" => rules.forks_check_versions = false,
-            "forks_pending" => rules.forks_pending = false,
-            "collector_abandons" => rules.collector_abandons = false,
-            "wal_follows" => rules.wal_follows = false,
-            "references" => rules.references = false,
-            "clones_refer_first" => rules.clones_refer_first = false,
-            "clones_record_first" => rules.clones_record_first = false,
-            "retirements_marked" => rules.retirements_marked = false,
-            "references_held" => rules.references_held = false,
-            "references_relisted" => rules.references_relisted = false,
-            "origins_kept" => rules.origins_kept = false,
-            "versions_kept" => rules.versions_kept = false,
-            "versions_carried" => rules.versions_carried = false,
-            "versions_acked" => rules.versions_acked = false,
-            "protect_wal_epoch" => rules.protect_wal_epoch = false,
-            "wal_fences" => rules.wal_fences = false,
-            "wal_offset_checked" => rules.wal_offset_checked = false,
-            "wal_rolls_before_next" => rules.wal_rolls_before_next = false,
-            "wal_fence_follows_roll" => rules.wal_fence_follows_roll = false,
-            "wal_rolls_before_limit" => rules.wal_rolls_before_limit = false,
-            "wal_kept_on_take" => rules.wal_kept_on_take = false,
-            "wal_activates_after_flush" => rules.wal_activates_after_flush = false,
-            "wal_after_large" => rules.wal_after_large = false,
-            "wal_reclaims_after_ack" => rules.wal_reclaims_after_ack = false,
-            "wal_sweep_tombstones" => rules.wal_sweep_tombstones = false,
-            "wal_rolled_tombstones" => rules.wal_rolled_tombstones = false,
-            "wal_contiguous" => rules.wal_contiguous = false,
-            other => panic!("no rule {other}"),
-        }
+        assert!(rules.turn_off(name), "no rule {name}");
     }
     set_rules(rules);
     let profile = match std::env::var("SIM_PROFILE").as_deref().unwrap_or("everything") {

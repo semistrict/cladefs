@@ -401,15 +401,14 @@ impl ObjectStore for Faulty {
     }
 }
 
-/// cladefs: how often a [`Seeded`] bucket does what to a request (TASK-685.5, doc-24): each request
-/// waits up to `delay_most`, as the seed draws it; then, as it draws, fails before it lands
+/// cladefs: how often a [`Seeded`] bucket does what to a request (TASK-685.5, doc-24): each request,
+/// once its scheduler lets it go ([`Seeded::schedule`]), as the seed draws it, fails before it lands
 /// (`fail_before`), or lands and fails after (`fail_after`), as a request answered with an error or
 /// lost on its way back does, its write in the bucket all the same; and the bucket goes out of
 /// reach for `out_for` at a time (`out_of_reach`, at each request), every request failing
 /// meanwhile, as a region's link does.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Odds {
-    pub delay_most: Duration,
     pub fail_before: f64,
     pub fail_after: f64,
     pub out_of_reach: f64,
@@ -418,19 +417,18 @@ pub struct Odds {
 
 impl Odds {
     /// None: every request answered at once.
-    pub const NONE: Self = Self {
-        delay_most: Duration::ZERO,
-        fail_before: 0.0,
-        fail_after: 0.0,
-        out_of_reach: 0.0,
-        out_for: Duration::ZERO,
-    };
+    pub const NONE: Self =
+        Self { fail_before: 0.0, fail_after: 0.0, out_of_reach: 0.0, out_for: Duration::ZERO };
 }
 
-/// cladefs: an object store whose requests are delayed and failed as a seed says, before `objects`
+/// cladefs: an object store whose requests are ordered and failed as a seed says, before `objects`
 /// ([`Odds`]): the simulation's bucket, which the simulated hosts share (TASK-685.5, doc-24). Its
-/// draws are its own generator's, seeded, and its waits the clock's, so that under madsim a seed's
-/// run is a function of the seed.
+/// requests wait in one queue until its scheduler ([`Seeded::schedule`]) lets one go, the one the
+/// seed picks of all waiting, as local_cell::sim's `SimBucket` completes its requests (board
+/// 14493): a request may wait out any number of others, a writer's taken over landing after its
+/// successor's whole take, which a delay of its own, up to 50 ms, as each had before, never let it.
+/// Its draws are its own generator's, seeded, and its waits the clock's, so that under madsim a
+/// seed's run is a function of the seed.
 #[derive(Debug)]
 pub struct Seeded {
     objects: Arc<dyn ObjectStore>,
@@ -438,6 +436,8 @@ pub struct Seeded {
     rng: Mutex<rand::rngs::StdRng>,
     /// Until when it is out of reach, if it is.
     out_until: Mutex<Option<tokio::time::Instant>>,
+    /// cladefs: the requests waiting for the scheduler to let them go.
+    waiting: Mutex<Vec<futures::channel::oneshot::Sender<()>>>,
 }
 
 /// What a [`Seeded`] bucket does to a request it lets through.
@@ -450,11 +450,36 @@ enum Fate {
 }
 
 impl Seeded {
-    /// `objects`, its requests as `odds` says, drawn from `seed`.
+    /// `objects`, its requests as `odds` says, drawn from `seed`: none goes until a task runs its
+    /// scheduler ([`Seeded::schedule`]).
     pub fn new(objects: Arc<dyn ObjectStore>, seed: u64, odds: Odds) -> Self {
         use rand::SeedableRng as _;
         let rng = Mutex::new(rand::rngs::StdRng::seed_from_u64(seed));
-        Self { objects, odds: Mutex::new(odds), rng, out_until: Mutex::new(None) }
+        let waiting = Mutex::new(Vec::new());
+        Self { objects, odds: Mutex::new(odds), rng, out_until: Mutex::new(None), waiting }
+    }
+
+    /// cladefs: lets one request go each `every`, the one the seed picks of those waiting, for as
+    /// long as it lives: its scheduler, which its simulation spawns.
+    pub async fn schedule(self: Arc<Self>, every: Duration) {
+        use rand::RngExt as _;
+        loop {
+            tokio::time::sleep(every).await;
+            let going = {
+                let mut waiting =
+                    self.waiting.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                // Those whose callers gave up on them wait no more.
+                waiting.retain(|request| !request.is_canceled());
+                if waiting.is_empty() {
+                    continue;
+                }
+                let mut rng = self.rng.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                let picked = rng.random_range(0..waiting.len());
+                waiting.swap_remove(picked)
+            };
+            // Its caller gone since: it goes nowhere, as a request dropped does.
+            let _ = going.send(());
+        }
     }
 
     /// Has the requests from now on go as `odds` says: [`Odds::NONE`] heals it.
@@ -469,20 +494,17 @@ impl Seeded {
     async fn request(&self) -> object_store::Result<Fate> {
         use rand::RngExt as _;
         let odds = *self.odds.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let (delay, before, after, out) = {
+        let (before, after, out) = {
             let mut rng = self.rng.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            let delay = match odds.delay_most.is_zero() {
-                true => Duration::ZERO,
-                false => odds.delay_most.mul_f64(rng.random_range(0.0..1.0)),
-            };
             let before = rng.random_bool(odds.fail_before.clamp(0.0, 1.0));
             let after = rng.random_bool(odds.fail_after.clamp(0.0, 1.0));
             let out = rng.random_bool(odds.out_of_reach.clamp(0.0, 1.0));
-            (delay, before, after, out)
+            (before, after, out)
         };
-        if !delay.is_zero() {
-            tokio::time::sleep(delay).await;
-        }
+        let (going, gone) = futures::channel::oneshot::channel();
+        self.waiting.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(going);
+        // Let go, or the scheduler gone, which lets every request go.
+        let _ = gone.await;
         let now = tokio::time::Instant::now();
         let reachable = {
             let mut until = self.out_until.lock().unwrap_or_else(|poisoned| poisoned.into_inner());

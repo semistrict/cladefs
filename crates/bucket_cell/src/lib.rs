@@ -591,6 +591,51 @@ impl Rules {
         wal_rolled_tombstones: true,
         wal_contiguous: true,
     };
+
+    /// cladefs: turns off the rule named `name`, as its field is named: whether there is one. What a
+    /// simulation's search or debugging run turns off, named in its environment (board 14493).
+    #[cfg(any(test, feature = "testing"))]
+    pub fn turn_off(&mut self, name: &str) -> bool {
+        let rules = self;
+        match name {
+            "head_swap" => rules.head_swap = false,
+            "epoch_keys" => rules.epoch_keys = false,
+            "collector_epochs" => rules.collector_epochs = false,
+            "epoch_sequences" => rules.epoch_sequences = false,
+            "candidates_first" => rules.candidates_first = false,
+            "tokens" => rules.tokens = false,
+            "delete_tokens" => rules.delete_tokens = false,
+            "forks_check_versions" => rules.forks_check_versions = false,
+            "forks_pending" => rules.forks_pending = false,
+            "collector_abandons" => rules.collector_abandons = false,
+            "wal_follows" => rules.wal_follows = false,
+            "references" => rules.references = false,
+            "clones_refer_first" => rules.clones_refer_first = false,
+            "references_held" => rules.references_held = false,
+            "references_relisted" => rules.references_relisted = false,
+            "origins_kept" => rules.origins_kept = false,
+            "clones_record_first" => rules.clones_record_first = false,
+            "retirements_marked" => rules.retirements_marked = false,
+            "versions_kept" => rules.versions_kept = false,
+            "versions_carried" => rules.versions_carried = false,
+            "versions_acked" => rules.versions_acked = false,
+            "protect_wal_epoch" => rules.protect_wal_epoch = false,
+            "wal_fences" => rules.wal_fences = false,
+            "wal_offset_checked" => rules.wal_offset_checked = false,
+            "wal_rolls_before_next" => rules.wal_rolls_before_next = false,
+            "wal_fence_follows_roll" => rules.wal_fence_follows_roll = false,
+            "wal_rolls_before_limit" => rules.wal_rolls_before_limit = false,
+            "wal_kept_on_take" => rules.wal_kept_on_take = false,
+            "wal_activates_after_flush" => rules.wal_activates_after_flush = false,
+            "wal_after_large" => rules.wal_after_large = false,
+            "wal_reclaims_after_ack" => rules.wal_reclaims_after_ack = false,
+            "wal_sweep_tombstones" => rules.wal_sweep_tombstones = false,
+            "wal_rolled_tombstones" => rules.wal_rolled_tombstones = false,
+            "wal_contiguous" => rules.wal_contiguous = false,
+            _ => return false,
+        }
+        true
+    }
 }
 
 /// The rules the protocol keeps: all of them (cladefs: public, as `local_cell` keeps one too).

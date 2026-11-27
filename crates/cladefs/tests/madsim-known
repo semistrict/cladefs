@@ -9,3 +9,4 @@
 # with the bug's fix, as its seeds join madsim-seeds.
 #
 # BOARD TEST                                            PANIC
+14556 ephemeral_cells_survive_disk_faults                  the faults healed, the cell's migration from host \d+ failed: Errno\(EEXIST\)
