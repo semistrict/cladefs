@@ -193,6 +193,18 @@ impl Notices {
     }
 }
 
+/// What the guest tells its device beside its requests, as the guest's dialect serves them
+/// (`cladefs::extent_requests::Guest`).
+impl cladefs::extent_requests::GuestNotices for Notices {
+    fn set_frozen(&self, frozen: bool) {
+        Notices::set_frozen(self, frozen);
+    }
+
+    fn resize_answered(&self, capacity: u64, took: bool) {
+        self.resizing.answered(capacity, took);
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;

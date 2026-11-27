@@ -58,9 +58,9 @@ pub use persist::SnapshotMode;
 // cladefs: doc-4's protocol, its buffers, backends and interpreter, which a local process's ring to
 // the extent daemon shares (board 14378).
 pub use cladefs::extent_requests::{
-    Backend, Buffers, BuffersError, Dialect, GuestBackend, handle, protocol,
+    Backend, Buffers, BuffersError, Dialect, Guest, GuestBackend, GuestNotices, handle, protocol,
 };
-pub use requests::{Guest, Requests, Served};
+pub use requests::{Requests, Served};
 #[cfg(target_os = "linux")]
 pub use window::dax_window_at;
 pub use window::{DaxWindowError, PrefaultGuestMemory, WindowVm};

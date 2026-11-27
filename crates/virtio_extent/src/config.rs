@@ -25,6 +25,14 @@ pub enum CacheType {
     Writeback,
 }
 
+impl CacheType {
+    /// Whether the guest's uploaded commits are answered once ordered: the guest's dialect's
+    /// (`cladefs::extent_requests::Guest::ordered_only`).
+    pub fn ordered_only(self) -> bool {
+        self == CacheType::Unsafe
+    }
+}
+
 /// Errors in a device's configuration.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ConfigError {

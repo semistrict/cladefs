@@ -19,7 +19,7 @@ use super::protocol::*;
 /// What a transport's requests are: which types it serves and the flags each takes, and what it
 /// does with its own. A type parameter of [`handle`], so that each transport's interpreter is
 /// compiled apart, with nothing chosen at run time: the guest's device's
-/// (`virtio_extent::Guest`, doc-4 as it is) and a local process's ring's ([`Process`]).
+/// ([`super::Guest`], doc-4 as it is) and a local process's ring's ([`Process`]).
 pub trait Dialect<S: Backend>: Sync {
     /// The bit of a `COMMIT`'s flags that has it complete once local, synced to the host's disk
     /// ([`crate::Commit::Local`]), if the dialect has one.
