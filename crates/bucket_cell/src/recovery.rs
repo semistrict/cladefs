@@ -1763,7 +1763,12 @@ async fn attempt_keys<B: Bucket>(
     }
 
     let KeyReplay { own, shadowed, .. } = replay_state.extents;
-    let mut named: FxHashSet<String> = own.into_values().collect();
+    // One at a time: collecting, or extending an empty set, reserves room for every extent, where
+    // the set holds their objects' keys, far fewer (hotbed review 184).
+    let mut named: FxHashSet<String> = FxHashSet::default();
+    for key in own.into_values() {
+        named.insert(key);
+    }
     if let Some((cp_key, cp_tail, cp_footer)) = base {
         let Some(kept) =
             checkpoint_live_keys(bucket, &cp_key, &cp_tail, &cp_footer, &shadowed).await?
