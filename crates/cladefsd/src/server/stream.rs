@@ -552,18 +552,21 @@ impl Connection {
     /// Stops accepting its guest's streams, and reading them, as the connection ends: the requests
     /// they took are served still.
     pub(super) fn stop_guest_stream(&self) {
-        // Its streams' requests read from now on admitted none ([`Connection::admit`]).
-        self.requests.with(Mutex::lock).streams_stopped = true;
         let stopped = {
             let mut state = self.guest_stream.lock().unwrap_or_else(PoisonError::into_inner);
             std::mem::replace(&mut *state, GuestStream::Stopped)
         };
-        let GuestStream::Listening { listener, streams } = stopped else { return };
-        // SAFETY: Shuts down a listener this holds: its accepting thread woken, which ends.
-        unsafe { libc::shutdown(listener.as_raw_fd(), libc::SHUT_RDWR) };
-        for stream in streams.lock().unwrap_or_else(PoisonError::into_inner).drain(..) {
-            let _ = stream.shutdown(std::net::Shutdown::Both);
+        if let GuestStream::Listening { listener, streams } = stopped {
+            // SAFETY: Shuts down a listener this holds: its accepting thread woken, which ends.
+            unsafe { libc::shutdown(listener.as_raw_fd(), libc::SHUT_RDWR) };
+            for stream in streams.lock().unwrap_or_else(PoisonError::into_inner).drain(..) {
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+            }
         }
+        // Then its streams' requests read from now on admitted none ([`Connection::admit`]):
+        // refused once their streams are shut down, none's reply of nothing written reaches its
+        // guest, which sends it again as it connects again.
+        self.requests.with(Mutex::lock).streams_stopped = true;
     }
 
     /// Serves `received`, a request its stream read and admitted, in its turn: as a future
@@ -615,6 +618,44 @@ impl Connection {
         // What the device wrote: every writable byte, or nothing (`handle`).
         written.truncate(handled.len as usize);
         answer.complete(written, handled.status);
+    }
+
+    /// Whether `extent`, an extent of its own cell's, holds the bytes of `buffers` at `offset`:
+    /// written there already, as a write sent again finds it (doc-4's stream transport). Only its
+    /// cell's own: another's extent, an ancestor's or a public base's, which a write is refused
+    /// for whatever it holds, is never taken for written. The bytes it reads are held in its
+    /// tenant's bytes in flight, and read in its turn at page-ins, as a `READ`'s are; compared with
+    /// `buffers` a piece at a time.
+    async fn holds(
+        &self,
+        open_cell: &OpenCell,
+        extent: ExtentId,
+        offset: u64,
+        buffers: &[VolatileSlice<'_>],
+    ) -> bool {
+        if extent.cell != open_cell.cell().id {
+            return false;
+        }
+        let len = buffers.iter().map(VolatileSlice::len).sum::<usize>();
+        if self.take_in_flight(len as u64).await.is_err() {
+            return false;
+        }
+        let _held =
+            InFlight { connection: self.this.upgrade().expect("serving"), bytes: len as u64 };
+        let Ok(_turn) = self.page_ins.acquire().await else { return false };
+        let mut held = vec![0u8; len];
+        let read =
+            open_cell.read(extent, offset, &mut [VolatileSliceMut::from(&mut held[..])]).await;
+        if read.is_err() {
+            return false;
+        }
+        const PIECE: usize = 64 << 10;
+        let mut wrote = vec![0u8; PIECE.min(len)];
+        held.chunks(PIECE).enumerate().all(|(i, piece)| {
+            let wrote = &mut wrote[..piece.len()];
+            cladefs_core::memory::gather(buffers, i * PIECE, wrote);
+            wrote == piece
+        })
     }
 
     /// Its cell, to serve a request with: `EBADF` before it opened one, its halting's errno once a
@@ -808,7 +849,7 @@ impl Backend for Connection {
         let open_cell = self.serving()?;
         // cladefs: within its disk and its tenant's limits, as its cell admits it (doc-22).
         match open_cell.write_with_barriers(extent, offset, buffers, barriers).await {
-            Err(Errno::EPERM) if holds(open_cell, extent, offset, buffers).await => {}
+            Err(Errno::EPERM) if self.holds(open_cell, extent, offset, buffers).await => {}
             done => return done,
         }
         match barriers.after {
@@ -850,21 +891,6 @@ impl Backend for Connection {
     async fn info(&self) -> Result<ExtentInfo, Errno> {
         self.serving()?.info()
     }
-}
-
-/// Whether `extent` holds the bytes of `buffers` at `offset`: written there already.
-async fn holds(
-    open_cell: &OpenCell,
-    extent: ExtentId,
-    offset: u64,
-    buffers: &[VolatileSlice<'_>],
-) -> bool {
-    let len = buffers.iter().map(VolatileSlice::len).sum::<usize>();
-    let mut wrote = vec![0u8; len];
-    cladefs_core::memory::gather(buffers, 0, &mut wrote);
-    let mut held = vec![0u8; len];
-    let read = open_cell.read(extent, offset, &mut [VolatileSliceMut::from(&mut held[..])]).await;
-    read.is_ok() && held == wrote
 }
 
 /// What a guest's requests ask of the cell besides: refused before they are served

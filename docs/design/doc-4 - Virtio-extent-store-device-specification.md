@@ -223,8 +223,9 @@ again, each whole. Every data request may be sent twice: a `COMMIT`, `FREE`, `RE
 `INFO` again changes nothing more; a `WRITE` again writes the same bytes to an extent still open, as
 the guest sends a barrier only once the writes it orders completed. A `WRITE` whose first send
 sealed its extent (`WRITE_COMMIT`), or that another's `WRITE_BARRIER` sent again sealed, would fail
-`EPERM` sent again: on a stream, a `WRITE` of the bytes a sealed extent already holds at its offset
-succeeds, changing nothing, and its commit, if it carries one, is made. A request cut short as a
+`EPERM` sent again: on a stream, a `WRITE` of the bytes a sealed extent of the guest's own branch
+already holds at its offset succeeds, changing nothing, and its commit, if it carries one, is made
+(another branch's extent, or a public base's, is refused whatever it holds). A request cut short as a
 connection ends is not answered, so that its guest sends it again. One whose connection is lost again before any
 reply, or that can't connect, fails every request in flight, and the driver every one after, `EIO`,
 as when the host's daemon goes (When the host's daemon goes). A snapshot holds no stream, whose

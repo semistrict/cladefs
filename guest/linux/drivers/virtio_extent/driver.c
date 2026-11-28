@@ -721,6 +721,7 @@ static int vext_stream_receiver(void *data)
 	struct kvec vec[2];
 	unsigned int n;
 	u32 written, want;
+	bool sending;
 	u64 tag;
 	int err;
 
@@ -733,14 +734,28 @@ static int vext_stream_receiver(void *data)
 			break;
 		tag = le64_to_cpu(head.tag);
 		written = le32_to_cpu(head.written);
-		wait_event(stream->sent_wait, READ_ONCE(stream->sending) != tag ||
-						      READ_ONCE(stream->error) || READ_ONCE(stream->broken));
+		/*
+		 * Taken out of flight under `lock`, under which its sender marks it sending before it
+		 * reads it: never while its frame is being sent, a host's early reply waiting.
+		 */
+		for (;;) {
+			spin_lock_irq(&stream->lock);
+			sending = READ_ONCE(stream->sending) == tag;
+			if (!sending || stream->error || stream->broken) {
+				req = !sending && tag <= U32_MAX ? xa_erase(&stream->in_flight, tag) : NULL;
+				spin_unlock_irq(&stream->lock);
+				break;
+			}
+			spin_unlock_irq(&stream->lock);
+			wait_event(stream->sent_wait, READ_ONCE(stream->sending) != tag ||
+							      READ_ONCE(stream->error) ||
+							      READ_ONCE(stream->broken));
+		}
 		/* Lost as it is sent: its sender sends it again, or fails it. */
-		if (READ_ONCE(stream->sending) == tag) {
+		if (sending) {
 			err = -EPIPE;
 			break;
 		}
-		req = tag <= U32_MAX ? xa_erase(&stream->in_flight, tag) : NULL;
 		if (!req) {
 			dev_err(&vext->vdev->dev, "the stream's reply to request %llu, not in flight\n",
 				tag);
@@ -878,6 +893,25 @@ static void vext_stream_transmit(struct virtio_extent *vext, struct vext_request
 }
 
 /*
+ * cladefs: marks `req`, whose tag `tag` is reserved, sending, then puts it in flight, both under
+ * `lock`, under which the receiver takes a request out of flight (vext_stream_receiver): 0, or a
+ * -errno, its tag let go of.
+ */
+static int vext_stream_mark(struct vext_stream *stream, u32 tag, struct vext_request *req)
+{
+	int err;
+
+	spin_lock_irq(&stream->lock);
+	WRITE_ONCE(stream->sending, tag);
+	/* Its slot reserved: nothing to allocate. */
+	err = xa_err(xa_store(&stream->in_flight, tag, req, GFP_NOWAIT));
+	spin_unlock_irq(&stream->lock);
+	if (err)
+		xa_erase(&stream->in_flight, tag);
+	return err;
+}
+
+/*
  * cladefs: puts `req` in flight and sends it, connecting the stream first if it never was: or
  * completes it with the error that stopped it. Its connection lost, it stays in flight, unsent,
  * and is sent once the stream connects again.
@@ -895,12 +929,8 @@ static void vext_stream_send(struct virtio_extent *vext, struct vext_request *re
 	if (!err)
 		err = xa_alloc_cyclic(&stream->in_flight, &tag, NULL, xa_limit_32b, &stream->next_tag,
 				      GFP_KERNEL);
-	if (err >= 0) {
-		WRITE_ONCE(stream->sending, tag);
-		err = xa_err(xa_store(&stream->in_flight, tag, req, GFP_KERNEL));
-		if (err)
-			xa_erase(&stream->in_flight, tag);
-	}
+	if (err >= 0)
+		err = vext_stream_mark(stream, tag, req);
 	if (err < 0) {
 		smp_store_release(&stream->sending, U64_MAX);
 		vext_stream_complete(vext, req, err == -ESHUTDOWN ? -ESHUTDOWN : -EIO);
@@ -954,12 +984,9 @@ static bool vext_stream_send_now(struct virtio_extent *vext, struct vext_request
 	err = xa_alloc_cyclic(&stream->in_flight, &tag, NULL, xa_limit_32b, &stream->next_tag,
 			      GFP_KERNEL);
 	if (err >= 0) {
-		WRITE_ONCE(stream->sending, tag);
-		err = xa_err(xa_store(&stream->in_flight, tag, req, GFP_KERNEL));
-		if (err) {
-			xa_erase(&stream->in_flight, tag);
+		err = vext_stream_mark(stream, tag, req);
+		if (err)
 			smp_store_release(&stream->sending, U64_MAX);
-		}
 	}
 	if (err < 0) {
 		memalloc_noio_restore(noio);
@@ -968,8 +995,8 @@ static bool vext_stream_send_now(struct virtio_extent *vext, struct vext_request
 	req->stream_hdr.tag = cpu_to_le64(tag);
 	req->stream_progress = 0;
 	err = vext_stream_put(stream->sock, req, true);
-	memalloc_noio_restore(noio);
 	if (err == -EAGAIN) {
+		memalloc_noio_restore(noio);
 		/* The rest the sender's, before anything else, `sending` its tag still. */
 		stream->partial = req;
 		wake_up(&stream->wake);
@@ -979,10 +1006,12 @@ static bool vext_stream_send_now(struct virtio_extent *vext, struct vext_request
 		if (!READ_ONCE(stream->error))
 			dev_info(&vext->vdev->dev,
 				 "the stream's connection lost sending (%d): connecting again\n", err);
+		/* Its shutdown's allocations too reclaim nothing that waits on its requests. */
 		vext_stream_break(vext);
 	} else {
 		atomic64_inc(&stream->sent);
 	}
+	memalloc_noio_restore(noio);
 	smp_store_release(&stream->sending, U64_MAX);
 	if (wq_has_sleeper(&stream->sent_wait))
 		wake_up(&stream->sent_wait);
@@ -1053,8 +1082,10 @@ static int vext_stream_reconnect(struct virtio_extent *vext)
 	xa_for_each(&stream->in_flight, index, req) {
 		if (READ_ONCE(stream->broken) || READ_ONCE(stream->error))
 			break;
+		spin_lock_irq(&stream->lock);
 		WRITE_ONCE(stream->sending, index);
 		req = xa_load(&stream->in_flight, index);
+		spin_unlock_irq(&stream->lock);
 		if (!req) {
 			smp_store_release(&stream->sending, U64_MAX);
 			continue;
@@ -1159,9 +1190,16 @@ static int vext_stream_submit(struct virtio_extent *vext, struct vext_request *r
 		if (sent)
 			return 0;
 	}
+	/* Queued unless the stream failed meanwhile, whose failing took what was queued then. */
 	spin_lock_irqsave(&stream->lock, flags);
-	list_add_tail(&req->stream_node, &stream->to_send);
+	err = stream->error;
+	if (!err)
+		list_add_tail(&req->stream_node, &stream->to_send);
 	spin_unlock_irqrestore(&stream->lock, flags);
+	if (err) {
+		vext_busy_end(vext);
+		return err == -ESHUTDOWN ? -ESHUTDOWN : -EIO;
+	}
 	wake_up(&stream->wake);
 	return 0;
 }
