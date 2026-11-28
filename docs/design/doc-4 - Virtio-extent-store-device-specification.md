@@ -216,10 +216,16 @@ for a response) closes the stream: nothing after it could be read in step. Barri
 stream's requests and the queues' alike, by completion: a `MAP` of an extent goes on its queue once
 the `COMMIT` that sealed it completed on the stream.
 
-A stream that fails or closes fails every request in flight, and the driver every one after, `EIO`,
-as when the host's daemon goes (When the host's daemon goes). A VMM refuses to snapshot a device
-with a stream for now, as the vsock device resets its connections on a snapshot and nothing makes
-its requests in flight safe to send again yet.
+A stream whose connection is lost, as a vsock device resets every connection when its VM is
+restored from a snapshot, connects again, and the driver sends every request in flight again, each
+whole: every data request may be sent twice, as the guest sends a barrier only once what it orders
+completed (a `WRITE` again writes the same bytes to an extent still open; a `COMMIT`, `FREE`,
+`READ`, `ROOT` or `INFO` again changes nothing more). One whose connection is lost again before any
+reply, or that can't connect, fails every request in flight, and the driver every one after, `EIO`,
+as when the host's daemon goes (When the host's daemon goes). A snapshot holds no stream, whose
+listener's path is each VM's own: its restore gives it (cladefs's Firecracker: the load's
+`cladefs_overrides`, `stream`), and a guest that sent its requests so, restored without one,
+refuses its device, whose features lack `F_STREAM`.
 
 ### Shared memory
 

@@ -528,6 +528,33 @@ impl Vm {
         Ok(self.config)
     }
 
+    /// cladefs: `overrides`, a snapshot load's `cladefs_overrides`, with each of the extent-store
+    /// devices `ids` (in the order the VM added them) given its stream, if CLADEFS_EXTENT_STREAM
+    /// sends their data requests over vsock (board 14663): a snapshot holds none, the restored VM's
+    /// vsock device, at `uds`, connecting them where its own path says.
+    pub fn stream_overrides(
+        mut overrides: serde_json::Value,
+        ids: &[&str],
+        uds: &Path,
+    ) -> anyhow::Result<serde_json::Value> {
+        if !extent_stream()? {
+            return Ok(overrides);
+        }
+        let entries = overrides.as_array_mut().context("overrides are an array")?;
+        for (port, id) in (STREAM_PORT..).zip(ids) {
+            let at = match entries.iter().position(|entry| entry["id"] == *id) {
+                Some(at) => at,
+                None => {
+                    entries.push(serde_json::json!({ "id": id }));
+                    entries.len() - 1
+                }
+            };
+            let listener = format!("{}_{port}", uds.display());
+            entries[at]["stream"] = serde_json::json!({ "port": port, "listener": listener });
+        }
+        Ok(overrides)
+    }
+
     /// cladefs: has each extent-store device's guest send its data requests over vsock
     /// ([`extent_stream`], board 14663): the VM's vsock device, given one if it has none, connects
     /// them to `<uds_path>_<port>`, where the device binds the listener the extent daemon accepts
