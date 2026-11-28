@@ -141,12 +141,10 @@ impl Reply {
             },
             libc::iovec { iov_base: self.written.as_ptr() as *mut _, iov_len: self.written.len() },
         ];
-        let message = libc::msghdr {
-            msg_iov: iov.as_ptr() as *mut _,
-            msg_iovlen: iov.len() as _,
-            // SAFETY: Zeroes are no name, no control data, and no flags.
-            ..unsafe { std::mem::zeroed() }
-        };
+        // SAFETY: Zeroes are no name, no control data, and no flags; its padding, on musl, private.
+        let mut message: libc::msghdr = unsafe { std::mem::zeroed() };
+        message.msg_iov = iov.as_ptr() as *mut _;
+        message.msg_iovlen = iov.len() as _;
         loop {
             let flags = libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL;
             // SAFETY: Sends the bytes `iov` describes, which `self` holds through the call.
