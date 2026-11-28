@@ -222,10 +222,7 @@ cladefs_rust_binary(
 
 cladefs_rust_test(
     name = "madsim_test",
-    srcs = [
-        "tests/madsim.rs",
-        "tests/madsim/regions.rs",
-    ],
+    srcs = ["tests/madsim.rs"] + glob(["tests/madsim/**/*.rs"]),
     crate_root = "tests/madsim.rs",
     aliases = _CLADEFS_ALIASES,
     data = [":peer_tls_testdata"],

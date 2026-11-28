@@ -422,7 +422,7 @@ impl Regions {
                     .restart_on_panic_matching(BOOT_FAILED)
                     .init(move || {
                         let (root, home) = (root.clone(), home.clone());
-                        async move { boot(host, &root, home, Kept::NONE).await }
+                        async move { boot(host, &root, home, Kept::NONE, None).await }
                     })
                     .build()
             })

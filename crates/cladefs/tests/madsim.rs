@@ -87,7 +87,7 @@ enum Home {
 
 /// Boots host `host`'s daemon, its cell directories under `root`, its cells in `home`'s bucket, at
 /// placement token `host`, keeping what `kept` says, and serves for as long as the host runs.
-async fn boot(host: u8, root: &Path, home: Home, kept: Kept) {
+async fn boot(host: u8, root: &Path, home: Home, kept: Kept, fast: Option<Arc<FastBuckets>>) {
     // As a host's process boots: its statics anew, its node started again by madsim itself too, as
     // after a boot failing (`BOOT_FAILED`), which `node_local::restart` doesn't start.
     node_local::starting();
@@ -135,6 +135,10 @@ async fn boot(host: u8, root: &Path, home: Home, kept: Kept) {
     set_daemon(daemon.clone());
     if let Some(bucket) = shared {
         daemon.use_bucket(bucket);
+    }
+    if let Some(fast) = fast {
+        let (config, large_extent) = fast.config(host);
+        daemon.use_fast_wal(config, large_extent);
     }
     if let Err(err) = daemon.boot(&root.join("vms.sock"), Some(256 << 20)).await {
         // As its supervisor starts a daemon whose boot failed again: its node, started anew.
@@ -212,6 +216,15 @@ const ROOTS: &str = "/hosts";
 /// How often the bucket lets a waiting request go ([`bucket_cell::faults::Seeded::schedule`]).
 const SCHEDULED_EVERY: Duration = Duration::from_micros(200);
 
+/// How the buckets' requests fail, as the seed draws it: the cold bucket's ([`world`]) and the fast
+/// WAL buckets' ([`fast_buckets`]).
+const ODDS: bucket_cell::faults::Odds = bucket_cell::faults::Odds {
+    fail_before: 0.05,
+    fail_after: 0.05,
+    out_of_reach: 0.01,
+    out_for: Duration::from_millis(500),
+};
+
 /// What every test's hosts share: their logger, and a bucket in memory, its requests ordered and
 /// failed as the seed says, and what heals it. Their KMS's master key is each host's own
 /// environment's ([`boot`]).
@@ -219,21 +232,97 @@ fn world() -> (Arc<RoutedBucket>, Arc<bucket_cell::faults::Seeded>) {
     // Once a process: a determinism check runs the test twice in it.
     let _ = cladefs::cladefsd::logging::to_stderr();
     bucket_cell::buggify::enable(madsim::runtime::Handle::current().seed());
-    let odds = bucket_cell::faults::Odds {
-        fail_before: 0.05,
-        fail_after: 0.05,
-        out_of_reach: 0.01,
-        out_for: Duration::from_millis(500),
-    };
     let objects = Arc::new(object_store::memory::InMemory::new());
     // Board 14493: its requests let go one at a time, the one the seed picks of all waiting, as
     // local_cell::sim's bucket completes them: one may wait out any number of others.
-    let seeded = bucket_cell::faults::Seeded::new(objects, madsim::rand::random(), odds);
+    let seeded = bucket_cell::faults::Seeded::new(objects, madsim::rand::random(), ODDS);
     let seeded = Arc::new(seeded);
     madsim::task::spawn(seeded.clone().schedule(SCHEDULED_EVERY));
     let backend = bucket_cell::faults::SeededBackend(seeded.clone());
     let bucket = ObjectBucket::new(Arc::new(backend), "");
     (Arc::new(bucket.unrouted()), seeded)
+}
+
+/// cladefs: how many zones' fast WAL buckets the hosts append their fast WAL cells' commits to
+/// (doc-29, board 14495): host H's zone `(H - 1) % FAST_ZONES`, so that a take on another host may
+/// fence and recover another zone's fast WAL.
+const FAST_ZONES: usize = 2;
+
+/// cladefs: how many appends a fast WAL writer makes to a segment before it rolls it, few, so that
+/// segments roll, are reclaimed and are followed by takes as they go.
+const FAST_APPENDS: u32 = 3;
+
+/// cladefs: the zones' fast WAL buckets (doc-29, board 14495), each its own store in memory behind
+/// its own seeded faults, as the cold bucket's ([`world`]): appendable, every host of its zone
+/// appending to one, and each zone's open to every host, as `CLADEFSD_FAST_WAL_ALLOWED_BUCKETS` lets
+/// a take fence another zone's.
+struct FastBuckets {
+    zones: Vec<Arc<bucket_cell::any_bucket::AnyBucket>>,
+    faults: Vec<Arc<bucket_cell::faults::Seeded>>,
+}
+
+impl FastBuckets {
+    /// Zone `zone`'s URL, as heads name it.
+    fn url(zone: usize) -> String {
+        format!("memory:///fast-{zone}")
+    }
+
+    /// The zone `url` names, if any.
+    fn zone(url: &str) -> Result<usize, String> {
+        let zone = url.strip_prefix("memory:///fast-").and_then(|zone| zone.parse().ok());
+        zone.filter(|&zone| zone < FAST_ZONES).ok_or_else(|| format!("no fast bucket {url:?}"))
+    }
+
+    /// Host `host`'s fast WAL: its zone's bucket, every zone's open to it, and its large-write
+    /// threshold, one block on odd hosts, so that their extents go to the cold bucket first, the
+    /// default (none of a guest's 4 KiB blocks) on even ones.
+    fn config(self: &Arc<Self>, host: u8) -> (local_cell::fast_wal::FastWalConfig, u64) {
+        let zone = (usize::from(host) - 1) % FAST_ZONES;
+        let opener: Arc<dyn local_cell::fast_wal::FastWalOpener> = self.clone();
+        let mut config = local_cell::fast_wal::FastWalConfig::new(
+            Self::url(zone),
+            self.zones[zone].clone(),
+            opener,
+        );
+        config.max_writer_appends = FAST_APPENDS;
+        let large_extent = match host % 2 {
+            1 => 4096,
+            _ => local_cell::fast_wal::DEFAULT_LARGE_EXTENT,
+        };
+        (config, large_extent)
+    }
+}
+
+impl local_cell::fast_wal::FastWalOpener for FastBuckets {
+    fn is_allowed(&self, url: &str) -> Result<(), String> {
+        Self::zone(url).map(drop)
+    }
+
+    fn open(
+        &self,
+        url: &str,
+    ) -> futures::future::BoxFuture<'static, Result<Arc<bucket_cell::any_bucket::AnyBucket>, String>>
+    {
+        let opened = Self::zone(url).map(|zone| self.zones[zone].clone());
+        Box::pin(async move { opened })
+    }
+}
+
+/// cladefs: the zones' fast WAL buckets, their requests ordered and failed as the cold bucket's are
+/// ([`world`]).
+fn fast_buckets() -> Arc<FastBuckets> {
+    let (mut zones, mut faults) = (Vec::new(), Vec::new());
+    for _ in 0..FAST_ZONES {
+        let objects = Arc::new(object_store::memory::InMemory::new());
+        let seeded = bucket_cell::faults::Seeded::new(objects, madsim::rand::random(), ODDS);
+        let seeded = Arc::new(seeded);
+        madsim::task::spawn(seeded.clone().schedule(SCHEDULED_EVERY));
+        let backend = bucket_cell::faults::SeededBackend(seeded.clone());
+        let bucket = ObjectBucket::new(Arc::new(backend), "");
+        zones.push(Arc::new(bucket_cell::any_bucket::AnyBucket::new(Arc::new(bucket))));
+        faults.push(seeded);
+    }
+    Arc::new(FastBuckets { zones, faults })
 }
 
 /// Hosts 1 to `count`, booted, their cell directories under [`ROOTS`]' `hostN`, their cells in
@@ -242,7 +331,7 @@ fn hosts(
     count: u8,
     bucket: &Arc<RoutedBucket>,
 ) -> (Vec<madsim::runtime::NodeHandle>, Vec<PathBuf>) {
-    hosts_keeping(count, bucket, Kept::NONE)
+    hosts_keeping(count, bucket, Kept::NONE, None)
 }
 
 /// Hosts as [`hosts`] makes them, keeping what `kept` says.
@@ -250,6 +339,7 @@ fn hosts_keeping(
     count: u8,
     bucket: &Arc<RoutedBucket>,
     kept: Kept,
+    fast: Option<Arc<FastBuckets>>,
 ) -> (Vec<madsim::runtime::NodeHandle>, Vec<PathBuf>) {
     let handle = madsim::runtime::Handle::current();
     let roots: Vec<PathBuf> =
@@ -257,15 +347,17 @@ fn hosts_keeping(
     let nodes = (1..=count)
         .zip(&roots)
         .map(|(host, root)| {
-            let (root, bucket) = (root.clone(), bucket.clone());
+            let (root, bucket, fast) = (root.clone(), bucket.clone(), fast.clone());
             handle
                 .create_node()
                 .name(format!("host{host}"))
                 .ip(control(host).ip())
                 .restart_on_panic_matching(BOOT_FAILED)
+                .restart_on_panic_matching(cladefs::cladefsd::EXITS)
                 .init(move || {
                     let (root, home) = (root.clone(), Home::Shared(bucket.clone()));
-                    async move { boot(host, &root, home, kept).await }
+                    let fast = fast.clone();
+                    async move { boot(host, &root, home, kept, fast).await }
                 })
                 .build()
         })
@@ -496,6 +588,10 @@ struct Told {
     /// after it was told uploaded, which uploads it too, as a version is told made once committed
     /// at rest, and named in the head once uploaded (doc-20).
     versions: std::sync::Mutex<Vec<(u64, Blocks)>>,
+    /// cladefs: what the fork family's steps were told (`workloads::forks`, board 14567).
+    forks: Arc<workloads::forks::Forks>,
+    /// cladefs: the stale family's episodes and what they found (`workloads::stale`, board 14566).
+    stale: workloads::stale::Episodes,
 }
 
 /// The block a writer writes at `sequence` of round `round`.
@@ -590,6 +686,30 @@ async fn free_one(guest: &cladefs::cladefsd::guest::Guest, cell: u64, told: &Tol
     true
 }
 
+/// cladefs: makes a fast WAL cell on host `host` through its control API, as its VM manager asks for
+/// one (doc-29, board 14495), its guests' syncs waiting for the fast WAL (`FSYNC_LEVEL_FAST_WAL`):
+/// its ID, trying again while the bucket refuses.
+async fn make_fast_wal_cell(host: u8) -> u64 {
+    use cladefs::cladefsd::control::proto::FsyncLevel;
+    let mut daemon = connect(host).await;
+    let making = CreateCellRequest {
+        capacity: 64 << 20,
+        fast_wal: Some(true),
+        fsync: FsyncLevel::FastWal as i32,
+        ..CreateCellRequest::default()
+    };
+    for _ in 0..200 {
+        match daemon.create_cell(making.clone()).await {
+            Ok(made) => return made.into_inner().cell,
+            Err(status) => {
+                log::info!("host {host} making a fast WAL cell: {status}");
+                madsim::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
+    }
+    panic!("host {host} never made a fast WAL cell");
+}
+
 /// Takes `cell` onto host `host`, at placement `token`, as the VM manager does, dropping any stale
 /// local copy first and trying again while the bucket refuses.
 async fn take(host: u8, cell: u64, token: u64) {
@@ -638,6 +758,16 @@ async fn take(host: u8, cell: u64, token: u64) {
 #[madsim::test]
 async fn uploaded_commits_survive_attrition() {
     survives(Profile::PLAIN).await;
+}
+
+/// cladefs: doc-29, board 14495: the attrition profile with a fast WAL cell, each host appending
+/// its commits to its zone's fast bucket, which fails and stalls as the cold bucket does; hosts
+/// killed losing their disks at times, other hosts (of either zone) taking the cell, fencing and
+/// recovering the fast WAL its head names. Every block a writer was told durable, by the fast WAL
+/// before its upload, reads back once the buckets heal.
+#[madsim::test]
+async fn fast_wal_commits_survive_attrition_and_lost_disks() {
+    survives(Profile::FAST_WAL).await;
 }
 
 /// TASK-685.7, doc-20: the attrition profile, its writers making versions as they go, as a VM's
@@ -717,6 +847,12 @@ macro_rules! needs {
         needs!($name, $rule, $profile, SEARCHED);
     };
     ($name:ident, $rule:ident, $profile:expr, $seeds:expr) => {
+        // Board 14565: named as a search, which scripts/madsim-seeds.py and scripts/test.sh run
+        // once, not at every seed as they run the rest (`_needs_`).
+        const _: () = assert!(
+            crate::names_a_search(stringify!($name)),
+            "a rule search's name holds `_needs_`"
+        );
         #[test]
         fn $name() {
             let off = || {
@@ -725,9 +861,43 @@ macro_rules! needs {
                     ..bucket_cell::Rules::ALL
                 })
             };
-            needed(stringify!($name), off, $profile, $seeds);
+            crate::needed(
+                &crate::test_path(module_path!(), stringify!($name)),
+                off,
+                $profile,
+                $seeds,
+            );
         }
     };
+}
+
+/// Whether `name` is a rule search's, holding `_needs_`, as scripts/madsim-seeds.py tells them from
+/// the tests it runs at every seed (board 14565): a search named otherwise ran its 2,000 seeds at
+/// each.
+const fn names_a_search(name: &str) -> bool {
+    let (name, needle) = (name.as_bytes(), b"_needs_");
+    let mut at = 0;
+    while at + needle.len() <= name.len() {
+        let mut matched = 0;
+        while matched < needle.len() && name[at + matched] == needle[matched] {
+            matched += 1;
+        }
+        if matched == needle.len() {
+            return true;
+        }
+        at += 1;
+    }
+    false
+}
+
+/// The name libtest gives the test `name` of the module `module` (`module_path!()`): its path past
+/// the crate's, as `--exact` takes it, so that a search in a workload family's module runs its own
+/// test again for each seed (board 14565).
+fn test_path(module: &str, name: &str) -> String {
+    match module.split_once("::") {
+        Some((_, within)) => format!("{within}::{name}"),
+        None => name.to_owned(),
+    }
 }
 
 /// The seed a search's process runs alone, as [`needed`] starts it.
@@ -832,7 +1002,7 @@ needs!(forking_needs_references_relisted, references_relisted, Profile::BASES);
 
 /// Board 14493: the search of the rule `CLADEFS_MADSIM_RULE` names (a field of
 /// `bucket_cell::Rules`) over `CLADEFS_MADSIM_SEEDS` seeds ([`SEARCHED`] unless said) of the profile
-/// `CLADEFS_MADSIM_PROFILE` names (`plain`, `collected` or `bases`): what measures which of the
+/// `CLADEFS_MADSIM_PROFILE` names (`plain`, `collected`, `bases`, `fast_wal`, or a workload family's): what measures which of the
 /// protocol's rules this world finds, beside its fixed searches, as local_cell::sim's find them all.
 #[test]
 #[ignore = "measures the search of a rule named in its environment (board 14493)"]
@@ -850,7 +1020,18 @@ fn search_named_rule() {
         "plain" => Profile::PLAIN,
         "collected" => Profile::COLLECTED,
         "bases" => Profile::BASES,
-        other => panic!("no profile {other}: plain, collected or bases"),
+        "fast_wal" => Profile::FAST_WAL,
+        "zombies" => workloads::zombies::ZOMBIES,
+        "recreated" => workloads::zombies::RECREATED,
+        "fast_zombies" => workloads::zombies::FAST_ZOMBIES,
+        "stale" => workloads::stale::STALE,
+        "late" => workloads::stale::LATE,
+        "forks" => workloads::forks::FORKS,
+        "freed" => workloads::forks::FREED,
+        "collector_dies" => workloads::collector::COLLECTOR_DIES,
+        "collector_dies_forking" => workloads::collector::COLLECTOR_DIES_FORKING,
+        "collector_dies_fast_wal" => workloads::collector::COLLECTOR_DIES_FAST_WAL,
+        other => panic!("no profile {other}"),
     };
     let seeds = var("CLADEFS_MADSIM_SEEDS").map_or(SEARCHED, |seeds| seeds.parse().unwrap());
     needed("search_named_rule", off, profile, seeds);
@@ -903,6 +1084,25 @@ struct Profile {
     /// Whether a host's memory and disk are limited a while at each round, as the seed says
     /// ([`press`]).
     pressure: bool,
+    /// cladefs: whether its cell keeps its commits not yet uploaded in a fast WAL (doc-29, board
+    /// 14495), each host appending to its zone's fast bucket ([`fast_buckets`]), its guests' syncs
+    /// waiting for it.
+    fast_wal: bool,
+    /// cladefs: whether a host killed may lose its disk, as the seed says, as a host replaced does
+    /// (`host_fs::lose`): what was uploaded, or told durable by a fast WAL, survives it.
+    lose: bool,
+    /// cladefs: the workload families ported from local_cell::sim (AGENTS.md, one simulator; boards
+    /// 14565-14568), each in its module of `workloads`: zombie requests landing late and the
+    /// takeovers they race (`workloads::zombies`).
+    zombies: bool,
+    /// Writers and placements cut off running on unaware: late checkpoints, stale deletes, takes
+    /// back with old tokens (`workloads::stale`).
+    stale: bool,
+    /// Versions cut, dropped and forked racing each other: twin restores, forks interrupted, bases
+    /// deleted under live forks (`workloads::forks`).
+    forks: bool,
+    /// The collector killed midway through its passes, and relocations (`workloads::collector`).
+    collector_dies: bool,
 }
 
 impl Profile {
@@ -920,7 +1120,17 @@ impl Profile {
         bases: false,
         collector: false,
         pressure: false,
+        fast_wal: false,
+        lose: false,
+        zombies: false,
+        stale: false,
+        forks: false,
+        collector_dies: false,
     };
+
+    /// cladefs: a fast WAL cell (doc-29, board 14495), its hosts killed losing their disks at times:
+    /// every block told durable, by the fast WAL before it was uploaded, survives losing its host.
+    const FAST_WAL: Self = Self { fast_wal: true, lose: true, ..Self::PLAIN };
 
     /// What the collector's rules need: frees leaving objects sparse, which writers relocate out
     /// of, versions it keeps, and passes meanwhile and at the end.
@@ -957,6 +1167,12 @@ impl Profile {
             bases: rng.gen_bool(0.3),
             collector: rng.gen_bool(0.5),
             pressure: rng.gen_bool(0.3),
+            fast_wal: rng.gen_bool(0.3),
+            lose: rng.gen_bool(0.3),
+            zombies: rng.gen_bool(0.3),
+            stale: rng.gen_bool(0.3),
+            forks: rng.gen_bool(0.3),
+            collector_dies: rng.gen_bool(0.3),
         };
         eprintln!("swarm: {profile:?}");
         profile
@@ -1044,7 +1260,12 @@ async fn base_round(
         guest.close();
         Some((cell, version))
     });
-    let Some((cell, version)) = made.await.unwrap() else {
+    // Its host killed as it made it, by a workload family's step (`workloads`): none made.
+    let made = made.await.unwrap_or_else(|killed| {
+        log::info!("round {round}: a base's host died as it made it: {killed}");
+        None
+    });
+    let Some((cell, version)) = made else {
         log::info!("round {round}: a base not made");
         return None;
     };
@@ -1068,10 +1289,15 @@ async fn base_round(
         }
         Ok::<_, cladefs::Errno>(child)
     });
-    let child = match forked.await.unwrap() {
-        Ok(child) => child,
-        Err(errno) => {
+    let child = match forked.await {
+        Ok(Ok(child)) => child,
+        Ok(Err(errno)) => {
             log::info!("round {round}: base {cell}'s version not forked: {errno:?}");
+            return None;
+        }
+        // Its node killed by a workload family's step (`workloads`) as it forked.
+        Err(killed) => {
+            log::info!("round {round}: base {cell}'s fork's node died: {killed}");
             return None;
         }
     };
@@ -1226,6 +1452,27 @@ fn reshuffle_peers(
         .collect()
 }
 
+/// The placement token the attrition's round `round` takes its cell at, and its last take at its
+/// rounds' count: above every host's own, which each boots with (`CLADEFSD_TOKEN`).
+fn token_of(round: u64) -> u64 {
+    round + 10
+}
+
+/// cladefs: the hosts of a run, killed as it ends, however it ends, as a host's processes die at
+/// once (board 14567): what their daemons had under way, a guest's cell still closing among it, goes
+/// as a killed process's does, rather than be dropped by the simulation's end on nodes that live,
+/// which an open cell dropped open refuses (`OpenCell`'s drop).
+struct Ended(Vec<madsim::task::NodeId>);
+
+impl Drop for Ended {
+    fn drop(&mut self) {
+        let handle = madsim::runtime::Handle::current();
+        for &node in &self.0 {
+            handle.kill(node);
+        }
+    }
+}
+
 /// The attrition profile, as [`uploaded_commits_survive_attrition`] says, as `profile` says: what
 /// was lost, if anything.
 async fn attrition(profile: Profile) -> Result<(), String> {
@@ -1234,7 +1481,9 @@ async fn attrition(profile: Profile) -> Result<(), String> {
     const WRITES: u64 = 6;
     let Profile { kept, net, loss, versions, disk, peers, drains, frees, bases, .. } = profile;
     let (bucket, faults) = world();
-    let (nodes, _roots) = hosts_keeping(3, &bucket, kept);
+    let fast = profile.fast_wal.then(fast_buckets);
+    let (nodes, _roots) = hosts_keeping(3, &bucket, kept, fast.clone());
+    let _ended = Ended(nodes.iter().map(|node| node.id()).collect());
     let handle = madsim::runtime::Handle::current();
     let told = Arc::new(Told { versioning: versions, freeing: frees, ..Told::default() });
     let manager = manager();
@@ -1281,6 +1530,11 @@ async fn attrition(profile: Profile) -> Result<(), String> {
     }
     let reachable: Vec<_> = nodes.iter().map(|node| node.id()).chain([manager.id()]).collect();
     let mut inherited = Vec::new();
+    // cladefs: a fast WAL cell made on the first host through its control API, as its VM manager
+    // asks for one, its guests' syncs waiting for the fast WAL (doc-29).
+    if profile.fast_wal {
+        cell = Some(manager.spawn(make_fast_wal_cell(1)).await.unwrap());
+    }
     for round in 0..ROUNDS {
         restart(std::mem::take(&mut killed)).await;
         // The disks failing once the cell is made: its making is not what the profile tries.
@@ -1304,7 +1558,7 @@ async fn attrition(profile: Profile) -> Result<(), String> {
         }
         let host = (round % 3) as usize;
         if let Some(cell) = cell {
-            let taking = async move { take(host as u8 + 1, cell, round + 10).await };
+            let taking = async move { take(host as u8 + 1, cell, token_of(round)).await };
             manager.spawn(taking).await.unwrap();
         }
         if bases {
@@ -1313,16 +1567,39 @@ async fn attrition(profile: Profile) -> Result<(), String> {
                 base_round(round, node(source), &manager, source as u8 + 1, target as u8 + 1).await,
             );
         }
+        // The workload families' steps of this round, beside its writer (`workloads`), once a
+        // cell is made: aborted with the rest at the heal.
+        if let Some(cell) = cell {
+            let at = workloads::Round {
+                profile: &profile,
+                manager: &manager,
+                nodes: &nodes,
+                bucket: &bucket,
+                cell,
+                round,
+                host,
+                told: &told,
+            };
+            meanwhile.extend(workloads::during(&at));
+        }
         let writing = write_round(cell, round, WRITES, told.clone());
         let mut written = node(host).spawn(writing);
         // As the seed says: the writer done; or the next round taking the cell as it writes; or
         // its host killed as it writes, drained first now and then, started again a while after.
         let wait = Duration::from_millis(madsim::rand::thread_rng().gen_range(0..3000));
+        // A writer whose host a family's step killed as it wrote (`workloads`) ended, as a writer
+        // whose host dies does: what it was told uploaded is what counts.
+        let ended = |done: Result<Option<u64>, madsim::task::JoinError>| {
+            done.unwrap_or_else(|killed| {
+                log::info!("round {round}: its writer's host died as it wrote: {killed}");
+                None
+            })
+        };
         match madsim::time::timeout(wait, &mut written).await {
-            Ok(done) => cell = cell.or(done.unwrap()),
+            Ok(done) => cell = cell.or(ended(done)),
             Err(_) => {
                 if cell.is_none() {
-                    cell = written.await.unwrap();
+                    cell = ended(written.await);
                     assert!(cell.is_some(), "the first round's writer opened no cell");
                 } else if madsim::rand::thread_rng().gen_bool(0.5) {
                     if drains && madsim::rand::thread_rng().gen_bool(0.5) {
@@ -1336,6 +1613,11 @@ async fn attrition(profile: Profile) -> Result<(), String> {
                         log::info!("host {}: drained: {:?}", host + 1, drained.await);
                     }
                     node_local::kill(nodes[host].id()).await;
+                    // cladefs: its disk lost, as the seed says, as a host replaced is.
+                    if profile.lose && madsim::rand::thread_rng().gen_bool(0.5) {
+                        log::info!("host {}: its disk lost", host + 1);
+                        host_fs::lose(nodes[host].id());
+                    }
                     killed.push(nodes[host].clone());
                 }
             }
@@ -1349,6 +1631,9 @@ async fn attrition(profile: Profile) -> Result<(), String> {
         task.abort();
     }
     faults.set(bucket_cell::faults::Odds::NONE);
+    for faults in fast.iter().flat_map(|fast| &fast.faults) {
+        faults.set(bucket_cell::faults::Odds::NONE);
+    }
     host_fs::faults::set(host_fs::faults::Odds::NONE);
     sim.update_config(|config| *config = madsim::net::Config::default());
     // Every node and every link mended: a shifting partition aborted midway leaves links cut,
@@ -1372,7 +1657,7 @@ async fn attrition(profile: Profile) -> Result<(), String> {
         Ok::<_, cladefs::Errno>(())
     });
     healing.await.unwrap().map_err(|errno| format!("lifting the limits: {errno:?}"))?;
-    manager.spawn(async move { take(1, cell, ROUNDS + 10).await }).await.unwrap();
+    manager.spawn(async move { take(1, cell, token_of(ROUNDS)).await }).await.unwrap();
     // The collector's last passes, one after the other.
     if let (Some(collector), Some(passes)) = (&collector, passes) {
         passes.abort();
@@ -1423,6 +1708,12 @@ async fn attrition(profile: Profile) -> Result<(), String> {
         eprintln!("forks of bases deleted, each read: {}", inherited.len());
     }
     for Inherited { host, cell: fork_cell, base, block } in inherited {
+        // cladefs: its host's disk perhaps lost since (`Profile::lose`), its placement with it:
+        // taken there again first, as a VM manager takes a cell back on a host replaced.
+        if profile.lose {
+            let taking = take(host as u8 + 1, fork_cell, token_of(ROUNDS) + 1);
+            manager.spawn(taking).await.unwrap();
+        }
         let read =
             read_on(|| node(host), fork_cell, cladefs::ExtentId { cell: base, sequence: 1 }).await;
         if read.as_ref().ok() != Some(&block) {
@@ -1432,6 +1723,16 @@ async fn attrition(profile: Profile) -> Result<(), String> {
             ));
         }
     }
+    // The workload families' own checks, the buckets, disks and network whole (`workloads`).
+    let healed = workloads::Healed {
+        profile: &profile,
+        manager: &manager,
+        nodes: &nodes,
+        bucket: &bucket,
+        cell,
+        told: &told,
+    };
+    workloads::healed(&healed).await?;
     Ok(())
 }
 
@@ -1589,7 +1890,7 @@ async fn hand_overs_to_wedged_targets_end_within_their_bound() {
     const BLOCKS: u64 = 4;
     let (bucket, faults) = world();
     faults.set(bucket_cell::faults::Odds::NONE);
-    let (nodes, roots) = hosts_keeping(2, &bucket, Kept::ephemeral(2));
+    let (nodes, roots) = hosts_keeping(2, &bucket, Kept::ephemeral(2), None);
     let handle = madsim::runtime::Handle::current();
     let node = |host: usize| handle.get_node(nodes[host].id()).unwrap();
     let manager = manager();
@@ -1728,7 +2029,7 @@ async fn ephemeral_attrition(disk: bool, aborts: bool) -> Result<(), String> {
     const ROUNDS: u64 = 6;
     const WRITES: u64 = 5;
     let (bucket, faults) = world();
-    let (nodes, roots) = hosts_keeping(3, &bucket, Kept::ephemeral(3));
+    let (nodes, roots) = hosts_keeping(3, &bucket, Kept::ephemeral(3), None);
     let handle = madsim::runtime::Handle::current();
     let manager = manager();
     let node = |host: usize| handle.get_node(nodes[host].id()).unwrap();
@@ -1957,3 +2258,8 @@ async fn ephemeral_attrition(disk: bool, aborts: bool) -> Result<(), String> {
         (true, false) => Err(format!("the cell noted on hosts {noted:?}, held on {host}")),
     }
 }
+
+// cladefs: the workload families ported from local_cell::sim, one module each (AGENTS.md, one
+// simulator; boards 14565-14568). Last in the file, so that the macros above are theirs too.
+#[path = "madsim/workloads/mod.rs"]
+mod workloads;
