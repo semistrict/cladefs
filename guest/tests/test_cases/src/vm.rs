@@ -537,7 +537,8 @@ impl Vm {
         static STREAMED: AtomicUsize = AtomicUsize::new(0);
         if !self.config["vsock"].is_object() {
             let n = STREAMED.fetch_add(1, Ordering::Relaxed);
-            let uds = std::env::temp_dir().join(format!("cladefs-{}-{n}.vsock", std::process::id()));
+            let uds =
+                std::env::temp_dir().join(format!("cladefs-{}-{n}.vsock", std::process::id()));
             self.vsock(&uds);
         }
         let uds = self.config["vsock"]["uds_path"].as_str().expect("a path").to_owned();
