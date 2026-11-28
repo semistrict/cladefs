@@ -998,4 +998,24 @@ mod tests {
             vec![(0, 8, true), (8, 4, false), (12, 4, true), (16, 4, false), (20, 12, true)]
         );
     }
+
+    /// A diff file's runs of data are overlaid in time linear in their number: `apply_diff_files`
+    /// calls `overlay_diff_span` once for each run `host_fs::data_ranges` gives, and each call
+    /// builds a new vector, copying every run overlaid before: quadratic in the runs. A diff of a
+    /// guest whose dirty pages alternate with clean ones, 200,000 runs (1.6 GiB of RAM, every
+    /// other 4 KiB page dirty), copies 2 * 10^10 entries before it writes a byte. Here 100,000
+    /// runs, a linear overlay's few milliseconds, held to a second.
+    #[test]
+    #[ignore = "board 14715: MemoryCell::apply_diff_files overlays a diff's runs in quadratic time"]
+    fn a_diffs_runs_are_overlaid_in_linear_time() {
+        const RUNS: u64 = 100_000;
+        let started = std::time::Instant::now();
+        let mut spans = Vec::new();
+        for run in 0..RUNS {
+            spans = super::overlay_diff_span(spans, 0, run * 8192..run * 8192 + 4096);
+        }
+        let took = started.elapsed();
+        assert_eq!(spans.len() as u64, RUNS);
+        assert!(took < std::time::Duration::from_secs(1), "{RUNS} runs overlaid in {took:?}");
+    }
 }
