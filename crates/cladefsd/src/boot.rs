@@ -412,6 +412,10 @@ fn serve_control(
         drop(tokio::spawn(async move {
             if let Err(err) = crate::control::serve_control_on(serving, address, tenants).await {
                 log::error!("cladefsd: serving the control API: {err}");
+                // As the process exits outside the simulation: its node dies, which the simulation
+                // starts again as a host's supervisor does (board 14567). Logging alone left a
+                // simulated daemon running on with no control API, every call to it refused.
+                panic!("{}: serving the control API: {err}", crate::EXITS);
             }
         }));
     }

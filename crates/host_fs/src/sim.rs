@@ -78,6 +78,14 @@ fn disk() -> Arc<Disk> {
     }
 }
 
+/// cladefs: loses simulated `node`'s disk, as a host replaced is, its disk wiped or swapped (board
+/// 14495): its next start finds an empty disk, nothing of what it held, synced or not. Call it once
+/// the node is killed, before it starts again.
+pub fn lose(node: madsim::task::NodeId) {
+    let host = (std::thread::current().id(), Some(node));
+    DISKS.lock().unwrap().retain(|(of, _, _)| *of != host);
+}
+
 /// `work` on the current host's file system.
 fn with<T>(work: impl FnOnce(&mut mem::Fs) -> io::Result<T>) -> io::Result<T> {
     let disk = disk();

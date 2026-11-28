@@ -47,7 +47,7 @@ pub use sim::{
     remove_dir_all, remove_file, rename, symlink_metadata, write,
 };
 #[cfg(madsim)]
-pub use sim::{FileExt, MetadataExt, OpenOptionsExt, faults};
+pub use sim::{FileExt, MetadataExt, OpenOptionsExt, faults, lose};
 
 mod flock;
 pub use flock::Flock;

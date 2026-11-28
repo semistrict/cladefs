@@ -96,6 +96,10 @@ static ALLOCATOR: cladefs_core::heap::Bounded = cladefs_core::heap::Bounded;
 
 mod boot;
 pub mod cells;
+/// cladefs: what a simulated daemon's node says as it dies where a daemon's process exits for good
+/// (`std::process::exit`): its simulation starts the node again on it, as a host's supervisor starts
+/// a daemon that exited (board 14567).
+pub const EXITS: &str = "cladefsd exits";
 pub use cladefs_wire::client;
 pub use cladefs_wire::codec;
 pub mod control;

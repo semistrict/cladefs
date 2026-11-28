@@ -439,4 +439,12 @@ impl Daemon {
     pub fn use_bucket(self: &Arc<Self>, bucket: Arc<RoutedBucket>) {
         crate::storage::use_bucket_on(self, bucket);
     }
+
+    /// cladefs: the fast WAL bucket its fast WAL cells append to, given rather than opened from
+    /// `CLADEFSD_FAST_WAL_BUCKET` (doc-29), with its large-write threshold: a simulation's, which
+    /// its hosts share (board 14495). Set before it boots.
+    pub fn use_fast_wal(&self, config: local_cell::fast_wal::FastWalConfig, large_extent: u64) {
+        let mut slot = self.fast_wal.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        *slot = Some(Some((config, large_extent)));
+    }
 }

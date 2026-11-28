@@ -50,6 +50,23 @@ pub fn fires(file: &'static str, line: u32, p: f64) -> bool {
     })
 }
 
+/// cladefs: a number below `bound` (at least 1), drawn from the run's own draws, as the seed says,
+/// for a site that fired to say how much (how long to wait, board 14565): 0 outside a run that
+/// switched buggify on. Built normally, 0, a constant.
+#[cfg(not(any(test, feature = "testing")))]
+#[inline(always)]
+pub fn below(_bound: u64) -> u64 {
+    0
+}
+
+/// cladefs: a number below `bound` (at least 1), drawn from the run's own draws, as the seed says,
+/// for a site that fired to say how much (how long to wait, board 14565): 0 outside a run that
+/// switched buggify on.
+#[cfg(any(test, feature = "testing"))]
+pub fn below(bound: u64) -> u64 {
+    RUN.with(|run| run.borrow_mut().as_mut().map_or(0, |run| run.next() % bound.max(1)))
+}
+
 #[cfg(any(test, feature = "testing"))]
 struct Run {
     seed: u64,

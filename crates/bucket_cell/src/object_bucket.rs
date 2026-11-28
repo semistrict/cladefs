@@ -1664,6 +1664,11 @@ impl ObjectBucket {
         };
         let upload = Upload::of(key);
         async move {
+            // cladefs: in a simulation, now and then held a long while before it goes out: a zombie
+            // writer's put landing after its successor's take (board 14565).
+            if crate::buggify!(0.1) {
+                zombie_hold().await;
+            }
             // cladefs: as long after its last write of the key as the backend needs (TASK-690).
             self.rewrites.wait(&path).await;
             // cladefs: its turn, once a write of its kind failed (TASK-382).
@@ -1732,6 +1737,11 @@ impl ObjectBucket {
         let path = self.path(key);
         let upload = Upload::of(key);
         async move {
+            // cladefs: as a put's, a zombie's append landing late, past its successor's fence or
+            // sweep (board 14565).
+            if crate::buggify!(0.1) {
+                zombie_hold().await;
+            }
             let timed = self.counts.request(Request::Append, Some(&path));
             let len = bytes.len() as u64;
             let result = self.appended(&path, offset, bytes).await;
@@ -1925,6 +1935,21 @@ impl ObjectBucket {
             }),
         }
     }
+}
+
+/// cladefs: the longest a write is held by [`zombie_hold`].
+const ZOMBIE_HOLD: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// cladefs: BUGGIFY's (board 14565, doc-24): waits up to [`ZOMBIE_HOLD`] of the clock's time, as
+/// the run's seed says, before a write goes out, so that a writer taken over lands its create,
+/// swap or append only after its successor's take, fence or sweep of the key: a zombie request, as
+/// a slow network or a paused process makes (the rules `head_swap`, `epoch_keys`, `wal_fences`,
+/// `wal_offset_checked` and the sweeps' exist for it). Its callers ask `buggify!` first, which is
+/// never true outside a simulation's run that switched it on: built normally the branch is gone.
+/// Nothing is sent, nor any lock held, while it waits, so a request dropped meanwhile never lands.
+async fn zombie_hold() {
+    let millis = ZOMBIE_HOLD.as_millis() as u64;
+    tokio::time::sleep(std::time::Duration::from_millis(crate::buggify::below(millis))).await;
 }
 
 impl Bucket for ObjectBucket {
