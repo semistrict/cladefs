@@ -169,7 +169,10 @@ host_shell() {
     else
         local placement
         host_placement
-        host_hotbed run --no-sync ${placement[@]+"${placement[@]}"} --kind shell -- bash -c "$1"
+        # Its output whole, which its callers read as data (host_fetch's archive): hotbed prints
+        # 32 KiB of a command's output unless told otherwise (hotbed build 369).
+        host_hotbed run --no-sync --max-output 0 ${placement[@]+"${placement[@]}"} --kind shell \
+            -- bash -c "$1"
     fi
 }
 
