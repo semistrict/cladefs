@@ -217,10 +217,15 @@ stream's requests and the queues' alike, by completion: a `MAP` of an extent goe
 the `COMMIT` that sealed it completed on the stream.
 
 A stream whose connection is lost, as a vsock device resets every connection when its VM is
-restored from a snapshot, connects again, and the driver sends every request in flight again, each
-whole: every data request may be sent twice, as the guest sends a barrier only once what it orders
-completed (a `WRITE` again writes the same bytes to an extent still open; a `COMMIT`, `FREE`,
-`READ`, `ROOT` or `INFO` again changes nothing more). One whose connection is lost again before any
+restored from a snapshot, connects again (tried for a second, as a vsock device that reset refuses
+connections until its guest heard of the reset), and the driver sends every request in flight
+again, each whole. Every data request may be sent twice: a `COMMIT`, `FREE`, `READ`, `ROOT` or
+`INFO` again changes nothing more; a `WRITE` again writes the same bytes to an extent still open, as
+the guest sends a barrier only once the writes it orders completed. A `WRITE` whose first send
+sealed its extent (`WRITE_COMMIT`), or that another's `WRITE_BARRIER` sent again sealed, would fail
+`EPERM` sent again: on a stream, a `WRITE` of the bytes a sealed extent already holds at its offset
+succeeds, changing nothing, and its commit, if it carries one, is made. A request cut short as a
+connection ends is not answered, so that its guest sends it again. One whose connection is lost again before any
 reply, or that can't connect, fails every request in flight, and the driver every one after, `EIO`,
 as when the host's daemon goes (When the host's daemon goes). A snapshot holds no stream, whose
 listener's path is each VM's own: its restore gives it (cladefs's Firecracker: the load's

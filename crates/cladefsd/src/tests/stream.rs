@@ -224,6 +224,35 @@ fn a_guests_data_requests_are_served_on_its_stream() {
     rig.finish();
 }
 
+/// A write sent again on a stream, as its guest does once its connection is lost, its first send
+/// having sealed its extent, succeeds, changing nothing, its commit made: as a `WRITE_COMMIT`
+/// sent twice. Other bytes, or bytes past what the extent holds, are refused still (`EPERM`), as a
+/// write to a sealed extent is (hotbed review 200).
+#[test]
+fn writes_sent_again_of_what_sealed_extents_hold_succeed() {
+    let rig = Rig::new();
+    let cell = rig.cell.cell();
+    let mut stream = rig.stream();
+    let data: Vec<u8> = (0..BLOCK).map(|i| (i % 249) as u8).collect();
+    let committed = bytes(
+        doc4::VIRTIO_EXTENT_T_WRITE,
+        doc4::VIRTIO_EXTENT_WRITE_COMMIT | doc4::VIRTIO_EXTENT_WRITE_UPLOADED,
+        Some(io(cell, 5, 0, BLOCK)),
+        &data,
+    );
+    assert_eq!(request(&mut stream, &committed, RESPONSE), (vec![], 0));
+    assert_eq!(request(&mut stream, &committed, RESPONSE), (vec![], 0), "sent again");
+    let mut other = data.clone();
+    other[7] ^= 1;
+    let otherwise = bytes(doc4::VIRTIO_EXTENT_T_WRITE, 0, Some(io(cell, 5, 0, BLOCK)), &other);
+    assert_eq!(request(&mut stream, &otherwise, RESPONSE).1, errno(Errno::EPERM));
+    let past = bytes(doc4::VIRTIO_EXTENT_T_WRITE, 0, Some(io(cell, 5, BLOCK as u64, BLOCK)), &data);
+    assert_eq!(request(&mut stream, &past, RESPONSE).1, errno(Errno::EPERM));
+    let read = bytes(doc4::VIRTIO_EXTENT_T_READ, 0, Some(io(cell, 5, 0, BLOCK)), &[]);
+    assert_eq!(request(&mut stream, &read, BLOCK + RESPONSE), (data, 0));
+    rig.finish();
+}
+
 /// A stream past the protocol's bounds is closed, as nothing after its request could be read in
 /// step: one of more bytes to read than any request has, of more to write than any returns, or of
 /// no room for its response. The daemon serves on, a guest connecting again served.

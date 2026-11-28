@@ -890,18 +890,25 @@ async fn run_connection(stream: crate::wire::Stream, tenant: Arc<Tenant>, connec
                         Ok(()) => peer.sender.shutdown(),
                         Err(err) => log::error!("cladefsd: waiting for a VM process to exit: {err}"),
                     }
+                    #[cfg(all(target_os = "linux", not(madsim)))]
+                    connection.stop_guest_stream();
                     connection.end_receiving();
                     went.await
                 }
                 () = crate::drain::started(&daemon) => {
                     peer.sender.shutdown();
+                    #[cfg(all(target_os = "linux", not(madsim)))]
+                    connection.stop_guest_stream();
                     connection.end_receiving();
                     went.await
                 }
             };
-            // cladefs: its receiving over however it ended, which what waits for room for a request
-            // hears, its guest's streams' among them, as their requests won't be answered to anyone
-            // (board 14663).
+            // cladefs: its guest's streams shut down first, so that none of their requests cut short
+            // as the connection ends is answered, its guest sending it again once it connects
+            // again (board 14663); then its receiving over however it ended, which what waits for
+            // room for a request hears.
+            #[cfg(all(target_os = "linux", not(madsim)))]
+            connection.stop_guest_stream();
             connection.end_receiving();
             // Dropped unsent if receiving failed. cladefs: a VM process past the protocol's
             // bounds the daemon lets go of (TASK-79.16).
