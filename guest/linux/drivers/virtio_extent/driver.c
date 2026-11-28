@@ -14,6 +14,7 @@
  */
 
 #include <linux/completion.h>
+#include <linux/delay.h>
 #include <linux/dax.h>
 #include <linux/device/driver.h>
 #include <linux/interrupt.h>
@@ -119,6 +120,11 @@ struct vext_window {
  * one after (-EIO), as a device whose daemon is gone does (doc-4).
  */
 struct vext_stream {
+	/*
+	 * Its connection's socket, which its sender alone sets, and lets go of, under `sock_lock`, which
+	 * a shutdown from any task takes too, so that none shuts down a socket let go of.
+	 */
+	struct mutex sock_lock;
 	struct socket *sock;
 	struct task_struct *sender, *receiver;
 	/* The requests waiting to be sent, which the sender takes, under `lock`. */
@@ -520,6 +526,9 @@ static bool vext_has(const struct vext_request *req, u32 flag)
 
 /* cladefs: the stream's connections lost in a row, no reply read between, before it fails. */
 #define VEXT_STREAM_RETRIES 3
+/* cladefs: the stream's tries to connect again, and the wait between them: a second, all told. */
+#define VEXT_STREAM_CONNECT_TRIES 50
+#define VEXT_STREAM_CONNECT_WAIT_MS 20
 
 /* cladefs: whether `req` goes on the stream (F_STREAM): a data request, of a device with one. */
 static bool vext_on_stream(struct virtio_extent *vext, const struct vext_request *req)
@@ -557,20 +566,28 @@ static void vext_stream_complete(struct virtio_extent *vext, struct vext_request
  * receiver's read and its sender's send, and its sender woken, which fails every request in
  * flight, and waiting to be sent (vext_stream_fail_all). From any task.
  */
+/* cladefs: shuts the stream's socket down, if it has one, ending every read and send of it. */
+static void vext_stream_shutdown(struct vext_stream *stream)
+{
+	mutex_lock(&stream->sock_lock);
+	if (stream->sock)
+		kernel_sock_shutdown(stream->sock, SHUT_RDWR);
+	mutex_unlock(&stream->sock_lock);
+}
+
 static void vext_stream_fail(struct virtio_extent *vext, int err)
 {
 	struct vext_stream *stream = &vext->stream;
-	struct socket *sock = NULL;
 	unsigned long flags;
+	bool first;
 
 	spin_lock_irqsave(&stream->lock, flags);
-	if (!stream->error) {
+	first = !stream->error;
+	if (first)
 		stream->error = err;
-		sock = stream->sock;
-	}
 	spin_unlock_irqrestore(&stream->lock, flags);
-	if (sock)
-		kernel_sock_shutdown(sock, SHUT_RDWR);
+	if (first)
+		vext_stream_shutdown(stream);
 	wake_up(&stream->wake);
 	wake_up(&stream->sent_wait);
 }
@@ -583,17 +600,16 @@ static void vext_stream_fail(struct virtio_extent *vext, int err)
 static void vext_stream_break(struct virtio_extent *vext)
 {
 	struct vext_stream *stream = &vext->stream;
-	struct socket *sock = NULL;
 	unsigned long flags;
+	bool first;
 
 	spin_lock_irqsave(&stream->lock, flags);
-	if (!stream->error && !stream->broken) {
+	first = !stream->error && !stream->broken;
+	if (first)
 		stream->broken = true;
-		sock = stream->sock;
-	}
 	spin_unlock_irqrestore(&stream->lock, flags);
-	if (sock)
-		kernel_sock_shutdown(sock, SHUT_RDWR);
+	if (first)
+		vext_stream_shutdown(stream);
 	wake_up(&stream->wake);
 	wake_up(&stream->sent_wait);
 }
@@ -756,11 +772,13 @@ static int vext_stream_connect(struct virtio_extent *vext)
 		err = kernel_connect(sock, (struct sockaddr *)&addr, sizeof(addr), 0);
 	if (err)
 		goto release;
+	mutex_lock(&stream->sock_lock);
 	spin_lock_irq(&stream->lock);
 	err = stream->error;
 	if (!err)
 		stream->sock = sock;
 	spin_unlock_irq(&stream->lock);
+	mutex_unlock(&stream->sock_lock);
 	if (err)
 		goto release;
 	receiver = kthread_create(vext_stream_receiver, vext, "vext-recv/%s", vext->config.tag);
@@ -787,7 +805,9 @@ release:
  */
 /*
  * cladefs: sends `req`, in flight as `tag`, on the stream's connection, whole: its connection lost
- * if it can't be, `req` left in flight, which the sender sends again once connected again.
+ * if it can't be, `req` left in flight, which the sender sends again once connected again. Its
+ * caller set `sending` to `tag` before it read anything of `req`: a host's bug that replied to it
+ * first completes it only once it is sent.
  */
 static void vext_stream_transmit(struct virtio_extent *vext, struct vext_request *req, u32 tag)
 {
@@ -805,7 +825,6 @@ static void vext_stream_transmit(struct virtio_extent *vext, struct vext_request
 		vec[n++] = (struct kvec) { req->data, req->out_len };
 	if (req->root_out)
 		vec[n++] = (struct kvec) { req->root, req->root_out };
-	WRITE_ONCE(stream->sending, tag);
 	err = vext_stream_io(stream->sock, vec, n,
 			     sizeof(req->stream_hdr) + le32_to_cpu(req->stream_hdr.readable), true);
 	if (err) {
@@ -838,15 +857,27 @@ static void vext_stream_send(struct virtio_extent *vext, struct vext_request *re
 	err = READ_ONCE(stream->error);
 	if (!err && !stream->sock && !READ_ONCE(stream->broken))
 		err = vext_stream_connect(vext);
+	/* Its tag reserved, then marked sending, before it is in flight for the receiver to take. */
 	if (!err)
-		err = xa_alloc_cyclic(&stream->in_flight, &tag, req, xa_limit_32b, &stream->next_tag,
+		err = xa_alloc_cyclic(&stream->in_flight, &tag, NULL, xa_limit_32b, &stream->next_tag,
 				      GFP_KERNEL);
+	if (err >= 0) {
+		WRITE_ONCE(stream->sending, tag);
+		err = xa_err(xa_store(&stream->in_flight, tag, req, GFP_KERNEL));
+		if (err)
+			xa_erase(&stream->in_flight, tag);
+	}
 	if (err < 0) {
+		smp_store_release(&stream->sending, U64_MAX);
 		vext_stream_complete(vext, req, err == -ESHUTDOWN ? -ESHUTDOWN : -EIO);
 		return;
 	}
-	if (!READ_ONCE(stream->broken))
-		vext_stream_transmit(vext, req, tag);
+	if (READ_ONCE(stream->broken)) {
+		smp_store_release(&stream->sending, U64_MAX);
+		wake_up(&stream->sent_wait);
+		return;
+	}
+	vext_stream_transmit(vext, req, tag);
 }
 
 /*
@@ -863,15 +894,20 @@ static int vext_stream_reconnect(struct virtio_extent *vext)
 	unsigned long index;
 	int err;
 
+	unsigned int tries;
+
 	if (receiver) {
 		kthread_stop(receiver);
 		put_task_struct(receiver);
 		stream->receiver = NULL;
 	}
-	spin_lock_irq(&stream->lock);
+	mutex_lock(&stream->sock_lock);
+	sock = stream->sock;
 	stream->sock = NULL;
+	spin_lock_irq(&stream->lock);
 	stream->broken = false;
 	spin_unlock_irq(&stream->lock);
+	mutex_unlock(&stream->sock_lock);
 	if (sock)
 		sock_release(sock);
 	if (++stream->retries > VEXT_STREAM_RETRIES) {
@@ -880,16 +916,38 @@ static int vext_stream_reconnect(struct virtio_extent *vext)
 		vext_stream_fail(vext, -EIO);
 		return -EIO;
 	}
-	err = vext_stream_connect(vext);
+	/*
+	 * Tried a while: a vsock device resetting its connections as its VM is restored refuses one
+	 * until its guest has heard of the reset.
+	 */
+	for (tries = 1;; tries++) {
+		err = vext_stream_connect(vext);
+		if (!err || tries == VEXT_STREAM_CONNECT_TRIES || READ_ONCE(stream->error) ||
+		    kthread_should_stop())
+			break;
+		msleep(VEXT_STREAM_CONNECT_WAIT_MS);
+	}
 	if (err) {
-		dev_err(&vext->vdev->dev, "connecting the stream again: %d\n", err);
+		dev_err(&vext->vdev->dev, "connecting the stream again, %u times: %d\n", tries, err);
 		vext_stream_fail(vext, -EIO);
 		return err;
 	}
-	/* Each whole, the new receiver completing them as their replies come. */
+	/* Nothing in flight to lose again: a connection lost again later is not this one's. */
+	if (xa_empty(&stream->in_flight))
+		stream->retries = 0;
+	/*
+	 * Each whole, the new receiver completing them as their replies come: each marked sending
+	 * before it is read, then read again, the receiver having completed none of them unsent.
+	 */
 	xa_for_each(&stream->in_flight, index, req) {
 		if (READ_ONCE(stream->broken) || READ_ONCE(stream->error))
 			break;
+		WRITE_ONCE(stream->sending, index);
+		req = xa_load(&stream->in_flight, index);
+		if (!req) {
+			smp_store_release(&stream->sending, U64_MAX);
+			continue;
+		}
 		vext_stream_transmit(vext, req, index);
 	}
 	return 0;
@@ -974,6 +1032,7 @@ static int vext_stream_start(struct virtio_extent *vext)
 	struct task_struct *sender;
 
 	spin_lock_init(&stream->lock);
+	mutex_init(&stream->sock_lock);
 	INIT_LIST_HEAD(&stream->to_send);
 	init_waitqueue_head(&stream->wake);
 	init_waitqueue_head(&stream->sent_wait);
@@ -1010,6 +1069,8 @@ static void vext_stream_close(struct virtio_extent *vext)
 		put_task_struct(stream->receiver);
 		stream->receiver = NULL;
 	}
+	/* What its receiver put back in flight as it ended, its sender gone: failed here. */
+	vext_stream_fail_all(vext);
 	if (stream->sock) {
 		sock_release(stream->sock);
 		stream->sock = NULL;

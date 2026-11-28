@@ -666,6 +666,10 @@ impl Backend for Connection {
         Ok(())
     }
 
+    /// A write again of the bytes a sealed extent holds at its offset, which a write sent again
+    /// after its stream's connection was lost is, its first send having written and sealed it
+    /// (with `WRITE_COMMIT`, or another sent again with `WRITE_BARRIER` before it), succeeds, as
+    /// it changes nothing: doc-4's stream transport. Its commit, if it has one, is made then.
     async fn write(
         &self,
         extent: ExtentId,
@@ -673,8 +677,18 @@ impl Backend for Connection {
         buffers: &[VolatileSlice<'_>],
         barriers: WriteBarriers<'_>,
     ) -> Result<(), Errno> {
+        let open_cell = self.serving()?;
         // cladefs: within its disk and its tenant's limits, as its cell admits it (doc-22).
-        self.serving()?.write_with_barriers(extent, offset, buffers, barriers).await
+        match open_cell.write_with_barriers(extent, offset, buffers, barriers).await {
+            Err(Errno::EPERM) if holds(open_cell, extent, offset, buffers).await => {}
+            done => return done,
+        }
+        match barriers.after {
+            None => Ok(()),
+            Some(Commit::Uploaded) => open_cell.commit(barriers.root).await,
+            Some(Commit::Local) => open_cell.commit_local(barriers.root).await,
+            Some(Commit::Ordered) => open_cell.commit_ordered(barriers.root).await,
+        }
     }
 
     async fn free_many(&self, extents: &[ExtentId]) -> Result<(), Errno> {
@@ -708,6 +722,21 @@ impl Backend for Connection {
     async fn info(&self) -> Result<ExtentInfo, Errno> {
         self.serving()?.info()
     }
+}
+
+/// Whether `extent` holds the bytes of `buffers` at `offset`: written there already.
+async fn holds(
+    open_cell: &OpenCell,
+    extent: ExtentId,
+    offset: u64,
+    buffers: &[VolatileSlice<'_>],
+) -> bool {
+    let len = buffers.iter().map(VolatileSlice::len).sum::<usize>();
+    let mut wrote = vec![0u8; len];
+    cladefs_core::memory::gather(buffers, 0, &mut wrote);
+    let mut held = vec![0u8; len];
+    let read = open_cell.read(extent, offset, &mut [VolatileSliceMut::from(&mut held[..])]).await;
+    read.is_ok() && held == wrote
 }
 
 /// What a guest's requests ask of the cell besides: refused before they are served
