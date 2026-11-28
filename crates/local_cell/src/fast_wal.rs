@@ -2691,6 +2691,219 @@ mod tests {
         });
     }
 
+    /// A fast bucket whose first append fails with `error`, the object unchanged, running `first`
+    /// as it fails: what happens meanwhile, while that append is in flight.
+    struct FailsOnce {
+        inner: Arc<ObjectBucket>,
+        error: bucket::Error,
+        first: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    }
+
+    impl Bucket for FailsOnce {
+        fn get(
+            &self,
+            key: &str,
+        ) -> impl Future<Output = Result<bucket::Object, bucket::Error>> + Send {
+            self.inner.get(key)
+        }
+
+        fn get_range(
+            &self,
+            key: &str,
+            range: bucket::ByteRange,
+        ) -> impl Future<Output = Result<Vec<u8>, bucket::Error>> + Send {
+            self.inner.get_range(key, range)
+        }
+
+        fn head(
+            &self,
+            key: &str,
+        ) -> impl Future<Output = Result<bucket::Meta, bucket::Error>> + Send {
+            self.inner.head(key)
+        }
+
+        fn list(
+            &self,
+            prefix: &str,
+        ) -> impl Future<Output = Result<Vec<bucket::Meta>, bucket::Error>> + Send {
+            self.inner.list(prefix)
+        }
+
+        fn list_delimited(
+            &self,
+            prefix: &str,
+            page: bucket::Page<'_>,
+        ) -> impl Future<Output = Result<bucket::Listing, bucket::Error>> + Send {
+            self.inner.list_delimited(prefix, page)
+        }
+
+        fn put(
+            &self,
+            key: &str,
+            bytes: Bytes,
+            mode: bucket::PutMode,
+        ) -> impl Future<Output = Result<bucket::Version, bucket::Error>> + Send {
+            self.inner.put(key, bytes, mode)
+        }
+
+        async fn append(&self, key: &str, offset: u64, bytes: Bytes) -> Result<u64, bucket::Error> {
+            let first = self.first.lock().unwrap().take();
+            match first {
+                Some(first) => {
+                    first();
+                    Err(self.error)
+                }
+                None => self.inner.append(key, offset, bytes).await,
+            }
+        }
+
+        fn delete(&self, key: &str) -> impl Future<Output = Result<(), bucket::Error>> + Send {
+            self.inner.delete(key)
+        }
+
+        fn now(&self) -> u64 {
+            self.inner.now()
+        }
+    }
+
+    /// `walContiguous` (doc-29, specs/fast-wal's `NoGaps`) across a stop: commit 1's batch is in
+    /// flight as commit 2 is staged and the cell's uploader stops (a close, or its failure,
+    /// `upload::Shared::stop`); commit 1's append then times out. `append_record` drops a batch the
+    /// cold head doesn't cover once the sink is stopped (`if ...stopped { return Ok(false) }`),
+    /// and the writer goes on to the next batch, which `take_batch` still hands it: commit 2 is
+    /// appended alone, and `mark_durable(2)` tells commit 1's waiter durable too. A take before
+    /// the cold drain covers commit 1 (the host lost, the drain cut short) recovers commit 2 over
+    /// commit 0: commit 1, acknowledged, is lost, and the cell is no prefix of its commits. The
+    /// `wal_contiguous` rule mutates only the first condition, so the simulation's rule search
+    /// never reaches this exit; the TLA+ model has no stopping writer.
+    #[test]
+    #[ignore = "board 14710: a stopped fast WAL writer drops an unacknowledged batch and appends the next"]
+    fn a_stopped_writer_never_appends_past_a_batch_it_dropped() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let cold = memory_bucket();
+            let inner = memory_bucket();
+            let cell = layout::test_cell(17);
+            lifecycle::create(&*cold, cell, 1).await.unwrap();
+            let w1 = Arc::new(Writer::open(cold.clone(), cell, 10, 1).await.unwrap());
+            let active1 = ActiveWal { epoch: w1.epoch(), bucket: "memory:///fast".into() };
+            w1.activate_fast_wal(Some(FastWal {
+                fsync: Fsync::FastWal,
+                active: Some(active1.clone()),
+            }))
+            .await
+            .unwrap();
+            let changed = Arc::new(Event::new());
+            let sink = FastWalSink::new("memory:///fast".into(), 0, changed, Arc::new(|| {}), None);
+            let first = w1.chain().next_sequence();
+            let (e1, e2) = (ExtentId::new(cell.id, first), ExtentId::new(cell.id, first + 1));
+            let commit = |epoch: u64, extent: ExtentId, root: &[u8]| StagedCommit {
+                epoch,
+                tag: layout::tag(w1.epoch(), epoch),
+                inline_extents: vec![(extent, root.to_vec())],
+                large_extents: Vec::new(),
+                frees: Vec::new(),
+                root: Some(root.to_vec()),
+                capacity: None,
+                next_sequence: extent.sequence + 1,
+                versions: Vec::new(),
+            };
+            // While commit 1's append is in flight: commit 2 staged, and the uploader stopping.
+            let meanwhile = {
+                let (sink, second) = (sink.clone(), commit(2, e2, b"root2"));
+                Box::new(move || {
+                    sink.push(vec![second], 2);
+                    sink.stop();
+                }) as Box<dyn FnOnce() + Send>
+            };
+            let fast = Arc::new(FailsOnce {
+                inner: inner.clone(),
+                error: bucket::Error::Unavailable,
+                first: Mutex::new(Some(meanwhile)),
+            });
+            sink.push(vec![commit(1, e1, b"root1")], 1);
+            FastWalWriter::new(
+                w1.clone(),
+                fast,
+                sink.clone(),
+                DEFAULT_MAX_WRITER_APPENDS,
+                DEFAULT_MAX_SEGMENT_BYTES,
+                tokio_clock(),
+            )
+            .run()
+            .await;
+            // The cold head never covered commit 1 (the host lost before the cold drain).
+            assert_eq!(w1.head().await.end, 0);
+            let durable = sink.durable();
+            let w2 = Arc::new(Writer::open(cold.clone(), cell, 20, 2).await.unwrap());
+            let target = Some(FastWal {
+                fsync: Fsync::FastWal,
+                active: Some(ActiveWal { epoch: w2.epoch(), bucket: "memory:///fast".into() }),
+            });
+            let recovered = fence_and_recover(&w2, &cold, &inner, &active1, target).await.unwrap();
+            // Nothing past commit 1 is durable, nor recovered, as commit 1 is neither.
+            assert_eq!(
+                (durable, recovered, w2.state().root.clone(), w2.state().extents.contains_key(&e2)),
+                (0, 0, None, false),
+                "commit 2 told durable and recovered without commit 1"
+            );
+        });
+    }
+
+    /// The writer's own append refused as S3 Express refuses a write conflicting with one in
+    /// progress (409, which `ObjectBucket` answers `Precondition`), the object unchanged: its
+    /// earlier attempt timed out on the client while the service still ran it. The take already
+    /// counts such a refusal as transient (`FENCE_REFUSALS`, board 14433); the writer finds no
+    /// tombstone, no fence and no record of its own, and takes it for a fence (`Err(Fenced)`),
+    /// failing the cell's fast WAL, and every commit waiting on it, with no taker anywhere.
+    #[test]
+    #[ignore = "board 14712: a fast WAL writer takes S3's transient 409 on its own append for a fence"]
+    fn a_writers_append_refused_by_a_write_in_progress_is_tried_again() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let cold = memory_bucket();
+            let inner = memory_bucket();
+            let cell = layout::test_cell(18);
+            lifecycle::create(&*cold, cell, 1).await.unwrap();
+            let w1 = Arc::new(Writer::open(cold.clone(), cell, 10, 1).await.unwrap());
+            let changed = Arc::new(Event::new());
+            let sink = FastWalSink::new("memory:///fast".into(), 0, changed, Arc::new(|| {}), None);
+            let fast = Arc::new(FailsOnce {
+                inner: inner.clone(),
+                error: bucket::Error::Precondition,
+                first: Mutex::new(Some(Box::new(|| {}))),
+            });
+            let mut writer = FastWalWriter::new(
+                w1.clone(),
+                fast,
+                sink,
+                DEFAULT_MAX_WRITER_APPENDS,
+                DEFAULT_MAX_SEGMENT_BYTES,
+                tokio_clock(),
+            );
+            writer.open = Some(OpenSegment::new(cell, w1.epoch(), 0, w1.keys()).unwrap());
+            writer.next_segment = 1;
+            let record = WalRecord::Batch(vec![FastWalCommit {
+                epoch: 1,
+                tag: layout::tag(w1.epoch(), 1),
+                inline_extents: Vec::new(),
+                large_refs: Vec::new(),
+                frees: Vec::new(),
+                root: Some(b"root1".to_vec()),
+                capacity: None,
+                next_sequence: 1,
+                versions: Vec::new(),
+            }]);
+            let landed = writer.append_record(&record, 1).await;
+            assert!(matches!(landed, Ok(true)), "{landed:?}");
+            let key = layout::wal(cell, w1.epoch(), 0);
+            let obj = inner.get(&key).await.unwrap();
+            let (_, _, recs) =
+                wire::decode_segment(&obj.bytes, cell, w1.epoch(), 0, w1.keys()).unwrap();
+            assert_eq!(recs.into_iter().map(|(_, r)| r).collect::<Vec<_>>(), vec![record]);
+        });
+    }
+
     /// Board 12295: damaging a data part while keeping the footer intact must be rejected by both
     /// Fast WAL pre-upload (`put_large_extent`) and takeover recovery (`fence_and_recover`).
     #[test]
