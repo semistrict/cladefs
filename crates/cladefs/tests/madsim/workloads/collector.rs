@@ -94,7 +94,7 @@ async fn some_cell(bucket: &RoutedBucket, own: CellId) -> CellId {
 /// fails, as the bucket's faults fail its requests, or leaves its cell to another, says so in the
 /// log alone: the next one decides anew.
 async fn passes(bucket: Arc<RoutedBucket>, cell: u64, round: u64, one_cell: f64) {
-    for pass in 0u64.. {
+    for pass in 0..=u64::MAX {
         let pause = Duration::from_millis(madsim::rand::thread_rng().gen_range(0..300));
         madsim::time::sleep(pause).await;
         let holder = HOLDERS | (round << 20) | pass;
