@@ -2600,6 +2600,30 @@ mod tests {
         assert_eq!(asked, [format!("get {KEY} last {TAIL}")]);
     }
 
+    /// A segment's footer naming an extent at an offset past what a u64 holds is corrupt, and the
+    /// read of it fails so: `Fetcher::located` adds the footer's offset to the range read
+    /// (`at + range.end.min(held)`) unchecked, and overflows, a panic in every profile cladefs
+    /// builds (`overflow-checks = true`), which halts the cell reading it. The footer is decoded
+    /// from the tail with its CRC alone (`Tail::of`, `Footer::decode`, which checks no run), its
+    /// MAC checked only later, in `Fetcher::data`: one who can write the bucket and holds no key
+    /// halts every cell, every fork of a base, that reads the segment (AGENTS.md, "Trust
+    /// boundaries": a bucket's objects before their MACs are checked).
+    #[test]
+    #[ignore = "board 14713: a segment footer's extent offset overflows Fetcher::located, a panic"]
+    fn footers_naming_extents_past_a_u64_are_corrupt() {
+        let bucket = holding(segment(&noise(PART), vec![(EXTENT, u64::MAX, 1)]));
+        let read_back = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            bucket.served(read(&bucket, &ring(), EXTENT, &location(1))).0
+        }));
+        let read_back = read_back.map_err(|panic| {
+            panic
+                .downcast_ref::<String>()
+                .cloned()
+                .or(panic.downcast_ref::<&str>().map(|s| s.to_string()))
+        });
+        assert!(matches!(read_back, Ok(Err(Error::Corrupt(_)))), "{read_back:?}");
+    }
+
     /// A range of an object's data is read from the parts it touches; an empty one reads none; one
     /// reversed, or past the data's end, is corrupt, and read not.
     #[test]
