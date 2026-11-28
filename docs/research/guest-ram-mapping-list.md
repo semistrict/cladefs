@@ -152,9 +152,8 @@ Two format changes, both decided by the user on 2026-11-28:
   format family under `formats/`, with its golden corpus.
 - **`snapshot-extent-state`** is Firecracker's state of an extent device: its window's place and
   every mapping (`MappingStateV2`). A Firecracker without the device can't load a state file that
-  has one. Backwards compatibility isn't required yet, so old state files are refused by name. The
-  one exception is stored data hotbed itself depends on: before the device leaves, check whether
-  hotbed keeps any such state file, and coordinate with it if so. This comes with point 2 as well
+  has one. Backwards compatibility isn't required yet, so old state files are refused by name. Hotbed
+  runs on cladefs, so the change's rollout is coordinated with hotbed's. This comes with point 2 as well
   as this plan.
 
 ## cladefsd
