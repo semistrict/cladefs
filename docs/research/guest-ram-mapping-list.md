@@ -260,7 +260,7 @@ Two format changes, both decided by the user on 2026-11-28:
 - **The cladefs driver binds virtio-pmem** (device ID 27) in place of `virtio_pmem`, and takes its
   window's guest range and size from the device's configuration space. Its requests go over vsock
   (point 2, the extent-device thread's work).
-- **doc-4 changes:**
+- **doc-4 changes**, which board 14663 writes into doc-4 with the move to vsock:
   - `MAP` can fail with `ENOMEM` when the host's mapping budget is spent (cladefsd, point 7).
   - `PRIVATE` and `MAP_PREFAULT` lose their host side. `KVM_PRE_FAULT_MEMORY` was fork code, and a
     store to a page not private yet now copies it in KVM's own fault, with no exit to userspace.
@@ -275,7 +275,10 @@ Two format changes, both decided by the user on 2026-11-28:
 - **Window maps take two more hops.** Today a guest's `MAP` reaches the window's stage inside the
   VM process. Here it goes over vsock to cladefsd, which sends Firecracker a map message, waits for
   it, and answers over vsock, each entry three system calls. `MAP_MANY` batches them. Measured with
-  the vsock prototype against step 0.
+  the vsock prototype against step 0 (board 14663 includes `MAP` latency). If it's too slow, only
+  taking pages away (`UNMAP`, or a `MAP` over mapped pages) must wait for Firecracker. A `MAP` into
+  an unmapped range could answer at once, if a window's unmapped ranges were anonymous memory
+  registered `MISSING` instead of none, so that a touch before the entries land waits in cladefsd.
 - **Faults per page.** Every VM's first touch of a node or mapped range reaches cladefsd, which
   installs it with `UFFDIO_CONTINUE`: an ioctl per node per VM, no mapping each. Today's second
   stage installs a node's pages ahead the same way.
@@ -314,8 +317,8 @@ named for no one. An upstream issue proposing them comes first, filed only with 
    faults filled and installed, persist of every region with the remap, the mapping budget. The
    window's mappings record is a new format family (Frozen formats).
 6. **Guest: the cladefs driver binds the window's virtio-pmem device** (board 14666), and retries a
-   `MAP` that fails with `ENOMEM` after reclaiming window ranges. Its requests come over vsock once
-   the extent-device thread's prototype lands.
+   `MAP` that fails with `ENOMEM` after reclaiming window ranges. Its requests come over vsock with
+   board 14663, which also edits doc-4. The extent device's snapshot state leaves with 14663 too.
 7. **Remove the fork's memory and window code** (board 14631), guest tests through the backend,
    measured against plan v3's step 0 baseline (a fresh boot, a restore, the bench's first touch of
    1 GiB, `b73e6d1ab`).
