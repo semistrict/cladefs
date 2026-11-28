@@ -21,9 +21,10 @@
 //! protocol's bounds as it is read, a stream past them closed, as nothing after it could be read in
 //! step; admitted in the connection's turns ([`super::Work`]); served as a future
 //! ([`super::serve_future`]), its bytes held in its tenant's bytes in flight while it is; and
-//! answered ([`StreamReply`]) on a thread of the stream's own, which writes replies in the order
-//! their requests are done, so that a guest slow to read holds up no serving. A stream has
-//! [`STREAM_REQUESTS`] requests in flight at most, its reading waiting for one to be done past them.
+//! answered ([`StreamReply`]) as it is done: by the thread that served it, at once, without waiting,
+//! while no one else writes, or by a thread of the stream's own, the rest ([`Writer`]), so that a
+//! guest slow to read holds up no serving. A stream has [`STREAM_REQUESTS`] requests in flight at
+//! most, and [`STREAM_BYTES`] of their bytes, its reading waiting for room past them.
 //! A request no transport's guest sends on it, any of the window's or of the device's state, is
 //! refused (`EINVAL`): its VMM's device serves those on its queues. A panic serving one halts the
 //! cell, and answers it with nothing written, as an unanswered request is.
@@ -109,11 +110,98 @@ struct Owed {
     replies: Option<Replies>,
 }
 
-/// A reply to write: its head, the bytes the device wrote, and the credit its request held.
+/// A reply to write: its head, the bytes the device wrote, the credit its request held, and how
+/// much of it, head and bytes, is written already.
 struct Reply {
     head: StreamReply,
     written: Vec<u8>,
     bytes: u64,
+    skip: usize,
+}
+
+impl Reply {
+    fn len(&self) -> usize {
+        size_of::<StreamReply>() + self.written.len()
+    }
+
+    /// Writes what is left of it to `stream`, waiting for room.
+    fn write_rest(&self, mut stream: &UnixStream) -> std::io::Result<()> {
+        let head = self.head.as_bytes();
+        stream.write_all(head.get(self.skip..).unwrap_or_default())?;
+        stream.write_all(&self.written[self.skip.saturating_sub(head.len())..])
+    }
+
+    /// Writes what it can of it to `stream` now, without waiting (`MSG_DONTWAIT`): the bytes it
+    /// wrote, 0 if the stream's socket is full.
+    fn write_now(&self, stream: &UnixStream) -> std::io::Result<usize> {
+        let iov = [
+            libc::iovec {
+                iov_base: self.head.as_bytes().as_ptr() as *mut _,
+                iov_len: size_of::<StreamReply>(),
+            },
+            libc::iovec { iov_base: self.written.as_ptr() as *mut _, iov_len: self.written.len() },
+        ];
+        let message = libc::msghdr {
+            msg_iov: iov.as_ptr() as *mut _,
+            msg_iovlen: iov.len() as _,
+            // SAFETY: Zeroes are no name, no control data, and no flags.
+            ..unsafe { std::mem::zeroed() }
+        };
+        loop {
+            let flags = libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL;
+            // SAFETY: Sends the bytes `iov` describes, which `self` holds through the call.
+            let sent = unsafe { libc::sendmsg(stream.as_raw_fd(), &message, flags) };
+            if sent >= 0 {
+                return Ok(sent as usize);
+            }
+            let err = std::io::Error::last_os_error();
+            match err.kind() {
+                std::io::ErrorKind::Interrupted => continue,
+                std::io::ErrorKind::WouldBlock => return Ok(0),
+                _ => return Err(err),
+            }
+        }
+    }
+}
+
+/// What a stream's writer thread is told: a reply to write, or to write what a serving thread began
+/// of one and the socket had no room for ([`Writing::partial`]).
+enum Queued {
+    Reply(Reply),
+    Wake,
+}
+
+/// Who writes a stream's replies, one at a time, each whole, under its lock: a reply's serving
+/// thread, at once, without waiting, while no one writes, rather than handing it to the stream's
+/// writer thread, which costs a reply a wakeup (board 14663's A/B: one each fsync waits on); or
+/// the writer thread, the rest.
+struct Writer {
+    stream: Arc<UnixStream>,
+    writing: Mutex<Writing>,
+}
+
+/// What its writers share: a reply a serving thread began and the socket had no room for the rest
+/// of, which the writer thread writes before any other; and whether the stream failed, after which
+/// replies go unwritten, their credit given back.
+#[derive(Default)]
+struct Writing {
+    partial: Option<Reply>,
+    failed: bool,
+}
+
+impl Writer {
+    /// Writes what is left of `reply`, waiting for room, with `writing` held, then gives back its
+    /// credit: the stream shut down if it fails.
+    fn write(&self, writing: &mut Writing, reply: Reply, credit: &Credit) {
+        if !writing.failed
+            && let Err(err) = reply.write_rest(&self.stream)
+        {
+            log::info!("cladefsd: replying on a guest's stream: {err}");
+            let _ = self.stream.shutdown(std::net::Shutdown::Both);
+            writing.failed = true;
+        }
+        credit.give(reply.bytes);
+    }
 }
 
 impl Owed {
@@ -123,13 +211,47 @@ impl Owed {
         Self::reply(&replies, self.tag, self.bytes, written);
     }
 
+    /// Writes the reply at once, if no one writes, or what of it the socket has room for, the rest
+    /// the writer thread's; or hands it to the writer thread.
     fn reply(replies: &Replies, tag: u64, bytes: u64, written: Vec<u8>) {
         // At most MAX_WRITABLE, a u32's.
         let len = written.len() as u32;
         let head = StreamReply { tag: tag.to_le(), written: len.to_le(), reserved: 0 };
+        let reply = Reply { head, written, bytes, skip: 0 };
+        let writer = &replies.writer;
+        if let Ok(mut writing) = writer.writing.try_lock() {
+            if writing.failed {
+                drop(writing);
+                return replies.credit.give(bytes);
+            }
+            if writing.partial.is_none() {
+                match reply.write_now(&writer.stream) {
+                    Ok(wrote) if wrote == reply.len() => {
+                        drop(writing);
+                        return replies.credit.give(bytes);
+                    }
+                    Ok(wrote) => {
+                        writing.partial = Some(Reply { skip: wrote, ..reply });
+                        drop(writing);
+                        // Its writer gone, the stream ended: the partial reply is no one's.
+                        let _ = replies.sender.send(Queued::Wake);
+                        return;
+                    }
+                    Err(err) => {
+                        log::info!("cladefsd: replying on a guest's stream: {err}");
+                        let _ = writer.stream.shutdown(std::net::Shutdown::Both);
+                        writing.failed = true;
+                        drop(writing);
+                        return replies.credit.give(bytes);
+                    }
+                }
+            }
+        }
         // Its writer gone, the stream ended: no guest to tell, its credit given back here.
-        if replies.sender.send(Reply { head, written, bytes }).is_err() {
-            replies.credit.give(bytes);
+        if let Err(mpsc::SendError(Queued::Reply(reply))) =
+            replies.sender.send(Queued::Reply(reply))
+        {
+            replies.credit.give(reply.bytes);
         }
     }
 }
@@ -145,8 +267,9 @@ impl Drop for Owed {
 /// Where a stream's replies go, and its credit, which each reply gives back as it is written.
 #[derive(Clone)]
 struct Replies {
-    sender: mpsc::Sender<Reply>,
+    sender: mpsc::Sender<Queued>,
     credit: Arc<Credit>,
+    writer: Arc<Writer>,
 }
 
 /// A stream's requests in flight and their bytes, [`STREAM_REQUESTS`] and [`STREAM_BYTES`] at most,
@@ -354,13 +477,14 @@ impl Connection {
     /// Serves the stream `reading` holds, read on a thread of its own and answered on another:
     /// shut down, and forgotten, if either can't start.
     fn serve_stream(self: Arc<Self>, reading: Reading, ordered_only: bool) -> std::io::Result<()> {
-        let (sender, replies) = mpsc::channel::<Reply>();
+        let (sender, queued) = mpsc::channel::<Queued>();
         let credit = Arc::new(Credit::new(self.stream_requests.clone()));
-        let (writer, giving) = (reading.stream.clone(), credit.clone());
+        let writer = Arc::new(Writer { stream: reading.stream.clone(), writing: Mutex::default() });
+        let (writing, giving) = (writer.clone(), credit.clone());
         std::thread::Builder::new()
             .name("cladefsd stream replies".into())
-            .spawn(move || write_replies(&writer, &replies, &giving))?;
-        let replies = Replies { sender, credit };
+            .spawn(move || write_replies(&writing, &queued, &giving))?;
+        let replies = Replies { sender, credit, writer };
         std::thread::Builder::new()
             .name("cladefsd stream requests".into())
             .spawn(move || self.read_requests(&reading, &replies, ordered_only))?;
@@ -510,18 +634,16 @@ impl Connection {
 /// written, until every sender is gone. A stream that fails is shut down, its reading with it, and
 /// the replies after it go unwritten, their credit given back, so that a reading waiting for room
 /// reads on, to the stream's end.
-fn write_replies(stream: &UnixStream, replies: &mpsc::Receiver<Reply>, credit: &Credit) {
-    let mut writing = Some(stream);
-    for Reply { head, written, bytes } in replies {
-        if let Some(stream) = &mut writing
-            && let Err(err) =
-                stream.write_all(head.as_bytes()).and_then(|()| stream.write_all(&written))
-        {
-            log::info!("cladefsd: replying on a guest's stream: {err}");
-            let _ = stream.shutdown(std::net::Shutdown::Both);
-            writing = None;
+fn write_replies(writer: &Writer, queued: &mpsc::Receiver<Queued>, credit: &Credit) {
+    for item in queued {
+        let mut writing = writer.writing.lock().unwrap_or_else(PoisonError::into_inner);
+        // A reply a serving thread began goes first, whole, before any other.
+        if let Some(partial) = writing.partial.take() {
+            writer.write(&mut writing, partial, credit);
         }
-        credit.give(bytes);
+        if let Queued::Reply(reply) = item {
+            writer.write(&mut writing, reply, credit);
+        }
     }
 }
 
