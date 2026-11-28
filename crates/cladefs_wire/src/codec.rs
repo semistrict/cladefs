@@ -83,6 +83,9 @@ pub enum Request<'a> {
     /// cladefs: [`STATS`]: the answer to ask `ask`, with its guest's stats if it has a guest that
     /// answers, [`MAX_STATS`] bytes at most.
     Stats { ask: u64, guest: Option<&'a str> },
+    /// cladefs: [`GUEST_STREAM`]: the guest's doc-4 requests come to `listener`, its uploaded
+    /// commits answered once ordered if `ordered_only` ([`GUEST_STREAM_UNSAFE`], board 14663).
+    GuestStream { ordered_only: bool, listener: Area<'a> },
 }
 
 /// How an [`OPEN`] opens its cell.
@@ -138,7 +141,8 @@ pub struct Fault {
     pub probe: bool,
 }
 
-/// The shared memory a [`TRANSFER`] carries, its descriptor.
+/// A descriptor a request carries: the shared memory a [`TRANSFER`] does, or the listening socket a
+/// [`GUEST_STREAM`] does.
 #[derive(Debug)]
 pub struct Area<'a>(pub BorrowedFd<'a>);
 
@@ -205,6 +209,7 @@ fn known_flags(kind: u32) -> Result<u32, Errno> {
         MAPPINGS => MAPPINGS_QUIESCENT,
         MAP => MAP_WARM,
         STATS => STATS_GUEST,
+        GUEST_STREAM => GUEST_STREAM_UNSAFE,
         FREE | UNMAP | ROOT | INFO | RESIZED | TRANSFER => 0,
         _ => return Err(Errno::EINVAL),
     })
@@ -245,6 +250,7 @@ impl<'a> Request<'a> {
             Request::Mappings { .. } => MAPPINGS,
             Request::Transfer { .. } => TRANSFER,
             Request::Stats { .. } => STATS,
+            Request::GuestStream { .. } => GUEST_STREAM,
         }
     }
 
@@ -432,6 +438,10 @@ impl<'a> Request<'a> {
                 &StatsBody { ask: *ask },
             )
             .carrying(guest.unwrap_or_default().as_bytes()),
+            Request::GuestStream { ordered_only, listener } => Encoded {
+                fd: Some(listener.0),
+                ..Encoded::empty(GUEST_STREAM, flag(*ordered_only, GUEST_STREAM_UNSAFE))
+            },
         }
     }
 
@@ -451,10 +461,11 @@ impl<'a> Request<'a> {
         // cladefs: what its kind has, after the guest request it says, if any (TASK-260).
         let (_, payload) = guest_request(message)?;
         let flags = flags & !REQUEST;
-        // A request's descriptors: a TRANSFER's one, and none of any other.
-        let fd = match (kind, fds.as_slice()) {
-            (TRANSFER, [fd]) => Some(fd.as_fd()),
-            (_, []) if kind != TRANSFER => None,
+        // A request's descriptors: a TRANSFER's one, a GUEST_STREAM's one, and none of any other.
+        let carries = matches!(kind, TRANSFER | GUEST_STREAM);
+        let fd = match (carries, fds.as_slice()) {
+            (true, [fd]) => Some(fd.as_fd()),
+            (false, []) => None,
             _ => return Err(Errno::EINVAL),
         };
         let has = |flag: u32| flags & flag != 0;
@@ -664,6 +675,12 @@ impl<'a> Request<'a> {
                     }
                 };
                 Request::Stats { ask: body.ask, guest }
+            }
+            GUEST_STREAM => {
+                nothing()?;
+                header.decode_empty()?;
+                let listener = Area(fd.ok_or(Errno::EINVAL)?);
+                Request::GuestStream { ordered_only: has(GUEST_STREAM_UNSAFE), listener }
             }
             _ => return Err(Errno::EINVAL),
         })
@@ -1599,6 +1616,7 @@ mod tests {
             Request::Transfer { len: a, area: Area(area) },
             Request::Stats { ask: a, guest: None },
             Request::Stats { ask: b, guest: Some(&fields.stats) },
+            Request::GuestStream { ordered_only: one, listener: Area(area) },
         ]
     }
 
@@ -1724,9 +1742,24 @@ mod tests {
     }
 
     /// Every kind of request.
-    const KINDS: [u32; 16] = [
-        OPEN, READ, WRITE, FREE, MAP, UNMAP, COMMIT, ROOT, INFO, WINDOW, FAULT, FORK, RESIZED,
-        MAPPINGS, TRANSFER, STATS,
+    const KINDS: [u32; 17] = [
+        OPEN,
+        READ,
+        WRITE,
+        FREE,
+        MAP,
+        UNMAP,
+        COMMIT,
+        ROOT,
+        INFO,
+        WINDOW,
+        FAULT,
+        FORK,
+        RESIZED,
+        MAPPINGS,
+        TRANSFER,
+        STATS,
+        GUEST_STREAM,
     ];
 
     /// `request`, as its receiver receives it: of ID `id`.
@@ -1888,6 +1921,7 @@ mod tests {
                 WINDOW => 0b1,
                 FORK => 0b11,
                 STATS => 0b1,
+                GUEST_STREAM => 0b1,
                 MAPPINGS => 0b1,
                 MAP => 0b1,
                 _ => 0,
@@ -2282,12 +2316,18 @@ mod tests {
                 Header::new(STATS, 0).with_body(&StatsBody { ask: 5 }),
                 vec![],
             ),
+            (
+                Request::GuestStream { ordered_only: true, listener: Area(area.as_fd()) },
+                Header::new(GUEST_STREAM, 0).with_flags(GUEST_STREAM_UNSAFE),
+                vec![],
+            ),
         ];
         for (request, header, payload) in cases {
             let encoded = request.encode();
             let bytes = (encoded.header, encoded.payload.concat());
             assert_eq!(bytes, (header, payload), "{request:?}");
-            assert_eq!(encoded.fd.is_some(), request.kind() == TRANSFER);
+            let carries = matches!(request.kind(), TRANSFER | GUEST_STREAM);
+            assert_eq!(encoded.fd.is_some(), carries, "{request:?}");
         }
         let map = Stage {
             id: 4,
@@ -2600,7 +2640,7 @@ mod tests {
     fn the_wire_is_its_version() {
         /// The version, and the fingerprint of the wire it is. A change to the wire is a new
         /// version, both changed together, never the fingerprint alone.
-        const WIRE: (u64, u64) = (23, 0xab82a34c3729a705);
+        const WIRE: (u64, u64) = (26, 0x9a6019b1975bfc5e);
         let fingerprint = fingerprint();
         assert_eq!(
             (VERSION, fingerprint),

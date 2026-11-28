@@ -3,7 +3,7 @@ id: doc-4
 title: Virtio extent-store device specification
 type: specification
 created_date: '2026-10-13 22:18'
-updated_date: '2026-11-17 01:09'
+updated_date: '2026-11-28 18:00'
 ---
 # The virtio extent-store device
 
@@ -86,7 +86,7 @@ Settled in a design review on 2026-10-13:
 ### Version
 
 The configuration's first field, `version`, is the device's protocol version, `VIRTIO_EXTENT_VERSION`,
-2 (TASK-141.3; 2 since live followers went, board 8237). A change to any request, flag, feature,
+3 (TASK-141.3; 2 since live followers went, board 8237; 3 since the stream transport, board 14663). A change to any request, flag, feature,
 configuration field or what it means makes a new one: cladefs migrates nothing (AGENTS.md), so a
 driver and a device of different versions refuse each other rather than serve with what both happen
 to know. The driver reads `version` first, as it
@@ -111,6 +111,7 @@ its probe on seeing so after `DRIVER_OK`.
 | 7 | `VIRTIO_EXTENT_F_MAP_MANY` | `MAP` takes `MAP_MANY`: its data holds more maps (TASK-91.4). Needs `DAX`. |
 | 8 | `VIRTIO_EXTENT_F_MAP_PREFAULT` | `MAP`, and each of its further maps, takes `MAP_PREFAULT`: the guest accesses the pages next (TASK-112.1). Needs `DAX`. |
 | 11 | `VIRTIO_EXTENT_F_STATS` | The configuration holds `stats_asked`, which changes while the device runs: the host asks for the guest's stats, which it answers with `STATS` (Stats, TASK-111.4). |
+| 12 | `VIRTIO_EXTENT_F_STREAM` | The guest sends its data requests, `READ`, `WRITE`, `FREE`, `COMMIT`, `ROOT` and `INFO`, over a vsock stream to the host's port `stream_port`, not on the queues (Stream transport, board 14663). |
 | 29 | `VIRTIO_RING_F_EVENT_IDX` | The ring's notification suppression: the device offers it, so that a guest's requests queued while it takes them, and its completions while the driver takes them, cost no exit each. |
 | 32 | `VIRTIO_F_VERSION_1` | Required. |
 
@@ -137,6 +138,8 @@ struct virtio_extent_config {
 	le64 private_max;         /* F_DAX: the most private pages the window holds at once, in
 	                             pages of map_alignment */
 	le64 stats_asked;         /* F_STATS: the host's latest ask for the guest's stats, or 0 */
+	le32 stream_port;         /* F_STREAM: the host's vsock port the data requests go to */
+	le32 reserved;
 };
 ```
 
@@ -182,6 +185,41 @@ CPU. Each request is one descriptor chain:
 5. the response, which the device writes.
 
 The driver may have as many requests in flight as the queues hold.
+
+### Stream transport
+
+*Added 2026-11-28 (board 14663).* With `VIRTIO_EXTENT_F_STREAM`, the guest sends its data requests,
+`READ`, `WRITE`, `FREE`, `COMMIT`, `ROOT` and `INFO`, over a vsock stream it connects to the host
+(CID 2) at `stream_port`, and nothing else on it: the window's requests and those of the device's
+state (`MAP`, `UNMAP`, `PRIVATE`, `RESIZED`, `FREEZE`, `STATS`) stay on the queues. cladefs's extent
+daemon serves the stream itself, the VMM's stock vsock device copying it between guest memory and
+the daemon, so the data requests need nothing of the VMM's own. A request is a chain's bytes in
+order, framed:
+
+```c
+struct virtio_extent_stream_req {
+	le64 tag;       /* the driver's: names the reply, unique among those in flight */
+	le32 readable;  /* bytes that follow: header, arguments, data, root */
+	le32 writable;  /* bytes the device writes: data, then the response */
+};
+
+struct virtio_extent_stream_reply {
+	le64 tag;       /* the request's */
+	le32 written;   /* bytes that follow: its `writable`, or 0 if it wrote nothing */
+	le32 reserved;
+};
+```
+
+Replies come in any order. A reply of nothing written fails its request with `EIO`. A request past
+the protocol's bounds (more to read than any request has, more to write than any returns, or no room
+for a response) closes the stream: nothing after it could be read in step. Barriers order the
+stream's requests and the queues' alike, by completion: a `MAP` of an extent goes on its queue once
+the `COMMIT` that sealed it completed on the stream.
+
+A stream that fails or closes fails every request in flight, and the driver every one after, `EIO`,
+as when the host's daemon goes (When the host's daemon goes). A VMM refuses to snapshot a device
+with a stream for now, as the vsock device resets its connections on a snapshot and nothing makes
+its requests in flight safe to send again yet.
 
 ### Shared memory
 

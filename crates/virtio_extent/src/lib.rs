@@ -51,7 +51,7 @@ pub mod vcpu;
 mod window;
 mod workers;
 
-pub use config::{CacheType, Config, ConfigError, PRIVATE_MAX_DEFAULT, private_max};
+pub use config::{CacheType, Config, ConfigError, PRIVATE_MAX_DEFAULT, StreamConfig, private_max};
 pub use device::{ActivateError, Device, Error, OnLost, ReleaseError, ShmRegion};
 pub use notices::{ConfigInterrupt, Notices, Resizing, StatsAsks};
 pub use persist::SnapshotMode;

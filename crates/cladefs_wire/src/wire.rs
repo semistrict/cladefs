@@ -592,7 +592,10 @@ const _: () = {
 /// `MapBody`/`MAP_ZEROS`, keeping [`MAP_WARM`]), and `STAGE_PRIVATE_COUNTS` into `STAGE_COUNTS`'s
 /// 40-byte payload; drop always-true `FAULT_PAGE` (board 11697); register `TRANSFER` lazily on
 /// first non-DAX I/O and verify hole-free once at registration (board 11707, hotbed question 575).
-pub const VERSION: u64 = 23;
+/// Versions 24 and 25 were the vhost-user back-end's (boards 14537, 14620), backed out.
+/// Version 26: [`GUEST_STREAM`]: the VM process hands the daemon a listening socket its guest's
+/// doc-4 requests come to over vsock, which the daemon serves itself (board 14663).
+pub const VERSION: u64 = 26;
 
 /// cladefs: a flag of any request, which says the guest request it is a call for, the guest's
 /// number of it (`crate::request`, TASK-260): little-endian, not 0, in the first
@@ -730,6 +733,20 @@ pub const STATS_GUEST: u32 = 1 << 0;
 pub const MAX_STATS: usize = cladefs_core::protocol::MAX_STATS;
 // 32 was `MAP_MANY`, folded into `MAP` in version 23 (board 11697), not reused.
 // 33 was `STAGE_PRIVATE_COUNTS`, folded into `STAGE_COUNTS`'s payload in version 23 (board 11697).
+// 34 was the vhost-user back-end's `VHOST_USER`, versions 24 and 25, backed out: not reused.
+/// cladefs: the connection's guest's doc-4 requests come over a stream the daemon serves itself
+/// (board 14663): the request carries a listening Unix stream socket the VM process bound where its
+/// vsock device connects a guest's connection to the device's port (Firecracker's
+/// `<uds_path>_<port>`), in its jail. The daemon accepts on it, on a thread of its own, the
+/// connections the VM process makes (`SO_PEERCRED`), closing any other, and serves each as doc-4's
+/// stream transport (`cladefs_core::extent_requests::stream`) with the connection's cell, in the
+/// guest's dialect; [`GUEST_STREAM_UNSAFE`] answers its uploaded commits once ordered, as an
+/// `Unsafe` cache does (TASK-363). No payload. Once, after [`OPEN`]: `EBADF` before, `EEXIST`
+/// again; `ENOTSUP` where the daemon serves none (not Linux, or under madsim). The reply, of no
+/// descriptor, says it listens.
+pub const GUEST_STREAM: u32 = 35;
+/// cladefs: a [`GUEST_STREAM`]'s guest's cache is `Unsafe`.
+pub const GUEST_STREAM_UNSAFE: u32 = 1 << 0;
 /// cladefs: how long a VM process's stage operations go uncounted at most while it makes them
 /// ([`STAGE_COUNTS`]): within a sample of the daemon's stats file (`CLADEFSD_STATS`).
 pub const STAGE_COUNTS_EVERY: std::time::Duration = std::time::Duration::from_millis(500);

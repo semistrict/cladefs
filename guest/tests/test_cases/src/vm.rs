@@ -101,6 +101,21 @@ fn balloon() -> anyhow::Result<bool> {
     }
 }
 
+/// cladefs: whether every extent-store device's guest sends its data requests over vsock to the
+/// extent daemon, which serves them itself (doc-4's stream transport, board 14663), rather than on
+/// the device's queues: CLADEFS_EXTENT_STREAM=1, what an A/B against the queues turns on. Off unset.
+fn extent_stream() -> anyhow::Result<bool> {
+    match std::env::var("CLADEFS_EXTENT_STREAM").as_deref() {
+        Ok("0") | Err(_) => Ok(false),
+        Ok("1") => Ok(true),
+        Ok(other) => anyhow::bail!("CLADEFS_EXTENT_STREAM is 0, 1 or unset, not {other:?}"),
+    }
+}
+
+/// cladefs: the vsock port of the first extent-store device's stream, the others' after it
+/// ([`extent_stream`]): "FX", clear of the ports the tests' guests connect to.
+const STREAM_PORT: u32 = 0x4658_0000;
+
 impl Vm {
     /// A VM of `cpus` vCPUs and `ram_mib` MiB of memory: a new memory cell's window, `0/0` on the
     /// extent daemon at CLADEFSD, if it is set ([`Vm::memory_cell`]).
@@ -507,7 +522,30 @@ impl Vm {
         boot_args.push_str(" -- ");
         boot_args.push_str(test_case);
         self.config["boot-source"]["boot_args"] = boot_args.into();
+        if extent_stream()? {
+            self.stream_extents();
+        }
         Ok(self.config)
+    }
+
+    /// cladefs: has each extent-store device's guest send its data requests over vsock
+    /// ([`extent_stream`], board 14663): the VM's vsock device, given one if it has none, connects
+    /// them to `<uds_path>_<port>`, where the device binds the listener the extent daemon accepts
+    /// them on.
+    fn stream_extents(&mut self) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static STREAMED: AtomicUsize = AtomicUsize::new(0);
+        if !self.config["vsock"].is_object() {
+            let n = STREAMED.fetch_add(1, Ordering::Relaxed);
+            let uds = std::env::temp_dir().join(format!("cladefs-{}-{n}.vsock", std::process::id()));
+            self.vsock(&uds);
+        }
+        let uds = self.config["vsock"]["uds_path"].as_str().expect("a path").to_owned();
+        let devices = self.config["cladefs"].as_array_mut().expect("an array");
+        for (port, device) in (STREAM_PORT..).zip(devices.iter_mut()) {
+            let listener = format!("{uds}_{port}");
+            device["stream"] = serde_json::json!({ "port": port, "listener": listener });
+        }
     }
 
     /// Makes the ext4 image of `root` it boots from now, not as it boots: a test timing its boot

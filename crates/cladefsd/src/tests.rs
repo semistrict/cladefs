@@ -7608,6 +7608,10 @@ mod hostile;
 /// TASK-258: the daemon's spans, exported.
 mod otel;
 
+/// Board 14663: doc-4's stream transport, the guest's data requests over vsock.
+#[cfg(all(target_os = "linux", not(madsim)))]
+mod stream;
+
 /// TASK-330.3: the daemon against a degraded bucket, for a long while.
 mod soak;
 
