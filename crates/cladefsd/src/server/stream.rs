@@ -301,7 +301,15 @@ impl Connection {
                     // shut down, its guest's next connections refused rather than waiting for an
                     // accept that won't come.
                     _ => {
-                        log::warn!("cladefsd: no more guest streams accepted: {err}");
+                        // As its connection's stop shuts it down, the end it should come to.
+                        let stopped = matches!(
+                            *self.guest_stream.lock().unwrap_or_else(PoisonError::into_inner),
+                            GuestStream::Stopped
+                        );
+                        match stopped {
+                            true => log::info!("cladefsd: no more guest streams accepted: {err}"),
+                            false => log::warn!("cladefsd: no more guest streams accepted: {err}"),
+                        }
                         // SAFETY: Shuts down a listener this holds.
                         unsafe { libc::shutdown(listener.as_raw_fd(), libc::SHUT_RDWR) };
                         return;

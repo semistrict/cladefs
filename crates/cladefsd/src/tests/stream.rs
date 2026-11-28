@@ -152,7 +152,9 @@ fn a_guests_data_requests_are_served_on_its_stream() {
         &root,
     );
     assert_eq!(request(&mut stream, &commit, RESPONSE), (vec![], 0));
-    let sealed = bytes(doc4::VIRTIO_EXTENT_T_WRITE, 0, Some(io(cell, 1, 0, BLOCK)), &data[..BLOCK]);
+    // Other bytes than it holds: what it holds, written again, succeeds (the next test's).
+    let other = vec![0x5a; BLOCK];
+    let sealed = bytes(doc4::VIRTIO_EXTENT_T_WRITE, 0, Some(io(cell, 1, 0, BLOCK)), &other);
     assert_eq!(request(&mut stream, &sealed, RESPONSE).1, errno(Errno::EPERM));
     let read_root = bytes::<()>(doc4::VIRTIO_EXTENT_T_ROOT, 0, None, &[]);
     let returned = doc4::MAX_ROOT as usize + size_of::<RootLen>();
