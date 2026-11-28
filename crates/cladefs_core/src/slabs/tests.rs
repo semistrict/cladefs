@@ -50,6 +50,53 @@ fn arenas_count_the_memory_their_objects_hold() {
     assert_eq!(arenas_bytes(), 0);
 }
 
+/// cladefs: a run placed (board 14629) holds no memory, and counts none, until populated; filled,
+/// its memory counts; depopulated, punched out, it counts none and holds none, its place kept,
+/// populated again where it was; freed, nothing more. Its arena's cap refuses a population past
+/// it, as it would an allocation.
+#[cfg(target_os = "linux")]
+#[test]
+fn placed_runs_hold_memory_only_while_populated() {
+    let ps = page_size();
+    let arena = create_arena().unwrap();
+    let check = |when: &str, bytes: u64| {
+        assert_eq!(arena_bytes(arena), bytes, "{when}");
+        assert_eq!(held(arena), bytes, "{when}: its object");
+    };
+    let pages = SLAB / ps;
+    let placed = place(arena, pages).unwrap();
+    check("placed", 0);
+    assert!(!placed.is_populated());
+    let at = placed.location();
+
+    placed.populate(Wait::No).unwrap();
+    placed.write(0, &vec![7; SLAB as usize]).unwrap();
+    check("populated and filled", SLAB);
+
+    placed.depopulate();
+    assert!(!placed.is_populated());
+    check("depopulated", 0);
+    assert_eq!(placed.location(), at, "its place kept");
+    let mut page = vec![1; ps as usize];
+    placed.read(0, &mut page).unwrap();
+    assert!(page.iter().all(|byte| *byte == 0), "a hole where it was");
+
+    set_arena_cap(arena, Some(SLAB / 2));
+    assert!(placed.populate(Wait::No).is_err(), "past its cap");
+    set_arena_cap(arena, None);
+    placed.populate(Wait::No).unwrap();
+    placed.write(0, &vec![8; SLAB as usize]).unwrap();
+    check("populated again, where it was", SLAB);
+    assert_eq!(placed.location(), at);
+
+    drop(placed);
+    release_spares(Some(arena));
+    check("freed", 0);
+    // Placed and freed unpopulated: nothing counted, nothing to give back.
+    drop(place(arena, 3).unwrap());
+    check("a placement freed", 0);
+}
+
 /// An arena at its cap holding nothing but spares gives them back for a run they can't serve, one
 /// shorter than a slab, rather than ask relief, which has nothing to evict, and fail: its short
 /// parts were unreadable until something else gave the spares back (Codex's review of board 6204).

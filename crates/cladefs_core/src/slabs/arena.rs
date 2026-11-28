@@ -256,14 +256,69 @@ impl ArenaState {
             return Err(Refused::Starved(Starved::Total));
         }
         self.populated += need;
+        Ok(self.take_run(pages, true))
+    }
+
+    /// cladefs: places a run of `pages` pages (board 14629): takes it as [`ArenaState::take`]
+    /// does, but populating none of it, so that neither its cap nor the total's counts it: its
+    /// place in the object, reserved for a part to be paged in there later
+    /// ([`ArenaState::populate`]). Never a spare, which holds memory.
+    pub(super) fn place(&mut self, pages: u16) -> Result<Taken, Refused> {
+        assert!((1..=self.pps).contains(&pages), "a run of {pages} pages of {}", self.pps);
+        if self.retired {
+            return Err(Refused::Starved(Starved::Removed));
+        }
+        Ok(self.take_run(pages, false))
+    }
+
+    /// cladefs: populates `run`, placed ([`ArenaState::place`]), as a part is to be paged in
+    /// there: within its cap and, for its pages, the total's, which `reserve` reserves and says
+    /// whether it could, as [`ArenaState::take`] would of a run taken now.
+    pub(super) fn populate(
+        &mut self,
+        run: Run,
+        wait_for_punches: bool,
+        reserve: impl FnOnce(u64) -> bool,
+    ) -> Result<(), Refused> {
+        if self.retired {
+            return Err(Refused::Starved(Starved::Removed));
+        }
+        let need = u64::from(run.pages);
+        if let Some(refused) = self.refused_by_cap(need, wait_for_punches) {
+            return Err(refused);
+        }
+        if !reserve(need) {
+            return Err(Refused::Starved(Starved::Total));
+        }
+        self.populated += need;
+        Ok(())
+    }
+
+    /// cladefs: `run`, held still, was punched out, if `done`: its pages populate it no more, its
+    /// place kept (board 14629); or its punch failed, and they are leaked, counted still. Returns
+    /// the pages it populates no more.
+    pub(super) fn depopulated(&mut self, run: Run, done: bool) -> u64 {
+        let pages = u64::from(run.pages);
+        if !done {
+            self.leaked += pages;
+            return 0;
+        }
+        self.populated -= pages;
+        pages
+    }
+
+    /// A run of `pages` pages, its slot marked taken: a spare for a whole slab, if `spares` and it
+    /// has one, else the lowest slot free; for fewer, the first fit of the small slab with the
+    /// smallest largest run that holds it, else a free slot made small.
+    fn take_run(&mut self, pages: u16, spares: bool) -> Taken {
         if pages == self.pps {
-            if let Some(slab) = self.spares.pop() {
+            if spares && let Some(slab) = self.spares.pop() {
                 self.slots[slab as usize] = Slot::Whole;
-                return Ok(Taken { run: Run { slab, first: 0, pages }, grown: None, spare: true });
+                return Taken { run: Run { slab, first: 0, pages }, grown: None, spare: true };
             }
             let (slab, grown) = self.take_slot();
             self.slots[slab as usize] = Slot::Whole;
-            return Ok(Taken { run: Run { slab, first: 0, pages }, grown, spare: false });
+            return Taken { run: Run { slab, first: 0, pages }, grown, spare: false };
         }
         let fitting = self.smalls.range((pages, 0)..).next().copied();
         let (slab, mut small, grown) = match fitting {
@@ -286,7 +341,7 @@ impl ArenaState {
         if small.largest > 0 {
             self.smalls.insert((small.largest, slab));
         }
-        Ok(Taken { run: Run { slab, first, pages }, grown, spare: false })
+        Taken { run: Run { slab, first, pages }, grown, spare: false }
     }
 
     /// The lowest slot free, or a new one, which grows its object to the slots it then holds.
@@ -301,15 +356,17 @@ impl ArenaState {
 
     /// `run`, which it gave, is freed: a whole slab is kept as a spare if `keep`, it has fewer
     /// than [`SPARE_SLABS`] and it is within its cap; else it is to be punched, and is no one's
-    /// until it is ([`ArenaState::punched`]).
-    pub(super) fn free(&mut self, run: Run, keep: bool) -> Freed {
+    /// until it is ([`ArenaState::punched`]). cladefs: one not `populated` (placed, or
+    /// depopulated, board 14629) is punched, in case anything put pages there, but makes no room:
+    /// a spare never, nor counted as being punched.
+    pub(super) fn free(&mut self, run: Run, keep: bool, populated: bool) -> Freed {
         self.relief.exhausted = false;
         self.relief.backoff.clear();
         let slot = &mut self.slots[run.slab as usize];
         if run.pages == self.pps {
             assert!(matches!(slot, Slot::Whole), "slab {} freed, not whole", run.slab);
             let room = self.cap.is_none_or(|cap| self.populated <= cap);
-            if keep && !self.retired && room && self.spares.len() < SPARE_SLABS {
+            if populated && keep && !self.retired && room && self.spares.len() < SPARE_SLABS {
                 *slot = Slot::Spare;
                 self.spares.push(run.slab);
                 return Freed::Spare;
@@ -322,7 +379,9 @@ impl ArenaState {
                 "{run:?} freed, not allocated"
             );
         }
-        self.punching += u64::from(run.pages);
+        if populated {
+            self.punching += u64::from(run.pages);
+        }
         Freed::Punch
     }
 
@@ -341,12 +400,14 @@ impl ArenaState {
 
     /// `run`, being punched, was, if `done`: its pages no one's, and populated no more; or its
     /// punch failed, and they are leaked, kept as used and counted (doc-26, Failure modes).
-    /// Returns the pages it populates no more.
-    pub(super) fn punched(&mut self, run: Run, done: bool) -> u64 {
+    /// Returns the pages it populates no more. cladefs: of a run freed not `populated`
+    /// ([`ArenaState::free`]), none: its pages were counted by nothing.
+    pub(super) fn punched(&mut self, run: Run, done: bool, populated: bool) -> u64 {
         let pages = u64::from(run.pages);
-        self.punching -= pages;
+        let counted = if populated { pages } else { 0 };
+        self.punching -= counted;
         if !done {
-            self.leaked += pages;
+            self.leaked += counted;
         }
         let slot = &mut self.slots[run.slab as usize];
         if run.pages == self.pps {
@@ -357,8 +418,8 @@ impl ArenaState {
             }
             *slot = Slot::Free;
             self.free.insert(run.slab);
-            self.populated -= pages;
-            return pages;
+            self.populated -= counted;
+            return counted;
         }
         let Slot::Small(small) = slot else { panic!("slab {} punched, not small", run.slab) };
         if !done {
@@ -373,8 +434,8 @@ impl ArenaState {
         } else {
             self.smalls.insert((small.largest, run.slab));
         }
-        self.populated -= pages;
-        pages
+        self.populated -= counted;
+        counted
     }
 
     /// Whether its page `page` of slab `slab` is free: neither held nor quarantined, a spare's or
@@ -406,9 +467,52 @@ mod tests {
 
     /// Frees `run` and punches it, as an arena's owner does.
     fn free(arena: &mut ArenaState, run: Run) {
-        if arena.free(run, true) == Freed::Punch {
-            arena.punched(run, true);
+        if arena.free(run, true, true) == Freed::Punch {
+            arena.punched(run, true, true);
         }
+    }
+
+    /// cladefs: a run placed (board 14629) populates nothing, nor takes a spare, which holds
+    /// memory; populated, its pages count, within its cap; depopulated, they count no more, its
+    /// place kept; freed unpopulated, punched, it gives no room back.
+    #[test]
+    fn placed_runs_count_once_populated() {
+        let mut arena = ArenaState::new(PPS);
+        arena.cap = Some(u64::from(PPS) + 8);
+        // A spare, which a placement passes over.
+        let whole = take(&mut arena, PPS);
+        assert_eq!(arena.free(whole, true, true), Freed::Spare);
+        assert_eq!(arena.populated, u64::from(PPS));
+
+        let placed = arena.place(PPS).expect("a place").run;
+        assert_ne!(placed.slab, whole.slab, "a spare taken by a placement");
+        assert_eq!(arena.populated, u64::from(PPS), "a placement counted");
+        // Past its cap, with the spare's memory counted: refused, until the spare goes.
+        assert!(matches!(
+            arena.populate(placed, false, |_| true),
+            Err(Refused::Starved(Starved::Arena))
+        ));
+        let spare = arena.release_spare().expect("the spare");
+        assert_eq!(arena.punched(spare, true, true), u64::from(PPS));
+        arena.populate(placed, false, |_| true).expect("room for it");
+        assert_eq!(arena.populated, u64::from(PPS));
+
+        assert_eq!(arena.depopulated(placed, true), u64::from(PPS));
+        assert_eq!(arena.populated, 0);
+        assert_eq!(arena.is_free(placed.slab, 0), Some(false), "its place kept");
+        // Freed unpopulated: punched, counting nothing.
+        assert_eq!(arena.free(placed, true, false), Freed::Punch);
+        assert_eq!(arena.punching, 0);
+        assert_eq!(arena.punched(placed, true, false), 0);
+        assert_eq!(arena.is_free(placed.slab, 0), Some(true));
+        assert_eq!(arena.populated, 0);
+
+        // A small run placed, populated, freed populated: counted, then given back.
+        let small = arena.place(8).expect("a place").run;
+        arena.populate(small, false, |_| true).expect("room");
+        assert_eq!(arena.populated, 8);
+        free(&mut arena, small);
+        assert_eq!(arena.populated, 0);
     }
 
     /// Runs shorter than a slab share small slabs, first fit in the one whose largest run unused
@@ -464,7 +568,7 @@ mod tests {
         let released = arena.release_spares();
         assert_eq!(released.len(), 1);
         for run in released {
-            assert_eq!(arena.punched(run, true), u64::from(PPS));
+            assert_eq!(arena.punched(run, true, true), u64::from(PPS));
         }
         assert_eq!(arena.populated, u64::from(PPS));
         assert_eq!(take(&mut arena, PPS).slab, 0, "the lowest slot free");
@@ -479,10 +583,10 @@ mod tests {
         arena.cap = Some(2 * u64::from(PPS));
         let (first, second) = (take(&mut arena, PPS), take(&mut arena, PPS));
         assert_eq!(arena.refusal(1, true), Some(Refused::Starved(Starved::Arena)));
-        assert_eq!(arena.free(first, false), Freed::Punch);
+        assert_eq!(arena.free(first, false, true), Freed::Punch);
         assert_eq!(arena.refusal(PPS, true), Some(Refused::Punching));
         assert_eq!(arena.refusal(PPS, false), Some(Refused::Starved(Starved::Arena)));
-        assert_eq!(arena.punched(first, false), 0, "leaked");
+        assert_eq!(arena.punched(first, false, true), 0, "leaked");
         assert_eq!((arena.populated, arena.leaked), (2 * u64::from(PPS), u64::from(PPS)));
         assert_eq!(arena.refusal(1, true), Some(Refused::Starved(Starved::Arena)));
         free(&mut arena, second);

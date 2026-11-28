@@ -443,7 +443,7 @@ impl Node {
                     spare
                 };
                 let Some(spare) = spare else { break };
-                arena.punch(spare);
+                arena.punch(spare, true);
                 released = true;
             }
         }
@@ -496,36 +496,103 @@ impl Arena {
     /// being punched that would make it room, whatever `wait` says, as they are as good as free.
     fn alloc(self: &Arc<Self>, pages: u16, wait: Wait) -> Result<PartSlab, NoMemory> {
         let node = &self.node;
+        let (Taken { run, spare, .. }, grew) = self.with_room(pages, wait, |state, waits| {
+            let taken = state.take(pages, waits, |need| node.reserve(need))?;
+            let grew = self.grow_for(&taken);
+            Ok((taken, grew))
+        })?;
+        if spare {
+            node.spares.fetch_sub(u64::from(run.pages), Ordering::Relaxed);
+        }
+        let slab = PartSlab::new(self.clone(), run, true);
+        if let Err(err) = grew {
+            log::error!("cladefs: growing {:?}'s memory object: {err}", self.id);
+            return Err(NoMemory);
+        }
+        Ok(slab)
+    }
+
+    /// cladefs: places a run of `pages` pages (board 14629): its place in the object, holding no
+    /// memory, which neither cap counts, until it is populated ([`PartSlab::populate`]). Fails
+    /// only of an arena removed, or an object that can't grow.
+    fn place(self: &Arc<Self>, pages: u16) -> Result<PartSlab, NoMemory> {
+        let (taken, grew) = {
+            let mut state = self.state.lock().unwrap();
+            let taken = state.place(pages).map_err(|_| NoMemory)?;
+            let grew = self.grow_for(&taken);
+            (taken, grew)
+        };
+        let slab = PartSlab::new(self.clone(), taken.run, false);
+        if let Err(err) = grew {
+            log::error!("cladefs: growing {:?}'s memory object: {err}", self.id);
+            return Err(NoMemory);
+        }
+        Ok(slab)
+    }
+
+    /// Grows its object to the slots `taken` says it grows to, if it grows: under its lock, so
+    /// that two growths can't cross: a smaller one's truncate after a larger one's would cut off
+    /// what the larger's slab holds, where its object isn't sealed against shrinking (macOS's
+    /// file).
+    fn grow_for(&self, taken: &Taken) -> std::io::Result<()> {
+        match taken.grown {
+            Some(slots) => self.object.grow(u64::from(slots) * SLAB),
+            None => Ok(()),
+        }
+    }
+
+    /// cladefs: populates `run`, placed, as a part is to be paged in there: as [`Arena::alloc`]
+    /// waits for room for a run, waiting for room for its pages.
+    fn populate(self: &Arc<Self>, run: Run, wait: Wait) -> Result<(), NoMemory> {
+        let node = &self.node;
+        self.with_room(run.pages, wait, |state, waits| {
+            state.populate(run, waits, |need| node.reserve(need))
+        })
+    }
+
+    /// cladefs: punches `run`, held still, out of its object, its pages populating it no more and
+    /// its place kept (board 14629): a punch that fails leaks them, counted still.
+    fn depopulate(&self, run: Run) {
+        let ps = page_size();
+        let punched = self.object.punch(Self::offset(run), u64::from(run.pages) * ps);
+        if let Err(err) = &punched {
+            log::error!("cladefs: punching {run:?} of {:?} out: {err}: its memory leaked", self.id);
+        }
+        // Room made, as a free makes it: relief's verdicts of before stand no more.
+        let released = {
+            let mut state = self.state.lock().unwrap();
+            state.relief.exhausted = false;
+            state.relief.backoff.clear();
+            state.depopulated(run, punched.is_ok())
+        };
+        self.node.released(released);
+        self.node.total_exhausted.store(false, Ordering::Release);
+        self.node.clear_total_backoff();
+        self.node.pulse();
+    }
+
+    /// Does what `under_lock` does under its lock, which may find it starved for `pages`: one
+    /// that may `wait` waits, while it is starved, for relief to make it room, and tries again;
+    /// and fails once nothing will. It waits for runs being punched that would make it room,
+    /// whatever `wait` says, as they are as good as free. `under_lock` is told whether to wait
+    /// for punches.
+    fn with_room<T>(
+        self: &Arc<Self>,
+        pages: u16,
+        wait: Wait,
+        mut under_lock: impl FnMut(&mut ArenaState, bool) -> Result<T, Refused>,
+    ) -> Result<T, NoMemory> {
+        let node = &self.node;
         let wait_for_punches = rules().allocations_wait_for_punches;
         loop {
             // What it waits for comes after it tries.
             let room = node.room.count();
-            let (taken, grew) = {
+            let tried = {
                 let mut state = self.state.lock().unwrap();
-                let taken = state.take(pages, wait_for_punches, |need| node.reserve(need));
-                // Grown under the lock, so that two growths can't cross: a smaller one's truncate
-                // after a larger one's would cut off what the larger's slab holds, where its object
-                // isn't sealed against shrinking (macOS's file).
-                let grew = match &taken {
-                    Ok(Taken { grown: Some(slots), .. }) => {
-                        self.object.grow(u64::from(*slots) * SLAB)
-                    }
-                    _ => Ok(()),
-                };
-                (taken, grew)
+                under_lock(&mut state, wait_for_punches)
             };
-            let starved = match taken {
-                Ok(Taken { run, spare, .. }) => {
-                    if spare {
-                        node.spares.fetch_sub(u64::from(run.pages), Ordering::Relaxed);
-                    }
-                    let slab = PartSlab::new(self.clone(), run);
-                    if let Err(err) = grew {
-                        log::error!("cladefs: growing {:?}'s memory object: {err}", self.id);
-                        return Err(NoMemory);
-                    }
-                    return Ok(slab);
-                }
+            let starved = match tried {
+                Ok(done) => return Ok(done),
                 Err(Refused::Punching) => {
                     node.room.wait_past(room);
                     continue;
@@ -575,7 +642,8 @@ impl Arena {
     }
 
     /// Frees `run`, which it gave: kept as a spare, or punched, here and now, outside its lock.
-    fn free(&self, run: Run) {
+    /// cladefs: one not `populated` makes no room (board 14629).
+    fn free(&self, run: Run, populated: bool) {
         let node = &self.node;
         node.total_exhausted.store(false, Ordering::Release);
         node.clear_total_backoff();
@@ -583,31 +651,36 @@ impl Arena {
             && node.populated.load(Ordering::Relaxed) <= node.limit();
         let freed = {
             let mut state = self.state.lock().unwrap();
-            let freed = state.free(run, keep);
+            let freed = state.free(run, keep, populated);
             let counted = match freed {
                 Freed::Punch => &node.punching,
                 Freed::Spare => &node.spares,
             };
-            counted.fetch_add(u64::from(run.pages), Ordering::Relaxed);
+            if populated {
+                counted.fetch_add(u64::from(run.pages), Ordering::Relaxed);
+            }
             freed
         };
         match freed {
             Freed::Spare => node.pulse(),
-            Freed::Punch => self.punch(run),
+            Freed::Punch => self.punch(run, populated),
         }
     }
 
     /// Punches `run`, which its state has being punched, out of its object, and tells its state;
     /// a punch that fails leaks the run, counted still, and says so (doc-26, Failure modes).
-    fn punch(&self, run: Run) {
+    /// cladefs: a run not `populated` was counted by nothing (board 14629).
+    fn punch(&self, run: Run, populated: bool) {
         let ps = page_size();
         let punched = self.object.punch(Self::offset(run), u64::from(run.pages) * ps);
         if let Err(err) = &punched {
             log::error!("cladefs: punching {run:?} of {:?} out: {err}: its memory leaked", self.id);
         }
-        let released = self.state.lock().unwrap().punched(run, punched.is_ok());
+        let released = self.state.lock().unwrap().punched(run, punched.is_ok(), populated);
         self.node.released(released);
-        self.node.punching.fetch_sub(u64::from(run.pages), Ordering::Relaxed);
+        if populated {
+            self.node.punching.fetch_sub(u64::from(run.pages), Ordering::Relaxed);
+        }
         self.node.pulse();
     }
 
@@ -623,7 +696,7 @@ impl Arena {
         };
         let released = spares.len();
         for spare in spares {
-            self.punch(spare);
+            self.punch(spare, true);
         }
         released
     }
@@ -656,11 +729,14 @@ pub struct PartSlab {
 struct Held {
     arena: Arc<Arena>,
     run: Run,
+    /// cladefs: whether its pages are populated, counted against the caps: a run placed is not
+    /// until it is populated, nor one depopulated after (board 14629).
+    populated: AtomicBool,
 }
 
 impl Drop for Held {
     fn drop(&mut self) {
-        self.arena.free(self.run);
+        self.arena.free(self.run, self.populated.load(Ordering::Acquire));
     }
 }
 
@@ -675,8 +751,39 @@ impl std::fmt::Debug for PartSlab {
 }
 
 impl PartSlab {
-    fn new(arena: Arc<Arena>, run: Run) -> Self {
-        Self { held: Some(Held { arena, run }), staged: Default::default() }
+    fn new(arena: Arc<Arena>, run: Run, populated: bool) -> Self {
+        let held = Held { arena, run, populated: AtomicBool::new(populated) };
+        Self { held: Some(held), staged: Default::default() }
+    }
+
+    /// cladefs: whether its pages are populated: a run allocated is; one placed is not until
+    /// populated, nor one depopulated after (board 14629).
+    pub fn is_populated(&self) -> bool {
+        self.held().populated.load(Ordering::Acquire)
+    }
+
+    /// cladefs: populates it, placed ([`HostSlabs::place`]) or depopulated, before a part is
+    /// paged in here: its pages counted against the caps, waiting for room as an allocation would
+    /// if it may `wait`. Nothing to do of one populated.
+    pub fn populate(&self, wait: Wait) -> Result<(), NoMemory> {
+        let held = self.held();
+        if held.populated.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        held.arena.populate(held.run, wait)?;
+        held.populated.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    /// cladefs: punches its memory out, keeping its place (board 14629): what a part placed by a
+    /// list leaves as it is evicted, so that it is paged in here again. Nothing to do of one not
+    /// populated. Its holder makes sure nothing maps it shared meanwhile that would read the
+    /// hole: no VM process it was staged to.
+    pub fn depopulate(&self) {
+        let held = self.held();
+        if held.populated.swap(false, Ordering::AcqRel) {
+            held.arena.depopulate(held.run);
+        }
     }
 
     fn held(&self) -> &Held {
@@ -776,6 +883,12 @@ impl PartSlab {
         }
     }
 
+    /// cladefs: whether it was staged to a VM process since it was allocated, which may map it
+    /// shared until that VM process has made the change taking it away (board 14629).
+    pub fn is_staged(&self) -> bool {
+        !self.staged.lock().unwrap().is_empty()
+    }
+
     /// The VM processes it was staged to.
     #[cfg(all(test, not(feature = "shuttle")))]
     pub fn staged(&self) -> Vec<VmProcessId> {
@@ -792,12 +905,23 @@ impl Drop for PartSlab {
     }
 }
 
+/// `pages` as a run's: of a slab at most, one at least. Past a u16, or out of that: a run of no
+/// slab, which panics.
+fn run_pages(pages: u64) -> u16 {
+    let run = u16::try_from(pages).ok().filter(|pages| (1..=slab_pages()).contains(pages));
+    run.unwrap_or_else(|| panic!("a run of {pages} pages, not of a slab"))
+}
+
 impl HostSlabs {
     pub fn alloc(&self, arena: ArenaId, pages: u64, wait: Wait) -> Result<PartSlab, NoMemory> {
-        // Past a u16: a run of no slab, which panics below.
-        let pages = u16::try_from(pages).ok().filter(|pages| (1..=slab_pages()).contains(pages));
-        let pages = pages.unwrap_or_else(|| panic!("a run of {pages:?} pages, not of a slab"));
-        self.node().arena(arena).ok_or(NoMemory)?.alloc(pages, wait)
+        self.node().arena(arena).ok_or(NoMemory)?.alloc(run_pages(pages), wait)
+    }
+
+    /// cladefs: places a run of `pages` pages in `arena` (board 14629): a place in its object a
+    /// part is to be paged in to, holding no memory, so neither cap counts it, until populated
+    /// ([`PartSlab::populate`]). Fails only of an arena removed, or one whose object can't grow.
+    pub fn place(&self, arena: ArenaId, pages: u64) -> Result<PartSlab, NoMemory> {
+        self.node().arena(arena).ok_or(NoMemory)?.place(run_pages(pages))
     }
 
     pub fn create_arena(&self) -> std::io::Result<ArenaId> {
@@ -1003,6 +1127,13 @@ fn caps_changed(node: &Arc<Node>) {
 #[cfg(not(madsim))]
 pub fn alloc(arena: ArenaId, pages: u64, wait: Wait) -> Result<PartSlab, NoMemory> {
     crate::Host::process().slabs().alloc(arena, pages, wait)
+}
+
+/// cladefs: places a run of `pages` pages of `arena` (board 14629), holding no memory until it is
+/// populated ([`PartSlab::populate`]): as [`HostSlabs::place`], the process's host's.
+#[cfg(not(madsim))]
+pub fn place(arena: ArenaId, pages: u64) -> Result<PartSlab, NoMemory> {
+    crate::Host::process().slabs().place(arena, pages)
 }
 
 /// A new arena, which holds no page; or why its memory object, or the default arena's, couldn't
