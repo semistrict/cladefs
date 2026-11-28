@@ -125,6 +125,13 @@ struct vext_stream {
 	/* The requests sent or being sent, by tag. */
 	struct xarray in_flight;
 	u32 next_tag;
+	/*
+	 * The tag of the request the sender is sending, U64_MAX between sends, and what its receiver
+	 * waits on for it: a reply read before its request's send returned, which a host's bug could
+	 * send, completes it only once the sender is done with its memory.
+	 */
+	u64 sending;
+	wait_queue_head_t sent;
 	/* Its -errno once it failed, or closed as the device resets; under `lock`. */
 	int error;
 	/* The requests it sent, and the replies it read. */
@@ -552,6 +559,7 @@ static void vext_stream_fail(struct virtio_extent *vext, int err)
 	if (sock)
 		kernel_sock_shutdown(sock, SHUT_RDWR);
 	wake_up(&stream->wake);
+	wake_up(&stream->sent);
 }
 
 /*
@@ -628,6 +636,12 @@ static int vext_stream_receiver(void *data)
 			break;
 		tag = le64_to_cpu(head.tag);
 		written = le32_to_cpu(head.written);
+		wait_event(stream->sent, READ_ONCE(stream->sending) != tag || READ_ONCE(stream->error));
+		/* Failing as it is sent: the sender, whose send fails, completes it. */
+		if (READ_ONCE(stream->sending) == tag) {
+			err = READ_ONCE(stream->error);
+			break;
+		}
 		req = tag <= U32_MAX ? xa_erase(&stream->in_flight, tag) : NULL;
 		if (!req) {
 			dev_err(&vext->vdev->dev, "the stream's reply to request %llu, not in flight\n",
@@ -703,15 +717,16 @@ static int vext_stream_connect(struct virtio_extent *vext)
 	spin_unlock_irq(&stream->lock);
 	if (err)
 		goto release;
-	receiver = kthread_run(vext_stream_receiver, vext, "vext-recv/%s", vext->config.tag);
+	receiver = kthread_create(vext_stream_receiver, vext, "vext-recv/%s", vext->config.tag);
 	if (IS_ERR(receiver)) {
 		err = PTR_ERR(receiver);
 		vext_stream_fail(vext, err);
 		return err;
 	}
-	/* Held for its stop, which it may have reached itself (vext_stream_close). */
+	/* Held before it runs, for its stop, which it may reach itself (vext_stream_close). */
 	get_task_struct(receiver);
 	stream->receiver = receiver;
+	wake_up_process(receiver);
 	dev_info(&vext->vdev->dev, "data requests over vsock to the host's port %u\n",
 		 vext->config.stream_port);
 	return 0;
@@ -751,6 +766,7 @@ static void vext_stream_send(struct virtio_extent *vext, struct vext_request *re
 		vec[n++] = (struct kvec) { req->data, req->out_len };
 	if (req->root_out)
 		vec[n++] = (struct kvec) { req->root, req->root_out };
+	WRITE_ONCE(stream->sending, tag);
 	err = vext_stream_io(stream->sock, vec, n,
 			     sizeof(req->stream_hdr) + le32_to_cpu(req->stream_hdr.readable), true);
 	if (err) {
@@ -760,9 +776,15 @@ static void vext_stream_send(struct virtio_extent *vext, struct vext_request *re
 		/* Completed here, or by vext_stream_fail_all, which this sender runs next. */
 		if (xa_erase(&stream->in_flight, tag) == req)
 			vext_stream_complete(vext, req, -EIO);
+		smp_store_release(&stream->sending, U64_MAX);
+		wake_up(&stream->sent);
 		return;
 	}
+	/* Counted before its reply can be: the receiver waits for the send. */
 	atomic64_inc(&stream->sent);
+	smp_store_release(&stream->sending, U64_MAX);
+	if (wq_has_sleeper(&stream->sent))
+		wake_up(&stream->sent);
 }
 
 /*
@@ -843,14 +865,18 @@ static int vext_stream_start(struct virtio_extent *vext)
 	spin_lock_init(&stream->lock);
 	INIT_LIST_HEAD(&stream->to_send);
 	init_waitqueue_head(&stream->wake);
+	init_waitqueue_head(&stream->sent);
+	stream->sending = U64_MAX;
 	xa_init_flags(&stream->in_flight, XA_FLAGS_ALLOC);
 	if (!virtio_has_feature(vext->vdev, VIRTIO_EXTENT_F_STREAM))
 		return 0;
-	sender = kthread_run(vext_stream_sender, vext, "vext-send/%s", vext->config.tag);
+	sender = kthread_create(vext_stream_sender, vext, "vext-send/%s", vext->config.tag);
 	if (IS_ERR(sender))
 		return PTR_ERR(sender);
+	/* Held before it runs, for its stop (vext_stream_close). */
 	get_task_struct(sender);
 	stream->sender = sender;
+	wake_up_process(sender);
 	return 0;
 }
 

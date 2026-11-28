@@ -85,6 +85,11 @@ pub enum ReleaseError {
     NotQuiescent(String),
     #[error("Extent device {0}: cannot list its DAX window's mappings before release: {1}")]
     Mappings(String, cladefs::Errno),
+    #[error(
+        "Extent device {0}: its guest's requests go over vsock (`stream`), which releasing its \
+         cell would end for good (board 14663)"
+    )]
+    Stream(String),
 }
 
 /// Errors activating a device.
@@ -580,6 +585,11 @@ impl Device {
     pub fn release_cell(&mut self, quiesce: impl FnOnce()) -> Result<(), ReleaseError> {
         if self.cell.is_none() {
             return Ok(());
+        }
+        // cladefs board 14663: its guest's stream ends with the cell's connection, and nothing
+        // starts it again as the cell reopens: refused, as its snapshots are.
+        if self.config.stream.is_some() {
+            return Err(ReleaseError::Stream(self.config.id.clone()));
         }
         quiesce();
         let id = self.config.id.clone();
