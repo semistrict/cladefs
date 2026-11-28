@@ -61,6 +61,10 @@ A memory backend, `backend_type: "Mappings"` with a `backend_path` socket, offer
 **Entries.** Each entry covers whole host pages of one region:
 - **File:** a descriptor, file offset, region offset and length, mapped `MAP_PRIVATE`.
 - **Zeros:** anonymous memory.
+- **Lazy:** anonymous memory registered for missing faults. Its first touch reaches the handler,
+  which maps the range anew and wakes the fault, never installing a page there. So a lazy range of
+  guest memory may be remapped while the guest runs: the handler can list RAM node by node as the
+  guest touches it, as today's window maps it, and a restore reads only the nodes touched.
 - **None:** `PROT_NONE`. A window's unmapped ranges, so a stray access fails instead of reading
   anything.
 
@@ -92,8 +96,9 @@ memory while one is in progress.
      entries, which is doc-4's `MAP` and `UNMAP`: either frees the private pages it replaces. The
      guest touches a window range only once its `MAP` has completed and stops before mapping over
      it. A vCPU's fault meanwhile waits on the VMM thread's `mmap_lock`.
-   - **RAM** is remapped only by a persist, with the vCPUs paused. The guest may store to any RAM
-     page at any time, and a remap would drop that store.
+   - **RAM** is remapped by a persist, with the vCPUs paused, and otherwise only over lazy
+     entries, which Firecracker tracks and enforces. The guest may store to any other RAM page at
+     any time, and a remap would drop that store.
 3. **Persist**, on `snapshot/create`:
    - **Device state first.** Firecracker pauses the vCPUs and saves device state (`save_state`:
      devices quiesce and write what they owe guest memory, the block queue drained, a deferred net
@@ -188,13 +193,23 @@ Two format changes, both decided by the user on 2026-11-28:
      exposure.
    - **16 KiB hosts** (arm64): entries are whole host pages. Where runs don't align to them,
      cladefsd composes the host page in the arena, as today's daemon does.
-4. **Fixed arena offsets.** Firecracker maps arena offsets and keeps them, so a part named in a
-   live list, a memory cell's or an extent's, keeps its offset until no list names it (the VM
-   exited, a remap replaced it, or the guest mapped over it). Eviction punches a hole there. The
-   kernel drops the page from every mapping and leaves private pages alone (`shmem_fallocate`:
-   "hole-punching leaves COWed pages"). The next touch faults `MISSING`, and cladefsd fills the
-   same offset again. This replaces the slots doc-26 reuses after its quarantine, for every part a
-   list names. `specs/part-slabs` changes with it. The arena is in-memory, in no `formats/` family.
+4. **An offset that changed hands is served a copy.** Firecracker maps arena offsets and keeps
+   them, but an evicted part's offset may hold another part later. cladefsd knows what each entry
+   should show, so on a fault it compares that with what the arena offset holds now. When they
+   match, it installs the arena's page with `UFFDIO_CONTINUE`. When they don't, it installs the
+   right contents as a private page with `UFFDIO_COPY`. On a private mapping that makes an
+   anonymous page and leaves the file alone (`mfill_atomic_pte_copy`, v7.1.2: "when we are asked
+   to fill a hole in a MAP_PRIVATE mapping, we'll generate anonymous memory directly"). The
+   check and the install hold the part against eviction. Eviction punches the hole, and the
+   kernel drops the page from every mapping, leaving private pages alone (`shmem_fallocate`:
+   "hole-punching leaves COWed pages"). So doc-26's slots and quarantine stay as they are, and
+   correctness doesn't depend on where a part lands.
+   - **Fixed arena offsets** (board 14629) give the sharing: a part named in a live list is
+     placed (its run reserved, holding no memory) before it is paged in, keeps its offset until
+     no list names it, and a refill goes to the same offset. Without them, a list could name only
+     parts in memory as it is made, and every other touch would take a copy, so the handler
+     depends on them for sharing. `specs/part-slabs` changes with it. The arena is in-memory, in
+     no `formats/` family.
 5. **Faults: everything goes through cladefsd.** With `MINOR` registered, a VM's first touch of a
    page already in the arena faults to cladefsd too (`shmem_get_folio_gfp` raises `MINOR` for any
    folio in the page cache, whoever made it). cladefsd installs it with `UFFDIO_CONTINUE`, which on
@@ -309,9 +324,9 @@ named for no one. An upstream issue proposing them comes first, filed only with 
 3. **(c) Firecracker: the handler sends runs to map** (board 14628): entries applied unregistered
    only while inaccessible, map messages while the guest runs (pmem regions) and at persist,
    persist after device state, exit when the handler goes, seccomp.
-4. **cladefsd: fixed arena offsets for every part a list names** (board 14629): eviction by
-   punching, offsets released when no live list names them, `specs/part-slabs` and the governor
-   updated.
+4. **cladefsd: fixed arena offsets for every part a list names** (board 14629): parts placed
+   before they are paged in, eviction by punching, offsets released when no live list names them,
+   `specs/part-slabs` and the governor updated.
 5. **cladefsd: the backend's handler** (board 14630): binding by the control plane, pidfds, per-VM
    threads, RAM and window lists, guest `MAP` and `UNMAP` as map messages, `MISSING` and `MINOR`
    faults filled and installed, persist of every region with the remap, the mapping budget. The
