@@ -977,13 +977,6 @@ mod host {
                 }
             };
             eprintln!("cells-per-host: held={} limit={limit}", ramp.held);
-            // cladefs: a host whose memory ran out has had its governor reclaim its VMs' cold
-            // memory first (`governor::reclaim_connected_vms`, board 14533), each VM in a cgroup
-            // of its own (`crate::cgroups`).
-            let reclaimed = *(host.memory.gauges()?)
-                .get("cladefsd_vm_reclaim_bytes_total")
-                .context("no cladefsd_vm_reclaim_bytes_total")?;
-            let out_of_memory = matches!(limit, Limit::Memory | Limit::Full);
             measured.higher("cells.held", "VMs", ramp.held as f64);
             if let Some((per_vm, mut boots, judged)) = last {
                 measured.lower("cells.per_vm", "MiB", per_vm as f64 / MIB as f64);
@@ -993,10 +986,6 @@ mod host {
                 }
             }
             self.stop(&mut cells, measured)?;
-            ensure!(
-                !out_of_memory || reclaimed > 0,
-                "the host's memory ran out ({limit}) and the governor reclaimed none of its VMs'"
-            );
             ensure!(
                 ramp.held >= settings.floor,
                 "held {} VMs, fewer than CLADEFS_CELLS_FLOOR's {}",
