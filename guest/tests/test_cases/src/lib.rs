@@ -34,6 +34,8 @@ mod test_fxfs_guest;
 use test_fxfs_guest::TestFxfsGuest;
 mod test_fxfs_guest_resize;
 use test_fxfs_guest_resize::TestFxfsGuestResize;
+mod test_fxfs_guest_pressure;
+use test_fxfs_guest_pressure::TestFxfsGuestPressure;
 mod test_fxfs_guest_stats;
 use test_fxfs_guest_stats::TestFxfsGuestStats;
 mod test_fxfs_guest_live_fork;
@@ -350,6 +352,11 @@ pub fn test_cases() -> Vec<TestCase> {
             "fxfs-guest-resize",
             &[Tag::Kernel, Tag::Nightly],
             Box::new(TestFxfsGuestResize),
+        ),
+        TestCase::new(
+            "fxfs-guest-pressure",
+            &[Tag::Kernel, Tag::Nightly],
+            Box::new(TestFxfsGuestPressure),
         ),
         TestCase::new(
             "fxfs-guest-stats",
