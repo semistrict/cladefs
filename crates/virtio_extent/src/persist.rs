@@ -77,6 +77,11 @@ pub struct ConfigState {
     pub cladefsd_socket: String,
     /// cladefs: what it does with the guest's asks for uploaded commits (TASK-363).
     pub cache_type: CacheType,
+    /// cladefs: where its guest's data requests go over vsock (board 14663): never in a snapshot,
+    /// whose format has no place for it, so none decoded; a restore gives its own, as its vsock
+    /// device's path is its own (its load's override, `cladefs_overrides`). A snapshot of a guest
+    /// that sent them so, restored without one, refuses its driver's features.
+    pub stream: Option<crate::config::StreamConfig>,
 }
 
 impl From<&Config> for ConfigState {
@@ -90,6 +95,7 @@ impl From<&Config> for ConfigState {
             dax_private_max_bytes: config.dax_private_max_bytes,
             cladefsd_socket: config.cladefsd_socket.clone(),
             cache_type: config.cache_type,
+            stream: config.stream.clone(),
         }
     }
 }
@@ -105,9 +111,7 @@ impl From<&ConfigState> for Config {
             dax_private_max_bytes: config.dax_private_max_bytes,
             cladefsd_socket: config.cladefsd_socket.clone(),
             cache_type: config.cache_type,
-            // cladefs: a stream device's snapshots are refused (`SnapshotError::Stream`, board
-            // 14663): none restores with one.
-            stream: None,
+            stream: config.stream.clone(),
         }
     }
 }
@@ -304,6 +308,8 @@ impl From<StateV3> for State {
                     CacheTypeV2::Unsafe => CacheType::Unsafe,
                     CacheTypeV2::Writeback => CacheType::Writeback,
                 },
+                // Never in a snapshot: its restore's own, as its load gives it.
+                stream: None,
             },
             window_addr: state.window_addr,
             target: match state.target {
@@ -352,6 +358,8 @@ impl From<StateV2> for State {
                     CacheTypeV2::Unsafe => CacheType::Unsafe,
                     CacheTypeV2::Writeback => CacheType::Writeback,
                 },
+                // Never in a snapshot: its restore's own, as its load gives it.
+                stream: None,
             },
             window_addr: state.window_addr,
             target: cladefs::CellSnapshot::Version(cladefs::CellVersion {
@@ -526,11 +534,6 @@ pub enum SnapshotError {
          (freeze the guest's filesystem, which rebinds them)"
     )]
     Private(String, u64),
-    #[error(
-        "Extent device {0}: its guest's requests go over vsock (`stream`), which a snapshot can't \
-         take yet (board 14663)"
-    )]
-    Stream(String),
 }
 
 #[cfg(test)]
@@ -548,6 +551,7 @@ mod tests {
                 dax_private_max_bytes: Some(1 << 20),
                 cladefsd_socket: "/cladefsd.sock".into(),
                 cache_type: CacheType::Unsafe,
+                stream: None,
             },
             window_addr: Some(1 << 40),
             target: cladefs::CellSnapshot::Version(cladefs::CellVersion {
@@ -582,6 +586,7 @@ mod tests {
                 dax_private_max_bytes: None,
                 cladefsd_socket: "/run/cladefsd.sock".into(),
                 cache_type: CacheType::Writeback,
+                stream: None,
             },
             window_addr: None,
             target: cladefs::CellSnapshot::Version(cladefs::CellVersion {

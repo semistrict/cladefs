@@ -616,6 +616,7 @@ mod host {
                     }
                 };
                 let uds = uds(name);
+                let overrides = Vm::stream_overrides(overrides, &["extents"], &uds)?;
                 let listener = listen(&uds)?;
                 if self.memory == Memory::Cell && name == GIVES_BACK {
                     gives_back = Some(listen_on(&uds, BALLOON_PORT)?);

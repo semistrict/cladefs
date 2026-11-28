@@ -58,6 +58,18 @@ pub enum Error {
     Stream(String, cladefs::Errno),
 }
 
+/// cladefs: has the extent daemon serve the guest's data requests over vsock, if `config` sends
+/// them so (board 14663), with `cell`: it accepts them on a listener bound where the VM's vsock
+/// device connects them, a restored or reopened device's bound again, its guest connecting again.
+fn start_stream(config: &Config, cell: &CellClient) -> Result<(), Error> {
+    let Some(stream) = &config.stream else { return Ok(()) };
+    let listener = bind_listener(&stream.listener)
+        .map_err(|err| Error::StreamListener(config.id.clone(), stream.listener.clone(), err))?;
+    let ordered_only = config.cache_type.ordered_only();
+    cell.guest_stream(ordered_only, std::os::fd::AsFd::as_fd(&listener))
+        .map_err(|errno| Error::Stream(config.id.clone(), errno))
+}
+
 /// cladefs: a listening Unix stream socket bound at `path`, where the VM's vsock device connects
 /// its guest's connections to the stream's port (board 14663): whatever was there gone first, a
 /// socket an earlier VM process left, as nothing removes it when that one exits.
@@ -85,11 +97,6 @@ pub enum ReleaseError {
     NotQuiescent(String),
     #[error("Extent device {0}: cannot list its DAX window's mappings before release: {1}")]
     Mappings(String, cladefs::Errno),
-    #[error(
-        "Extent device {0}: its guest's requests go over vsock (`stream`), which releasing its \
-         cell would end for good (board 14663)"
-    )]
-    Stream(String),
 }
 
 /// Errors activating a device.
@@ -315,15 +322,9 @@ impl Device {
             });
         }
         config_space.cell = cell.cell().to_le();
-        // cladefs board 14663: the guest's data requests go over vsock to the daemon, which
-        // accepts them on a listener bound where the VM's vsock device connects them.
+        // cladefs board 14663: the guest's data requests go over vsock to the daemon.
+        start_stream(&config, &cell)?;
         if let Some(stream) = &config.stream {
-            let listener = bind_listener(&stream.listener).map_err(|err| {
-                Error::StreamListener(config.id.clone(), stream.listener.clone(), err)
-            })?;
-            let ordered_only = config.cache_type.ordered_only();
-            cell.guest_stream(ordered_only, std::os::fd::AsFd::as_fd(&listener))
-                .map_err(|errno| Error::Stream(config.id.clone(), errno))?;
             config_space.stream_port = stream.port.to_le();
         }
         let notices = Arc::new(Notices::default());
@@ -531,9 +532,6 @@ impl Device {
         if self.cell.is_none() {
             return Err(SnapshotError::Released(id));
         }
-        if self.config.stream.is_some() {
-            return Err(SnapshotError::Stream(id));
-        }
         if mode == SnapshotMode::Versioned && !self.notices.frozen() {
             return Err(SnapshotError::NotFrozen(id));
         }
@@ -585,11 +583,6 @@ impl Device {
     pub fn release_cell(&mut self, quiesce: impl FnOnce()) -> Result<(), ReleaseError> {
         if self.cell.is_none() {
             return Ok(());
-        }
-        // cladefs board 14663: its guest's stream ends with the cell's connection, and nothing
-        // starts it again as the cell reopens: refused, as its snapshots are.
-        if self.config.stream.is_some() {
-            return Err(ReleaseError::Stream(self.config.id.clone()));
         }
         quiesce();
         let id = self.config.id.clone();
@@ -647,6 +640,9 @@ impl Device {
         let changes = self.notices.clone();
         cell.on_capacity(move |capacity, ask| changes.resizing.changed(capacity, ask));
         hear_stats_asks(&cell, &self.notices);
+        // cladefs board 14663: its guest's stream ended with the released cell's connection; its
+        // guest connects again, to a listener bound again.
+        start_stream(&self.config, &cell)?;
         self.cell = Some(Arc::new(cell));
         if let Some(mappings) = self.released_mappings.take() {
             let result = self
