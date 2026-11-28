@@ -1,5 +1,14 @@
 # vhost-user extensions for a backend-directed device: a sketch
 
+> **Superseded** (2026-11-28, the user's decision, board 14378): no vhost-user extent device. A
+> back-end could reach a memory cell's private pages, anonymous memory in the VM process, only
+> through `process_vm_readv`, which the user judged too slow and complex for what it saves. The
+> direction now: doc-4's requests over stock vsock, Firecracker copying from guest memory, and the
+> DAX window as a stock virtio-pmem device whose memory is the same lazily mapped region of the
+> daemon's memfd runs, copied on write, as guest RAM's (`docs/research/guest-ram-mapping-list.md`,
+> board 14602): one generic patch in the fork. The back-end (cladefsd's `server/vhost.rs`, the
+> `vhost_user` crate, boards 14537, 14603, 14620) is backed out of main; kept for its reasoning.
+
 Superseded as a proposal by doc-32 (`docs/design/doc-32 - vhost-user-lazy-shared-memory-regions.md`),
 which folds in review 176; kept for its reasoning and history.
 

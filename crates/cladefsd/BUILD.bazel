@@ -39,7 +39,6 @@ _PROD_DEPS = _BASE_DEPS + [
     "//crates/extent_frame",
     "//crates/extent_keys",
     "//crates/local_cell",
-    "//crates/vhost_user",
 ]
 
 _TEST_DEPS = _BASE_DEPS + [
@@ -51,7 +50,6 @@ _TEST_DEPS = _BASE_DEPS + [
     "//crates/extent_frame:extent_frame_testing",
     "//crates/extent_keys:extent_keys_testing",
     "//crates/local_cell:local_cell_testing",
-    "//crates/vhost_user:vhost_user_testing",
 ]
 
 _PROC_MACROS = all_crate_deps(proc_macro = True)
@@ -90,7 +88,6 @@ cladefs_rust_library(
         "//crates/extent_frame:extent_frame_testing",
         "//crates/extent_keys:extent_keys_testing",
         "//crates/local_cell:local_cell_keys_testing",
-        "//crates/vhost_user",
     ] + all_crate_deps(normal = True),
 )
 
@@ -111,7 +108,6 @@ cladefs_rust_library(
         "//crates/extent_frame:extent_frame_testing",
         "//crates/extent_keys:extent_keys_testing",
         "//crates/local_cell:local_cell_testing",
-        "//crates/vhost_user",
     ] + all_crate_deps(normal = True),
 )
 

@@ -151,7 +151,6 @@ _MEMBER_MANIFESTS = [
     "//crates/storage_device:Cargo.toml",
     "//crates/storage_units:Cargo.toml",
     "//crates/storage_xts:Cargo.toml",
-    "//crates/vhost_user:Cargo.toml",
     "//crates/virtio_extent:Cargo.toml",
 ]
 

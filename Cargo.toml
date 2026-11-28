@@ -143,7 +143,6 @@ cladefs_fuse = { path = "crates/cladefs_fuse" }
 # cladefs: without its default features, its FUSE mount among them (`mount`, board 14536): each
 # dependant says whether its daemon mounts cells, as cladefs's does and libcladefs's does not.
 cladefsd = { path = "crates/cladefsd", default-features = false }
-vhost_user = { path = "crates/vhost_user" }
 libcladefs = { path = "crates/libcladefs" }
 
 # libmachine, the library VMM (crates/libmachine, board 13054), and its guest agent: on the

@@ -3,10 +3,9 @@
 // found in the LICENSE file.
 
 //! A guest's requests, as its extent device has them: doc-4 as it is ([`Guest`]), whoever serves
-//! its virtqueues: its VMM (`virtio_extent`), or the extent daemon as the device's vhost-user
-//! back-end (board 14537). What the guest tells the device beside the cell, that its filesystem
-//! froze and how it answered a shrink, goes to whoever keeps the device's state
-//! ([`GuestNotices`]).
+//! its virtqueues (today its VMM, `virtio_extent`). What the guest tells the device beside the
+//! cell, that its filesystem froze and how it answered a shrink, goes to whoever keeps the
+//! device's state ([`GuestNotices`]).
 
 use crate::Errno;
 
@@ -16,7 +15,7 @@ use super::interpret::Dialect;
 use super::protocol::*;
 
 /// What a guest tells its device beside its cell's requests, to whoever keeps the device's state:
-/// a VMM's device (`virtio_extent::Notices`), or the daemon's vhost-user back-end.
+/// a VMM's device (`virtio_extent::Notices`).
 pub trait GuestNotices: Sync {
     /// `FREEZE`: the guest's filesystem is frozen, if `frozen`, or thawed: a versioned snapshot of
     /// the VM is taken frozen.

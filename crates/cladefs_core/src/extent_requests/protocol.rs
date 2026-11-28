@@ -250,18 +250,6 @@ pub fn known_flags(type_: u32) -> Option<u32> {
 /// length fits in.
 pub const MAX_WRITABLE: usize = MAX_TRANSFER as usize + size_of::<Response>();
 
-/// cladefs board 14537: the most bytes a request's readable buffers hold: its header and the most
-/// any request's arguments and data are, a `WRITE`'s with its root or a `STATS`'s, whichever is
-/// more. A transport that copies them out of guest memory (the extent daemon's vhost-user
-/// back-end) refuses a chain with more, as nothing past them means anything to any request.
-pub const MAX_READABLE: usize = size_of::<RequestHeader>() + {
-    let write = size_of::<IoArgs>() + MAX_TRANSFER as usize + MAX_ROOT as usize;
-    let stats = size_of::<StatsArgs>() + MAX_STATS;
-    let many = size_of::<MapArgs>() + MAX_MANY_DATA;
-    let most = if write > stats { write } else { stats };
-    if most > many { most } else { many }
-};
-
 pub fn ordered_only(type_: u32, flags: u32) -> u32 {
     match type_ {
         VIRTIO_EXTENT_T_COMMIT => flags & !VIRTIO_EXTENT_COMMIT_UPLOADED,

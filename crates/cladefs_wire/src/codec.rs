@@ -83,12 +83,6 @@ pub enum Request<'a> {
     /// cladefs: [`STATS`]: the answer to ask `ask`, with its guest's stats if it has a guest that
     /// answers, [`MAX_STATS`] bytes at most.
     Stats { ask: u64, guest: Option<&'a str> },
-    /// cladefs: [`VHOST_USER`]: the vhost-user channel of the connection's extent device, of
-    /// `queues` request queues, 1 to [`MAX_VHOST_USER_QUEUES`], its guest's uploaded commits
-    /// answered once ordered if `ordered_only` ([`VHOST_USER_UNSAFE`]), its tag `tag`, 1 to
-    /// [`MAX_VHOST_USER_TAG`] bytes, none NUL (board 14537); its front-end connecting to
-    /// `listener` if given ([`VHOST_USER_LISTENER`], board 14620).
-    VhostUser { queues: u16, ordered_only: bool, tag: &'a str, listener: Option<Area<'a>> },
 }
 
 /// How an [`OPEN`] opens its cell.
@@ -144,8 +138,7 @@ pub struct Fault {
     pub probe: bool,
 }
 
-/// A descriptor a request carries: the shared memory a [`TRANSFER`] does, or the listening socket a
-/// [`VHOST_USER`] does ([`VHOST_USER_LISTENER`]).
+/// The shared memory a [`TRANSFER`] carries, its descriptor.
 #[derive(Debug)]
 pub struct Area<'a>(pub BorrowedFd<'a>);
 
@@ -212,7 +205,6 @@ fn known_flags(kind: u32) -> Result<u32, Errno> {
         MAPPINGS => MAPPINGS_QUIESCENT,
         MAP => MAP_WARM,
         STATS => STATS_GUEST,
-        VHOST_USER => VHOST_USER_UNSAFE | VHOST_USER_LISTENER,
         FREE | UNMAP | ROOT | INFO | RESIZED | TRANSFER => 0,
         _ => return Err(Errno::EINVAL),
     })
@@ -253,7 +245,6 @@ impl<'a> Request<'a> {
             Request::Mappings { .. } => MAPPINGS,
             Request::Transfer { .. } => TRANSFER,
             Request::Stats { .. } => STATS,
-            Request::VhostUser { .. } => VHOST_USER,
         }
     }
 
@@ -441,16 +432,6 @@ impl<'a> Request<'a> {
                 &StatsBody { ask: *ask },
             )
             .carrying(guest.unwrap_or_default().as_bytes()),
-            Request::VhostUser { queues, ordered_only, tag, listener } => Encoded {
-                fd: listener.as_ref().map(|listener| listener.0),
-                ..Encoded::with_body(
-                    VHOST_USER,
-                    flag(*ordered_only, VHOST_USER_UNSAFE)
-                        | flag(listener.is_some(), VHOST_USER_LISTENER),
-                    &VhostUserBody { queues: u64::from(*queues) },
-                )
-            }
-            .carrying(tag.as_bytes()),
         }
     }
 
@@ -470,12 +451,10 @@ impl<'a> Request<'a> {
         // cladefs: what its kind has, after the guest request it says, if any (TASK-260).
         let (_, payload) = guest_request(message)?;
         let flags = flags & !REQUEST;
-        // A request's descriptors: a TRANSFER's one, a listening VHOST_USER's one, and none of
-        // any other.
-        let carries = kind == TRANSFER || (kind == VHOST_USER && flags & VHOST_USER_LISTENER != 0);
-        let fd = match (carries, fds.as_slice()) {
-            (true, [fd]) => Some(fd.as_fd()),
-            (false, []) => None,
+        // A request's descriptors: a TRANSFER's one, and none of any other.
+        let fd = match (kind, fds.as_slice()) {
+            (TRANSFER, [fd]) => Some(fd.as_fd()),
+            (_, []) if kind != TRANSFER => None,
             _ => return Err(Errno::EINVAL),
         };
         let has = |flag: u32| flags & flag != 0;
@@ -686,19 +665,6 @@ impl<'a> Request<'a> {
                 };
                 Request::Stats { ask: body.ask, guest }
             }
-            VHOST_USER => {
-                let body: VhostUserBody = header.decode_body()?;
-                if !(1..=MAX_VHOST_USER_QUEUES).contains(&body.queues) {
-                    return Err(Errno::EINVAL);
-                }
-                let queues = u16::try_from(body.queues).map_err(|_| Errno::EINVAL)?;
-                if !(1..=MAX_VHOST_USER_TAG).contains(&payload.len()) || payload.contains(&0) {
-                    return Err(Errno::EINVAL);
-                }
-                let tag = std::str::from_utf8(payload).map_err(|_| Errno::EINVAL)?;
-                let ordered_only = has(VHOST_USER_UNSAFE);
-                Request::VhostUser { queues, ordered_only, tag, listener: fd.map(Area) }
-            }
             _ => return Err(Errno::EINVAL),
         })
     }
@@ -754,8 +720,6 @@ pub fn most_payload(header: &Header) -> u64 {
         FREE | MAP => MAX_PAYLOAD,
         STAGE_COUNTS => size_of::<PrivateCountsBody>() as u64,
         STATS if has(STATS_GUEST) => cladefs_core::protocol::MAX_STATS as u64,
-        // cladefs: its device's tag (board 14537).
-        VHOST_USER => MAX_VHOST_USER_TAG as u64,
         _ => 0,
     };
     match has(REQUEST) && known_flags(header.kind).is_ok() {
@@ -1635,18 +1599,6 @@ mod tests {
             Request::Transfer { len: a, area: Area(area) },
             Request::Stats { ask: a, guest: None },
             Request::Stats { ask: b, guest: Some(&fields.stats) },
-            Request::VhostUser {
-                queues: (a % MAX_VHOST_USER_QUEUES) as u16 + 1,
-                ordered_only: one,
-                tag: &fields.build[..fields.build.len().min(MAX_VHOST_USER_TAG)],
-                listener: None,
-            },
-            Request::VhostUser {
-                queues: (b % MAX_VHOST_USER_QUEUES) as u16 + 1,
-                ordered_only: !one,
-                tag: &fields.build[..fields.build.len().min(MAX_VHOST_USER_TAG)],
-                listener: Some(Area(area)),
-            },
         ]
     }
 
@@ -1772,9 +1724,9 @@ mod tests {
     }
 
     /// Every kind of request.
-    const KINDS: [u32; 17] = [
+    const KINDS: [u32; 16] = [
         OPEN, READ, WRITE, FREE, MAP, UNMAP, COMMIT, ROOT, INFO, WINDOW, FAULT, FORK, RESIZED,
-        MAPPINGS, TRANSFER, STATS, VHOST_USER,
+        MAPPINGS, TRANSFER, STATS,
     ];
 
     /// `request`, as its receiver receives it: of ID `id`.
@@ -1936,7 +1888,6 @@ mod tests {
                 WINDOW => 0b1,
                 FORK => 0b11,
                 STATS => 0b1,
-                VHOST_USER => 0b1,
                 MAPPINGS => 0b1,
                 MAP => 0b1,
                 _ => 0,
@@ -1989,28 +1940,6 @@ mod tests {
         refused(FORK, 0, b"");
         refused(FORK, 0, b"store");
         refused(FORK, FORK_QUIESCENT | FORK_DROP, b"");
-        // cladefs board 14537: a vhost-user device of no queues, of more than a connection keeps
-        // requests in flight for, or of a tag the configuration can't hold.
-        let vhost_user = |queues: u64, tag: &[u8]| {
-            let header = Header::new(VHOST_USER, 1).with_body(&VhostUserBody { queues });
-            Request::decode(&Message { header, payload: tag.to_vec(), fds: vec![] }).map(drop)
-        };
-        assert!(vhost_user(1, b"fxfs").is_ok());
-        assert!(vhost_user(MAX_VHOST_USER_QUEUES, &[b'x'; MAX_VHOST_USER_TAG]).is_ok());
-        let long = [b'x'; MAX_VHOST_USER_TAG + 1];
-        let refused_vhost_user: [(u64, &[u8]); 8] = [
-            (0, b"fxfs"),
-            (MAX_VHOST_USER_QUEUES + 1, b"fxfs"),
-            (u64::from(u16::MAX) + 2, b"fxfs"),
-            (u64::MAX, b"fxfs"),
-            (1, b""),
-            (1, &long),
-            (1, b"fx\0fs"),
-            (1, b"fx\xfffs"),
-        ];
-        for (queues, tag) in refused_vhost_user {
-            assert_eq!(vhost_user(queues, tag).err(), Some(Errno::EINVAL), "{queues} {tag:?}");
-        }
         let phys = PhysLocation { arena: ArenaId::DEFAULT, offset: 0 };
         let ops = [
             StageOp::Map { offset: 0, phys, len: 4096 },
@@ -2671,7 +2600,7 @@ mod tests {
     fn the_wire_is_its_version() {
         /// The version, and the fingerprint of the wire it is. A change to the wire is a new
         /// version, both changed together, never the fingerprint alone.
-        const WIRE: (u64, u64) = (25, 0xb04aba04cccaec4e);
+        const WIRE: (u64, u64) = (23, 0xab82a34c3729a705);
         let fingerprint = fingerprint();
         assert_eq!(
             (VERSION, fingerprint),

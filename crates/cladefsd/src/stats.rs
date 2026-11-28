@@ -270,18 +270,6 @@ pub(super) struct Report {
     budget: AtomicU64,
     /// The asks for its VM process's stats it has yet to answer ([`super::wire::STATS_ASK`]).
     asked: Mutex<Vec<Asked>>,
-    /// cladefs board 14603: who asks its guest in its VM process's stead, while the connection's
-    /// vhost-user back-end serves the guest's device.
-    guest: Mutex<Option<Arc<dyn AsksGuest>>>,
-}
-
-/// Who asks a VM process's guest for its stats in the VM process's stead: its connection's
-/// vhost-user back-end, as the guest drives a device the back-end serves (cladefs board 14603).
-pub(super) trait AsksGuest: Send + Sync {
-    /// Asks the guest `ask`: whether it is asked, its answer to come as its `STATS`; one not asked
-    /// is answered at once, without its stats, as a VM process answers for a guest that takes no
-    /// asks.
-    fn ask(&self, ask: u64) -> bool;
 }
 
 /// The cell a connection opened.
@@ -333,7 +321,6 @@ impl Report {
             window: OnceLock::new(),
             budget: AtomicU64::new(0),
             asked: Mutex::new(Vec::new()),
-            guest: Mutex::new(None),
         });
         daemon.stats_reports.lock().unwrap().push(Arc::downgrade(&report));
         report
@@ -426,28 +413,10 @@ impl Report {
         })
     }
 
-    /// Has `guest` ask its guest from here on, or, if none, its VM process.
-    #[cfg_attr(not(all(target_os = "linux", not(madsim))), allow(dead_code))]
-    pub fn asks_guest(&self, guest: Option<Arc<dyn AsksGuest>>) {
-        *self.guest.lock().unwrap() = guest;
-    }
-
-    /// Asks its VM process for its stats, as ask `ask`, made at `at` ([`super::wire::STATS_ASK`]),
-    /// or its guest, through whoever asks it ([`Report::asks_guest`]): what its answer will say,
-    /// unless it opened no cell, or can't be asked.
+    /// Asks its VM process for its stats, as ask `ask`, made at `at` ([`super::wire::STATS_ASK`]):
+    /// what its answer will say, unless it opened no cell, or can't be asked.
     fn ask(&self, ask: u64, at: Instant) -> Option<tokio::sync::oneshot::Receiver<Vm>> {
         self.opened.get()?;
-        let guest = self.guest.lock().unwrap().clone();
-        if let Some(guest) = guest {
-            let (answered, answer) = tokio::sync::oneshot::channel();
-            self.asked.lock().unwrap().push(Asked { ask, at, answered });
-            if !guest.ask(ask)
-                && let Err(errno) = self.answered(ask, None)
-            {
-                log::warn!("cladefsd: answering for a guest not asked for its stats: {errno}");
-            }
-            return Some(answer);
-        }
         let sender = self.sender.upgrade()?;
         let (answered, answer) = tokio::sync::oneshot::channel();
         self.asked.lock().unwrap().push(Asked { ask, at, answered });

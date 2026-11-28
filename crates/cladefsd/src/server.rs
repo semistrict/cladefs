@@ -30,14 +30,6 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak, mpsc};
 /// for one of them, then, on the threads every connection shares ([`Pool`]).
 const WORKERS: usize = 8;
 
-/// cladefs: the extent device's vhost-user back-end (board 14537). Linux alone, its channel a
-/// socket pair, its kicks and calls eventfds and its memory memfds; and not under madsim, whose one
-/// deterministic thread can't host the channel's thread of its own, blocking in `epoll_wait`, nor
-/// has the simulation Unix sockets (`crate::wire::memory`): there a `VHOST_USER` is refused
-/// `ENOTSUP`, the interpreter and the cell it serves with run by the simulation's other paths.
-#[cfg(all(target_os = "linux", not(madsim)))]
-mod vhost;
-
 /// cladefs: how many of a connection's faults and `PRIVATE`s the daemon resolves at once
 /// (TASK-149.34), each paging in what it waits for: a part of an extent, a MiB, and the two after
 /// it if it reads on (`cache::PARTS_AHEAD`), each part's frames of its tenant's memory held until
@@ -859,8 +851,6 @@ async fn run_connection(stream: crate::wire::Stream, tenant: Arc<Tenant>, connec
         behind: SharedLock::new("connection behind", Mutex::new(None)),
         shrinking: Shrinking::new(),
         transfer: OnceLock::new(),
-        #[cfg(all(target_os = "linux", not(madsim)))]
-        vhost_user: Mutex::default(),
         versions_made: SharedLock::new("connection versions", Mutex::new(Default::default())),
         closing: AtomicBool::new(false),
         ended: AtomicBool::new(false),
@@ -905,10 +895,6 @@ async fn run_connection(stream: crate::wire::Stream, tenant: Arc<Tenant>, connec
         }
         Err(err) => log::error!("cladefsd: receiving from a VM process: {err}"),
     }
-    // cladefs: its vhost-user back-end stopped, whoever holds the channel's other end: the chains
-    // it took are served still, and counted in its requests below (board 14537).
-    #[cfg(all(target_os = "linux", not(madsim)))]
-    connection.stop_vhost_user().await;
     // The VM process is gone, and its mappings of the window with it: nothing waits for it.
     // cladefs: one the daemon let go, or that still reaches pages, once it has exited (TASK-79.9,
     // TASK-79.100).
@@ -1005,14 +991,12 @@ fn receive(
                         ),
                     }
                 }
-                Ok(Some((message, charge))) => {
-                    let Some(work) = connection.admit(Work::Message(message, charge)) else {
-                        continue;
-                    };
+                Ok(Some(admitted)) => {
+                    let Some((message, charge)) = connection.admit(admitted) else { continue };
                     connection.daemon().spawn(receive(connection.clone(), receiver, gone));
                     // The task does nothing more: its receiving goes on in another. Inline under
                     // madsim, which has one thread (`upload::blocking`, doc-24 step 11).
-                    local_cell::upload::blocking(move || connection.serve_in_turn(work));
+                    local_cell::upload::blocking(move || connection.serve_in_turn(message, charge));
                     return;
                 }
                 Ok(None) => break,
@@ -1086,7 +1070,7 @@ async fn finish_connection(connection: Arc<Connection>) {
 /// of those received whose replies are not queued yet ([`Answer`], TASK-79.16).
 #[derive(Default)]
 struct Requests {
-    waiting: std::collections::VecDeque<Work>,
+    waiting: std::collections::VecDeque<(Message, Charge)>,
     running: usize,
     deferred: usize,
     stream_bytes: u64,
@@ -1102,14 +1086,6 @@ impl Requests {
     fn in_flight(&self) -> usize {
         self.running + self.deferred + self.waiting.len()
     }
-}
-
-/// A request a connection serves in its turns: a message its socket received, with what the daemon
-/// holds for it; or, cladefs, a chain its vhost-user device took off a guest's queue (board 14537).
-enum Work {
-    Message(Message, Charge),
-    #[cfg(all(target_os = "linux", not(madsim)))]
-    Chain(Arc<vhost::GuestState>, vhost_user::Chain),
 }
 
 /// cladefs: what the daemon holds for a request, as its connection's room and its tenant's bytes in
@@ -1511,10 +1487,6 @@ pub(super) struct Connection {
     shrinking: Shrinking,
     /// Its transfer area, once its VM process gives it one ([`TRANSFER`]).
     transfer: OnceLock<TransferArea>,
-    /// cladefs: its extent device's vhost-user back-end, once its VM process asks for its channel
-    /// ([`VHOST_USER`], board 14537), until stopped as the connection ends.
-    #[cfg(all(target_os = "linux", not(madsim)))]
-    vhost_user: Mutex<vhost::VhostUser>,
     /// cladefs: the versions its VM process made ([`FORK_QUIESCENT`]), which alone it drops
     /// ([`FORK_DROP`], TASK-575).
     versions_made: SharedLock<Mutex<std::collections::BTreeSet<u64>>>,
@@ -1803,25 +1775,14 @@ impl Connection {
     /// `message`, a request, with what the daemon holds for it counted, to serve now, unless
     /// [`WORKERS`] of the connection's run, when it waits for one of them to be done, which serves
     /// it then ([`Connection::serve_in_turn`]).
-    fn admit(&self, work: Work) -> Option<Work> {
+    fn admit(&self, admitted: (Message, Charge)) -> Option<(Message, Charge)> {
         let mut requests = self.requests.with(Mutex::lock);
         if requests.running == WORKERS {
-            requests.waiting.push_back(work);
+            requests.waiting.push_back(admitted);
             return None;
         }
         requests.running += 1;
-        Some(work)
-    }
-
-    /// Serves `work`, admitted ([`Connection::admit`]): a message
-    /// ([`Connection::serve_message_in_turn`]) or, cladefs, a chain of its vhost-user device's
-    /// (board 14537).
-    fn serve_in_turn(self: Arc<Self>, work: Work) {
-        match work {
-            Work::Message(message, charge) => self.serve_message_in_turn(message, charge),
-            #[cfg(all(target_os = "linux", not(madsim)))]
-            Work::Chain(guest, chain) => self.serve_chain_in_turn(guest, chain),
-        }
+        Some(admitted)
     }
 
     /// Serves `message`, admitted ([`Connection::admit`]); then the next waiting, if any, on the
@@ -1832,7 +1793,7 @@ impl Connection {
     /// (TASK-92.5). A request its kind gives no meaning ([`Request::decode`]), or naming a cell
     /// its tenant's VM processes don't ([`Connection::authorize`]), is refused, whatever it is, in
     /// one place (TASK-160.9).
-    fn serve_message_in_turn(self: Arc<Self>, message: Message, charge: Charge) {
+    fn serve_in_turn(self: Arc<Self>, message: Message, charge: Charge) {
         // cladefs: served with the guest request it is a call for current, if any, as its futures
         // are polled too, wherever: what its log records and its span name (`crate::request`,
         // TASK-260).
@@ -1879,21 +1840,6 @@ impl Connection {
             Err(Errno::EPROTONOSUPPORT) => refuse_version(&message.header, answer),
             Err(errno) => refuse(answer, errno),
             Ok(Request::Fault(fault)) => self.clone().fault(fault, answer).await,
-            // cladefs: its reply carries the channel's end (board 14537).
-            #[cfg(all(target_os = "linux", not(madsim)))]
-            Ok(Request::VhostUser { queues, ordered_only, tag, listener }) => {
-                match listener.map(|listener| listener.0.try_clone_to_owned()).transpose() {
-                    Ok(listener) => {
-                        self.serve_vhost_user(queues, ordered_only, tag, listener, answer)
-                    }
-                    Err(err) => {
-                        log::warn!("cladefsd: keeping a vhost-user listener: {err}");
-                        refuse(answer, Errno::EMFILE)
-                    }
-                }
-            }
-            #[cfg(not(all(target_os = "linux", not(madsim))))]
-            Ok(Request::VhostUser { .. }) => refuse(answer, Errno::ENOTSUP),
             // cladefs: boxed, as an opening's future holds all a cell's opening awaits, some 22 KB,
             // which every request's future, commits' and writes' too, would hold and be copied
             // with, onto the heap in `serve_future`: some 15% of the daemon's CPU under pgbench
@@ -1911,25 +1857,21 @@ impl Connection {
     fn next_turn(self: Arc<Self>) {
         loop {
             let mut requests = self.requests.with(Mutex::lock);
-            if let Some(next) = requests.waiting.pop_front() {
+            if let Some((next, charge)) = requests.waiting.pop_front() {
                 drop(requests);
-                // What answers it if no thread is had to serve it: a message `EAGAIN`; a chain
-                // returns itself, nothing written, as it drops with what would have served it.
-                let refused = match &next {
-                    Work::Message(message, _) => Some(message.header),
-                    #[cfg(all(target_os = "linux", not(madsim)))]
-                    Work::Chain(..) => None,
-                };
+                let header = next.header;
                 let connection = self.clone();
                 // Its charge, refused, dropped with what would have served it.
-                if self.daemon().pool().run(Box::new(move || connection.serve_in_turn(next))) {
+                if self
+                    .daemon()
+                    .pool()
+                    .run(Box::new(move || connection.serve_in_turn(next, charge)))
+                {
                     return;
                 }
-                if let Some(header) = refused {
-                    let answer = Answer::new(&self, header, None, None);
-                    let reply = answer.reply_header();
-                    answer.send(Err(Errno::EAGAIN), reply, Vec::new(), Vec::new());
-                }
+                let answer = Answer::new(&self, header, None, None);
+                let reply = answer.reply_header();
+                answer.send(Err(Errno::EAGAIN), reply, Vec::new(), Vec::new());
                 continue;
             }
             requests.running -= 1;
@@ -2172,10 +2114,8 @@ impl Connection {
                 Ok(())
             }
             Request::Stats { ask, guest } => self.report.answered(*ask, *guest),
-            // Served apart ([`Connection::serve_message`]).
-            Request::Open { .. } | Request::Fault(_) | Request::VhostUser { .. } => {
-                Err(Errno::EINVAL)
-            }
+            // Served apart, as futures ([`Connection::serve_in_turn`]).
+            Request::Open { .. } | Request::Fault(_) => Err(Errno::EINVAL),
         }
     }
 
@@ -2681,13 +2621,8 @@ impl Connection {
     }
 
     /// Tells the VM process the cell's capacity is `capacity` bytes, or, if `ask`, asks its guest
-    /// to shrink to it ([`CAPACITY`]); or, the guest's device served by the connection's vhost-user
-    /// back-end, the guest itself (board 14603).
+    /// to shrink to it ([`CAPACITY`]).
     fn tell_capacity(&self, capacity: u64, ask: bool) -> Result<(), Errno> {
-        #[cfg(all(target_os = "linux", not(madsim)))]
-        if let Some(guest) = self.vhost_guest() {
-            return guest.tell_capacity(capacity, ask);
-        }
         let (header, payload) = Told::Capacity { capacity, ask }.encode();
         self.peer.sender.send(header, payload, &[]).map_err(|err| {
             log::warn!("cladefsd: telling a VM process its capacity: {err}");

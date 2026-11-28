@@ -2,9 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Serving the device's requests: a guest's, as doc-4 has them (`cladefs::extent_requests::Guest`,
-//! which the extent daemon's vhost-user back-end serves too, board 14537), with the interpreter
-//! every transport of doc-4's requests shares ([`handle`], board 14378). The device applies requests
+//! Serving the device's requests: a guest's, as doc-4 has them (`cladefs::extent_requests::Guest`),
+//! with the interpreter every transport of doc-4's requests shares ([`handle`], board 14378). The device applies requests
 //! in any order but across barriers (doc-4), so a guest's `MAP` doesn't wait for the writes and
 //! uploaded commits queued before it: each is served as a future ([`handle`]), several at once. On
 //! Linux, [`Requests`] serves them on the threads receiving the daemon's replies, which go on with

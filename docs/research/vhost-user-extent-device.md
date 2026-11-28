@@ -1,5 +1,14 @@
 # The extent device as a vhost-user backend: guest memory the daemon reaches
 
+> **Superseded** (2026-11-28, the user's decision, board 14378): no vhost-user extent device. A
+> back-end could reach a memory cell's private pages, anonymous memory in the VM process, only
+> through `process_vm_readv`, which the user judged too slow and complex for what it saves. The
+> direction now: doc-4's requests over stock vsock, Firecracker copying from guest memory, and the
+> DAX window as a stock virtio-pmem device whose memory is the same lazily mapped region of the
+> daemon's memfd runs, copied on write, as guest RAM's (`docs/research/guest-ram-mapping-list.md`,
+> board 14602): one generic patch in the fork. The back-end (cladefsd's `server/vhost.rs`, the
+> `vhost_user` crate, boards 14537, 14603, 14620) is backed out of main; kept for its reasoning.
+
 Research for board 14378 (2026-11-27). The question: can cladefsd serve a guest's extent-device
 virtqueues itself, as a vhost-user backend, taking the VMM out of every request's path, without
 losing the performance guest RAM has today? And would that let our Firecracker fork shrink to what
