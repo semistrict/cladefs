@@ -533,23 +533,27 @@ fn max_vcpus() -> Result<u32> {
     Ok(max.min(layout::MAX_VCPUS))
 }
 
+/// Whether this host's Hypervisor.framework gives VMs EL2 (nested virtualization: Apple M3 and
+/// later, macOS 15 and later).
+pub(crate) fn el2_supported() -> Result<bool> {
+    let mut supported = false;
+    // SAFETY: writes into a live local.
+    check("ask whether VMs may have EL2", unsafe {
+        hv_vm_config_get_el2_supported(&mut supported)
+    })?;
+    Ok(supported)
+}
+
 /// Creates the process's VM with the map's IPA size and 4 KiB stage 2 pages, where the host
 /// can (macOS 26), so that a DAX window maps the guest's pages one by one; and EL2 if `el2`,
 /// refused if the host has none.
 fn create_vm(el2: bool) -> Result<()> {
-    if el2 {
-        let mut supported = false;
-        // SAFETY: writes into a live local.
-        check("ask whether VMs may have EL2", unsafe {
-            hv_vm_config_get_el2_supported(&mut supported)
-        })?;
-        if !supported {
-            return Err(Error::InvalidConfig(
-                "this host's Hypervisor.framework gives VMs no EL2 (nested virtualization: \
-                 Apple M3 and later, macOS 15 and later); nested_virtualization must be false"
-                    .into(),
-            ));
-        }
+    if el2 && !el2_supported()? {
+        return Err(Error::InvalidConfig(
+            "this host's Hypervisor.framework gives VMs no EL2 (nested virtualization: Apple M3 \
+             and later, macOS 15 and later); nested_virtualization must be false"
+                .into(),
+        ));
     }
     let mut max_ipa = 0;
     // SAFETY: writes the size into a live local.

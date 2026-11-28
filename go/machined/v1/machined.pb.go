@@ -289,9 +289,13 @@ type MachineSpec struct {
 	RootDaxWindowBytes uint64 `protobuf:"varint,8,opt,name=root_dax_window_bytes,json=rootDaxWindowBytes,proto3" json:"root_dax_window_bytes,omitempty"`
 	// Gives the guest a virtio-balloon: its free memory reported and given back to the host as it
 	// frees it (free page reporting).
-	Balloon       bool `protobuf:"varint,9,opt,name=balloon,proto3" json:"balloon,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Balloon bool `protobuf:"varint,9,opt,name=balloon,proto3" json:"balloon,omitempty"`
+	// Gives the guest the CPU's virtualization extensions, EL2 (nested virtualization): its kernel
+	// boots at EL2 and, built with KVM, has /dev/kvm, to run VMs of its own. Refused with
+	// FAILED_PRECONDITION on a host without it (Apple M3 and later, macOS 15 and later).
+	NestedVirtualization bool `protobuf:"varint,10,opt,name=nested_virtualization,json=nestedVirtualization,proto3" json:"nested_virtualization,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
 func (x *MachineSpec) Reset() {
@@ -383,6 +387,13 @@ func (x *MachineSpec) GetRootDaxWindowBytes() uint64 {
 func (x *MachineSpec) GetBalloon() bool {
 	if x != nil {
 		return x.Balloon
+	}
+	return false
+}
+
+func (x *MachineSpec) GetNestedVirtualization() bool {
+	if x != nil {
+		return x.NestedVirtualization
 	}
 	return false
 }
@@ -1480,7 +1491,7 @@ var File_machined_v1_machined_proto protoreflect.FileDescriptor
 
 const file_machined_v1_machined_proto_rawDesc = "" +
 	"\n" +
-	"\x1amachined/v1/machined.proto\x12\vmachined.v1\"\xb8\x03\n" +
+	"\x1amachined/v1/machined.proto\x12\vmachined.v1\"\xed\x03\n" +
 	"\vMachineSpec\x12\x14\n" +
 	"\x05vcpus\x18\x01 \x01(\rR\x05vcpus\x12!\n" +
 	"\fmemory_bytes\x18\x02 \x01(\x04R\vmemoryBytes\x12%\n" +
@@ -1490,7 +1501,9 @@ const file_machined_v1_machined_proto_rawDesc = "" +
 	"\x12vsock_listen_ports\x18\x06 \x03(\rR\x10vsockListenPorts\x12<\n" +
 	"\x06labels\x18\a \x03(\v2$.machined.v1.MachineSpec.LabelsEntryR\x06labels\x121\n" +
 	"\x15root_dax_window_bytes\x18\b \x01(\x04R\x12rootDaxWindowBytes\x12\x18\n" +
-	"\aballoon\x18\t \x01(\bR\aballoon\x1a9\n" +
+	"\aballoon\x18\t \x01(\bR\aballoon\x123\n" +
+	"\x15nested_virtualization\x18\n" +
+	" \x01(\bR\x14nestedVirtualization\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"_\n" +

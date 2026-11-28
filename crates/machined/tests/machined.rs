@@ -258,6 +258,25 @@ async fn a_balloon_gives_memory_back() {
     daemon.shutdown().await;
 }
 
+/// A machine with nested virtualization (hotbed issue 33), which hotbed asks for on every
+/// workspace: its guest's kernel boots at EL2 and has /dev/kvm, to run Firecracker's VMs and
+/// tests (Apple M3 and later).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_nested_machine_has_kvm() {
+    let Some((kernel, initramfs)) = guest() else { return };
+    let daemon = Daemon::start_guest(&kernel, &initramfs).await;
+    let mut client = daemon.client.clone();
+    let spec = proto::MachineSpec {
+        nested_virtualization: true,
+        ..daemon.spec(&sh("test -c /dev/kvm && echo kvm=yes")).await
+    };
+    create(&mut client, "n", spec).await;
+    start(&mut client, "n").await;
+    let text = console_has(&mut client, "n", "sh exited").await;
+    assert!(text.contains("kvm=yes"), "{text}");
+    daemon.shutdown().await;
+}
+
 /// A machine's network (board 14131), as hotbed's egress rule gives it, the one rule allowing "*":
 /// its guest reaches a host listener through its gateway, which stands for the host's loopback,
 /// where a rule allows it, and is refused where none does.

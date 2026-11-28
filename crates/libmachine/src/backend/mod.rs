@@ -12,7 +12,7 @@ use crate::machine::ExitReason;
 
 pub(crate) mod hvf;
 pub use hvf::ram::GuestRam;
-pub(crate) use hvf::{Ram, Vcpu, VcpuState, Vm, VmState, kick};
+pub(crate) use hvf::{Ram, Vcpu, VcpuState, Vm, VmState, el2_supported, kick};
 
 /// Which machine the backend builds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

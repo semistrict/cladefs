@@ -88,6 +88,12 @@ impl MachineConfig {
     pub const MAX_VCPUS: u32 = 254;
     /// The default [`serial_capture_limit`](MachineConfig::serial_capture_limit): 1 MiB.
     pub const DEFAULT_SERIAL_CAPTURE_LIMIT: usize = 1 << 20;
+
+    /// Whether this host gives machines [`nested_virtualization`](Self::nested_virtualization):
+    /// Apple M3 and later, macOS 15 and later.
+    pub fn nested_virtualization_supported() -> Result<bool> {
+        backend::el2_supported()
+    }
 }
 
 impl Default for MachineConfig {

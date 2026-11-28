@@ -143,6 +143,7 @@ pub(crate) fn plan(images: &Path, spec: &proto::MachineSpec) -> Result<Plan, Sta
     let root = root(spec)?;
     vsock_ports(&spec.vsock_listen_ports)?;
     labels(&spec.labels)?;
+    nested_virtualization(spec.nested_virtualization)?;
     Ok(Plan {
         config: MachineConfig {
             mem_size,
@@ -153,6 +154,7 @@ pub(crate) fn plan(images: &Path, spec: &proto::MachineSpec) -> Result<Plan, Sta
             // The daemon its helper connects to is the helper's to name (`crate::helper`).
             extent_stores: vec![root],
             balloon: spec.balloon,
+            nested_virtualization: spec.nested_virtualization,
             ..MachineConfig::default()
         },
         boot: LinuxBoot {
@@ -161,6 +163,22 @@ pub(crate) fn plan(images: &Path, spec: &proto::MachineSpec) -> Result<Plan, Sta
             cmdline: format!("root={ROOT_TAG} rootfstype=cladefs rw {}", boot.command_line),
         },
     })
+}
+
+/// Nested virtualization, if asked for, on a host that has it: refused as the machine is made,
+/// not as each start fails.
+fn nested_virtualization(asked: bool) -> Result<(), Status> {
+    if !asked {
+        return Ok(());
+    }
+    match MachineConfig::nested_virtualization_supported() {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(Status::failed_precondition(
+            "nested_virtualization: this host's Hypervisor.framework gives VMs no EL2 (Apple M3 \
+             and later, macOS 15 and later)",
+        )),
+        Err(e) => Err(crate::errors::status(e)),
+    }
 }
 
 /// The extent store device's tag a machine's root is mounted from (`root=`).

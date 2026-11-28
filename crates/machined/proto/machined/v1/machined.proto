@@ -100,6 +100,10 @@ message MachineSpec {
   // Gives the guest a virtio-balloon: its free memory reported and given back to the host as it
   // frees it (free page reporting).
   bool balloon = 9;
+  // Gives the guest the CPU's virtualization extensions, EL2 (nested virtualization): its kernel
+  // boots at EL2 and, built with KVM, has /dev/kvm, to run VMs of its own. Refused with
+  // FAILED_PRECONDITION on a host without it (Apple M3 and later, macOS 15 and later).
+  bool nested_virtualization = 10;
 }
 
 // A Linux kernel and how it boots.
