@@ -39,7 +39,6 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 /// A cell open in the daemon's process. See the module docs.
 pub struct EmbeddedCell {
     daemon: Arc<Daemon>,
-    id: CellId,
     /// Its cell, once open.
     open_cell: OnceLock<Arc<OpenCell>>,
     /// Its hold of its cell's path, once it has one: let go after its cell closes.
@@ -53,13 +52,17 @@ pub struct EmbeddedCell {
 impl EmbeddedCell {
     /// Its cell's ID.
     pub fn id(&self) -> CellId {
-        self.id
+        self.open_cell().cell()
+    }
+
+    /// Its cell.
+    pub(crate) fn open_cell(&self) -> &Arc<OpenCell> {
+        self.open_cell.get().expect("an embedded cell is open")
     }
 
     /// A device over its cell, which holds it (see the module docs): its database's.
     pub fn device(self: &Arc<Self>) -> anyhow::Result<cladefs_fs::OpenCellDevice> {
-        let open_cell = self.open_cell.get().expect("an embedded cell is open").clone();
-        cladefs_fs::OpenCellDevice::holding(open_cell, self.clone())
+        cladefs_fs::OpenCellDevice::holding(self.open_cell().clone(), self.clone())
     }
 }
 
@@ -132,7 +135,7 @@ impl Daemon {
             let disk = pool.pick_disk()?;
             let (path, id) = cells::new_managed_cell(&daemon, &disk, tenant).await?;
             let new = cells::New { capacity, kind, tenant, cell: Some(id), ephemeral: false };
-            let embedded = embed(&daemon, id, &path, Some(new)).await?;
+            let embedded = embed(&daemon, &path, Some(new), arena_of(&daemon, tenant)?).await?;
             pool.register_cell(id, path);
             Ok(embedded)
         })
@@ -146,7 +149,7 @@ impl Daemon {
         self.run(async move {
             let pool = daemon.disk_pool().ok_or(Errno::EINVAL)?.clone();
             let path = cells::managed_cell_dir(&pool, cell).await?;
-            embed(&daemon, cell, &path, None).await
+            embed(&daemon, &path, None, arena_of(&daemon, cell.tenant)?).await
         })
         .await
     }
@@ -171,20 +174,31 @@ fn arena_of(daemon: &Arc<Daemon>, tenant: u64) -> Result<Arc<Arena>, Errno> {
     })
 }
 
-/// The cell `id` at `path` on `daemon`, made as `new` says if given, open in this process: held
-/// to write, as a connection's opening holds it (`server::Connection::open`), opened, and the
-/// hold given it, or let go of, with the cell closed, if anything fails.
+/// cladefs: the existing cell at `path`, its pages in `arena`, open in this process: a VM's memory
+/// cell, which its memory backend serves (`crate::memory_backend`, board 14630). `EBUSY` if a
+/// writer has it open, past a writer going.
+#[cfg(all(target_os = "linux", not(madsim)))]
+pub(crate) async fn embed_at(
+    daemon: &Arc<Daemon>,
+    path: &std::path::Path,
+    arena: Arc<Arena>,
+) -> Result<Arc<EmbeddedCell>, Errno> {
+    embed(daemon, path, None, arena).await
+}
+
+/// The cell at `path` on `daemon`, made as `new` says if given, its pages in `arena`, open in this
+/// process: held to write, as a connection's opening holds it (`server::Connection::open`),
+/// opened, and the hold given it, or let go of, with the cell closed, if anything fails.
 async fn embed(
     daemon: &Arc<Daemon>,
-    id: CellId,
     path: &std::path::Path,
     new: Option<cells::New>,
+    arena: Arc<Arena>,
 ) -> Result<Arc<EmbeddedCell>, Errno> {
     // cladefs: none while the daemon drains, as no connection is taken then (board 13909).
     let doing = daemon.embedded_work.begin(daemon).ok_or(Errno::EBUSY)?;
     let embedded = Arc::new(EmbeddedCell {
         daemon: Arc::clone(daemon),
-        id,
         open_cell: OnceLock::new(),
         hold: Mutex::new(None),
         going: AtomicBool::new(false),
@@ -192,7 +206,6 @@ async fn embed(
     });
     let writer: std::sync::Weak<dyn CellWriter> = Arc::downgrade(&embedded) as _;
     let hold = cells::hold_to_write(daemon, &cells::cell_dir_key(path), writer).await?;
-    let arena = arena_of(daemon, id.tenant)?;
     // Closed before its hold lets its path go, if it fails here.
     let open_cell = Arc::new(cells::open_cell_at(daemon, path, new, Some(&arena)).await?);
     if let Err(err) = open_cell.access().may_write().and_then(|()| hold.open(&open_cell)) {

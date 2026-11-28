@@ -1989,7 +1989,8 @@ impl CachedExtent {
             // placement takes it before its punch; and past the extent's lock, as the slabs are
             // called nowhere under it. One staged to a VM process, which may map it shared until
             // it has made what took it away, waits for that in quarantine, as any: a refill goes
-            // elsewhere, and the lists' handler copies.
+            // elsewhere, and the lists' handler copies; and, listed ([`PartSlab::list`]), it is
+            // punched as it comes out, which takes it out of the lists' VMs too.
             let homing: Vec<bool> = {
                 let parts = self.parts.with(Mutex::lock);
                 (evictions.iter())

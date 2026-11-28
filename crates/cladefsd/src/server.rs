@@ -651,6 +651,30 @@ impl Tenant {
         self.memory.arena.id()
     }
 
+    /// cladefs: the daemon it is a tenant of (the memory backend's, board 14630).
+    #[cfg(all(target_os = "linux", not(madsim)))]
+    pub(crate) fn daemon(&self) -> &Arc<Daemon> {
+        &self.daemon
+    }
+
+    /// cladefs: the read-only descriptor of arena `arena`'s memory, which a VM process of its may
+    /// map: its own arena's, or the default's, which public bases' parts are of; none of another
+    /// tenant's (the memory backend's lists, board 14630).
+    #[cfg(all(target_os = "linux", not(madsim)))]
+    pub(crate) fn arena_memory(
+        &self,
+        arena: cladefs_core::pages::ArenaId,
+    ) -> Option<std::os::fd::BorrowedFd<'_>> {
+        use std::os::fd::AsFd;
+        if arena == self.arena() {
+            Some(self.memory.memory.as_fd())
+        } else if arena == cladefs_core::pages::ArenaId::DEFAULT {
+            Some(self.memory.public.as_fd())
+        } else {
+            None
+        }
+    }
+
     /// cladefs: its arena itself, which its cells' own pages are of: an embedded cell's, outside
     /// the simulation as `embedded` is (board 14256).
     #[cfg(not(madsim))]

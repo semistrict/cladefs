@@ -122,6 +122,8 @@ pub mod guest;
 mod http;
 pub mod logging;
 pub mod memory;
+#[cfg(all(target_os = "linux", not(madsim)))]
+pub mod memory_backend;
 pub mod metrics;
 pub mod migration;
 pub mod mount;

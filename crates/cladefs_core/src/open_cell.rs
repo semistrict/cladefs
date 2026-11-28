@@ -1525,6 +1525,18 @@ impl OpenCell {
         window_offset: u64,
     ) -> Result<(Arc<CachedExtent>, u64)> {
         self.dax_range_checked(window_offset, len)?;
+        self.extent_for_list(extent, offset, len).await
+    }
+
+    /// cladefs: the sealed `extent`'s copy in the cache whose bytes `offset..offset + len` a
+    /// mapping names, and how many of those bytes it holds, past which the mapping is of zeros:
+    /// as a `MAP` finds it, but for no window: the memory backend's lists' (board 14630).
+    pub async fn extent_for_list(
+        &self,
+        extent: ExtentId,
+        offset: u64,
+        len: u64,
+    ) -> Result<(Arc<CachedExtent>, u64)> {
         // cladefs: an open extent maps nowhere: a guest's bug, counted, as a tripwire
         // (`open_maps_refused`).
         let extent_len = match self.local.extent(extent).map_err(errno)? {

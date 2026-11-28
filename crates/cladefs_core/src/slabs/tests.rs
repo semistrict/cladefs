@@ -97,6 +97,29 @@ fn placed_runs_hold_memory_only_while_populated() {
     check("a placement freed", 0);
 }
 
+/// cladefs: a whole slab a VM's memory backend installed pages of ([`PartSlab::list`], board
+/// 14630), freed, is punched, its memory out of the VM's page tables, never kept a spare that
+/// another part's page-in would fill there; one not listed is kept a spare, as before.
+#[cfg(target_os = "linux")]
+#[test]
+fn slabs_listed_are_punched_as_they_are_freed() {
+    let ps = page_size();
+    let arena = create_arena().unwrap();
+    let written = || {
+        let run = alloc(arena, SLAB / ps, Wait::No).unwrap();
+        run.write(0, &vec![5; SLAB as usize]).unwrap();
+        run
+    };
+    let listed = written();
+    listed.list();
+    drop(listed);
+    assert_eq!(arena_bytes(arena), 0, "a slab listed kept a spare");
+    assert_eq!(held(arena), 0, "a slab listed not punched");
+    drop(written());
+    assert_eq!(arena_bytes(arena), SLAB, "a slab not listed not kept a spare");
+    release_spares(Some(arena));
+}
+
 /// An arena at its cap holding nothing but spares gives them back for a run they can't serve, one
 /// shorter than a slab, rather than ask relief, which has nothing to evict, and fail: its short
 /// parts were unreadable until something else gave the spares back (Codex's review of board 6204).

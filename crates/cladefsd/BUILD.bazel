@@ -23,6 +23,7 @@ _LIB_SRCS = glob(["src/**/*.rs"])
 
 _BASE_DEPS = [
     "//crates/base32_id",
+    "//crates/block_device",
     "//crates/cladefs_proto",
     "//crates/formats",
     "//crates/host_fs",

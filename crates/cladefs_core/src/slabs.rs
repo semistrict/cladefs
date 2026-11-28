@@ -641,13 +641,14 @@ impl Arena {
         }
     }
 
-    /// Frees `run`, which it gave: kept as a spare, or punched, here and now, outside its lock.
-    /// cladefs: one not `populated` makes no room (board 14629).
-    fn free(&self, run: Run, populated: bool) {
+    /// Frees `run`, which it gave: kept as a spare if it `may_spare`, or punched, here and now,
+    /// outside its lock. cladefs: one not `populated` makes no room (board 14629).
+    fn free(&self, run: Run, populated: bool, may_spare: bool) {
         let node = &self.node;
         node.total_exhausted.store(false, Ordering::Release);
         node.clear_total_backoff();
-        let keep = node.keep_spares.load(Ordering::Relaxed)
+        let keep = may_spare
+            && node.keep_spares.load(Ordering::Relaxed)
             && node.populated.load(Ordering::Relaxed) <= node.limit();
         let freed = {
             let mut state = self.state.lock().unwrap();
@@ -732,11 +733,15 @@ struct Held {
     /// cladefs: whether its pages are populated, counted against the caps: a run placed is not
     /// until it is populated, nor one depopulated after (board 14629).
     populated: AtomicBool,
+    /// cladefs: whether a VM process's memory backend installed its pages in the VM's page tables
+    /// ([`PartSlab::list`], board 14630): freed, it is punched, which takes them out of those.
+    listed: AtomicBool,
 }
 
 impl Drop for Held {
     fn drop(&mut self) {
-        self.arena.free(self.run, self.populated.load(Ordering::Acquire));
+        let listed = self.listed.load(Ordering::Acquire);
+        self.arena.free(self.run, self.populated.load(Ordering::Acquire), !listed);
     }
 }
 
@@ -752,7 +757,12 @@ impl std::fmt::Debug for PartSlab {
 
 impl PartSlab {
     fn new(arena: Arc<Arena>, run: Run, populated: bool) -> Self {
-        let held = Held { arena, run, populated: AtomicBool::new(populated) };
+        let held = Held {
+            arena,
+            run,
+            populated: AtomicBool::new(populated),
+            listed: AtomicBool::new(false),
+        };
         Self { held: Some(held), staged: Default::default() }
     }
 
@@ -784,6 +794,15 @@ impl PartSlab {
         if held.populated.swap(false, Ordering::AcqRel) {
             held.arena.depopulate(held.run);
         }
+    }
+
+    /// cladefs: a VM process's memory backend installs its pages in the VM's page tables, a
+    /// private mapping of its arena's object (board 14630): which only a punch takes out of them.
+    /// Freed, it is punched therefore, never kept a spare, populated still, that another part fills
+    /// for the VM to read: as it is freed at once, or once out of quarantine. Called under its
+    /// part's lock, which no eviction passes, as the pages are installed.
+    pub fn list(&self) {
+        self.held().listed.store(true, Ordering::Release);
     }
 
     fn held(&self) -> &Held {
