@@ -620,6 +620,30 @@ mod tests {
         }
     }
 
+    /// A disk is one daemon's at a time: its root, locked as the daemon's pool opens it, refuses
+    /// another's pool while the first lives, and is taken by one once the first is gone. What
+    /// holds a cell's directory from other processes since each cell's own lock went (board
+    /// 14305), as a test of a cell directory's lock had checked of an uploader's hold, until it
+    /// checked what nothing did any more (TASK-129, board 14471).
+    #[test]
+    fn disks_are_owned_by_one_daemon_at_a_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("disk0");
+        let open = || DiskPool::from_roots(&bucket_cell::Host::new(), std::slice::from_ref(&root));
+        let first = open().unwrap();
+        let canonical = root.canonicalize().unwrap();
+        assert_eq!(
+            open().err(),
+            Some(format!(
+                "disk disk-0 ({}): another extent daemon owns it: a host has one, which its cells \
+                 are opened through",
+                canonical.display()
+            ))
+        );
+        drop(first);
+        assert_eq!(open().err(), None, "taken once its owner is gone");
+    }
+
     #[test]
     fn find_cell_evicts_vanished_cached_path_without_deadlocking() {
         let dir = tempfile::tempdir().unwrap();

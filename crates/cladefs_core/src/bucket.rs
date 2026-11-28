@@ -1582,40 +1582,6 @@ mod tests {
         assert_eq!(uploaded.map_err(drop), Ok(Ok(())));
     }
 
-    /// An open cell's uploader holds its directory taken until it stops, after the open cell
-    /// closed: the open cell's closing let it go, and its uploader, which uploads the open cell's
-    /// last commits as it stops, wrote the cell's marker in the directory after, while another
-    /// process, a crash test's copy, had taken it, and the open cell at the version found the
-    /// marker's new file gone (TASK-129, GCE, the DAX gate's second run).
-    #[tokio::test(flavor = "multi_thread")]
-    async fn uploaders_hold_their_cell_directory_until_they_stop() {
-        use std::os::fd::AsRawFd;
-        // Whether another process could take the directory at `path` now, as `Dir::take` does.
-        let free = |path: &std::path::Path| {
-            let dir = std::fs::File::open(path).unwrap();
-            // SAFETY: Plain system call on the directory's descriptor, which closing unlocks.
-            unsafe { libc::flock(dir.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
-        };
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("store");
-        let cell = crate::host_cell::new_alone();
-        let opened = crate::host_cell::create(
-            &path,
-            1 << 30,
-            crate::host_cell::CellOf::Named(cell),
-            bucket_cell::cell::Kind::Fxfs,
-            idle(),
-        )
-        .await
-        .unwrap();
-        let crate::host_cell::Opened { local, uploader, .. } = opened;
-        assert!(!free(&path), "taken while the cell is open");
-        local.close().await.unwrap();
-        assert!(!free(&path), "taken while its uploader runs");
-        drop(uploader);
-        assert!(free(&path), "free once the uploader stopped");
-    }
-
     /// TASK-79.19: a benchmark of an open cell's uploads keeping up with sustained writes, to a
     /// bucket whose PUTs take 350 ms each, as S3's of a segment of 32 MiB may: 4 GiB written, a MiB
     /// an extent, an ordered commit after each 32 MiB, as a guest's writeback makes them, each
