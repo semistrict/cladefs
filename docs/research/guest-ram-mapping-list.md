@@ -144,15 +144,18 @@ vsock (point 2). The fork's other commits (`fix(vsock)`, `fix(jailer)`, `fix(sig
 
 ### Frozen formats
 
-Two changes need the user's explicit approval before any step that makes them:
+Two format changes, both decided by the user on 2026-11-28:
 
+- **The window's mappings move into the memory cell** (approved). A version must record which
+  extent range each window range maps, which today's state file does. With point 4 the state file
+  holds only guest ranges, so cladefsd stores the mappings in a record of the memory cell: a new
+  format family under `formats/`, with its golden corpus.
 - **`snapshot-extent-state`** is Firecracker's state of an extent device: its window's place and
   every mapping (`MappingStateV2`). A Firecracker without the device can't load a state file that
-  has one. This comes with point 2 as well as this plan.
-- **The window's mappings move into the memory cell.** A version must record which extent range
-  each window range maps, which today's state file does. With point 4 the state file holds only
-  guest ranges, so cladefsd stores the mappings: a new record in the memory cell, a new format
-  family.
+  has one. Backwards compatibility isn't required yet, so old state files are refused by name. The
+  one exception is stored data hotbed itself depends on: before the device leaves, check whether
+  hotbed keeps any such state file, and coordinate with it if so. This comes with point 2 as well
+  as this plan.
 
 ## cladefsd
 
@@ -309,7 +312,7 @@ named for no one. An upstream issue proposing them comes first, filed only with 
 5. **cladefsd: the backend's handler** (board 14630): binding by the control plane, pidfds, per-VM
    threads, RAM and window lists, guest `MAP` and `UNMAP` as map messages, `MISSING` and `MINOR`
    faults filled and installed, persist of every region with the remap, the mapping budget. The
-   window's mappings record waits for the user's approval (Frozen formats).
+   window's mappings record is a new format family (Frozen formats).
 6. **Guest: the cladefs driver binds the window's virtio-pmem device** (board 14666), and retries a
    `MAP` that fails with `ENOMEM` after reclaiming window ranges. Its requests come over vsock once
    the extent-device thread's prototype lands.
