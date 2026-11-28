@@ -6,7 +6,7 @@
 //! installs, each by an ioctl on the descriptor (`include/uapi/linux/userfaultfd.h`).
 
 use std::fs::File;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, BorrowedFd};
 
 const UFFD_EVENT_PAGEFAULT: u8 = 0x12;
 const UFFD_PAGEFAULT_FLAG_MINOR: u64 = 1 << 2;
@@ -66,6 +66,17 @@ pub(super) struct Fault {
     pub minor: bool,
 }
 
+/// What waiting on a userfaultfd came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Next {
+    /// A page fault.
+    Fault(Fault),
+    /// The other descriptor waited on is readable.
+    Also,
+    /// Nothing: the time ran out, or the event was another's.
+    Nothing,
+}
+
 /// A VM process's userfaultfd, handed over.
 pub(super) struct Uffd(File);
 
@@ -74,28 +85,32 @@ impl Uffd {
         Self(file)
     }
 
-    /// The next page fault, waiting up to `timeout_ms` for one: none if none came, or the event
-    /// was another's. Firecracker requests no events but faults.
+    /// The next page fault, waiting up to `timeout_ms` for one, or for `also` to be readable,
+    /// if given. Firecracker requests no events but faults.
     ///
     /// The descriptor's file is the VM process's too, which may make it blocking: a poll of it
     /// fails then, at once, which ends the VM; and the read waits for nothing, whatever its flags
     /// (`RWF_NOWAIT`), so that no read waits for ever on a VM process gone, holding its memory.
-    pub fn next(&self, timeout_ms: i32) -> std::io::Result<Option<Fault>> {
-        let mut poll = libc::pollfd { fd: self.0.as_raw_fd(), events: libc::POLLIN, revents: 0 };
-        // SAFETY: Polls the one descriptor it is given.
-        match unsafe { libc::poll(&mut poll, 1, timeout_ms) } {
-            0 => return Ok(None),
+    pub fn next(&self, timeout_ms: i32, also: Option<BorrowedFd<'_>>) -> std::io::Result<Next> {
+        let pollfd = |fd| libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+        let mut polls = [pollfd(self.0.as_raw_fd()), pollfd(also.map_or(-1, |fd| fd.as_raw_fd()))];
+        // SAFETY: Polls the descriptors it is given; a negative one is passed over.
+        match unsafe { libc::poll(polls.as_mut_ptr(), 2, timeout_ms) } {
+            0 => return Ok(Next::Nothing),
             polled if polled < 0 => {
                 let err = std::io::Error::last_os_error();
                 return match err.kind() {
-                    std::io::ErrorKind::Interrupted => Ok(None),
+                    std::io::ErrorKind::Interrupted => Ok(Next::Nothing),
                     _ => Err(err),
                 };
             }
             _ => {}
         }
-        if poll.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+        if polls[0].revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
             return Err(std::io::Error::other("the userfaultfd polls as an error: made blocking"));
+        }
+        if polls[0].revents & libc::POLLIN == 0 {
+            return Ok(if polls[1].revents != 0 { Next::Also } else { Next::Nothing });
         }
         let mut msg = Msg::default();
         let mut iov =
@@ -106,17 +121,15 @@ impl Uffd {
             let err = std::io::Error::last_os_error();
             return match err.kind() {
                 // Woken before it was read, or read by the VM process.
-                std::io::ErrorKind::WouldBlock => Ok(None),
+                std::io::ErrorKind::WouldBlock => Ok(Next::Nothing),
                 _ => Err(err),
             };
         }
-        if read as usize != size_of::<Msg>() {
-            return Ok(None);
+        if read as usize != size_of::<Msg>() || msg.event != UFFD_EVENT_PAGEFAULT {
+            return Ok(Next::Nothing);
         }
-        if msg.event != UFFD_EVENT_PAGEFAULT {
-            return Ok(None);
-        }
-        Ok(Some(Fault { address: msg.address, minor: msg.flags & UFFD_PAGEFAULT_FLAG_MINOR != 0 }))
+        let minor = msg.flags & UFFD_PAGEFAULT_FLAG_MINOR != 0;
+        Ok(Next::Fault(Fault { address: msg.address, minor }))
     }
 
     /// Installs the file's pages at `start`, `len` bytes, read-only in a private mapping (a store

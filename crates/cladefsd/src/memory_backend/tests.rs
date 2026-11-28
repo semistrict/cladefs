@@ -228,16 +228,35 @@ impl FakeVmm {
     }
 
     /// Answers the backend's maps on a thread of its own, as Firecracker's reader does, until the
-    /// test ends.
-    fn serve_maps(self: &std::sync::Arc<Self>) {
+    /// test ends: what it answers persists, passed on.
+    fn serve_maps(self: &std::sync::Arc<Self>) -> std::sync::mpsc::Receiver<serde_json::Value> {
         let vmm = self.clone();
+        let (persisted, results) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            while let Ok((ToVmm::Map { id, entries, .. }, fds)) =
-                protocol::recv::<ToVmm>(&vmm.stream)
-            {
-                vmm.apply(id, &entries, &fds);
+            while let Ok((message, fds)) = protocol::recv::<ToVmm>(&vmm.stream) {
+                match message {
+                    ToVmm::Map { id, entries, .. } => vmm.apply(id, &entries, &fds),
+                    ToVmm::Persisted { result } => persisted.send(result).unwrap(),
+                    ToVmm::Ready => panic!("ready twice"),
+                }
             }
         });
+        results
+    }
+
+    /// Asks the backend to persist its memory, as Firecracker does making a snapshot, its vCPUs
+    /// paused: what it answers, which `results` (its [`FakeVmm::serve_maps`]) passes on.
+    fn persist(&self, results: &std::sync::mpsc::Receiver<serde_json::Value>) -> serde_json::Value {
+        protocol::send(&self.stream, &FromVmm::Persist, &[]).unwrap();
+        results.recv().unwrap()
+    }
+
+    /// Stores `bytes` at `at` in its guest memory, as the guest would.
+    fn store(&self, at: u64, bytes: &[u8]) {
+        for (i, byte) in bytes.iter().enumerate() {
+            // SAFETY: Its guest memory, whose faults the backend serves.
+            unsafe { self.base.as_ptr().add(at as usize + i).write_volatile(*byte) };
+        }
     }
 
     /// Its guest memory's bytes from `at` to `end`, as the guest reads them.
@@ -250,6 +269,9 @@ impl FakeVmm {
         self.base.as_ptr() as usize + at as usize
     }
 }
+
+/// How long the tests' persists may take: as long as a test runs.
+const PERSIST_DEADLINE: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// A daemon serving a memory cell's version, made of `image`, to its VMs' memory backends.
 struct Versions {
@@ -289,15 +311,34 @@ impl Versions {
         &self,
         name: &str,
     ) -> (std::sync::Arc<FakeVmm>, std::thread::JoinHandle<Result<(), String>>) {
+        self.restore_from(self.version, name)
+    }
+
+    /// A VM restored from version `version` of the memory cell, as [`Versions::restore`] does.
+    fn restore_from(
+        &self,
+        version: cladefs_core::CellVersion,
+        name: &str,
+    ) -> (std::sync::Arc<FakeVmm>, std::thread::JoinHandle<Result<(), String>>) {
+        let (backend, serving) = self.serve_fork(version, name, PERSIST_DEADLINE);
+        (std::sync::Arc::new(FakeVmm::start(&backend, self.size)), serving)
+    }
+
+    /// A fork of version `version` of the memory cell, named `name`, served by a memory backend,
+    /// its persists past `persist_deadline` killing its VM process: the backend's socket, and the
+    /// thread serving it.
+    fn serve_fork(
+        &self,
+        version: cladefs_core::CellVersion,
+        name: &str,
+        persist_deadline: std::time::Duration,
+    ) -> (std::path::PathBuf, std::thread::JoinHandle<Result<(), String>>) {
         let path = self.dir.path().join(name);
-        MemoryCell::open_forked(&self.socket, &path, self.version, self.size)
-            .unwrap()
-            .close()
-            .unwrap();
+        MemoryCell::open_forked(&self.socket, &path, version, self.size).unwrap().close().unwrap();
         let backend = self.dir.path().join(format!("{name}.sock"));
         let listener = UnixListener::bind(&backend).unwrap();
-        let serving = super::serve(listener, default_tenant().unwrap(), path);
-        (std::sync::Arc::new(FakeVmm::start(&backend, self.size)), serving)
+        let tenant = default_tenant().unwrap();
+        (backend, super::serve(listener, tenant, path, persist_deadline))
     }
 }
 
@@ -433,4 +474,203 @@ fn maps_refused_end_the_memory_backend() {
     assert_eq!(serving.join().unwrap(), Err("no room".to_owned()));
     let after = protocol::recv::<ToVmm>(&vmm.stream);
     assert!(matches!(after, Err(protocol::FrameError::Gone)), "{after:?}");
+}
+
+/// A persist keeps what the guest stored: the version it answers holds the VM's memory, stores
+/// over data and over a hole, a page zeroed a hole, and a VM restored from it reads that; the VM
+/// persisted reads what it did, its pages written shared again, with the restored VM's, the page
+/// it zeroed zeros.
+#[test]
+fn persists_keep_what_guests_stored_shared_again() {
+    let ps = page_size();
+    const PAGES: u64 = 400;
+    let size = PAGES * ps;
+    let mut image = Vec::with_capacity(size as usize);
+    for page in 0..PAGES {
+        image.extend(pattern(page as u8, ps as usize));
+    }
+    let versions = Versions::of(&image, 200..230);
+    image[(200 * ps) as usize..(230 * ps) as usize].fill(0);
+    let (a, _a_serving) = versions.restore("one");
+    let persisted = a.serve_maps();
+    assert!(a.read(0, size) == image, "the VM's memory holds the image");
+    let mut expected = image.clone();
+    let mut store = |page: u64, bytes: Vec<u8>| {
+        a.store(page * ps, &bytes);
+        expected[(page * ps) as usize..((page + 1) * ps) as usize].copy_from_slice(&bytes);
+    };
+    store(5, pattern(0xa5, ps as usize));
+    store(210, pattern(0x77, ps as usize));
+    store(7, vec![0; ps as usize]);
+    store(399, pattern(0x3c, ps as usize));
+
+    let result = a.persist(&persisted);
+    let version: cladefs_core::CellVersion =
+        serde_json::from_value(result["version"].clone()).unwrap_or_else(|_| panic!("{result}"));
+    assert!(a.read(0, size) == expected, "the VM persisted reads what it stored");
+    for page in [5, 210, 399] {
+        assert!(maps_file_page(a.addr(page * ps)), "page {page} is private still");
+    }
+    assert_eq!(mapped_from(a.addr(7 * ps)).0, "00:00 0", "a page zeroed maps zeros");
+
+    let (c, _c_serving) = versions.restore_from(version, "two");
+    c.serve_maps();
+    assert!(c.read(0, size) == expected, "the VM restored reads what was stored");
+    for page in [5, 210, 399, 0] {
+        let (at_a, at_c) = (a.addr(page * ps), c.addr(page * ps));
+        assert!(maps_file_page(at_c), "page {page} is private in the VM restored");
+        assert_eq!(mapped_from(at_a), mapped_from(at_c), "page {page} isn't shared");
+    }
+}
+
+/// What a VM process of the test's in a process of its own does ([`child_vmm`]): its role, then
+/// what it needs, `:` apart.
+const CHILD_VMM: &str = "CLADEFSD_TEST_CHILD_VMM";
+
+/// A VM process of the test's in a process of its own, this test run again as a child, which its
+/// environment says what to do ([`CHILD_VMM`]):
+/// - `connect:SOCKET`: connects, and waits until killed.
+/// - `persist-stalls:SIZE:SOCKET`: a VM process of `SIZE` bytes of guest memory, which stores to
+///   a page, asks for a persist, and answers no map after: until killed.
+#[test]
+#[ignore = "a VM process of the tests', which they run as a child"]
+fn child_vmm() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let role = std::env::var(CHILD_VMM).expect("a child VM process's role");
+    let (role, args) = role.split_once(':').unwrap();
+    match role {
+        "connect" => {
+            let _stream = UnixStream::connect(args).unwrap();
+            loop {
+                std::thread::park();
+            }
+        }
+        "persist-stalls" => {
+            let (size, socket) = args.split_once(':').unwrap();
+            let vmm = std::sync::Arc::new(FakeVmm::start(Path::new(socket), size.parse().unwrap()));
+            let stalled = std::sync::Arc::new(AtomicBool::new(false));
+            let (server, stalls) = (vmm.clone(), stalled.clone());
+            std::thread::spawn(move || {
+                while let Ok((message, fds)) = protocol::recv::<ToVmm>(&server.stream) {
+                    match message {
+                        ToVmm::Map { .. } if stalls.load(Ordering::Acquire) => {}
+                        ToVmm::Map { id, entries, .. } => server.apply(id, &entries, &fds),
+                        other => panic!("{other:?} before the persist's maps"),
+                    }
+                }
+            });
+            // A page of its own to persist, its fault served.
+            vmm.store(0, &[1]);
+            stalled.store(true, Ordering::Release);
+            protocol::send(&vmm.stream, &FromVmm::Persist, &[]).unwrap();
+            loop {
+                std::thread::park();
+            }
+        }
+        _ => panic!("a child VM process's role: {role}"),
+    }
+}
+
+/// A [`child_vmm`] running: killed and reaped as it is dropped, a test failing included.
+struct ChildVmm(std::process::Child);
+
+impl Drop for ChildVmm {
+    fn drop(&mut self) {
+        // Gone already, if the test waited for it.
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Runs [`child_vmm`] in a process of its own, as `role` says.
+fn child_vmm_as(role: &str) -> ChildVmm {
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "memory_backend::tests::child_vmm", "--ignored", "--nocapture"])
+        .env(CHILD_VMM, role)
+        .spawn()
+        .unwrap();
+    ChildVmm(child)
+}
+
+/// The exit of `vmm`, which must come within `within`: waited for on its pidfd.
+fn exited_within(vmm: &mut ChildVmm, within: std::time::Duration) -> std::process::ExitStatus {
+    use std::os::fd::{FromRawFd, OwnedFd};
+    // SAFETY: pidfd_open of the child's PID, which it holds until reaped below.
+    let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, vmm.0.id(), 0) };
+    assert!(pidfd >= 0, "pidfd_open: {}", std::io::Error::last_os_error());
+    // SAFETY: The descriptor just made.
+    let pidfd = unsafe { OwnedFd::from_raw_fd(pidfd as i32) };
+    let mut poll = libc::pollfd { fd: pidfd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+    // SAFETY: Polls the pidfd, readable once the process exits.
+    let polled = unsafe { libc::poll(&mut poll, 1, within.as_millis() as i32) };
+    assert_eq!(polled, 1, "the VM process didn't exit within {within:?}");
+    vmm.0.wait().unwrap()
+}
+
+/// What `serving` came to, which must come within `within`.
+fn joined_within<T: Send + 'static>(
+    serving: std::thread::JoinHandle<T>,
+    within: std::time::Duration,
+) -> T {
+    let (joined, done) = std::sync::mpsc::channel();
+    std::thread::spawn(move || joined.send(serving.join().unwrap()));
+    done.recv_timeout(within).expect("the memory backend didn't end")
+}
+
+/// A persist past its deadline kills the VM process, through its pidfd, and ends its memory
+/// backend: here, one that answers none of the persist's maps.
+#[test]
+fn persists_past_their_deadline_kill_the_vm_process() {
+    use std::os::unix::process::ExitStatusExt;
+    let size = 16 * page_size();
+    let versions = Versions::of(&pattern(9, size as usize), 0..0);
+    let deadline = std::time::Duration::from_secs(3);
+    let (backend, serving) = versions.serve_fork(versions.version, "one", deadline);
+    let mut vmm = child_vmm_as(&format!("persist-stalls:{size}:{}", backend.display()));
+    let status = exited_within(&mut vmm, 10 * deadline);
+    assert_eq!(status.signal(), Some(libc::SIGKILL), "the VM process wasn't killed");
+    let ended = joined_within(serving, 10 * deadline);
+    assert_eq!(ended, Err("the VM process went".to_owned()));
+}
+
+/// A persist asked for as a map waits for its answer is served once the map is answered.
+#[test]
+fn persists_asked_as_a_map_waits_are_served_after_it() {
+    let ps = page_size();
+    let image = pattern(6, (16 * ps) as usize);
+    let versions = Versions::of(&image, 0..0);
+    let (vmm, _serving) = versions.restore("one");
+    let toucher = vmm.clone();
+    let touched = std::thread::spawn(move || toucher.read(0, 1));
+    let (map, fds) = protocol::recv::<ToVmm>(&vmm.stream).unwrap();
+    let ToVmm::Map { id, entries, .. } = map else { panic!("{map:?} in place of a map") };
+    protocol::send(&vmm.stream, &FromVmm::Persist, &[]).unwrap();
+    vmm.apply(id, &entries, &fds);
+    let persisted = vmm.serve_maps();
+    assert_eq!(touched.join().unwrap(), [image[0]]);
+    let result = persisted.recv().unwrap();
+    let version: Result<cladefs_core::CellVersion, _> =
+        serde_json::from_value(result["version"].clone());
+    assert!(version.is_ok(), "{result}");
+}
+
+/// A VM process's pidfd names it alone: gone, and reaped, so that another may take its PID, what
+/// would read its memory is refused (`ESRCH`), as is killing it.
+#[test]
+fn peers_gone_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("peer.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let mut vmm = child_vmm_as(&format!("connect:{}", socket.display()));
+    let (stream, _) = listener.accept().unwrap();
+    let peer = super::peer::Peer::of(&stream).unwrap();
+    peer.pagemap().expect("its pagemap, while it runs");
+    vmm.0.kill().unwrap();
+    vmm.0.wait().unwrap();
+    let errno = |err: std::io::Error| err.raw_os_error();
+    let mut byte = [0u8];
+    assert_eq!(peer.read(page_size(), &mut byte).map_err(errno), Err(Some(libc::ESRCH)));
+    assert_eq!(peer.pagemap().map(drop).map_err(errno), Err(Some(libc::ENOENT)));
+    assert_eq!(peer.check().map_err(errno), Err(Some(libc::ESRCH)));
+    assert_eq!(peer.kill().map_err(errno), Err(Some(libc::ESRCH)));
 }

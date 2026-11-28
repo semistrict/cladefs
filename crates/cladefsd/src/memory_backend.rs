@@ -16,11 +16,18 @@
 //! read-only (`UFFDIO_CONTINUE`), if its part is where its entry maps it, else a copy of its bytes
 //! (`UFFDIO_COPY`), decided and made under the part's lock.
 //!
+//! A persist, the VM paused, writes the VM's private pages (`PAGEMAP_SCAN`, `process_vm_readv`)
+//! into the image, makes a version of the cell, and maps the nodes they were in anew, from the
+//! image, so that they are shared again (board 14695). What reads the VM process's memory is
+//! checked against its pidfd, which a PID recycled doesn't fool.
+//!
 //! A VM's memory is served on threads of its own, which block on its faults and its socket: one
-//! reading its faults and serving them, one reading its socket. The VM process going ends them,
-//! and its placements.
+//! reading its faults and serving them, and its persists; one reading its socket. The VM process
+//! going ends them, and its placements.
 
 mod handler;
+mod pagemap;
+mod peer;
 mod protocol;
 mod uffd;
 
