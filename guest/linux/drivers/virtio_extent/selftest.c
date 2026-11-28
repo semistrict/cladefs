@@ -202,12 +202,15 @@ static void run(struct vext_selftest *st)
 	if (err)
 		FAIL("READ: %d", err);
 
-	/* The commit sealed them. */
+	/*
+	 * The commit sealed them: other bytes than one holds are refused. cladefs board 14663: its own
+	 * bytes again, as a write sent again over a stream is, may succeed, changing nothing.
+	 */
+	fill(bufs[0], len, EXTENTS);
 	err = CALL(.type = VIRTIO_EXTENT_T_WRITE, .id = EXTENT(0), .data = bufs[0],
 		   .data_len = len);
 	if (err != -EPERM)
 		FAIL("WRITE of a sealed extent: %d", err);
-	fill(bufs[0], len, EXTENTS);
 	err = CALL(.type = VIRTIO_EXTENT_T_WRITE, .flags = VIRTIO_EXTENT_WRITE_BARRIER,
 		   .id = EXTENT(EXTENTS), .data_len = len, .data = bufs[0]);
 	if (err)
