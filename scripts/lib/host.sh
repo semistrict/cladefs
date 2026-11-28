@@ -400,8 +400,10 @@ host_launch() {
         flags+=(--keep-idle)
     fi
     if [[ -n ${CLADEFS_TEST_HOST_MEM:-} ]]; then flags+=(--mem-high "$CLADEFS_TEST_HOST_MEM"); fi
+    # Each its own --env, its commas escaped: hotbed splits --env's value at unescaped commas, as a
+    # list's, which cut CLADEFS_BENCH_GROUPS=io,metadata,build,pgbench to `io` (run abstream3).
     for assignment in ${host_environment[@]+"${host_environment[@]}"}; do
-        flags+=(--env "$assignment")
+        flags+=(--env "${assignment//,/\\,}")
     done
     # cladefs: hotbed reserves a detached command's peak memory on its node, which it needs said
     # (above); and its refusal, JSON on stdout, is said here, not swallowed with it.
