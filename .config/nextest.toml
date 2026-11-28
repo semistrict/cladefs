@@ -60,6 +60,7 @@ not (
         | test(=tests::hostile::a_compromised_vm_process_harms_no_tenant_beside_it)
         | test(=tests::window_mappings_are_answered_beside_the_stream_data_in_flight)
         | test(=tests::hostile::mappings_asked_for_past_the_credit_let_their_vm_process_go)
+        | test(=tests::hostile::what_requests_hold_is_within_the_credit)
         | test(=tests::forks_opening_reads_nothing_more_of_a_larger_base)
         | test(=tests::restores_wait_for_a_version_however_long_its_opening_takes)))
     | (binary_id(cladefs::control) & (
