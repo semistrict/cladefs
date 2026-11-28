@@ -49,6 +49,36 @@ fn reset(node: Node) {
     }
 }
 
+/// cladefs: the incarnation of the simulated host something was made on (board 14567): what its
+/// drop asks whether that incarnation died since, killed or started anew, so that what it had under
+/// way goes as a killed process's does, waiting for nothing and closing nothing. madsim drops a
+/// killed node's tasks only as they next run, so a task one of their drops spawned may be dropped
+/// after the node started again, no longer [`dying`]. Built normally, never gone.
+#[derive(Clone, Copy, Debug)]
+pub struct Incarnation {
+    #[cfg(madsim)]
+    generation: u64,
+}
+
+impl Incarnation {
+    /// The incarnation of the host this runs on.
+    pub fn now() -> Self {
+        Self {
+            #[cfg(madsim)]
+            generation: generation(),
+        }
+    }
+
+    /// Whether it died: its host dying, or started anew since.
+    pub fn is_gone(&self) -> bool {
+        #[cfg(madsim)]
+        if dying() || self.generation != generation() {
+            return true;
+        }
+        false
+    }
+}
+
 /// Whether the simulated node this runs in is dying: killed, its tasks dropped, as a host's process
 /// dies, closing nothing, waiting for nothing. Never, built normally, nor outside a node. A node
 /// [`restart`] starts again is dying until every task of its kill is dropped.

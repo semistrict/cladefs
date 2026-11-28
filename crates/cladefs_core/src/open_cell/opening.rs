@@ -419,6 +419,7 @@ impl OpenCell {
             halt,
             fetcher,
             closed: false,
+            incarnation: node_local::Incarnation::now(),
             on_close: Default::default(),
         })
     }

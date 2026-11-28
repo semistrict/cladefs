@@ -552,7 +552,8 @@ pub async fn open_with_head<D: Dir>(
     };
     let dir = opened.hold_dir()?;
     mirror_for(&bucket, cell, &runtime.handle);
-    let uploader = Uploader { shared, bucket, stopped: Some(stopped), _dir: dir };
+    let incarnation = node_local::Incarnation::now();
+    let uploader = Uploader { shared, bucket, stopped: Some(stopped), incarnation, _dir: dir };
     Ok((opened, uploader))
 }
 
@@ -734,6 +735,9 @@ pub struct Uploader<D: Dir> {
     /// Says the uploader stopped, once it has: taken by [`Uploader::close`], or its drop, which
     /// wait for it.
     stopped: Option<Arc<Stopped>>,
+    /// cladefs: the incarnation of the host it runs on: one gone since, killed, waits for
+    /// nothing as it drops (board 14567).
+    incarnation: node_local::Incarnation,
     /// The cell directory, held taken for this process until the uploader stopped, last of its
     /// fields to go (TASK-129).
     _dir: DirHold<D>,
@@ -1391,8 +1395,9 @@ impl<D: Dir> Drop for Uploader<D> {
     fn drop(&mut self) {
         self.shared.stop();
         // cladefs: its host dying, killed, as a simulated host is, nothing waits: its task went
-        // with it (doc-24).
-        if node_local::dying() {
+        // with it (doc-24). Or killed since, its drop coming after the host started again
+        // (`node_local::Incarnation`, board 14567).
+        if self.incarnation.is_gone() {
             return;
         }
         let Some(stopped) = self.stopped.take() else { return };

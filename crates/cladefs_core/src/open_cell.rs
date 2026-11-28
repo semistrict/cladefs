@@ -250,6 +250,9 @@ pub struct OpenCell {
     halt: Halt,
     /// cladefs: whether it was closed ([`OpenCell::close`]), which its drop then does again not.
     closed: bool,
+    /// cladefs: the incarnation of the host it was opened on: one gone since, killed, closes
+    /// nothing, as a killed process doesn't (board 14567).
+    incarnation: node_local::Incarnation,
     /// cladefs: what reads its extents whose data is in the bucket: of the bucket its uploader
     /// keeps the cell in, keeping what it fetches in the host's cache, if it has one.
     fetcher: Arc<crate::bucket::HostFetcher>,
@@ -485,7 +488,9 @@ impl Drop for OpenCell {
         // cladefs: the daemon closes every open cell it has, awaited ([`release`]): under madsim,
         // an open cell dropped open is one it let go of where it couldn't wait (doc-24, step 9);
         // but for its host's dying, killed, which closes nothing, as a process killed doesn't.
-        if cfg!(madsim) && node_local::dying() {
+        // cladefs: nor one of an incarnation killed since, whose tasks the simulation may drop
+        // only as the host started again (`node_local::Incarnation`, board 14567).
+        if cfg!(madsim) && self.incarnation.is_gone() {
             return;
         }
         if cfg!(madsim) && !std::thread::panicking() {
