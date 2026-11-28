@@ -69,7 +69,8 @@ host_run_pattern='^run-([a-z0-9]+-)?[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$'
 host_bench=${CLADEFS_TEST_HOST_BENCH:-0}
 [[ $host_bench =~ ^[01]$ ]] || { echo "CLADEFS_TEST_HOST_BENCH is 0 or 1" >&2; exit 2; }
 # Where the run stands: '' (nothing of it in the workspace), prepared (its directory made),
-# launched (its job running, as far as this knows) or ended.
+# launched (its job running, as far as this knows), ended, or unfetched (ended, its results not
+# back: host_fetch).
 host_state=''
 # A function the driver names, which host_actions' resume runs as the driver's run would once the
 # results are back, with the run's status, and whose status is the resume's.
@@ -429,17 +430,21 @@ host_wait() {
 # (host-workspace.sh's fetch). A tar that fails there may still have written the archive of every
 # other file (1: a file changed as it read it, as the logs of a daemon a killed host script left
 # running do; 2: it could not read one): so the archive is unpacked however it ended, and the first
-# failure is this function's.
+# failure is this function's. An archive that came back cut short (hotbed issue 26), or not at
+# all, leaves the run unfetched, which host_end keeps in the workspace for a resume to fetch again
+# (board 14634).
 host_fetch() {
     local statuses
     host_side fetch "$host_dir" 2>> "$results/remote.log" | base64 --decode | tar -xzf - -C "$results"
     statuses=("${PIPESTATUS[@]}")
+    if (( statuses[1] || statuses[2] )); then host_state=unfetched; fi
     return $(( statuses[0] ? statuses[0] : statuses[1] ? statuses[1] : statuses[2] ))
 }
 
 # host_end removes the run's directory from the workspace, its worktrees with it, once the run has
 # one, and ends the session the run started: but for a job that runs on, its driver having stopped
-# waiting for it, which it says how to wait for again.
+# waiting for it, which it says how to wait for again, and for a run whose results did not come
+# back, its directory the only whole copy of them, which it says how to fetch again.
 host_end() {
     case $host_state in
         '')
@@ -450,6 +455,11 @@ host_end() {
             echo "$host_run runs on, hotbed command $host_command_id: wait for it and fetch its" \
                 "results with \`$0 resume $host_run ${results:-RESULTS}\`, or end it with" \
                 "\`$0 cancel $host_run\`." >&2
+            return 0
+            ;;
+        unfetched)
+            echo "$host_run's results did not come back; it stays in the workspace: fetch them" \
+                "with \`$0 resume $host_run ${results:-RESULTS}\`." >&2
             return 0
             ;;
     esac

@@ -661,6 +661,26 @@ class Fetch(unittest.TestCase):
              "sandboxes", "sandboxes/store-1.log", "source.txt"])
 
 
+    def test_a_run_whose_results_did_not_come_back_stays_for_a_resume(self):
+        """board 14634: the fetch's archive cut short (hotbed issue 26) removed the run all the
+        same, the only whole copy of its results."""
+        fleet = Fleet()
+        (fleet.directory / "session").write_text("mine\n")
+        cut_short = 'base64() { cat > /dev/null; return 1; }\necho "$host_run"\n'
+        status, out, errors = fleet.drive(cut_short + RAN)
+        run, said = out.splitlines()
+        self.assertEqual((status, said), (0, "status 1"), errors)
+        self.assertEqual(fleet.runs(), [run])
+        self.assertEqual(errors.splitlines()[-1],
+                         f"{run}'s results did not come back; it stays in the workspace: fetch them "
+                         f"with `/bin/bash resume {run} {fleet.directory / 'results'}`.")
+        results = fleet.directory / "resumed"
+        status, out, errors = fleet.run_driver("test-host.sh", "resume", run, str(results))
+        self.assertEqual((status, out), (0, ""), errors)
+        self.assertEqual((results / "ran.txt").read_text().splitlines()[0], "test-linux-host.sh a b")
+        self.assertEqual(fleet.runs(), [])
+
+
 class Resume(unittest.TestCase):
     """A driver's resume and cancel (host_actions), of a run whose driver stopped waiting for its
     job."""
