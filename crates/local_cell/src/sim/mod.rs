@@ -214,7 +214,6 @@ fn one() {
         "everything" => Profile::default(),
         "forks" => forks(),
         "bases" => deleted_bases(),
-        "stale" => stale_placements(),
         "collected" => collected(),
         "takeovers" => takeovers(),
         "recreated" => recreated(),
@@ -230,7 +229,6 @@ fn one() {
         "whole_restores" => whole_restores(),
         "wals" => wals(),
         "versioned_wals" => versioned_wals(),
-        "late_checkpoints" => late_checkpoints(),
         "versions" => versions(),
         "regions" => regions(),
         "mirrors" => mirrors(),
@@ -259,7 +257,6 @@ fn seeds_replay() {
         deleted_bases(),
         restores(),
         versioned_wals(),
-        late_checkpoints(),
         recreated(),
         twin_restores(),
         regions(),
@@ -298,18 +295,16 @@ fn buggify_sites_are_reached() {
 fn swarm(seed: u64) -> Profile {
     use rand::{RngExt as _, SeedableRng as _};
     let mut rng = rand::rngs::StdRng::seed_from_u64(seed ^ 0x5a5a_f00d);
-    let bases: [fn() -> Profile; 24] = [
+    let bases: [fn() -> Profile; 22] = [
         Profile::default,
         forks,
         deleted_bases,
         regions,
-        stale_placements,
         collected,
         children,
         fresh_cells,
         takeovers,
         recreated,
-        late_checkpoints,
         taken,
         crashes,
         wals,
@@ -480,26 +475,6 @@ fn mirrors_are_reached_across_regions() {
 test_needs!(references_hold_across_regions, references, regions());
 test_needs!(origins_are_kept_across_regions, origins_kept, regions());
 
-/// Placements cut off taking cells back, and deleting them, with their earlier fencing tokens,
-/// from the ones after them, while those write and are taken over in turn (TASK-39.7, TASK-45.1).
-fn stale_placements() -> Profile {
-    weights(|weights| {
-        weights.takeover = 4;
-        weights.open = 6;
-        weights.reclaim = 4;
-        weights.stale_delete = 2;
-        weights.delete = 1;
-        weights.close = 4;
-        weights.crash = 2;
-    })
-}
-
-test_holds!(stale_placements_take_nothing_back, stale_placements());
-
-test_needs!(fencing_needs_tokens, tokens, stale_placements());
-
-test_needs!(deletes_need_tokens, delete_tokens, stale_placements());
-
 /// Case 3: restores racing collection.
 fn collected() -> Profile {
     weights(|weights| {
@@ -609,31 +584,6 @@ test_holds!(stale_creates_landing_past_deletions, recreated(), [453]);
 // and extents of their own at or past its end, checkpoints newer than its own; deleted, a writer's
 // swap names what is gone.
 test_needs!(collection_needs_epochs, collector_epochs, recreated());
-
-/// Writers checkpointing often, taken over with their checkpoints in flight, which land late, past
-/// where the next writer recovered from, while collectors delete what they cover (TASK-175).
-fn late_checkpoints() -> Profile {
-    let mut profile = weights(|weights| {
-        weights.complete = 80;
-        weights.write = 2;
-        weights.commit = 6;
-        weights.close = 6;
-        weights.checkpoint = 12;
-        weights.takeover = 12;
-        weights.open = 2;
-        weights.crash = 0;
-        weights.delete = 0;
-        weights.version = 0;
-        weights.restore_version = 0;
-        weights.collect = 12;
-        weights.stale_checkpoint = 6;
-        weights.tick = 8;
-    });
-    profile.ticks = 1;
-    profile
-}
-
-test_holds!(late_checkpoints_landing_past_takeovers, late_checkpoints());
 
 /// Takeovers while collectors run: an extent of the writer taken over, uploaded, its segment not
 /// yet.

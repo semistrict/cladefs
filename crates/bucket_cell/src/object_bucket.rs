@@ -74,6 +74,12 @@ pub struct ObjectBucket {
     /// whether [`ObjectBucket::probed_append`] already verified offset enforcement.
     appends: Appends,
     appends_honoured: std::sync::atomic::AtomicBool,
+    /// cladefs: the most appends an object of an in-process store takes, as S3 Express's MaxParts
+    /// has it ([`ObjectBucket::with_max_parts`], board 14565): none unless set, a store of the
+    /// process's own (memory, as a simulation's) having no limit of its own.
+    max_parts: Option<u32>,
+    /// How many appends each key has taken, counted only under `max_parts`.
+    parts: std::sync::Mutex<std::collections::HashMap<Path, u32>>,
     /// cladefs: active storage-version ratchet shared with the owning host (doc-28).
     ratchet: Arc<formats::Ratchet>,
 }
@@ -668,6 +674,8 @@ impl ObjectBucket {
             clock: Clock::Host,
             appends,
             appends_honoured: std::sync::atomic::AtomicBool::new(false),
+            max_parts: None,
+            parts: Default::default(),
             ratchet: Arc::new(formats::Ratchet::current()),
         }
     }
@@ -695,6 +703,14 @@ impl ObjectBucket {
     /// (board 6023).
     pub fn routed(self, resolve: Arc<dyn Resolve<ObjectBucket>>) -> RoutedBucket<ObjectBucket> {
         RoutedBucket::new(Arc::new(self), resolve)
+    }
+
+    /// cladefs: it, its in-process appends refused past `parts` to an object, as S3 Express refuses
+    /// a part past its MaxParts (board 14565): a simulation's fast WAL bucket, whose writers must
+    /// roll their segments before it, keeping room for a `Rolled` record and a taker's `Fence`.
+    pub fn with_max_parts(mut self, parts: u32) -> Self {
+        self.max_parts = Some(parts);
+        self
     }
 
     /// cladefs: wraps this bucket in an unrouted [`RoutedBucket`].
@@ -1669,6 +1685,15 @@ impl ObjectBucket {
             if crate::buggify!(0.1) {
                 zombie_hold().await;
             }
+            // cladefs: a create of a segment, the write a successor's of the same number races
+            // (`epoch_keys`), held more often by a site of its own (board 14565): a zombie's
+            // landing past its successor's take, or the successor's past a zombie's.
+            if upload == Upload::Segments
+                && matches!(request, Request::Create)
+                && crate::buggify!(0.5)
+            {
+                zombie_hold().await;
+            }
             // cladefs: as long after its last write of the key as the backend needs (TASK-690).
             self.rewrites.wait(&path).await;
             // cladefs: its turn, once a write of its kind failed (TASK-382).
@@ -1751,6 +1776,11 @@ impl ObjectBucket {
         }
     }
 
+    /// How many appends `path` has taken, as counted ([`ObjectBucket::parts`]).
+    fn parts_of(&self, path: &Path) -> u32 {
+        self.parts.lock().unwrap().get(path).copied().unwrap_or(0)
+    }
+
     async fn appended(
         &self,
         path: &Path,
@@ -1765,41 +1795,73 @@ impl ObjectBucket {
             Appends::Local(local) => local.append(path, offset, bytes).await,
             Appends::InProcess(lock) => {
                 let _alone = lock.lock().await;
-                if offset == 0 {
-                    let create =
-                        PutOptions { mode: object_store::PutMode::Create, ..PutOptions::default() };
-                    return match self.backend.put_opts(path, PutPayload::from(bytes), create).await
-                    {
-                        Ok(_) => Ok(len),
-                        Err(object_store::Error::AlreadyExists { path, source }) => {
-                            Err(object_store::Error::Precondition { path, source })
-                        }
-                        Err(other) => Err(other),
-                    };
-                }
-                let existing = match self.backend.get_opts(path, GetOptions::default()).await {
-                    Ok(got) => got.bytes().await?,
-                    Err(object_store::Error::NotFound { .. }) => {
-                        return Err(object_store::Error::Precondition {
-                            path: path.to_string(),
-                            source: format!("missing object for append at offset {offset}").into(),
-                        });
-                    }
-                    Err(other) => return Err(other),
-                };
-                if existing.len() as u64 != offset {
+                // cladefs: an object takes at most `max_parts` appends, if set, as S3 Express's
+                // MaxParts has it (board 14565): the part past it refused as an offset's mismatch
+                // is, which a fast WAL writer keeping no room for a `Rolled` record and a taker's
+                // `Fence` (`wal_rolls_before_limit`) finds its segment full to.
+                let counting = self.max_parts;
+                if let Some(most) = counting
+                    && offset != 0
+                    && self.parts_of(path) >= most
+                {
                     return Err(object_store::Error::Precondition {
                         path: path.to_string(),
-                        source: format!("length {} != offset {offset}", existing.len()).into(),
+                        source: format!("MaxPartsExceeded: {most} parts").into(),
                     });
                 }
-                let mut combined = Vec::with_capacity(existing.len() + bytes.len());
-                combined.extend_from_slice(&existing);
-                combined.extend_from_slice(&bytes);
-                let opts =
-                    PutOptions { mode: object_store::PutMode::Overwrite, ..PutOptions::default() };
-                self.backend.put_opts(path, PutPayload::from(combined), opts).await?;
-                Ok(new_len)
+                let appended = async {
+                    if offset == 0 {
+                        let create = PutOptions {
+                            mode: object_store::PutMode::Create,
+                            ..PutOptions::default()
+                        };
+                        return match self
+                            .backend
+                            .put_opts(path, PutPayload::from(bytes), create)
+                            .await
+                        {
+                            Ok(_) => Ok(len),
+                            Err(object_store::Error::AlreadyExists { path, source }) => {
+                                Err(object_store::Error::Precondition { path, source })
+                            }
+                            Err(other) => Err(other),
+                        };
+                    }
+                    let existing = match self.backend.get_opts(path, GetOptions::default()).await {
+                        Ok(got) => got.bytes().await?,
+                        Err(object_store::Error::NotFound { .. }) => {
+                            return Err(object_store::Error::Precondition {
+                                path: path.to_string(),
+                                source: format!("missing object for append at offset {offset}")
+                                    .into(),
+                            });
+                        }
+                        Err(other) => return Err(other),
+                    };
+                    if existing.len() as u64 != offset {
+                        return Err(object_store::Error::Precondition {
+                            path: path.to_string(),
+                            source: format!("length {} != offset {offset}", existing.len()).into(),
+                        });
+                    }
+                    let mut combined = Vec::with_capacity(existing.len() + bytes.len());
+                    combined.extend_from_slice(&existing);
+                    combined.extend_from_slice(&bytes);
+                    let opts = PutOptions {
+                        mode: object_store::PutMode::Overwrite,
+                        ..PutOptions::default()
+                    };
+                    self.backend.put_opts(path, PutPayload::from(combined), opts).await?;
+                    Ok::<u64, object_store::Error>(new_len)
+                }
+                .await;
+                if counting.is_some() && appended.is_ok() {
+                    let mut parts = self.parts.lock().unwrap();
+                    // A create at offset 0 is the object's first part, of a key written anew.
+                    let parts = parts.entry(path.clone()).or_insert(0);
+                    *parts = if offset == 0 { 1 } else { *parts + 1 };
+                }
+                appended
             }
             Appends::HttpS3 { objects, s3, client, region, s3_express, skip_signature } => {
                 if offset == 0 {

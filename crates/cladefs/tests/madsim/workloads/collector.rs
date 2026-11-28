@@ -41,7 +41,10 @@ const HEALED_AT: u8 = 250;
 /// The collector's node at `10.0.1.NUMBER`, which passes over `bucket` as `cladefs-gc` does, under
 /// the hosts' KMS: its environment a host's, as far as the bucket goes ([`crate::collector`]'s, at
 /// an address of its own, which each of this family's collectors needs).
-fn collector_node(bucket: &Arc<RoutedBucket>, number: u8) -> madsim::runtime::NodeHandle {
+pub(super) fn collector_node(
+    bucket: &Arc<RoutedBucket>,
+    number: u8,
+) -> madsim::runtime::NodeHandle {
     let handle = madsim::runtime::Handle::current();
     let bucket = bucket.clone();
     let node = handle
@@ -52,7 +55,12 @@ fn collector_node(bucket: &Arc<RoutedBucket>, number: u8) -> madsim::runtime::No
         let bucket = bucket.clone();
         async move {
             // A host's token the daemon's bucket asks for, which no placement of the hosts' is.
-            let vars = [("CLADEFSD_BUCKET", "memory:///cells"), ("CLADEFSD_TOKEN", "1000")];
+            // And the hosts' KMS master key, which their tenants' KEKs are under ([`crate::master_key`]).
+            let vars = [
+                ("CLADEFSD_BUCKET", "memory:///cells".to_owned()),
+                ("CLADEFSD_TOKEN", "1000".to_owned()),
+                ("CLADEFS_MASTER_KEY", crate::master_key()),
+            ];
             node_local::env::set_vars(vars);
             let daemon = cladefs::cladefsd::Daemon::new();
             daemon.use_bucket(bucket);
@@ -179,7 +187,8 @@ pub(crate) async fn healed(healed: &Healed<'_>) -> Result<(), String> {
     let uploaded = healed.told.uploaded.lock().unwrap().clone();
     let freed = healed.told.freed.lock().unwrap().clone();
     let sequences: Vec<u64> = uploaded.keys().copied().collect();
-    let lost = host().spawn(crate::lost_in(cell, cell, uploaded, freed)).await.unwrap();
+    let reading = || crate::lost_in(cell, cell, uploaded.clone(), freed.clone());
+    let lost = crate::again_on(host, reading).await?;
     if !lost.is_empty() {
         return Err(format!(
             "after the collector's last sweeps, blocks told uploaded lost or other, or told freed \
@@ -190,10 +199,10 @@ pub(crate) async fn healed(healed: &Healed<'_>) -> Result<(), String> {
         let made = healed.told.versions.lock().unwrap().clone();
         for (version, before) in made {
             let forking = crate::fork_version(1, cell, version);
-            let fork = healed.manager.spawn(forking).await.unwrap();
+            let fork = healed.manager.spawn(forking).await.unwrap()?;
             let sequences: Vec<u64> = before.keys().copied().collect();
-            let reading = crate::lost_in(fork, cell, before, Blocks::new());
-            let lost = host().spawn(reading).await.unwrap();
+            let reading = || crate::lost_in(fork, cell, before.clone(), Blocks::new());
+            let lost = crate::again_on(host, reading).await?;
             if !lost.is_empty() {
                 return Err(format!(
                     "after the collector's last sweeps, version {version}'s fork lost blocks told \

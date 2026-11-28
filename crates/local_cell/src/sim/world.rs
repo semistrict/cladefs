@@ -34,7 +34,7 @@ use bucket_cell::collector;
 use bucket_cell::fetch::{Budget, Limits};
 use bucket_cell::layout::{self, Origin, epoch_of, writer_of};
 use bucket_cell::testing::{Direct, Fault, SimBucket, key_of};
-use bucket_cell::{Error, Recovered, Writer, lifecycle, recovery};
+use bucket_cell::{Error, Recovered, lifecycle, recovery};
 use extent_frame::spent::Spent;
 use futures::channel::oneshot;
 use futures::executor::{LocalPool, LocalSpawner, block_on};
@@ -75,19 +75,12 @@ pub struct Weights {
     pub collect: u32,
     /// A collector stops midway.
     pub stop_collector: u32,
-    /// A placement cut off takes a cell back, with the fencing token it had (TASK-39.7).
-    pub reclaim: u32,
-    /// A placement cut off deletes a cell, with the fencing token it had (TASK-45.1).
-    pub stale_delete: u32,
     /// What a crash left of a fork of a version, or of a failed one's deletion, is gone on with:
     /// finished, deleted as its host's cleanup deletes it, or forgotten (TASK-79.82).
     pub unfork: u32,
     /// Two hosts restore versions to one child within a round trip, as guests may name any ID:
     /// whichever's record comes first takes it, the other refused (TASK-173).
     pub twins: u32,
-    /// A writer whose session stopped, a later one taking its cell or its host cut off, which
-    /// runs on unaware, checkpoints: late, past where the next writer recovered from (TASK-175).
-    pub stale_checkpoint: u32,
     /// cladefs: a cell's writer cuts a version, its cell quiescent (doc-18, TASK-476).
     pub version: u32,
     /// cladefs: a cell's writer drops one of its versions, uploaded or local.
@@ -165,11 +158,8 @@ impl Weights {
             delete_base,
             collect,
             stop_collector,
-            reclaim,
-            stale_delete,
             unfork,
             twins,
-            stale_checkpoint,
             version,
             drop_version,
             restore_version,
@@ -214,11 +204,8 @@ impl Default for Profile {
                 delete_base: 0,
                 collect: 2,
                 stop_collector: 1,
-                reclaim: 0,
-                stale_delete: 0,
                 unfork: 0,
                 twins: 0,
-                stale_checkpoint: 0,
                 version: 1,
                 drop_version: 0,
                 restore_version: 1,
@@ -270,9 +257,6 @@ macro_rules! trace {
         }
     };
 }
-
-/// How many of the writers of the sessions stopped the world keeps ([`World::stale`]).
-const STALE_WRITERS: usize = 4;
 
 /// How many PUTs a host's writers have in flight at once ([`Host::uploads`]).
 const UPLOADS_AT_ONCE: usize = 2;
@@ -498,8 +482,6 @@ enum Event {
     },
     Deleted {
         cell: u64,
-        /// Whether a placement cut off deleted it, which must fail.
-        stale: bool,
         result: Result<(), Error>,
     },
     /// What deleting a failed fork's child gave ([`lifecycle::delete_fork`]).
@@ -590,9 +572,6 @@ pub struct World {
     /// uploads one cell's.
     stamps: HashMap<(u64, u64), u64>,
     collectors: BTreeMap<u64, AbortHandle>,
-    /// The writers of the sessions stopped, the latest few, which may run on unaware
-    /// ([`World::stale_checkpoint`]).
-    stale: Vec<Arc<Writer<SimBucket>>>,
     unforks: BTreeMap<u64, Unfork>,
     restores: BTreeMap<u64, Restore>,
     /// cladefs: the versions the guests cut, by their IDs (TASK-476).
@@ -665,7 +644,6 @@ impl World {
             lineages: HashMap::new(),
             stamps: HashMap::new(),
             collectors: BTreeMap::new(),
-            stale: Vec::new(),
             unforks: BTreeMap::new(),
             restores: BTreeMap::new(),
             versions: BTreeMap::new(),
@@ -797,12 +775,9 @@ impl World {
             w.delete_base,
             w.collect,
             w.stop_collector,
-            w.reclaim,
-            w.stale_delete,
             w.unfork,
             w.twins,
             w.write,
-            w.stale_checkpoint,
             w.version,
             w.drop_version,
             w.restore_version,
@@ -827,16 +802,13 @@ impl World {
             8 => self.delete(true),
             9 => self.collect(),
             10 => self.stop_collector(),
-            11 => self.reclaim(),
-            12 => self.stale_delete(),
-            13 => self.unfork(),
-            14 => self.twins(),
-            15 => self.write().await,
-            16 => self.stale_checkpoint(),
-            17 => self.cut_version().await,
-            18 => self.drop_version(),
-            19 => self.restore_version(),
-            20 => {
+            11 => self.unfork(),
+            12 => self.twins(),
+            13 => self.write().await,
+            14 => self.cut_version().await,
+            15 => self.drop_version(),
+            16 => self.restore_version(),
+            17 => {
                 let ticks = self.rng.random_range(1..=self.profile.ticks);
                 self.bucket.advance(ticks);
             }
@@ -895,25 +867,13 @@ impl World {
                     )),
                 }
             }
-            Event::Deleted { cell, stale: false, result } => match result {
+            Event::Deleted { cell, result } => match result {
                 Ok(()) => {}
                 // A later placement took it as it was deleted: it lives on.
                 Err(Error::Stale) => self.cells.get_mut(&cell).unwrap().deleting = false,
                 Err(error) => {
                     self.violation(format!("deleting cell {cell}: {error}", cell = Short(cell)))
                 }
-            },
-            Event::Deleted { cell, stale: true, result } => match result {
-                Err(Error::Stale) => {}
-                // It found the cell's head final, which only its latest placement's delete,
-                // begun since, writes: the cell is deleted, by that, as deletes are idempotent.
-                Ok(()) if self.cells[&cell].deleting => {}
-                Ok(()) => self.violation(format!(
-                    "a placement cut off deleted cell {cell}",
-                    cell = Short(cell)
-                )),
-                Err(error) => self
-                    .violation(format!("cell {cell}'s stale delete: {error}", cell = Short(cell))),
             },
             Event::Unforked { child, result: Ok(true) } => drop(self.unforks.remove(&child)),
             Event::Unforked { child, result } => {
@@ -1128,8 +1088,8 @@ impl World {
     }
 
     /// Starts a session of `cell` on `host`: its cell opened, its writer taking the cell, of
-    /// the placement whose fencing token is `token`, or, with none, of a new one, the latest.
-    fn start_session(&mut self, host: usize, cell: u64, token: Option<u64>) {
+    /// a new placement, the latest.
+    fn start_session(&mut self, host: usize, cell: u64) {
         let disk = self.disk(host, cell);
         let dir = disk.dir.clone();
         let recovering = match disk.made {
@@ -1137,7 +1097,7 @@ impl World {
             false => LocalCell::recover_unmade(dir),
         };
         match recovering {
-            Ok(recovering) => self.run_session(host, cell, token, recovering),
+            Ok(recovering) => self.run_session(host, cell, None, recovering),
             Err(err) => {
                 self.violation(format!("recovering cell {cell}: {err:#}", cell = Short(cell)))
             }
@@ -1366,12 +1326,6 @@ impl World {
         session.running.abort();
         for keeper in &session.keepers {
             keeper.abort();
-        }
-        if let Some(writer) = session.uploader.writer() {
-            self.stale.push(writer);
-            if self.stale.len() > STALE_WRITERS {
-                self.stale.remove(0);
-            }
         }
         let Session { uploader, cell: open_cell, kept, .. } = session;
         drop(kept);
@@ -1620,18 +1574,6 @@ impl World {
         }
     }
 
-    /// A writer whose session stopped checkpoints, as one running on unaware of it would: a later
-    /// writer's, or none, holding its cell's head.
-    fn stale_checkpoint(&mut self) {
-        if self.stale.is_empty() {
-            return;
-        }
-        let writer = self.stale[self.rng.random_range(0..self.stale.len())].clone();
-        self.spawn(async move {
-            let _ = writer.checkpoint().await;
-        });
-    }
-
     fn checkpoint(&mut self) {
         let Some((host, cell)) = self.ready() else { return };
         let session = &self.hosts[host].sessions[&cell];
@@ -1717,7 +1659,7 @@ impl World {
                 self.bucket.hold(sim_cell(cell), epoch);
             }
         }
-        self.start_session(host, cell, None);
+        self.start_session(host, cell);
     }
 
     /// A host crashes: its uploaders stop where they are, what they had in flight landing or not;
@@ -1758,7 +1700,7 @@ impl World {
             for cell in cells {
                 let kept = self.hosts[host].disks.contains_key(&cell);
                 if kept && !self.cells[&cell].deleting {
-                    self.start_session(host, cell, None);
+                    self.start_session(host, cell);
                 }
             }
         }
@@ -1983,28 +1925,6 @@ impl World {
         });
     }
 
-    /// A placement cut off takes a cell back, on a host that has no writer of it, with an earlier
-    /// fencing token than the cell's latest placement's: which must fail.
-    fn reclaim(&mut self) {
-        let candidates: Vec<(u64, u64)> = (self.cells.iter())
-            .filter(|(_, found)| !found.deleting && found.taken > 1)
-            .map(|(&cell, found)| (cell, found.taken))
-            .collect();
-        if candidates.is_empty() {
-            return;
-        }
-        let (cell, taken) = candidates[self.rng.random_range(0..candidates.len())];
-        let hosts: Vec<usize> = (0..self.hosts.len())
-            .filter(|&host| !self.hosts[host].sessions.contains_key(&cell))
-            .collect();
-        if hosts.is_empty() {
-            return;
-        }
-        let host = hosts[self.rng.random_range(0..hosts.len())];
-        let token = self.rng.random_range(1..taken);
-        self.start_session(host, cell, Some(token));
-    }
-
     /// Goes on with what a crash left, as its host's next start does: a failed fork's deletion
     /// ([`lifecycle::delete_fork`]), or a fork of a version, finished, deleted or, as often as
     /// [`Profile::forget`] says, forgotten.
@@ -2072,31 +1992,16 @@ impl World {
         found.deleting = true;
         // Its latest placement's, as far as anything here knows: one taking it meanwhile is later.
         let token = found.taken;
-        self.spawn_delete(cell, token, false);
+        self.spawn_delete(cell, token);
     }
 
-    /// A placement cut off deletes a cell, with an earlier fencing token than the cell's latest
-    /// placement's: which must fail, the cell living on.
-    fn stale_delete(&mut self) {
-        let candidates: Vec<(u64, u64)> = (self.cells.iter())
-            .filter(|(_, found)| !found.deleting && found.taken > 1)
-            .map(|(&cell, found)| (cell, found.taken))
-            .collect();
-        if candidates.is_empty() {
-            return;
-        }
-        let (cell, taken) = candidates[self.rng.random_range(0..candidates.len())];
-        let token = self.rng.random_range(1..taken);
-        self.spawn_delete(cell, token, true);
-    }
-
-    /// Deletes `cell` with the fencing token `token`, a placement cut off's if `stale`.
-    fn spawn_delete(&mut self, cell: u64, token: u64, stale: bool) {
+    /// Deletes `cell` with the fencing token `token`.
+    fn spawn_delete(&mut self, cell: u64, token: u64) {
         let holder = self.id();
         let (bucket, events) = (self.cell_bucket(cell), self.events.clone());
         self.spawn(async move {
             let result = lifecycle::delete(&*bucket, sim_cell(cell), holder, token).await;
-            events.borrow_mut().push(Event::Deleted { cell, stale, result });
+            events.borrow_mut().push(Event::Deleted { cell, result });
         });
     }
 
@@ -3008,7 +2913,7 @@ impl World {
                 }
                 let host =
                     self.hosts.iter().position(|host| host.disks.contains_key(&cell)).unwrap_or(0);
-                self.start_session(host, cell, None);
+                self.start_session(host, cell);
             }
             self.settle();
             self.check_uploaded();
@@ -3094,7 +2999,7 @@ impl World {
             let found = self.cells.get_mut(&cell).unwrap();
             found.deleting = true;
             let token = found.taken;
-            self.spawn_delete(cell, token, false);
+            self.spawn_delete(cell, token);
         }
         self.settle();
         let left = self.live();

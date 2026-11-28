@@ -318,7 +318,9 @@ fn fast_buckets() -> Arc<FastBuckets> {
         let seeded = Arc::new(seeded);
         madsim::task::spawn(seeded.clone().schedule(SCHEDULED_EVERY));
         let backend = bucket_cell::faults::SeededBackend(seeded.clone());
-        let bucket = ObjectBucket::new(Arc::new(backend), "");
+        // As S3 Express's MaxParts, its writers rolling before it with room for `Rolled` and a
+        // taker's `Fence` and not one more (board 14565).
+        let bucket = ObjectBucket::new(Arc::new(backend), "").with_max_parts(FAST_APPENDS + 2);
         zones.push(Arc::new(bucket_cell::any_bucket::AnyBucket::new(Arc::new(bucket))));
         faults.push(seeded);
     }
@@ -592,6 +594,11 @@ struct Told {
     forks: Arc<workloads::forks::Forks>,
     /// cladefs: the stale family's episodes and what they found (`workloads::stale`, board 14566).
     stale: workloads::stale::Episodes,
+    /// cladefs: whether writers commit in bursts, as the seed says, blocks committed ordered and the
+    /// burst's last uploaded, all told durable by it alone (board 14565): what a fast WAL writer's
+    /// batch dropped while degraded leaves a gap in, a later batch's durability covering it
+    /// (`wal_contiguous`).
+    bursts: bool,
 }
 
 /// The block a writer writes at `sequence` of round `round`.
@@ -627,19 +634,39 @@ async fn write_round(
             return None;
         }
     };
-    let Ok(first) = guest.next_sequence().await else { return Some(cell) };
+    let first = match guest.next_sequence().await {
+        Ok(first) => first,
+        Err(errno) => {
+            log::info!("round {round}: cell {cell}'s next sequence: {errno:?}");
+            return Some(cell);
+        }
+    };
     // Versions made, which a commit told uploaded after them uploads.
     let mut made = Vec::new();
+    // cladefs: the blocks of a burst committed ordered, not yet told durable.
+    let mut bursting = Vec::new();
     for sequence in first..first + writes {
         let block = block_of(round, sequence);
         let extent = cladefs::ExtentId { cell, sequence };
-        if guest.write(extent, 0, &block).await.is_err() {
+        if let Err(errno) = guest.write(extent, 0, &block).await {
+            log::info!("round {round}: writing {sequence} of cell {cell}: {errno:?}");
             break;
         }
-        if guest.commit(cladefs::Commit::Uploaded).await.is_err() {
+        // cladefs: in a burst, as the seed says, committed ordered, told durable with the burst's
+        // last, uploaded commit (`Told::bursts`).
+        let more = told.bursts
+            && sequence + 1 < first + writes
+            && madsim::rand::thread_rng().gen_bool(0.6);
+        let level = if more { cladefs::Commit::Ordered } else { cladefs::Commit::Uploaded };
+        if let Err(errno) = guest.commit(level).await {
+            log::info!("round {round}: committing {sequence} of cell {cell} {level:?}: {errno:?}");
             break;
         }
-        told.uploaded.lock().unwrap().insert(sequence, block);
+        bursting.push((sequence, block));
+        if more {
+            continue;
+        }
+        told.uploaded.lock().unwrap().extend(bursting.drain(..));
         told.versions.lock().unwrap().append(&mut made);
         if told.versioning && madsim::rand::thread_rng().gen_bool(0.3) {
             let before = told.uploaded.lock().unwrap().clone();
@@ -711,8 +738,26 @@ async fn make_fast_wal_cell(host: u8) -> u64 {
 }
 
 /// Takes `cell` onto host `host`, at placement `token`, as the VM manager does, dropping any stale
-/// local copy first and trying again while the bucket refuses.
+/// local copy first and trying again while the bucket refuses; panicking if it never does.
 async fn take(host: u8, cell: u64, token: u64) {
+    if let Err(lost) = try_take(host, cell, token).await {
+        panic!("{lost}");
+    }
+}
+
+/// cladefs: what a take's refusal says that is a loss, not a refusal to try again (board 14565):
+/// the cell's recovery finding an object it needs gone or corrupt, or a fast WAL it can never
+/// fence, which local_cell::sim counted as violations.
+fn a_loss(message: &str) -> bool {
+    ["lost:", "corrupt:", "missing during recovery", "can be fenced never"]
+        .iter()
+        .any(|loss| message.contains(loss))
+}
+
+/// cladefs: takes `cell` onto host `host`, as [`take`] does, but says what went wrong rather than
+/// panic (board 14565): a take refused for a loss ([`a_loss`]), or never succeeding, which a rule
+/// search counts as a finding, as a panic it counts as none.
+async fn try_take(host: u8, cell: u64, token: u64) -> Result<(), String> {
     use cladefs::cladefsd::control::proto::DropCellRequest;
     let mut daemon = connect(host).await;
     let taking = CreateCellRequest {
@@ -721,9 +766,10 @@ async fn take(host: u8, cell: u64, token: u64) {
         cell,
         ..CreateCellRequest::default()
     };
+    let mut last = String::new();
     for _ in 0..200 {
         match daemon.create_cell(taking.clone()).await {
-            Ok(_) => return,
+            Ok(_) => return Ok(()),
             Err(status) if status.code() == tonic::Code::AlreadyExists => {
                 // Drop stale local copy from an earlier round on this host before re-taking.
                 if let Err(err) = daemon.drop_cell(DropCellRequest { tenant: 0, cell }).await {
@@ -735,17 +781,21 @@ async fn take(host: u8, cell: u64, token: u64) {
                 }
                 madsim::time::sleep(Duration::from_millis(200)).await;
             }
+            Err(status) if a_loss(status.message()) => {
+                return Err(format!("host {host} taking cell {cell}: {}", status.message()));
+            }
             Err(status) => {
                 eprintln!(
                     "host {host} taking cell {cell}: {:?} {}",
                     status.code(),
                     status.message()
                 );
+                last = status.message().to_owned();
                 madsim::time::sleep(Duration::from_millis(200)).await;
             }
         }
     }
-    panic!("host {host} never took cell {cell}");
+    Err(format!("host {host} never took cell {cell}: {last}"))
 }
 
 /// TASK-685.6, doc-24: attrition, FoundationDB's: a writer guest on one of three hosts writes and
@@ -1031,6 +1081,10 @@ fn search_named_rule() {
         "collector_dies" => workloads::collector::COLLECTOR_DIES,
         "collector_dies_forking" => workloads::collector::COLLECTOR_DIES_FORKING,
         "collector_dies_fast_wal" => workloads::collector::COLLECTOR_DIES_FAST_WAL,
+        "fast_collected" => workloads::zombies::FAST_COLLECTED,
+        "forked_late" => workloads::forks::FORKED_LATE,
+        "abandoning" => workloads::forks::ABANDONING,
+        "cutting" => workloads::forks::CUTTING,
         other => panic!("no profile {other}"),
     };
     let seeds = var("CLADEFS_MADSIM_SEEDS").map_or(SEARCHED, |seeds| seeds.parse().unwrap());
@@ -1182,9 +1236,17 @@ impl Profile {
 /// Reads the blocks of `told`, `extent_cell`'s, in `opened_cell` on this host, which a guest opens,
 /// and those of `freed`: those of `told` lost, or read other than they were written, and those of
 /// `freed` read as they were written, by their sequences.
-async fn lost_in(opened_cell: u64, extent_cell: u64, told: Blocks, freed: Blocks) -> Vec<u64> {
+async fn lost_in(
+    opened_cell: u64,
+    extent_cell: u64,
+    told: Blocks,
+    freed: Blocks,
+) -> Result<Vec<u64>, String> {
     let guest = guest().await;
-    guest.open_cell(cladefs::CellId { tenant: 0, id: opened_cell }).await.unwrap();
+    // cladefs: a cell that does not open lost what it was told (board 14567): said, not a panic.
+    if let Err(errno) = guest.open_cell(cladefs::CellId { tenant: 0, id: opened_cell }).await {
+        return Err(format!("cell {opened_cell} did not open to be read: {errno:?}"));
+    }
     let mut lost = Vec::new();
     for (&sequence, block) in &told {
         let extent = cladefs::ExtentId { cell: extent_cell, sequence };
@@ -1199,17 +1261,22 @@ async fn lost_in(opened_cell: u64, extent_cell: u64, told: Blocks, freed: Blocks
         }
     }
     guest.close();
-    lost
+    Ok(lost)
 }
 
 /// Forks version `version` of `cell` on host `host`, as the VM manager does, trying again while
 /// the bucket refuses: returns the forked cell's ID.
-async fn fork_version(host: u8, cell: u64, version: u64) -> u64 {
+async fn fork_version(host: u8, cell: u64, version: u64) -> Result<u64, String> {
     let mut daemon = connect(host).await;
     let forking = ForkCellRequest { version, cell, ..ForkCellRequest::default() };
     for _ in 0..200 {
         match daemon.fork_cell(forking.clone()).await {
-            Ok(forked) => return forked.into_inner().cell,
+            Ok(forked) => return Ok(forked.into_inner().cell),
+            // cladefs: refused for a loss, as a version gone: what a rule search finds (board
+            // 14567), not a panic, which it counts as none.
+            Err(status) if a_loss(status.message()) => {
+                return Err(format!("host {host} forking version {version}: {}", status.message()));
+            }
             Err(status) => {
                 eprintln!(
                     "host {host} forking version {version}: {:?} {}",
@@ -1220,7 +1287,7 @@ async fn fork_version(host: u8, cell: u64, version: u64) -> u64 {
             }
         }
     }
-    panic!("host {host} never forked version {version} of cell {cell}");
+    Err(format!("host {host} never forked version {version} of cell {cell}"))
 }
 
 /// A fork of a base's version, the base deleted since: where it is, and what it inherits.
@@ -1485,7 +1552,8 @@ async fn attrition(profile: Profile) -> Result<(), String> {
     let (nodes, _roots) = hosts_keeping(3, &bucket, kept, fast.clone());
     let _ended = Ended(nodes.iter().map(|node| node.id()).collect());
     let handle = madsim::runtime::Handle::current();
-    let told = Arc::new(Told { versioning: versions, freeing: frees, ..Told::default() });
+    let bursts = profile.fast_wal && profile.zombies;
+    let told = Arc::new(Told { versioning: versions, freeing: frees, bursts, ..Told::default() });
     let manager = manager();
     let mut cell = None;
     // A host's node as it is now: one started again is a node anew, which a handle of the one
@@ -1558,8 +1626,8 @@ async fn attrition(profile: Profile) -> Result<(), String> {
         }
         let host = (round % 3) as usize;
         if let Some(cell) = cell {
-            let taking = async move { take(host as u8 + 1, cell, token_of(round)).await };
-            manager.spawn(taking).await.unwrap();
+            let taking = async move { try_take(host as u8 + 1, cell, token_of(round)).await };
+            manager.spawn(taking).await.unwrap()?;
         }
         if bases {
             let (source, target) = (host, (host + 1) % 3);
@@ -1575,6 +1643,8 @@ async fn attrition(profile: Profile) -> Result<(), String> {
                 manager: &manager,
                 nodes: &nodes,
                 bucket: &bucket,
+                faults: &faults,
+                fast: fast.as_ref(),
                 cell,
                 round,
                 host,
@@ -1595,7 +1665,14 @@ async fn attrition(profile: Profile) -> Result<(), String> {
                 None
             })
         };
-        match madsim::time::timeout(wait, &mut written).await {
+        // cladefs: the first round's writer of a run with zombies is waited for: the rounds after
+        // may fence every writer before it is told anything (`workloads::zombies::during`), so
+        // that what the first is told is what the run checks.
+        let waited = match round == 0 && profile.zombies {
+            true => Ok((&mut written).await),
+            false => madsim::time::timeout(wait, &mut written).await,
+        };
+        match waited {
             Ok(done) => cell = cell.or(ended(done)),
             Err(_) => {
                 if cell.is_none() {
@@ -1657,7 +1734,7 @@ async fn attrition(profile: Profile) -> Result<(), String> {
         Ok::<_, cladefs::Errno>(())
     });
     healing.await.unwrap().map_err(|errno| format!("lifting the limits: {errno:?}"))?;
-    manager.spawn(async move { take(1, cell, token_of(ROUNDS)).await }).await.unwrap();
+    manager.spawn(async move { try_take(1, cell, token_of(ROUNDS)).await }).await.unwrap()?;
     // The collector's last passes, one after the other.
     if let (Some(collector), Some(passes)) = (&collector, passes) {
         passes.abort();
@@ -1679,7 +1756,8 @@ async fn attrition(profile: Profile) -> Result<(), String> {
     }
     let sequences: Vec<u64> = uploaded.keys().copied().collect();
     let freed_sequences: Vec<u64> = freed.keys().copied().collect();
-    let lost = node(0).spawn(lost_in(cell, cell, uploaded, freed)).await.unwrap();
+    let lost =
+        again_on(|| node(0), || lost_in(cell, cell, uploaded.clone(), freed.clone())).await?;
     if !lost.is_empty() {
         return Err(format!(
             "blocks told uploaded lost or other, or told freed read back: {lost:?} of \
@@ -1693,9 +1771,10 @@ async fn attrition(profile: Profile) -> Result<(), String> {
     }
     for (version, before) in made {
         let fork =
-            manager.spawn(async move { fork_version(1, cell, version).await }).await.unwrap();
+            manager.spawn(async move { fork_version(1, cell, version).await }).await.unwrap()?;
         let sequences: Vec<u64> = before.keys().copied().collect();
-        let lost = node(0).spawn(lost_in(fork, cell, before, Blocks::new())).await.unwrap();
+        let lost =
+            again_on(|| node(0), || lost_in(fork, cell, before.clone(), Blocks::new())).await?;
         if !lost.is_empty() {
             return Err(format!(
                 "version {version}'s fork lost blocks told uploaded before it: {lost:?} of \
@@ -1711,8 +1790,8 @@ async fn attrition(profile: Profile) -> Result<(), String> {
         // cladefs: its host's disk perhaps lost since (`Profile::lose`), its placement with it:
         // taken there again first, as a VM manager takes a cell back on a host replaced.
         if profile.lose {
-            let taking = take(host as u8 + 1, fork_cell, token_of(ROUNDS) + 1);
-            manager.spawn(taking).await.unwrap();
+            let taking = try_take(host as u8 + 1, fork_cell, token_of(ROUNDS) + 1);
+            manager.spawn(taking).await.unwrap()?;
         }
         let read =
             read_on(|| node(host), fork_cell, cladefs::ExtentId { cell: base, sequence: 1 }).await;
@@ -1798,6 +1877,27 @@ async fn read_on(
         }
     }
     panic!("{:?} never read {extent:?}", host().id())
+}
+
+/// cladefs: what `work` gives, run on `host`'s node, run again if the node is killed meanwhile and
+/// started anew (board 14565): a workload family's kill may land as the run's last checks read, its
+/// task cancelled with the node, which is no loss.
+async fn again_on<T, F>(host: impl Fn() -> madsim::runtime::NodeHandle, work: impl Fn() -> F) -> T
+where
+    T: Send + 'static,
+    F: std::future::Future<Output = T> + Send + 'static,
+{
+    for _ in 0..100 {
+        match host().spawn(work()).await {
+            Ok(done) => return done,
+            Err(ended) if ended.is_cancelled() => {
+                log::info!("{:?}: started again, its check with it", host().id());
+                madsim::time::sleep(Duration::from_millis(200)).await;
+            }
+            Err(ended) => panic!("{:?}'s check: {ended}", host().id()),
+        }
+    }
+    panic!("{:?} never finished its check", host().id())
 }
 
 /// Calls `call` on host `host`'s control API until it answers otherwise than the bucket or a peer

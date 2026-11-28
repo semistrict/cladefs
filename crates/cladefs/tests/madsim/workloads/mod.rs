@@ -26,6 +26,10 @@ pub(crate) struct Round<'a> {
     /// `madsim::runtime::Handle::current().get_node(nodes[i].id())` is the one running).
     pub nodes: &'a [madsim::runtime::NodeHandle],
     pub bucket: &'a Arc<RoutedBucket>,
+    /// The cold bucket's faults, which a family may set a while (restoring `crate::ODDS`).
+    pub faults: &'a Arc<bucket_cell::faults::Seeded>,
+    /// The zones' fast WAL buckets, of a run with fast WAL cells.
+    pub fast: Option<&'a Arc<crate::FastBuckets>>,
     /// The cell the writers write.
     pub cell: u64,
     pub round: u64,

@@ -874,7 +874,17 @@ async fn opened_version(
         })
         .collect();
     for path in writers {
-        sync(daemon, path).await?;
+        match sync(daemon, path.clone()).await {
+            // Fenced: a later placement took the cell, on another host, recovering from what this
+            // copy uploaded, the rest lost with it. What it uploaded is in the bucket, which the
+            // version is read from, or found not named there (`ENOENT`): a version the cell's head
+            // names forks on any host, its stale copy here or not.
+            Err(Errno::EROFS) => log::info!(
+                "cladefsd: {} fenced, a later placement's: version {version:x} read from the bucket",
+                path.display()
+            ),
+            synced => synced?,
+        }
     }
     // A cell its connection let go of is none of those, while it closes on a blocking thread,
     // uploading its last commits, the version's among them: its close waited for, if the version
