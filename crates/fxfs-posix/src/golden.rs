@@ -212,7 +212,8 @@ async fn verify_golden_version(compressed: &[u8], manifest: &[u8]) {
         .await
         .map(drop)
         .expect_err("fsck passed the volume over a base");
-    let issues = issues.lock().unwrap();
+    // Taken out of the lock, which no await below may hold.
+    let issues = std::mem::take(&mut *issues.lock().unwrap());
     assert!(
         matches!(&issues[..], [issue] if issue.starts_with("Fatal(StoreOverBase(")),
         "{issues:?}"
