@@ -131,7 +131,7 @@ struct vext_stream {
 	 * send, completes it only once the sender is done with its memory.
 	 */
 	u64 sending;
-	wait_queue_head_t sent;
+	wait_queue_head_t sent_wait;
 	/* Its -errno once it failed, or closed as the device resets; under `lock`. */
 	int error;
 	/* The requests it sent, and the replies it read. */
@@ -559,7 +559,7 @@ static void vext_stream_fail(struct virtio_extent *vext, int err)
 	if (sock)
 		kernel_sock_shutdown(sock, SHUT_RDWR);
 	wake_up(&stream->wake);
-	wake_up(&stream->sent);
+	wake_up(&stream->sent_wait);
 }
 
 /*
@@ -636,7 +636,7 @@ static int vext_stream_receiver(void *data)
 			break;
 		tag = le64_to_cpu(head.tag);
 		written = le32_to_cpu(head.written);
-		wait_event(stream->sent, READ_ONCE(stream->sending) != tag || READ_ONCE(stream->error));
+		wait_event(stream->sent_wait, READ_ONCE(stream->sending) != tag || READ_ONCE(stream->error));
 		/* Failing as it is sent: the sender, whose send fails, completes it. */
 		if (READ_ONCE(stream->sending) == tag) {
 			err = READ_ONCE(stream->error);
@@ -777,14 +777,14 @@ static void vext_stream_send(struct virtio_extent *vext, struct vext_request *re
 		if (xa_erase(&stream->in_flight, tag) == req)
 			vext_stream_complete(vext, req, -EIO);
 		smp_store_release(&stream->sending, U64_MAX);
-		wake_up(&stream->sent);
+		wake_up(&stream->sent_wait);
 		return;
 	}
 	/* Counted before its reply can be: the receiver waits for the send. */
 	atomic64_inc(&stream->sent);
 	smp_store_release(&stream->sending, U64_MAX);
-	if (wq_has_sleeper(&stream->sent))
-		wake_up(&stream->sent);
+	if (wq_has_sleeper(&stream->sent_wait))
+		wake_up(&stream->sent_wait);
 }
 
 /*
@@ -865,7 +865,7 @@ static int vext_stream_start(struct virtio_extent *vext)
 	spin_lock_init(&stream->lock);
 	INIT_LIST_HEAD(&stream->to_send);
 	init_waitqueue_head(&stream->wake);
-	init_waitqueue_head(&stream->sent);
+	init_waitqueue_head(&stream->sent_wait);
 	stream->sending = U64_MAX;
 	xa_init_flags(&stream->in_flight, XA_FLAGS_ALLOC);
 	if (!virtio_has_feature(vext->vdev, VIRTIO_EXTENT_F_STREAM))
