@@ -15,11 +15,15 @@
 //!
 //! The files are all the cache keeps: one opened finds what an earlier one kept in them
 //! ([`Cache::open`]), so that a host's restart refetches nothing it had. Its index is rebuilt from
-//! their tails, each checked against its CRCs, a file whose tail fails going whole; an object's
-//! parts kept are those its file holds data for, not holes. And what it gives, it checks: a tail
-//! against its CRCs, a part against the one its tail gives, dropping what fails. So whatever a
-//! crash left of a write, torn or lost, reads as not kept, never as other bytes, and is fetched
-//! again by its reader. One cache at a time has a directory.
+//! their tails alone, each checked against its CRCs, a file whose tail fails going whole; an
+//! object's parts kept are those its file holds data for, not holes, none of them read: a restart
+//! with hundreds of GiB cached reads their tails, not the parts behind them (board 14702). Some it
+//! counts so are no parts: one a crash tore, one shorter than a block, whose punch freed nothing,
+//! and, on APFS, which fills with zeros the holes near what is written, those never written. And
+//! what it gives, it checks: a tail against its CRCs, a part against the one its tail gives,
+//! dropping what fails. So whatever a crash left of a write, torn or lost, and whatever an
+//! eviction left of a part, reads as not kept, never as other bytes, and is fetched again by its
+//! reader. One cache at a time has a directory.
 
 use crate::host_disk::HostDisk;
 use crate::object;
@@ -528,7 +532,8 @@ const FILES: &str = "cladefs-parts";
 const VERSIONS: &str = "cladefs-versions";
 
 /// The blocks of the filesystems the cache's files are on, as the parts in them are aligned to:
-/// what punching a hole frees whole.
+/// what punching a hole frees whole, and all macOS punches ([`punch`]).
+#[cfg(target_os = "macos")]
 const BLOCK: u64 = extent_frame::ALIGN;
 
 /// Persistent disk-ID file stored at the root of each part-cache shard (beside `cladefs-parts/`
@@ -818,7 +823,12 @@ impl Shard {
         if stored.check(&bytes).is_ok() {
             return Ok(Some(bytes));
         }
-        log::warn!("cladefs: part {part} of {key} in the cache failed its CRC");
+        // Zeros are where no part is, a hole its filesystem reads as data (APFS fills those near
+        // a write): what an opening counts kept unread, not a part gone bad.
+        match bytes.iter().all(|&byte| byte == 0) {
+            true => log::debug!("cladefs: part {part} of {key} in the cache is zeros"),
+            false => log::warn!("cladefs: part {part} of {key} in the cache failed its CRC"),
+        }
         self.forget_part(key, part)?;
         Ok(None)
     }
@@ -942,7 +952,7 @@ impl Shard {
     }
 
     fn adopt(&self, key: &str, from: &Path) -> io::Result<bool> {
-        let found = found(from, key, self.files.holes)?.ok_or_else(|| {
+        let found = self.files.found(from, key)?.ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidData, format!("{}: no object", from.display()))
         })?;
         let len = found.bytes();
@@ -1546,9 +1556,8 @@ fn lock(dir: &Path) -> io::Result<host_fs::Flock> {
 }
 
 /// An object a file of the cache holds: where its parts are stored, as its tail, checked against
-/// its CRCs, says; those the file holds data for, not holes, those shorter than a block, and all
-/// on a filesystem that doesn't find its holes, checked against their CRCs too; and when it was
-/// written last.
+/// its CRCs, says; those the file holds data for, not holes, unread, their CRCs checked as each is
+/// read ([`Cache::part`]); and when it was written last.
 #[derive(Debug)]
 struct Found {
     parts: Parts,
@@ -1565,44 +1574,6 @@ impl Found {
     }
 }
 
-/// The object at `key` the file at `path` holds, if its tail, at its end, passes its checks: its
-/// parts checked against their CRCs unless `holes`, the filesystem finding holes punched.
-fn found(path: &Path, key: &str, holes: bool) -> io::Result<Option<Found>> {
-    let file = opened(path, false)?;
-    let read_exact_at = |bytes: &mut [u8], at: u64| read_exact(&file, bytes, at);
-    let metadata = file.metadata()?;
-    let size = metadata.len();
-    let Some(at) = size.checked_sub(TRAILER) else { return Ok(None) };
-    let mut trailer = vec![0; TRAILER as usize];
-    read_exact_at(&mut trailer, at)?;
-    let Ok(frame) = Frame::of_trailer(&trailer) else { return Ok(None) };
-    if frame.size() != size {
-        return Ok(None);
-    }
-    let tail = frame.tail();
-    let mut bytes = vec![0; (tail.end - tail.start) as usize];
-    read_exact_at(&mut bytes, tail.start)?;
-    let Ok(tail) = object::Tail::of(key, bytes) else { return Ok(None) };
-    let data = data(&file, size)?;
-    let mut kept = Vec::new();
-    for (part, stored) in (0..).zip(&tail.parts.stored) {
-        if !holds(&data, stored.range()) {
-            continue;
-        }
-        // A punch frees none of a part shorter than a block, whose hole none finds: what dropped
-        // it is told by its CRC.
-        if stored.len < BLOCK || !holes {
-            let mut bytes = vec![0; stored.len as usize];
-            read_exact_at(&mut bytes, stored.offset)?;
-            if stored.check(&bytes).is_err() {
-                continue;
-            }
-        }
-        kept.push(part);
-    }
-    Ok(Some(Found { parts: tail.parts, kept, modified: metadata.modified()? }))
-}
-
 /// cladefs: the file at `path`, opened to read, and to write if `write`, bypassing the host's page
 /// cache ([`crate::direct::bypass`], TASK-433.4), or failing if its file system can't (TASK-433.6).
 fn opened(path: &Path, write: bool) -> io::Result<File> {
@@ -1616,16 +1587,6 @@ fn opened(path: &Path, write: bool) -> io::Result<File> {
     Ok(file)
 }
 
-/// cladefs: reads all of `bytes` at `at` in `file`, as [`crate::direct::read_at`] does, failing as
-/// `read_exact_at` does if the file ends before them (`UnexpectedEof`): one that shrank behind
-/// the cache's back.
-fn read_exact(file: &File, bytes: &mut [u8], at: u64) -> io::Result<()> {
-    if at + bytes.len() as u64 > file.metadata()?.len() {
-        return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
-    }
-    crate::direct::read_at(file, bytes, at)
-}
-
 /// The ranges of `file`, of `size` bytes, that hold data, not holes, as `SEEK_DATA` and
 /// `SEEK_HOLE` find them: all of it, on a filesystem that finds no holes.
 fn data(file: &File, size: u64) -> io::Result<Vec<Range<u64>>> {
@@ -1633,24 +1594,14 @@ fn data(file: &File, size: u64) -> io::Result<Vec<Range<u64>>> {
 }
 
 /// cladefs: the filesystem `dir` is on, checked once, as the cache opens: that its files bypass
-/// the host's page cache, or the cache fails to open, naming `dir` (TASK-433.6); and whether it
-/// finds the holes of a file it punched a hole in, as `SEEK_DATA` finds them: a file of four
-/// blocks, the second written then punched, holding none. APFS doesn't: those a resize left read
-/// as data once a hole is punched.
-fn probed(dir: &Path) -> io::Result<bool> {
-    let path = dir.join(".holes");
+/// the host's page cache, or the cache fails to open, naming `dir` (TASK-433.6).
+fn bypassed(dir: &Path) -> io::Result<()> {
+    let path = dir.join(".bypass");
     let mut options = host_fs::OpenOptions::new();
     let file = options.create(true).truncate(true).read(true).write(true).open(&path)?;
-    let found = (|| {
-        file.set_len(4 * BLOCK)?;
-        file.write_all_at(&[1; BLOCK as usize], BLOCK)?;
-        punch(&file, BLOCK, BLOCK)?;
-        Ok(data(&file, 4 * BLOCK)?.is_empty())
-    })();
     let bypassed = crate::direct::bypass(&file, dir);
     host_fs::remove_file(&path)?;
-    bypassed?;
-    found
+    bypassed
 }
 
 /// Whether `range` is within one of `data`, ranges in order.
@@ -1681,20 +1632,23 @@ struct Files {
     dir: PathBuf,
     /// cladefs: its filesystem's disk (doc-22).
     disk: Arc<HostDisk>,
-    /// Whether its filesystem finds the holes punched in its files ([`probed`]).
-    holes: bool,
     #[cfg(test)]
     cut: Option<std::sync::Arc<tests::Cut>>,
+    /// The bytes read of its files, an opening's included.
+    #[cfg(test)]
+    bytes_read: AtomicU64,
 }
 
 impl Files {
     fn new_on(host: &crate::Host, dir: PathBuf) -> io::Result<Self> {
+        bypassed(&dir)?;
         Ok(Self {
-            holes: probed(&dir)?,
             disk: HostDisk::of_on(host, &dir)?,
             dir,
             #[cfg(test)]
             cut: None,
+            #[cfg(test)]
+            bytes_read: AtomicU64::new(0),
         })
     }
 
@@ -1719,7 +1673,7 @@ impl Files {
                 continue;
             }
             let object = match rel.to_str() {
-                Some(key) if kind.is_file() => match self::found(&path, key, self.holes) {
+                Some(key) if kind.is_file() => match self.found(&path, key) {
                     Ok(object) => object.map(|object| (key.to_owned(), object)),
                     Err(err) => {
                         log::warn!("cladefs: reading {} in the cache: {err}", path.display());
@@ -1740,6 +1694,30 @@ impl Files {
             }
         }
         Ok(any)
+    }
+
+    /// The object at `key` the file at `path` holds, if its tail, at its end, passes its checks:
+    /// its tail read, and where the file holds data, none of its parts.
+    fn found(&self, path: &Path, key: &str) -> io::Result<Option<Found>> {
+        let file = opened(path, false)?;
+        let metadata = file.metadata()?;
+        let size = metadata.len();
+        let Some(at) = size.checked_sub(TRAILER) else { return Ok(None) };
+        let mut trailer = vec![0; TRAILER as usize];
+        self.read_exact(&file, &mut trailer, at)?;
+        let Ok(frame) = Frame::of_trailer(&trailer) else { return Ok(None) };
+        if frame.size() != size {
+            return Ok(None);
+        }
+        let tail = frame.tail();
+        let mut bytes = vec![0; (tail.end - tail.start) as usize];
+        self.read_exact(&file, &mut bytes, tail.start)?;
+        let Ok(tail) = object::Tail::of(key, bytes) else { return Ok(None) };
+        let data = data(&file, size)?;
+        let stored = (0..).zip(&tail.parts.stored);
+        let kept = stored.filter(|(_, stored)| holds(&data, stored.range())).map(|(part, _)| part);
+        let kept = kept.collect();
+        Ok(Some(Found { parts: tail.parts, kept, modified: metadata.modified()? }))
     }
 
     /// Makes the file of the object at `key`, of `size` bytes, if there is none.
@@ -1808,8 +1786,20 @@ impl Files {
     fn read(&self, key: &str, place: Range<u64>) -> io::Result<Vec<u8>> {
         let mut bytes = vec![0; (place.end - place.start) as usize];
         let file = opened(&self.path(key), false)?;
-        read_exact(&file, &mut bytes, place.start)?;
+        self.read_exact(&file, &mut bytes, place.start)?;
         Ok(bytes)
+    }
+
+    /// cladefs: reads all of `bytes` at `at` in `file`, as [`crate::direct::read_at`] does, failing
+    /// as `read_exact_at` does if the file ends before them (`UnexpectedEof`): one that shrank
+    /// behind the cache's back.
+    fn read_exact(&self, file: &File, bytes: &mut [u8], at: u64) -> io::Result<()> {
+        if at + bytes.len() as u64 > file.metadata()?.len() {
+            return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
+        }
+        #[cfg(test)]
+        self.bytes_read.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+        crate::direct::read_at(file, bytes, at)
     }
 
     /// Whether `change`, which isn't a write, is made.
@@ -2077,8 +2067,9 @@ mod tests {
         cache.check();
     }
 
-    /// Evicted parts' blocks are freed, and parts never kept take none. (APFS, which development
-    /// on macOS uses, allocates a sparse file's holes as it is written, and frees none it punches.)
+    /// Evicted parts' blocks are freed, and parts never kept take none. (APFS frees what it
+    /// punches, but fills with zeros the holes near what is written, under 16 MiB or so: parts
+    /// never kept take blocks there, board 14705.)
     /// On any filesystem that frees what is punched: the file's data, as SEEK_DATA and SEEK_HOLE
     /// find it, not its blocks, which ZFS, a hotbed workspace's, counts compressed and once their
     /// transaction group syncs; read after a sync, and held to three parts' worth, as ZFS's holes
@@ -2488,8 +2479,7 @@ mod tests {
     }
 
     /// TASK-165.4: a part an earlier cache kept whose bytes changed since, as a write torn by a
-    /// crash leaves them, is counted until read: then it fails its CRC, and is dropped. On APFS,
-    /// which finds no holes, the cache checks it as it opens.
+    /// crash leaves them, is counted until read: then it fails its CRC, and is dropped.
     #[test]
     fn earlier_parts_failing_their_crcs_are_dropped_as_read() {
         let dir = tempfile::tempdir().unwrap();
@@ -2500,8 +2490,7 @@ mod tests {
         flip(&dir.path().join(FILES).join(KEY), object.stored(1).offset + 100);
 
         let cache = Cache::open(dir.path(), 8 * PART).unwrap();
-        let counted = object.len() - if cfg!(target_os = "linux") { 0 } else { PART };
-        assert_eq!(cache.bytes(), counted);
+        assert_eq!(cache.bytes(), object.len());
         assert_eq!(object.read(&cache, 1), None);
         assert_eq!(cache.bytes(), object.len() - PART);
         assert_eq!(object.kept(&cache), [0]);
@@ -2535,13 +2524,65 @@ mod tests {
         assert_eq!((cache.bytes(), cache.keys(), files(dir.path())), (0, vec![], vec![]));
     }
 
-    /// TASK-165.4: the filesystems the cache runs on find the holes punched in a file, but APFS,
-    /// whose files a cache then checks each part of as it opens: macOS is for development.
+    /// board 14702: a cache opened reads its files' tails, however many parts they keep, and none
+    /// of the parts: a host's restart with hundreds of GiB cached reads none of them, each told by
+    /// its CRC as it is first read instead. A part an earlier cache evicted, its hole found, is
+    /// not counted; those whose bytes changed since, all the others here, are, until read.
     #[test]
-    fn filesystems_find_holes_but_apfs() {
+    fn opening_reads_tails_not_parts() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(probed(dir.path()).unwrap(), cfg!(target_os = "linux"));
-        assert_eq!(host_fs::read_dir(dir.path()).unwrap().count(), 0);
+        let objects: Vec<_> = (0..8)
+            .map(|at| {
+                let key = format!("segments/0000000000001/{at}", at = base32_id::Padded(at));
+                Object::noise(&key, 4 * PART, at)
+            })
+            .collect();
+        let cache = Cache::open(dir.path(), u64::MAX).unwrap();
+        for object in &objects {
+            object.keep(&cache);
+            cache.forget_part(&object.key, 0).unwrap();
+        }
+        drop(cache);
+        for object in &objects {
+            for part in 1..object.parts() {
+                flip(&dir.path().join(FILES).join(&object.key), object.stored(part).offset + 100);
+            }
+        }
+
+        let cache = Cache::open(dir.path(), u64::MAX).unwrap();
+        let tails = objects.iter().map(|object| TRAILER + object.tail_len()).sum::<u64>();
+        assert_eq!(cache.shards[0].files.bytes_read.load(Ordering::Relaxed), tails);
+        let counted = |object: &Object| {
+            let parts = (1..object.parts()).map(|part| object.stored(part).len);
+            object.tail_len() + parts.sum::<u64>()
+        };
+        assert_eq!(cache.bytes(), objects.iter().map(counted).sum::<u64>());
+        for object in &objects {
+            assert_eq!(object.kept(&cache), Vec::<u64>::new(), "{}", object.key);
+        }
+        let tails = objects.iter().map(Object::tail_len).sum::<u64>();
+        assert_eq!(cache.bytes(), tails);
+        cache.check();
+    }
+
+    /// board 14702: why a cache opened counts parts it doesn't read, which may be none: the
+    /// filesystems it runs on find the holes a punch leaves, as of a part evicted, but APFS fills
+    /// with zeros those near a write, of ranges never written.
+    #[test]
+    fn filesystems_find_punched_holes_but_apfs_fills_unwritten_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file");
+        let mut options = host_fs::OpenOptions::new();
+        let file = options.create(true).truncate(true).read(true).write(true).open(&path).unwrap();
+        file.set_len(4 * PART).unwrap();
+        file.write_all_at(&[1; PART as usize], PART).unwrap();
+        file.write_all_at(&[1; PART as usize], 3 * PART).unwrap();
+        punch(&file, 3 * PART, PART).unwrap();
+        let data = data(&file, 4 * PART).unwrap();
+        match cfg!(target_os = "macos") {
+            true => assert_eq!(data, [0..3 * PART]),
+            false => assert_eq!(data, [PART..2 * PART]),
+        }
     }
 
     /// TASK-433.6: a cache on a file system that can't bypass the host's page cache, as the
