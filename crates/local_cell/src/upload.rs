@@ -1971,10 +1971,15 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                             let acked = self.acknowledged(through, &mut in_flight).await;
                             // A checkpoint every so many segments, after the commits it covers
                             // returned, running concurrently with subsequent acknowledgements.
-                            if segments - checkpointed >= self.options.checkpoint_every
-                                && checkpoint_work.is_none()
-                                && !stop
-                            {
+                            // cladefs: BUGGIFY (doc-24, board 14567): one after any segment, as a
+                            // knob drawn low would have it, so that what versions alone keep, their
+                            // segments before the cell's checkpoint, is the collector's once they
+                            // are dropped (`forks_check_versions`).
+                            let due = match bucket_cell::buggify!(0.3) {
+                                true => segments > checkpointed,
+                                false => segments - checkpointed >= self.options.checkpoint_every,
+                            };
+                            if due && checkpoint_work.is_none() && !stop {
                                 checkpointed = segments;
                                 checkpoint_work = Some(Self::checkpointing(writer.clone()));
                             }
