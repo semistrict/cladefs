@@ -474,4 +474,35 @@ pub(crate) mod tests {
             ["reserve 0x10000000000 0x200000", "release 0x10000000000 0x200000"]
         );
     }
+
+    /// A snapshot's state is untrusted (AGENTS.md, "Trust boundaries"), and a restore makes the
+    /// device's window of its saved size at its saved address with no check of either:
+    /// `Device::restoring` takes `state.config` without `Config::validate`, Firecracker's
+    /// `WindowVm::reserve` takes any `at` it is given (`Some(start) => Ok(start)`), and
+    /// `WindowMemory::new` checks only the size's alignment. A size whose window would end past
+    /// a u64 overflows `HostMemory::map`'s `len + align`, a panic of the VM process (debug
+    /// builds; a wrapped `mmap` length in release); an address whose window ends past a u64 is
+    /// taken, and every lookup of the window's (`dax_window_at`'s `start + len`) overflows then.
+    /// Each must be refused, as a size not a multiple of 2 MiB is.
+    #[test]
+    #[ignore = "board 14716: a restored window's saved size and address are taken unchecked, overflowing"]
+    fn windows_ending_past_a_u64_are_refused() {
+        let vm = Arc::new(FakeVm::default());
+        let huge = u64::MAX - DAX_WINDOW_ALIGNMENT + 1;
+        let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            WindowMemory::new(vm.clone(), huge, Some(0)).map(drop).map_err(|err| err.to_string())
+        }));
+        let late = u64::MAX - DAX_WINDOW_ALIGNMENT + 1;
+        let placed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            WindowMemory::new(vm.clone(), 4 << 20, Some(late))
+                .map(drop)
+                .map_err(|err| err.to_string())
+        }));
+        assert!(
+            matches!((&made, &placed), (Ok(Err(_)), Ok(Err(_)))),
+            "a huge window: {:?}; a window past the end: {:?}",
+            made.as_ref().map_err(|_| "panicked"),
+            placed.as_ref().map_err(|_| "panicked")
+        );
+    }
 }
