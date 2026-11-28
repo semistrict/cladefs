@@ -183,7 +183,16 @@ crate.render_config(
 crate.from_cargo(
     name = "crates",
     cargo_lockfile = "@cladefs_cargo_manifests//:Cargo.lock",
-    manifests = ["@cladefs_cargo_manifests//:Cargo.toml"],
+    # Every member's manifest, not the root's alone: the extension watches what it is given,
+    # and Bazel keeps its result (MODULE.bazel.lock) until one changes, so a dependency a member
+    # gained that Cargo.lock already held (cladefs_fs's `fail`, from dev to normal) was never
+    # spliced in, its crate built without it.
+    manifests = ["@cladefs_cargo_manifests//:Cargo.toml"] + [
+        "@cladefs_cargo_manifests//:crates/{}/Cargo.toml".format(
+            member.removeprefix("//crates/").removesuffix(":Cargo.toml"),
+        )
+        for member in _MEMBER_MANIFESTS
+    ],
     supported_platform_triples = _SUPPORTED_TRIPLES,
 )
 
