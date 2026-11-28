@@ -3630,3 +3630,52 @@ fn a_tenant_filling_its_disk_leaves_others_committing() {
     assert_eq!(write(client, extent, 0, &noise(0, MIB as usize)), Ok(()));
     assert_eq!(client.commit(None), Ok(()));
 }
+
+/// A VM process's transfer area of hugetlbfs memory it never touched is refused, as one of
+/// shared memory with holes is (TASK-547, board 11707): the daemon would fault its huge pages in
+/// itself, as it reads into the area, charged to the daemon's hugetlb cgroup and taken from the
+/// host's pool, past the VM's limits. `TransferArea::map` checks the shrink seal, the size and
+/// `SEEK_HOLE`, but not the file system: hugetlbfs answers `SEEK_HOLE` with the file's size
+/// (`default_llseek`), so the hole check passes on a memfd of no pages at all. Needs a pool of
+/// huge pages (`sysctl vm.nr_hugepages=8`): without one the daemon's `mmap` fails, `ENOMEM`.
+#[test]
+#[ignore = "board 14711: a transfer area of untouched hugetlbfs memory is accepted (needs vm.nr_hugepages >= 1)"]
+fn transfer_areas_of_hugetlbfs_memory_never_touched_are_refused() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let (sender, mut receiver, _stream, _cell) =
+        super::raw_connection(&socket, &dir.path().join("store"), 1 << 30);
+    // 2 MiB, one huge page, sealed against shrinking, never mapped nor written.
+    let len: u64 = 2 << 20;
+    // SAFETY: Makes a descriptor, owned below.
+    let fd = unsafe {
+        libc::memfd_create(c"transfer".as_ptr(), libc::MFD_ALLOW_SEALING | libc::MFD_HUGETLB)
+    };
+    assert!(fd >= 0, "memfd_create(MFD_HUGETLB): {}", std::io::Error::last_os_error());
+    // SAFETY: Just made, and owned here.
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    // SAFETY: Sizes and seals a descriptor this holds.
+    unsafe {
+        assert_eq!(libc::ftruncate(fd.as_raw_fd(), len as i64), 0);
+        assert_eq!(libc::fcntl(fd.as_raw_fd(), libc::F_ADD_SEALS, libc::F_SEAL_SHRINK), 0);
+    }
+    let free_before = huge_pages_free();
+    let transfer = Header::new(TRANSFER, 2).with_body(&TransferBody { len });
+    sender.send(transfer, &[], &[fd.as_fd()]).unwrap();
+    let transferred = receiver.receive(|| 0).unwrap().unwrap().header;
+    assert_eq!(
+        (transferred.id, transferred.status, huge_pages_free()),
+        (2, -libc::EINVAL, free_before),
+        "the daemon took an untouched hugetlbfs area"
+    );
+}
+
+/// The host's free huge pages of the default size (`/proc/meminfo`'s `HugePages_Free`).
+fn huge_pages_free() -> u64 {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").unwrap();
+    let line = meminfo.lines().find(|line| line.starts_with("HugePages_Free:")).unwrap();
+    line.split_whitespace().nth(1).unwrap().parse().unwrap()
+}
