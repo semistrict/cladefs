@@ -3248,6 +3248,60 @@ mod shuttle_tests {
             .run(evictions_race_page_ins_and_maps);
     }
 
+    /// A tenant's extent promoted to the default arena (TASK-234, `ExtentCache::cache_now`)
+    /// rebinds each window mapping the tenant's copy to the promoted one (`Window::rebind`), which
+    /// registers the window with the new source (`to.mapped(self)`) only after it lets the
+    /// window's lock go. A fault in that gap maps the new source's part, and an eviction of the
+    /// new source in it unmaps nothing from the window it doesn't know of yet: no slab is freed
+    /// while the second stage maps it all the same, as the window's PTEs hold their slabs.
+    fn rebinds_race_faults_and_evictions() {
+        let part = extent_frame::PART;
+        let stage = Arc::new(Recording::default());
+        *STAGE.lock().unwrap() = Some(stage.clone());
+        let new = |sequence| {
+            let extent = ExtentId { cell: 0, sequence };
+            Arc::new(CachedExtent::new(ArenaId::DEFAULT, extent, Box::new(Numbered), part))
+        };
+        let (from, to) = (new(1), new(2));
+        let from_source: Arc<dyn Source> = from.clone();
+        let to_source: Arc<dyn Source> = to.clone();
+        let (mut dax, window) = Dax::new(part, Some(stage.clone())).unwrap();
+        dax.map(0, &from_source, 0, part);
+        future::block_on(window.fault(0, Access::Read)).unwrap();
+        // As `ExtentCache::cache_now` rebinds them: each window the old source knows of.
+        let rebinding = from.windows();
+        assert_eq!(rebinding.len(), 1);
+        let rebind = thread::spawn(move || {
+            for window in rebinding {
+                window.rebind(&from_source, to_source.clone());
+            }
+        });
+        let faulting = window.clone();
+        let fault = thread::spawn(move || {
+            future::block_on(faulting.fault(0, Access::Read)).unwrap();
+        });
+        let evicting = to.clone();
+        let evict = thread::spawn(move || evicting.evict());
+        rebind.join().unwrap();
+        fault.join().unwrap();
+        evict.join().unwrap();
+        assert_eq!((from.windows_held(), to.windows_held()), (0, 1));
+        dax.unmap(0, part);
+        to.evict();
+        from.evict();
+        drop((dax, window));
+        STAGE.lock().unwrap().take();
+    }
+
+    #[test]
+    fn rebinds_race_faults_and_evictions_in_any_order() {
+        let _quarantine = checking_quarantine();
+        Runner::new(RandomScheduler::new(runs(200)), config())
+            .run(rebinds_race_faults_and_evictions);
+        Runner::new(PctScheduler::new(3, runs(200)), config())
+            .run(rebinds_race_faults_and_evictions);
+    }
+
     /// Board 12315: concurrent `ExtentCache::evict_least_used` racing page-ins, window
     /// map/unmap, and lock-free `used()` touches must never deadlock, never free a slab still
     /// mapped in the second stage, and never lose a resident extent from `EvictionIndex`.
