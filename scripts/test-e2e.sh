@@ -321,6 +321,11 @@ fi
 # the jail and vm.unprivileged_userfaultfd off; under a seccomp filter, for musl.
 if [[ -n ${CLADEFS_FIRECRACKER_JAIL:-} && -z $build_only ]]; then
     [[ $seccomp != none ]] || { echo "CLADEFS_FIRECRACKER_JAIL needs a seccomp filter" >&2; exit 2; }
+    # The jailer, and setpriv to the jailed user, need root (board 14621).
+    if (( EUID != 0 )); then
+        echo "CLADEFS_FIRECRACKER_JAIL needs root: run this as root, or through sudo" >&2
+        exit 2
+    fi
     export CLADEFS_JAIL_UID=64000 CLADEFS_JAIL_GID=64000
     # The jailed user binds its VM's sockets in the cases' directories, under the results, and
     # their APIs' in the temporary directory: one it can't reach, or write in, failed every case

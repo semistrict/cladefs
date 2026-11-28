@@ -3,6 +3,9 @@
 # (scripts/lib/linux-host-setup.sh) run. A word per package; `#` starts a comment.
 
 build-essential pkg-config python3 curl ca-certificates git rsync e2fsprogs sqlite3
+# mkfs.xfs, for the guest tests' own kernel XFS, which they make as root (script_run's Loop): a
+# jailed run's are root's (scripts/lib/test-linux-host.sh).
+xfsprogs
 # clang's libraries build Firecracker's bindings; guest/sim and aarch64 Linux Rust builds
 # (.cargo/config.toml) link with lld (-fuse-ld=lld); guest/sim builds with ASan and UBSan, whose
 # headers and runtimes libclang-rt-dev holds.
