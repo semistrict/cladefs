@@ -22,7 +22,8 @@
  * every one the device offers, and the device refuses its activation otherwise. Firecracker's
  * device's is VIRTIO_EXTENT_VERSION in vendor/firecracker's virtio/extent/mod.rs.
  */
-#define VIRTIO_EXTENT_VERSION 2
+/* cladefs: 3 added F_STREAM and the configuration's stream_port (board 14663). */
+#define VIRTIO_EXTENT_VERSION 3
 
 /*
  * Shared memory region 0 is a DAX window, and MAP and UNMAP work. cladefs: the window copies on write
@@ -67,6 +68,12 @@
  * it with a configuration change, and the guest answers with STATS (cladefs's TASK-111.4).
  */
 #define VIRTIO_EXTENT_F_STATS 11
+/*
+ * cladefs: the guest sends its data requests, READ, WRITE, FREE, COMMIT, ROOT and INFO, over a
+ * vsock stream to the host's port `stream_port`, doc-4's stream transport, which the extent daemon
+ * serves itself, rather than on the device's queues (struct virtio_extent_stream_req, board 14663).
+ */
+#define VIRTIO_EXTENT_F_STREAM 12
 
 #define VIRTIO_EXTENT_T_READ 1
 #define VIRTIO_EXTENT_T_WRITE 2
@@ -144,7 +151,32 @@ struct virtio_extent_config {
 	__le64 private_max;
 	/* F_STATS: the host's latest ask for the guest's stats, or 0 before the first. */
 	__le64 stats_asked;
+	/* F_STREAM: the host's vsock port the guest's data requests go to, or 0. */
+	__le32 stream_port;
+	__le32 reserved;
 } __packed;
+
+/*
+ * cladefs: a request on doc-4's stream transport (F_STREAM), as a descriptor chain is on a queue:
+ * `readable` bytes follow, the request's header, arguments and data; and it has `writable` bytes
+ * for the device to write, its data and its response, which its reply carries. `tag` names the
+ * reply: unique among the requests in flight.
+ */
+struct virtio_extent_stream_req {
+	__le64 tag;
+	__le32 readable;
+	__le32 writable;
+};
+
+/*
+ * cladefs: the reply to the request tagged `tag`: `written` bytes follow, its writable bytes as the
+ * device wrote them, its response last; 0 if it wrote nothing, an EIO. Replies come in any order.
+ */
+struct virtio_extent_stream_reply {
+	__le64 tag;
+	__le32 written;
+	__le32 reserved;
+};
 
 struct virtio_extent_id {
 	__le64 cell;
@@ -253,6 +285,8 @@ struct vext_config {
 	u64 max_extent;
 	/* F_DAX: the most private pages the device holds at once, or 0 without it. */
 	u64 private_max;
+	/* cladefs: F_STREAM: the host's vsock port the data requests go to, or 0 (board 14663). */
+	u32 stream_port;
 };
 
 /*
@@ -314,6 +348,13 @@ struct vext_request {
 	} args;
 	struct virtio_extent_resp resp;
 	struct sg_table data_sgt;
+	/*
+	 * cladefs: on doc-4's stream transport (F_STREAM, board 14663): its frame's header, the lengths
+	 * of its arguments, data and root, and its place in the requests waiting to be sent.
+	 */
+	struct virtio_extent_stream_req stream_hdr;
+	u32 args_len, out_len, in_len, root_out;
+	struct list_head stream_node;
 };
 
 /*

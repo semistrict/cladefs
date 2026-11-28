@@ -105,6 +105,9 @@ impl From<&ConfigState> for Config {
             dax_private_max_bytes: config.dax_private_max_bytes,
             cladefsd_socket: config.cladefsd_socket.clone(),
             cache_type: config.cache_type,
+            // cladefs: a stream device's snapshots are refused (`SnapshotError::Stream`, board
+            // 14663): none restores with one.
+            stream: None,
         }
     }
 }
@@ -523,6 +526,11 @@ pub enum SnapshotError {
          (freeze the guest's filesystem, which rebinds them)"
     )]
     Private(String, u64),
+    #[error(
+        "Extent device {0}: its guest's requests go over vsock (`stream`), which a snapshot can't \
+         take yet (board 14663)"
+    )]
+    Stream(String),
 }
 
 #[cfg(test)]
@@ -752,6 +760,7 @@ mod tests {
             dax_private_max_bytes: Some(3 * 4096),
             cladefsd_socket: "/cladefsd.sock".into(),
             cache_type: CacheType::Writeback,
+            stream: None,
         };
         let state = ConfigState::from(&config);
         assert_eq!(state.dax_private_max_bytes, Some(3 * 4096));

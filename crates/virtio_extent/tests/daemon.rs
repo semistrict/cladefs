@@ -560,6 +560,7 @@ fn config(dir: &TestDir, path: &str) -> Config {
         dax_private_max_bytes: None,
         cladefsd_socket: dir.socket().display().to_string(),
         cache_type: CacheType::Writeback,
+        stream: None,
     }
 }
 

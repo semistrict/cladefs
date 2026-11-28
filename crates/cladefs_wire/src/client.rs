@@ -31,7 +31,7 @@ use futures::channel::oneshot;
 use futures::future::BoxFuture;
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::os::fd::{AsFd, OwnedFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::ptr::NonNull;
@@ -227,6 +227,20 @@ impl CellClient {
     /// [`CellClient::answer_stats`], waiting for the daemon holding no thread.
     pub async fn answer_stats_async(&self, ask: u64, guest: Option<&str>) -> Result<()> {
         self.client.answer_stats(ask, guest).await.map(drop)
+    }
+
+    /// cladefs: has the daemon serve the guest's doc-4 requests that come to `listener`, a
+    /// listening Unix stream socket this process bound where its vsock device connects the guest's
+    /// connections to the device's port ([`GUEST_STREAM`], board 14663): their uploaded commits
+    /// answered once ordered if `ordered_only`. Once a connection.
+    pub fn guest_stream(&self, ordered_only: bool, listener: BorrowedFd<'_>) -> Result<()> {
+        let request = Request::GuestStream { ordered_only, listener: crate::codec::Area(listener) };
+        let reply = self.client.request_blocking(&request)?;
+        match reply.fds.is_empty() {
+            true => Ok(()),
+            // A daemon's reply of a descriptor is no reply this build's daemon sends.
+            false => Err(Errno::EIO),
+        }
     }
 
     /// The cell whose extents the guest mints.

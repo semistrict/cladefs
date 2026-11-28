@@ -131,6 +131,7 @@ impl ExtentDevice {
                 ExtentCache::Writeback => virtio_extent::CacheType::Writeback,
                 ExtentCache::Unsafe => virtio_extent::CacheType::Unsafe,
             },
+            stream: None,
         };
         config
             .validate()
