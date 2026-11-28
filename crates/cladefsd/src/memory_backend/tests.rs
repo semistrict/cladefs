@@ -51,6 +51,45 @@ fn maps_file_page(addr: usize) -> bool {
     entry & 1 << 61 != 0
 }
 
+/// Reads the page of arena memory the page at `addr` maps, through a mapping of its own, as any
+/// VM process of the default tenant's may map it (shared, read-only): a hole there, faulted in
+/// as zeros. Returns its first byte.
+fn read_arena_page_of(addr: usize) -> u8 {
+    let (file, offset) = mapped_from(addr);
+    let inode: u64 = file.split_whitespace().nth(1).unwrap().parse().unwrap();
+    let tenant = default_tenant().unwrap();
+    let arenas = [tenant.arena(), cladefs_core::pages::ArenaId::DEFAULT];
+    let memory = (arenas.into_iter())
+        .filter_map(|arena| tenant.arena_memory(arena))
+        .find(|memory| {
+            // SAFETY: A stat of a descriptor the tenant holds, into a structure of the test's.
+            let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+            // SAFETY: As above.
+            let done = unsafe { libc::fstat(memory.as_raw_fd(), &mut stat) };
+            done == 0 && stat.st_ino == inode
+        })
+        .expect("the page maps an arena's memory");
+    let ps = page_size() as usize;
+    // SAFETY: Maps one page of the arena's memory, read-only, unmapped below.
+    let page = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            ps,
+            libc::PROT_READ,
+            libc::MAP_SHARED,
+            memory.as_raw_fd(),
+            offset as libc::off_t,
+        )
+    };
+    assert_ne!(page, libc::MAP_FAILED);
+    // SAFETY: The page just mapped, read, then unmapped.
+    unsafe {
+        let first = page.cast::<u8>().read_volatile();
+        libc::munmap(page, ps);
+        first
+    }
+}
+
 /// A userfaultfd made as Firecracker makes one: through `/dev/userfaultfd`, kernel faults
 /// included, no events but faults.
 fn userfaultfd() -> File {
@@ -277,7 +316,8 @@ fn resident(addr: usize) -> bool {
 /// from a fork of its own: each reads the image, its holes zeros, every node's range listed as
 /// its first touch reaches it; the data pages each maps are the same arena pages, shared, and
 /// stay so through the cache's eviction of them, paged in again where they were as the guests
-/// touch them; a store of one VM's is its own, the other's page unchanged.
+/// touch them, zeros another mapping faulted in there meanwhile never served; a store of one VM's
+/// is its own, the other's page unchanged.
 #[test]
 fn versions_serve_guest_memory_shared_between_vms() {
     let ps = page_size();
@@ -308,6 +348,9 @@ fn versions_serve_guest_memory_shared_between_vms() {
     cladefs_core::cache::evict_least_used(None, |_| false);
     for page in shared {
         assert!(!resident(a.addr(page * ps)), "page {page} wasn't evicted");
+        // Faulted in as zeros by another mapping before the part is paged in again there: what
+        // the VMs are served is still the image, never that.
+        assert_eq!(read_arena_page_of(a.addr(page * ps)), 0, "page {page}'s place isn't a hole");
     }
     assert!(a.read(0, size) == image, "the first VM's memory holds the image after an eviction");
     assert!(b.read(0, size) == image, "the second VM's memory holds the image after an eviction");
