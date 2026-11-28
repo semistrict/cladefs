@@ -254,6 +254,32 @@ fn streams_past_the_protocols_bounds_are_closed() {
     rig.finish();
 }
 
+/// A guest has four streams open at most: one past them is closed, each of those served on; and a
+/// stream closed is forgotten, its place another's, however many come and go (hotbed review 198).
+#[test]
+fn a_guest_has_four_streams_at_most() {
+    let rig = Rig::new();
+    let info = bytes::<()>(doc4::VIRTIO_EXTENT_T_INFO, 0, None, &[]);
+    let mut open: Vec<UnixStream> = (0..4).map(|_| rig.stream()).collect();
+    for stream in &mut open {
+        assert_eq!(request(stream, &info, size_of::<Info>() + RESPONSE).1, 0);
+    }
+    let mut past = rig.stream();
+    let mut rest = Vec::new();
+    assert_eq!(past.read_to_end(&mut rest).unwrap(), 0, "a fifth stream served");
+    // Streams come and go, many more than four, each forgotten as it closes: its end seen once
+    // the daemon forgot it.
+    for _ in 0..32 {
+        let mut closing = open.pop().unwrap();
+        closing.shutdown(std::net::Shutdown::Write).unwrap();
+        assert_eq!(closing.read_to_end(&mut rest).unwrap(), 0);
+        let mut stream = rig.stream();
+        assert_eq!(request(&mut stream, &info, size_of::<Info>() + RESPONSE).1, 0);
+        open.push(stream);
+    }
+    rig.finish();
+}
+
 /// A listener that is no listening Unix stream socket is refused, as is a second one, and a
 /// stream before the cell is open; and every stream is shut down as its connection ends.
 #[test]

@@ -885,6 +885,8 @@ async fn run_connection(stream: crate::wire::Stream, tenant: Arc<Tenant>, connec
         transfer: OnceLock::new(),
         #[cfg(all(target_os = "linux", not(madsim)))]
         guest_stream: Mutex::default(),
+        #[cfg(all(target_os = "linux", not(madsim)))]
+        stream_requests: Arc::default(),
         versions_made: SharedLock::new("connection versions", Mutex::new(Default::default())),
         closing: AtomicBool::new(false),
         ended: AtomicBool::new(false),
@@ -921,6 +923,10 @@ async fn run_connection(stream: crate::wire::Stream, tenant: Arc<Tenant>, connec
                     went.await
                 }
             };
+            // cladefs: its receiving over however it ended, which what waits for room for a request
+            // hears, its guest's streams' among them, as their requests won't be answered to anyone
+            // (board 14663).
+            connection.end_receiving();
             // Dropped unsent if receiving failed. cladefs: a VM process past the protocol's
             // bounds the daemon lets go of (TASK-79.16).
             if ended == Ok(Ended::Broke) {
@@ -1114,6 +1120,9 @@ struct Requests {
     running: usize,
     deferred: usize,
     stream_bytes: u64,
+    /// cladefs: whether its guest's streams stopped, after which none of their requests is
+    /// admitted, so that none reaches the cell once the connection drains (board 14663).
+    streams_stopped: bool,
 }
 
 impl Requests {
@@ -1539,6 +1548,11 @@ pub(super) struct Connection {
     /// board 14663), until stopped as the connection ends.
     #[cfg(all(target_os = "linux", not(madsim)))]
     guest_stream: Mutex<stream::GuestStream>,
+    /// cladefs: its guest's streams' requests in flight, from their reading to their replies'
+    /// writing, which its VM process's own bound, [`MAX_REQUESTS`], leaves out: each stream bounds
+    /// its own (board 14663).
+    #[cfg(all(target_os = "linux", not(madsim)))]
+    stream_requests: Arc<std::sync::atomic::AtomicUsize>,
     /// cladefs: the versions its VM process made ([`FORK_QUIESCENT`]), which alone it drops
     /// ([`FORK_DROP`], TASK-575).
     versions_made: SharedLock<Mutex<std::collections::BTreeSet<u64>>>,
@@ -1758,7 +1772,7 @@ impl Connection {
         let bytes = self.held_for(&header);
         {
             let requests = self.requests.with(Mutex::lock);
-            let in_flight = requests.in_flight();
+            let in_flight = requests.in_flight().saturating_sub(self.stream_requests());
             let held = requests.stream_bytes + bytes + self.peer.sender.queued();
             if in_flight >= MAX_REQUESTS || held > self.peer.credit() {
                 let what = format!("{} requests, and {held} bytes, in flight", in_flight + 1);
@@ -1819,6 +1833,15 @@ impl Connection {
 
     /// cladefs: ends its receiving: one waiting for room in its tenant's bytes in flight fails
     /// ([`Connection::take_in_flight`]), as its VM process went or the daemon drains.
+    /// cladefs: its guest's streams' requests in flight, which its VM process's own bound leaves
+    /// out (board 14663): none where it has no streams.
+    fn stream_requests(&self) -> usize {
+        #[cfg(all(target_os = "linux", not(madsim)))]
+        return self.stream_requests.load(Ordering::Relaxed);
+        #[cfg(not(all(target_os = "linux", not(madsim))))]
+        0
+    }
+
     fn end_receiving(&self) {
         self.ended.store(true, Ordering::Release);
         self.ending.notify(usize::MAX);
@@ -1829,6 +1852,14 @@ impl Connection {
     /// it then ([`Connection::serve_in_turn`]).
     fn admit(&self, work: Work) -> Option<Work> {
         let mut requests = self.requests.with(Mutex::lock);
+        // cladefs: a stream's request read as its streams stopped, answered with nothing written
+        // as it drops, outside the lock (board 14663).
+        #[cfg(all(target_os = "linux", not(madsim)))]
+        if requests.streams_stopped && matches!(work, Work::Stream(_)) {
+            drop(requests);
+            drop(work);
+            return None;
+        }
         if requests.running == WORKERS {
             requests.waiting.push_back(work);
             return None;

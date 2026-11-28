@@ -44,6 +44,7 @@ use cladefs_core::{
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError, mpsc};
 use zerocopy::{FromBytes, IntoBytes};
 
@@ -56,10 +57,20 @@ const BOUNDS: Bounds = Bounds {
     window: 0,
 };
 
-/// The most requests a stream has in flight: its reading waits for one to be done past them, so
-/// that a guest holds no more of the daemon's memory than that many requests' bytes. Two queues'
-/// worth of a VMM's device (`QUEUE_SIZE`).
-pub(super) const STREAM_REQUESTS: usize = 2 * protocol::QUEUE_SIZE as usize;
+/// The most requests a stream has in flight, from its reading to its reply's writing: its reading
+/// waits for one to be done past them. A VMM's device's queue's worth (`QUEUE_SIZE`).
+const STREAM_REQUESTS: usize = protocol::QUEUE_SIZE as usize;
+
+/// The most bytes a stream's requests in flight hold, what the device reads and writes of each,
+/// beside the tenant's bytes in flight that their serving holds too: its reading waits for room
+/// past them, so that a guest holds no more of the daemon's memory however slowly it reads its
+/// replies, or however long they wait for their turns. Room for one request whatever its size.
+const STREAM_BYTES: u64 = 64 << 20;
+
+/// The most streams a connection's guest has open at once: one connects past them is closed. Its
+/// driver keeps one, connecting again once one resets; a guest connecting many holds no more of
+/// the daemon's threads, descriptors and memory than these.
+const MAX_STREAMS: usize = 4;
 
 /// A connection's guest's stream: none yet; accepted on the VM process's listener, and the streams
 /// it accepted, which a stop shuts down; or stopped as the connection ends, after which none
@@ -70,10 +81,13 @@ pub(super) enum GuestStream {
     Unstarted,
     Listening {
         listener: Arc<OwnedFd>,
-        streams: Arc<Mutex<Vec<Arc<UnixStream>>>>,
+        streams: Streams,
     },
     Stopped,
 }
+
+/// A connection's guest's streams open, which each one's reading removes as it ends.
+type Streams = Arc<Mutex<Vec<Arc<UnixStream>>>>;
 
 /// A guest's request a stream received, to serve in its connection's turns: the bytes the device
 /// reads, the bytes it writes, and the reply it is owed.
@@ -84,68 +98,107 @@ pub(super) struct Received {
     owed: Owed,
 }
 
-/// The reply a stream's request is owed, to the request tagged `tag`: sent once
-/// ([`Owed::send`]), or, dropped unsent, as one of nothing written, which its guest takes for an
-/// `EIO`, so that none waits for good, whatever ends its serving: a panic, the connection ending
-/// first, or no thread to serve it.
+/// The reply a stream's request is owed, to the request tagged `tag`, which holds `bytes` of its
+/// stream's credit: sent once ([`Owed::send`]), or, dropped unsent, as one of nothing written,
+/// which its guest takes for an `EIO`, so that none waits for good, whatever ends its serving: a
+/// panic, the connection ending first, or no thread to serve it. Its credit is given back once its
+/// reply is written ([`write_replies`]), or couldn't be.
 struct Owed {
     tag: u64,
+    bytes: u64,
     replies: Option<Replies>,
 }
 
+/// A reply to write: its head, the bytes the device wrote, and the credit its request held.
+struct Reply {
+    head: StreamReply,
+    written: Vec<u8>,
+    bytes: u64,
+}
+
 impl Owed {
-    /// Sends the reply, `written` the bytes the device wrote, and counts its request done.
+    /// Sends the reply, `written` the bytes the device wrote.
     fn send(mut self, written: Vec<u8>) {
         let replies = self.replies.take().expect("a reply sent once");
-        Self::reply(&replies, self.tag, written);
+        Self::reply(&replies, self.tag, self.bytes, written);
     }
 
-    fn reply(replies: &Replies, tag: u64, written: Vec<u8>) {
+    fn reply(replies: &Replies, tag: u64, bytes: u64, written: Vec<u8>) {
         // At most MAX_WRITABLE, a u32's.
         let len = written.len() as u32;
         let head = StreamReply { tag: tag.to_le(), written: len.to_le(), reserved: 0 };
-        // Its writer gone, the stream ended: no guest to tell.
-        let _ = replies.sender.send((head, written));
-        replies.credit.give();
+        // Its writer gone, the stream ended: no guest to tell, its credit given back here.
+        if replies.sender.send(Reply { head, written, bytes }).is_err() {
+            replies.credit.give(bytes);
+        }
     }
 }
 
 impl Drop for Owed {
     fn drop(&mut self) {
         if let Some(replies) = self.replies.take() {
-            Self::reply(&replies, self.tag, Vec::new());
+            Self::reply(&replies, self.tag, self.bytes, Vec::new());
         }
     }
 }
 
-/// Where a stream's replies go, and its requests in flight, one of which each reply ends.
+/// Where a stream's replies go, and its credit, which each reply gives back as it is written.
 #[derive(Clone)]
 struct Replies {
-    sender: mpsc::Sender<(StreamReply, Vec<u8>)>,
+    sender: mpsc::Sender<Reply>,
     credit: Arc<Credit>,
 }
 
-/// A stream's requests in flight, [`STREAM_REQUESTS`] at most, and what its reading waits on.
-#[derive(Default)]
+/// A stream's requests in flight and their bytes, [`STREAM_REQUESTS`] and [`STREAM_BYTES`] at most,
+/// what its reading waits on; and its connection's count of every stream's requests in flight,
+/// which its VM process's own bound leaves out ([`Connection::stream_requests`]).
 struct Credit {
-    in_flight: Mutex<usize>,
+    held: Mutex<(usize, u64)>,
     done: Condvar,
+    connection: Arc<AtomicUsize>,
 }
 
 impl Credit {
-    /// Waits for room for a request more, and counts it.
-    fn take(&self) {
-        let mut in_flight = self.in_flight.lock().unwrap_or_else(PoisonError::into_inner);
-        while *in_flight >= STREAM_REQUESTS {
-            in_flight = self.done.wait(in_flight).unwrap_or_else(PoisonError::into_inner);
-        }
-        *in_flight += 1;
+    fn new(connection: Arc<AtomicUsize>) -> Self {
+        Self { held: Mutex::new((0, 0)), done: Condvar::new(), connection }
     }
 
-    /// A request is done.
-    fn give(&self) {
-        *self.in_flight.lock().unwrap_or_else(PoisonError::into_inner) -= 1;
+    /// Waits for room for a request more, of `bytes`, and counts it: room for one whatever its
+    /// size, with none held.
+    fn take(&self, bytes: u64) {
+        let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
+        while held.0 >= STREAM_REQUESTS || (held.0 > 0 && held.1 + bytes > STREAM_BYTES) {
+            held = self.done.wait(held).unwrap_or_else(PoisonError::into_inner);
+        }
+        *held = (held.0 + 1, held.1 + bytes);
+        self.connection.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A request of `bytes` is done.
+    fn give(&self, bytes: u64) {
+        {
+            let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
+            *held = (held.0 - 1, held.1 - bytes);
+        }
+        self.connection.fetch_sub(1, Ordering::Relaxed);
         self.done.notify_one();
+    }
+}
+
+/// A stream its reading holds: shut down and forgotten as the reading ends, however, a panic
+/// serving a request on its thread included, so that no guest waits on a stream no one reads.
+struct Reading {
+    stream: Arc<UnixStream>,
+    streams: Streams,
+}
+
+impl Drop for Reading {
+    /// Forgotten first, then shut down: a guest that sees its stream end may open another.
+    fn drop(&mut self) {
+        let mut streams = self.streams.lock().unwrap_or_else(PoisonError::into_inner);
+        streams.retain(|open| !Arc::ptr_eq(open, &self.stream));
+        drop(streams);
+        let _ = self.stream.shutdown(std::net::Shutdown::Both);
     }
 }
 
@@ -213,12 +266,7 @@ impl Connection {
     /// Accepts its guest's streams on `listener`, recording each in `streams`, and serves each on
     /// threads of its own: any connection from another process closed, until the connection's stop
     /// shuts the listener down, or it fails.
-    fn accept_streams(
-        self: Arc<Self>,
-        listener: &OwnedFd,
-        streams: &Mutex<Vec<Arc<UnixStream>>>,
-        ordered_only: bool,
-    ) {
+    fn accept_streams(self: Arc<Self>, listener: &OwnedFd, streams: &Streams, ordered_only: bool) {
         loop {
             // Waited for here, not in the accept, which the VM process may make return at once
             // (`O_NONBLOCK`, the listener's file its too), which would spin; woken by a shutdown.
@@ -244,11 +292,18 @@ impl Connection {
             };
             if accepted < 0 {
                 let err = std::io::Error::last_os_error();
-                match err.kind() {
-                    std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock => continue,
-                    // Shut down by the connection's stop, or failing: no stream comes.
+                match err.raw_os_error() {
+                    // The connection that came went first, or none came: the next.
+                    Some(libc::EINTR | libc::EAGAIN | libc::ECONNABORTED | libc::EPROTO) => {
+                        continue;
+                    }
+                    // Shut down by the connection's stop, or failing, as of no descriptors left:
+                    // shut down, its guest's next connections refused rather than waiting for an
+                    // accept that won't come.
                     _ => {
-                        log::info!("cladefsd: no more guest streams accepted: {err}");
+                        log::warn!("cladefsd: no more guest streams accepted: {err}");
+                        // SAFETY: Shuts down a listener this holds.
+                        unsafe { libc::shutdown(listener.as_raw_fd(), libc::SHUT_RDWR) };
                         return;
                     }
                 }
@@ -265,7 +320,7 @@ impl Connection {
             }
             let stream = Arc::new(UnixStream::from(socket));
             {
-                let mut streams = streams.lock().unwrap_or_else(PoisonError::into_inner);
+                let mut open = streams.lock().unwrap_or_else(PoisonError::into_inner);
                 // Recorded under the lock the stop takes, or shut down here, the stop past.
                 if !matches!(
                     *self.guest_stream.lock().unwrap_or_else(PoisonError::into_inner),
@@ -273,36 +328,41 @@ impl Connection {
                 ) {
                     return;
                 }
-                streams.push(stream.clone());
+                if open.len() >= MAX_STREAMS {
+                    log::warn!(
+                        "cladefsd: a guest's stream past the {MAX_STREAMS} it may have open: closed"
+                    );
+                    continue;
+                }
+                open.push(stream.clone());
             }
-            if let Err(err) = self.clone().serve_stream(stream.clone(), ordered_only) {
+            let reading = Reading { stream, streams: streams.clone() };
+            if let Err(err) = self.clone().serve_stream(reading, ordered_only) {
                 log::error!("cladefsd: serving a guest's stream: {err}");
-                let _ = stream.shutdown(std::net::Shutdown::Both);
             }
         }
     }
 
-    /// Serves `stream`, read on a thread of its own and answered on another.
-    fn serve_stream(
-        self: Arc<Self>,
-        stream: Arc<UnixStream>,
-        ordered_only: bool,
-    ) -> std::io::Result<()> {
-        let (sender, replies) = mpsc::channel::<(StreamReply, Vec<u8>)>();
-        let writer = stream.clone();
+    /// Serves the stream `reading` holds, read on a thread of its own and answered on another:
+    /// shut down, and forgotten, if either can't start.
+    fn serve_stream(self: Arc<Self>, reading: Reading, ordered_only: bool) -> std::io::Result<()> {
+        let (sender, replies) = mpsc::channel::<Reply>();
+        let credit = Arc::new(Credit::new(self.stream_requests.clone()));
+        let (writer, giving) = (reading.stream.clone(), credit.clone());
         std::thread::Builder::new()
             .name("cladefsd stream replies".into())
-            .spawn(move || write_replies(&writer, &replies))?;
-        let replies = Replies { sender, credit: Arc::new(Credit::default()) };
+            .spawn(move || write_replies(&writer, &replies, &giving))?;
+        let replies = Replies { sender, credit };
         std::thread::Builder::new()
             .name("cladefsd stream requests".into())
-            .spawn(move || self.read_requests(&stream, &replies, ordered_only))?;
+            .spawn(move || self.read_requests(&reading, &replies, ordered_only))?;
         Ok(())
     }
 
-    /// Reads `stream`'s requests, admitting each in the connection's turns, until it ends or
-    /// breaks the protocol's bounds, when it is shut down.
-    fn read_requests(self: Arc<Self>, stream: &UnixStream, replies: &Replies, ordered_only: bool) {
+    /// Reads the requests of the stream `reading` holds, admitting each in the connection's turns,
+    /// until it ends or breaks the protocol's bounds; then it is shut down ([`Reading`]).
+    fn read_requests(self: Arc<Self>, reading: &Reading, replies: &Replies, ordered_only: bool) {
+        let stream = &*reading.stream;
         let mut reading = stream;
         loop {
             let mut head = StreamRequest::default();
@@ -327,19 +387,26 @@ impl Connection {
                     "cladefsd: a guest's request of {readable} bytes to read and {writable} to \
                      write, out of the protocol's bounds: its stream closed"
                 );
-                let _ = stream.shutdown(std::net::Shutdown::Both);
                 return;
             }
+            // Its room had before its bytes are read, which it holds until its reply is written.
+            let held = (readable + writable) as u64;
+            replies.credit.take(held);
+            let owed = Owed { tag, bytes: held, replies: Some(replies.clone()) };
             let mut bytes = vec![0u8; readable];
             if let Err(err) = reading.read_exact(&mut bytes) {
                 log::info!("cladefsd: a guest's stream ended within a request: {err}");
                 return;
             }
-            replies.credit.take();
-            let owed = Owed { tag, replies: Some(replies.clone()) };
             let received = Received { ordered_only, readable: bytes, writable, owed };
             if let Some(work) = self.admit(Work::Stream(received)) {
-                self.clone().serve_in_turn(work);
+                // Its first poll here: a panic in it, which halted the cell and answered it
+                // (`StreamAnswer`), ends no more than it, as a task's ends no more than the task,
+                // the stream read on, its requests refused by the halted cell.
+                let serving = std::panic::AssertUnwindSafe(|| self.clone().serve_in_turn(work));
+                if std::panic::catch_unwind(serving).is_err() {
+                    log::error!("cladefsd: a panic serving a guest stream's request");
+                }
             }
         }
     }
@@ -355,6 +422,8 @@ impl Connection {
     /// Stops accepting its guest's streams, and reading them, as the connection ends: the requests
     /// they took are served still.
     pub(super) fn stop_guest_stream(&self) {
+        // Its streams' requests read from now on admitted none ([`Connection::admit`]).
+        self.requests.with(Mutex::lock).streams_stopped = true;
         let stopped = {
             let mut state = self.guest_stream.lock().unwrap_or_else(PoisonError::into_inner);
             std::mem::replace(&mut *state, GuestStream::Stopped)
@@ -429,18 +498,22 @@ impl Connection {
     }
 }
 
-/// Writes a stream's replies as they come, each whole, until every sender is gone or the stream
-/// fails, when it is shut down, its reading with it.
-fn write_replies(stream: &UnixStream, replies: &mpsc::Receiver<(StreamReply, Vec<u8>)>) {
-    let mut writing = stream;
-    for (reply, written) in replies {
-        if let Err(err) =
-            writing.write_all(reply.as_bytes()).and_then(|()| writing.write_all(&written))
+/// Writes a stream's replies as they come, each whole, giving back its request's credit once
+/// written, until every sender is gone. A stream that fails is shut down, its reading with it, and
+/// the replies after it go unwritten, their credit given back, so that a reading waiting for room
+/// reads on, to the stream's end.
+fn write_replies(stream: &UnixStream, replies: &mpsc::Receiver<Reply>, credit: &Credit) {
+    let mut writing = Some(stream);
+    for Reply { head, written, bytes } in replies {
+        if let Some(stream) = &mut writing
+            && let Err(err) =
+                stream.write_all(head.as_bytes()).and_then(|()| stream.write_all(&written))
         {
             log::info!("cladefsd: replying on a guest's stream: {err}");
             let _ = stream.shutdown(std::net::Shutdown::Both);
-            return;
+            writing = None;
         }
+        credit.give(bytes);
     }
 }
 
