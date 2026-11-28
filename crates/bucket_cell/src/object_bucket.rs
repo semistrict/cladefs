@@ -2008,10 +2008,8 @@ const ZOMBIE_HOLD: std::time::Duration = std::time::Duration::from_secs(8);
 /// a slow network or a paused process makes (the rules `head_swap`, `epoch_keys`, `wal_fences`,
 /// `wal_offset_checked` and the sweeps' exist for it). Its callers ask `buggify!` first, which is
 /// never true outside a simulation's run that switched it on: built normally the branch is gone.
-/// Nothing is sent, nor any lock held, while it waits, so a request dropped meanwhile never lands.
 async fn zombie_hold() {
-    let millis = ZOMBIE_HOLD.as_millis() as u64;
-    tokio::time::sleep(std::time::Duration::from_millis(crate::buggify::below(millis))).await;
+    crate::buggify::hold(ZOMBIE_HOLD).await;
 }
 
 impl Bucket for ObjectBucket {

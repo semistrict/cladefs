@@ -554,6 +554,11 @@ mod full_ops {
         Ok(Decommissioned { retired: retiring.len(), left: left.len() })
     }
 
+    /// cladefs: the longest a fork's record is held back by BUGGIFY ([`fork_version_keyed`]): past
+    /// a pass of the collector or two.
+    #[cfg(feature = "full")]
+    const FORK_HOLD: std::time::Duration = std::time::Duration::from_secs(4);
+
     /// cladefs: a restore of the version `version` of the cell `origin` names, at the segment it
     /// names, to `child`, whose owner is `owner` (doc-18, TASK-476): the child's head made, being
     /// made ([`Made::Forking`]), then its reference to its origin, then the cell's head read, which
@@ -587,6 +592,14 @@ mod full_ops {
         keys: Parents<'_>,
     ) -> Result<(), Error> {
         failpoint!("version::record");
+        // cladefs: BUGGIFY (board 14567, doc-24): the record made long after its caller looked the
+        // version up, as a slow network or a paused process makes it, so that the version is
+        // dropped, and a pass of the collector deletes what it alone kept, before the child's
+        // record lands (the rule `forks_check_versions` exists for it).
+        #[cfg(feature = "full")]
+        if crate::buggify!(0.3) {
+            crate::buggify::hold(FORK_HOLD).await;
+        }
         // cladefs: before creating a child head (which would embed parent DEKs wrapped under the
         // child's KEK), verify that a cross-tenant fork targets an existing, unshredded, shared
         // version (TASK-544, board 2484). Same-tenant forks still write `Made::Forking` before reading

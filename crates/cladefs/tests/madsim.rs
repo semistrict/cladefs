@@ -232,6 +232,8 @@ fn world() -> (Arc<RoutedBucket>, Arc<bucket_cell::faults::Seeded>) {
     // Once a process: a determinism check runs the test twice in it.
     let _ = cladefs::cladefsd::logging::to_stderr();
     bucket_cell::buggify::enable(madsim::runtime::Handle::current().seed());
+    // What an earlier run in this process found (a determinism check's): its own.
+    drop(bucket_cell::buggify::violations());
     let objects = Arc::new(object_store::memory::InMemory::new());
     // Board 14493: its requests let go one at a time, the one the seed picks of all waiting, as
     // local_cell::sim's bucket completes them: one may wait out any number of others.
@@ -592,13 +594,42 @@ struct Told {
     versions: std::sync::Mutex<Vec<(u64, Blocks)>>,
     /// cladefs: what the fork family's steps were told (`workloads::forks`, board 14567).
     forks: Arc<workloads::forks::Forks>,
-    /// cladefs: the stale family's episodes and what they found (`workloads::stale`, board 14566).
+    /// cladefs: the stale family's episodes (`workloads::stale`, board 14566).
     stale: workloads::stale::Episodes,
+    /// cladefs: what the run found done that none may ([`violated`]), which fails it once healed.
+    found: std::sync::Mutex<Vec<String>>,
+    /// cladefs: each extent a writer wrote, and the round whose writer did: a writer mints its
+    /// extents' IDs from its epoch's range, past every earlier writer's, so no two rounds' writers
+    /// write one (`epoch_sequences`, local_cell::sim's `minted`).
+    minted: std::sync::Mutex<std::collections::HashMap<cladefs::ExtentId, u64>>,
     /// cladefs: whether writers commit in bursts, as the seed says, blocks committed ordered and the
     /// burst's last uploaded, all told durable by it alone (board 14565): what a fast WAL writer's
     /// batch dropped while degraded leaves a gap in, a later batch's durability covering it
     /// (`wal_contiguous`).
     bursts: bool,
+}
+
+/// cladefs: notes that the run found done what none may, `lost`: to fail it once healed
+/// ([`found`]), and, in a search's process, said at once, as the run may not get that far (a cell
+/// deleted has no take that succeeds, which panics, finding nothing).
+fn violated(told: &Told, lost: String) {
+    eprintln!("violated: {lost}");
+    if std::env::var_os(SEARCH_SEED).is_some() {
+        println!("{LOST}{lost}");
+    }
+    told.found.lock().unwrap().push(lost);
+}
+
+/// cladefs: whether the run, healed, found done what none may: noted by its steps ([`violated`]),
+/// or by the code it runs ([`bucket_cell::buggify::violated`]), as FoundationDB's simulation fails a
+/// run on any event of severity error.
+fn found(told: &Told) -> Result<(), String> {
+    let mut found = std::mem::take(&mut *told.found.lock().unwrap());
+    found.extend(bucket_cell::buggify::violations());
+    match found.is_empty() {
+        true => Ok(()),
+        false => Err(found.join("; ")),
+    }
 }
 
 /// The block a writer writes at `sequence` of round `round`.
@@ -651,6 +682,12 @@ async fn write_round(
         if let Err(errno) = guest.write(extent, 0, &block).await {
             log::info!("round {round}: writing {sequence} of cell {cell}: {errno:?}");
             break;
+        }
+        if let Some(other) = told.minted.lock().unwrap().insert(extent, round) {
+            violated(
+                &told,
+                format!("extent {sequence} of cell {cell} written by rounds {other} and {round}"),
+            );
         }
         // cladefs: in a burst, as the seed says, committed ordered, told durable with the burst's
         // last, uploaded commit (`Told::bursts`).
@@ -1001,8 +1038,14 @@ fn needed(name: &str, off: fn(), profile: Profile, seeds: u64) {
         off();
         let seed = seed.parse().expect("a search's seed is a number");
         let runtime = madsim::runtime::Runtime::with_seed_and_config(seed, Default::default());
-        if let Err(lost) = runtime.block_on(attrition(profile)) {
-            println!("{LOST}{lost}");
+        let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            runtime.block_on(attrition(profile))
+        }));
+        // What the code did that none may, though the run went on to panic after.
+        match (bucket_cell::buggify::violations().into_iter().next(), run) {
+            (Some(lost), _) | (None, Ok(Err(lost))) => println!("{LOST}{lost}"),
+            (None, Ok(Ok(()))) => {}
+            (None, Err(panic)) => std::panic::resume_unwind(panic),
         }
         return;
     }
@@ -1735,6 +1778,7 @@ async fn attrition(profile: Profile) -> Result<(), String> {
     });
     healing.await.unwrap().map_err(|errno| format!("lifting the limits: {errno:?}"))?;
     manager.spawn(async move { try_take(1, cell, token_of(ROUNDS)).await }).await.unwrap()?;
+    found(&told)?;
     // The collector's last passes, one after the other.
     if let (Some(collector), Some(passes)) = (&collector, passes) {
         passes.abort();

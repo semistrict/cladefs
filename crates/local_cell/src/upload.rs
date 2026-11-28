@@ -2085,6 +2085,11 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         if !progress.stop {
             log::error!("cladefs: uploading cell {}: {err}", writer.cell());
         }
+        // What its cell needs gone or corrupt: no fault but a rule of the protocol broken.
+        if let Failure::Bucket(bucket_cell::Error::Lost(_) | bucket_cell::Error::Corrupt(_)) = &err
+        {
+            bucket_cell::buggify::violated(|| format!("uploading cell {}: {err}", writer.cell()));
+        }
         progress.failed = Some(err);
         self.changed.notify(usize::MAX);
     }

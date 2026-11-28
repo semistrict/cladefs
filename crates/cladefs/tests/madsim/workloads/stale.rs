@@ -33,13 +33,11 @@ const FROZEN_FOR: Duration = Duration::from_secs(4);
 /// [`crate::connect`] for 60).
 const ASK_WITHIN: Duration = Duration::from_secs(10);
 
-/// cladefs: what a run's episodes and its checks share, kept in its [`Told`] (`Told::stale`).
+/// cladefs: what a run's episodes share, kept in its [`Told`] (`Told::stale`).
 #[derive(Default)]
 pub(crate) struct Episodes {
     /// The hosts (0-based) an episode has cut off from the VM manager now: no other cuts them.
     cut: Mutex<BTreeSet<usize>>,
-    /// What the asks found a placement cut off do that none may, which fails the run once healed.
-    found: Mutex<Vec<String>>,
 }
 
 /// cladefs: a host cut off from the VM manager (its link from there lost, so that no take of the
@@ -159,17 +157,6 @@ async fn ask(host: u8, cell: u64, ask: Ask) -> Option<String> {
     }
 }
 
-/// cladefs: notes that a placement cut off did what none may, `lost`: to fail the run once healed
-/// ([`healed`]), and, in a search's process, said at once, as the cell may be past the rest of the
-/// run (a cell deleted has no take that succeeds, which panics, finding nothing).
-fn violated(told: &Told, lost: String) {
-    eprintln!("stale: {lost}");
-    if std::env::var_os(crate::SEARCH_SEED).is_some() {
-        println!("{}{lost}", crate::LOST);
-    }
-    told.stale.found.lock().unwrap().push(lost);
-}
-
 /// cladefs: what it does beside a round's writer (`profile.stale`), as the seed says: a host that
 /// is not the round's, which an earlier round's was (or the next round's), cut off from the VM
 /// manager, and paused or not, a while, running on unaware of the take this round made; then a
@@ -215,7 +202,7 @@ pub(crate) fn during(round: &Round<'_>) -> Vec<madsim::task::JoinHandle<()>> {
         madsim::time::sleep(frozen).await;
         cut.thaw();
         match madsim::time::timeout(ASK_WITHIN, ask(host, cell, asking)).await {
-            Ok(Some(lost)) => violated(&told, lost),
+            Ok(Some(lost)) => crate::violated(&told, lost),
             Ok(None) => {}
             Err(_) => log::info!("host {host}, cut off: {asking:?} of cell {cell} unanswered"),
         }
@@ -225,14 +212,10 @@ pub(crate) fn during(round: &Round<'_>) -> Vec<madsim::task::JoinHandle<()>> {
     vec![task]
 }
 
-/// cladefs: what it checks once healed: that no ask found a placement cut off do what none may
-/// (what the run did not already fail on), and that the cell lives, its latest placement's host
-/// answering for it.
+/// cladefs: what it checks once healed: that the cell lives, its latest placement's host answering
+/// for it. What an ask found a placement cut off do that none may failed the run already
+/// ([`crate::found`]).
 pub(crate) async fn healed(healed: &Healed<'_>) -> Result<(), String> {
-    let found = std::mem::take(&mut *healed.told.stale.found.lock().unwrap());
-    if !found.is_empty() {
-        return Err(found.join("; "));
-    }
     let cell = healed.cell;
     let stat = healed.manager.spawn(async move {
         let stating = || async move {

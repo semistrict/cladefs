@@ -67,6 +67,47 @@ pub fn below(bound: u64) -> u64 {
     RUN.with(|run| run.borrow_mut().as_mut().map_or(0, |run| run.next() % bound.max(1)))
 }
 
+/// cladefs: waits a while, up to `most` of the clock's time, as the run's draws say ([`below`]), for
+/// a site that fired: a request held back, as a slow network or a paused process holds it, so that
+/// what races it lands first. Nothing is sent, nor any lock held, while it waits, so a request its
+/// caller drops meanwhile never lands. Built normally no site fires, and none waits; nor does one
+/// on an executor with no clock, as local_cell::sim's, whose scheduler holds requests itself.
+pub async fn hold(most: std::time::Duration) {
+    if tokio::runtime::Handle::try_current().is_err() {
+        return;
+    }
+    let millis = u64::try_from(most.as_millis()).unwrap_or(u64::MAX);
+    tokio::time::sleep(std::time::Duration::from_millis(below(millis))).await;
+}
+
+/// cladefs: notes that the code did what none may, `what`, as FoundationDB's simulation fails a run
+/// on any event of severity error (board 14565): a writer stopped finding what its cell needs gone
+/// or corrupt, which no fault the simulations make may cause, only a rule of the protocol broken.
+/// The simulation's checker reads them ([`violations`]). Built normally, nothing: production logs
+/// what it found, as it always did.
+#[cfg(not(any(test, feature = "testing")))]
+#[inline(always)]
+pub fn violated(_what: impl FnOnce() -> String) {}
+
+/// cladefs: notes that the code did what none may, `what`, as FoundationDB's simulation fails a run
+/// on any event of severity error (board 14565), for the simulation's checker ([`violations`]).
+#[cfg(any(test, feature = "testing"))]
+pub fn violated(what: impl FnOnce() -> String) {
+    VIOLATIONS.with(|violations| violations.borrow_mut().push(what()));
+}
+
+/// cladefs: what this thread's code did that none may since it was last asked ([`violated`]), in
+/// the order it did them, taken.
+#[cfg(any(test, feature = "testing"))]
+pub fn violations() -> Vec<String> {
+    VIOLATIONS.with(|violations| std::mem::take(&mut *violations.borrow_mut()))
+}
+
+#[cfg(any(test, feature = "testing"))]
+thread_local! {
+    static VIOLATIONS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 #[cfg(any(test, feature = "testing"))]
 struct Run {
     seed: u64,

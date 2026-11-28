@@ -54,8 +54,9 @@ pub(crate) const FREED: Profile = Profile { frees: true, ..FORKS };
 
 /// [`FREED`], no base made and deleted by the attrition itself, which [`Mix::of`] reads as: versions
 /// dropped alone ([`Plan::drop_alone`]), and forked long after ([`Plan::late`]), once the collector
-/// passed and deleted the extents the blocks freed since left it, so that a fork that is not refused
-/// for its version dropped (`forks_check_versions`) reads what is gone.
+/// passed and deleted the extents the blocks freed since left it; and dropped as they are forked
+/// ([`Plan::dropped`]), the forks' records held back by BUGGIFY past the collector's passes: so that
+/// a fork that is not refused for its version dropped (`forks_check_versions`) reads what is gone.
 pub(crate) const FORKED_LATE: Profile = Profile { bases: false, ..FREED };
 
 /// [`FREED`], hosts losing their disks as they are killed ([`Profile::lose`], which [`Mix::of`] reads
@@ -368,11 +369,15 @@ impl Mix {
     fn steps(self) -> &'static [Step] {
         match self {
             Self::Whole => &[Step::Restore, Step::Pair, Step::Dropped, Step::Killed, Step::Base],
+            // Versions dropped as they are forked too, the forks' records held back by BUGGIFY past
+            // the collector's passes (`bucket_cell::lifecycle::fork_version_keyed`).
             Self::Late => &[
                 Step::DropAlone,
                 Step::DropAlone,
                 Step::Late,
                 Step::Late,
+                Step::Dropped,
+                Step::Dropped,
                 Step::Restore,
                 Step::Killed,
             ],
@@ -473,14 +478,25 @@ impl Plan {
         })
     }
 
-    /// Drops `version` of the writers' cell through the writer's host.
+    /// Drops `version` of the writers' cell through the writer's host; or, once a later round took
+    /// the cell elsewhere, its copy there stale or fenced, or gone, through the host that holds it
+    /// now, as a VM manager asks the host it placed the cell on: the last host's refusal if none
+    /// dropped it.
     async fn drop_version(&self, version: u64) -> Result<(), Option<Errno>> {
         let cell = self.cell;
-        ask(self.writer as u8 + 1, move |mut daemon| async move {
-            let dropping = DropVersionsRequest { versions: vec![version], tenant: 0, cell };
-            daemon.drop_versions(dropping).await.map(drop)
-        })
-        .await
+        let hosts = self.nodes.len();
+        let mut dropped = Err(None);
+        for host in (0..hosts).map(|at| (self.writer + at) % hosts) {
+            dropped = ask(host as u8 + 1, move |mut daemon| async move {
+                let dropping = DropVersionsRequest { versions: vec![version], tenant: 0, cell };
+                daemon.drop_versions(dropping).await.map(drop)
+            })
+            .await;
+            if dropped.is_ok() {
+                break;
+            }
+        }
+        dropped
     }
 
     /// A version forked on another host.
