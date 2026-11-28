@@ -943,32 +943,63 @@ async fn alloc_with_retry(
     arena: ArenaId,
     pages: u64,
 ) -> Result<PartSlab, slabs::NoMemory> {
+    let asked = (slabs.clone(), arena, pages);
+    let alloc = |(slabs, arena, pages): &(Arc<slabs::HostSlabs>, ArenaId, u64), wait| {
+        slabs.alloc(*arena, *pages, wait)
+    };
+    with_memory(slabs, total_is_the_hosts, arena, asked, alloc).await.0
+}
+
+/// cladefs: populates `slab`, placed, of `arena` (board 14629), as [`alloc_with_retry`]
+/// allocates: what it came to, and the slab.
+async fn populate_with_retry(
+    slabs: &Arc<slabs::HostSlabs>,
+    total_is_the_hosts: impl Fn() -> bool,
+    arena: ArenaId,
+    slab: PartSlab,
+) -> (Result<(), slabs::NoMemory>, PartSlab) {
+    with_memory(slabs, total_is_the_hosts, arena, slab, |slab, wait| slab.populate(wait)).await
+}
+
+/// cladefs: what an allocation of `arena`'s memory goes through: `attempt` on `held`, without
+/// waiting; then waiting for relief, off async workers when in Tokio; and again with bounded
+/// backoff while the host's governed total cap is full and room may still return (board 5662,
+/// board 11703). What it came to, and `held` back.
+async fn with_memory<H: Send + 'static, T: Send + 'static>(
+    slabs: &Arc<slabs::HostSlabs>,
+    total_is_the_hosts: impl Fn() -> bool,
+    arena: ArenaId,
+    // Moved into a blocking task and back, but where it waits on the thread it is on.
+    #[cfg_attr(any(madsim, feature = "shuttle"), allow(unused_mut))] mut held: H,
+    attempt: fn(&H, slabs::Wait) -> Result<T, slabs::NoMemory>,
+) -> (Result<T, slabs::NoMemory>, H) {
     let mut pause = RETRY_FIRST;
     loop {
-        let alloc = match slabs.alloc(arena, pages, slabs::Wait::No) {
-            Ok(slab) => Ok(slab),
+        let tried = match attempt(&held, slabs::Wait::No) {
+            Ok(done) => Ok(done),
             Err(slabs::NoMemory) => {
                 #[cfg(all(not(madsim), not(feature = "shuttle")))]
                 {
                     if tokio::runtime::Handle::try_current().is_ok() {
-                        let slabs = slabs.clone();
-                        tokio::task::spawn_blocking(move || {
-                            slabs.alloc(arena, pages, slabs::Wait::Yes)
+                        let (tried, back) = tokio::task::spawn_blocking(move || {
+                            (attempt(&held, slabs::Wait::Yes), held)
                         })
                         .await
-                        .expect("a slab allocation panicked")
+                        .expect("a slab allocation panicked");
+                        held = back;
+                        tried
                     } else {
-                        slabs.alloc(arena, pages, slabs::Wait::Yes)
+                        attempt(&held, slabs::Wait::Yes)
                     }
                 }
                 #[cfg(any(madsim, feature = "shuttle"))]
                 {
-                    slabs.alloc(arena, pages, slabs::Wait::Yes)
+                    attempt(&held, slabs::Wait::Yes)
                 }
             }
         };
-        match alloc {
-            Ok(slab) => return Ok(slab),
+        match tried {
+            Ok(done) => return (Ok(done), held),
             Err(slabs::NoMemory) if slabs.room_may_come(arena) && total_is_the_hosts() => {
                 waiting_for_memory();
                 #[cfg(not(feature = "shuttle"))]
@@ -986,7 +1017,7 @@ async fn alloc_with_retry(
                 }
                 pause = (pause * 2).min(RETRY_MOST);
             }
-            Err(slabs::NoMemory) => return Err(slabs::NoMemory),
+            Err(slabs::NoMemory) => return (Err(slabs::NoMemory), held),
         }
     }
 }
@@ -1439,6 +1470,21 @@ struct Parts {
     /// in-flight `Filling` page-in discards its slab instead of publishing it, and every waiter
     /// fails with `EACCES` (TASK-630, board 2658, board 5544, board 2704).
     revoked: bool,
+    /// cladefs: per part, how many lists place it ([`CachedExtent::place`], board 14629): while
+    /// any does, it is paged in at one place, its home, kept as it is evicted.
+    placements: Vec<u32>,
+    /// cladefs: per part placed, its home while its slot holds no slab: placed, holding no memory
+    /// (`slabs::HostSlabs::place`), or depopulated as it was evicted. A page-in takes it, filling
+    /// it where it is; a part present holds its home in its slot.
+    homes: Vec<Option<PartSlab>>,
+}
+
+/// cladefs: where a part of a cached extent is paged in ([`CachedExtent::place`], board 14629):
+/// its pages of the extent, and where the first of them is in its arena's object.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Placement {
+    pub pages: Range<u64>,
+    pub at: PhysLocation,
 }
 
 /// The part page `page` of an extent is in: of an object's parts (`extent_frame::PART`), which a
@@ -1504,6 +1550,8 @@ impl CachedExtent {
             windows: HashMap::new(),
             next: 0,
             revoked: false,
+            placements: vec![0; count],
+            homes: std::iter::repeat_with(|| None).take(count).collect(),
         };
         let eviction_id = cache.next_eviction_id.fetch_add(1, Ordering::Relaxed);
         Self {
@@ -1862,12 +1910,14 @@ impl CachedExtent {
     /// already evicted, and ensuring any in-flight `Filling` page-in drops its slab without
     /// installing it (TASK-630, board 2658, board 5544, board 2704; review 102 finding 351).
     pub fn revoke(&self) -> u64 {
-        let windows = {
+        let (windows, homes) = {
             let mut parts = self.parts.with(Mutex::lock);
             parts.revoked = true;
+            let homes: Vec<PartSlab> = parts.homes.iter_mut().filter_map(Option::take).collect();
             parts.windows.retain(|_, window| window.strong_count() > 0);
-            parts.windows.values().filter_map(Weak::upgrade).collect::<Vec<_>>()
+            (parts.windows.values().filter_map(Weak::upgrade).collect::<Vec<_>>(), homes)
         };
+        drop(homes);
         self.changed.notify(usize::MAX);
         let evicted = self.evict();
         let identity = self as *const Self as *const () as usize;
@@ -1930,11 +1980,34 @@ impl CachedExtent {
         for window in windows {
             window.unmap_pages_of(identity, &|at| evicted.contains(at));
         }
-        {
+        let bytes = evictions.iter().map(|eviction| eviction.slab.len()).sum();
+        let evictions = {
             let at_ms =
                 self.cache.upgrade().map_or(1, |cache| cache.clock_ms.load(Ordering::Relaxed));
+            // cladefs: a part lists place keeps its slab as its home (board 14629), punched out
+            // while its slot still says it is being evicted, so that neither a page-in nor a
+            // placement takes it before its punch; and past the extent's lock, as the slabs are
+            // called nowhere under it. One staged to a VM process, which may map it shared until
+            // it has made what took it away, waits for that in quarantine, as any: a refill goes
+            // elsewhere, and the lists' handler copies.
+            let homing: Vec<bool> = {
+                let parts = self.parts.with(Mutex::lock);
+                (evictions.iter())
+                    .map(|eviction| {
+                        parts.placements[eviction.part] > 0
+                            && !parts.revoked
+                            && !eviction.slab.is_staged()
+                    })
+                    .collect()
+            };
+            for (eviction, home) in evictions.iter().zip(&homing) {
+                if *home {
+                    eviction.slab.depopulate();
+                }
+            }
             let mut parts = self.parts.with(Mutex::lock);
-            for eviction in &evictions {
+            let mut freed = Vec::with_capacity(evictions.len());
+            for (eviction, home) in evictions.into_iter().zip(homing) {
                 let slot = &mut parts.slots[eviction.part];
                 assert!(
                     matches!(slot, PartSlot::Evicting(token) if *token == eviction.token),
@@ -1943,10 +2016,19 @@ impl CachedExtent {
                     self.extent
                 );
                 *slot = PartSlot::Evicted { at_ms, by_governor };
+                // Placed by none since, or revoked: freed after all, punched already.
+                let still = parts.placements[eviction.part] > 0
+                    && !parts.revoked
+                    && parts.homes[eviction.part].is_none();
+                if home && still {
+                    parts.homes[eviction.part] = Some(eviction.slab);
+                } else {
+                    freed.push(eviction);
+                }
             }
-        }
+            freed
+        };
         self.changed.notify(usize::MAX);
-        let bytes = evictions.iter().map(|eviction| eviction.slab.len()).sum();
         // Freed past the extent's lock, each into quarantine if it was staged.
         drop(evictions);
         bytes
@@ -2036,28 +2118,154 @@ impl CachedExtent {
     /// past its end.
     async fn fill(&self, part: usize) -> std::result::Result<PartSlab, anyhow::Error> {
         let pages = self.part_pages(part);
+        let total_is_the_hosts = || {
+            self.cache
+                .upgrade()
+                .is_some_and(|cache| cache.total_is_the_hosts.load(Ordering::Relaxed))
+        };
+        // cladefs: a part placed is paged in at its home, populated (board 14629).
+        let home = self.parts.with(Mutex::lock).homes[part].take();
         // cladefs: with no memory for it, relief having found none to free, the host's memory
         // full, it waits for some rather than fail the guest's fault, which killed its VM (board
         // 5662), the governor telling the VM manager by refusing cells
         // (`cladefsd::governor::full`). At its arena's own cap, or past a limit the control API
         // set, it fails, as before.
-        let slab = alloc_with_retry(
-            &self.slabs,
-            || {
-                self.cache
-                    .upgrade()
-                    .is_some_and(|cache| cache.total_is_the_hosts.load(Ordering::Relaxed))
-            },
-            self.arena,
-            pages.end - pages.start,
-        )
-        .await
-        .map_err(|_| anyhow::Error::new(NoPages))?;
+        let slab = match home {
+            Some(home) => {
+                let (populated, home) =
+                    populate_with_retry(&self.slabs, total_is_the_hosts, self.arena, home).await;
+                if populated.is_err() {
+                    self.home_again(part, home);
+                    return Err(anyhow::Error::new(NoPages));
+                }
+                home
+            }
+            None => alloc_with_retry(
+                &self.slabs,
+                total_is_the_hosts,
+                self.arena,
+                pages.end - pages.start,
+            )
+            .await
+            .map_err(|_| anyhow::Error::new(NoPages))?,
+        };
         let offset = pages.start * page_size();
         // What of it the extent holds; past it, zeros.
         let len = self.len.saturating_sub(offset).min(slab.len());
-        self.contents.fill(offset, len, &slab).await?;
+        if let Err(err) = self.contents.fill(offset, len, &slab).await {
+            self.home_again(part, slab);
+            return Err(err);
+        }
         Ok(slab)
+    }
+
+    /// cladefs: `slab`, of part `part`, a page-in having failed, made its home again, depopulated,
+    /// if lists still place the part and it isn't revoked; else freed (board 14629).
+    fn home_again(&self, part: usize, slab: PartSlab) {
+        // Punched past the extent's lock, which no one else sees it by yet.
+        slab.depopulate();
+        let freed = {
+            let mut table = self.parts.with(Mutex::lock);
+            if table.placements[part] > 0 && !table.revoked && table.homes[part].is_none() {
+                table.homes[part] = Some(slab);
+                None
+            } else {
+                Some(slab)
+            }
+        };
+        drop(freed);
+    }
+
+    /// cladefs: places the parts holding its pages `pages` (board 14629), for a list naming where
+    /// they are paged in, as cladefsd's memory backend lists them: each part paged in, when it
+    /// is, at one place while any list places it, its home, which an eviction keeps (punched, its
+    /// memory the host's again) and a page-in fills again. Where each is: a part present, its
+    /// slab's; one not, its home, placed now if it had none, holding no memory until paged in.
+    /// Each call to be matched by an [`CachedExtent::unplace`] of the same pages.
+    pub async fn place(self: &Arc<Self>, pages: Range<u64>) -> Result<Vec<Placement>> {
+        let parts = self.parts_of(pages);
+        {
+            let mut table = self.parts.with(Mutex::lock);
+            if table.revoked {
+                return Err(Errno::EACCES);
+            }
+            for part in parts.clone() {
+                table.placements[part] += 1;
+            }
+        }
+        let mut placed = Vec::with_capacity(parts.len());
+        for part in parts.clone() {
+            match self.home_of(part).await {
+                Ok(at) => placed.push(Placement { pages: self.part_pages(part), at }),
+                Err(errno) => {
+                    self.unplace_parts(parts);
+                    return Err(errno);
+                }
+            }
+        }
+        Ok(placed)
+    }
+
+    /// cladefs: where part `part`, which a list places, is paged in: its slab's place, present;
+    /// its home's, placed if it had none, past the extent's lock, as the slabs are called nowhere
+    /// under it; once it is no longer being read in or evicted.
+    async fn home_of(&self, part: usize) -> Result<PhysLocation> {
+        let mut placed: Option<PartSlab> = None;
+        loop {
+            let listener = {
+                let mut table = self.parts.with(Mutex::lock);
+                if table.revoked {
+                    return Err(Errno::EACCES);
+                }
+                match &table.slots[part] {
+                    PartSlot::Present(slab) => return Ok(slab.location()),
+                    PartSlot::Filling | PartSlot::Evicting(_) => {}
+                    PartSlot::Absent | PartSlot::Evicted { .. } | PartSlot::Failed(_) => {
+                        if table.homes[part].is_none()
+                            && let Some(home) = placed.take()
+                        {
+                            table.homes[part] = Some(home);
+                        }
+                        if let Some(home) = &table.homes[part] {
+                            let at = home.location();
+                            drop(table);
+                            // One placed while another took its place first: freed.
+                            drop(placed);
+                            return Ok(at);
+                        }
+                        drop(table);
+                        let pages = self.part_pages(part);
+                        let home = self.slabs.place(self.arena, pages.end - pages.start);
+                        placed = Some(home.map_err(|_| Errno::ENOMEM)?);
+                        continue;
+                    }
+                }
+                // Listened for under the lock, which what changes the part takes.
+                self.changed.listen()
+            };
+            listener.await;
+        }
+    }
+
+    /// cladefs: ends a [`CachedExtent::place`] of its pages `pages` (board 14629): a part no list
+    /// places any more frees its home, if its slot holds none; one present stays in memory, as
+    /// any part paged in does, evicted from then on as one placed by none.
+    pub fn unplace(&self, pages: Range<u64>) {
+        self.unplace_parts(self.parts_of(pages));
+    }
+
+    fn unplace_parts(&self, parts: Range<usize>) {
+        let freed: Vec<PartSlab> = {
+            let mut table = self.parts.with(Mutex::lock);
+            (parts.filter_map(|part| {
+                let placements = &mut table.placements[part];
+                *placements = placements.checked_sub(1).expect("a part unplaced, not placed");
+                (*placements == 0).then(|| table.homes[part].take()).flatten()
+            }))
+            .collect()
+        };
+        // Freed past the extent's lock.
+        drop(freed);
     }
 
     /// Marks the part of `page`, and those after it a reader reading on asks for next, filling,
@@ -2231,6 +2439,110 @@ impl Source for Zeros {
 }
 
 /// cladefs: board 5662: page-ins of a host whose memory is full.
+/// cladefs: parts placed by lists (board 14629): paged in at their homes, kept through
+/// evictions, punched; freed once no list places them.
+#[cfg(all(test, not(madsim), not(feature = "shuttle")))]
+mod placement {
+    use super::*;
+
+    /// Contents whose every byte of part `n` is `n + 1`.
+    struct ByPart;
+
+    impl Contents for ByPart {
+        fn read<'a>(
+            &'a self,
+            offset: u64,
+            buf: &'a mut [u8],
+        ) -> BoxFuture<'a, std::result::Result<(), anyhow::Error>> {
+            Box::pin(async move {
+                for (at, byte) in buf.iter_mut().enumerate() {
+                    *byte = ((offset + at as u64) / extent_frame::PART + 1) as u8;
+                }
+                Ok(())
+            })
+        }
+    }
+
+    /// An extent of two parts read from [`ByPart`], cached in an arena of its own.
+    fn two_parts() -> (ArenaId, Arc<CachedExtent>) {
+        let arena = slabs::create_arena().unwrap();
+        let extent = ExtentId { cell: 14629, sequence: u64::from(arena.0) };
+        let len = 2 * extent_frame::PART;
+        let cached = Arc::new(CachedExtent::new(arena, extent, Box::new(ByPart), len));
+        (arena, cached)
+    }
+
+    /// Where its page `page` is, present.
+    fn present_at(cached: &CachedExtent, page: u64) -> Option<PhysLocation> {
+        let mut at = None;
+        cached.each_present(page..page + 1, &mut |present| at = Some(present.at));
+        at
+    }
+
+    /// A part placed is paged in at its home, which holds no memory until then; evicted, its
+    /// home is kept, punched, and placed again it is there; paged in again, it is there with its
+    /// bytes. Its pages count as its arena's while present alone.
+    #[test]
+    fn placed_parts_page_in_at_their_homes_through_evictions() {
+        let (arena, cached) = two_parts();
+        let pages = cached.pages();
+        let part_pages = extent_frame::PART / page_size();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let placed = cached.place(0..pages).await.unwrap();
+            assert_eq!(placed.len(), 2);
+            assert_eq!(placed[0].pages, 0..part_pages);
+            assert_eq!(placed[1].pages, part_pages..pages);
+            assert_eq!(slabs::arena_bytes(arena), 0, "homes placed hold no memory");
+
+            // The second part first, which no reader reads ahead of.
+            assert_eq!(cached.clone().bring_in(part_pages).await, Ok(true));
+            assert_eq!(present_at(&cached, part_pages), Some(placed[1].at), "at its home");
+            assert_eq!(slabs::arena_bytes(arena), extent_frame::PART);
+
+            assert_eq!(cached.evict(), extent_frame::PART);
+            assert_eq!(slabs::arena_bytes(arena), 0, "evicted, punched");
+            assert_eq!(slabs::is_free(placed[1].at), Some(false), "its home kept");
+            assert_eq!(cached.place(0..pages).await.unwrap(), placed, "placed again, there");
+
+            assert_eq!(cached.clone().bring_in(0).await, Ok(true));
+            assert_eq!(present_at(&cached, 0), Some(placed[0].at));
+            let mut byte = [0u8];
+            cached.read(0, &mut byte).await.unwrap();
+            assert_eq!(byte, [1], "its bytes, at its home");
+            assert_eq!(cached.clone().bring_in(part_pages).await, Ok(true));
+            assert_eq!(present_at(&cached, part_pages), Some(placed[1].at), "refilled there");
+            cached.read(extent_frame::PART, &mut byte).await.unwrap();
+            assert_eq!(byte, [2]);
+            assert_eq!(cached.evict(), 2 * extent_frame::PART);
+
+            // Unplaced by both lists: the parts' homes freed.
+            cached.unplace(0..pages);
+            cached.unplace(0..pages);
+            assert_eq!(slabs::is_free(placed[0].at), Some(true));
+            assert_eq!(slabs::is_free(placed[1].at), Some(true));
+        });
+    }
+
+    /// A part placed while present is placed where it is; a revoked extent places nothing, and
+    /// gives up the homes it had.
+    #[test]
+    fn present_parts_place_where_they_are_and_revoked_extents_none() {
+        let (_, cached) = two_parts();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            assert_eq!(cached.clone().bring_in(0).await, Ok(true));
+            let at = present_at(&cached, 0).unwrap();
+            let placed = cached.place(0..1).await.unwrap();
+            assert_eq!(placed[0].at, at);
+            let other = cached.place(cached.pages() - 1..cached.pages()).await.unwrap();
+            cached.revoke();
+            assert_eq!(slabs::is_free(other[0].at), Some(true), "its home freed");
+            assert_eq!(cached.place(0..1).await, Err(Errno::EACCES));
+        });
+    }
+}
+
 #[cfg(test)]
 mod full_host {
     use super::*;
@@ -2868,6 +3180,62 @@ mod shuttle_tests {
         cached.evict();
         drop((dax, window));
         STAGE.lock().unwrap().take();
+    }
+
+    /// board 14629: an extent of two parts, placed by a list, its parts paged in and evicted on
+    /// threads of their own while a second list places it and ends: each part stays where the
+    /// first list placed it, as long as that list places it, its bytes there whenever present.
+    /// An eviction's punch made after its home was published, or a home freed by the second
+    /// list's end, would move a part or fill its place with another's bytes.
+    fn placements_race_evictions_and_page_ins() {
+        let part = extent_frame::PART;
+        let ps = page_size();
+        let extent = ExtentId { cell: 0, sequence: 14629 };
+        let cached =
+            Arc::new(CachedExtent::new(ArenaId::DEFAULT, extent, Box::new(Numbered), 2 * part));
+        let pages = cached.pages();
+        let first = future::block_on(cached.place(0..pages)).unwrap();
+        let workers: Vec<_> = (0..2u64)
+            .map(|which| {
+                let cached = cached.clone();
+                thread::spawn(move || {
+                    let page = which * part / ps;
+                    future::block_on(cached.clone().bring_in(page)).unwrap();
+                    cached.evict_pages(page..page + part / ps);
+                    future::block_on(cached.clone().bring_in(page)).unwrap();
+                })
+            })
+            .collect();
+        let second = {
+            let cached = cached.clone();
+            thread::spawn(move || {
+                let placed = future::block_on(cached.place(0..pages)).unwrap();
+                cached.unplace(0..pages);
+                placed
+            })
+        };
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        assert_eq!(second.join().unwrap(), first, "placed again elsewhere");
+        for (n, placement) in first.iter().enumerate() {
+            let mut at = None;
+            cached.each_present(placement.pages.clone(), &mut |present| at = Some(present.at));
+            assert_eq!(at, Some(placement.at), "part {n} moved");
+            let mut byte = [0u8];
+            future::block_on(cached.read(n as u64 * part, &mut byte)).unwrap();
+            assert_eq!(byte, [n as u8 + 1], "part {n}'s bytes");
+        }
+        cached.unplace(0..pages);
+        cached.evict();
+    }
+
+    #[test]
+    fn placements_race_evictions_and_page_ins_in_any_order() {
+        Runner::new(RandomScheduler::new(runs(100)), config())
+            .run(placements_race_evictions_and_page_ins);
+        Runner::new(PctScheduler::new(3, runs(100)), config())
+            .run(placements_race_evictions_and_page_ins);
     }
 
     #[test]

@@ -26,6 +26,7 @@ _SPECS = [
     "fast-wal",
     "journal",
     "part-slabs",
+    "placed-parts",
 ]
 
 [
