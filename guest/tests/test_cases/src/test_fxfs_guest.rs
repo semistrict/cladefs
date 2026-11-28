@@ -1712,11 +1712,16 @@ mod guest {
             writer.join().unwrap();
         }
         if streamed {
-            // A write and a commit at least each, every one replied to.
+            // A write and a commit at least each, sent and replied to, the writers' every request
+            // done: others, the filesystem's own in the background, may be in flight still.
             let (sent, replies) = stream_requests();
             let writers = before.len() as u64;
-            assert!(sent >= stream_before.0 + 2 * writers, "{sent} sent, {stream_before:?} before");
-            assert_eq!(replies, sent, "the stream's replies");
+            let (sent_before, replies_before) = stream_before;
+            assert!(sent >= sent_before + 2 * writers, "{sent} sent, {sent_before} before");
+            assert!(
+                replies >= replies_before + 2 * writers,
+                "{replies} replies, {replies_before} before"
+            );
             return;
         }
         let after = queue_requests();
