@@ -20,8 +20,9 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 /// version moves. Its driver's is `VIRTIO_EXTENT_VERSION`
 /// (guest/linux/include/linux/virtio_extent.h).
 /// cladefs: version 2 dropped the followers' `F_READ_ONLY`, `ADVANCE`, `LET_GO`, `PIN`, `UNPIN`
-/// and the configuration's `committed` (board 8237).
-pub const VIRTIO_EXTENT_VERSION: u32 = 2;
+/// and the configuration's `committed` (board 8237). Version 3 added [`VIRTIO_EXTENT_F_STREAM`]
+/// and the configuration's `stream_port` (board 14663).
+pub const VIRTIO_EXTENT_VERSION: u32 = 3;
 
 /// The device's virtio device type: `0x4658`, "FX" (backlog doc-4).
 pub const VIRTIO_ID_EXTENT: u32 = 0x4658;
@@ -62,6 +63,11 @@ pub const VIRTIO_EXTENT_F_MAP_PREFAULT: u32 = 8;
 /// telling it with a configuration change; the guest answers with `STATS`, its stats as text: what
 /// the extent daemon's snapshots report (TASK-111.4).
 pub const VIRTIO_EXTENT_F_STATS: u32 = 11;
+/// cladefs: the guest sends its data requests, `READ`, `WRITE`, `FREE`, `COMMIT`, `ROOT` and
+/// `INFO`, over a vsock stream to the host's port `stream_port` (the configuration's), doc-4's
+/// stream transport ([`StreamRequest`], [`StreamReply`]), which the extent daemon serves itself,
+/// rather than on the device's queues, which its VMM serves (board 14663).
+pub const VIRTIO_EXTENT_F_STREAM: u32 = 12;
 
 pub const VIRTIO_EXTENT_T_READ: u32 = 1;
 pub const VIRTIO_EXTENT_T_WRITE: u32 = 2;
@@ -250,6 +256,18 @@ pub fn known_flags(type_: u32) -> Option<u32> {
 /// length fits in.
 pub const MAX_WRITABLE: usize = MAX_TRANSFER as usize + size_of::<Response>();
 
+/// cladefs: the most bytes a request's readable buffers hold: its header and the most any
+/// request's arguments and data are, a `WRITE`'s with its root, a `STATS`'s or a `MAP_MANY`'s,
+/// whichever is more. A transport that copies them (doc-4's stream transport) refuses a request
+/// with more, as nothing past them means anything to any request.
+pub const MAX_READABLE: usize = size_of::<RequestHeader>() + {
+    let write = size_of::<IoArgs>() + MAX_TRANSFER as usize + MAX_ROOT as usize;
+    let stats = size_of::<StatsArgs>() + MAX_STATS;
+    let many = size_of::<MapArgs>() + MAX_MANY_DATA;
+    let most = if write > stats { write } else { stats };
+    if most > many { most } else { many }
+};
+
 pub fn ordered_only(type_: u32, flags: u32) -> u32 {
     match type_ {
         VIRTIO_EXTENT_T_COMMIT => flags & !VIRTIO_EXTENT_COMMIT_UPLOADED,
@@ -335,6 +353,34 @@ pub struct RequestHeader {
 pub struct Response {
     /// 0, or an errno.
     pub status: u32,
+    pub reserved: u32,
+}
+
+/// cladefs: a request on doc-4's stream transport (`VIRTIO_EXTENT_F_STREAM`, board 14663), as a
+/// descriptor chain is on a queue: `readable` bytes follow, what the device reads, the request's
+/// header, arguments and data; and the request has `writable` bytes for the device to write, its
+/// data and its response, which its [`StreamReply`] carries. `tag` is the driver's, which names
+/// the reply, as a chain's head does: unique among its requests in flight.
+#[derive(
+    Copy, Clone, Debug, Default, PartialEq, Eq, FromBytes, IntoBytes, Immutable, KnownLayout,
+)]
+#[repr(C)]
+pub struct StreamRequest {
+    pub tag: u64,
+    pub readable: u32,
+    pub writable: u32,
+}
+
+/// cladefs: the reply to the [`StreamRequest`] tagged `tag`: `written` bytes follow, its writable
+/// bytes, as the device wrote them, its response last; 0 if it wrote nothing, as a chain returned
+/// with nothing written, which the driver takes for an `EIO`. Replies come in any order.
+#[derive(
+    Copy, Clone, Debug, Default, PartialEq, Eq, FromBytes, IntoBytes, Immutable, KnownLayout,
+)]
+#[repr(C)]
+pub struct StreamReply {
+    pub tag: u64,
+    pub written: u32,
     pub reserved: u32,
 }
 
@@ -455,6 +501,10 @@ pub struct ConfigSpace {
     /// cladefs: the latest of the extent daemon's asks for the guest's stats, 0 before the first
     /// (`VIRTIO_EXTENT_F_STATS`, TASK-111.4).
     pub stats_asked: u64,
+    /// cladefs: the host's vsock port the guest's data requests go to (`VIRTIO_EXTENT_F_STREAM`,
+    /// board 14663), or 0.
+    pub stream_port: u32,
+    pub reserved: u32,
 }
 
 impl ConfigSpace {
@@ -529,7 +579,7 @@ mod tests {
     fn the_configuration_says_its_version_first() {
         assert_eq!(std::mem::offset_of!(ConfigSpace, version), 0);
         assert_eq!(std::mem::offset_of!(ConfigSpace, tag), 4);
-        assert_eq!(std::mem::size_of::<ConfigSpace>(), 112);
+        assert_eq!(std::mem::size_of::<ConfigSpace>(), 120);
     }
 
     /// The wire structures' sizes, as the driver's header has them.
@@ -537,6 +587,8 @@ mod tests {
     fn structures_are_the_drivers_sizes() {
         assert_eq!(size_of::<RequestHeader>(), 16);
         assert_eq!(size_of::<Response>(), 8);
+        assert_eq!(size_of::<StreamRequest>(), 16);
+        assert_eq!(size_of::<StreamReply>(), 16);
         assert_eq!(size_of::<IoArgs>(), 32);
         assert_eq!(size_of::<MapArgs>(), 40);
         assert_eq!(size_of::<MapEntry>(), 48);

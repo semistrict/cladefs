@@ -52,6 +52,22 @@ pub enum Error {
     ReopenWindow(String, cladefs::Error),
     #[error("Extent device {0}: remapping its DAX window after reopen: {1}")]
     ReopenMappings(String, cladefs::Errno),
+    #[error("Extent device {0}: listening for its guest's stream at {1}: {2}")]
+    StreamListener(String, String, std::io::Error),
+    #[error("Extent device {0}: the extent daemon serving its guest's stream: {1}")]
+    Stream(String, cladefs::Errno),
+}
+
+/// cladefs: a listening Unix stream socket bound at `path`, where the VM's vsock device connects
+/// its guest's connections to the stream's port (board 14663): whatever was there gone first, a
+/// socket an earlier VM process left, as nothing removes it when that one exits.
+fn bind_listener(path: &str) -> std::io::Result<std::os::unix::net::UnixListener> {
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err),
+    }
+    std::os::unix::net::UnixListener::bind(path)
 }
 
 /// Errors releasing a paused device's cell ([`Device::release_cell`]).
@@ -294,6 +310,17 @@ impl Device {
             });
         }
         config_space.cell = cell.cell().to_le();
+        // cladefs board 14663: the guest's data requests go over vsock to the daemon, which
+        // accepts them on a listener bound where the VM's vsock device connects them.
+        if let Some(stream) = &config.stream {
+            let listener = bind_listener(&stream.listener).map_err(|err| {
+                Error::StreamListener(config.id.clone(), stream.listener.clone(), err)
+            })?;
+            let ordered_only = config.cache_type.ordered_only();
+            cell.guest_stream(ordered_only, std::os::fd::AsFd::as_fd(&listener))
+                .map_err(|errno| Error::Stream(config.id.clone(), errno))?;
+            config_space.stream_port = stream.port.to_le();
+        }
         let notices = Arc::new(Notices::default());
         notices.resizing.opened(cell.capacity());
         let changes = notices.clone();
@@ -498,6 +525,9 @@ impl Device {
         let id = self.config.id.clone();
         if self.cell.is_none() {
             return Err(SnapshotError::Released(id));
+        }
+        if self.config.stream.is_some() {
+            return Err(SnapshotError::Stream(id));
         }
         if mode == SnapshotMode::Versioned && !self.notices.frozen() {
             return Err(SnapshotError::NotFrozen(id));

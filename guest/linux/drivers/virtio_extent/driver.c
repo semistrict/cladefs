@@ -18,10 +18,12 @@
 #include <linux/device/driver.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
+#include <linux/kthread.h>
 #include <linux/memremap.h>
 #include <linux/list.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
+#include <linux/net.h>
 #include <linux/sched.h>
 #include <linux/sched/clock.h>
 #include <linux/sched/mm.h>
@@ -30,9 +32,12 @@
 #include <linux/virtio.h>
 #include <linux/virtio_config.h>
 #include <linux/virtio_extent.h>
+#include <linux/vm_sockets.h>
 #include <linux/vmalloc.h>
 #include <linux/wait.h>
 #include <linux/workqueue.h>
+#include <linux/xarray.h>
+#include <net/sock.h>
 
 #include "selftest.h"
 
@@ -99,6 +104,33 @@ struct vext_window {
 	atomic64_t made, made_ns;
 };
 
+/*
+ * cladefs: doc-4's stream transport (F_STREAM, board 14663): the data requests, READ, WRITE, FREE,
+ * COMMIT, ROOT and INFO, go over a vsock stream to the host's extent daemon, which serves them
+ * itself, rather than on the device's queues, which its VMM serves. A thread of the stream's own
+ * sends them, whole, one after another, as their submitters queue them: a submitter's signal
+ * could cut a send it made short, and nothing after it would be read in step. It connects as it
+ * first has one to send, the vsock device probed by then. Another reads the replies, in any order,
+ * completing each by its tag, as a queue's interrupt does. A stream that fails, its host's daemon
+ * gone, fails every request in flight and every one after (-EIO), as a device whose daemon is gone
+ * does (doc-4): nothing connects again.
+ */
+struct vext_stream {
+	struct socket *sock;
+	struct task_struct *sender, *receiver;
+	/* The requests waiting to be sent, which the sender takes, under `lock`. */
+	spinlock_t lock;
+	struct list_head to_send;
+	wait_queue_head_t wake;
+	/* The requests sent or being sent, by tag. */
+	struct xarray in_flight;
+	u32 next_tag;
+	/* Its -errno once it failed, or closed as the device resets; under `lock`. */
+	int error;
+	/* The requests it sent, and the replies it read. */
+	atomic64_t sent, replies;
+};
+
 struct virtio_extent {
 	struct virtio_device *vdev;
 	/*
@@ -115,6 +147,8 @@ struct virtio_extent {
 	struct vext_config config;
 	/* cladefs: its DAX window, if it has one (F_DAX, with FS_DAX). */
 	struct vext_window window;
+	/* cladefs: its data requests' stream, if it has one (F_STREAM, board 14663). */
+	struct vext_stream stream;
 	atomic64_t unique;
 	/* The requests the device has taken, by type. */
 	atomic64_t requests[VIRTIO_EXTENT_T_LAST + 1];
@@ -462,6 +496,391 @@ static bool vext_has(const struct vext_request *req, u32 flag)
 }
 
 /*
+ * cladefs: the bytes a stream buffers each way, its vsock socket's: room for a few requests of
+ * max_transfer in flight, the default (256 KiB) less than one (board 14663).
+ */
+#define VEXT_STREAM_BUFFER (8ULL << 20)
+
+/* cladefs: whether `req` goes on the stream (F_STREAM): a data request, of a device with one. */
+static bool vext_on_stream(struct virtio_extent *vext, const struct vext_request *req)
+{
+	if (!virtio_has_feature(vext->vdev, VIRTIO_EXTENT_F_STREAM))
+		return false;
+	switch (req->type) {
+	case VIRTIO_EXTENT_T_READ:
+	case VIRTIO_EXTENT_T_WRITE:
+	case VIRTIO_EXTENT_T_FREE:
+	case VIRTIO_EXTENT_T_COMMIT:
+	case VIRTIO_EXTENT_T_ROOT:
+	case VIRTIO_EXTENT_T_INFO:
+		return true;
+	default:
+		return false;
+	}
+}
+
+/* cladefs: completes `req`, sent on the stream, with `status`, as vext_reap a queue's. */
+static void vext_stream_complete(struct virtio_extent *vext, struct vext_request *req, int status)
+{
+	u64 took = ktime_get_ns() - req->queued_ns, *recent;
+
+	atomic64_add(took, &vext->request_ns[req->type]);
+	recent = &vext->recent_ns[req->type];
+	WRITE_ONCE(*recent, READ_ONCE(*recent) - (READ_ONCE(*recent) >> 3) + (took >> 3));
+	req->status = status;
+	vext_busy_end(vext);
+	req->done(req);
+}
+
+/*
+ * cladefs: fails the stream with `err`, if it hasn't failed: its socket shut down, which ends its
+ * receiver's read and its sender's send, and its sender woken, which fails every request in
+ * flight, and waiting to be sent (vext_stream_fail_all). From any task.
+ */
+static void vext_stream_fail(struct virtio_extent *vext, int err)
+{
+	struct vext_stream *stream = &vext->stream;
+	struct socket *sock = NULL;
+	unsigned long flags;
+
+	spin_lock_irqsave(&stream->lock, flags);
+	if (!stream->error) {
+		stream->error = err;
+		sock = stream->sock;
+	}
+	spin_unlock_irqrestore(&stream->lock, flags);
+	if (sock)
+		kernel_sock_shutdown(sock, SHUT_RDWR);
+	wake_up(&stream->wake);
+}
+
+/*
+ * cladefs: fails every request of the stream's in flight and waiting to be sent, -EIO, the stream
+ * having failed: on its sender, which alone sends, so that none it is sending completes, and its
+ * memory goes, meanwhile.
+ */
+static void vext_stream_fail_all(struct virtio_extent *vext)
+{
+	struct vext_stream *stream = &vext->stream;
+	struct vext_request *req, *next;
+	unsigned long index;
+	LIST_HEAD(waiting);
+
+	spin_lock_irq(&stream->lock);
+	list_splice_init(&stream->to_send, &waiting);
+	spin_unlock_irq(&stream->lock);
+	list_for_each_entry_safe(req, next, &waiting, stream_node) {
+		list_del(&req->stream_node);
+		vext_stream_complete(vext, req, -EIO);
+	}
+	/* Each once: the receiver may take one meanwhile, whose reply it read. */
+	xa_for_each(&stream->in_flight, index, req) {
+		if (xa_erase(&stream->in_flight, index) == req)
+			vext_stream_complete(vext, req, -EIO);
+	}
+}
+
+/*
+ * cladefs: moves `len` bytes between the stream's socket and `vec`, all of them: sent, if `send`,
+ * or received. 0, or a -errno, -EPIPE if the stream ended.
+ */
+static int vext_stream_io(struct socket *sock, struct kvec *vec, unsigned int n, size_t len,
+			  bool send)
+{
+	struct msghdr msg = { .msg_flags = send ? MSG_NOSIGNAL : MSG_WAITALL };
+	int moved;
+
+	iov_iter_kvec(&msg.msg_iter, send ? ITER_SOURCE : ITER_DEST, vec, n, len);
+	while (msg_data_left(&msg)) {
+		moved = send ? sock_sendmsg(sock, &msg) : sock_recvmsg(sock, &msg, msg.msg_flags);
+		if (moved < 0)
+			return moved;
+		if (!moved)
+			return -EPIPE;
+	}
+	return 0;
+}
+
+/*
+ * cladefs: the stream's receiver: reads each reply, and completes the request its tag names with
+ * what the device wrote, until the stream fails or closes. A reply of nothing written completes its
+ * request -EIO; one naming no request in flight, or of other than its request's writable bytes,
+ * fails the stream, which nothing after it could be read in step with.
+ */
+static int vext_stream_receiver(void *data)
+{
+	struct virtio_extent *vext = data;
+	struct vext_stream *stream = &vext->stream;
+	struct virtio_extent_stream_reply head;
+	struct vext_request *req;
+	struct kvec vec[2];
+	unsigned int n;
+	u32 written, want;
+	u64 tag;
+	int err;
+
+	/* Its allocations reclaim nothing that waits on requests of the device's. */
+	memalloc_noio_save();
+	for (;;) {
+		vec[0] = (struct kvec) { &head, sizeof(head) };
+		err = vext_stream_io(stream->sock, vec, 1, sizeof(head), false);
+		if (err)
+			break;
+		tag = le64_to_cpu(head.tag);
+		written = le32_to_cpu(head.written);
+		req = tag <= U32_MAX ? xa_erase(&stream->in_flight, tag) : NULL;
+		if (!req) {
+			dev_err(&vext->vdev->dev, "the stream's reply to request %llu, not in flight\n",
+				tag);
+			err = -EPROTO;
+			break;
+		}
+		if (!written) {
+			vext_stream_complete(vext, req, -EIO);
+			continue;
+		}
+		want = req->in_len + sizeof(req->resp);
+		if (written != want) {
+			dev_err(&vext->vdev->dev,
+				"the stream's reply to request %llu of %u bytes, not its %u\n", tag,
+				written, want);
+			vext_stream_complete(vext, req, -EIO);
+			err = -EPROTO;
+			break;
+		}
+		n = 0;
+		if (req->in_len)
+			vec[n++] = (struct kvec) { req->data, req->in_len };
+		vec[n++] = (struct kvec) { &req->resp, sizeof(req->resp) };
+		err = vext_stream_io(stream->sock, vec, n, want, false);
+		if (err) {
+			vext_stream_complete(vext, req, -EIO);
+			break;
+		}
+		atomic64_inc(&stream->replies);
+		vext_stream_complete(vext, req, -(int)le32_to_cpu(req->resp.status));
+	}
+	if (!READ_ONCE(stream->error))
+		dev_err(&vext->vdev->dev, "the stream failed reading: %d\n", err);
+	vext_stream_fail(vext, err ?: -EPIPE);
+	return 0;
+}
+
+/*
+ * cladefs: connects the stream to the host's port `stream_port`, its socket's buffers
+ * VEXT_STREAM_BUFFER, and starts its receiver: 0, or a -errno, when the next request tries again.
+ */
+static int vext_stream_connect(struct virtio_extent *vext)
+{
+	struct vext_stream *stream = &vext->stream;
+	struct sockaddr_vm addr = {
+		.svm_family = AF_VSOCK,
+		.svm_cid = VMADDR_CID_HOST,
+		.svm_port = vext->config.stream_port,
+	};
+	u64 size = VEXT_STREAM_BUFFER;
+	struct task_struct *receiver;
+	struct socket *sock;
+	int err;
+
+	err = sock_create_kern(&init_net, AF_VSOCK, SOCK_STREAM, 0, &sock);
+	if (err)
+		return err;
+	/* The most first, which bounds the size. */
+	err = sock->ops->setsockopt(sock, AF_VSOCK, SO_VM_SOCKETS_BUFFER_MAX_SIZE,
+				    KERNEL_SOCKPTR(&size), sizeof(size));
+	if (!err)
+		err = sock->ops->setsockopt(sock, AF_VSOCK, SO_VM_SOCKETS_BUFFER_SIZE,
+					    KERNEL_SOCKPTR(&size), sizeof(size));
+	if (!err)
+		err = kernel_connect(sock, (struct sockaddr *)&addr, sizeof(addr), 0);
+	if (err)
+		goto release;
+	spin_lock_irq(&stream->lock);
+	err = stream->error;
+	if (!err)
+		stream->sock = sock;
+	spin_unlock_irq(&stream->lock);
+	if (err)
+		goto release;
+	receiver = kthread_run(vext_stream_receiver, vext, "vext-recv/%s", vext->config.tag);
+	if (IS_ERR(receiver)) {
+		err = PTR_ERR(receiver);
+		vext_stream_fail(vext, err);
+		return err;
+	}
+	/* Held for its stop, which it may have reached itself (vext_stream_close). */
+	get_task_struct(receiver);
+	stream->receiver = receiver;
+	dev_info(&vext->vdev->dev, "data requests over vsock to the host's port %u\n",
+		 vext->config.stream_port);
+	return 0;
+release:
+	sock_release(sock);
+	return err;
+}
+
+/*
+ * cladefs: sends `req` on the stream, whole, connecting it first if it isn't: or completes it with
+ * the error that stopped it, the stream failing if its send did.
+ */
+static void vext_stream_send(struct virtio_extent *vext, struct vext_request *req)
+{
+	struct vext_stream *stream = &vext->stream;
+	struct kvec vec[5];
+	unsigned int n = 0;
+	u32 tag;
+	int err;
+
+	err = READ_ONCE(stream->error);
+	if (!err && !stream->sock)
+		err = vext_stream_connect(vext);
+	if (!err)
+		err = xa_alloc_cyclic(&stream->in_flight, &tag, req, xa_limit_32b, &stream->next_tag,
+				      GFP_KERNEL);
+	if (err < 0) {
+		vext_stream_complete(vext, req, err == -ESHUTDOWN ? -ESHUTDOWN : -EIO);
+		return;
+	}
+	req->stream_hdr.tag = cpu_to_le64(tag);
+	vec[n++] = (struct kvec) { &req->stream_hdr, sizeof(req->stream_hdr) };
+	vec[n++] = (struct kvec) { &req->hdr, sizeof(req->hdr) };
+	if (req->args_len)
+		vec[n++] = (struct kvec) { &req->args, req->args_len };
+	if (req->out_len)
+		vec[n++] = (struct kvec) { req->data, req->out_len };
+	if (req->root_out)
+		vec[n++] = (struct kvec) { req->root, req->root_out };
+	err = vext_stream_io(stream->sock, vec, n,
+			     sizeof(req->stream_hdr) + le32_to_cpu(req->stream_hdr.readable), true);
+	if (err) {
+		if (!READ_ONCE(stream->error))
+			dev_err(&vext->vdev->dev, "the stream failed sending: %d\n", err);
+		vext_stream_fail(vext, err);
+		/* Completed here, or by vext_stream_fail_all, which this sender runs next. */
+		if (xa_erase(&stream->in_flight, tag) == req)
+			vext_stream_complete(vext, req, -EIO);
+		return;
+	}
+	atomic64_inc(&stream->sent);
+}
+
+/*
+ * cladefs: the stream's sender: sends the requests its submitters queue, in order, until it is
+ * stopped; and, the stream failed, fails every request it had, then any queued after.
+ */
+static int vext_stream_sender(void *data)
+{
+	struct virtio_extent *vext = data;
+	struct vext_stream *stream = &vext->stream;
+	struct vext_request *req, *next;
+	LIST_HEAD(batch);
+
+	/* Its allocations reclaim nothing that waits on requests of the device's. */
+	memalloc_noio_save();
+	for (;;) {
+		wait_event_idle(stream->wake, kthread_should_stop() || READ_ONCE(stream->error) ||
+						      !list_empty_careful(&stream->to_send));
+		if (READ_ONCE(stream->error) || kthread_should_stop())
+			break;
+		spin_lock_irq(&stream->lock);
+		list_splice_init(&stream->to_send, &batch);
+		spin_unlock_irq(&stream->lock);
+		list_for_each_entry_safe(req, next, &batch, stream_node) {
+			list_del(&req->stream_node);
+			vext_stream_send(vext, req);
+		}
+	}
+	vext_stream_fail_all(vext);
+	/* None is queued past its failure (vext_stream_submit): only its stop is left. */
+	wait_event_idle(stream->wake, kthread_should_stop());
+	return 0;
+}
+
+/*
+ * cladefs: queues `req`, a data request whose arguments, data and root are `args_len`,
+ * `data_len` and `root_len` bytes, for the stream's sender: 0, or the stream's -errno, once it
+ * failed, when `done` isn't called.
+ */
+static int vext_stream_submit(struct virtio_extent *vext, struct vext_request *req,
+			      const struct vext_type *type, u32 args_len, u32 data_len, u32 root_len)
+{
+	struct vext_stream *stream = &vext->stream;
+	unsigned long flags;
+	int err;
+
+	req->args_len = args_len;
+	req->out_len = type->data == VEXT_OUT ? data_len : 0;
+	req->in_len = type->data == VEXT_IN ? data_len : 0;
+	req->root_out = root_len;
+	req->stream_hdr = (struct virtio_extent_stream_req) {
+		.readable = cpu_to_le32(sizeof(req->hdr) + args_len + req->out_len + root_len),
+		.writable = cpu_to_le32(req->in_len + sizeof(req->resp)),
+	};
+	req->queue = NULL;
+	req->queued_ns = ktime_get_ns();
+	req->cpu = raw_smp_processor_id();
+	spin_lock_irqsave(&stream->lock, flags);
+	err = stream->error;
+	if (!err) {
+		atomic64_inc(&vext->requests[req->type]);
+		vext_busy_begin(vext);
+		list_add_tail(&req->stream_node, &stream->to_send);
+	}
+	spin_unlock_irqrestore(&stream->lock, flags);
+	if (err)
+		return err == -ESHUTDOWN ? -ESHUTDOWN : -EIO;
+	wake_up(&stream->wake);
+	return 0;
+}
+
+/* cladefs: starts the stream's sender, if the device has a stream: 0, or a -errno. */
+static int vext_stream_start(struct virtio_extent *vext)
+{
+	struct vext_stream *stream = &vext->stream;
+	struct task_struct *sender;
+
+	spin_lock_init(&stream->lock);
+	INIT_LIST_HEAD(&stream->to_send);
+	init_waitqueue_head(&stream->wake);
+	xa_init_flags(&stream->in_flight, XA_FLAGS_ALLOC);
+	if (!virtio_has_feature(vext->vdev, VIRTIO_EXTENT_F_STREAM))
+		return 0;
+	sender = kthread_run(vext_stream_sender, vext, "vext-send/%s", vext->config.tag);
+	if (IS_ERR(sender))
+		return PTR_ERR(sender);
+	get_task_struct(sender);
+	stream->sender = sender;
+	return 0;
+}
+
+/*
+ * cladefs: closes the stream, as the device resets: every request it had failed, and its threads
+ * stopped, its socket let go of.
+ */
+static void vext_stream_close(struct virtio_extent *vext)
+{
+	struct vext_stream *stream = &vext->stream;
+
+	if (!stream->sender)
+		return;
+	vext_stream_fail(vext, -ESHUTDOWN);
+	kthread_stop(stream->sender);
+	put_task_struct(stream->sender);
+	stream->sender = NULL;
+	if (stream->receiver) {
+		kthread_stop(stream->receiver);
+		put_task_struct(stream->receiver);
+		stream->receiver = NULL;
+	}
+	if (stream->sock) {
+		sock_release(stream->sock);
+		stream->sock = NULL;
+	}
+	xa_destroy(&stream->in_flight);
+}
+
+/*
  * cladefs: the most scatterlists a request has besides its data's pages: its header, arguments,
  * root and response, a descriptor each (virtio_extent_submit). A queue's ring holds them and
  * max_segments data pages (vext_check_rings). Before, 3, the root uncounted: a WRITE with its root
@@ -497,6 +916,9 @@ int virtio_extent_submit(struct virtio_extent *vext, struct vext_request *req)
 	};
 	req->resp.status = 0;
 	memset(&req->data_sgt, 0, sizeof(req->data_sgt));
+	/* cladefs: a data request of a device with a stream goes on it (board 14663). */
+	if (vext_on_stream(vext, req))
+		return vext_stream_submit(vext, req, type, args_len, data_len, root_len);
 	if (data_len) {
 		err = vext_map_data(&req->data_sgt, req->data, data_len);
 		if (err)
@@ -648,7 +1070,8 @@ static void vext_wait(struct virtio_extent *vext, struct vext_request *req, stru
 	unsigned long flags;
 	bool completed;
 
-	if (READ_ONCE(vext->recent_ns[req->type]) >= spin_ns) {
+	/* cladefs: on the stream, its receiver completes it: no queue to poll (board 14663). */
+	if (!queue || READ_ONCE(vext->recent_ns[req->type]) >= spin_ns) {
 		wait_for_completion(done);
 		return;
 	}
@@ -994,6 +1417,19 @@ static ssize_t queues_show(struct device *dev, struct device_attribute *attr, ch
 static DEVICE_ATTR_RO(queues);
 
 /*
+ * cladefs: the requests its stream sent, and the replies it read, on a line: 0 0 without one
+ * (F_STREAM, board 14663).
+ */
+static ssize_t stream_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct virtio_extent *vext = dev_to_virtio(dev)->priv;
+
+	return sysfs_emit(buf, "%lld %lld\n", atomic64_read(&vext->stream.sent),
+			  atomic64_read(&vext->stream.replies));
+}
+static DEVICE_ATTR_RO(stream);
+
+/*
  * cladefs: the `completions` attribute: the queues' interrupts, and the requests their callers
  * completed polling them, without one (vext_wait), all told; and the requests completed on a CPU
  * other than their own (TASK-276).
@@ -1033,6 +1469,7 @@ static struct attribute *vext_attrs[] = {
 	&dev_attr_request_ns.attr,
 	&dev_attr_busy_ns.attr,
 	&dev_attr_queues.attr,
+	&dev_attr_stream.attr,
 	&dev_attr_completions.attr,
 	&dev_attr_window.attr,
 	NULL,
@@ -1099,6 +1536,14 @@ static int vext_read_config(struct virtio_extent *vext)
 	config->private_max = 0;
 	if (virtio_has_feature(vdev, VIRTIO_EXTENT_F_DAX))
 		virtio_cread_le(vdev, struct virtio_extent_config, private_max, &config->private_max);
+	/* cladefs: board 14663. */
+	config->stream_port = 0;
+	if (virtio_has_feature(vdev, VIRTIO_EXTENT_F_STREAM)) {
+		virtio_cread_le(vdev, struct virtio_extent_config, stream_port, &config->stream_port);
+		if (!config->stream_port || config->stream_port == VMADDR_PORT_ANY)
+			return vext_refuse(vdev, "stream_port", config->stream_port,
+					   "not a port to connect to");
+	}
 
 	config->block_size = vext_faulted(VEXT_FAULT_BLOCK_SIZE, config->block_size);
 	config->map_alignment = vext_faulted(VEXT_FAULT_MAP_ALIGNMENT, config->map_alignment);
@@ -1325,6 +1770,12 @@ static int vext_probe(struct virtio_device *vdev)
 	err = vext_find_queues(vext);
 	if (err)
 		return err;
+	/* cladefs: its data requests' stream, if it has one (board 14663). */
+	err = vext_stream_start(vext);
+	if (err) {
+		vdev->config->del_vqs(vdev);
+		return err;
+	}
 	virtio_device_ready(vdev);
 	/*
 	 * cladefs: the device activates as it takes DRIVER_OK, and asks for a reset if it can't: as it
@@ -1343,6 +1794,7 @@ static int vext_probe(struct virtio_device *vdev)
 		}
 	}
 	if (err) {
+		vext_stream_close(vext);
 		virtio_reset_device(vdev);
 		vdev->config->del_vqs(vdev);
 		return err;
@@ -1350,10 +1802,11 @@ static int vext_probe(struct virtio_device *vdev)
 	mutex_lock(&devices_lock);
 	list_add(&vext->node, &devices);
 	mutex_unlock(&devices_lock);
-	dev_info(&vdev->dev, "extent store \"%s\", cell %llx, %u request queue%s%s\n",
+	dev_info(&vdev->dev, "extent store \"%s\", cell %llx, %u request queue%s%s%s\n",
 		 vext->config.tag, vext->config.cell, vext->nr_queues,
 		 vext->nr_queues == 1 ? "" : "s",
-		 vext->window.dax ? ", with a DAX window copying on write" : "");
+		 vext->window.dax ? ", with a DAX window copying on write" : "",
+		 vext->stream.sender ? ", its data requests over vsock" : "");
 	return 0;
 }
 
@@ -1498,6 +1951,8 @@ static void vext_reset(struct virtio_device *vdev)
 
 	vext_close_queues(vext);
 	flush_work(&vext->stats_work);
+	/* cladefs: its stream's requests failed, none taken after (board 14663). */
+	vext_stream_close(vext);
 	virtio_reset_device(vdev);
 	for (i = 0; i < vext->nr_queues; i++) {
 		struct vext_queue *queue = &vext->queues[i];
@@ -1553,6 +2008,7 @@ static const unsigned int vext_features[] = {
 	VIRTIO_EXTENT_F_MAP_MANY,
 	VIRTIO_EXTENT_F_MAP_PREFAULT,
 	VIRTIO_EXTENT_F_STATS,
+	VIRTIO_EXTENT_F_STREAM,
 };
 
 static struct virtio_driver vext_driver = {

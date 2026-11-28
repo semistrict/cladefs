@@ -49,7 +49,7 @@ pub struct TestExtentGuestSelftestMounted;
 const SYNCED: &[u8] = b"synced before the self-test was asked for\n";
 
 /// The version the driver is told it speaks: the device's, this build's, and one more.
-const OTHER_VERSION: (u32, u32) = (2, 3);
+const OTHER_VERSION: (u32, u32) = (3, 4);
 
 /// The root the driver's self-test commits.
 #[cfg_attr(feature = "guest", allow(dead_code))]

@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 use crate::protocol::{
     DAX_WINDOW_ALIGNMENT, MAX_TAG_LEN, VIRTIO_EXTENT_F_DAX, VIRTIO_EXTENT_F_FREE_MANY,
     VIRTIO_EXTENT_F_FREEZE, VIRTIO_EXTENT_F_MAP_MANY, VIRTIO_EXTENT_F_MAP_PREFAULT,
-    VIRTIO_EXTENT_F_RESIZE, VIRTIO_EXTENT_F_STATS, VIRTIO_EXTENT_F_WRITE_COMMIT,
+    VIRTIO_EXTENT_F_RESIZE, VIRTIO_EXTENT_F_STATS, VIRTIO_EXTENT_F_STREAM,
+    VIRTIO_EXTENT_F_WRITE_COMMIT,
 };
 
 /// cladefs: what the device does with the guest's asks for uploaded commits, as a block device's
@@ -45,6 +46,20 @@ pub enum ConfigError {
          or more than the window's, or it has no window"
     )]
     InvalidDaxPrivateMaxBytes(u64),
+    #[error("The stream's port, {0}, is not a vsock port a guest connects to (1 to 0xfffffffe)")]
+    InvalidStreamPort(u32),
+}
+
+/// cladefs: where the guest's data requests go over vsock to the extent daemon, which serves them
+/// itself (doc-4's stream transport, `F_STREAM`, board 14663): the host's vsock `port` the guest
+/// connects to, and the path its VMM's vsock device connects such a guest's connections to,
+/// `listener`, where the device binds a socket the daemon accepts them on (Firecracker's
+/// `<uds_path>_<port>`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StreamConfig {
+    pub port: u32,
+    pub listener: String,
 }
 
 /// An extent-store device: the cell of extents that a guest running cladefs's Fxfs itself keeps
@@ -84,6 +99,11 @@ pub struct Config {
     /// disk image whose flushes the host drops.
     #[serde(default = "writeback", skip_serializing_if = "is_writeback")]
     pub cache_type: CacheType,
+    /// cladefs: the guest's data requests go over vsock to the extent daemon, rather than to the
+    /// device's queues ([`StreamConfig`], board 14663). Its VM has a vsock device, whose
+    /// connections to `port` reach `listener`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream: Option<StreamConfig>,
 }
 
 fn writeback() -> CacheType {
@@ -113,6 +133,12 @@ impl Config {
                 return Err(ConfigError::InvalidDaxPrivateMaxBytes(most));
             }
         }
+        // cladefs: a port a guest's connect names, not VMADDR_PORT_ANY (board 14663).
+        if let Some(stream) = &self.stream
+            && (stream.port == 0 || stream.port == u32::MAX)
+        {
+            return Err(ConfigError::InvalidStreamPort(stream.port));
+        }
         Ok(())
     }
 
@@ -130,6 +156,9 @@ impl Config {
             features |= (1 << VIRTIO_EXTENT_F_DAX)
                 | (1 << VIRTIO_EXTENT_F_MAP_MANY)
                 | (1 << VIRTIO_EXTENT_F_MAP_PREFAULT);
+        }
+        if self.stream.is_some() {
+            features |= 1 << VIRTIO_EXTENT_F_STREAM;
         }
         features
     }
@@ -163,6 +192,7 @@ mod tests {
             dax_private_max_bytes: None,
             cladefsd_socket: "/cladefsd.sock".into(),
             cache_type: CacheType::Writeback,
+            stream: None,
         }
     }
 
@@ -219,6 +249,20 @@ mod tests {
         none.validate().unwrap();
         let private = Config { dax_private_max_bytes: Some(page), ..none };
         assert_eq!(private.validate(), Err(ConfigError::InvalidDaxPrivateMaxBytes(page)));
+        // cladefs board 14663: a stream to a port a guest can connect to.
+        let stream = |port| Config {
+            stream: Some(StreamConfig { port, listener: "/vsock.sock_5000".into() }),
+            ..config("a")
+        };
+        stream(5000).validate().unwrap();
+        for port in [0, u32::MAX] {
+            assert_eq!(stream(port).validate(), Err(ConfigError::InvalidStreamPort(port)));
+        }
+        assert_eq!(
+            stream(5000).features() & (1 << VIRTIO_EXTENT_F_STREAM),
+            1 << VIRTIO_EXTENT_F_STREAM
+        );
+        assert_eq!(config("a").features() & (1 << VIRTIO_EXTENT_F_STREAM), 0);
     }
 
     /// cladefs TASK-227: a writer's window holds 1 GiB of private pages at most unless configured

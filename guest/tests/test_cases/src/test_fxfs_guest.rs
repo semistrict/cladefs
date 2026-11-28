@@ -1682,11 +1682,15 @@ mod guest {
     }
 
     /// The driver uses a request queue per CPU, of the device's four (cladefs TASK-26.18.5): a
-    /// writer on each CPU fsyncs a file, through its CPU's queue.
+    /// writer on each CPU fsyncs a file, through its CPU's queue. cladefs board 14663: or, its
+    /// data requests going over vsock (`F_STREAM`, CLADEFS_EXTENT_STREAM), each writer's writes and
+    /// commits through the stream, which replies to each.
     fn queue_per_cpu() {
         let cpus = std::thread::available_parallelism().unwrap().get();
         let before = queue_requests();
         assert_eq!(before.len(), cpus.min(4), "the driver's queues");
+        let streamed = device_has_feature(12);
+        let stream_before = stream_requests();
         let writers: Vec<_> = (0..before.len())
             .map(|cpu| {
                 std::thread::spawn(move || {
@@ -1707,10 +1711,42 @@ mod guest {
         for writer in writers {
             writer.join().unwrap();
         }
+        if streamed {
+            // A write and a commit at least each, every one replied to.
+            let (sent, replies) = stream_requests();
+            let writers = before.len() as u64;
+            assert!(sent >= stream_before.0 + 2 * writers, "{sent} sent, {stream_before:?} before");
+            assert_eq!(replies, sent, "the stream's replies");
+            return;
+        }
         let after = queue_requests();
         for (queue, (before, after)) in before.iter().zip(&after).enumerate() {
             assert!(after > before, "queue {queue} took no request: {after} of {before}");
         }
+    }
+
+    /// The extent-store device's directory in sysfs, its driver's one.
+    fn device_dir() -> std::path::PathBuf {
+        let devices: Vec<_> = fs::read_dir("/sys/bus/virtio/drivers/virtio_extent")
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.join("queues").exists())
+            .collect();
+        assert_eq!(devices.len(), 1, "{devices:?}");
+        devices[0].clone()
+    }
+
+    /// Whether the extent-store device and its driver took feature `bit` (virtio's `features`).
+    fn device_has_feature(bit: usize) -> bool {
+        let features = fs::read_to_string(device_dir().join("features")).unwrap();
+        features.as_bytes().get(bit) == Some(&b'1')
+    }
+
+    /// The requests the extent-store device's stream sent, and the replies it read (board 14663).
+    fn stream_requests() -> (u64, u64) {
+        let line = fs::read_to_string(device_dir().join("stream")).unwrap();
+        let mut counts = line.split_whitespace().map(|count| count.parse().unwrap());
+        (counts.next().unwrap(), counts.next().unwrap())
     }
 
     /// The extent-store device's count of the requests it has taken, by type.
