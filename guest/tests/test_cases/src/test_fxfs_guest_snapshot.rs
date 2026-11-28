@@ -907,6 +907,18 @@ mod guest {
     const MNT: &str = "/mnt/fxfs";
     /// The volume a mount naming none mounts (fs/cladefs's CLADEFS_DEFAULT_VOLUME).
     const FXFS_DEFAULT: &str = "default";
+    /// cladefs board 14663: whether the extent-store device's guest sends its data requests over
+    /// vsock (`F_STREAM`, bit 12 of virtio's `features`).
+    fn stream_device() -> bool {
+        let devices: Vec<_> = fs::read_dir("/sys/bus/virtio/drivers/virtio_extent")
+            .unwrap()
+            .map(|entry| entry.unwrap().path().join("features"))
+            .filter(|path| path.exists())
+            .collect();
+        assert_eq!(devices.len(), 1, "{devices:?}");
+        fs::read_to_string(&devices[0]).unwrap().as_bytes().get(12) == Some(&b'1')
+    }
+
     /// `FIFREEZE` and `FITHAW`: `_IOWR('X', 119, int)` and `_IOWR('X', 120, int)`.
     const FIFREEZE: libc::c_ulong = 0xc004_5877;
     const FITHAW: libc::c_ulong = 0xc004_5878;
@@ -1130,6 +1142,14 @@ mod guest {
             }
             // Read in again by the next mount, a DAX file, mapped through the window.
             write_pieces(&format!("{MNT}/pieces"));
+            // cladefs board 14663: a file read again and again across the snapshot, its pages
+            // dropped before each read, so that reads are in flight as it is taken: in each
+            // restored VM, their device's transport takes them again, and each completes once,
+            // reading what was written.
+            let in_flight = format!("{MNT}/in-flight");
+            let in_flight_bytes: Vec<u8> = (0..1 << 20).map(|i: usize| (i % 239) as u8).collect();
+            fs::write(&in_flight, &in_flight_bytes).unwrap();
+            fs::File::open(&in_flight).unwrap().sync_all().unwrap();
             unmount();
             mount();
             let mut mapped_pieces = map_pieces(&format!("{MNT}/pieces"));
@@ -1174,6 +1194,25 @@ mod guest {
             let counts = || (stat("dax_private_pages"), stat("dax_dirty_pages"));
             eprintln!("before the freeze: (private, dirty) pages {:?}", counts());
             freeze(volumes, FIFREEZE);
+            let reading = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let reader = {
+                let (reading, path, bytes) = (reading.clone(), in_flight.clone(), in_flight_bytes);
+                std::thread::spawn(move || {
+                    let mut reads = 0u64;
+                    while reading.load(std::sync::atomic::Ordering::Relaxed) {
+                        let file = fs::File::open(&path).unwrap();
+                        // SAFETY: a call on a descriptor this holds.
+                        unsafe {
+                            libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED)
+                        };
+                        let mut back = Vec::with_capacity(bytes.len());
+                        (&file).read_to_end(&mut back).unwrap();
+                        assert!(back == bytes, "read {reads}: the file read otherwise");
+                        reads += 1;
+                    }
+                    reads
+                })
+            };
             // Frozen, the window holds no private page, its dirty pages written back and every
             // one rebound, which a snapshot's fork requires (backlog doc-13; TASK-92.14).
             let (private, dirty) = counts();
@@ -1192,6 +1231,19 @@ mod guest {
             }
             eprintln!("restored");
             let name = name_from_host();
+            reading.store(false, std::sync::atomic::Ordering::Relaxed);
+            let reads = reader.join().unwrap();
+            eprintln!("{name}: {reads} reads of the in-flight file across the snapshot");
+            // cladefs board 14663: a stream's connection, which the vsock device reset, made
+            // again, its requests in flight sent again.
+            if stream_device() {
+                let records = crate::kernel_log::records();
+                assert!(
+                    records.iter().any(|record| record.contains("connection lost")
+                        && record.contains("connecting again")),
+                    "{name}: no stream connected again"
+                );
+            }
             eprintln!("{name}: thawing");
             freeze(volumes, FITHAW);
             match self.read_only {
