@@ -371,8 +371,9 @@ struct Inner {
     /// In-flight operations, which unmount waits for before closing the volume and filesystem.
     operations: Arc<Operations>,
     /// Set once unmount + filesystem close has finished so `Drop` returns immediately without
-    /// blocking on already-unmounted/closed filesystems.
-    finished: AtomicBool,
+    /// blocking on already-unmounted/closed filesystems: by the unmount's task, once it let go of
+    /// its hold of this, which it keeps the flag beyond (board 14679).
+    finished: Arc<AtomicBool>,
     state: Mutex<State>,
 }
 
@@ -740,11 +741,21 @@ impl Inner {
                 }
                 Err(err) => Err(err),
             };
-            inner.finished.store(true, Ordering::Release);
+            // cladefs: its hold of the filesystem let go of before it says it unmounted, to a drop
+            // as to its waiters, so that what holds the storage closed, and its cell open, is its
+            // callers' alone, which they let go of as they go on: dropping their filesystem after,
+            // they close its cell, which they may open again at once. Said first, this task held it
+            // on the runtime after a mount's drop returned, and the test's reopening found the cell
+            // open (board 14679), as an image's uploader did once (TASK-165.6).
+            let finished = Arc::clone(&inner.finished);
+            drop(inner);
+            finished.store(true, Ordering::Release);
             // Its beginner may have given up on it.
             let _ = result.send(outcome);
             // Its waiter gone: nothing to tell.
             let _ = done.send(());
+            // Where the task lingers once it said so, as a loaded runtime's may.
+            fail::fail_point!("filesystem::unmounted");
         });
         Unmount::Began(began)
     }
@@ -902,7 +913,7 @@ impl Filesystem {
             storage_kind,
             namespace: tokio::sync::RwLock::new(()),
             operations: Arc::default(),
-            finished: AtomicBool::new(false),
+            finished: Arc::new(AtomicBool::new(false)),
             state: Mutex::new(State { mounted: Some(mounted), unmounting: None, closed: None }),
         });
         let root = Node(Arc::new(Hold { inner: Arc::downgrade(&inner), object_id: root_id }));
@@ -2054,6 +2065,36 @@ mod tests {
             drop(file);
             fs.close().await.unwrap().check().await.unwrap();
         })
+    }
+
+    /// board 14679: a filesystem dropped once its unmount returned, or dropped while it unmounts,
+    /// has closed its cell as the drop returns, which this process opens again at once, though
+    /// the unmount's task lingers after it said it unmounted, held up by the failpoint there. That
+    /// task held the filesystem as it said so, and so the storage closed and its cell open: a
+    /// mount dropped returned with its cell open still, and the cell's opening after failed
+    /// (fuse_mount's `an_encrypted_cell_mounted_holds_nothing_in_the_clear`).
+    #[test]
+    fn filesystems_unmounted_have_let_go_of_their_cells() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("image");
+        let scenario = fail::FailScenario::setup();
+        fail::cfg("filesystem::unmounted", "sleep(500)").unwrap();
+        block_on(async {
+            let fs =
+                Filesystem::format(Storage::create(&path, 32 << 20).await.unwrap()).await.unwrap();
+            fs.unmount().await.unwrap();
+            drop(fs);
+            let after = Storage::open(&path).await.map_err(|err| format!("{err:#}"));
+            assert_eq!(after.as_ref().err(), None, "opened once its unmount returned");
+            let fs = Filesystem::mount(after.unwrap()).await.unwrap();
+            // Polled once, the unmount begins on the runtime; the drop waits for it.
+            assert!(fs.unmount().now_or_never().is_none(), "the filesystem unmounted at once");
+            drop(fs);
+            let mid = Storage::open(&path).await.map_err(|err| format!("{err:#}"));
+            assert_eq!(mid.as_ref().err(), None, "opened once dropped mid-unmount");
+            drop(mid);
+        });
+        scenario.teardown();
     }
 
     /// Holds the lock of Fxfs's that a transaction changing `object_id` takes until released.

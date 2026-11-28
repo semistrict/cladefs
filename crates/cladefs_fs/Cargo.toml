@@ -8,7 +8,7 @@ publish = false
 
 [features]
 testing = ["cladefs_core/testing"]
-failpoints = ["cladefs_core/failpoints"]
+failpoints = ["cladefs_core/failpoints", "fail/failpoints"]
 tests-kms = ["testing", "cladefs_core/tests-kms"]
 
 [dependencies]
@@ -21,6 +21,7 @@ bucket_cell.workspace = true
 cladefs_core.workspace = true
 event-listener.workspace = true
 extent_frame.workspace = true
+fail = "0.5.1"
 flate2.workspace = true
 fuchsia-async.workspace = true
 futures.workspace = true
@@ -42,7 +43,6 @@ bucket_cell = { workspace = true, features = ["testing"] }
 cladefs_core = { workspace = true, features = ["failpoints", "testing", "tests-kms"] }
 cladefs_fs = { path = ".", features = ["failpoints", "testing", "tests-kms"] }
 extent_keys = { workspace = true, features = ["testing"] }
-fail = "0.5.1"
 local_cell = { workspace = true, features = ["testing"] }
 object_store.workspace = true
 proptest.workspace = true

@@ -1166,6 +1166,7 @@ dependencies = [
  "cladefs_core",
  "event-listener",
  "extent_frame",
+ "fail",
  "flate2",
  "fuchsia-async",
  "futures",
