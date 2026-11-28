@@ -349,6 +349,6 @@ http_file = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_
 http_file(
     name = "tla2tools",
     downloaded_file_path = "tla2tools-1.8.0.jar",
-    sha256 = "67f9575c3b9ef7a0787b1bded34812862ffe79d711298e5a75b1a77720b19928",
+    sha256 = "df7cef5d37bcca879817424c001696e07fd094d68a72690449af3045fd972469",
     url = "https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar",
 )
