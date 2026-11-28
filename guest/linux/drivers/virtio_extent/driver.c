@@ -108,10 +108,11 @@ struct vext_window {
 /*
  * cladefs: doc-4's stream transport (F_STREAM, board 14663): the data requests, READ, WRITE, FREE,
  * COMMIT, ROOT and INFO, go over a vsock stream to the host's extent daemon, which serves them
- * itself, rather than on the device's queues, which its VMM serves. A thread of the stream's own
- * sends them, whole, one after another, as their submitters queue them: a submitter's signal
- * could cut a send it made short, and nothing after it would be read in step. It connects as it
- * first has one to send, the vsock device probed by then. Another reads the replies, in any order,
+ * itself, rather than on the device's queues, which its VMM serves. Its frames go whole, one after
+ * another: a submitter with none queued before it sends its own without waiting, which a signal
+ * can't cut short, and a thread of the stream's own, the sender, sends the rest, the ones queued,
+ * and what of a submitter's the socket had no room for, waking for no request that went at once.
+ * It connects as it first has one to send, the vsock device probed by then. Another reads the replies, in any order,
  * completing each by its tag, as a queue's interrupt does. A stream whose connection is lost, as
  * the vsock device resets every connection when its VM is restored from a snapshot, connects again,
  * and sends its requests in flight again, each whole, as every data request may be: they are its
@@ -127,6 +128,14 @@ struct vext_stream {
 	struct mutex sock_lock;
 	struct socket *sock;
 	struct task_struct *sender, *receiver;
+	/*
+	 * Who sends on the connection, one frame at a time, whole: the sender, or a submitter sending
+	 * its own request without waiting (vext_stream_submit). `partial` is a request whose frame a
+	 * submitter's send began and the socket had no room for the rest of, which the sender sends the
+	 * rest of before anything else; under `send_lock`.
+	 */
+	struct mutex send_lock;
+	struct vext_request *partial;
 	/* The requests waiting to be sent, which the sender takes, under `lock`. */
 	spinlock_t lock;
 	struct list_head to_send;
@@ -662,6 +671,42 @@ static int vext_stream_io(struct socket *sock, struct kvec *vec, unsigned int n,
 }
 
 /*
+ * cladefs: sends what is left of `req`'s frame, from its `stream_progress`, waiting for room unless
+ * `nowait`: 0 once it is all sent; -EAGAIN, with nowait, the socket full, its progress kept; or a
+ * -errno, the connection lost.
+ */
+static int vext_stream_put(struct socket *sock, struct vext_request *req, bool nowait)
+{
+	struct msghdr msg = { .msg_flags = MSG_NOSIGNAL | (nowait ? MSG_DONTWAIT : 0) };
+	size_t len = sizeof(req->stream_hdr) + le32_to_cpu(req->stream_hdr.readable);
+	struct kvec vec[5];
+	unsigned int n = 0;
+	int moved;
+
+	vec[n++] = (struct kvec) { &req->stream_hdr, sizeof(req->stream_hdr) };
+	vec[n++] = (struct kvec) { &req->hdr, sizeof(req->hdr) };
+	if (req->args_len)
+		vec[n++] = (struct kvec) { &req->args, req->args_len };
+	if (req->out_len)
+		vec[n++] = (struct kvec) { req->data, req->out_len };
+	if (req->root_out)
+		vec[n++] = (struct kvec) { req->root, req->root_out };
+	iov_iter_kvec(&msg.msg_iter, ITER_SOURCE, vec, n, len);
+	iov_iter_advance(&msg.msg_iter, req->stream_progress);
+	while (msg_data_left(&msg)) {
+		moved = sock_sendmsg(sock, &msg);
+		if (moved == -EAGAIN && nowait)
+			return -EAGAIN;
+		if (moved < 0)
+			return moved;
+		if (!moved)
+			return -EPIPE;
+		req->stream_progress += moved;
+	}
+	return 0;
+}
+
+/*
  * cladefs: the stream's receiver: reads each reply, and completes the request its tag names with
  * what the device wrote, until the stream fails or closes. A reply of nothing written completes its
  * request -EIO; one naming no request in flight, or of other than its request's writable bytes,
@@ -812,21 +857,10 @@ release:
 static void vext_stream_transmit(struct virtio_extent *vext, struct vext_request *req, u32 tag)
 {
 	struct vext_stream *stream = &vext->stream;
-	struct kvec vec[5];
-	unsigned int n = 0;
 	int err;
 
 	req->stream_hdr.tag = cpu_to_le64(tag);
-	vec[n++] = (struct kvec) { &req->stream_hdr, sizeof(req->stream_hdr) };
-	vec[n++] = (struct kvec) { &req->hdr, sizeof(req->hdr) };
-	if (req->args_len)
-		vec[n++] = (struct kvec) { &req->args, req->args_len };
-	if (req->out_len)
-		vec[n++] = (struct kvec) { req->data, req->out_len };
-	if (req->root_out)
-		vec[n++] = (struct kvec) { req->root, req->root_out };
-	err = vext_stream_io(stream->sock, vec, n,
-			     sizeof(req->stream_hdr) + le32_to_cpu(req->stream_hdr.readable), true);
+	err = vext_stream_put(stream->sock, req, false);
 	if (err) {
 		if (!READ_ONCE(stream->error))
 			dev_info(&vext->vdev->dev,
@@ -877,7 +911,82 @@ static void vext_stream_send(struct virtio_extent *vext, struct vext_request *re
 		wake_up(&stream->sent_wait);
 		return;
 	}
+	req->stream_progress = 0;
 	vext_stream_transmit(vext, req, tag);
+}
+
+/*
+ * cladefs: sends the rest of the frame a submitter began (`partial`), with `send_lock` held, before
+ * anything else goes on the connection: `sending` its tag still.
+ */
+static void vext_stream_finish_partial(struct virtio_extent *vext)
+{
+	struct vext_stream *stream = &vext->stream;
+	struct vext_request *req = stream->partial;
+
+	if (!req)
+		return;
+	stream->partial = NULL;
+	vext_stream_transmit(vext, req, le64_to_cpu(req->stream_hdr.tag));
+}
+
+/*
+ * cladefs: a submitter sends its own request on the connection, without waiting, with `send_lock`
+ * held, rather than waking the sender for it, which costs a request a wakeup: whether it did, sent
+ * or begun, the rest the sender's (`partial`), or put in flight for the connection made again;
+ * false if it couldn't, the connection not made, lost or busy, when the sender takes it.
+ */
+static bool vext_stream_send_now(struct virtio_extent *vext, struct vext_request *req)
+{
+	struct vext_stream *stream = &vext->stream;
+	unsigned int noio;
+	u32 tag;
+	int err;
+
+	if (!stream->sock || stream->partial || READ_ONCE(stream->broken) ||
+	    READ_ONCE(stream->error))
+		return false;
+	/*
+	 * Its allocations, its tag's and the socket's buffers', reclaim nothing that waits on requests
+	 * of the device's: its submitter may be writing back, holding what such reclaim would wait for.
+	 */
+	noio = memalloc_noio_save();
+	err = xa_alloc_cyclic(&stream->in_flight, &tag, NULL, xa_limit_32b, &stream->next_tag,
+			      GFP_KERNEL);
+	if (err >= 0) {
+		WRITE_ONCE(stream->sending, tag);
+		err = xa_err(xa_store(&stream->in_flight, tag, req, GFP_KERNEL));
+		if (err) {
+			xa_erase(&stream->in_flight, tag);
+			smp_store_release(&stream->sending, U64_MAX);
+		}
+	}
+	if (err < 0) {
+		memalloc_noio_restore(noio);
+		return false;
+	}
+	req->stream_hdr.tag = cpu_to_le64(tag);
+	req->stream_progress = 0;
+	err = vext_stream_put(stream->sock, req, true);
+	memalloc_noio_restore(noio);
+	if (err == -EAGAIN) {
+		/* The rest the sender's, before anything else, `sending` its tag still. */
+		stream->partial = req;
+		wake_up(&stream->wake);
+		return true;
+	}
+	if (err) {
+		if (!READ_ONCE(stream->error))
+			dev_info(&vext->vdev->dev,
+				 "the stream's connection lost sending (%d): connecting again\n", err);
+		vext_stream_break(vext);
+	} else {
+		atomic64_inc(&stream->sent);
+	}
+	smp_store_release(&stream->sending, U64_MAX);
+	if (wq_has_sleeper(&stream->sent_wait))
+		wake_up(&stream->sent_wait);
+	return true;
 }
 
 /*
@@ -910,6 +1019,8 @@ static int vext_stream_reconnect(struct virtio_extent *vext)
 	mutex_unlock(&stream->sock_lock);
 	if (sock)
 		sock_release(sock);
+	/* A frame begun on the lost connection is in flight still, and sent again whole below. */
+	stream->partial = NULL;
 	if (++stream->retries > VEXT_STREAM_RETRIES) {
 		dev_err(&vext->vdev->dev, "the stream's connection lost %u times in a row\n",
 			stream->retries - 1);
@@ -948,6 +1059,7 @@ static int vext_stream_reconnect(struct virtio_extent *vext)
 			smp_store_release(&stream->sending, U64_MAX);
 			continue;
 		}
+		req->stream_progress = 0;
 		vext_stream_transmit(vext, req, index);
 	}
 	return 0;
@@ -969,20 +1081,34 @@ static int vext_stream_sender(void *data)
 	for (;;) {
 		wait_event_idle(stream->wake, kthread_should_stop() || READ_ONCE(stream->error) ||
 						      READ_ONCE(stream->broken) ||
+						      READ_ONCE(stream->partial) ||
 						      !list_empty_careful(&stream->to_send));
 		if (READ_ONCE(stream->error) || kthread_should_stop())
 			break;
-		if (READ_ONCE(stream->broken) && vext_stream_reconnect(vext))
+		mutex_lock(&stream->send_lock);
+		if (READ_ONCE(stream->broken) && vext_stream_reconnect(vext)) {
+			mutex_unlock(&stream->send_lock);
 			break;
+		}
+		vext_stream_finish_partial(vext);
+		mutex_unlock(&stream->send_lock);
 		spin_lock_irq(&stream->lock);
 		list_splice_init(&stream->to_send, &batch);
 		spin_unlock_irq(&stream->lock);
 		list_for_each_entry_safe(req, next, &batch, stream_node) {
 			list_del(&req->stream_node);
+			/* A submitter's frame begun meanwhile goes first. */
+			mutex_lock(&stream->send_lock);
+			vext_stream_finish_partial(vext);
 			vext_stream_send(vext, req);
+			mutex_unlock(&stream->send_lock);
 		}
 	}
+	/* Once no submitter sends: one sending finds the stream failed after. */
+	mutex_lock(&stream->send_lock);
+	stream->partial = NULL;
 	vext_stream_fail_all(vext);
+	mutex_unlock(&stream->send_lock);
 	/* None is queued past its failure (vext_stream_submit): only its stop is left. */
 	wait_event_idle(stream->wake, kthread_should_stop());
 	return 0;
@@ -998,6 +1124,7 @@ static int vext_stream_submit(struct virtio_extent *vext, struct vext_request *r
 {
 	struct vext_stream *stream = &vext->stream;
 	unsigned long flags;
+	bool now;
 	int err;
 
 	req->args_len = args_len;
@@ -1016,11 +1143,25 @@ static int vext_stream_submit(struct virtio_extent *vext, struct vext_request *r
 	if (!err) {
 		atomic64_inc(&vext->requests[req->type]);
 		vext_busy_begin(vext);
-		list_add_tail(&req->stream_node, &stream->to_send);
 	}
+	now = !err && list_empty(&stream->to_send);
 	spin_unlock_irqrestore(&stream->lock, flags);
 	if (err)
 		return err == -ESHUTDOWN ? -ESHUTDOWN : -EIO;
+	/*
+	 * Sent here, with none queued before it and no one sending, without waiting: the sender
+	 * woken for none of it (board 14663's A/B: a wakeup each fsync waits on).
+	 */
+	if (now && mutex_trylock(&stream->send_lock)) {
+		bool sent = vext_stream_send_now(vext, req);
+
+		mutex_unlock(&stream->send_lock);
+		if (sent)
+			return 0;
+	}
+	spin_lock_irqsave(&stream->lock, flags);
+	list_add_tail(&req->stream_node, &stream->to_send);
+	spin_unlock_irqrestore(&stream->lock, flags);
 	wake_up(&stream->wake);
 	return 0;
 }
@@ -1033,6 +1174,7 @@ static int vext_stream_start(struct virtio_extent *vext)
 
 	spin_lock_init(&stream->lock);
 	mutex_init(&stream->sock_lock);
+	mutex_init(&stream->send_lock);
 	INIT_LIST_HEAD(&stream->to_send);
 	init_waitqueue_head(&stream->wake);
 	init_waitqueue_head(&stream->sent_wait);
@@ -1069,12 +1211,18 @@ static void vext_stream_close(struct virtio_extent *vext)
 		put_task_struct(stream->receiver);
 		stream->receiver = NULL;
 	}
-	/* What its receiver put back in flight as it ended, its sender gone: failed here. */
+	/*
+	 * What its receiver put back in flight as it ended, its sender gone: failed here. Once no
+	 * submitter sends, which finds the stream failed after.
+	 */
+	mutex_lock(&stream->send_lock);
+	stream->partial = NULL;
 	vext_stream_fail_all(vext);
 	if (stream->sock) {
 		sock_release(stream->sock);
 		stream->sock = NULL;
 	}
+	mutex_unlock(&stream->send_lock);
 	xa_destroy(&stream->in_flight);
 }
 

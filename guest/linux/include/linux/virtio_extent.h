@@ -355,6 +355,8 @@ struct vext_request {
 	struct virtio_extent_stream_req stream_hdr;
 	u32 args_len, out_len, in_len, root_out;
 	struct list_head stream_node;
+	/* cladefs: the bytes of its frame sent so far, as a send without waiting stops short. */
+	u32 stream_progress;
 };
 
 /*
